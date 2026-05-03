@@ -4423,6 +4423,10 @@ async fn queue_cancel_dispatch_pg_only_without_sqlite_mirror() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queue_cancel_dispatch_cancels_matching_active_turn_pg() {
+    let _obs_guard = crate::services::observability::test_runtime_lock();
+    crate::services::observability::reset_for_tests();
+    crate::services::observability::init_observability(None);
+
     let db = test_db();
     let pg_db = TestPostgresDb::create().await;
     let pg_pool = pg_db.connect_and_migrate().await;
@@ -4548,6 +4552,8 @@ async fn queue_cancel_dispatch_cancels_matching_active_turn_pg() {
     assert_eq!(json["turn_tmux_session"], tmux_name);
     assert_eq!(json["turn_channel_id"], channel_id);
     assert_eq!(json["turn_agent_id"], "agent-dispatch-cancel-turn");
+    assert_eq!(json["turn_status"], "cancelled");
+    assert!(json["turn_completed_at"].as_str().is_some());
     assert_eq!(json["turn_lifecycle_path"], "runtime-fallback");
     assert_eq!(json["turn_tmux_killed"], false);
     assert_eq!(json["turn_queue_preserved"], true);
@@ -4562,6 +4568,20 @@ async fn queue_cancel_dispatch_cancels_matching_active_turn_pg() {
     assert!(!has_active_turn);
     assert_eq!(queue_depth, 1);
     assert_eq!(session_id, None);
+
+    let event = crate::services::observability::events::recent(10)
+        .into_iter()
+        .find(|event| event.event_type == "turn_cancelled")
+        .expect("turn_cancelled event should be recorded");
+    assert_eq!(event.channel_id, Some(channel_num));
+    assert_eq!(event.provider.as_deref(), Some("codex"));
+    assert_eq!(
+        event.payload["reason"],
+        "queue-api cancel_dispatch (preserve)"
+    );
+    assert_eq!(event.payload["surface"], "queue_cancel_preserve");
+    assert_eq!(event.payload["dispatch_id"], "dispatch-cancel-turn-1552");
+    assert_eq!(event.payload["session_key"], session_key);
 
     let dispatch_status: String =
         sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")

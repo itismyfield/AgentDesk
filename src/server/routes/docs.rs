@@ -3704,12 +3704,18 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/dispatches/{id}/cancel",
             "dispatches",
-            "Cancel a pending or dispatched dispatch, reset linked auto-queue bookkeeping, and remove the dispatch notify guard. Terminal dispatches return 409 Conflict.",
+            "Cancel a pending or dispatched dispatch, reset linked auto-queue bookkeeping, cancel any matching active turn through the shared turn cancel finalizer, and remove the dispatch notify guard. Terminal dispatches return 409 Conflict.",
         )
         .with_params([("id", path_param("Dispatch ID"))])
         .with_example(
             json!({"path": {"id": "dispatch-1"}}),
-            json!({"ok": true, "dispatch_id": "dispatch-1"}),
+            json!({
+                "ok": true,
+                "dispatch_id": "dispatch-1",
+                "active_turn_cancelled": true,
+                "turn_status": "cancelled",
+                "turn_completed_at": "2026-05-03T01:23:45Z"
+            }),
         )
         .with_error_example(
             409,
@@ -4793,6 +4799,7 @@ mod tests {
         assert_eq!(effective_category(cancel), "dispatches");
         assert!(
             cancel.description.contains("pending or dispatched")
+                && cancel.description.contains("active turn")
                 && cancel
                     .description
                     .contains("Terminal dispatches return 409"),

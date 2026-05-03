@@ -7,7 +7,7 @@ use crate::services::discord::health::HealthRegistry;
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use crate::services::turn_lifecycle::{
-    TurnLifecycleTarget, force_kill_turn_without_cancel_event, stop_turn_preserving_queue,
+    TurnLifecycleTarget, force_kill_turn_without_cancel_event,
     stop_turn_preserving_queue_without_cancel_event,
 };
 use poise::serenity_prelude::ChannelId;
@@ -102,6 +102,8 @@ impl QueueService {
                 let mut turn_tmux_name = None;
                 let mut turn_channel_id = None;
                 let mut turn_agent_id = None;
+                let mut turn_status = None;
+                let mut turn_completed_at = None;
                 let mut turn_lifecycle_path = None;
                 let mut turn_tmux_killed = None;
                 let mut turn_queue_preserved = None;
@@ -129,12 +131,31 @@ impl QueueService {
                         channel_id: parsed_channel_id,
                         tmux_name: tmux_name.clone(),
                     };
-                    let lifecycle = stop_turn_preserving_queue(
+                    let lifecycle = stop_turn_preserving_queue_without_cancel_event(
                         health_registry.map(Arc::as_ref),
                         &target,
                         "queue-api cancel_dispatch (preserve)",
                     )
                     .await;
+                    let finalizer =
+                        crate::services::turn_cancel_finalizer::finalize_turn_cancel(
+                            crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_lifecycle_result(
+                                crate::services::turn_cancel_finalizer::TurnCancelCorrelation {
+                                    provider: target.provider.clone(),
+                                    channel_id: target.channel_id,
+                                    dispatch_id: Some(dispatch_id.to_string()),
+                                    session_key: Some(active_turn.session_key.clone()),
+                                    turn_id: None,
+                                },
+                                "queue-api cancel_dispatch (preserve)",
+                                crate::services::turn_lifecycle::cleanup_policy_observability_surface(
+                                    crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
+                                        restart_mode: crate::services::discord::InflightRestartMode::HotSwapHandoff,
+                                    },
+                                ),
+                                &lifecycle,
+                            ),
+                        );
 
                     if let Err(error) = sqlx::query(
                         "UPDATE sessions
@@ -158,6 +179,8 @@ impl QueueService {
                     turn_tmux_name = Some(tmux_name);
                     turn_channel_id = active_turn.channel_id.clone();
                     turn_agent_id = active_turn.agent_id.clone();
+                    turn_status = Some(finalizer.status);
+                    turn_completed_at = Some(finalizer.completed_at.to_rfc3339());
                     turn_lifecycle_path = Some(lifecycle.lifecycle_path);
                     turn_tmux_killed = Some(lifecycle.tmux_killed);
                     turn_queue_preserved = Some(lifecycle.queue_preserved);
@@ -200,6 +223,8 @@ impl QueueService {
                     "turn_tmux_session": turn_tmux_name,
                     "turn_channel_id": turn_channel_id,
                     "turn_agent_id": turn_agent_id,
+                    "turn_status": turn_status,
+                    "turn_completed_at": turn_completed_at,
                     "turn_lifecycle_path": turn_lifecycle_path,
                     "turn_tmux_killed": turn_tmux_killed,
                     "turn_queue_preserved": turn_queue_preserved,
