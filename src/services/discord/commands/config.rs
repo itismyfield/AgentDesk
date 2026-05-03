@@ -175,10 +175,6 @@ pub(in crate::services::discord) fn fast_mode_reset_pending_key(
     format!("{}:{}", provider.as_str(), channel_id.get())
 }
 
-fn legacy_fast_mode_reset_pending_key(channel_id: serenity::ChannelId) -> String {
-    channel_id.get().to_string()
-}
-
 pub(in crate::services::discord) fn parse_fast_mode_reset_pending_entry(
     entry: &str,
 ) -> Option<(Option<&str>, serenity::ChannelId)> {
@@ -245,16 +241,10 @@ pub(in crate::services::discord) fn clear_fast_mode_reset_pending_for_provider(
     provider: &ProviderKind,
 ) -> bool {
     let provider_key = fast_mode_reset_pending_key(channel_id, provider);
-    let legacy_key = legacy_fast_mode_reset_pending_key(channel_id);
-    let removed_provider = shared
+    shared
         .fast_mode_session_reset_pending
         .remove(&provider_key)
-        .is_some();
-    let removed_legacy = shared
-        .fast_mode_session_reset_pending
-        .remove(&legacy_key)
-        .is_some();
-    removed_provider || removed_legacy
+        .is_some()
 }
 
 pub(in crate::services::discord) fn clear_fast_mode_reset_pending_for_channel(

@@ -19,7 +19,7 @@ pub(in crate::services::discord) async fn cmd_meeting(
     let ts = chrono::Local::now().format("%H:%M:%S");
     let channel_id = ctx.channel_id();
     let agenda_str = agenda.as_deref().unwrap_or("");
-    println!("  [{ts}] ◀ [{user_name}] /meeting {action} {agenda_str}");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /meeting {action} {agenda_str}");
 
     ctx.defer().await?;
 
@@ -64,12 +64,12 @@ pub(in crate::services::discord) async fn cmd_meeting(
                 {
                     Ok(Some(id)) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] ✅ Meeting completed: {id}");
+                        tracing::info!("  [{ts}] ✅ Meeting completed: {id}");
                     }
                     Ok(None) => {}
                     Err(e) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] ❌ Meeting error: {e}");
+                        tracing::warn!("  [{ts}] ❌ Meeting error: {e}");
                         let _ = meeting::send_meeting_message(
                             &http,
                             channel_id,

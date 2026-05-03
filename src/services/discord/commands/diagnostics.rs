@@ -631,25 +631,6 @@ fn build_queue_report_sync(
         } else {
             lines.push("  Disk: (no directory)".to_string());
         }
-        let legacy_dir = root.join(provider.as_str());
-        if legacy_dir.is_dir() {
-            let legacy_files: Vec<_> = std::fs::read_dir(&legacy_dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter(|entry| {
-                    let path = entry.path();
-                    path.is_file() && path.extension().map(|ext| ext == "json").unwrap_or(false)
-                })
-                .collect();
-            if !legacy_files.is_empty() {
-                lines.push(format!(
-                    "  ⚠ **Legacy queue files** ({} file(s)) found at `{}/` — predates bot-identity namespacing, will NOT be restored.",
-                    legacy_files.len(),
-                    provider.as_str()
-                ));
-            }
-        }
     }
 
     lines.join("\n")
