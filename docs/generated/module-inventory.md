@@ -319,7 +319,7 @@
 | `services::discord::router::authorization` | `src/services/discord/router/authorization.rs` | 48 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 148 |  |
-| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2050 | giant-file |
+| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2162 | giant-file |
 | `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 6989 | giant-file |
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 314 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
