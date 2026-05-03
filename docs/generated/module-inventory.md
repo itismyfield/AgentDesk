@@ -299,7 +299,7 @@
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 309 |  |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 456 |  |
 | `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 1237 | giant-file |
-| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events.rs` | 2026 | giant-file |
+| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events.rs` | 2038 | giant-file |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 554 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 3034 | giant-file |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 570 |  |
