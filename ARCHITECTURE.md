@@ -50,13 +50,20 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── db/
+│   ├── dispatches/
+│   │   ├── mod.rs
+│   │   └── outbox.rs
+│   ├── kanban_cards/
+│   │   ├── crud.rs
+│   │   ├── listing.rs
+│   │   ├── metadata.rs
+│   │   ├── mod.rs
+│   │   └── transitions.rs
 │   ├── agents.rs
 │   ├── auto_queue.rs
 │   ├── cancel_tombstones.rs
 │   ├── dispatched_sessions.rs
-│   ├── dispatches.rs
 │   ├── kanban.rs
-│   ├── kanban_cards.rs
 │   ├── memento_feedback_stats.rs
 │   ├── mod.rs
 │   ├── postgres.rs
@@ -127,12 +134,14 @@ src/
 │   └── skill_sync.rs
 ├── server/
 │   ├── dto/
+│   │   ├── dispatches.rs
 │   │   ├── kanban.rs
 │   │   └── mod.rs
 │   ├── routes/
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
 │   │   │   ├── discord_delivery.rs
+│   │   │   ├── discord_delivery_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── outbox.rs
 │   │   │   ├── tests.rs
@@ -359,6 +368,9 @@ src/
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_session_files.rs
 │   │   └── tmux_watcher.rs
+│   ├── dispatches/
+│   │   ├── discord_delivery.rs
+│   │   └── mod.rs
 │   ├── git/
 │   │   ├── branch_resolver.rs
 │   │   ├── commit_resolver.rs
@@ -429,13 +441,11 @@ src/
 │   ├── codex.rs
 │   ├── codex_tmux_wrapper.rs
 │   ├── discord_config_audit.rs
-│   ├── discord_delivery.rs
 │   ├── discord_delivery_metadata.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
 │   ├── dispatch_watchdog.rs
 │   ├── dispatched_sessions.rs
-│   ├── dispatches.rs
 │   ├── dispatches_followup.rs
 │   ├── gemini.rs
 │   ├── issue_announcements.rs
