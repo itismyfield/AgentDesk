@@ -233,6 +233,8 @@
     persistence helpers).
   - `src/db/session_transcripts.rs` (877 lines, retained PG-cleanup surface).
   - `src/db/agents.rs` (1125 lines).
+  - `src/db/prompt_manifests.rs` (1219 lines, post-#1699 retention policy +
+    write-time byte cap pushed it past the giant-file threshold).
 - active_callsite_coverage: PG-only cleanup tracked per #1237/#1238/#1239 —
   see `known-legacy.md`.
 - invariants: production reads/writes go through `pg_pool_ref()`; `legacy_db()`
