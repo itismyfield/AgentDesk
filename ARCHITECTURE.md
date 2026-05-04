@@ -275,6 +275,16 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── policy.rs
 │   │   │   └── result.rs
+│   │   ├── placeholder_live_events/
+│   │   │   ├── common.rs
+│   │   │   ├── context_panel.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── prompt_panel.rs
+│   │   │   ├── recent_events.rs
+│   │   │   ├── session_panel.rs
+│   │   │   ├── status_events.rs
+│   │   │   ├── task_panel.rs
+│   │   │   └── tests.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── dispatch_contract.rs
 │   │   │   ├── dispatch_contract_tests.rs
