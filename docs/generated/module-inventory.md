@@ -414,7 +414,7 @@
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
 | `services::onboarding` | `src/services/onboarding.rs` | 5279 | giant-file |
 | `services::opencode` | `src/services/opencode.rs` | 2133 | giant-file |
-| `services::pipeline_override` | `src/services/pipeline_override.rs` | 176 |  |
+| `services::pipeline_override` | `src/services/pipeline_override.rs` | 307 |  |
 | `services::pipeline_routes` | `src/services/pipeline_routes.rs` | 644 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 25 |  |
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1377 | giant-file |
