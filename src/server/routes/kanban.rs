@@ -21,7 +21,7 @@ use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 
 const MIXED_STATUS_FIELD_UPDATE_ERROR: &str = "PATCH /api/kanban-cards/{id} cannot combine status changes with metadata or other field updates. Send metadata/field updates in one request, then send a status-only PATCH request, or use POST /api/kanban-cards/{id}/transition for administrative force transitions.";
 
-fn validate_update_card_fields(body: &UpdateCardBody) -> Result<bool, &'static str> {
+fn validate_update_card_fields(body: &UpdateCardBody) -> Result<bool, String> {
     let has_non_status_updates = body.title.is_some()
         || body.priority.is_some()
         || body.assignee_agent_id.is_some()
@@ -34,11 +34,20 @@ fn validate_update_card_fields(body: &UpdateCardBody) -> Result<bool, &'static s
         || body.review_notes.is_some();
 
     if !has_non_status_updates && body.status.is_none() {
-        return Err("no fields to update");
+        return Err("no fields to update".to_string());
     }
 
     if body.status.is_some() && has_non_status_updates {
-        return Err(MIXED_STATUS_FIELD_UPDATE_ERROR);
+        return Err(MIXED_STATUS_FIELD_UPDATE_ERROR.to_string());
+    }
+
+    // #1690: Pre-validate raw metadata_json so invalid JSON returns HTTP 400 from
+    // the route layer instead of bubbling up as a Postgres `::jsonb` cast error
+    // (HTTP 500) from update_card_fields_pg.
+    if let Some(raw) = body.metadata_json.as_deref() {
+        if let Err(err) = serde_json::from_str::<serde_json::Value>(raw) {
+            return Err(format!("invalid metadata_json: {err}"));
+        }
     }
 
     Ok(has_non_status_updates)
@@ -3203,7 +3212,7 @@ mod update_card_validation_tests {
     #[test]
     fn update_card_validation_rejects_status_with_metadata_json() {
         let body: UpdateCardBody =
-            serde_json::from_str(r#"{"status":"ready","metadata_json":"not-json"}"#)
+            serde_json::from_str(r#"{"status":"ready","metadata_json":"{}"}"#)
                 .expect("payload should deserialize");
 
         let error = validate_update_card_fields(&body).expect_err("mixed update must be rejected");
@@ -3212,14 +3221,51 @@ mod update_card_validation_tests {
     }
 
     #[test]
-    fn update_card_validation_allows_status_only_or_metadata_only() {
+    fn update_card_validation_allows_status_only_or_valid_metadata_only() {
         let status_only: UpdateCardBody =
             serde_json::from_str(r#"{"status":"ready"}"#).expect("payload should deserialize");
         assert_eq!(validate_update_card_fields(&status_only), Ok(false));
 
-        let metadata_only: UpdateCardBody = serde_json::from_str(r#"{"metadata_json":"not-json"}"#)
-            .expect("payload should deserialize");
+        // #1690: a metadata_only payload with valid JSON must still pass validation.
+        let metadata_only: UpdateCardBody =
+            serde_json::from_str(r#"{"metadata_json":"{\"k\":\"v\"}"}"#)
+                .expect("payload should deserialize");
         assert_eq!(validate_update_card_fields(&metadata_only), Ok(true));
+    }
+
+    #[test]
+    fn update_card_validation_rejects_invalid_metadata_json() {
+        // #1690: invalid metadata_json must be rejected at the route layer
+        // (HTTP 400) instead of forwarding to update_card_fields_pg, which
+        // would return HTTP 500 from a Postgres ::jsonb cast error.
+        let body: UpdateCardBody = serde_json::from_str(r#"{"metadata_json":"not-json"}"#)
+            .expect("payload should deserialize");
+
+        let error =
+            validate_update_card_fields(&body).expect_err("invalid metadata_json must be rejected");
+
+        assert!(
+            error.starts_with("invalid metadata_json:"),
+            "error must call out invalid metadata_json, got: {error}"
+        );
+    }
+
+    #[test]
+    fn update_card_validation_accepts_valid_metadata_json_object() {
+        // #1690: valid JSON object metadata_json must still pass.
+        let body: UpdateCardBody = serde_json::from_str(r#"{"metadata_json":"{\"k\":\"v\"}"}"#)
+            .expect("payload should deserialize");
+        assert_eq!(validate_update_card_fields(&body), Ok(true));
+    }
+
+    #[test]
+    fn update_card_validation_accepts_valid_metadata_json_scalar() {
+        // serde_json::from_str accepts any valid JSON value (including bare
+        // strings like `"foo"`); guard that the validator does not falsely
+        // reject scalar JSON values.
+        let body: UpdateCardBody = serde_json::from_str(r#"{"metadata_json":"\"foo\""}"#)
+            .expect("payload should deserialize");
+        assert_eq!(validate_update_card_fields(&body), Ok(true));
     }
 }
 
