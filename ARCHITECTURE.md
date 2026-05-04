@@ -53,12 +53,6 @@ src/
 │   ├── dispatches/
 │   │   ├── mod.rs
 │   │   └── outbox.rs
-│   ├── kanban_cards/
-│   │   ├── crud.rs
-│   │   ├── listing.rs
-│   │   ├── metadata.rs
-│   │   ├── mod.rs
-│   │   └── transitions.rs
 │   ├── agents.rs
 │   ├── auto_queue.rs
 │   ├── cancel_tombstones.rs
@@ -144,6 +138,7 @@ src/
 │   │   │   ├── discord_delivery_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── outbox.rs
+│   │   │   ├── outbox_tests.rs
 │   │   │   ├── tests.rs
 │   │   │   └── thread_reuse.rs
 │   │   ├── domains/
@@ -370,7 +365,8 @@ src/
 │   │   └── tmux_watcher.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery.rs
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   └── outbox_queue.rs
 │   ├── git/
 │   │   ├── branch_resolver.rs
 │   │   ├── commit_resolver.rs
