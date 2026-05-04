@@ -13,6 +13,7 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 jobs:
   regen:
@@ -76,3 +77,10 @@ jobs:
           echo "Opened ${pr_url}"
           gh pr merge "${pr_url}" --auto --squash --delete-branch
           echo "Auto-merge enabled on ${pr_url}."
+
+          # GITHUB_TOKEN-initiated push and PR creation don't fire downstream
+          # workflows, so the maintenance PR's required checks would never run
+          # on their own. workflow_dispatch is the documented exception, so we
+          # manually dispatch CI PR on the regen branch.
+          gh workflow run ci-pr.yml --ref "${branch}"
+          echo "Dispatched ci-pr.yml on ${branch}."
