@@ -92,7 +92,6 @@ CREATE TABLE IF NOT EXISTS task_dispatches (
 CREATE TABLE IF NOT EXISTS sessions (
     id                      BIGSERIAL PRIMARY KEY,
     session_key             TEXT UNIQUE,
-    instance_id             TEXT,
     agent_id                TEXT REFERENCES agents(id),
     provider                TEXT DEFAULT 'claude',
     status                  TEXT DEFAULT 'disconnected',
