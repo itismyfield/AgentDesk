@@ -104,22 +104,37 @@ impl<'a> PipelineOverrideService<'a> {
         }
     }
 
-    /// When writing a repo override, fetch every agent currently bound to
-    /// this repo (via `github_repos.default_agent_id`) that carries its own
-    /// non-null pipeline override, and validate the merged repo+agent
-    /// effective pipeline. Reject the write if any combination is invalid.
+    /// When writing a repo override, fetch every agent that pairs with this
+    /// repo at runtime — i.e. every agent referenced by `kanban_cards.repo_id
+    /// = $1` via `kanban_cards.assigned_agent_id`, plus the
+    /// `github_repos.default_agent_id` fallback for unassigned cards — that
+    /// carries its own non-null pipeline override, and validate the merged
+    /// repo+agent effective pipeline. Reject the write if any combination is
+    /// invalid.
+    ///
+    /// The runtime resolver `crate::pipeline::resolve(repo_override,
+    /// agent_override)` is invoked per-card with `(kanban_cards.repo_id,
+    /// kanban_cards.assigned_agent_id)`, so the cross-layer gate must check
+    /// the same pairs (#1692).
     async fn validate_against_existing_agent_overrides(
         &self,
         repo_id: &str,
         new_repo_override: Option<&crate::pipeline::PipelineOverride>,
     ) -> Result<(), PipelineOverrideError> {
         let rows = sqlx::query_as::<_, (String, Option<String>)>(
-            "SELECT a.id, a.pipeline_config::text \
-             FROM agents a \
-             JOIN github_repos r ON r.default_agent_id = a.id \
-             WHERE r.id = $1 \
-               AND a.pipeline_config IS NOT NULL \
-               AND TRIM(a.pipeline_config::text) <> ''",
+            "SELECT DISTINCT a.id, a.pipeline_config::text \
+               FROM kanban_cards c \
+               JOIN agents a ON a.id = c.assigned_agent_id \
+              WHERE c.repo_id = $1 \
+                AND a.pipeline_config IS NOT NULL \
+                AND TRIM(a.pipeline_config::text) <> '' \
+             UNION \
+             SELECT a.id, a.pipeline_config::text \
+               FROM github_repos r \
+               JOIN agents a ON a.id = r.default_agent_id \
+              WHERE r.id = $1 \
+                AND a.pipeline_config IS NOT NULL \
+                AND TRIM(a.pipeline_config::text) <> ''",
         )
         .bind(repo_id)
         .fetch_all(self.pool)
@@ -153,21 +168,36 @@ impl<'a> PipelineOverrideService<'a> {
         Ok(())
     }
 
-    /// When writing an agent override, fetch every repo for which this agent
-    /// is the default (via `github_repos.default_agent_id = $1`) that carries
-    /// its own non-null pipeline override, and validate the merged repo+agent
-    /// effective pipeline. Reject the write if any combination is invalid.
+    /// When writing an agent override, fetch every repo that pairs with this
+    /// agent at runtime — i.e. every repo referenced by
+    /// `kanban_cards.assigned_agent_id = $1` via `kanban_cards.repo_id`, plus
+    /// the `github_repos.default_agent_id = $1` fallback for unassigned
+    /// cards — that carries its own non-null pipeline override, and validate
+    /// the merged repo+agent effective pipeline. Reject the write if any
+    /// combination is invalid.
+    ///
+    /// The runtime resolver `crate::pipeline::resolve(repo_override,
+    /// agent_override)` is invoked per-card with `(kanban_cards.repo_id,
+    /// kanban_cards.assigned_agent_id)`, so the cross-layer gate must check
+    /// the same pairs (#1692).
     async fn validate_against_existing_repo_overrides(
         &self,
         agent_id: &str,
         new_agent_override: Option<&crate::pipeline::PipelineOverride>,
     ) -> Result<(), PipelineOverrideError> {
         let rows = sqlx::query_as::<_, (String, Option<String>)>(
-            "SELECT id, pipeline_config::text \
-             FROM github_repos \
-             WHERE default_agent_id = $1 \
-               AND pipeline_config IS NOT NULL \
-               AND TRIM(pipeline_config::text) <> ''",
+            "SELECT DISTINCT r.id, r.pipeline_config::text \
+               FROM kanban_cards c \
+               JOIN github_repos r ON r.id = c.repo_id \
+              WHERE c.assigned_agent_id = $1 \
+                AND r.pipeline_config IS NOT NULL \
+                AND TRIM(r.pipeline_config::text) <> '' \
+             UNION \
+             SELECT r.id, r.pipeline_config::text \
+               FROM github_repos r \
+              WHERE r.default_agent_id = $1 \
+                AND r.pipeline_config IS NOT NULL \
+                AND TRIM(r.pipeline_config::text) <> ''",
         )
         .bind(agent_id)
         .fetch_all(self.pool)
