@@ -4355,18 +4355,24 @@ pub(super) async fn run_stall_watchdog_pass(
                 //      survived queue items drain without waiting for the
                 //      next user message.
                 let finish = mailbox_finish_turn(&shared, provider, channel_id).await;
-                if let Some(removed_token) = finish.removed_token {
-                    super::turn_bridge::cancel_active_token(
-                        &removed_token,
-                        super::TmuxCleanupPolicy::CleanupSession {
-                            termination_reason_code: Some(
-                                "1671_stall_watchdog_explicit_background",
-                            ),
-                        },
-                        "1671_stall_watchdog_explicit_background",
-                    );
-                    shared.global_active.fetch_sub(1, Ordering::Relaxed);
-                }
+                // codex P1 — route the orphan cancel through
+                // `stall_recovery::finalize_orphaned_clear` so the
+                // `global_active` decrement is saturating. A raw
+                // `fetch_sub(1)` can wrap `0 → usize::MAX` after
+                // `reregister_active_turn_from_inflight` re-creates the
+                // cancel token without restoring the global counter
+                // (the parent counter died with the previous dcserver
+                // process), which would convince health and
+                // deferred-restart logic that a phantom turn is alive
+                // forever. The helper also matches the canonical
+                // `CleanupSession` policy + cancel-attribution pattern
+                // used by every other stall-recovery callsite.
+                super::stall_recovery::finalize_orphaned_clear(
+                    &shared,
+                    channel_id,
+                    finish.removed_token,
+                    "1671_stall_watchdog_explicit_background",
+                );
                 shared
                     .dispatch_thread_parents
                     .retain(|_, thread_id| *thread_id != channel_id);
@@ -6958,6 +6964,21 @@ mod tests {
             super::super::relay_health::RelayStallState::ExplicitBackgroundWork
         );
 
+        // codex P1 — `reregister_active_turn_from_inflight` re-creates a
+        // mailbox cancel token after a dcserver restart WITHOUT touching
+        // `global_active` (the previous parent's counter died with that
+        // process). Mirror that here by leaving `global_active = 0` and
+        // proving the orphan-recovery decrement does not wrap to
+        // `usize::MAX`.
+        let global_active_before = harness
+            .shared
+            .global_active
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert_eq!(
+            global_active_before, 0,
+            "test setup: counter must start at 0 to exercise the wrap-protection branch",
+        );
+
         // Run the watchdog pass — orphan ExplicitBackgroundWork must be
         // recovered.
         let cleaned =
@@ -6969,6 +6990,19 @@ mod tests {
         assert!(
             super::super::inflight::load_inflight_state(&ProviderKind::Codex, channel_id).is_none(),
             "watchdog must delete the stale orphan inflight state file"
+        );
+        // codex P1 — saturating-decrement invariant: counter must remain
+        // 0 (never wrap to `usize::MAX`). A regression that re-introduces
+        // raw `fetch_sub(1)` here would surface as a wrapped value, which
+        // would convince health and deferred-restart logic that a phantom
+        // active turn lives forever.
+        let global_active_after = harness
+            .shared
+            .global_active
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert_eq!(
+            global_active_after, 0,
+            "global_active must not wrap when the orphan-recovery branch decrements an already-zero counter",
         );
     }
 
