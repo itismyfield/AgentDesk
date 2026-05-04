@@ -121,14 +121,12 @@ async fn build_inspect_report(
             let Some(turn) = load_latest_turn(pool, channel_id).await? else {
                 return Ok(no_data_report());
             };
-            let Some(manifest) = load_latest_prompt_manifest(pool, channel_id).await? else {
-                return Ok(no_data_report());
-            };
+            let manifest = fetch_prompt_manifest(Some(pool), &turn.turn_id).await?;
             let compaction = load_latest_compaction_event(pool, channel_id).await?;
             let context = load_context_config(ctx, turn.provider.as_deref()).await;
             Ok(render_context_report(
                 &turn,
-                &manifest,
+                manifest.as_ref(),
                 compaction.as_ref(),
                 &context,
             ))
@@ -502,15 +500,13 @@ fn render_prompt_manifest_report(manifest: &PromptManifest) -> String {
 
 fn render_context_report(
     turn: &LatestTurn,
-    manifest: &PromptManifest,
+    manifest: Option<&PromptManifest>,
     compaction: Option<&LifecycleEventRow>,
     context: &InspectContextConfig,
 ) -> String {
-    let mut layers = manifest.layers.clone();
-    layers.sort_by(|a, b| b.tokens_est.cmp(&a.tokens_est));
-
     let mut out = String::new();
     push_line(&mut out, "Context Window");
+    push_kv(&mut out, "turn_id", &turn.turn_id);
     push_kv(&mut out, "usage", &format_context_usage(turn, context));
     push_kv(
         &mut out,
@@ -519,23 +515,44 @@ fn render_context_report(
     );
     push_kv(&mut out, "provider", context.provider.as_str());
     push_kv(&mut out, "model", opt_or_none(context.model.as_deref()));
-    push_kv(
-        &mut out,
-        "prompt estimate",
-        &format!("{} tokens", format_tokens(manifest.total_input_tokens_est)),
-    );
+    match manifest {
+        Some(manifest) => {
+            push_kv(
+                &mut out,
+                "prompt estimate",
+                &format!("{} tokens", format_tokens(manifest.total_input_tokens_est)),
+            );
+        }
+        None => {
+            push_kv(
+                &mut out,
+                "prompt estimate",
+                "(manifest pending for this turn)",
+            );
+        }
+    }
     push_kv(&mut out, "last compact", &format_compaction(compaction));
     push_line(&mut out, "");
-    push_line(&mut out, "largest layers:");
-    for layer in layers.iter().take(6) {
-        push_line(
-            &mut out,
-            &format!(
-                "- {}: {}",
-                truncate_chars(&layer.layer_name, 54),
-                format_tokens(layer.tokens_est)
-            ),
-        );
+    match manifest {
+        Some(manifest) => {
+            let mut layers = manifest.layers.clone();
+            layers.sort_by(|a, b| b.tokens_est.cmp(&a.tokens_est));
+            push_line(&mut out, "largest layers:");
+            for layer in layers.iter().take(6) {
+                push_line(
+                    &mut out,
+                    &format!(
+                        "- {}: {}",
+                        truncate_chars(&layer.layer_name, 54),
+                        format_tokens(layer.tokens_est)
+                    ),
+                );
+            }
+        }
+        None => {
+            push_line(&mut out, "largest layers:");
+            push_line(&mut out, "- (manifest pending for this turn)");
+        }
     }
     fenced_report(out)
 }
@@ -950,13 +967,58 @@ mod tests {
             compact_percent: 85,
         };
 
-        let report = render_context_report(&turn, &manifest, Some(&compaction), &context);
+        let report = render_context_report(&turn, Some(&manifest), Some(&compaction), &context);
         let user_idx = report.find("- user_message").unwrap();
         let role_idx = report.find("- role_prompt").unwrap();
 
         assert!(report.contains("usage: 50%"));
         assert!(report.contains("before 88% -> after 41%"));
         assert!(user_idx < role_idx);
+    }
+
+    #[test]
+    fn context_report_omits_other_turns_manifest_when_none() {
+        // Regression for #1691: when the latest turn has no manifest yet,
+        // we must NOT pull layer data from a different turn's manifest.
+        let turn = LatestTurn {
+            turn_id: "discord:1:99".to_string(),
+            channel_id: "1".to_string(),
+            provider: Some("codex".to_string()),
+            session_key: Some("channel:1".to_string()),
+            session_id: Some("codex-session".to_string()),
+            dispatch_id: None,
+            finished_at: DateTime::parse_from_rfc3339("2026-05-01T00:01:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            duration_ms: Some(60_000),
+            input_tokens: 500,
+            cache_create_tokens: 250,
+            cache_read_tokens: 250,
+        };
+        let other_turn_manifest = test_manifest();
+        let context = InspectContextConfig {
+            provider: ProviderKind::Codex,
+            model: Some("gpt-test".to_string()),
+            context_window_tokens: 2_000,
+            compact_percent: 85,
+        };
+
+        let report = render_context_report(&turn, None, None, &context);
+
+        // Identifies that this report is bound to the current turn.
+        assert!(report.contains("turn_id: discord:1:99"));
+        // Manifest-pending indicator is shown.
+        assert!(report.contains("manifest pending for this turn"));
+        // Layer details from a different turn must not appear.
+        for layer in &other_turn_manifest.layers {
+            assert!(
+                !report.contains(&layer.layer_name),
+                "report leaked layer name {} from a different turn",
+                layer.layer_name
+            );
+        }
+        // Token usage from the latest turn is still rendered.
+        assert!(report.contains("usage: 50%"));
     }
 
     #[test]
