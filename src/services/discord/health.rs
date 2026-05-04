@@ -7102,6 +7102,4 @@ mod tests {
             "queued interventions must survive orphan ExplicitBackgroundWork cleanup",
         );
     }
-
 }
-
