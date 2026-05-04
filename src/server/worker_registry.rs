@@ -468,8 +468,13 @@ impl SupervisedWorkerRegistry {
                     self.log_skip(spec, "postgres pool unavailable");
                     return Ok(None);
                 };
+                let prompt_manifest_retention = self.config.prompt_manifest_retention.clone();
                 self.register_tokio(spec, async move {
-                    super::maintenance::scheduler_loop(maintenance_pg_pool).await;
+                    super::maintenance::scheduler_loop(
+                        maintenance_pg_pool,
+                        prompt_manifest_retention,
+                    )
+                    .await;
                 });
                 Ok(None)
             }

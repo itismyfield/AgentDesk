@@ -55,11 +55,18 @@ impl MaintenanceJobRegistry {
     }
 
     fn static_registry() -> Self {
+        Self::static_registry_with_config(crate::config::PromptManifestRetentionConfig::default())
+    }
+
+    fn static_registry_with_config(
+        prompt_manifest_retention: crate::config::PromptManifestRetentionConfig,
+    ) -> Self {
         Self::new(vec![
             Arc::new(NoopHeartbeatJob),
             Arc::new(AgentQualityRollupJob),
             Arc::new(QualityRegressionAlerterJob),
             Arc::new(CancelTombstonePruneJob),
+            Arc::new(PromptManifestRetentionJob::new(prompt_manifest_retention)),
         ])
     }
 
@@ -177,6 +184,59 @@ impl MaintenanceJob for CancelTombstonePruneJob {
     }
 }
 
+/// #1699 — daily sweep over `prompt_manifest_layers` to enforce the
+/// retention policy from `agentdesk.yaml::prompt_manifest_retention`.
+/// Trims `full_content` for rows older than `full_content_days`, preserves
+/// `content_sha256` and metadata.
+struct PromptManifestRetentionJob {
+    config: crate::config::PromptManifestRetentionConfig,
+}
+
+impl PromptManifestRetentionJob {
+    fn new(config: crate::config::PromptManifestRetentionConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl MaintenanceJob for PromptManifestRetentionJob {
+    fn name(&self) -> &'static str {
+        "storage.prompt_manifest_retention"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        // Daily cadence with a small startup stagger so it doesn't pile on
+        // top of the other storage jobs at boot.
+        MaintenanceSchedule::every(Duration::from_secs(24 * 60 * 60), Duration::from_secs(45))
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            if !self.config.enabled {
+                tracing::debug!(
+                    job = self.name(),
+                    "skipping prompt_manifest_retention (disabled by config)"
+                );
+                return Ok(());
+            }
+            let report =
+                crate::db::prompt_manifests::apply_retention_policy(pool, &self.config, false)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("prompt_manifest_retention failed: {error}")
+                    })?;
+            if report.trimmed_full_content > 0 {
+                tracing::info!(
+                    job = self.name(),
+                    trimmed = report.trimmed_full_content,
+                    horizon_at = ?report.horizon_at,
+                    "[maintenance] prompt_manifest_retention trimmed full content"
+                );
+            }
+            Ok(())
+        })
+    }
+}
+
 trait MaintenanceJobStore: Send + Sync {
     fn read<'a>(&'a self, key: &'a str) -> StoreFuture<'a, Option<String>>;
     fn upsert<'a>(&'a self, key: &'a str, value: &'a str) -> StoreFuture<'a, ()>;
@@ -260,8 +320,11 @@ struct MaintenanceJobState {
     failure_count: i64,
 }
 
-pub(crate) async fn scheduler_loop(pg_pool: Arc<PgPool>) {
-    let registry = MaintenanceJobRegistry::static_registry();
+pub(crate) async fn scheduler_loop(
+    pg_pool: Arc<PgPool>,
+    prompt_manifest_retention: crate::config::PromptManifestRetentionConfig,
+) {
+    let registry = MaintenanceJobRegistry::static_registry_with_config(prompt_manifest_retention);
     let store: Arc<dyn MaintenanceJobStore> =
         Arc::new(PgMaintenanceJobStore::new(pg_pool.as_ref().clone()));
 

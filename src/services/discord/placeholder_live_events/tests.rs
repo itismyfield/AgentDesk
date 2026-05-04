@@ -335,6 +335,8 @@ fn status_panel_renders_prompt_manifest_block() {
             content_visibility: crate::db::prompt_manifests::PromptContentVisibility::AdkProvided,
             full_content: Some(String::new()),
             redacted_preview: None,
+            is_truncated: false,
+            original_bytes: Some(0),
         }
     }
 

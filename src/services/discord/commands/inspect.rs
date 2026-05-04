@@ -904,6 +904,8 @@ mod tests {
                     content_visibility: PromptContentVisibility::AdkProvided,
                     full_content: Some("ADK full body with ``` fence".to_string()),
                     redacted_preview: None,
+                    is_truncated: false,
+                    original_bytes: Some(28),
                 },
                 PromptManifestLayer {
                     id: None,
@@ -918,6 +920,8 @@ mod tests {
                     content_visibility: PromptContentVisibility::UserDerived,
                     full_content: Some("SECRET USER BODY MUST NOT LEAK".to_string()),
                     redacted_preview: Some("redacted user preview".to_string()),
+                    is_truncated: false,
+                    original_bytes: Some(30),
                 },
             ],
         }

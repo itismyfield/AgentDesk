@@ -110,6 +110,19 @@ runtime:
   rate_limit_stale_sec: 600
   reset_overrides_on_restart: false
 
+# Prompt-manifest retention policy + per-layer max full-content size (#1699).
+# - full_content_days: keep `full_content` for rows newer than this many days;
+#   older rows are trimmed to NULL by the daily `storage.prompt_manifest_retention`
+#   maintenance job. `content_sha256` and metadata are always preserved.
+# - per_layer_max_bytes_*: write-time per-layer byte cap. Layers exceeding the
+#   cap are stored truncated + flagged (`is_truncated = TRUE`); the hash always
+#   covers the original content. Setting either value to 0 disables that cap.
+prompt_manifest_retention:
+  enabled: true
+  full_content_days: 30
+  per_layer_max_bytes_adk_provided: 65536
+  per_layer_max_bytes_user_derived: 16384
+
 automation:
   enabled: false
   strategy: "squash"

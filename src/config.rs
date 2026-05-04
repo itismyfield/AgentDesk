@@ -49,6 +49,11 @@ pub struct Config {
     pub memory: Option<MemoryConfig>,
     #[serde(default, skip_serializing_if = "McpConfig::is_default")]
     pub mcp: McpConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "PromptManifestRetentionConfig::is_default"
+    )]
+    pub prompt_manifest_retention: PromptManifestRetentionConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -777,6 +782,85 @@ impl PlaceholderConfig {
     }
 }
 
+/// Retention + per-layer size cap for `prompt_manifest_layers` (#1699).
+///
+/// Storage growth bound: rows older than `full_content_days` get their
+/// `full_content` trimmed to NULL by the periodic sweeper, while metadata and
+/// `content_sha256` are preserved. Layers whose original content exceeds the
+/// per-visibility byte cap are stored truncated at write-time with `is_truncated`
+/// set; the hash always reflects the *original* content.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PromptManifestRetentionConfig {
+    /// When false, neither write-time truncation nor the periodic sweeper apply.
+    /// Defaults to true so deployments are bounded out of the box.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Keep `full_content` for rows newer than this many days. Older rows have
+    /// `full_content` trimmed (set to NULL) by `prompt_manifest_retention` job.
+    #[serde(default = "default_prompt_full_content_days")]
+    pub full_content_days: u32,
+    /// Per-layer maximum stored bytes for `adk_provided` content. Layers larger
+    /// than this are stored truncated + flagged; the hash covers the original.
+    #[serde(default = "default_prompt_max_bytes_adk_provided")]
+    pub per_layer_max_bytes_adk_provided: u64,
+    /// Per-layer maximum stored bytes for `user_derived` redacted previews.
+    /// User-derived layers already store only a redacted preview, so this is the
+    /// upper bound on that preview to prevent pathological growth.
+    #[serde(default = "default_prompt_max_bytes_user_derived")]
+    pub per_layer_max_bytes_user_derived: u64,
+}
+
+impl Default for PromptManifestRetentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            full_content_days: default_prompt_full_content_days(),
+            per_layer_max_bytes_adk_provided: default_prompt_max_bytes_adk_provided(),
+            per_layer_max_bytes_user_derived: default_prompt_max_bytes_user_derived(),
+        }
+    }
+}
+
+impl PromptManifestRetentionConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Returns `Some(cap)` when the per-layer max is finite (> 0). A zero or
+    /// missing cap means "no truncation for this visibility".
+    pub fn cap_for(&self, visibility: PromptManifestVisibilityKind) -> Option<usize> {
+        let raw = match visibility {
+            PromptManifestVisibilityKind::AdkProvided => self.per_layer_max_bytes_adk_provided,
+            PromptManifestVisibilityKind::UserDerived => self.per_layer_max_bytes_user_derived,
+        };
+        if raw == 0 {
+            return None;
+        }
+        usize::try_from(raw).ok()
+    }
+}
+
+/// Lightweight enum mirror of `db::prompt_manifests::PromptContentVisibility`
+/// — kept here so `config` does not depend on `db`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptManifestVisibilityKind {
+    AdkProvided,
+    UserDerived,
+}
+
+fn default_prompt_full_content_days() -> u32 {
+    30
+}
+
+fn default_prompt_max_bytes_adk_provided() -> u64 {
+    64 * 1024
+}
+
+fn default_prompt_max_bytes_user_derived() -> u64 {
+    16 * 1024
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RuntimeSettingsConfig {
@@ -1458,6 +1542,7 @@ impl Default for Config {
             onboarding: OnboardingConfig::default(),
             memory: None,
             mcp: McpConfig::default(),
+            prompt_manifest_retention: PromptManifestRetentionConfig::default(),
         }
         .apply_runtime_defaults()
     }
