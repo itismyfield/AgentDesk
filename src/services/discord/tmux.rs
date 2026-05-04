@@ -616,9 +616,19 @@ fn decide_placeholder_suppression(
             }
         }
         PlaceholderSuppressOrigin::TaskNotificationTerminal => {
+            // #1708: Background, Subagent, and MonitorAutoTurn task notifications
+            // are all auto-fired by tooling, not by the user. If the main turn is
+            // streaming user-facing body when one of them terminates, we must
+            // preserve that body — otherwise the SUPPRESSED_INTERNAL_LABEL edit
+            // overwrites the actual response (Monitor stream-end was the trigger
+            // observed in the 2026-05-04 adk-cc incident).
             let preserves_body = matches!(
                 ctx.task_notification_kind,
-                Some(TaskNotificationKind::Background | TaskNotificationKind::Subagent)
+                Some(
+                    TaskNotificationKind::Background
+                        | TaskNotificationKind::Subagent
+                        | TaskNotificationKind::MonitorAutoTurn
+                )
             );
             match suppressed_placeholder_action(
                 ctx.placeholder_msg_id.is_some(),
@@ -629,7 +639,7 @@ fn decide_placeholder_suppression(
                 SuppressedPlaceholderAction::Delete => PlaceholderSuppressDecision::Delete,
                 SuppressedPlaceholderAction::Edit(_) if preserves_body => {
                     PlaceholderSuppressDecision::Preserve {
-                        reason: "background-or-subagent-kind",
+                        reason: "auto-task-notification-kind",
                         cleaned_body: strip_placeholder_indicators_for_preserve(ctx.last_edit_text),
                     }
                 }
@@ -5570,12 +5580,12 @@ mod tests {
         );
         match decide_placeholder_suppression(&ctx) {
             PlaceholderSuppressDecision::Preserve {
-                reason: "background-or-subagent-kind",
+                reason: "auto-task-notification-kind",
                 cleaned_body,
             } => {
                 assert_eq!(cleaned_body, "live user-facing content");
             }
-            other => panic!("expected Preserve background-or-subagent-kind, got {other:?}"),
+            other => panic!("expected Preserve auto-task-notification-kind, got {other:?}"),
         }
     }
 
@@ -5592,17 +5602,21 @@ mod tests {
         );
         match decide_placeholder_suppression(&ctx) {
             PlaceholderSuppressDecision::Preserve {
-                reason: "background-or-subagent-kind",
+                reason: "auto-task-notification-kind",
                 cleaned_body,
             } => {
                 assert_eq!(cleaned_body, "subagent body");
             }
-            other => panic!("expected Preserve background-or-subagent-kind, got {other:?}"),
+            other => panic!("expected Preserve auto-task-notification-kind, got {other:?}"),
         }
     }
 
+    /// #1708 regression: MonitorAutoTurn terminal notification used to fall
+    /// through to `Edit(SUPPRESSED_INTERNAL_LABEL)`, overwriting the live
+    /// user-facing body that the main turn was streaming. It must Preserve
+    /// the body just like Background and Subagent kinds.
     #[test]
-    fn decide_placeholder_suppression_task_notification_edits_for_monitor_auto_turn() {
+    fn decide_placeholder_suppression_task_notification_preserves_monitor_auto_turn_body() {
         let ctx = test_placeholder_suppress_context(
             PlaceholderSuppressOrigin::TaskNotificationTerminal,
             Some(MessageId::new(1)),
@@ -5613,10 +5627,13 @@ mod tests {
             false,
         );
         match decide_placeholder_suppression(&ctx) {
-            PlaceholderSuppressDecision::Edit(content) => {
-                assert!(content.contains(SUPPRESSED_INTERNAL_LABEL))
+            PlaceholderSuppressDecision::Preserve {
+                reason: "auto-task-notification-kind",
+                cleaned_body,
+            } => {
+                assert_eq!(cleaned_body, "monitor-auto body");
             }
-            other => panic!("expected Edit with label, got {other:?}"),
+            other => panic!("expected Preserve auto-task-notification-kind, got {other:?}"),
         }
     }
 
