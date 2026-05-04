@@ -53,12 +53,6 @@ src/
 │   ├── dispatches/
 │   │   ├── mod.rs
 │   │   └── outbox.rs
-│   ├── kanban_cards/
-│   │   ├── crud.rs
-│   │   ├── listing.rs
-│   │   ├── metadata.rs
-│   │   ├── mod.rs
-│   │   └── transitions.rs
 │   ├── agents.rs
 │   ├── auto_queue.rs
 │   ├── cancel_tombstones.rs
@@ -274,6 +268,16 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── policy.rs
 │   │   │   └── result.rs
+│   │   ├── placeholder_live_events/
+│   │   │   ├── common.rs
+│   │   │   ├── context_panel.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── prompt_panel.rs
+│   │   │   ├── recent_events.rs
+│   │   │   ├── session_panel.rs
+│   │   │   ├── status_events.rs
+│   │   │   ├── task_panel.rs
+│   │   │   └── tests.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── mod.rs
 │   │   │   └── shared.rs
@@ -337,7 +341,6 @@ src/
 │   │   ├── org_writer.rs
 │   │   ├── placeholder_cleanup.rs
 │   │   ├── placeholder_controller.rs
-│   │   ├── placeholder_live_events.rs
 │   │   ├── placeholder_sweeper.rs
 │   │   ├── prompt_builder.rs
 │   │   ├── queue_io.rs
