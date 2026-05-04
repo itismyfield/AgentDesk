@@ -292,6 +292,17 @@ The remaining giant-file modules under `src/services/` not covered above:
 
 Same rule: `bugfix` only without a split issue.
 
+## Shared API Helpers
+
+For new HTTP route logic that paginates over Postgres-backed lists, prefer the
+shared helper `crate::utils::api::clamp_api_limit` (in `src/utils/api.rs`) over
+inline `limit.clamp(1, 100)` calls. The helper applies the standard API-limit
+shape (default 50, clamped to 1..=100) and is the single canonical site for
+that bound — `scripts/audit_maintainability/checks/limit_clamp_duplication.py`
+flags any new inline `clamp(1, 100)` outside the helper definition (#1698).
+For non-standard bounds, extend `clamp_limit(limit, default, max)` rather than
+reintroducing bespoke clamp expressions.
+
 ## Updating This Page
 
 - Re-run `python3 scripts/generate_inventory_docs.py` and reconcile the

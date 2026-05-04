@@ -231,6 +231,23 @@ class LimitClampDuplicationCheck(unittest.TestCase):
             hits = list(limit_clamp_duplication.CHECK.runner(set()))
         self.assertEqual(hits, [])
 
+    def test_flags_inline_api_limit_shape_even_in_a_single_file(self) -> None:
+        body = "let limit = limit.clamp(1, 100);\n"
+        with _FakeSrcTree({"src/server/routes/only.rs": body}):
+            hits = list(limit_clamp_duplication.CHECK.runner(set()))
+        self.assertEqual(_files(hits), {"src/server/routes/only.rs"})
+
+    def test_helper_definition_marker_opts_out(self) -> None:
+        helper = (
+            "// audit-allow: limit_clamp_helper_definition\n"
+            "pub fn clamp_api_limit(limit: Option<usize>) -> usize {\n"
+            "    limit.unwrap_or(50).clamp(1, 100)\n"
+            "}\n"
+        )
+        with _FakeSrcTree({"src/utils/api.rs": helper}):
+            hits = list(limit_clamp_duplication.CHECK.runner(set()))
+        self.assertEqual(hits, [])
+
 
 class GitSubprocessCheck(unittest.TestCase):
     def test_flags_git_command_outside_services_git(self) -> None:
@@ -342,7 +359,7 @@ class HarnessCli(unittest.TestCase):
             self.assertIn(f'"{key}"', json_text, f"missing json section for {key}")
             self.assertIn(f"`{key}`", md_text, f"missing markdown section for {key}")
 
-    def test_only_selected_four_checks_are_hard_gated(self) -> None:
+    def test_only_selected_checks_are_hard_gated(self) -> None:
         specs = HARNESS.load_check_specs()
         hard_gated = {spec.key for spec in specs if spec.hard_gate}
         self.assertEqual(
@@ -352,6 +369,7 @@ class HarnessCli(unittest.TestCase):
                 "direct_discord_sends",
                 "legacy_sqlite_refs",
                 "source_of_truth_alias_writes",
+                "git_subprocess_callsites",
             },
         )
         warning_only = {
@@ -368,9 +386,9 @@ class HarnessCli(unittest.TestCase):
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
-        self.assertIn("hard_gate_count: 4", yaml_text)
+        self.assertIn("hard_gate_count: 5", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
-        self.assertEqual(json_payload["hard_gate_count"], 4)
+        self.assertEqual(json_payload["hard_gate_count"], 5)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):

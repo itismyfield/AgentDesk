@@ -215,14 +215,14 @@
 | `server::routes::review_verdict::tuning_aggregate` | `src/server/routes/review_verdict/tuning_aggregate.rs` | 707 |  |
 | `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 554 |  |
 | `server::routes::reviews` | `src/server/routes/reviews.rs` | 530 |  |
-| `server::routes::routines` | `src/server/routes/routines.rs` | 766 |  |
+| `server::routes::routines` | `src/server/routes/routines.rs` | 768 |  |
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 405 |  |
 | `server::routes::settings` | `src/server/routes/settings.rs` | 811 |  |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 328 |  |
 | `server::routes::skills_api` | `src/server/routes/skills_api.rs` | 708 |  |
 | `server::routes::stats` | `src/server/routes/stats.rs` | 587 |  |
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 303 |  |
-| `server::routes::v1` | `src/server/routes/v1.rs` | 1856 | giant-file |
+| `server::routes::v1` | `src/server/routes/v1.rs` | 1857 | giant-file |
 | `server::state` | `src/server/state.rs` | 235 |  |
 | `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 394 |  |
 | `server::test_phase_runs` | `src/server/test_phase_runs.rs` | 426 |  |
@@ -451,7 +451,7 @@
 | `services::routines::runtime` | `src/services/routines/runtime.rs` | 786 |  |
 | `services::routines::runtime_config` | `src/services/routines/runtime_config.rs` | 108 |  |
 | `services::routines::session_control` | `src/services/routines/session_control.rs` | 419 |  |
-| `services::routines::store` | `src/services/routines/store.rs` | 2744 | giant-file |
+| `services::routines::store` | `src/services/routines/store.rs` | 2746 | giant-file |
 | `services::service_error` | `src/services/service_error.rs` | 1 |  |
 | `services::session_backend` | `src/services/session_backend.rs` | 1045 | giant-file |
 | `services::session_forwarding` | `src/services/session_forwarding.rs` | 471 |  |
@@ -470,7 +470,7 @@
 | `ui` | `src/ui/mod.rs` | 1 |  |
 | `ui::ai_screen` | `src/ui/ai_screen.rs` | 103 |  |
 | `utils` | `src/utils/mod.rs` | 5 |  |
-| `utils::api` | `src/utils/api.rs` | 50 |  |
+| `utils::api` | `src/utils/api.rs` | 53 |  |
 | `utils::async_bridge` | `src/utils/async_bridge.rs` | 137 |  |
 | `utils::format` | `src/utils/format.rs` | 324 |  |
 | `utils::loopback_url` | `src/utils/loopback_url.rs` | 58 |  |

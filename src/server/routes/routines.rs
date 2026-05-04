@@ -14,6 +14,7 @@ use crate::services::routines::{
     RoutineScriptLoader, RoutineSessionCommand, RoutineSessionController, RoutineStore,
     execute_claimed_script_run, validate_routine_runtime_config, validate_routine_schedule,
 };
+use crate::utils::api::clamp_api_limit;
 
 use super::AppState;
 
@@ -169,13 +170,14 @@ pub async fn search_routine_run_results(
         validate_run_status_filter(status)?;
     }
     let store = routine_store(&state)?;
+    let limit = clamp_api_limit(Some(query.limit.unwrap_or(20).max(0) as usize)) as i64;
     let runs = store
         .search_run_results(
             q,
             query.agent_id.as_deref(),
             query.status.as_deref(),
             query.since,
-            query.limit.unwrap_or(20),
+            limit,
         )
         .await
         .map_err(store_error)?;
@@ -186,7 +188,7 @@ pub async fn search_routine_run_results(
             "agent_id": query.agent_id,
             "status": query.status,
             "since": query.since,
-            "limit": query.limit.unwrap_or(20).clamp(1, 100),
+            "limit": limit,
         },
     })))
 }

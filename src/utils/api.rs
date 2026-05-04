@@ -4,6 +4,9 @@ use std::fmt::Display;
 
 pub(crate) type ApiJsonResponse = (StatusCode, Json<Value>);
 
+// audit-allow: limit_clamp_helper_definition — this module owns the shared
+// `clamp_api_limit` / `clamp_limit` helpers, so the inline `clamp(1, ...)`
+// call below is the single canonical site for the API-limit shape (#1698).
 pub(crate) fn clamp_limit(limit: Option<usize>, default: usize, max: usize) -> usize {
     limit.unwrap_or(default).clamp(1, max)
 }
