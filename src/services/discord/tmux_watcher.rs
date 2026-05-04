@@ -2630,12 +2630,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     "full_response_len": full_response.len(),
                 }),
             );
+            // codex P2 (#1670): cleanup (mailbox_finish_turn + cancel_token
+            // release) MUST run on every relay-completed terminal even when
+            // `dispatch_ok = false`, otherwise organic turns leak forever.
+            // But the queue-kickoff side-effect — auto-dispatching the next
+            // queued turn — must stay gated on `dispatch_ok`. Without this
+            // split a failed dispatch silently kicks off the next backlog
+            // entry. The redundant `should_kickoff_queue` block further
+            // below is also `dispatch_ok`-gated and remains as a fallback
+            // for paths where the helper short-circuited.
             finish_restored_watcher_active_turn(
                 &shared,
                 &provider_kind,
                 channel_id,
                 finish_mailbox_on_completion,
                 owed,
+                dispatch_ok,
                 "restored watcher completed with queued backlog",
             )
             .await;

@@ -1962,12 +1962,39 @@ pub(super) async fn test_finish_restored_watcher_active_turn(
     delegated_finalize_owed: bool,
     stop_source: &'static str,
 ) {
+    // Tests historically exercised this helper without a separate kickoff
+    // gate, so default to the legacy "kickoff is allowed" behavior. New tests
+    // that need to exercise the failed-dispatch path call
+    // `test_finish_restored_watcher_active_turn_with_kickoff_gate` below.
     finish_restored_watcher_active_turn(
         shared,
         provider,
         channel_id,
         finish_mailbox_on_completion,
         delegated_finalize_owed,
+        true,
+        stop_source,
+    )
+    .await
+}
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(super) async fn test_finish_restored_watcher_active_turn_with_kickoff_gate(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    finish_mailbox_on_completion: bool,
+    delegated_finalize_owed: bool,
+    kickoff_queue: bool,
+    stop_source: &'static str,
+) {
+    finish_restored_watcher_active_turn(
+        shared,
+        provider,
+        channel_id,
+        finish_mailbox_on_completion,
+        delegated_finalize_owed,
+        kickoff_queue,
         stop_source,
     )
     .await
@@ -1979,6 +2006,7 @@ async fn finish_restored_watcher_active_turn(
     channel_id: ChannelId,
     finish_mailbox_on_completion: bool,
     delegated_finalize_owed: bool,
+    kickoff_queue: bool,
     stop_source: &'static str,
 ) {
     // Either flag implies the watcher must clear the channel mailbox now:
@@ -1994,6 +2022,13 @@ async fn finish_restored_watcher_active_turn(
     // `mailbox_finish_turn` once per turn is idempotent for our purposes —
     // the second call would just observe an empty active slot — but we
     // gate on the OR to keep the call site to a single place.
+    //
+    // `kickoff_queue` is the dispatch-lifecycle gate (codex #1670 P2): the
+    // mailbox/inflight cleanup above is required for orphan prevention even
+    // when the dispatch finalization failed, but auto-dispatching the next
+    // queued turn must NOT happen on a failed dispatch — that decision is
+    // left to the operator/user. Callers pass `dispatch_ok` (or an
+    // equivalent gate) here.
     if !finish_mailbox_on_completion && !delegated_finalize_owed {
         return;
     }
@@ -2024,7 +2059,7 @@ async fn finish_restored_watcher_active_turn(
     if !finish.has_pending {
         shared.dispatch_role_overrides.remove(&channel_id);
     }
-    if finish.mailbox_online && finish.has_pending {
+    if kickoff_queue && finish.mailbox_online && finish.has_pending {
         super::schedule_deferred_idle_queue_kickoff(
             shared.clone(),
             provider.clone(),
@@ -4205,6 +4240,7 @@ mod tests {
             channel_id,
             true,
             false,
+            true,
             "restored_watcher_finish_does_not_underflow_global_active",
         )
         .await;

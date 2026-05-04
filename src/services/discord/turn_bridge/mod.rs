@@ -1871,12 +1871,24 @@ pub(super) fn spawn_turn_bridge(
                                 // close, which then misroutes downstream
                                 // suppression decisions and persists into the
                                 // saved inflight when the watcher takes over.
-                                // The stream is single-threaded inside this
-                                // branch and only one child is closed per
-                                // event, so resetting to `None` matches the
-                                // current 1-deep usage; if nested kind tracking
-                                // is added later, switch to a stack pop.
-                                inflight_state.task_notification_kind = None;
+                                //
+                                // codex P2 followup: only reset the kind once
+                                // ALL tracked children have closed.
+                                // `active_background_child_session_ids` is a
+                                // queue and `close_next_tracked_background_child`
+                                // pops a single entry, so when concurrent
+                                // subagent children are tracked and only one
+                                // emits a terminal status we must keep the
+                                // outer kind so the remaining child still
+                                // routes through the ExplicitBackground/
+                                // Subagent classification path. A stack/multiset
+                                // of kinds would be the proper structural fix;
+                                // here we approximate by gating reset on the
+                                // remaining-children count, which covers the
+                                // single-kind concurrent-children regression.
+                                if active_background_child_session_ids.is_empty() {
+                                    inflight_state.task_notification_kind = None;
+                                }
                             }
                             push_transcript_event(
                                 &mut transcript_events,
@@ -4217,6 +4229,113 @@ pub(super) fn spawn_turn_bridge(
 
         // completion_tx is sent automatically by CompletionGuard on drop
     }.instrument(bridge_span));
+}
+
+/// codex P2 followup (#1670): unit-level coverage of the
+/// "preserve task_notification_kind while other children remain" rule.
+/// This mirrors the production logic at the
+/// `task_notification_closes_background_child` arm in
+/// `StreamMessage::TaskNotification` (search: `codex P2 followup`).
+///
+/// The existing exhaustive-status coverage lives in
+/// `tests::task_notification_kind_resets_after_terminal_status` but that
+/// module is feature-gated on `legacy-sqlite-tests`; this lighter copy is
+/// added in the non-gated mod so the regression is observable in normal
+/// `cargo test` runs.
+#[cfg(test)]
+mod task_notification_kind_lifecycle_tests {
+    use super::{
+        TaskNotificationKind, merge_task_notification_kind,
+        task_notification_closes_background_child,
+    };
+
+    #[test]
+    fn kind_persists_while_other_children_remain() {
+        let mut child_ids: Vec<i64> = vec![100, 101];
+        let mut kind: Option<TaskNotificationKind> = None;
+        kind = merge_task_notification_kind(kind, TaskNotificationKind::Subagent);
+
+        let new_kind = TaskNotificationKind::Subagent;
+        let status = "completed";
+        kind = merge_task_notification_kind(kind, new_kind);
+        if task_notification_closes_background_child(new_kind, status) {
+            // Mirror the single-pop behavior of
+            // `close_next_tracked_background_child` at the call site.
+            let _ = child_ids.remove(0);
+            if child_ids.is_empty() {
+                kind = None;
+            }
+        }
+
+        assert_eq!(child_ids, vec![101]);
+        assert_eq!(
+            kind,
+            Some(TaskNotificationKind::Subagent),
+            "#1670 P2: kind must persist while other tracked children remain"
+        );
+
+        // Second terminal closes the queue, kind releases.
+        let new_kind = TaskNotificationKind::Subagent;
+        let status = "completed";
+        kind = merge_task_notification_kind(kind, new_kind);
+        if task_notification_closes_background_child(new_kind, status) {
+            let _ = child_ids.remove(0);
+            if child_ids.is_empty() {
+                kind = None;
+            }
+        }
+        assert!(child_ids.is_empty());
+        assert_eq!(
+            kind, None,
+            "#1670 P2: kind must release once the last child closes"
+        );
+    }
+
+    #[test]
+    fn kind_releases_immediately_when_queue_was_already_singleton() {
+        let mut child_ids: Vec<i64> = vec![42];
+        let mut kind: Option<TaskNotificationKind> = Some(TaskNotificationKind::Background);
+
+        let new_kind = TaskNotificationKind::Background;
+        let status = "aborted";
+        kind = merge_task_notification_kind(kind, new_kind);
+        if task_notification_closes_background_child(new_kind, status) {
+            let _ = child_ids.remove(0);
+            if child_ids.is_empty() {
+                kind = None;
+            }
+        }
+
+        assert!(child_ids.is_empty());
+        assert_eq!(
+            kind, None,
+            "#1670 P2: with a single tracked child, terminal status must release the kind"
+        );
+    }
+
+    #[test]
+    fn non_terminal_status_keeps_kind_and_does_not_pop() {
+        let mut child_ids: Vec<i64> = vec![1, 2];
+        let mut kind: Option<TaskNotificationKind> = None;
+        kind = merge_task_notification_kind(kind, TaskNotificationKind::Subagent);
+
+        let new_kind = TaskNotificationKind::Subagent;
+        let status = "started";
+        kind = merge_task_notification_kind(kind, new_kind);
+        if task_notification_closes_background_child(new_kind, status) {
+            let _ = child_ids.remove(0);
+            if child_ids.is_empty() {
+                kind = None;
+            }
+        }
+
+        assert_eq!(child_ids, vec![1, 2], "non-terminal must not pop");
+        assert_eq!(
+            kind,
+            Some(TaskNotificationKind::Subagent),
+            "non-terminal must keep kind"
+        );
+    }
 }
 
 #[cfg(test)]

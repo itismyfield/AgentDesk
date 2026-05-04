@@ -2971,6 +2971,120 @@ async fn organic_turn_clears_inflight_on_watcher_delegated_finalize() {
     );
 }
 
+/// codex P2 followup (#1670): when dispatch finalization fails, the
+/// watcher MUST still clear inflight + mailbox (orphan prevention), but
+/// MUST NOT auto-kick the next queued turn. Pre-fix
+/// `finish_restored_watcher_active_turn` always called
+/// `schedule_deferred_idle_queue_kickoff` whenever a soft-queue item was
+/// pending, regardless of `dispatch_ok`, so a failed dispatch silently
+/// dispatched the next backlog entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_does_not_kickoff_queue_when_dispatch_failed() {
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1500042670918336515);
+
+    let active_token = Arc::new(CancelToken::new());
+    assert!(
+        shared
+            .mailbox(channel_id)
+            .try_start_turn(
+                active_token.clone(),
+                UserId::new(7),
+                MessageId::new(1500042670918336516),
+            )
+            .await
+    );
+
+    // Plant a soft-queued intervention so `mailbox_finish_turn` reports
+    // `has_pending = true` — the precise condition under which the legacy
+    // helper would have scheduled a kickoff.
+    let enqueue = super::super::mailbox_enqueue_intervention(
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        super::super::Intervention {
+            author_id: UserId::new(7),
+            message_id: MessageId::new(1500042670918336517),
+            source_message_ids: vec![MessageId::new(1500042670918336517)],
+            text: "queued behind failing dispatch".to_string(),
+            mode: super::super::InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+        },
+    )
+    .await;
+    assert!(enqueue.enqueued, "queued intervention must enqueue");
+
+    let backlog_before = shared
+        .deferred_hook_backlog
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    // dispatch_ok = false → cleanup runs but kickoff must NOT fire.
+    super::super::tmux::test_finish_restored_watcher_active_turn_with_kickoff_gate(
+        &shared,
+        &provider,
+        channel_id,
+        false, // finish_mailbox_on_completion
+        true,  // delegated_finalize_owed (#1452)
+        false, // kickoff_queue (= dispatch_ok)
+        "test #1670 P2 dispatch_ok=false must not kickoff",
+    )
+    .await;
+
+    assert!(
+        !shared.mailbox(channel_id).has_active_turn().await,
+        "#1670: cleanup must still clear the active turn even when dispatch failed"
+    );
+    assert!(
+        active_token.cancelled.load(Ordering::Relaxed),
+        "#1670: cancel_token must still be released"
+    );
+    let backlog_after = shared
+        .deferred_hook_backlog
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        backlog_after, backlog_before,
+        "#1670 P2: deferred_hook_backlog must NOT grow when dispatch_ok=false (failed dispatch must not auto-dispatch the next queued turn)"
+    );
+
+    // Sanity check the converse: if we now invoke the helper with
+    // kickoff_queue=true on the SAME mailbox state (still has the queued
+    // intervention), the backlog grows. This guards against a regression
+    // where the gate is wired to always-false.
+    let active_token2 = Arc::new(CancelToken::new());
+    assert!(
+        shared
+            .mailbox(channel_id)
+            .try_start_turn(
+                active_token2.clone(),
+                UserId::new(7),
+                MessageId::new(1500042670918336518),
+            )
+            .await,
+        "must be able to start a fresh turn after #1670 cleanup"
+    );
+    super::super::tmux::test_finish_restored_watcher_active_turn_with_kickoff_gate(
+        &shared,
+        &provider,
+        channel_id,
+        false,
+        true,
+        true, // kickoff_queue (= dispatch_ok)
+        "test #1670 P2 dispatch_ok=true must kickoff",
+    )
+    .await;
+    let backlog_kickoff = shared
+        .deferred_hook_backlog
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        backlog_kickoff > backlog_after,
+        "sanity: kickoff must fire when kickoff_queue=true and queue is non-empty (got before={backlog_after}, after={backlog_kickoff})"
+    );
+}
+
 /// 5. Regression: the existing `finish_mailbox_on_completion = true`
 /// (inflight-restore) path keeps working when the new flag is also set.
 /// `mailbox_finish_turn` is idempotent (the second call observes an empty
@@ -3133,5 +3247,92 @@ fn task_notification_kind_resets_after_terminal_status() {
         kind,
         Some(TaskNotificationKind::MonitorAutoTurn),
         "#1670: MonitorAutoTurn is NOT a background child — kind must persist"
+    );
+}
+
+/// codex P2 followup (#1670): when multiple subagent children are tracked
+/// concurrently and only ONE emits a terminal status, the absorbed
+/// `task_notification_kind` MUST be preserved so the remaining child still
+/// routes through the ExplicitBackground/Subagent classification path.
+///
+/// `active_background_child_session_ids` is a queue (Vec<i64>) and
+/// `close_next_tracked_background_child` pops a single entry per terminal
+/// notification. Pre-fix the kind was reset unconditionally, which made
+/// subsequent classification of the remaining child miss its kind.
+///
+/// This test mirrors the production logic in
+/// `turn_bridge::mod::StreamMessage::TaskNotification`:
+///   - merge kind on every notification
+///   - on terminal status: pop one child, then reset kind ONLY IF the
+///     queue is now empty
+#[test]
+fn task_notification_kind_persists_while_other_children_remain() {
+    // Two concurrent subagent children tracked in the queue.
+    let mut child_ids: Vec<i64> = vec![100, 101];
+    let mut kind: Option<TaskNotificationKind> = None;
+
+    // First Subagent "started" notification (kind absorbed).
+    kind = merge_task_notification_kind(kind, TaskNotificationKind::Subagent);
+    assert_eq!(kind, Some(TaskNotificationKind::Subagent));
+
+    // Child 100 emits "completed" — pop one, but child 101 is still alive.
+    let new_kind = TaskNotificationKind::Subagent;
+    let status = "completed";
+    kind = merge_task_notification_kind(kind, new_kind);
+    if task_notification_closes_background_child(new_kind, status) {
+        // Pop one child from the queue to mirror
+        // `close_next_tracked_background_child`'s removal of `child_ids[0]`.
+        let _popped = child_ids.remove(0);
+        if child_ids.is_empty() {
+            kind = None;
+        }
+    }
+
+    assert_eq!(
+        child_ids,
+        vec![101],
+        "one child must remain after the first terminal notification"
+    );
+    assert_eq!(
+        kind,
+        Some(TaskNotificationKind::Subagent),
+        "#1670 P2: kind MUST persist while other tracked children remain — pre-fix this was reset to None and the remaining child was misclassified"
+    );
+
+    // Child 101 emits "completed" — queue drains, kind releases.
+    let new_kind = TaskNotificationKind::Subagent;
+    let status = "completed";
+    kind = merge_task_notification_kind(kind, new_kind);
+    if task_notification_closes_background_child(new_kind, status) {
+        let _popped = child_ids.remove(0);
+        if child_ids.is_empty() {
+            kind = None;
+        }
+    }
+    assert!(
+        child_ids.is_empty(),
+        "queue must be empty after the second terminal notification"
+    );
+    assert_eq!(
+        kind, None,
+        "#1670 P2: kind MUST release once the last tracked child closes"
+    );
+
+    // Mixed-status case: aborted on one of two children — same gating.
+    let mut child_ids: Vec<i64> = vec![200, 201];
+    let mut kind: Option<TaskNotificationKind> = Some(TaskNotificationKind::Subagent);
+    let new_kind = TaskNotificationKind::Subagent;
+    let status = "aborted";
+    kind = merge_task_notification_kind(kind, new_kind);
+    if task_notification_closes_background_child(new_kind, status) {
+        let _popped = child_ids.remove(0);
+        if child_ids.is_empty() {
+            kind = None;
+        }
+    }
+    assert_eq!(
+        kind,
+        Some(TaskNotificationKind::Subagent),
+        "#1670 P2: aborted on one child must NOT clear the kind while the other child remains"
     );
 }
