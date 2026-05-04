@@ -34,6 +34,41 @@ async fn cancel_text_stop_token_mailbox(
     }
 }
 
+/// #1672: After a `!stop`/`!cc stop` completes, kick the deferred
+/// idle-queue drain so any pending_queue items the user already sent
+/// (and that we explicitly preserved across cancel) get picked up
+/// without waiting for the next user message. Mirrors the
+/// `cancel_turn` API path's `schedule_pending_queue_drain_after_cancel`
+/// call so the three cancel surfaces (`!stop`, `!cc stop`, and the
+/// REST cancel endpoint) all share the same post-cancel drain
+/// semantics.
+fn schedule_text_stop_pending_queue_drain(
+    shared: &Arc<SharedData>,
+    provider: &crate::services::provider::ProviderKind,
+    channel_id: serenity::ChannelId,
+    stop_source: &'static str,
+) {
+    let shared = shared.clone();
+    let provider = provider.clone();
+    tokio::spawn(async move {
+        let snapshot = shared
+            .mailbox(channel_id)
+            .snapshot()
+            .await
+            .intervention_queue
+            .len();
+        if snapshot == 0 {
+            return;
+        }
+        super::super::schedule_deferred_idle_queue_kickoff(
+            shared,
+            provider,
+            channel_id,
+            stop_source,
+        );
+    });
+}
+
 async fn fetch_escalation_settings_via_api()
 -> Result<crate::server::routes::escalation::EscalationSettingsResponse, String> {
     let body = crate::services::discord::internal_api::get_escalation_settings().await?;
@@ -361,6 +396,18 @@ pub(in crate::services::discord) async fn handle_text_command(
                         "!stop",
                     )
                     .await;
+                    // #1672: belt-and-suspenders drain trigger so the
+                    // !stop surface matches the cancel-API contract.
+                    // The turn_bridge cancellation tail also schedules
+                    // a drain when `has_pending` is true, but we
+                    // re-arm here so a watcher-finalized turn (where
+                    // the bridge skips its own finalize) still drains.
+                    schedule_text_stop_pending_queue_drain(
+                        &data.shared,
+                        &data.provider,
+                        channel_id,
+                        "!stop",
+                    );
                 }
                 TextStopLookup::AlreadyStopping => {
                     let _ = msg.reply(&ctx.http, "Already stopping...").await;
@@ -1153,6 +1200,16 @@ Any other message is sent to {p}.
                                 "!cc stop",
                             )
                             .await;
+                            // #1672: mirror the !stop / cancel API drain
+                            // trigger so the three cancel surfaces all
+                            // pick up the queued user message after the
+                            // channel goes idle.
+                            schedule_text_stop_pending_queue_drain(
+                                &data.shared,
+                                &data.provider,
+                                channel_id,
+                                "!cc stop",
+                            );
                             let _ = msg.reply(&ctx.http, "Stopping...").await;
                         }
                         TextStopLookup::AlreadyStopping => {

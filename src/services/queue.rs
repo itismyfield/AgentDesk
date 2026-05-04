@@ -455,17 +455,53 @@ impl QueueService {
         }
 
         let exact_channel_match = match_rank.is_none_or(|rank| rank <= 2);
+
+        // #1672: prefer the *observed* tmux session name over the
+        // session-key-derived one. The latter is empty whenever the
+        // session row is missing (cancel-via-watcher fallback) but the
+        // runtime still knows the tmux name from the watcher binding /
+        // inflight state — those are exactly the incidents where the
+        // operator most needs to see the real session name.
+        let reported_tmux_session = lifecycle
+            .tmux_session_observed
+            .clone()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| tmux_name.clone());
+        let queued_remaining = lifecycle.queue_depth_after.or(lifecycle.queue_depth);
+
+        // #1672: with the cancel completed and the channel idle, kick
+        // any survived pending_queue items so the next intervention is
+        // picked up without needing a fresh user message to drive the
+        // mailbox poll.
+        if !force
+            && let (Some(registry), Some(provider_kind), Some(channel)) =
+                (health_registry, target.provider.as_ref(), target.channel_id)
+        {
+            let _ = crate::services::discord::health::schedule_pending_queue_drain_after_cancel(
+                registry.as_ref(),
+                provider_kind.as_str(),
+                channel,
+                "queue_api_cancel_turn",
+            )
+            .await;
+        }
+
         tracing::info!(
-            "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}",
+            "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={}, queued_before={:?}, queued_after={:?}, queue_disk_before={}, queue_disk_after={}",
             channel_id,
             session_key,
-            tmux_name,
+            reported_tmux_session,
             lifecycle.tmux_killed,
             dispatch_id,
             lifecycle.lifecycle_path,
             agent_id,
             requested_provider,
             exact_channel_match,
+            lifecycle.queue_preserved,
+            lifecycle.queue_depth_before,
+            lifecycle.queue_depth_after,
+            lifecycle.queue_disk_present_before,
+            lifecycle.queue_disk_present_after,
         );
 
         Ok(json!({
@@ -475,11 +511,14 @@ impl QueueService {
             "requested_provider": requested_provider,
             "exact_channel_match": exact_channel_match,
             "session_key": session_key,
-            "tmux_session": tmux_name,
+            "tmux_session": reported_tmux_session,
             "tmux_killed": lifecycle.tmux_killed,
             "lifecycle_path": lifecycle.lifecycle_path,
-            "queued_remaining": lifecycle.queue_depth,
+            "queued_remaining": queued_remaining,
+            "queued_before": lifecycle.queue_depth_before,
             "queue_preserved": lifecycle.queue_preserved,
+            "queue_disk_present_before": lifecycle.queue_disk_present_before,
+            "queue_disk_present_after": lifecycle.queue_disk_present_after,
             "inflight_cleared": lifecycle.inflight_cleared,
             "dispatch_cancelled": dispatch_id,
             "turn_status": finalizer.status,

@@ -3299,6 +3299,25 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
     assert_eq!(json["inflight_cleared"], false);
     assert_eq!(json["turn_status"], "cancelled");
     assert!(json["turn_completed_at"].as_str().is_some());
+    // #1672: response must surface the *observed* pre/post queue depth
+    // and the disk-presence transition so operators can tell the
+    // difference between "queue preserved" and "queue silently
+    // dropped". The legacy contract reported `queue_preserved=true`
+    // unconditionally; this test pins the observability fields the
+    // queue-api cancel response now carries.
+    assert_eq!(json["queued_before"], 1);
+    assert_eq!(
+        json["queued_remaining"], 1,
+        "1 queued intervention must survive cancel — issue #1672"
+    );
+    assert!(
+        json["queue_disk_present_before"].is_boolean(),
+        "queue_disk_present_before must be reported"
+    );
+    assert!(
+        json["queue_disk_present_after"].is_boolean(),
+        "queue_disk_present_after must be reported"
+    );
     assert!(
         token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
         "turn cancel must signal the active turn token"
