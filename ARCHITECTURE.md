@@ -53,12 +53,6 @@ src/
 │   ├── dispatches/
 │   │   ├── mod.rs
 │   │   └── outbox.rs
-│   ├── kanban_cards/
-│   │   ├── crud.rs
-│   │   ├── listing.rs
-│   │   ├── metadata.rs
-│   │   ├── mod.rs
-│   │   └── transitions.rs
 │   ├── agents.rs
 │   ├── auto_queue.rs
 │   ├── cancel_tombstones.rs
@@ -194,6 +188,7 @@ src/
 │   │   ├── offices.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
+│   │   ├── prompt_manifest_retention.rs
 │   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
 │   │   ├── receipt.rs
