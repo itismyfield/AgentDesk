@@ -4869,7 +4869,7 @@ mod tests {
 
     /// Seed a kanban_card with explicit (repo_id, assigned_agent_id), the
     /// pair the runtime resolver actually merges.
-    async fn seed_card_with_repo_pg(
+    async fn seed_card_with_repo_and_agent_pg(
         pool: &sqlx::PgPool,
         card_id: &str,
         repo_id: &str,
@@ -4900,7 +4900,7 @@ mod tests {
         let pool = pg_db.migrate().await;
         seed_agent_pg(&pool).await;
         seed_repo_no_default_agent_pg(&pool, "repo-1692-d").await;
-        seed_card_with_repo_pg(&pool, "card-1692-d", "repo-1692-d", "agent-1").await;
+        seed_card_with_repo_and_agent_pg(&pool, "card-1692-d", "repo-1692-d", "agent-1").await;
         crate::pipeline::ensure_loaded();
 
         // Pre-existing agent override is valid alone.
@@ -4958,7 +4958,7 @@ mod tests {
         let pool = pg_db.migrate().await;
         seed_agent_pg(&pool).await;
         seed_repo_no_default_agent_pg(&pool, "repo-1692-e").await;
-        seed_card_with_repo_pg(&pool, "card-1692-e", "repo-1692-e", "agent-1").await;
+        seed_card_with_repo_and_agent_pg(&pool, "card-1692-e", "repo-1692-e", "agent-1").await;
         crate::pipeline::ensure_loaded();
 
         sqlx::query("UPDATE github_repos SET pipeline_config = $1::jsonb WHERE id = 'repo-1692-e'")
