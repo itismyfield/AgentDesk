@@ -13,3 +13,12 @@
 
 ## Closes
 <!-- e.g. Closes #1234 -->
+
+## Boundary fingerprint
+
+- Agent:
+- Boundary:
+- Primary files:
+- Queue hygiene invariant:
+- Related PRs/issues checked:
+- Why this is non-overlapping:
