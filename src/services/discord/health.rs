@@ -4336,16 +4336,48 @@ pub(super) async fn run_stall_watchdog_pass(
                 let watcher_owns_live_relay =
                     inflight_before.as_ref().map(|s| s.watcher_owns_live_relay);
                 super::inflight::delete_inflight_state_file(provider, channel_id.get());
-                let cleared = mailbox_clear_channel(&shared, provider, channel_id).await;
-                super::stall_recovery::finalize_orphaned_clear(
-                    &shared,
-                    channel_id,
-                    cleared.removed_token,
-                    "1671_stall_watchdog_explicit_background",
-                );
+                // codex re-review P2 — the orphan recovery branch must NOT
+                // drop the channel's queued user interventions. The
+                // pre-existing `mailbox_clear_channel` path drained
+                // `intervention_queue` and emitted `Superseded` events,
+                // which silently discarded any user message the operator
+                // had queued behind the stalled turn. Use
+                // `mailbox_finish_turn` (canonical "release lock + cancel
+                // token, keep queue") so the queued interventions survive
+                // and replay once the cancel completes. Mirrors the
+                // `placeholder_sweeper::finalize_abandoned_mailbox` pattern
+                // for the same orphan-recovery contract:
+                //   1) finish the active turn → release cancel_token,
+                //      preserving `intervention_queue`,
+                //   2) cancel the orphan token + decrement `global_active`,
+                //      and tear down the tmux session,
+                //   3) schedule a deferred idle-queue kickoff so any
+                //      survived queue items drain without waiting for the
+                //      next user message.
+                let finish = mailbox_finish_turn(&shared, provider, channel_id).await;
+                if let Some(removed_token) = finish.removed_token {
+                    super::turn_bridge::cancel_active_token(
+                        &removed_token,
+                        super::TmuxCleanupPolicy::CleanupSession {
+                            termination_reason_code: Some(
+                                "1671_stall_watchdog_explicit_background",
+                            ),
+                        },
+                        "1671_stall_watchdog_explicit_background",
+                    );
+                    shared.global_active.fetch_sub(1, Ordering::Relaxed);
+                }
                 shared
                     .dispatch_thread_parents
                     .retain(|_, thread_id| *thread_id != channel_id);
+                if finish.has_pending {
+                    super::schedule_deferred_idle_queue_kickoff(
+                        shared.clone(),
+                        provider.clone(),
+                        channel_id,
+                        "1671_stall_watchdog_explicit_background",
+                    );
+                }
                 crate::services::observability::emit_inflight_lifecycle_event(
                     provider.as_str(),
                     channel_id.get(),
@@ -7028,6 +7060,124 @@ mod tests {
         assert!(
             super::super::inflight::load_inflight_state(&ProviderKind::Codex, channel_id).is_some(),
             "active background inflight must survive the watchdog"
+        );
+    }
+
+    /// #1671 codex re-review P2 — the orphan ExplicitBackgroundWork
+    /// cleanup branch MUST preserve the channel's queued user
+    /// interventions. The legacy implementation routed cleanup through
+    /// `mailbox_clear_channel`, which drained `intervention_queue` as
+    /// `Superseded`; any user message queued behind the stalled turn was
+    /// silently dropped. The fix swaps to `mailbox_finish_turn`, which
+    /// only releases the active-turn anchor + cancel token while leaving
+    /// the queue intact, then schedules a deferred idle-queue kickoff so
+    /// the survived items drain without waiting for a fresh user message.
+    /// This test seeds the same orphan-recovery scenario as the parent
+    /// test plus a non-empty mailbox queue, runs the watchdog, and
+    /// asserts (1) the queue items survive in the mailbox snapshot and
+    /// (2) the inflight cleanup still happens.
+    #[tokio::test]
+    async fn stall_watchdog_orphan_explicit_background_preserves_pending_queue() {
+        let Some(tmux_guard) = start_test_tmux_session("watchdog-orphan-bg-queue") else {
+            return;
+        };
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(temp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id: u64 = 700_111_222_333_777_777;
+        harness.seed_watcher_for_tmux(channel_id, &tmux_guard.name);
+
+        // Seed two queued interventions BEFORE the watchdog runs. These
+        // must survive the orphan-recovery cleanup; if the cleanup still
+        // routes through `mailbox_clear_channel` they will be drained.
+        harness
+            .set_queue_depth_for_channel(channel_id, ProviderKind::Codex, 2)
+            .await;
+        let pre_queue_depth = harness.queue_depth_for_channel(channel_id).await;
+        assert_eq!(
+            pre_queue_depth, 2,
+            "test setup must successfully seed 2 queued interventions"
+        );
+
+        let output_path = temp.path().join("watchdog-orphan-bg-queue-output.jsonl");
+        let capture_bytes: u64 = 256;
+        std::fs::write(&output_path, vec![b'x'; capture_bytes as usize])
+            .expect("seed output capture");
+
+        let mut inflight = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("watchdog-orphan-bg-queue".to_string()),
+            42,
+            9_777,
+            9_778,
+            String::new(),
+            Some("session-watchdog-orphan-bg-queue".to_string()),
+            Some(tmux_guard.name.clone()),
+            Some(output_path.to_string_lossy().into_owned()),
+            None,
+            0,
+        );
+        inflight.task_notification_kind =
+            Some(crate::services::agent_protocol::TaskNotificationKind::Background);
+        inflight.last_offset = capture_bytes;
+        let stale_unix = chrono::Utc::now().timestamp()
+            - (super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS as i64)
+            - 60;
+        let stale_local = chrono::Local
+            .timestamp_opt(stale_unix, 0)
+            .single()
+            .expect("valid local time")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        inflight.started_at = stale_local.clone();
+        inflight.updated_at = stale_local.clone();
+        super::super::inflight::save_inflight_state(&inflight)
+            .expect("write seeded stale inflight JSON");
+        let json = serde_json::to_string_pretty(&inflight).expect("serialize stale inflight");
+        let inflight_path = super::super::inflight::inflight_runtime_root()
+            .expect("inflight root override")
+            .join("codex")
+            .join(format!("{channel_id}.json"));
+        std::fs::write(&inflight_path, json).expect("rewrite stale inflight on disk");
+
+        let coord = harness.shared.tmux_relay_coord(ChannelId::new(channel_id));
+        coord
+            .confirmed_end_offset
+            .store(capture_bytes, std::sync::atomic::Ordering::Release);
+        let stale_outbound_ms = chrono::Utc::now().timestamp_millis()
+            - ((super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_OUTBOUND_THRESHOLD_SECS as i64) * 1000)
+            - 60_000;
+        coord
+            .last_relay_ts_ms
+            .store(stale_outbound_ms, std::sync::atomic::Ordering::Release);
+
+        let cleaned =
+            super::run_stall_watchdog_pass(&harness.registry(), &ProviderKind::Codex).await;
+        assert_eq!(
+            cleaned, 1,
+            "watchdog must clean exactly 1 orphan ExplicitBackgroundWork channel"
+        );
+        assert!(
+            super::super::inflight::load_inflight_state(&ProviderKind::Codex, channel_id).is_none(),
+            "watchdog must delete the stale orphan inflight state file"
+        );
+        // CORE invariant for codex P2 — queued interventions survive the
+        // watchdog cleanup. A regression that re-routes through
+        // `mailbox_clear_channel` would surface here as queue_depth == 0.
+        let post_queue_depth = harness.queue_depth_for_channel(channel_id).await;
+        assert_eq!(
+            post_queue_depth, 2,
+            "queued interventions must survive orphan ExplicitBackgroundWork cleanup",
         );
     }
 }
