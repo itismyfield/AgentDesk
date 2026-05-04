@@ -4646,6 +4646,212 @@ mod tests {
         pg_db.drop().await;
     }
 
+    // ── #1692 cross-layer pipeline override validation on write ─────────────
+
+    /// Helper: a repo-level override that strips the `in_progress` state out
+    /// of the pipeline. Valid alone against the base pipeline.
+    fn pipeline_override_1692_repo_strips_in_progress() -> serde_json::Value {
+        serde_json::json!({
+            "states": [
+                {"id": "backlog", "label": "Backlog"},
+                {"id": "ready", "label": "Ready"},
+                {"id": "done", "label": "Done", "terminal": true}
+            ],
+            "transitions": [
+                {"from": "backlog", "to": "ready", "type": "free"},
+                {"from": "ready", "to": "done", "type": "free"}
+            ]
+        })
+    }
+
+    /// Helper: an agent-level override that adds a transition referencing the
+    /// `in_progress` state. Valid alone against the base pipeline (which
+    /// includes `in_progress`), but invalid when merged on top of the repo
+    /// override above (which removes `in_progress`).
+    fn pipeline_override_1692_agent_uses_in_progress() -> serde_json::Value {
+        serde_json::json!({
+            "transitions": [
+                {"from": "backlog", "to": "in_progress", "type": "free"}
+            ]
+        })
+    }
+
+    /// Helper: an agent-level override that does NOT reference any state the
+    /// repo override removes. Used for the valid+valid case.
+    fn pipeline_override_1692_agent_safe() -> serde_json::Value {
+        serde_json::json!({
+            "hooks": {
+                "ready": {"on_enter": ["OnCardTransition"], "on_exit": []}
+            }
+        })
+    }
+
+    async fn seed_repo_with_default_agent_pg(pool: &sqlx::PgPool, repo_id: &str, agent_id: &str) {
+        sqlx::query(
+            "INSERT INTO github_repos (id, display_name, default_agent_id) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (id) DO UPDATE SET default_agent_id = EXCLUDED.default_agent_id",
+        )
+        .bind(repo_id)
+        .bind(format!("test/{repo_id}"))
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Repo override is valid alone, but combined with the existing agent
+    /// override the merged pipeline references a removed state. Write must
+    /// be rejected with a BadRequest naming the offending agent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pipeline_override_1692_repo_write_rejected_when_existing_agent_invalid_combo() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        seed_agent_pg(&pool).await;
+        seed_repo_with_default_agent_pg(&pool, "repo-1692-a", "agent-1").await;
+        crate::pipeline::ensure_loaded();
+
+        // Pre-existing agent override is valid alone (uses in_progress, which
+        // base pipeline knows about).
+        sqlx::query("UPDATE agents SET pipeline_config = $1::jsonb WHERE id = 'agent-1'")
+            .bind(pipeline_override_1692_agent_uses_in_progress().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let service = crate::services::pipeline_override::PipelineOverrideService::new(&pool);
+        let new_repo = pipeline_override_1692_repo_strips_in_progress();
+        let result = service
+            .set_repo_pipeline("repo-1692-a", Some(&new_repo))
+            .await;
+
+        match result {
+            Err(crate::services::pipeline_override::PipelineOverrideError::BadRequest(message)) => {
+                assert!(
+                    message.contains("agent-1"),
+                    "BadRequest must name the offending agent, got: {message}"
+                );
+                assert!(
+                    message.contains("agent override"),
+                    "BadRequest must mention agent override layer, got: {message}"
+                );
+            }
+            other => panic!(
+                "expected BadRequest naming agent-1, got: {:?}",
+                other.map(|()| "Ok").unwrap_or("non-BadRequest err")
+            ),
+        }
+
+        // Write must NOT have happened.
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT pipeline_config::text FROM github_repos WHERE id = 'repo-1692-a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            stored.is_none(),
+            "repo pipeline_config must remain NULL after rejected write; got {stored:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Agent override is valid alone, but combined with the existing repo
+    /// override the merged pipeline is invalid. Write must be rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pipeline_override_1692_agent_write_rejected_when_existing_repo_invalid_combo() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        seed_agent_pg(&pool).await;
+        seed_repo_with_default_agent_pg(&pool, "repo-1692-b", "agent-1").await;
+        crate::pipeline::ensure_loaded();
+
+        // Pre-existing repo override is valid alone (full state set).
+        sqlx::query("UPDATE github_repos SET pipeline_config = $1::jsonb WHERE id = 'repo-1692-b'")
+            .bind(pipeline_override_1692_repo_strips_in_progress().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let service = crate::services::pipeline_override::PipelineOverrideService::new(&pool);
+        let new_agent = pipeline_override_1692_agent_uses_in_progress();
+        let result = service
+            .set_agent_pipeline("agent-1", Some(&new_agent))
+            .await;
+
+        match result {
+            Err(crate::services::pipeline_override::PipelineOverrideError::BadRequest(message)) => {
+                assert!(
+                    message.contains("repo-1692-b"),
+                    "BadRequest must name the offending repo, got: {message}"
+                );
+                assert!(
+                    message.contains("repo override"),
+                    "BadRequest must mention repo override layer, got: {message}"
+                );
+            }
+            other => panic!(
+                "expected BadRequest naming repo-1692-b, got: {:?}",
+                other.map(|()| "Ok").unwrap_or("non-BadRequest err")
+            ),
+        }
+
+        // Agent pipeline_config must remain NULL.
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT pipeline_config::text FROM agents WHERE id = 'agent-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            stored.is_none(),
+            "agent pipeline_config must remain NULL after rejected write; got {stored:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Sanity check: when the new override and the existing opposite-layer
+    /// override merge into a valid effective config, the write succeeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pipeline_override_1692_valid_combo_succeeds() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        seed_agent_pg(&pool).await;
+        seed_repo_with_default_agent_pg(&pool, "repo-1692-c", "agent-1").await;
+        crate::pipeline::ensure_loaded();
+
+        // Existing safe agent override (does not reference removed states).
+        sqlx::query("UPDATE agents SET pipeline_config = $1::jsonb WHERE id = 'agent-1'")
+            .bind(pipeline_override_1692_agent_safe().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let service = crate::services::pipeline_override::PipelineOverrideService::new(&pool);
+        let new_repo = pipeline_override_1692_repo_strips_in_progress();
+        service
+            .set_repo_pipeline("repo-1692-c", Some(&new_repo))
+            .await
+            .expect("valid+valid combination must be accepted");
+
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT pipeline_config::text FROM github_repos WHERE id = 'repo-1692-c'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            stored.is_some(),
+            "repo pipeline_config must be persisted on accepted write"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     // ── Scenario 10: Multi-dispatchable pipeline — kickoff resolves from card's current state ──
 
     #[test]
