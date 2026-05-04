@@ -67,14 +67,14 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs:1212",
   "src/services/discord/turn_bridge/mod.rs:1256",
   "src/services/discord/turn_bridge/mod.rs:1662",
-  "src/services/discord/turn_bridge/mod.rs:2329",
-  "src/services/discord/turn_bridge/mod.rs:2377",
-  "src/services/discord/turn_bridge/mod.rs:2380",
-  "src/services/discord/turn_bridge/mod.rs:2461",
-  "src/services/discord/turn_bridge/mod.rs:2504",
-  "src/services/discord/turn_bridge/mod.rs:2930",
-  "src/services/discord/turn_bridge/mod.rs:3175",
-  "src/services/discord/turn_bridge/mod.rs:3471",
+  "src/services/discord/turn_bridge/mod.rs:2355",
+  "src/services/discord/turn_bridge/mod.rs:2403",
+  "src/services/discord/turn_bridge/mod.rs:2406",
+  "src/services/discord/turn_bridge/mod.rs:2487",
+  "src/services/discord/turn_bridge/mod.rs:2530",
+  "src/services/discord/turn_bridge/mod.rs:2956",
+  "src/services/discord/turn_bridge/mod.rs:3201",
+  "src/services/discord/turn_bridge/mod.rs:3497",
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.
