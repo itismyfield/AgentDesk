@@ -373,7 +373,7 @@ jobs:
           if python3 scripts/generate_inventory_docs.py --check; then
             echo "Inventory docs are up to date."
           else
-            echo "::warning::Inventory docs drift detected. After this PR merges, the Regen inventory docs workflow will open a maintenance PR with regenerated docs and auto-merge it. No action needed on this PR."
+            echo "::warning::Inventory docs drift detected. The weekly Regen inventory docs workflow opens a maintenance PR every Monday. To fix sooner, run python3 scripts/generate_inventory_docs.py locally or trigger the workflow manually from the Actions tab."
           fi
 
       - name: Agent maintenance freshness gate (warn, #1432)
