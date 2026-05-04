@@ -1077,8 +1077,7 @@ mod tests {
             let up_checksum = POSTGRES_MIGRATOR
                 .iter()
                 .find(|m| {
-                    m.version == version
-                        && matches!(m.migration_type, MigrationType::ReversibleUp)
+                    m.version == version && matches!(m.migration_type, MigrationType::ReversibleUp)
                 })
                 .map(|m| m.checksum.as_ref())
                 .expect("reversible up entry");
