@@ -16,7 +16,7 @@
 | `config` | 1 |
 | `crate` | 1 |
 | `credential` | 1 |
-| `db` | 23 |
+| `db` | 19 |
 | `dispatch` | 5 |
 | `engine` | 28 |
 | `error` | 1 |
@@ -32,8 +32,8 @@
 | `reconcile` | 1 |
 | `runtime` | 1 |
 | `runtime_layout` | 5 |
-| `server` | 79 |
-| `services` | 245 |
+| `server` | 78 |
+| `services` | 241 |
 | `supervisor` | 1 |
 | `ui` | 2 |
 | `utils` | 6 |
@@ -317,7 +317,11 @@
 | `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 309 |  |
 | `services::discord::placeholder_live_events::task_panel` | `src/services/discord/placeholder_live_events/task_panel.rs` | 28 |  |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 554 |  |
-| `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 3034 | giant-file |
+| `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 372 |  |
+| `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 491 |  |
+| `services::discord::prompt_builder::layer_rendering` | `src/services/discord/prompt_builder/layer_rendering.rs` | 187 |  |
+| `services::discord::prompt_builder::manifest` | `src/services/discord/prompt_builder/manifest.rs` | 325 |  |
+| `services::discord::prompt_builder::memory_guidance` | `src/services/discord/prompt_builder/memory_guidance.rs` | 71 |  |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 570 |  |
 | `services::discord::queued_placeholders_store` | `src/services/discord/queued_placeholders_store.rs` | 412 |  |
 | `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 4842 | giant-file |
