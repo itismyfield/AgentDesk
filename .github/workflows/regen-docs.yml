@@ -1,10 +1,10 @@
 name: Regen inventory docs
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+  schedule:
+    # Monday 01:00 UTC (10:00 KST). Surfaces accumulated docs drift weekly.
+    - cron: "0 1 * * 1"
 
 concurrency:
   group: regen-docs-main
@@ -13,11 +13,10 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
-  actions: write
 
 jobs:
   regen:
-    name: Regen inventory docs (post-merge)
+    name: Regen inventory docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,22 +64,11 @@ jobs:
 
           git checkout -b "$branch"
           git add ARCHITECTURE.md docs/generated
-          git commit -m "chore: regenerate inventory docs after ${short_sha}"
+          git commit -m "chore: regenerate inventory docs"
           git push -u origin "$branch"
 
-          pr_url=$(gh pr create \
+          gh pr create \
             --base main \
             --head "$branch" \
-            --title "chore: regenerate inventory docs after ${short_sha}" \
-            --body "Automated maintenance PR. Inventory drift detected after [\`${short_sha}\`](${SERVER_URL}/${REPOSITORY}/commit/${BASE_SHA}). Auto-merges once required checks pass.")
-
-          echo "Opened ${pr_url}"
-          gh pr merge "${pr_url}" --auto --squash --delete-branch
-          echo "Auto-merge enabled on ${pr_url}."
-
-          # GITHUB_TOKEN-initiated push and PR creation don't fire downstream
-          # workflows, so the maintenance PR's required checks would never run
-          # on their own. workflow_dispatch is the documented exception, so we
-          # manually dispatch CI PR on the regen branch.
-          gh workflow run ci-pr.yml --ref "${branch}"
-          echo "Dispatched ci-pr.yml on ${branch}."
+            --title "chore: weekly inventory docs regen (${short_sha})" \
+            --body "Automated weekly maintenance PR. Inventory drift detected against main HEAD [\`${short_sha}\`](${SERVER_URL}/${REPOSITORY}/commit/${BASE_SHA}). Review and merge when convenient. No auto-merge — drift in generated inventory is informational only."
