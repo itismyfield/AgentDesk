@@ -1018,40 +1018,83 @@ pub async fn schedule_pending_queue_drain_after_cancel(
     provider_name: &str,
     channel_id: ChannelId,
     reason: &'static str,
-) -> bool {
+) -> PostCancelDrainOutcome {
     let Some(provider) = ProviderKind::from_str(provider_name) else {
-        return false;
+        return PostCancelDrainOutcome::skipped();
     };
     let Some(shared) = shared_for_provider(registry, &provider).await else {
-        return false;
+        return PostCancelDrainOutcome::skipped();
     };
     let snapshot = snapshot_pending_queue_state_for_shared(&shared, &provider, channel_id).await;
-    if snapshot.queue_depth == 0 {
-        // Mailbox is empty in memory. If a disk-backed queue file still
-        // exists for this channel, hydrate the in-memory mailbox from
-        // disk so the deferred drain has something to absorb. Without
-        // this, the disk file lingers until the next user message
-        // overwrites it.
-        if !snapshot.disk_present {
-            return false;
-        }
-        let hydrated = hydrate_pending_queue_from_disk(&shared, &provider, channel_id).await;
-        if !hydrated {
-            return false;
-        }
+    // codex review round-4 P2-1 (#1672): hydrate from disk *whenever*
+    // the disk file is present, not just when the in-memory queue is
+    // empty. If a concurrent `mailbox_enqueue_intervention` slipped a
+    // fresh message in between the cancel and this helper running, we
+    // still need to merge whatever the disk holds — `mailbox_hydrate_pending_queue`
+    // dedupes by `message_id` and prepends disk items so neither the
+    // surviving disk payload nor the live racer is dropped.
+    if snapshot.disk_present {
+        hydrate_pending_queue_from_disk(&shared, &provider, channel_id).await;
+    }
+    // Re-snapshot after the (possibly skipped) hydrate so the caller
+    // gets the post-merge depth — that is the value the cancel
+    // observability surface should report as `queued_remaining`.
+    let post_depth = shared
+        .mailbox(channel_id)
+        .snapshot()
+        .await
+        .intervention_queue
+        .len();
+    if post_depth == 0 {
+        return PostCancelDrainOutcome {
+            scheduled: false,
+            queue_depth_after: 0,
+        };
     }
     super::schedule_deferred_idle_queue_kickoff(shared.clone(), provider, channel_id, reason);
-    true
+    PostCancelDrainOutcome {
+        scheduled: true,
+        queue_depth_after: post_depth,
+    }
+}
+
+/// codex review round-4 P2-2 (#1672): return value of
+/// `schedule_pending_queue_drain_after_cancel`. The cancel response
+/// builders use `queue_depth_after` as the source of truth for
+/// `queued_remaining` so the API contract reflects the post-hydrate
+/// state, not the (typically zero) snapshot taken before disk
+/// hydration ran.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PostCancelDrainOutcome {
+    pub scheduled: bool,
+    pub queue_depth_after: usize,
+}
+
+impl PostCancelDrainOutcome {
+    fn skipped() -> Self {
+        Self::default()
+    }
 }
 
 /// codex review round-3 P2 (#1672): load the disk-backed pending queue
-/// for `channel_id` and push it into the in-memory mailbox via
-/// `mailbox_replace_queue`. Restores the matching `dispatch_role_override`
-/// alongside the queue so requeued items target the same destination
-/// channel as the original `mailbox_enqueue_intervention` call.
+/// for `channel_id` and merge it into the in-memory mailbox. Restores
+/// the matching `dispatch_role_override` alongside the queue so
+/// requeued items target the same destination channel as the original
+/// `mailbox_enqueue_intervention` call.
 ///
-/// Returns `true` when at least one intervention was hydrated; `false`
-/// when the disk file is missing, empty, or unparseable.
+/// codex review round-4 P2-1 (#1672): the merge runs through the
+/// mailbox actor's atomic `HydratePendingQueue` message, so a
+/// concurrent `mailbox_enqueue_intervention` racing with this hydrate
+/// (e.g. user fires a fresh message between the cancel completing and
+/// the disk read finishing) is *preserved* rather than clobbered. Disk
+/// items are inserted at the head of the queue (they are chronologically
+/// earlier than any in-memory item that came in after the cancel) and
+/// any `message_id` already present is skipped to keep the merge
+/// idempotent on retry.
+///
+/// Returns `true` when at least one intervention was absorbed into the
+/// mailbox; `false` when the disk file is missing, empty, unparseable,
+/// or every entry was already present in memory.
 async fn hydrate_pending_queue_from_disk(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -1075,8 +1118,9 @@ async fn hydrate_pending_queue_from_disk(
             .dispatch_role_overrides
             .insert(channel_id, alt_channel_id);
     }
-    super::mailbox_replace_queue(shared, provider, channel_id, interventions).await;
-    true
+    let absorbed =
+        super::mailbox_hydrate_pending_queue(shared, provider, channel_id, interventions).await;
+    absorbed > 0
 }
 
 /// #1672: Resolve a usable tmux session name for cancel observability.
@@ -6489,10 +6533,11 @@ mod tests {
         );
 
         // Drive the helper. With the round-3 P2 fix it must hydrate the
-        // mailbox from disk and schedule the deferred drain (returns
-        // `true`); without the fix it short-circuits on the empty
-        // mailbox and returns `false`, leaving the disk queue stranded.
-        let scheduled = schedule_pending_queue_drain_after_cancel(
+        // mailbox from disk and schedule the deferred drain
+        // (`scheduled=true`, `queue_depth_after>0`); without the fix
+        // it short-circuits on the empty mailbox, leaving the disk
+        // queue stranded.
+        let outcome = schedule_pending_queue_drain_after_cancel(
             &harness.registry(),
             "codex",
             channel_id,
@@ -6500,8 +6545,12 @@ mod tests {
         )
         .await;
         assert!(
-            scheduled,
+            outcome.scheduled,
             "drain must be scheduled when only the disk-backed queue is non-empty"
+        );
+        assert_eq!(
+            outcome.queue_depth_after, 1,
+            "post-hydrate depth must reflect the disk-backed item"
         );
 
         // Post-condition: mailbox is now hydrated from disk so the
@@ -6518,6 +6567,181 @@ mod tests {
         assert!(
             harness.deferred_hook_backlog() >= 1,
             "post-cancel drain helper must register a deferred hook"
+        );
+    }
+
+    /// codex review round-4 P2-1 (#1672): when a fresh user message
+    /// races into the mailbox in between a cancel completing and the
+    /// disk-backed pending queue being hydrated, the merge must
+    /// preserve *both* the disk payload (chronologically older) and
+    /// the live racer (chronologically newer) — not clobber the
+    /// in-memory entry with the disk snapshot. The previous
+    /// implementation called `mailbox_replace_queue`, which performed
+    /// a wholesale overwrite and silently dropped the racer.
+    #[tokio::test]
+    async fn schedule_pending_queue_drain_merges_concurrent_enqueue_with_disk_payload() {
+        use crate::services::discord::runtime_store::lock_test_env;
+        use crate::services::turn_orchestrator::save_channel_queue;
+
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(tmp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id_u64: u64 = 660_111_222_333_444_002;
+        let channel_id = ChannelId::new(channel_id_u64);
+
+        // Seed disk with two surviving interventions (came in before the cancel).
+        let disk_items = vec![
+            super::super::Intervention {
+                author_id: UserId::new(7),
+                message_id: MessageId::new(1001),
+                source_message_ids: vec![MessageId::new(1001)],
+                text: "disk-1".to_string(),
+                mode: super::super::InterventionMode::Soft,
+                created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+            },
+            super::super::Intervention {
+                author_id: UserId::new(7),
+                message_id: MessageId::new(1002),
+                source_message_ids: vec![MessageId::new(1002)],
+                text: "disk-2".to_string(),
+                mode: super::super::InterventionMode::Soft,
+                created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+            },
+        ];
+        save_channel_queue(
+            &ProviderKind::Codex,
+            &harness.shared.token_hash,
+            channel_id,
+            &disk_items,
+            None,
+        );
+
+        // Simulate the racer: a brand-new user message that landed in
+        // the in-memory mailbox after the cancel emptied it but before
+        // the drain helper got to hydrate.
+        harness
+            .seed_queue(channel_id_u64, &[(2003, "concurrent-enqueue")])
+            .await;
+        assert_eq!(
+            harness.queue_depth_for_channel(channel_id_u64).await,
+            1,
+            "racer message must already be in the in-memory mailbox"
+        );
+
+        // Drive the post-cancel drain. The fix must merge disk+memory.
+        let outcome = schedule_pending_queue_drain_after_cancel(
+            &harness.registry(),
+            "codex",
+            channel_id,
+            "test-merge-with-racer",
+        )
+        .await;
+        assert!(
+            outcome.scheduled,
+            "drain must be scheduled when either source has items"
+        );
+        assert_eq!(
+            outcome.queue_depth_after, 3,
+            "post-hydrate depth must include both disk items and the racer"
+        );
+
+        // Verify ordering: disk items prepend (chronologically older),
+        // racer stays at the tail (newest).
+        let snapshot = harness
+            .shared
+            .mailbox(channel_id)
+            .snapshot()
+            .await
+            .intervention_queue;
+        assert_eq!(snapshot.len(), 3);
+        assert_eq!(snapshot[0].message_id, MessageId::new(1001));
+        assert_eq!(snapshot[1].message_id, MessageId::new(1002));
+        assert_eq!(snapshot[2].message_id, MessageId::new(2003));
+    }
+
+    /// codex review round-4 P2-1 (#1672): hydration must be idempotent
+    /// — if the same disk file is processed twice (e.g. retry after a
+    /// transient error) the duplicate `message_id`s are skipped, not
+    /// inserted twice.
+    #[tokio::test]
+    async fn hydrate_pending_queue_is_idempotent_on_repeated_disk_load() {
+        use crate::services::discord::runtime_store::lock_test_env;
+        use crate::services::turn_orchestrator::save_channel_queue;
+
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(tmp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id_u64: u64 = 660_111_222_333_444_003;
+        let channel_id = ChannelId::new(channel_id_u64);
+
+        let intervention = super::super::Intervention {
+            author_id: UserId::new(8),
+            message_id: MessageId::new(3001),
+            source_message_ids: vec![MessageId::new(3001)],
+            text: "only-once".to_string(),
+            mode: super::super::InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+        };
+        save_channel_queue(
+            &ProviderKind::Codex,
+            &harness.shared.token_hash,
+            channel_id,
+            &[intervention],
+            None,
+        );
+
+        let first = schedule_pending_queue_drain_after_cancel(
+            &harness.registry(),
+            "codex",
+            channel_id,
+            "test-idempotent-1",
+        )
+        .await;
+        assert_eq!(first.queue_depth_after, 1);
+
+        // Second invocation: the disk file is still present (the hydrate
+        // helper only writes through the mailbox actor which re-persists
+        // the same payload), but the in-memory entry already has
+        // `message_id=3001` so the merge must be a no-op on count.
+        let second = schedule_pending_queue_drain_after_cancel(
+            &harness.registry(),
+            "codex",
+            channel_id,
+            "test-idempotent-2",
+        )
+        .await;
+        assert_eq!(
+            second.queue_depth_after, 1,
+            "duplicate disk entry must not double-count"
         );
     }
 
@@ -6880,3 +7104,4 @@ mod tests {
     }
 
 }
+

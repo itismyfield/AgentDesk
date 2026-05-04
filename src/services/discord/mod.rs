@@ -2633,6 +2633,24 @@ async fn mailbox_replace_queue(
         .await;
 }
 
+/// codex review round-4 P2-1 (#1672): atomic disk → in-memory hydration
+/// helper. See `ChannelMailboxHandle::hydrate_pending_queue` for the
+/// race-free merge contract.
+async fn mailbox_hydrate_pending_queue(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    disk_items: Vec<Intervention>,
+) -> usize {
+    shared
+        .mailbox(channel_id)
+        .hydrate_pending_queue(
+            disk_items,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await
+}
+
 async fn mailbox_restart_drain_all(shared: &SharedData, provider: &ProviderKind) -> usize {
     shared
         .mailboxes

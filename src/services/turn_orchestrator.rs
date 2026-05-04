@@ -897,6 +897,32 @@ impl ChannelMailboxHandle {
             .await;
     }
 
+    /// codex review round-4 P2-1 (#1672): atomically merge a disk-loaded
+    /// pending queue into the in-memory mailbox without clobbering items
+    /// that arrived concurrently. Disk items are inserted at the *front*
+    /// of the queue (they were enqueued earlier in wall-clock time than
+    /// any in-memory item that survived a cancel-induced empty window),
+    /// and any item whose `message_id` already lives in the mailbox is
+    /// skipped to keep the merge idempotent.
+    ///
+    /// Returns the number of disk items that were absorbed (0 if the
+    /// disk payload was empty, or every entry was already present).
+    pub(crate) async fn hydrate_pending_queue(
+        &self,
+        disk_items: Vec<Intervention>,
+        persistence: QueuePersistenceContext,
+    ) -> usize {
+        self.request(
+            |reply| ChannelMailboxMsg::HydratePendingQueue {
+                disk_items,
+                persistence,
+                reply,
+            },
+            0,
+        )
+        .await
+    }
+
     pub(crate) async fn restart_drain(
         &self,
         persistence: QueuePersistenceContext,
@@ -1100,6 +1126,11 @@ enum ChannelMailboxMsg {
         queue: Vec<Intervention>,
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<()>,
+    },
+    HydratePendingQueue {
+        disk_items: Vec<Intervention>,
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<usize>,
     },
     RestartDrain {
         persistence: QueuePersistenceContext,
@@ -1444,6 +1475,42 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.intervention_queue = queue;
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
                     let _ = reply.send(());
+                }
+                ChannelMailboxMsg::HydratePendingQueue {
+                    disk_items,
+                    persistence,
+                    reply,
+                } => {
+                    // codex review round-4 P2-1 (#1672): merge disk
+                    // payload into the in-memory queue *atomically* —
+                    // running inside the mailbox actor means no other
+                    // ChannelMailboxMsg can interleave between the
+                    // dedup scan and the prepend, so a concurrent
+                    // `mailbox_enqueue_intervention` is serialised
+                    // either fully before (we'll see its message_id
+                    // and skip the dup) or fully after (it appends to
+                    // the end of the merged queue). Either way no
+                    // user message is lost.
+                    state.last_persistence = Some(persistence.clone());
+                    let existing_ids: std::collections::HashSet<MessageId> = state
+                        .intervention_queue
+                        .iter()
+                        .map(|item| item.message_id)
+                        .collect();
+                    let mut absorbed = 0usize;
+                    // Walk in reverse so repeated `insert(0, …)` ends
+                    // up with disk items in their original order.
+                    for item in disk_items.into_iter().rev() {
+                        if existing_ids.contains(&item.message_id) {
+                            continue;
+                        }
+                        state.intervention_queue.insert(0, item);
+                        absorbed += 1;
+                    }
+                    if absorbed > 0 {
+                        persist_queue(channel_id, &state.intervention_queue, &persistence);
+                    }
+                    let _ = reply.send(absorbed);
                 }
                 ChannelMailboxMsg::RestartDrain { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
