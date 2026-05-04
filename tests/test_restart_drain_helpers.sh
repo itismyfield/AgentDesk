@@ -318,6 +318,94 @@ else
   fail "marker removed"
 fi
 
+echo "== Test 7: #1686 — wait_for_live_turns_to_drain_or_fail self-hosted/skip semantics =="
+# 7a: skip=1 + live_turns>0 → returns 0 immediately (no max_wait stall).
+# Stub health_turn_snapshot to report a stable live count; if the helper
+# still entered the wait loop the test would take >max_wait seconds.
+mkdir -p "$TMP_FIXTURE_DIR/bin_skip1"
+cat >"$TMP_FIXTURE_DIR/bin_skip1/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s' '{"global_active":1,"global_finalizing":0,"queue_depth":0}'
+EOF
+chmod +x "$TMP_FIXTURE_DIR/bin_skip1/curl"
+_launchd_job_state() { echo "running"; }
+start_ts=$(date +%s)
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_skip1:$PATH" \
+  AGENTDESK_SKIP_TURN_DRAIN=1 \
+  wait_for_live_turns_to_drain_or_fail "release" "test.label" 0 30 2 \
+  >/dev/null 2>&1
+rc=$?
+set -e
+elapsed=$(( $(date +%s) - start_ts ))
+unset -f _launchd_job_state
+assert_eq "skip=1 returns 0 with live turn" "0" "$rc"
+if [ "$elapsed" -lt 5 ]; then
+  pass "skip=1 short-circuits without entering wait loop (elapsed=${elapsed}s < 5)"
+else
+  fail "skip=1 short-circuits without entering wait loop (elapsed=${elapsed}s)"
+fi
+
+# 7b: self-hosted detached child with exactly 1 live turn (the operator's
+# own deploy turn) → effective_live=0, returns 0 even under skip=0 strict.
+mkdir -p "$TMP_FIXTURE_DIR/bin_self1"
+cat >"$TMP_FIXTURE_DIR/bin_self1/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s' '{"global_active":1,"global_finalizing":0,"queue_depth":0}'
+EOF
+chmod +x "$TMP_FIXTURE_DIR/bin_self1/curl"
+_launchd_job_state() { echo "running"; }
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_self1:$PATH" \
+  AGENTDESK_SKIP_TURN_DRAIN=0 \
+  AGENTDESK_DEPLOY_DETACHED_CHILD=1 \
+  AGENTDESK_REPORT_CHANNEL_ID=99999999999999 \
+  wait_for_live_turns_to_drain_or_fail "release" "test.label" 0 5 1 \
+  >/dev/null 2>&1
+rc=$?
+set -e
+unset -f _launchd_job_state
+assert_eq "skip=0 + self-hosted self-turn = treated as drained" "0" "$rc"
+
+# 7c: skip=0 + 2 live turns + self-hosted (1 attributable to self) →
+# effective_live=1 → enters wait loop and times out → returns 1.
+mkdir -p "$TMP_FIXTURE_DIR/bin_self2"
+cat >"$TMP_FIXTURE_DIR/bin_self2/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s' '{"global_active":2,"global_finalizing":0,"queue_depth":0}'
+EOF
+chmod +x "$TMP_FIXTURE_DIR/bin_self2/curl"
+_launchd_job_state() { echo "running"; }
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_self2:$PATH" \
+  AGENTDESK_SKIP_TURN_DRAIN=0 \
+  AGENTDESK_DEPLOY_DETACHED_CHILD=1 \
+  AGENTDESK_REPORT_CHANNEL_ID=99999999999999 \
+  wait_for_live_turns_to_drain_or_fail "release" "test.label" 0 4 1 \
+  >/dev/null 2>&1
+rc=$?
+set -e
+unset -f _launchd_job_state
+assert_eq "skip=0 + extra non-self live turn → strict timeout returns 1" "1" "$rc"
+
+# 7d: skip=1 + no live turns → returns 0 with normal "no active/finalizing" path.
+mkdir -p "$TMP_FIXTURE_DIR/bin_zero"
+cat >"$TMP_FIXTURE_DIR/bin_zero/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s' '{"global_active":0,"global_finalizing":0,"queue_depth":0}'
+EOF
+chmod +x "$TMP_FIXTURE_DIR/bin_zero/curl"
+_launchd_job_state() { echo "running"; }
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_zero:$PATH" \
+  AGENTDESK_SKIP_TURN_DRAIN=1 \
+  wait_for_live_turns_to_drain_or_fail "release" "test.label" 0 5 1 \
+  >/dev/null 2>&1
+rc=$?
+set -e
+unset -f _launchd_job_state
+assert_eq "skip=1 + zero live turns returns 0" "0" "$rc"
+
 echo
 echo "==== Results ===="
 echo "  PASS: $PASS"

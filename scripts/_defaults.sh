@@ -588,11 +588,13 @@ wait_for_live_turns_to_drain_or_fail() {
   # this flag only skips the drain wait, at the cost of possibly truncating a
   # mid-stream Discord response during the SIGTERM window.
   #
-  # #899: default is now `1` (bypass). In the self-hosted promote topology the
-  # operator agent running the promote IS a live turn on release, so drain
-  # would time out nearly always. The stream hiccup is acceptable and #826 /
-  # #896 guarantee recovery via watcher silent-reattach + inflight rebind.
-  # Set `AGENTDESK_SKIP_TURN_DRAIN=0` to force the classic drain-wait.
+  # #899: default is `1` (bypass). #1686: skip=1 now exits immediately after
+  # a single snapshot instead of running the full max_wait timer — the prior
+  # behaviour wasted the entire timeout on every self-hosted promote because
+  # the operator agent's own turn is always live (it's the parent of the
+  # deploy script). Set `AGENTDESK_SKIP_TURN_DRAIN=0` to force the classic
+  # drain-wait when chunk-level integrity matters (external host, scheduled
+  # maintenance window, post-incident strict mode).
   local skip_drain="${AGENTDESK_SKIP_TURN_DRAIN:-1}"
   local waited=0
   local active=0 finalizing=0 queue_depth=0 live_turns=0 job_state=""
@@ -618,8 +620,25 @@ EOF
   fi
 
   live_turns=$(( active + finalizing ))
-  if [ "$live_turns" -eq 0 ]; then
-    if [ "${queue_depth:-0}" -gt 0 ]; then
+
+  # #1686: self-hosted promote topology — when the deploy script is the
+  # detached child of an operator agent's turn, that turn will never drain
+  # during this run because IT is the deploy parent. Subtract one from the
+  # live count so the strict path doesn't deadlock against itself, and so
+  # the bypass path can report a meaningful "0 effective live" snapshot.
+  local self_hosted_self_turn=0
+  if [ "${AGENTDESK_DEPLOY_DETACHED_CHILD:-0}" = "1" ] && [ -n "${AGENTDESK_REPORT_CHANNEL_ID:-}" ]; then
+    self_hosted_self_turn=1
+  fi
+  local effective_live=$(( live_turns - self_hosted_self_turn ))
+  if [ "$effective_live" -lt 0 ]; then
+    effective_live=0
+  fi
+
+  if [ "$effective_live" -eq 0 ]; then
+    if [ "$live_turns" -gt 0 ]; then
+      echo "▸ [gate] ${scope} has ${live_turns} live turn(s) all attributable to the operator's own deploy turn — safe to restart (queued=${queue_depth})"
+    elif [ "${queue_depth:-0}" -gt 0 ]; then
       echo "▸ [gate] ${scope} has ${queue_depth} queued intervention(s) only — safe to restart"
     else
       echo "▸ [gate] ${scope} has no active/finalizing turns"
@@ -627,8 +646,16 @@ EOF
     return 0
   fi
 
-  echo "▸ [gate] Waiting for ${scope} active/finalizing turns to drain (${live_turns} live; queued=${queue_depth})..."
-  while [ "$live_turns" -gt 0 ] && [ "$waited" -lt "$max_wait" ]; do
+  # #1686: skip=1 → single snapshot, no wait loop. The earlier implementation
+  # waited the full max_wait before warning + proceeding, which wasted 120s
+  # per self-hosted promote (the operator turn never drains in-process).
+  if [ "$skip_drain" = "1" ]; then
+    echo "⚠ [gate] ${scope} has ${effective_live} active/finalizing turn(s) (live=${live_turns}, self=${self_hosted_self_turn}, queued=${queue_depth}) — proceeding due to AGENTDESK_SKIP_TURN_DRAIN=1; silent reattach will preserve turn state"
+    return 0
+  fi
+
+  echo "▸ [gate] Waiting for ${scope} active/finalizing turns to drain (${effective_live} live, self=${self_hosted_self_turn}; queued=${queue_depth})..."
+  while [ "$effective_live" -gt 0 ] && [ "$waited" -lt "$max_wait" ]; do
     sleep "$poll_secs"
     waited=$(( waited + poll_secs ))
     if ! read -r active finalizing queue_depth <<EOF
@@ -636,10 +663,6 @@ $(health_turn_snapshot "$port")
 EOF
     then
       job_state=$(_launchd_job_state "$label")
-      if [ "$skip_drain" = "1" ]; then
-        echo "⚠ [gate] Lost ${scope} health during drain wait after ${waited}s (launchd state: ${job_state:-unknown}) — proceeding due to AGENTDESK_SKIP_TURN_DRAIN=1"
-        return 0
-      fi
       echo "✗ [gate] Lost ${scope} health during drain wait after ${waited}s (launchd state: ${job_state:-unknown})"
       echo "  Refusing restart to avoid truncating mid-stream output."
       echo "  You opted into strict drain via AGENTDESK_SKIP_TURN_DRAIN=0;"
@@ -647,14 +670,14 @@ EOF
       return 1
     fi
     live_turns=$(( active + finalizing ))
+    effective_live=$(( live_turns - self_hosted_self_turn ))
+    if [ "$effective_live" -lt 0 ]; then
+      effective_live=0
+    fi
   done
 
-  if [ "$live_turns" -gt 0 ]; then
-    if [ "$skip_drain" = "1" ]; then
-      echo "⚠ [gate] ${scope} still has ${live_turns} active/finalizing turn(s) after ${max_wait}s — proceeding due to AGENTDESK_SKIP_TURN_DRAIN=1 (queued=${queue_depth}); silent reattach will preserve turn state"
-      return 0
-    fi
-    echo "✗ [gate] ${scope} still has ${live_turns} active/finalizing turn(s) after ${max_wait}s (queued=${queue_depth})"
+  if [ "$effective_live" -gt 0 ]; then
+    echo "✗ [gate] ${scope} still has ${effective_live} active/finalizing turn(s) after ${max_wait}s (live=${live_turns}, self=${self_hosted_self_turn}, queued=${queue_depth})"
     echo "  Refusing restart to avoid truncating mid-stream output."
     echo "  You opted into strict drain via AGENTDESK_SKIP_TURN_DRAIN=0;"
     echo "  retry after work finishes or remove that override (default=1) when a brief stream hiccup is acceptable."
