@@ -768,6 +768,15 @@ pub async fn agent_diag(
     // payload. Operators previously had to call
     // `/api/channels/{id}/watcher-state` to see these signals; folding them
     // into `agentdesk diag` shortens the same-class incident playbook.
+    //
+    // codex P2 — scope the watcher-state snapshot to *this* session's
+    // provider. The unscoped helper returns the FIRST registered provider
+    // that knows the channel, so when multiple providers share a Discord
+    // channel the diag would surface another runtime's state for the same
+    // channel (silently misleading). When the session row has no provider
+    // recorded, fall back to the unscoped lookup so we still report
+    // something useful instead of forcing a hard `null`.
+    let session_provider_kind = session.provider.as_deref().and_then(ProviderKind::from_str);
     let watcher_snapshot = match (
         state.health_registry.as_ref(),
         session
@@ -775,7 +784,14 @@ pub async fn agent_diag(
             .as_deref()
             .and_then(|raw| raw.trim().parse::<u64>().ok()),
     ) {
-        (Some(registry), Some(channel_num)) => registry.snapshot_watcher_state(channel_num).await,
+        (Some(registry), Some(channel_num)) => match session_provider_kind {
+            Some(provider) => {
+                registry
+                    .snapshot_watcher_state_for_provider(&provider, channel_num)
+                    .await
+            }
+            None => registry.snapshot_watcher_state(channel_num).await,
+        },
         _ => None,
     };
     let watcher_snapshot_json = watcher_snapshot

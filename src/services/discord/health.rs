@@ -4119,6 +4119,15 @@ pub(super) fn inflight_completed_stale_leak_detected(
 ///   This is the load-bearing false-positive guard: a real
 ///   long-running/explicit-background turn keeps writing tool output to
 ///   tmux, so its outbound activity stays fresh.
+/// - `ready_for_input_observed == true` — POSITIVE idle signal taken from
+///   the live tmux pane. This is the codex P1 hardening on top of the four
+///   gates above: a real long-running background turn (Monitor polling, a
+///   background-Bash waiting on IO) sits on a tool-spinner row and never
+///   prints the "Ready for input (type message + Enter)" footer, so even if
+///   `last_outbound_activity_ms` happened to be stale (e.g. between two
+///   slow tool ticks) we still abstain unless the agent has explicitly
+///   surfaced its prompt. Without this gate, the four staleness signals
+///   alone could silently kill a healthy long-running turn.
 ///
 /// All conditions must hold; the `desynced` signal is intentionally not
 /// required — the original #1670 case had `desynced=false` because the
@@ -4131,6 +4140,7 @@ pub(super) fn stall_watchdog_should_force_clean_orphan_explicit_background(
     unread_bytes: Option<u64>,
     inflight_updated_at: Option<&str>,
     last_outbound_activity_ms: Option<i64>,
+    ready_for_input_observed: bool,
     now_unix_secs: i64,
     inflight_threshold_secs: u64,
     outbound_threshold_secs: u64,
@@ -4170,6 +4180,17 @@ pub(super) fn stall_watchdog_should_force_clean_orphan_explicit_background(
         if outbound_age_ms < (outbound_threshold_secs.saturating_mul(1000)) as i64 {
             return false;
         }
+    }
+    // codex P1 — positive idle signal. The four staleness gates above are
+    // necessary but not sufficient: a real long-running background turn
+    // sitting on a slow tool tick can satisfy them transiently. Require
+    // explicit evidence from the pane that the agent itself believes the
+    // turn is over (the "Ready for input" footer the wrappers print at
+    // turn end). Tmux-capture failures or non-unix builds resolve to
+    // `false` upstream, which makes us abstain — biased toward leaving
+    // the inflight in place rather than risking a false positive.
+    if !ready_for_input_observed {
+        return false;
     }
     true
 }
@@ -4262,12 +4283,33 @@ pub(super) async fn run_stall_watchdog_pass(
             // marker that nobody will ever clear. The classic
             // stall_watchdog_should_force_clean path requires `desynced=true`
             // and therefore cannot recover this case (issue #1670 / #1671).
+            //
+            // codex P1 — capture a positive idle signal from the live tmux
+            // pane before considering the orphan path. A real long-running
+            // background turn (Monitor poll, background-Bash IO wait) sits
+            // on a tool-spinner row and never prints the "Ready for input
+            // (type message + Enter)" footer the wrapper emits at turn
+            // end. Probing tmux here (instead of trusting only the four
+            // staleness gates) prevents the silent kill of healthy long
+            // turns when their outbound activity dips below the window.
+            // The probe is a single `tmux capture-pane` shell-out, wrapped
+            // in `spawn_blocking` like the existing `tmux::has_session`
+            // probe so the watchdog never blocks the runtime.
+            let ready_for_input_observed = match snapshot.tmux_session.clone() {
+                Some(name) => tokio::task::spawn_blocking(move || {
+                    crate::services::provider::tmux_session_ready_for_input(&name)
+                })
+                .await
+                .unwrap_or(false),
+                None => false,
+            };
             if stall_watchdog_should_force_clean_orphan_explicit_background(
                 snapshot.tmux_session_alive,
                 snapshot.relay_stall_state,
                 snapshot.unread_bytes,
                 snapshot.inflight_updated_at.as_deref(),
                 snapshot.relay_health.last_outbound_activity_ms,
+                ready_for_input_observed,
                 now_unix_secs,
                 STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS,
                 STALL_WATCHDOG_EXPLICIT_BACKGROUND_OUTBOUND_THRESHOLD_SECS,
@@ -4324,6 +4366,12 @@ pub(super) async fn run_stall_watchdog_pass(
                         "last_outbound_activity_ms":
                             snapshot.relay_health.last_outbound_activity_ms,
                         "relay_stall_state": snapshot.relay_stall_state.as_str(),
+                        // codex P1 — record the positive idle signal that
+                        // unlocked this cleanup so the post-mortem can tell
+                        // a real orphan (`true`) from a legacy unguarded
+                        // false-positive (which would never reach this path
+                        // anymore but is worth distinguishing in audit).
+                        "ready_for_input_observed": ready_for_input_observed,
                     }),
                 );
                 cleaned += 1;
@@ -4660,6 +4708,11 @@ mod stall_watchdog_pure_tests {
     /// #1671 — orphan ExplicitBackgroundWork safety net. Each AND-clause is
     /// inverted to lock the gate against accidental relaxation that would
     /// turn a real long-running background turn into a false positive.
+    ///
+    /// codex P1 — every happy-path assertion now passes
+    /// `ready_for_input_observed=true`. The new "missing positive idle
+    /// signal" assertion at the end pins the load-bearing false-positive
+    /// guard introduced for healthy long-running background turns.
     #[test]
     fn stall_watchdog_orphan_explicit_background_requires_all_signals() {
         let now_unix = chrono::Utc::now().timestamp();
@@ -4682,7 +4735,8 @@ mod stall_watchdog_pure_tests {
         let fresh_outbound_ms = (now_unix - 30) * 1000;
 
         // Happy path: alive tmux + ExplicitBackgroundWork + zero unread +
-        // stale inflight + stale outbound activity → clean.
+        // stale inflight + stale outbound activity + ready-for-input footer
+        // observed on the live pane → clean.
         assert!(
             stall_watchdog_should_force_clean_orphan_explicit_background(
                 Some(true),
@@ -4690,6 +4744,7 @@ mod stall_watchdog_pure_tests {
                 Some(0),
                 Some(stale_str.as_str()),
                 Some(stale_outbound_ms),
+                true,
                 now_unix,
                 inflight_threshold,
                 outbound_threshold,
@@ -4704,6 +4759,7 @@ mod stall_watchdog_pure_tests {
                 Some(0),
                 Some(stale_str.as_str()),
                 Some(stale_outbound_ms),
+                true,
                 now_unix,
                 inflight_threshold,
                 outbound_threshold,
@@ -4716,6 +4772,7 @@ mod stall_watchdog_pure_tests {
                 Some(0),
                 Some(stale_str.as_str()),
                 Some(stale_outbound_ms),
+                true,
                 now_unix,
                 inflight_threshold,
                 outbound_threshold,
@@ -4739,6 +4796,7 @@ mod stall_watchdog_pure_tests {
                     Some(0),
                     Some(stale_str.as_str()),
                     Some(stale_outbound_ms),
+                    true,
                     now_unix,
                     inflight_threshold,
                     outbound_threshold,
@@ -4757,6 +4815,7 @@ mod stall_watchdog_pure_tests {
                 Some(64),
                 Some(stale_str.as_str()),
                 Some(stale_outbound_ms),
+                true,
                 now_unix,
                 inflight_threshold,
                 outbound_threshold,
@@ -4772,6 +4831,7 @@ mod stall_watchdog_pure_tests {
                 None,
                 Some(stale_str.as_str()),
                 Some(stale_outbound_ms),
+                true,
                 now_unix,
                 inflight_threshold,
                 outbound_threshold,
@@ -4786,6 +4846,7 @@ mod stall_watchdog_pure_tests {
                 Some(0),
                 Some(fresh_str.as_str()),
                 Some(stale_outbound_ms),
+                true,
                 now_unix,
                 inflight_threshold,
                 outbound_threshold,
@@ -4800,6 +4861,7 @@ mod stall_watchdog_pure_tests {
                 Some(0),
                 None,
                 Some(stale_outbound_ms),
+                true,
                 now_unix,
                 inflight_threshold,
                 outbound_threshold,
@@ -4814,14 +4876,15 @@ mod stall_watchdog_pure_tests {
                 Some(0),
                 Some("not-a-real-timestamp"),
                 Some(stale_outbound_ms),
+                true,
                 now_unix,
                 inflight_threshold,
                 outbound_threshold,
             )
         );
 
-        // Fresh outbound activity → no clean (this is the load-bearing
-        // false-positive guard for real long-running background work).
+        // Fresh outbound activity → no clean (this is one of the
+        // false-positive guards for real long-running background work).
         assert!(
             !stall_watchdog_should_force_clean_orphan_explicit_background(
                 Some(true),
@@ -4829,15 +4892,18 @@ mod stall_watchdog_pure_tests {
                 Some(0),
                 Some(stale_str.as_str()),
                 Some(fresh_outbound_ms),
+                true,
                 now_unix,
                 inflight_threshold,
                 outbound_threshold,
             )
         );
 
-        // Outbound activity unknown (None) → still cleans, because that case
-        // means the bridge has zero write evidence at all (typical of a
-        // post-restart orphan). The other gates already confirm staleness.
+        // Outbound activity unknown (None) + ready-for-input observed →
+        // still cleans, because that combination means the bridge has zero
+        // write evidence (typical of a post-restart orphan) AND the live
+        // pane is sitting at the input prompt. The other gates already
+        // confirm staleness.
         assert!(
             stall_watchdog_should_force_clean_orphan_explicit_background(
                 Some(true),
@@ -4845,10 +4911,48 @@ mod stall_watchdog_pure_tests {
                 Some(0),
                 Some(stale_str.as_str()),
                 None,
+                true,
                 now_unix,
                 inflight_threshold,
                 outbound_threshold,
             )
+        );
+
+        // codex P1 — load-bearing positive-idle false-positive guard:
+        // every staleness gate satisfied, but the live pane is NOT at
+        // the "Ready for input" footer. This is the active long-running
+        // background turn shape (Monitor poll, background-Bash IO wait
+        // between two slow tool ticks). Must abstain.
+        assert!(
+            !stall_watchdog_should_force_clean_orphan_explicit_background(
+                Some(true),
+                RelayStallState::ExplicitBackgroundWork,
+                Some(0),
+                Some(stale_str.as_str()),
+                Some(stale_outbound_ms),
+                false,
+                now_unix,
+                inflight_threshold,
+                outbound_threshold,
+            ),
+            "missing ready-for-input footer must abstain (active long-running background turn)"
+        );
+        // Same with outbound activity unknown — ready_for_input=false
+        // still wins over the post-restart-orphan shape, because we
+        // refuse to kill anything that has not surfaced its prompt yet.
+        assert!(
+            !stall_watchdog_should_force_clean_orphan_explicit_background(
+                Some(true),
+                RelayStallState::ExplicitBackgroundWork,
+                Some(0),
+                Some(stale_str.as_str()),
+                None,
+                false,
+                now_unix,
+                inflight_threshold,
+                outbound_threshold,
+            ),
+            "post-restart-orphan shape without ready-for-input must still abstain"
         );
     }
 }
