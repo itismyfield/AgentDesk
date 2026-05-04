@@ -4110,6 +4110,15 @@ pub(super) fn spawn_turn_bridge(
                         "full_response_len": inflight_state.full_response.len(),
                         "response_sent_offset": inflight_state.response_sent_offset,
                         "watcher_owns_live_relay": inflight_state.watcher_owns_live_relay,
+                        // #1671 — record the dispatch outcome and notification
+                        // kind on every bridge-side lifecycle event so
+                        // same-class incidents (orphan inflight after the
+                        // bridge handed off) can be triaged from log payloads
+                        // alone instead of requiring a watcher-state hit.
+                        "dispatch_ok": false,
+                        "task_notification_kind": inflight_state
+                            .task_notification_kind
+                            .map(|kind| kind.as_str()),
                     }),
                 );
             }
@@ -4127,6 +4136,14 @@ pub(super) fn spawn_turn_bridge(
                 serde_json::json!({
                     "full_response_len": inflight_state.full_response.len(),
                     "response_sent_offset": inflight_state.response_sent_offset,
+                    // #1671 — `dispatch_ok=true` here marks "bridge handled
+                    // the full lifecycle without delegation"; pair with the
+                    // notification kind so a stale `task_notification_kind`
+                    // pattern is searchable directly off the lifecycle event.
+                    "dispatch_ok": true,
+                    "task_notification_kind": inflight_state
+                        .task_notification_kind
+                        .map(|kind| kind.as_str()),
                 }),
             );
         }

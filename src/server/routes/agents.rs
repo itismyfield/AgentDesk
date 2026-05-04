@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -169,6 +169,10 @@ struct InflightTurnSnapshot {
     current_tool_line: Option<String>,
     prev_tool_status: Option<String>,
     full_response: Option<String>,
+    /// #1671: persisted notification kind (`subagent`/`background`/
+    /// `monitor_auto_turn`) for the live turn, surfaced through `agentdesk
+    /// diag` so operators do not have to hit the watcher-state endpoint.
+    task_notification_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -373,6 +377,10 @@ fn load_inflight_snapshot(
                     .map(str::to_string),
                 full_response: state
                     .get("full_response")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                task_notification_kind: state
+                    .get("task_notification_kind")
                     .and_then(|value| value.as_str())
                     .map(str::to_string),
             });
@@ -755,6 +763,41 @@ pub async fn agent_diag(
         .min()
         .map(|value| value.to_rfc3339());
 
+    // #1671: surface `relay_stall_state`, `pending_queue_depth`,
+    // `inflight_age_secs`, and `task_notification_kind` directly on the diag
+    // payload. Operators previously had to call
+    // `/api/channels/{id}/watcher-state` to see these signals; folding them
+    // into `agentdesk diag` shortens the same-class incident playbook.
+    let watcher_snapshot = match (
+        state.health_registry.as_ref(),
+        session
+            .thread_channel_id
+            .as_deref()
+            .and_then(|raw| raw.trim().parse::<u64>().ok()),
+    ) {
+        (Some(registry), Some(channel_num)) => registry.snapshot_watcher_state(channel_num).await,
+        _ => None,
+    };
+    let watcher_snapshot_json = watcher_snapshot
+        .as_ref()
+        .and_then(|snapshot| serde_json::to_value(snapshot).ok());
+    let relay_stall_state = watcher_snapshot_json
+        .as_ref()
+        .and_then(|value| value.get("relay_stall_state").cloned());
+    let pending_queue_depth = watcher_snapshot_json
+        .as_ref()
+        .and_then(|value| value.get("relay_health"))
+        .and_then(|value| value.get("queue_depth"))
+        .and_then(serde_json::Value::as_u64);
+    let inflight_age_secs = inflight
+        .as_ref()
+        .and_then(|state| state.updated_at.as_deref())
+        .and_then(parse_local_timestamp_to_unix)
+        .map(|unix| Utc::now().timestamp().saturating_sub(unix).max(0));
+    let task_notification_kind = inflight
+        .as_ref()
+        .and_then(|state| state.task_notification_kind.clone());
+
     (
         StatusCode::OK,
         Json(json!({
@@ -781,8 +824,25 @@ pub async fn agent_diag(
                 "line": event.line,
             })),
             "recent_loop_suspicion": loop_suspicion(&events),
+            // #1671 — observability fields lifted from the watcher-state
+            // endpoint. `null` when the registry/channel is unavailable.
+            "relay_stall_state": relay_stall_state,
+            "inflight_age_secs": inflight_age_secs,
+            "pending_queue_depth": pending_queue_depth,
+            "task_notification_kind": task_notification_kind,
         })),
     )
+}
+
+/// #1671 — parse the inflight `started_at`/`updated_at` localtime encoding
+/// (`YYYY-MM-DD HH:MM:SS`) into a Unix timestamp without pulling in the
+/// service-side helper (which is not exposed at the route layer).
+pub(super) fn parse_local_timestamp_to_unix(value: &str) -> Option<i64> {
+    let naive = chrono::NaiveDateTime::parse_from_str(value.trim(), "%Y-%m-%d %H:%M:%S").ok()?;
+    chrono::Local
+        .from_local_datetime(&naive)
+        .single()
+        .map(|local| local.with_timezone(&Utc).timestamp())
 }
 
 /// GET /api/agents/:id/offices
