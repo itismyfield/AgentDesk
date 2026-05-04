@@ -52,5 +52,11 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
         tracing::warn!("  [mcp] Failed to sync OpenCode MCP servers: {error}");
     }
 
+    // #1699: install the prompt-manifest retention snapshot so write-time
+    // truncation in `db::prompt_manifests::save_prompt_manifest_pg` reflects
+    // the operator-chosen `agentdesk.yaml` policy. Set-once; restart required
+    // to change retention bounds.
+    crate::db::prompt_manifests::install_retention_config(config.prompt_manifest_retention.clone());
+
     Ok(BootstrapState { config })
 }
