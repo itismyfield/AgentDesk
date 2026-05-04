@@ -144,6 +144,7 @@ src/
 │   │   │   ├── discord_delivery_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── outbox.rs
+│   │   │   ├── outbox_tests.rs
 │   │   │   ├── tests.rs
 │   │   │   └── thread_reuse.rs
 │   │   ├── domains/
@@ -370,7 +371,8 @@ src/
 │   │   └── tmux_watcher.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery.rs
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   └── outbox_queue.rs
 │   ├── git/
 │   │   ├── branch_resolver.rs
 │   │   ├── commit_resolver.rs

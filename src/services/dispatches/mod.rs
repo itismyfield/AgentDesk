@@ -11,6 +11,11 @@ use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 // as a re-export in `services/mod.rs` for compatibility).
 pub(crate) mod discord_delivery;
 
+// #1694: Dispatch outbox queue worker + state-transition logic, extracted
+// from `src/server/routes/dispatches/outbox.rs`. See module doc for the
+// route ↔ service ↔ db boundary.
+pub(crate) mod outbox_queue;
+
 const VALID_DISPATCH_STATUSES: &[&str] =
     &["pending", "dispatched", "completed", "cancelled", "failed"];
 
