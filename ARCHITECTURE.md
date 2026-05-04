@@ -53,12 +53,6 @@ src/
 │   ├── dispatches/
 │   │   ├── mod.rs
 │   │   └── outbox.rs
-│   ├── kanban_cards/
-│   │   ├── crud.rs
-│   │   ├── listing.rs
-│   │   ├── metadata.rs
-│   │   ├── mod.rs
-│   │   └── transitions.rs
 │   ├── agents.rs
 │   ├── auto_queue.rs
 │   ├── cancel_tombstones.rs
