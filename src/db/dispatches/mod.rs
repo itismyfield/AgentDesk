@@ -1,5 +1,11 @@
 use sqlx::{PgPool, Row as SqlxRow};
 
+// #1693: Dispatch outbox repository surface.
+// `outbox` re-exports the per-dispatch outbox-shaped queries so the route
+// layer / service layer / future #1694 work can depend on a narrow API
+// without further extraction.
+pub(crate) mod outbox;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SlotThreadBinding {
     pub(crate) agent_id: String,
@@ -939,4 +945,41 @@ pub(crate) async fn review_followup_already_resolved_pg(pool: &PgPool, card_id: 
         .flatten()
         .map(|s| s == "rework_pending" || s == "dilemma_pending")
         .unwrap_or(false)
+}
+
+/// #1693: SQLite-only helper for `latest_completed_review_provider`. The
+/// production path uses the Postgres equivalent in `crate::db::dispatches`;
+/// this lives only behind `legacy-sqlite-tests` so the legacy SQLite test
+/// fixtures keep working. Lives here so the route layer no longer holds raw
+/// SQL.
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(crate) fn latest_completed_review_provider_on_conn(
+    conn: &sqlite_test::Connection,
+    card_id: &str,
+) -> Result<Option<String>, String> {
+    use sqlite_test::OptionalExtension;
+
+    let context: Option<String> = conn
+        .query_row(
+            "SELECT context
+             FROM task_dispatches
+             WHERE kanban_card_id = ?1
+               AND dispatch_type = 'review'
+               AND status = 'completed'
+             ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC
+             LIMIT 1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("load sqlite review provider for {card_id}: {error}"))?;
+
+    Ok(context
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|ctx| {
+            ctx.get("from_provider")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        }))
 }

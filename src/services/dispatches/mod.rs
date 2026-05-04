@@ -6,6 +6,11 @@ use crate::dispatch;
 use crate::engine::PolicyEngine;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
+// #1693: Discord delivery transport / error types / delivery-guard helper
+// migrated from `crate::services::discord_delivery` (the flat path is kept
+// as a re-export in `services/mod.rs` for compatibility).
+pub(crate) mod discord_delivery;
+
 const VALID_DISPATCH_STATUSES: &[&str] =
     &["pending", "dispatched", "completed", "cancelled", "failed"];
 
