@@ -1876,6 +1876,18 @@ impl TestHealthHarness {
             .store(count, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// #1672 P2: read-only view of `deferred_hook_backlog` so route
+    /// tests can verify that a cancel surface scheduled a deferred
+    /// idle-queue drain. The `SharedData` field is `pub(super)`, which
+    /// is invisible from `server::routes::routes_tests` — this getter
+    /// keeps that boundary intact while still letting tests assert on
+    /// the post-cancel drain contract.
+    pub(crate) fn deferred_hook_backlog(&self) -> usize {
+        self.shared
+            .deferred_hook_backlog
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn set_recovery_duration_ms(&self, duration_ms: u64) {
         self.shared
             .recovery_duration_ms

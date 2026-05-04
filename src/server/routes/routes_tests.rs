@@ -3327,6 +3327,16 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
     assert_eq!(queue_depth, 1);
     assert_eq!(session_id, None);
 
+    // #1672 P2: turn cancel must schedule the deferred idle-queue
+    // drain so preserved pending_queue items resume without waiting
+    // for the next user message. The dispatch-cancel sibling test
+    // pins the same invariant for `/dispatches/{id}/cancel`.
+    let backlog_after_cancel = harness.deferred_hook_backlog();
+    assert!(
+        backlog_after_cancel >= 1,
+        "turn cancel must schedule the post-cancel queue drain (backlog={backlog_after_cancel}) — issue #1672 P2"
+    );
+
     let event = crate::services::observability::events::recent(10)
         .into_iter()
         .find(|event| event.event_type == "turn_cancelled")
@@ -4618,6 +4628,19 @@ async fn queue_cancel_dispatch_cancels_matching_active_turn_pg() {
     assert!(!has_active_turn);
     assert_eq!(queue_depth, 1);
     assert_eq!(session_id, None);
+
+    // #1672 P2: dispatch cancel must mirror the `/turns/{id}/cancel`
+    // surface and schedule the deferred idle-queue drain so the
+    // preserved pending_queue item resumes without waiting for the
+    // next user message. We observe this through the harness'
+    // `deferred_hook_backlog()` getter, which surfaces the counter
+    // that `schedule_deferred_idle_queue_kickoff` increments
+    // *synchronously* before spawning the 2s-delayed drain task.
+    let backlog_after_cancel = harness.deferred_hook_backlog();
+    assert!(
+        backlog_after_cancel >= 1,
+        "dispatch cancel must schedule the post-cancel queue drain (backlog={backlog_after_cancel}) — issue #1672 P2"
+    );
 
     let event = crate::services::observability::events::recent(10)
         .into_iter()

@@ -12,6 +12,37 @@ use crate::services::turn_lifecycle::{
 };
 use poise::serenity_prelude::ChannelId;
 
+/// #1672 P2: shared post-cancel drain helper used by both the
+/// `/turns/{channel_id}/cancel` and `/dispatches/{id}/cancel` queue-api
+/// surfaces. Whenever a cancel goes through the *preserve* path (queue
+/// stays put, watcher stays alive) the channel becomes idle while
+/// `pending_queue` items are still on disk — without an explicit drain
+/// kick the next intervention only runs after a fresh user message
+/// arrives. This helper centralises the call so the two cancel
+/// entry-points cannot drift apart.
+async fn schedule_post_cancel_queue_drain(
+    health_registry: Option<&Arc<HealthRegistry>>,
+    target: &TurnLifecycleTarget,
+    reason: &'static str,
+) {
+    let Some(registry) = health_registry else {
+        return;
+    };
+    let Some(provider) = target.provider.as_ref() else {
+        return;
+    };
+    let Some(channel_id) = target.channel_id else {
+        return;
+    };
+    let _ = crate::services::discord::health::schedule_pending_queue_drain_after_cancel(
+        registry.as_ref(),
+        provider.as_str(),
+        channel_id,
+        reason,
+    )
+    .await;
+}
+
 #[derive(Clone)]
 pub struct QueueService {
     pg_pool: Option<PgPool>,
@@ -109,6 +140,11 @@ impl QueueService {
                 let mut turn_queue_preserved = None;
                 let mut turn_inflight_cleared = None;
                 let mut turn_queued_remaining = None;
+                // #1672 P2: capture the lifecycle target so we can kick a
+                // post-cancel queue drain after the dispatch row is
+                // updated — same semantics the `/turns/{id}/cancel`
+                // surface already provides.
+                let mut drain_target: Option<TurnLifecycleTarget> = None;
 
                 if let Some(active_turn) = active_turn.as_ref() {
                     let provider_kind = active_turn
@@ -186,6 +222,7 @@ impl QueueService {
                     turn_queue_preserved = Some(lifecycle.queue_preserved);
                     turn_inflight_cleared = Some(lifecycle.inflight_cleared);
                     turn_queued_remaining = lifecycle.queue_depth;
+                    drain_target = Some(target);
                 }
 
                 crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
@@ -213,6 +250,20 @@ impl QueueService {
                         .with_operation("cancel_dispatch.clear_guard_pg")
                         .with_context("dispatch_id", dispatch_id)
                     })?;
+
+                // #1672 P2: with the active turn cancelled and the
+                // dispatch row finalized, kick the deferred idle-queue
+                // drain so any preserved pending_queue items resume
+                // without waiting for the next user message — mirrors
+                // the `/turns/{channel_id}/cancel` (preserve) surface.
+                if let Some(target) = drain_target.as_ref() {
+                    schedule_post_cancel_queue_drain(
+                        health_registry,
+                        target,
+                        "queue_api_cancel_dispatch",
+                    )
+                    .await;
+                }
 
                 tracing::info!("[queue-api] Cancelled dispatch {dispatch_id}");
                 Ok(json!({
@@ -473,17 +524,9 @@ impl QueueService {
         // any survived pending_queue items so the next intervention is
         // picked up without needing a fresh user message to drive the
         // mailbox poll.
-        if !force
-            && let (Some(registry), Some(provider_kind), Some(channel)) =
-                (health_registry, target.provider.as_ref(), target.channel_id)
-        {
-            let _ = crate::services::discord::health::schedule_pending_queue_drain_after_cancel(
-                registry.as_ref(),
-                provider_kind.as_str(),
-                channel,
-                "queue_api_cancel_turn",
-            )
-            .await;
+        if !force {
+            schedule_post_cancel_queue_drain(health_registry, &target, "queue_api_cancel_turn")
+                .await;
         }
 
         tracing::info!(
