@@ -783,6 +783,12 @@ pub fn cmd_diag(identifier: &str, json_output: bool) -> Result<(), String> {
         "last_tool_elapsed_secs",
         "active_children",
         "oldest_child_spawned_at",
+        // #1671 — observability fields lifted from the watcher-state
+        // endpoint so a single `diag` call surfaces stall fingerprints.
+        "relay_stall_state",
+        "inflight_age_secs",
+        "pending_queue_depth",
+        "task_notification_kind",
     ] {
         if let Some(value) = value.get(key).filter(|value| !value.is_null()) {
             println!("{key}: {}", render_diag_value(value));
