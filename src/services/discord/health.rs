@@ -1002,7 +1002,17 @@ async fn snapshot_pending_queue_state_for_shared(
 /// without requiring the next user message to arrive first.
 ///
 /// Returns `true` when the drain was scheduled (registered shared runtime
-/// found and queue is non-empty), `false` otherwise.
+/// found and at least one item is queued in memory or on disk), `false`
+/// otherwise.
+///
+/// codex review round-3 P2: when the in-memory mailbox is empty but the
+/// disk-backed `discord_pending_queue/<provider>/<token>/<channel>.json`
+/// file is still present, hydrate the mailbox from disk before
+/// scheduling the drain. Without this, the cancel response correctly
+/// reports `queue_disk_present_after=true` but the queued items remain
+/// stranded — the drain helper sees an empty mailbox and bails out, and
+/// the next `mailbox_enqueue_intervention` may overwrite the disk file
+/// before the items are ever absorbed.
 pub async fn schedule_pending_queue_drain_after_cancel(
     registry: &HealthRegistry,
     provider_name: &str,
@@ -1017,9 +1027,55 @@ pub async fn schedule_pending_queue_drain_after_cancel(
     };
     let snapshot = snapshot_pending_queue_state_for_shared(&shared, &provider, channel_id).await;
     if snapshot.queue_depth == 0 {
-        return false;
+        // Mailbox is empty in memory. If a disk-backed queue file still
+        // exists for this channel, hydrate the in-memory mailbox from
+        // disk so the deferred drain has something to absorb. Without
+        // this, the disk file lingers until the next user message
+        // overwrites it.
+        if !snapshot.disk_present {
+            return false;
+        }
+        let hydrated = hydrate_pending_queue_from_disk(&shared, &provider, channel_id).await;
+        if !hydrated {
+            return false;
+        }
     }
     super::schedule_deferred_idle_queue_kickoff(shared.clone(), provider, channel_id, reason);
+    true
+}
+
+/// codex review round-3 P2 (#1672): load the disk-backed pending queue
+/// for `channel_id` and push it into the in-memory mailbox via
+/// `mailbox_replace_queue`. Restores the matching `dispatch_role_override`
+/// alongside the queue so requeued items target the same destination
+/// channel as the original `mailbox_enqueue_intervention` call.
+///
+/// Returns `true` when at least one intervention was hydrated; `false`
+/// when the disk file is missing, empty, or unparseable.
+async fn hydrate_pending_queue_from_disk(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> bool {
+    let (queues, overrides) = super::load_pending_queues(provider, &shared.token_hash);
+    let Some(interventions) =
+        queues.into_iter().find_map(
+            |(cid, items)| {
+                if cid == channel_id { Some(items) } else { None }
+            },
+        )
+    else {
+        return false;
+    };
+    if interventions.is_empty() {
+        return false;
+    }
+    if let Some(alt_channel_id) = overrides.get(&channel_id).copied() {
+        shared
+            .dispatch_role_overrides
+            .insert(channel_id, alt_channel_id);
+    }
+    super::mailbox_replace_queue(shared, provider, channel_id, interventions).await;
     true
 }
 
@@ -4113,100 +4169,6 @@ pub(super) fn inflight_completed_stale_leak_detected(
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
-/// #1671 — orphan-`ExplicitBackgroundWork` safety net for the
-/// `stall_watchdog` periodic loop. Returns `true` when the watcher snapshot
-/// matches the issue #1670 fingerprint of a `task_notification_kind`-driven
-/// background-style relay that nobody is going to terminate:
-/// - `tmux_alive == Some(true)` (session still owns the slot)
-/// - `relay_stall_state == ExplicitBackgroundWork`
-///   (`task_notification_kind` or `long_running_placeholder_active` set on the
-///    inflight; the classifier promotes that to the explicit-background bucket)
-/// - `unread_bytes == Some(0)` — relay caught up; there is no pending
-///   capture-side work that would justify keeping the inflight pinned
-/// - `inflight_updated_at` older than `inflight_threshold_secs` (defaults to
-///   600s in the runtime caller)
-/// - `last_outbound_activity_ms` (if known) older than
-///   `outbound_threshold_secs` — both the relay timestamp and any
-///   write-evidence-derived `updated_at` agree the bridge has gone silent.
-///   This is the load-bearing false-positive guard: a real
-///   long-running/explicit-background turn keeps writing tool output to
-///   tmux, so its outbound activity stays fresh.
-/// - `ready_for_input_observed == true` — POSITIVE idle signal taken from
-///   the live tmux pane. This is the codex P1 hardening on top of the four
-///   gates above: a real long-running background turn (Monitor polling, a
-///   background-Bash waiting on IO) sits on a tool-spinner row and never
-///   prints the "Ready for input (type message + Enter)" footer, so even if
-///   `last_outbound_activity_ms` happened to be stale (e.g. between two
-///   slow tool ticks) we still abstain unless the agent has explicitly
-///   surfaced its prompt. Without this gate, the four staleness signals
-///   alone could silently kill a healthy long-running turn.
-///
-/// All conditions must hold; the `desynced` signal is intentionally not
-/// required — the original #1670 case had `desynced=false` because the
-/// watcher view looked healthy, which is exactly why the existing
-/// `stall_watchdog_should_force_clean` path missed it.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn stall_watchdog_should_force_clean_orphan_explicit_background(
-    tmux_alive: Option<bool>,
-    relay_stall_state: RelayStallState,
-    unread_bytes: Option<u64>,
-    inflight_updated_at: Option<&str>,
-    last_outbound_activity_ms: Option<i64>,
-    ready_for_input_observed: bool,
-    now_unix_secs: i64,
-    inflight_threshold_secs: u64,
-    outbound_threshold_secs: u64,
-) -> bool {
-    if tmux_alive != Some(true) {
-        return false;
-    }
-    if !matches!(relay_stall_state, RelayStallState::ExplicitBackgroundWork) {
-        return false;
-    }
-    // Requires that we *know* unread_bytes is exactly zero. `None` means we
-    // could not measure, so we abstain rather than risk cleaning a turn that
-    // has actual capture bytes the watcher hasn't relayed yet.
-    if unread_bytes != Some(0) {
-        return false;
-    }
-    let Some(updated_at) = inflight_updated_at else {
-        return false;
-    };
-    let Some(updated_at_unix) = super::inflight::parse_updated_at_unix(updated_at) else {
-        return false;
-    };
-    let updated_age_secs = now_unix_secs.saturating_sub(updated_at_unix);
-    if updated_age_secs < 0 || (updated_age_secs as u64) < inflight_threshold_secs {
-        return false;
-    }
-    // False-positive guard: a healthy long-running background turn
-    // (Monitor / background dispatch / etc.) still streams tool output, which
-    // bumps `last_outbound_activity_ms`. Only flag when we have explicit
-    // evidence the outbound side has gone quiet too. `None` is treated as
-    // "no evidence the bridge ever wrote" and is therefore considered stale —
-    // that case can only arise post-restart when the inflight survived but no
-    // discord write evidence exists, which is itself the orphan fingerprint.
-    if let Some(activity_ms) = last_outbound_activity_ms {
-        let now_ms = now_unix_secs.saturating_mul(1000);
-        let outbound_age_ms = now_ms.saturating_sub(activity_ms);
-        if outbound_age_ms < (outbound_threshold_secs.saturating_mul(1000)) as i64 {
-            return false;
-        }
-    }
-    // codex P1 — positive idle signal. The four staleness gates above are
-    // necessary but not sufficient: a real long-running background turn
-    // sitting on a slow tool tick can satisfy them transiently. Require
-    // explicit evidence from the pane that the agent itself believes the
-    // turn is over (the "Ready for input" footer the wrappers print at
-    // turn end). Tmux-capture failures or non-unix builds resolve to
-    // `false` upstream, which makes us abstain — biased toward leaving
-    // the inflight in place rather than risking a false positive.
-    if !ready_for_input_observed {
-        return false;
-    }
-    true
-}
-
 /// Watchdog tick interval. Picked to converge inside ~1 cycle once the
 /// `2x` staleness window has elapsed, while staying well below the
 /// gateway-lease keepalive cadence so we never starve the gateway loop.
@@ -4223,22 +4185,6 @@ pub(super) const STALL_WATCHDOG_INITIAL_DELAY_SECS: u64 = 90;
 /// trigger) so the watchdog never races ahead of an in-flight intake call.
 pub(super) const STALL_WATCHDOG_THRESHOLD_SECS: u64 =
     2 * super::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS;
-
-/// #1671 — orphan-`ExplicitBackgroundWork` cleanup window for the secondary
-/// safety net. Strictly more conservative than the desynced path
-/// (`STALL_WATCHDOG_THRESHOLD_SECS`) because the desynced signal alone is
-/// already strong evidence; here the snapshot is "healthy by every other
-/// metric" and we are using `task_notification_kind`-style staleness as a
-/// last-resort recovery. 10 minutes matches the issue #1671 acceptance
-/// criteria.
-pub(super) const STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS: u64 = 600;
-
-/// #1671 — outbound-quiet window paired with the inflight age above. Mirrors
-/// `STALL_WATCHDOG_THRESHOLD_SECS` (10 minutes) so a real long-running
-/// background turn that is still writing tool output to tmux can never be
-/// flagged: as long as `last_outbound_activity_ms` advances within this
-/// window, the safety net abstains.
-pub(super) const STALL_WATCHDOG_EXPLICIT_BACKGROUND_OUTBOUND_THRESHOLD_SECS: u64 = 600;
 
 /// Run a single stall-watchdog pass against one provider+SharedData.
 ///
@@ -4288,145 +4234,6 @@ pub(super) async fn run_stall_watchdog_pass(
             STALL_WATCHDOG_THRESHOLD_SECS,
         );
         if !should_clean {
-            // #1671 — secondary safety net for the "ExplicitBackgroundWork
-            // orphan" pattern. The watcher view says everything is healthy
-            // (`desynced=false`, watcher attached) but the inflight is pinned
-            // by a stale `task_notification_kind`/`long_running_placeholder`
-            // marker that nobody will ever clear. The classic
-            // stall_watchdog_should_force_clean path requires `desynced=true`
-            // and therefore cannot recover this case (issue #1670 / #1671).
-            //
-            // codex P1 — capture a positive idle signal from the live tmux
-            // pane before considering the orphan path. A real long-running
-            // background turn (Monitor poll, background-Bash IO wait) sits
-            // on a tool-spinner row and never prints the "Ready for input
-            // (type message + Enter)" footer the wrapper emits at turn
-            // end. Probing tmux here (instead of trusting only the four
-            // staleness gates) prevents the silent kill of healthy long
-            // turns when their outbound activity dips below the window.
-            // The probe is a single `tmux capture-pane` shell-out, wrapped
-            // in `spawn_blocking` like the existing `tmux::has_session`
-            // probe so the watchdog never blocks the runtime.
-            let ready_for_input_observed = match snapshot.tmux_session.clone() {
-                Some(name) => tokio::task::spawn_blocking(move || {
-                    crate::services::provider::tmux_session_ready_for_input(&name)
-                })
-                .await
-                .unwrap_or(false),
-                None => false,
-            };
-            if stall_watchdog_should_force_clean_orphan_explicit_background(
-                snapshot.tmux_session_alive,
-                snapshot.relay_stall_state,
-                snapshot.unread_bytes,
-                snapshot.inflight_updated_at.as_deref(),
-                snapshot.relay_health.last_outbound_activity_ms,
-                ready_for_input_observed,
-                now_unix_secs,
-                STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS,
-                STALL_WATCHDOG_EXPLICIT_BACKGROUND_OUTBOUND_THRESHOLD_SECS,
-            ) {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for orphan ExplicitBackgroundWork channel {} (provider={})",
-                    channel_id,
-                    provider.as_str()
-                );
-                let inflight_before =
-                    super::inflight::load_inflight_state(provider, channel_id.get());
-                let cleanup_turn_id = inflight_before
-                    .as_ref()
-                    .filter(|s| s.user_msg_id != 0)
-                    .map(|s| format!("discord:{}:{}", s.channel_id, s.user_msg_id));
-                let cleanup_dispatch_id =
-                    inflight_before.as_ref().and_then(|s| s.dispatch_id.clone());
-                let cleanup_session_key =
-                    inflight_before.as_ref().and_then(|s| s.session_key.clone());
-                let task_notification_kind = inflight_before
-                    .as_ref()
-                    .and_then(|s| s.task_notification_kind.map(|k| k.as_str().to_string()));
-                let watcher_owns_live_relay =
-                    inflight_before.as_ref().map(|s| s.watcher_owns_live_relay);
-                super::inflight::delete_inflight_state_file(provider, channel_id.get());
-                // codex re-review P2 — the orphan recovery branch must NOT
-                // drop the channel's queued user interventions. The
-                // pre-existing `mailbox_clear_channel` path drained
-                // `intervention_queue` and emitted `Superseded` events,
-                // which silently discarded any user message the operator
-                // had queued behind the stalled turn. Use
-                // `mailbox_finish_turn` (canonical "release lock + cancel
-                // token, keep queue") so the queued interventions survive
-                // and replay once the cancel completes. Mirrors the
-                // `placeholder_sweeper::finalize_abandoned_mailbox` pattern
-                // for the same orphan-recovery contract:
-                //   1) finish the active turn → release cancel_token,
-                //      preserving `intervention_queue`,
-                //   2) cancel the orphan token + decrement `global_active`,
-                //      and tear down the tmux session,
-                //   3) schedule a deferred idle-queue kickoff so any
-                //      survived queue items drain without waiting for the
-                //      next user message.
-                let finish = mailbox_finish_turn(&shared, provider, channel_id).await;
-                // codex P1 — route the orphan cancel through
-                // `stall_recovery::finalize_orphaned_clear` so the
-                // `global_active` decrement is saturating. A raw
-                // `fetch_sub(1)` can wrap `0 → usize::MAX` after
-                // `reregister_active_turn_from_inflight` re-creates the
-                // cancel token without restoring the global counter
-                // (the parent counter died with the previous dcserver
-                // process), which would convince health and
-                // deferred-restart logic that a phantom turn is alive
-                // forever. The helper also matches the canonical
-                // `CleanupSession` policy + cancel-attribution pattern
-                // used by every other stall-recovery callsite.
-                super::stall_recovery::finalize_orphaned_clear(
-                    &shared,
-                    channel_id,
-                    finish.removed_token,
-                    "1671_stall_watchdog_explicit_background",
-                );
-                shared
-                    .dispatch_thread_parents
-                    .retain(|_, thread_id| *thread_id != channel_id);
-                if finish.has_pending {
-                    super::schedule_deferred_idle_queue_kickoff(
-                        shared.clone(),
-                        provider.clone(),
-                        channel_id,
-                        "1671_stall_watchdog_explicit_background",
-                    );
-                }
-                crate::services::observability::emit_inflight_lifecycle_event(
-                    provider.as_str(),
-                    channel_id.get(),
-                    cleanup_dispatch_id.as_deref(),
-                    cleanup_session_key.as_deref(),
-                    cleanup_turn_id.as_deref(),
-                    "stall_watchdog_explicit_background",
-                    serde_json::json!({
-                        "inflight_started_at": snapshot.inflight_started_at,
-                        "inflight_updated_at": snapshot.inflight_updated_at,
-                        "tmux_session": snapshot.tmux_session,
-                        "tmux_session_alive": snapshot.tmux_session_alive,
-                        "watcher_attached": snapshot.attached,
-                        "has_pending_queue": snapshot.has_pending_queue,
-                        "unread_bytes": snapshot.unread_bytes,
-                        "task_notification_kind": task_notification_kind,
-                        "watcher_owns_live_relay": watcher_owns_live_relay,
-                        "last_outbound_activity_ms":
-                            snapshot.relay_health.last_outbound_activity_ms,
-                        "relay_stall_state": snapshot.relay_stall_state.as_str(),
-                        // codex P1 — record the positive idle signal that
-                        // unlocked this cleanup so the post-mortem can tell
-                        // a real orphan (`true`) from a legacy unguarded
-                        // false-positive (which would never reach this path
-                        // anymore but is worth distinguishing in audit).
-                        "ready_for_input_observed": ready_for_input_observed,
-                    }),
-                );
-                cleaned += 1;
-                continue;
-            }
             // Detection-only sibling probe for "completed-stale" inflight
             // leaks: bridge handed off cleanup to the watcher (or the watcher
             // delivered the response itself), but the inflight file persisted
@@ -4558,10 +4365,8 @@ pub fn spawn_stall_watchdog(registry: Arc<HealthRegistry>, provider: ProviderKin
 #[cfg(test)]
 mod stall_watchdog_pure_tests {
     use super::{
-        RelayStallState, STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS,
-        STALL_WATCHDOG_EXPLICIT_BACKGROUND_OUTBOUND_THRESHOLD_SECS, STALL_WATCHDOG_THRESHOLD_SECS,
-        inflight_completed_stale_leak_detected, stall_watchdog_should_force_clean,
-        stall_watchdog_should_force_clean_orphan_explicit_background,
+        STALL_WATCHDOG_THRESHOLD_SECS, inflight_completed_stale_leak_detected,
+        stall_watchdog_should_force_clean,
     };
     use chrono::TimeZone;
 
@@ -4753,257 +4558,6 @@ mod stall_watchdog_pure_tests {
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
         ));
-    }
-
-    /// #1671 — orphan ExplicitBackgroundWork safety net. Each AND-clause is
-    /// inverted to lock the gate against accidental relaxation that would
-    /// turn a real long-running background turn into a false positive.
-    ///
-    /// codex P1 — every happy-path assertion now passes
-    /// `ready_for_input_observed=true`. The new "missing positive idle
-    /// signal" assertion at the end pins the load-bearing false-positive
-    /// guard introduced for healthy long-running background turns.
-    #[test]
-    fn stall_watchdog_orphan_explicit_background_requires_all_signals() {
-        let now_unix = chrono::Utc::now().timestamp();
-        let inflight_threshold = STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS;
-        let outbound_threshold = STALL_WATCHDOG_EXPLICIT_BACKGROUND_OUTBOUND_THRESHOLD_SECS;
-        let stale_unix = now_unix - (inflight_threshold as i64) - 30;
-        let fresh_unix = now_unix - 30;
-        let to_local = |unix: i64| {
-            chrono::Local
-                .timestamp_opt(unix, 0)
-                .single()
-                .expect("valid local time")
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        };
-        let stale_str = to_local(stale_unix);
-        let fresh_str = to_local(fresh_unix);
-
-        let stale_outbound_ms = (now_unix - (outbound_threshold as i64) - 30) * 1000;
-        let fresh_outbound_ms = (now_unix - 30) * 1000;
-
-        // Happy path: alive tmux + ExplicitBackgroundWork + zero unread +
-        // stale inflight + stale outbound activity + ready-for-input footer
-        // observed on the live pane → clean.
-        assert!(
-            stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(true),
-                RelayStallState::ExplicitBackgroundWork,
-                Some(0),
-                Some(stale_str.as_str()),
-                Some(stale_outbound_ms),
-                true,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            )
-        );
-
-        // tmux not alive (or unknown) → no clean.
-        assert!(
-            !stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(false),
-                RelayStallState::ExplicitBackgroundWork,
-                Some(0),
-                Some(stale_str.as_str()),
-                Some(stale_outbound_ms),
-                true,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            )
-        );
-        assert!(
-            !stall_watchdog_should_force_clean_orphan_explicit_background(
-                None,
-                RelayStallState::ExplicitBackgroundWork,
-                Some(0),
-                Some(stale_str.as_str()),
-                Some(stale_outbound_ms),
-                true,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            )
-        );
-
-        // Wrong relay-stall-state → no clean (foreground/healthy must not
-        // trigger this path).
-        for state in [
-            RelayStallState::Healthy,
-            RelayStallState::ActiveForegroundStream,
-            RelayStallState::TmuxAliveRelayDead,
-            RelayStallState::StaleThreadProof,
-            RelayStallState::OrphanPendingToken,
-            RelayStallState::QueueBlocked,
-        ] {
-            assert!(
-                !stall_watchdog_should_force_clean_orphan_explicit_background(
-                    Some(true),
-                    state,
-                    Some(0),
-                    Some(stale_str.as_str()),
-                    Some(stale_outbound_ms),
-                    true,
-                    now_unix,
-                    inflight_threshold,
-                    outbound_threshold,
-                ),
-                "must not trigger for state {:?}",
-                state
-            );
-        }
-
-        // unread_bytes > 0 → no clean (capture has bytes the watcher has not
-        // yet relayed).
-        assert!(
-            !stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(true),
-                RelayStallState::ExplicitBackgroundWork,
-                Some(64),
-                Some(stale_str.as_str()),
-                Some(stale_outbound_ms),
-                true,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            )
-        );
-
-        // unread_bytes unknown (None) → no clean (abstain rather than risk
-        // cleaning a turn we cannot measure).
-        assert!(
-            !stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(true),
-                RelayStallState::ExplicitBackgroundWork,
-                None,
-                Some(stale_str.as_str()),
-                Some(stale_outbound_ms),
-                true,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            )
-        );
-
-        // Fresh inflight updated_at → no clean.
-        assert!(
-            !stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(true),
-                RelayStallState::ExplicitBackgroundWork,
-                Some(0),
-                Some(fresh_str.as_str()),
-                Some(stale_outbound_ms),
-                true,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            )
-        );
-
-        // Missing inflight updated_at → no clean.
-        assert!(
-            !stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(true),
-                RelayStallState::ExplicitBackgroundWork,
-                Some(0),
-                None,
-                Some(stale_outbound_ms),
-                true,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            )
-        );
-
-        // Unparseable inflight updated_at → no clean.
-        assert!(
-            !stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(true),
-                RelayStallState::ExplicitBackgroundWork,
-                Some(0),
-                Some("not-a-real-timestamp"),
-                Some(stale_outbound_ms),
-                true,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            )
-        );
-
-        // Fresh outbound activity → no clean (this is one of the
-        // false-positive guards for real long-running background work).
-        assert!(
-            !stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(true),
-                RelayStallState::ExplicitBackgroundWork,
-                Some(0),
-                Some(stale_str.as_str()),
-                Some(fresh_outbound_ms),
-                true,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            )
-        );
-
-        // Outbound activity unknown (None) + ready-for-input observed →
-        // still cleans, because that combination means the bridge has zero
-        // write evidence (typical of a post-restart orphan) AND the live
-        // pane is sitting at the input prompt. The other gates already
-        // confirm staleness.
-        assert!(
-            stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(true),
-                RelayStallState::ExplicitBackgroundWork,
-                Some(0),
-                Some(stale_str.as_str()),
-                None,
-                true,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            )
-        );
-
-        // codex P1 — load-bearing positive-idle false-positive guard:
-        // every staleness gate satisfied, but the live pane is NOT at
-        // the "Ready for input" footer. This is the active long-running
-        // background turn shape (Monitor poll, background-Bash IO wait
-        // between two slow tool ticks). Must abstain.
-        assert!(
-            !stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(true),
-                RelayStallState::ExplicitBackgroundWork,
-                Some(0),
-                Some(stale_str.as_str()),
-                Some(stale_outbound_ms),
-                false,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            ),
-            "missing ready-for-input footer must abstain (active long-running background turn)"
-        );
-        // Same with outbound activity unknown — ready_for_input=false
-        // still wins over the post-restart-orphan shape, because we
-        // refuse to kill anything that has not surfaced its prompt yet.
-        assert!(
-            !stall_watchdog_should_force_clean_orphan_explicit_background(
-                Some(true),
-                RelayStallState::ExplicitBackgroundWork,
-                Some(0),
-                Some(stale_str.as_str()),
-                None,
-                false,
-                now_unix,
-                inflight_threshold,
-                outbound_threshold,
-            ),
-            "post-restart-orphan shape without ready-for-input must still abstain"
-        );
     }
 }
 
@@ -6869,6 +6423,104 @@ mod tests {
         );
     }
 
+    /// codex review round-3 P2 (#1672): when the in-memory mailbox is
+    /// empty but the disk-backed `discord_pending_queue/<provider>/<token>/<channel>.json`
+    /// is still present, `schedule_pending_queue_drain_after_cancel` must
+    /// hydrate the mailbox from disk and schedule the deferred drain.
+    /// Otherwise the cancel response truthfully reports
+    /// `queue_disk_present_after=true` but the queued items remain
+    /// stranded — they only get absorbed when the next user message
+    /// arrives, and the next `mailbox_enqueue_intervention` may
+    /// overwrite the disk file before that happens.
+    #[tokio::test]
+    async fn schedule_pending_queue_drain_hydrates_mailbox_when_only_disk_queue_exists() {
+        use crate::services::discord::runtime_store::lock_test_env;
+        use crate::services::turn_orchestrator::save_channel_queue;
+
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(tmp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id_u64: u64 = 660_111_222_333_444_001;
+        let channel_id = ChannelId::new(channel_id_u64);
+
+        // Seed disk-only queue: write a pending queue file *without*
+        // touching the in-memory mailbox so we recreate the production
+        // failure mode where a previous restart left the file behind.
+        let intervention = super::super::Intervention {
+            author_id: UserId::new(123),
+            message_id: MessageId::new(987_654_321),
+            source_message_ids: vec![MessageId::new(987_654_321)],
+            text: "stranded-on-disk".to_string(),
+            mode: super::super::InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+        };
+        save_channel_queue(
+            &ProviderKind::Codex,
+            &harness.shared.token_hash,
+            channel_id,
+            &[intervention],
+            None,
+        );
+
+        // Pre-condition: mailbox is empty, disk file is present.
+        let pre_snapshot = snapshot_pending_queue_state(&harness.registry(), "codex", channel_id)
+            .await
+            .expect("snapshot must resolve registered runtime");
+        assert_eq!(
+            pre_snapshot.queue_depth, 0,
+            "in-memory mailbox must start empty"
+        );
+        assert!(
+            pre_snapshot.disk_present,
+            "disk-backed queue file must be seeded for the test"
+        );
+
+        // Drive the helper. With the round-3 P2 fix it must hydrate the
+        // mailbox from disk and schedule the deferred drain (returns
+        // `true`); without the fix it short-circuits on the empty
+        // mailbox and returns `false`, leaving the disk queue stranded.
+        let scheduled = schedule_pending_queue_drain_after_cancel(
+            &harness.registry(),
+            "codex",
+            channel_id,
+            "test-disk-only-hydrate",
+        )
+        .await;
+        assert!(
+            scheduled,
+            "drain must be scheduled when only the disk-backed queue is non-empty"
+        );
+
+        // Post-condition: mailbox is now hydrated from disk so the
+        // deferred drain (and any subsequent `mailbox_enqueue_intervention`)
+        // sees the surviving items.
+        let post_depth = harness.queue_depth_for_channel(channel_id_u64).await;
+        assert_eq!(
+            post_depth, 1,
+            "mailbox must be hydrated from disk after the drain helper runs"
+        );
+
+        // The deferred drain itself increments `deferred_hook_backlog`
+        // synchronously before spawning the delayed kickoff task.
+        assert!(
+            harness.deferred_hook_backlog() >= 1,
+            "post-cancel drain helper must register a deferred hook"
+        );
+    }
+
     /// #1671 — orphan ExplicitBackgroundWork safety net. The bridge left
     /// behind an inflight whose `task_notification_kind` is set so the relay
     /// classifier reports `ExplicitBackgroundWork`, the watcher view looks
@@ -7226,4 +6878,5 @@ mod tests {
             "queued interventions must survive orphan ExplicitBackgroundWork cleanup",
         );
     }
+
 }
