@@ -125,6 +125,8 @@
   - `src/services/discord/runtime_bootstrap.rs` (2844 lines).
   - `src/services/discord/session_runtime.rs` (1887 lines).
   - `src/services/discord/commands/config.rs` (1877 lines).
+  - `src/services/discord/commands/inspect.rs` (1058 lines, post-#1701
+    context-view manifest binding pushed it past the giant-file threshold).
   - `src/services/discord/{commands/text_commands.rs, commands/diagnostics.rs,
     discord_config_audit.rs, router/intake_gate.rs, model_catalog.rs,
     qwen_tmux_wrapper.rs, agentdesk_config.rs, inflight.rs}` (all 1000+ lines).
