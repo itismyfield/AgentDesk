@@ -20,6 +20,7 @@ use super::{
     session_activity::SessionActivityResolver, settings,
 };
 use crate::db::session_status::is_active_status;
+use crate::utils::api::clamp_api_limit;
 
 const CACHE_OVERVIEW: &str = "max-age=30";
 const CACHE_AGENTS: &str = "max-age=10";
@@ -286,7 +287,7 @@ async fn stream(State(state): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 async fn activity(State(state): State<AppState>, Query(query): Query<ActivityQuery>) -> Response {
-    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let limit = clamp_api_limit(Some(query.limit.unwrap_or(20)));
     let before = query.before.as_deref().and_then(parse_cursor);
     let Some(pool) = state.pg_pool_ref() else {
         return pg_unavailable("activity");

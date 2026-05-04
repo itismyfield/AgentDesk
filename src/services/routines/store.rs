@@ -10,6 +10,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::utils::api::clamp_api_limit;
+
 pub const ROUTINE_RUN_LEASE_SECS: u64 = 30 * 60;
 const RUN_LEASE_SECS: i64 = ROUTINE_RUN_LEASE_SECS as i64;
 
@@ -541,7 +543,7 @@ impl RoutineStore {
     }
 
     pub async fn list_runs(&self, routine_id: &str, limit: i64) -> Result<Vec<RoutineRunRecord>> {
-        let limit = limit.clamp(1, 100);
+        let limit = clamp_api_limit(usize::try_from(limit).ok()) as i64;
         sqlx::query_as(
             r#"
             SELECT id, routine_id, status, action, turn_id, lease_expires_at,
@@ -683,7 +685,7 @@ impl RoutineStore {
         since: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<Vec<RoutineRunSearchRecord>> {
-        let limit = limit.clamp(1, 100);
+        let limit = clamp_api_limit(usize::try_from(limit).ok()) as i64;
         let pattern = format!("%{}%", escape_like_pattern(query));
         sqlx::query_as(
             r#"
