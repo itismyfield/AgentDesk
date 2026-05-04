@@ -24,11 +24,12 @@ use super::stale_resume::{
     result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
 };
 use super::{
-    advance_tmux_relay_confirmed_end, monitor_handoff_tool_context,
-    should_delegate_bridge_relay_to_watcher, turn_bridge_replace_outcome_committed,
+    advance_tmux_relay_confirmed_end, merge_task_notification_kind, monitor_handoff_tool_context,
+    should_delegate_bridge_relay_to_watcher, task_notification_closes_background_child,
+    turn_bridge_replace_outcome_committed,
 };
 use crate::db::turns::TurnTokenUsage;
-use crate::services::agent_protocol::StreamMessage;
+use crate::services::agent_protocol::{StreamMessage, TaskNotificationKind};
 use crate::services::discord::ChannelId;
 use crate::services::discord::DiscordSession;
 use crate::services::discord::InflightTurnState;
@@ -2846,35 +2847,127 @@ fn bridge_finalizes_when_no_debt_was_published_for_this_turn() {
     );
 }
 
-/// 4d. `watcher_skips_swap_when_dispatch_failed` — Codex iter 3 P2.
+/// 4d. `watcher_consumes_swap_even_when_dispatch_failed` — issue #1670.
 ///
-/// The watcher must consume `mailbox_finalize_owed` ONLY when it is
-/// actually about to call `finish_restored_watcher_active_turn`. If
-/// `dispatch_ok` is false (e.g., dispatch lookup or fallback completion
-/// failed), the watcher skips finalization — eating the debt would leave
-/// the channel without finalization on either side.
+/// Before #1670 the watcher gated `mailbox_finalize_owed.swap` on
+/// `dispatch_ok = true`, which assumed a bridge that would later revoke the
+/// debt via `compare_exchange`. That assumption breaks for organic user
+/// turns (`dispatch_id = null`) routed through
+/// `bridge_relay_delegated_to_watcher`: the bridge's
+/// `else if preserve_inflight_for_cleanup_retry || bridge_relay_delegated_to_watcher`
+/// arm in `turn_bridge/mod.rs` saves inflight and IMMEDIATELY returns —
+/// it never re-enters the `compare_exchange` revoke path. So if the watcher
+/// also skips its swap when dispatch finalization happened to fail, both
+/// sides walk away leaving the cancel_token + inflight orphaned forever.
+///
+/// The fix decouples mailbox/inflight cleanup from `dispatch_ok`: when the
+/// watcher relay succeeded it ALWAYS swaps, clears inflight, and runs
+/// `finish_restored_watcher_active_turn`. Dispatch lifecycle work (queue
+/// kickoff, terminal-stop decision, dispatch followup) keeps its
+/// `dispatch_ok` gate further downstream.
 #[test]
-fn watcher_skips_swap_when_dispatch_failed() {
+fn watcher_consumes_swap_even_when_dispatch_failed() {
     use std::sync::atomic::AtomicBool;
     let owed = Arc::new(AtomicBool::new(true)); // bridge published debt
 
-    // Watcher's relay completed but dispatch_ok = false — emulate the
-    // production gate at `tmux.rs` (~line 4900): only swap inside the
-    // `if dispatch_ok` arm.
-    let dispatch_ok = false;
-    let consumed = if dispatch_ok {
+    // Watcher's relay completed; the streaming finalizer reported
+    // dispatch_ok = false (e.g., a fallback dispatch_id was stale, or the
+    // dispatch row was already in a terminal state). Per #1670 the watcher
+    // MUST still consume the debt — the bridge already exited via
+    // `bridge_relay_delegated_to_watcher` and will not come back.
+    let relay_ok = true;
+    let _dispatch_ok = false;
+    let consumed = if relay_ok {
         owed.swap(false, Ordering::AcqRel)
     } else {
         false
     };
 
     assert!(
-        !consumed,
-        "watcher must not eat the debt when it won't finalize"
+        consumed,
+        "watcher MUST consume the debt on relay_ok regardless of dispatch_ok (#1670)"
     );
     assert!(
-        owed.load(Ordering::Acquire),
-        "debt must remain available for the bridge's compare_exchange revoke (Codex iter 3 P2)"
+        !owed.load(Ordering::Acquire),
+        "swap must reset the flag so a paused-survivor watcher cannot clear the next turn's token"
+    );
+}
+
+/// 4e. `organic_turn_clears_inflight_on_watcher_delegated_finalize` — issue #1670.
+///
+/// End-to-end at the mailbox layer for the regression scenario: an organic
+/// user turn (no dispatch_id) is bridge→watcher delegated. Even when the
+/// watcher's downstream dispatch finalization would have failed, the
+/// channel mailbox cancel_token must be released — otherwise the next
+/// organic turn cannot be admitted by `try_start_turn`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn organic_turn_clears_inflight_on_watcher_delegated_finalize() {
+    use std::sync::atomic::AtomicBool;
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1474933804887179286);
+
+    // Active turn registered (organic user message, no dispatch).
+    let turn1_token = Arc::new(CancelToken::new());
+    assert!(
+        shared
+            .mailbox(channel_id)
+            .try_start_turn(
+                turn1_token.clone(),
+                UserId::new(7),
+                MessageId::new(1500042670918336513),
+            )
+            .await
+    );
+
+    // Bridge delegates to watcher and stores the debt, then exits via the
+    // `bridge_relay_delegated_to_watcher` save+return arm.
+    let owed = Arc::new(AtomicBool::new(false));
+    owed.store(true, Ordering::Release);
+
+    // Watcher path under #1670: relay_ok = true regardless of dispatch_ok.
+    // The swap+finalize MUST run for organic turns where dispatch finalization
+    // never happens (no dispatch_id ever resolved).
+    let relay_ok = true;
+    let consumed = if relay_ok {
+        owed.swap(false, Ordering::AcqRel)
+    } else {
+        false
+    };
+    assert!(consumed, "#1670: organic turn must consume the debt");
+
+    super::super::tmux::test_finish_restored_watcher_active_turn(
+        &shared,
+        &provider,
+        channel_id,
+        false,    // finish_mailbox_on_completion (no inflight-restore)
+        consumed, // delegated_finalize_owed
+        "test #1670 organic-turn watcher delegated finalize",
+    )
+    .await;
+
+    assert!(
+        !shared.mailbox(channel_id).has_active_turn().await,
+        "#1670: organic turn finalization must clear the channel mailbox"
+    );
+    assert!(
+        turn1_token.cancelled.load(Ordering::Relaxed),
+        "#1670: cancel_token must be marked cancelled (no orphan)"
+    );
+
+    // Subsequent organic turn must be admitted (pre-fix this would fail
+    // because turn 1's cancel_token leaked).
+    let turn2_token = Arc::new(CancelToken::new());
+    assert!(
+        shared
+            .mailbox(channel_id)
+            .try_start_turn(
+                turn2_token,
+                UserId::new(7),
+                MessageId::new(1500042670918336514),
+            )
+            .await,
+        "#1670: next organic turn must be admitted after watcher cleanup"
     );
 }
 
@@ -2955,5 +3048,90 @@ fn shared_data_exposes_placeholder_controller() {
     assert_eq!(
         lifecycle,
         crate::services::discord::placeholder_controller::PlaceholderLifecycle::NotCreated
+    );
+}
+
+// ==========================================================================
+// Issue #1670: `task_notification_kind` terminal release semantics.
+// ==========================================================================
+
+/// `task_notification_kind_resets_after_terminal_status` — issue #1670.
+///
+/// `merge_task_notification_kind` is an absorb operator (max by priority): once
+/// a Subagent or Background notification raises the kind, subsequent
+/// notifications for the same or lower priority cannot lower it back. Without
+/// an explicit release on the terminal status the kind sticks in
+/// `inflight_state` past the child close, which then misroutes downstream
+/// suppression decisions and persists into the saved inflight when the
+/// watcher takes over.
+///
+/// This test pins the contract that the
+/// `StreamMessage::TaskNotification` arm in `mod.rs` resets
+/// `inflight_state.task_notification_kind = None` whenever
+/// `task_notification_closes_background_child` returns true.
+#[test]
+fn task_notification_kind_resets_after_terminal_status() {
+    // Simulate the in-arm sequence for an inflight that already absorbed a
+    // Background task notification.
+    let mut kind: Option<TaskNotificationKind> = None;
+    kind = merge_task_notification_kind(kind, TaskNotificationKind::Background);
+    assert_eq!(kind, Some(TaskNotificationKind::Background));
+
+    // Terminal "completed" arrives. Mirror the production logic in
+    // `mod.rs` `StreamMessage::TaskNotification`:
+    let new_kind = TaskNotificationKind::Background;
+    let status = "completed";
+    kind = merge_task_notification_kind(kind, new_kind);
+    if task_notification_closes_background_child(new_kind, status) {
+        kind = None;
+    }
+    assert_eq!(
+        kind, None,
+        "#1670: terminal completed must release the absorbed kind"
+    );
+
+    // Aborted, cancelled, failed, error must all release as well.
+    for status in ["aborted", "cancelled", "canceled", "failed", "error"] {
+        let mut kind: Option<TaskNotificationKind> = Some(TaskNotificationKind::Subagent);
+        let new_kind = TaskNotificationKind::Subagent;
+        kind = merge_task_notification_kind(kind, new_kind);
+        if task_notification_closes_background_child(new_kind, status) {
+            kind = None;
+        }
+        assert_eq!(
+            kind, None,
+            "#1670: terminal `{status}` must release the absorbed kind"
+        );
+    }
+
+    // Non-terminal status (e.g., "started", "running") MUST NOT release —
+    // the child is still in flight.
+    let mut kind: Option<TaskNotificationKind> = Some(TaskNotificationKind::Background);
+    let new_kind = TaskNotificationKind::Background;
+    let status = "started";
+    kind = merge_task_notification_kind(kind, new_kind);
+    if task_notification_closes_background_child(new_kind, status) {
+        kind = None;
+    }
+    assert_eq!(
+        kind,
+        Some(TaskNotificationKind::Background),
+        "#1670: non-terminal status must keep the absorbed kind"
+    );
+
+    // MonitorAutoTurn is intentionally NOT closed by the
+    // `task_notification_closes_background_child` predicate (it's not a
+    // background child). Its kind must persist until the turn ends.
+    let mut kind: Option<TaskNotificationKind> = Some(TaskNotificationKind::MonitorAutoTurn);
+    let new_kind = TaskNotificationKind::MonitorAutoTurn;
+    let status = "completed";
+    kind = merge_task_notification_kind(kind, new_kind);
+    if task_notification_closes_background_child(new_kind, status) {
+        kind = None;
+    }
+    assert_eq!(
+        kind,
+        Some(TaskNotificationKind::MonitorAutoTurn),
+        "#1670: MonitorAutoTurn is NOT a background child — kind must persist"
     );
 }

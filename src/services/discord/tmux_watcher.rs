@@ -2572,69 +2572,74 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 drop(data);
             }
             turn_result_relayed = true;
-            // #1452 (Codex iter 3 P2): only consume the handoff debt when
-            // we are actually going to finalize. If `dispatch_ok` is false
-            // (e.g., dispatch type lookup or fallback completion failed)
-            // we'd skip `finish_restored_watcher_active_turn` anyway —
-            // swapping early would leave the debt cleared with no
-            // finalization, and a bridge racing this path would then see
-            // `false` and skip its own finish too, leaving the channel
-            // mailbox active forever.
+            // #1670: Always consume the handoff debt and clear inflight when the
+            // relay succeeded — the bridge's `bridge_relay_delegated_to_watcher`
+            // arm in `turn_bridge/mod.rs` (the `else if` at ~line 4071) saves
+            // inflight and immediately returns, so the bridge will NOT come back
+            // to revoke the debt or clear the inflight even if dispatch
+            // finalization fails. Organic user turns (`dispatch_id = null`)
+            // surfaced this regression: when the streaming finalizer fell
+            // through to a stale fallback dispatch_id and reported
+            // `dispatch_ok = false`, the watcher used to leave the inflight and
+            // the channel mailbox cancel_token in place, orphaning them
+            // forever. The decoupling rule is:
             //
-            // Swap inside the `if dispatch_ok` arm so:
+            //   * `clear_inflight_state` + `finish_restored_watcher_active_turn`
+            //     fire whenever the watcher relayed the terminal response
+            //     successfully — both bridge and watcher are now safe to call
+            //     them concurrently because `mailbox_finish_turn` is idempotent
+            //     (the second caller observes an empty active slot).
+            //   * Anything that genuinely depends on the dispatch lifecycle
+            //     having completed (queue kickoff, dispatch followup,
+            //     terminal-stop decision) remains gated on `dispatch_ok` further
+            //     below.
+            //
+            // The `mailbox_finalize_owed.swap(false, AcqRel)` ordering still
+            // matters:
             //   * Acquire — observes the bridge's prior `Release` store of
             //     `true` (and any inflight writes that preceded it) before
-            //     we decide to call `mailbox_finish_turn`.
-            //   * Release — publishes our reset back to `false`, so a
-            //     watcher that survives into the next turn (e.g., paused
-            //     between dispatches) will see `false` on its next swap
-            //     and will not accidentally clear that turn's freshly
-            //     registered cancel_token.
-            //
-            // When `dispatch_ok = false` we deliberately leave the debt in
-            // place; the bridge's later `compare_exchange(true, false, ...)`
-            // will revoke it and run `mailbox_finish_turn` on its side.
-            let delegated_finalize_owed = if dispatch_ok {
-                let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
-                crate::services::discord::inflight::clear_inflight_state(
-                    &provider_kind,
-                    channel_id.get(),
-                );
-                let watcher_turn_id = inflight_state
-                    .as_ref()
-                    .filter(|s| s.user_msg_id != 0)
-                    .map(|s| format!("discord:{}:{}", s.channel_id, s.user_msg_id));
-                let watcher_session_key_owned =
-                    inflight_state.as_ref().and_then(|s| s.session_key.clone());
-                let watcher_dispatch_id_owned = resolved_did
-                    .clone()
-                    .or_else(|| inflight_state.as_ref().and_then(|s| s.dispatch_id.clone()));
-                crate::services::observability::emit_inflight_lifecycle_event(
-                    provider_kind.as_str(),
-                    channel_id.get(),
-                    watcher_dispatch_id_owned.as_deref(),
-                    watcher_session_key_owned.as_deref(),
-                    watcher_turn_id.as_deref(),
-                    "cleared_by_watcher",
-                    serde_json::json!({
-                        "owed_finalize": owed,
-                        "has_assistant_response": has_assistant_response,
-                        "full_response_len": full_response.len(),
-                    }),
-                );
-                finish_restored_watcher_active_turn(
-                    &shared,
-                    &provider_kind,
-                    channel_id,
-                    finish_mailbox_on_completion,
-                    owed,
-                    "restored watcher completed with queued backlog",
-                )
-                .await;
-                owed
-            } else {
-                false
-            };
+            //     we call `mailbox_finish_turn`.
+            //   * Release — publishes our reset back to `false`, so a watcher
+            //     that survives into the next turn will not accidentally clear
+            //     that turn's freshly registered cancel_token.
+            let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
+            crate::services::discord::inflight::clear_inflight_state(
+                &provider_kind,
+                channel_id.get(),
+            );
+            let watcher_turn_id = inflight_state
+                .as_ref()
+                .filter(|s| s.user_msg_id != 0)
+                .map(|s| format!("discord:{}:{}", s.channel_id, s.user_msg_id));
+            let watcher_session_key_owned =
+                inflight_state.as_ref().and_then(|s| s.session_key.clone());
+            let watcher_dispatch_id_owned = resolved_did
+                .clone()
+                .or_else(|| inflight_state.as_ref().and_then(|s| s.dispatch_id.clone()));
+            crate::services::observability::emit_inflight_lifecycle_event(
+                provider_kind.as_str(),
+                channel_id.get(),
+                watcher_dispatch_id_owned.as_deref(),
+                watcher_session_key_owned.as_deref(),
+                watcher_turn_id.as_deref(),
+                "cleared_by_watcher",
+                serde_json::json!({
+                    "owed_finalize": owed,
+                    "dispatch_ok": dispatch_ok,
+                    "has_assistant_response": has_assistant_response,
+                    "full_response_len": full_response.len(),
+                }),
+            );
+            finish_restored_watcher_active_turn(
+                &shared,
+                &provider_kind,
+                channel_id,
+                finish_mailbox_on_completion,
+                owed,
+                "restored watcher completed with queued backlog",
+            )
+            .await;
+            let delegated_finalize_owed = owed;
             let mailbox = shared.mailbox(channel_id);
             let has_active_turn = mailbox.has_active_turn().await;
             let watcher_handled_mailbox_finish =

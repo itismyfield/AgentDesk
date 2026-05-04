@@ -1863,6 +1863,20 @@ pub(super) fn spawn_turn_bridge(
                                     "task notification",
                                 )
                                 .await;
+                                // #1670: `merge_task_notification_kind` is an
+                                // absorb operator (priority-max). Without an
+                                // explicit release on the terminal status the
+                                // outer `inflight_state.task_notification_kind`
+                                // sticks at Subagent/Background past the child
+                                // close, which then misroutes downstream
+                                // suppression decisions and persists into the
+                                // saved inflight when the watcher takes over.
+                                // The stream is single-threaded inside this
+                                // branch and only one child is closed per
+                                // event, so resetting to `None` matches the
+                                // current 1-deep usage; if nested kind tracking
+                                // is added later, switch to a stack pop.
+                                inflight_state.task_notification_kind = None;
                             }
                             push_transcript_event(
                                 &mut transcript_events,
