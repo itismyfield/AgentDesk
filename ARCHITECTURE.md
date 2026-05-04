@@ -285,6 +285,14 @@ src/
 │   │   │   ├── status_events.rs
 │   │   │   ├── task_panel.rs
 │   │   │   └── tests.rs
+│   │   ├── prompt_builder/
+│   │   │   ├── dispatch_contract.rs
+│   │   │   ├── dispatch_contract_tests.rs
+│   │   │   ├── layer_rendering.rs
+│   │   │   ├── manifest.rs
+│   │   │   ├── memory_guidance.rs
+│   │   │   ├── mod.rs
+│   │   │   └── tests.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── mod.rs
 │   │   │   └── shared.rs
@@ -349,7 +357,6 @@ src/
 │   │   ├── placeholder_cleanup.rs
 │   │   ├── placeholder_controller.rs
 │   │   ├── placeholder_sweeper.rs
-│   │   ├── prompt_builder.rs
 │   │   ├── queue_io.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── recovery_engine.rs
