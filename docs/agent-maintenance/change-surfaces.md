@@ -111,7 +111,6 @@
   - `src/services/discord/recovery_engine.rs` (4842 lines).
   - `src/services/discord/health.rs` (6247 lines).
   - `src/services/discord/placeholder_controller.rs` (1237 lines).
-  - `src/services/discord/placeholder_live_events.rs` (2038 lines).
   - `src/services/discord/router/message_handler.rs` (7013 lines).
   - `src/services/discord/meeting_orchestrator.rs` (3779 lines).
   - `src/services/discord/turn_bridge/mod.rs` (4267 lines).
