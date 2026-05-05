@@ -108,6 +108,9 @@ pub(super) fn dispatch_session_path_should_update(
     if !has_dispatch {
         return false;
     }
+    if bootstrapped_fresh_thread_session && !has_worktree_path {
+        return false;
+    }
     if crate::dispatch::dispatch_type_requires_fresh_worktree(dispatch_type)
         && bootstrapped_fresh_thread_session
     {
@@ -117,6 +120,16 @@ pub(super) fn dispatch_session_path_should_update(
         return true;
     }
     dispatch_effective_path != current_path
+}
+
+pub(super) fn dispatch_should_recover_session_worktree(
+    has_dispatch: bool,
+    dispatch_type: Option<&str>,
+    has_worktree_path: bool,
+) -> bool {
+    has_dispatch
+        && !has_worktree_path
+        && crate::dispatch::dispatch_type_requires_fresh_worktree(dispatch_type)
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -144,5 +157,66 @@ pub(super) fn evaluate_dispatch_cwd_policy(
         reject_for_missing_fresh_worktree: requires_fresh_worktree
             && worktrees_root.is_some()
             && !is_managed_worktree,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_session_path_should_update;
+
+    #[test]
+    fn dispatch_session_path_preserves_fresh_bootstrap_without_worktree_hint() {
+        assert!(!dispatch_session_path_should_update(
+            true,
+            None,
+            false,
+            true,
+            "/tmp/worktrees/thread-wt",
+            "/tmp/workspaces/agentdesk",
+        ));
+        assert!(!dispatch_session_path_should_update(
+            true,
+            Some("review"),
+            false,
+            true,
+            "/tmp/worktrees/thread-wt",
+            "/tmp/external-target-repo",
+        ));
+    }
+
+    #[test]
+    fn dispatch_session_path_reused_thread_still_updates_divergent_fallback() {
+        assert!(dispatch_session_path_should_update(
+            true,
+            Some("review"),
+            false,
+            false,
+            "/tmp/stale-impl-repo",
+            "/tmp/external-target-repo",
+        ));
+    }
+
+    #[test]
+    fn dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches() {
+        assert!(super::dispatch_should_recover_session_worktree(
+            true,
+            Some("implementation"),
+            false,
+        ));
+        assert!(!super::dispatch_should_recover_session_worktree(
+            true,
+            Some("implementation"),
+            true,
+        ));
+        assert!(!super::dispatch_should_recover_session_worktree(
+            true,
+            Some("review"),
+            false,
+        ));
+        assert!(!super::dispatch_should_recover_session_worktree(
+            false,
+            Some("implementation"),
+            false,
+        ));
     }
 }

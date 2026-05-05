@@ -42,8 +42,7 @@ pub(super) use completion_guard::{
     streaming_final_complete_dispatch_with_result,
 };
 pub(super) use recovery_text::{
-    SessionRetryContext, auto_retry_with_history, build_session_retry_context_from_history,
-    store_session_retry_context, take_session_retry_context, take_session_retry_context_for_turn,
+    auto_retry_with_history, build_session_retry_context_from_history, store_session_retry_context,
     take_session_retry_context_for_turn_with_audit,
 };
 pub(super) use stale_resume::result_event_has_stale_resume_error;
@@ -52,7 +51,6 @@ pub(super) use tmux_runtime::bind_cancel_token_tmux_runtime;
 pub(super) use tmux_runtime::cancel_active_token;
 pub(super) use tmux_runtime::cancel_token_has_tmux_session;
 pub(super) use tmux_runtime::handoff_interrupted_message;
-pub(super) use tmux_runtime::interrupt_provider_cli_turn;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::stop_active_turn;
 

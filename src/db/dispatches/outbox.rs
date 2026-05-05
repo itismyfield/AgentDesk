@@ -30,12 +30,6 @@
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use super::latest_completed_review_provider_on_conn;
-pub(crate) use super::{
-    DispatchReactionRow, ReviewFollowupCard, latest_work_dispatch_thread_pg,
-    load_dispatch_context_pg, load_dispatch_reaction_row_pg, load_review_followup_card_pg,
-    persist_dispatch_message_target_pg, persist_dispatch_slot_index_pg,
-    persist_dispatch_thread_id_pg, review_followup_already_resolved_pg,
-};
 
 // ── #1694: Outbox queue + followup repository surface ────────────────────
 //

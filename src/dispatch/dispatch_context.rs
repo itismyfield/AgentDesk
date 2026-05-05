@@ -192,8 +192,8 @@ pub(crate) fn dispatch_type_requires_fresh_worktree(dispatch_type: Option<&str>)
     matches!(dispatch_type, Some("implementation" | "rework"))
 }
 
-pub(crate) fn dispatch_type_uses_thread_routing(dispatch_type: Option<&str>) -> bool {
-    !matches!(dispatch_type, Some("phase-gate"))
+pub(crate) fn dispatch_type_uses_thread_routing(_dispatch_type: Option<&str>) -> bool {
+    true
 }
 
 /// Resolve the per-dispatch session strategy from the incoming context.

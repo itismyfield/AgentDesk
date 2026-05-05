@@ -857,6 +857,8 @@ fn stale_zero_byte_db_candidates(
     [
         runtime_root.join("agentdesk.db"),
         runtime_root.join("data.db"),
+        runtime_root.join("db.sqlite3"),
+        runtime_root.join("agentdesk.sqlite"),
     ]
     .into_iter()
     .filter(|candidate| candidate != canonical_db_path)
@@ -2350,22 +2352,17 @@ fn check_provider_cli(
                     format!("{ver} — {path} [{source}; {capability_summary}; {health_note}]");
 
                 if !configured {
-                    Check::warn(
+                    Check::ok(
                         id,
                         CheckGroup::ProviderRuntime,
                         name,
                         format!("{detail} — installed but not referenced by current config/health"),
-                        provider_unused_guidance(&provider),
                     )
                     .with_path(path)
                     .with_expected_actual(
-                        "provider referenced by config or health registry",
-                        "binary exists but provider not referenced",
+                        "provider configured only when used",
+                        "binary exists but provider is unused",
                     )
-                    .with_next_steps(vec![
-                        "agentdesk doctor --json".to_string(),
-                        format!("tail -n 200 {}", log_hint),
-                    ])
                 } else if connected == Some(false) {
                     Check::warn(
                         id,
@@ -2414,18 +2411,12 @@ fn check_provider_cli(
                         format!("tail -n 200 {}", log_hint),
                     ])
                 } else {
-                    Check::warn(
-                        id,
-                        CheckGroup::ProviderRuntime,
-                        name,
-                        detail,
-                        provider_unused_guidance(&provider),
-                    )
-                    .with_path(path)
-                    .with_expected_actual(
-                        "provider version probe succeeds",
-                        "version probe failed for unused provider",
-                    )
+                    Check::ok(id, CheckGroup::ProviderRuntime, name, detail)
+                        .with_path(path)
+                        .with_expected_actual(
+                            "provider probe required only when configured",
+                            "version probe failed for unused provider",
+                        )
                 }
             }
             (None, Some(ver)) => Check::ok(
@@ -3121,27 +3112,49 @@ fn check_stale_zero_byte_db_files(cfg: &config::Config) -> Check {
     };
 
     let canonical_db_path = cfg.data.dir.join(&cfg.data.db_name);
+    let stale_paths = stale_zero_byte_db_candidates(&runtime_root, &canonical_db_path);
     if crate::db::postgres::database_enabled(cfg) {
+        if stale_paths.is_empty() {
+            return Check::ok(
+                "stale_db_files",
+                CheckGroup::Core,
+                "Legacy SQLite Stale Files",
+                format!(
+                    "no zero-byte legacy SQLite files near {}",
+                    runtime_root.display()
+                ),
+            )
+            .with_subsystem("sqlite_cache")
+            .with_path(runtime_root.display().to_string())
+            .with_expected_actual(
+                "Postgres source-of-truth active with no stale zero-byte SQLite files",
+                "no stale local artifacts found",
+            );
+        }
+
         return Check::warn(
             "stale_db_files",
             CheckGroup::Core,
             "Legacy SQLite Stale Files",
-            format!("legacy local artifact scan near {}", runtime_root.display()),
-            "Postgres is enabled; zero-byte SQLite files are stale local artifacts, not authoritative DB state.",
+            format!(
+                "{} zero-byte legacy SQLite file(s) near {}",
+                stale_paths.len(),
+                runtime_root.display()
+            ),
+            "Postgres is enabled; these zero-byte SQLite files are stale local artifacts and can be removed with the explicit repair flag.",
         )
         .with_subsystem("sqlite_cache")
         .with_fix_safety(FixSafety::ExplicitDbRepairRequired)
         .with_security_exposure(SecurityExposure::LocalPath)
         .with_path(runtime_root.display().to_string())
         .with_expected_actual(
-            "Postgres source-of-truth active; stale SQLite files are local artifacts only",
-            "legacy SQLite stale-file scan demoted",
+            "Postgres source-of-truth active with no stale zero-byte SQLite files",
+            format!("{} stale local artifact(s)", stale_paths.len()),
         )
         .with_next_steps(vec![
             "agentdesk doctor --fix --repair-sqlite-cache".to_string()
         ]);
     }
-    let stale_paths = stale_zero_byte_db_candidates(&runtime_root, &canonical_db_path);
     if stale_paths.is_empty() {
         return Check::ok(
             "stale_db_files",
@@ -3247,6 +3260,7 @@ fn open_registered_github_repo_ids(db_path: &std::path::Path) -> Result<BTreeSet
 
 const DISK_WARN_BYTES: u64 = 30 * 1024 * 1024 * 1024;
 const DISK_FAIL_BYTES: u64 = 80 * 1024 * 1024 * 1024;
+const DISK_USAGE_EXCLUDED_ROOT_CHILDREN: &[&str] = &["workspaces", "worktrees"];
 
 fn recursive_dir_size(path: &Path) -> std::io::Result<u64> {
     let metadata = fs::symlink_metadata(path)?;
@@ -3281,8 +3295,8 @@ fn check_disk_usage() -> Check {
         )
         .with_next_steps(vec!["agentdesk doctor --fix".to_string()]),
         Some(path) => match recursive_dir_size(&path) {
-            Ok(total) => {
-                let mb = total as f64 / 1_048_576.0;
+            Ok(raw_total) => {
+                let mut excluded_total = 0u64;
                 let mut children = fs::read_dir(&path)
                     .ok()
                     .into_iter()
@@ -3290,17 +3304,22 @@ fn check_disk_usage() -> Check {
                     .filter_map(|entry| {
                         let entry = entry.ok()?;
                         let child_path = entry.path();
+                        let name = child_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
                         let size = recursive_dir_size(&child_path).ok()?;
-                        Some((
-                            child_path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("unknown")
-                                .to_string(),
-                            size,
-                        ))
+                        Some((name, size))
                     })
                     .collect::<Vec<_>>();
+                for (name, size) in &children {
+                    if DISK_USAGE_EXCLUDED_ROOT_CHILDREN.contains(&name.as_str()) {
+                        excluded_total = excluded_total.saturating_add(*size);
+                    }
+                }
+                let total = raw_total.saturating_sub(excluded_total);
+                let mb = total as f64 / 1_048_576.0;
                 children.sort_by(|left, right| right.1.cmp(&left.1));
                 let top_children = children
                     .into_iter()
@@ -3308,18 +3327,31 @@ fn check_disk_usage() -> Check {
                     .map(|(name, size)| {
                         json!({
                             "name": name,
-                            "mb": (size as f64 / 1_048_576.0)
+                            "mb": (size as f64 / 1_048_576.0),
+                            "excluded_from_threshold": DISK_USAGE_EXCLUDED_ROOT_CHILDREN.contains(&name.as_str())
                         })
                     })
                     .collect::<Vec<_>>();
                 let evidence = json!({
                     "runtime_root": path.display().to_string(),
                     "total_bytes": total,
+                    "raw_total_bytes": raw_total,
+                    "excluded_root_children": DISK_USAGE_EXCLUDED_ROOT_CHILDREN,
+                    "excluded_bytes": excluded_total,
                     "warn_threshold_bytes": DISK_WARN_BYTES,
                     "fail_threshold_bytes": DISK_FAIL_BYTES,
                     "top_children": top_children
                 });
-                let detail = format!("{:.1} MB recursively in {}", mb, path.display());
+                let detail = if excluded_total > 0 {
+                    format!(
+                        "{:.1} MB operational usage in {} ({:.1} MB excluded: workspaces/worktrees)",
+                        mb,
+                        path.display(),
+                        excluded_total as f64 / 1_048_576.0
+                    )
+                } else {
+                    format!("{:.1} MB recursively in {}", mb, path.display())
+                };
                 if total >= DISK_FAIL_BYTES {
                     Check::fail(
                         "disk_usage",

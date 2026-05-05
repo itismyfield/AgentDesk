@@ -63,7 +63,10 @@ fn context_reset_slot_thread_before_reuse(dispatch_context: Option<&serde_json::
 }
 
 fn dispatch_type_requires_independent_slot_thread(dispatch_type: Option<&str>) -> bool {
-    matches!(dispatch_type, Some("review-decision"))
+    matches!(
+        dispatch_type,
+        Some("review" | "review-decision" | "phase-gate")
+    )
 }
 
 #[cfg(test)]
@@ -71,15 +74,18 @@ mod slot_routing_pure_tests {
     use super::dispatch_type_requires_independent_slot_thread;
 
     #[test]
-    fn review_decision_requires_independent_slot_thread() {
+    fn review_and_phase_gate_require_independent_slot_thread() {
+        assert!(dispatch_type_requires_independent_slot_thread(Some(
+            "review"
+        )));
         assert!(dispatch_type_requires_independent_slot_thread(Some(
             "review-decision"
         )));
-        assert!(!dispatch_type_requires_independent_slot_thread(Some(
-            "implementation"
+        assert!(dispatch_type_requires_independent_slot_thread(Some(
+            "phase-gate"
         )));
         assert!(!dispatch_type_requires_independent_slot_thread(Some(
-            "review"
+            "implementation"
         )));
         assert!(!dispatch_type_requires_independent_slot_thread(None));
     }

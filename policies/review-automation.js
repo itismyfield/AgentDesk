@@ -261,10 +261,10 @@ var reviewAutomation = {
     agentdesk.log.info("[review] Creating review dispatch: card=" + card.id + " agent=" + card.assigned_agent_id + " round=" + newRound);
     try {
       var latestWorkDispatch = loadLatestCompletedWorkDispatch(card.id);
-      var reviewDispatchContext = {};
+      var reviewDispatchContext = buildReviewDispatchContext(latestWorkDispatch);
       var noopReviewContext = buildNoopReviewContext(latestWorkDispatch);
       if (noopReviewContext) {
-        reviewDispatchContext = noopReviewContext;
+        reviewDispatchContext = mergeObjects(reviewDispatchContext, noopReviewContext);
         agentdesk.log.info(
           "[review] Card " + card.id + " entering noop_verification mode from " + latestWorkDispatch.id
         );
@@ -701,6 +701,47 @@ function buildNoopReviewContext(workDispatch) {
   };
   if (workDispatch.id) {
     reviewContext.parent_dispatch_id = workDispatch.id;
+  }
+  return reviewContext;
+}
+
+function mergeObjects(base, overlay) {
+  var merged = {};
+  var key;
+  base = base || {};
+  overlay = overlay || {};
+  for (key in base) {
+    if (Object.prototype.hasOwnProperty.call(base, key)) merged[key] = base[key];
+  }
+  for (key in overlay) {
+    if (Object.prototype.hasOwnProperty.call(overlay, key)) merged[key] = overlay[key];
+  }
+  return merged;
+}
+
+function normalizeSlotIndex(value) {
+  if (typeof value === "number" && isFinite(value) && Math.floor(value) === value && value >= 0) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    var parsed = Number(value);
+    if (isFinite(parsed) && Math.floor(parsed) === parsed && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function buildReviewDispatchContext(workDispatch) {
+  var reviewContext = {};
+  if (!workDispatch) return reviewContext;
+  if (workDispatch.id) {
+    reviewContext.parent_dispatch_id = workDispatch.id;
+  }
+  var workContext = workDispatch.context || {};
+  var slotIndex = normalizeSlotIndex(workContext.slot_index);
+  if (slotIndex !== null) {
+    reviewContext.slot_index = slotIndex;
   }
   return reviewContext;
 }
