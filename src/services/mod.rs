@@ -1,6 +1,7 @@
 pub mod agent_protocol;
 pub mod agent_quality;
 pub mod agents;
+pub mod analytics;
 pub mod api_friction;
 pub mod auto_queue;
 pub mod claude;
