@@ -85,6 +85,8 @@
   - `src/dispatch/dispatch_context.rs` (3987 lines).
   - `src/dispatch/dispatch_create.rs` (2877 lines).
   - `src/dispatch/dispatch_status.rs` (1875 lines).
+  - `src/services/dispatches/outbox_route.rs` (1074 lines; route extraction
+    orchestration surface from #1722, split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
 - invariants: dispatch creation is the only writer for `dispatched_sessions`;
   status transitions go through `dispatch_status`.
