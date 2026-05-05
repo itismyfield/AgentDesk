@@ -16,6 +16,22 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  dashboard:
+    name: Dashboard (Node 22)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: dashboard build/test
+        run: ./scripts/verify-dashboard.sh
+
   full_macos:
     name: Full tests (macos-latest)
     runs-on: macos-latest
@@ -187,7 +203,7 @@ jobs:
 
       - name: Rust multinode invariants
         timeout-minutes: 15
-        run: cargo test --bin agentdesk multinode_regression:: -- --nocapture --test-threads=1
+        run: "cargo test --bin agentdesk multinode_regression:: -- --nocapture --test-threads=1"
 
       - name: Merge gate policy invariants
         run: node --test policies/__tests__/merge-automation.test.js
