@@ -1,6 +1,7 @@
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct DispatchContextHints {
     pub(super) worktree_path: Option<String>,
+    pub(super) worktree_branch: Option<String>,
     pub(super) stale_worktree_path: Option<String>,
     /// #762: when the dispatch context explicitly pins a `target_repo` (e.g. an
     /// external-repo review), propagate it so bootstrap fallbacks can resolve
@@ -29,6 +30,13 @@ pub(super) fn parse_dispatch_context_hints(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(String::from);
+    let worktree_branch = parsed
+        .as_ref()
+        .and_then(|v| v.get("worktree_branch"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from);
     let retry_resume_session_id = parsed
         .as_ref()
         .and_then(|value| value.get("auto_queue_retry_resume_session_id"))
@@ -48,6 +56,7 @@ pub(super) fn parse_dispatch_context_hints(
             .as_deref()
             .filter(|p| std::path::Path::new(p).exists())
             .map(str::to_string),
+        worktree_branch,
         stale_worktree_path: requested_worktree_path.filter(|p| !std::path::Path::new(p).exists()),
         target_repo,
         reset_provider_state: strategy.reset_provider_state,

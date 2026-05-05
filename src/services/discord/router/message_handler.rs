@@ -2176,7 +2176,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     // the stale path. Propagate `dispatch_effective_path` into the
     // session whenever it differs from the current path, regardless of
     // whether `worktree_path` was supplied.
-    let current_path = if dispatch_session_path_should_update(
+    let mut current_path = if dispatch_session_path_should_update(
         dispatch_id_for_thread.is_some(),
         dispatch_type_str.as_deref(),
         dispatch_worktree_path.is_some(),
@@ -2200,6 +2200,39 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         current_path
     };
+    if let Some(active_info) = active_dispatch_info.as_ref() {
+        let active_hints = parse_dispatch_context_hints(
+            active_info.context.as_deref(),
+            dispatch_type_str.as_deref(),
+        );
+        if let Some(active_worktree_path) = active_hints.worktree_path.as_deref()
+            && current_path != active_worktree_path
+        {
+            let original_path =
+                resolve_dispatch_target_repo_dir(active_hints.target_repo.as_deref())
+                    .unwrap_or_else(|| dispatch_default_path.clone());
+            let mut data = shared.core.lock().await;
+            if let Some(session) = data.sessions.get_mut(&channel_id) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔄 Active dispatch CWD update: {:?} → {}",
+                    session.current_path,
+                    active_worktree_path
+                );
+                session.current_path = Some(active_worktree_path.to_string());
+                if crate::dispatch::dispatch_type_requires_fresh_worktree(
+                    dispatch_type_str.as_deref(),
+                ) {
+                    session.worktree = Some(WorktreeInfo {
+                        original_path,
+                        worktree_path: active_worktree_path.to_string(),
+                        branch_name: active_hints.worktree_branch.unwrap_or_default(),
+                    });
+                }
+            }
+            current_path = active_worktree_path.to_string();
+        }
+    }
     // Sanitize input
     let sanitized_input = ai_screen::sanitize_user_input(user_text);
 
