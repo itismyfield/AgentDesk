@@ -86,7 +86,12 @@ test("auto-queue onTick1min honors stale dispatched runtime config", () => {
         result: []
       },
       {
-        match: "FROM auto_queue_runs r JOIN auto_queue_entries e ON e.run_id = r.id",
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("AND EXISTS (") &&
+            sql.includes("e.status = 'pending'") &&
+            !sql.includes("SELECT DISTINCT r.id");
+        },
         result: []
       },
       {
@@ -178,11 +183,20 @@ test("auto-queue terminal cleanup uses pipeline terminal states", () => {
         }]
       },
       {
-        match: "SELECT r.id FROM auto_queue_runs r",
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("user_cancelled");
+        },
         result: []
       },
       {
-        match: "SELECT DISTINCT r.id",
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("AND EXISTS (") &&
+            sql.includes("e.status = 'pending'") &&
+            sql.includes("ORDER BY r.updated_at ASC LIMIT 50") &&
+            !sql.includes("SELECT DISTINCT r.id");
+        },
         result: []
       },
       {
@@ -213,11 +227,20 @@ test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
         result: []
       },
       {
-        match: "SELECT r.id FROM auto_queue_runs r",
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("user_cancelled");
+        },
         result: []
       },
       {
-        match: "SELECT DISTINCT r.id",
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("AND EXISTS (") &&
+            sql.includes("e.status = 'pending'") &&
+            sql.includes("ORDER BY r.updated_at ASC LIMIT 50") &&
+            !sql.includes("SELECT DISTINCT r.id");
+        },
         result: [{ id: "run-saturated" }]
       },
       {
