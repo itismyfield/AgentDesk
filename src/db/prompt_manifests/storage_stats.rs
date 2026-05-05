@@ -18,8 +18,9 @@ pub struct PromptManifestStorageStats {
     /// rows that still carry a body. Excludes rows whose bodies have been
     /// trimmed by the retention sweeper.
     pub total_stored_bytes: i64,
-    /// Sum of `original_bytes` across all layers (or `chars` fallback for
-    /// pre-#1699 rows). Reflects the audit-true content size.
+    /// Sum of `original_bytes` across all layers, falling back to retained
+    /// UTF-8 body bytes and then `chars` only for pre-#1699 bodyless rows.
+    /// Reflects the audit-true content size.
     pub total_original_bytes: i64,
     /// Number of layer rows currently flagged `is_truncated`.
     pub truncated_count: i64,
@@ -57,10 +58,17 @@ pub async fn manifest_storage_stats(
     let row = sqlx::query(
         "SELECT
             COALESCE(SUM(
-                COALESCE(LENGTH(full_content), 0)
-              + COALESCE(LENGTH(redacted_preview), 0)
+                COALESCE(OCTET_LENGTH(full_content), 0)
+              + COALESCE(OCTET_LENGTH(redacted_preview), 0)
             ), 0)::BIGINT AS total_stored_bytes,
-            COALESCE(SUM(COALESCE(original_bytes, chars)), 0)::BIGINT AS total_original_bytes,
+            COALESCE(SUM(
+                COALESCE(
+                    original_bytes,
+                    OCTET_LENGTH(full_content),
+                    OCTET_LENGTH(redacted_preview),
+                    chars
+                )
+            ), 0)::BIGINT AS total_original_bytes,
             COUNT(*) FILTER (WHERE is_truncated)::BIGINT AS truncated_count,
             COUNT(*)::BIGINT AS layer_count
          FROM prompt_manifest_layers",
