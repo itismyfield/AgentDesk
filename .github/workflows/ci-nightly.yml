@@ -187,7 +187,7 @@ jobs:
 
       - name: Rust multinode invariants
         timeout-minutes: 15
-        run: cargo test --bin agentdesk multinode_regression:: -- --nocapture --test-threads=1
+        run: "cargo test --bin agentdesk multinode_regression:: -- --nocapture --test-threads=1"
 
       - name: Merge gate policy invariants
         run: node --test policies/__tests__/merge-automation.test.js
