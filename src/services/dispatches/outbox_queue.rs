@@ -87,7 +87,7 @@ impl OutboxNotifier for RealOutboxNotifier {
         db: Option<crate::db::Db>,
         dispatch_id: String,
     ) -> Result<(), String> {
-        crate::server::routes::dispatches::handle_completed_dispatch_followups_with_pg(
+        crate::services::dispatches::outbox_route::handle_completed_dispatch_followups_with_pg(
             db.as_ref(),
             Some(self.pg_pool.as_ref()),
             &dispatch_id,

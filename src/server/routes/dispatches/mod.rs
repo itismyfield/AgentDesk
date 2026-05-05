@@ -32,6 +32,7 @@ pub(crate) use outbox::handle_completed_dispatch_followups_with_pg;
 
 // ── Re-exports: Thread reuse ─────────────────────────────────
 pub(super) use thread_reuse::clear_all_threads;
+pub(crate) use thread_reuse::should_defer_thread_archive_pg;
 pub(crate) use thread_reuse::validate_channel_thread_maps_on_startup_with_backends;
 pub use thread_reuse::{
     LinkDispatchThreadBody, get_card_thread, get_pending_dispatch_for_thread, link_dispatch_thread,

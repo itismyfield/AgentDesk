@@ -15,6 +15,7 @@ pub(crate) mod discord_delivery;
 // from `src/server/routes/dispatches/outbox.rs`. See module doc for the
 // route ↔ service ↔ db boundary.
 pub(crate) mod outbox_queue;
+pub(crate) mod outbox_route;
 
 const VALID_DISPATCH_STATUSES: &[&str] =
     &["pending", "dispatched", "completed", "cancelled", "failed"];

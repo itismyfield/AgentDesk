@@ -1835,7 +1835,7 @@ pub(super) async fn send_review_result_to_primary(
     .await
 }
 
-pub(super) async fn send_review_result_to_primary_with_transport<T: DispatchTransport>(
+pub(crate) async fn send_review_result_to_primary_with_transport<T: DispatchTransport>(
     db: Option<&crate::db::Db>,
     card_id: &str,
     review_dispatch_id: &str,
