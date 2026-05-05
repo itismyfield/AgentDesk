@@ -215,6 +215,7 @@ export default function KanbanBoard({
         return (
           <section className="rounded-2xl border px-4 py-3" style={{ borderColor: "var(--th-border-subtle)", background: "rgba(34,197,94,0.04)" }}>
             <button
+              type="button"
               onClick={() => setRecentDoneOpen((v) => !v)}
               className="flex w-full items-center gap-2 text-left"
             >
@@ -235,6 +236,7 @@ export default function KanbanBoard({
                   return (
                     <button
                       key={card.id}
+                      type="button"
                       onClick={() => onCardClick(card.id)}
                       className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition-colors hover:brightness-125"
                       style={{ background: "rgba(148,163,184,0.06)" }}
@@ -261,6 +263,7 @@ export default function KanbanBoard({
                 {totalPages > 1 && (
                   <div className="flex items-center justify-center gap-3 pt-1">
                     <button
+                      type="button"
                       disabled={page === 0}
                       onClick={() => setRecentDonePage((p) => Math.max(0, p - 1))}
                       className="rounded px-2 py-0.5 text-xs disabled:opacity-30"
@@ -272,6 +275,7 @@ export default function KanbanBoard({
                       {page + 1} / {totalPages}
                     </span>
                     <button
+                      type="button"
                       disabled={page >= totalPages - 1}
                       onClick={() => setRecentDonePage((p) => Math.min(totalPages - 1, p + 1))}
                       className="rounded px-2 py-0.5 text-xs disabled:opacity-30"
@@ -410,6 +414,7 @@ export default function KanbanBoard({
                   return (
                     <button
                       key={column.status}
+                      type="button"
                       onClick={() => setMobileColumnStatus(column.status)}
                       className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium border"
                       style={{

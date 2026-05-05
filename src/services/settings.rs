@@ -4,6 +4,7 @@ use std::{
 };
 
 use axum::http::StatusCode;
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sqlx::Row;
 
@@ -188,6 +189,65 @@ pub struct SettingsService {
     config: Arc<crate::config::Config>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub struct SettingsDocument(pub Value);
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsOkResponse {
+    pub ok: bool,
+}
+
+impl SettingsOkResponse {
+    pub fn ok() -> Self {
+        Self { ok: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsConfigEntriesResponse {
+    pub entries: Vec<SettingsConfigEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsConfigEntry {
+    pub key: String,
+    pub value: Option<String>,
+    pub category: String,
+    pub label_ko: String,
+    pub label_en: String,
+    #[serde(rename = "default")]
+    pub default_value: Option<String>,
+    pub baseline: Option<String>,
+    pub baseline_source: Option<String>,
+    pub override_active: bool,
+    pub editable: bool,
+    pub restart_behavior: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsConfigPatchResponse {
+    pub ok: bool,
+    pub updated: usize,
+    pub rejected: Vec<String>,
+}
+
+impl SettingsConfigPatchResponse {
+    pub fn new(updated: usize, rejected: Vec<String>) -> Self {
+        Self {
+            ok: true,
+            updated,
+            rejected,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeConfigResponse {
+    pub current: Map<String, Value>,
+    pub defaults: Map<String, Value>,
+}
+
 impl SettingsService {
     pub fn new(pg_pool: Option<sqlx::PgPool>, config: Arc<crate::config::Config>) -> Self {
         Self { pg_pool, config }
@@ -199,7 +259,7 @@ impl SettingsService {
             .ok_or_else(|| pg_unavailable_error(operation))
     }
 
-    pub async fn get_settings(&self) -> ServiceResult<Value> {
+    pub async fn get_settings(&self) -> ServiceResult<SettingsDocument> {
         let pool = self.pg_pool("get_settings.pg_pool")?;
         let value = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
             .bind("settings")
@@ -212,10 +272,12 @@ impl SettingsService {
             })?
             .unwrap_or_else(|| "{}".to_string());
 
-        Ok(serde_json::from_str(&value).unwrap_or_else(|_| json!({})))
+        Ok(SettingsDocument(
+            serde_json::from_str(&value).unwrap_or_else(|_| json!({})),
+        ))
     }
 
-    pub async fn put_settings(&self, body: Value) -> ServiceResult<()> {
+    pub async fn put_settings(&self, body: Value) -> ServiceResult<SettingsOkResponse> {
         let pool = self.pg_pool("put_settings.pg_pool")?;
         let normalized = prune_retired_settings_keys(body);
         let value_str = serde_json::to_string(&normalized).unwrap_or_else(|_| "{}".to_string());
@@ -235,10 +297,10 @@ impl SettingsService {
                 .with_operation("put_settings.upsert_pg")
         })?;
 
-        Ok(())
+        Ok(SettingsOkResponse::ok())
     }
 
-    pub async fn get_config_entries(&self) -> ServiceResult<Value> {
+    pub async fn get_config_entries(&self) -> ServiceResult<SettingsConfigEntriesResponse> {
         let pool = self.pg_pool("get_config_entries.pg_pool")?;
         let pg_values = load_pg_kv_values(pool).await?;
 
@@ -252,29 +314,42 @@ impl SettingsService {
             let baseline = config_entry_default(self.config.as_ref(), key, *default_val);
             let effective = config_entry_effective_value(key, stored_value, baseline.clone());
             let editable = !is_read_only_config_key(key);
-            entries.push(json!({
-                "key": key,
-                "value": effective,
-                "category": category,
-                "label_ko": label_ko,
-                "label_en": label_en,
-                "default": baseline.clone(),
-                "baseline": baseline.clone(),
-                "baseline_source": config_entry_baseline_source(self.config.as_ref(), key, *default_val),
-                "override_active": config_entry_override_active(
+            entries.push(SettingsConfigEntry {
+                key: (*key).to_string(),
+                value: effective.clone(),
+                category: (*category).to_string(),
+                label_ko: (*label_ko).to_string(),
+                label_en: (*label_en).to_string(),
+                default_value: baseline.clone(),
+                baseline: baseline.clone(),
+                baseline_source: config_entry_baseline_source(
+                    self.config.as_ref(),
+                    key,
+                    *default_val,
+                )
+                .map(str::to_string),
+                override_active: config_entry_override_active(
                     editable,
                     effective.as_deref(),
                     baseline.as_deref(),
                 ),
-                "editable": editable,
-                "restart_behavior": config_entry_restart_behavior(self.config.as_ref(), key, *default_val),
-            }));
+                editable,
+                restart_behavior: config_entry_restart_behavior(
+                    self.config.as_ref(),
+                    key,
+                    *default_val,
+                )
+                .to_string(),
+            });
         }
 
-        Ok(json!({"entries": entries}))
+        Ok(SettingsConfigEntriesResponse { entries })
     }
 
-    pub async fn patch_config_entries(&self, body: Value) -> ServiceResult<Value> {
+    pub async fn patch_config_entries(
+        &self,
+        body: Value,
+    ) -> ServiceResult<SettingsConfigPatchResponse> {
         let entries = body.as_object().ok_or_else(|| {
             ServiceError::bad_request("expected JSON object")
                 .with_code(ErrorCode::Settings)
@@ -319,10 +394,10 @@ impl SettingsService {
             );
         }
 
-        Ok(json!({"ok": true, "updated": updated, "rejected": rejected}))
+        Ok(SettingsConfigPatchResponse::new(updated, rejected))
     }
 
-    pub async fn get_runtime_config(&self) -> ServiceResult<Value> {
+    pub async fn get_runtime_config(&self) -> ServiceResult<RuntimeConfigResponse> {
         let pool = self.pg_pool("get_runtime_config.pg_pool")?;
         let saved_raw =
             sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
@@ -338,29 +413,27 @@ impl SettingsService {
             .as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok())
             .unwrap_or_else(|| json!({}));
-        let defaults = runtime_config_defaults(self.config.as_ref());
+        let defaults = runtime_config_defaults_map(self.config.as_ref());
 
-        let mut current = defaults.as_object().cloned().unwrap_or_default();
+        let mut current = defaults.clone();
         if let Some(saved_obj) = saved.as_object() {
             for (key, value) in saved_obj {
                 current.insert(key.clone(), value.clone());
             }
         }
 
-        Ok(json!({
-            "current": current,
-            "defaults": defaults,
-        }))
+        Ok(RuntimeConfigResponse { current, defaults })
     }
 
-    pub async fn put_runtime_config(&self, body: Value) -> ServiceResult<()> {
+    pub async fn put_runtime_config(&self, body: Value) -> ServiceResult<SettingsOkResponse> {
         let pool = self.pg_pool("put_runtime_config.pg_pool")?;
         let value_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
         if let Some(values) = body.as_object() {
-            write_runtime_config_pg_async(pool, &value_str, values).await
+            write_runtime_config_pg_async(pool, &value_str, values).await?;
         } else {
-            upsert_runtime_config_value_pg_async(pool, &value_str).await
+            upsert_runtime_config_value_pg_async(pool, &value_str).await?;
         }
+        Ok(SettingsOkResponse::ok())
     }
 }
 
@@ -1011,5 +1084,45 @@ fn seeded_runtime_config_map(
         current
     } else {
         saved_obj.unwrap_or(current)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn settings_response_dtos_serialize_existing_contract_fields() {
+        let response = SettingsConfigEntriesResponse {
+            entries: vec![SettingsConfigEntry {
+                key: "merge_strategy".to_string(),
+                value: Some("rebase".to_string()),
+                category: "automation".to_string(),
+                label_ko: "자동 머지 전략".to_string(),
+                label_en: "Merge Strategy".to_string(),
+                default_value: Some("squash".to_string()),
+                baseline: Some("squash".to_string()),
+                baseline_source: Some("hardcoded".to_string()),
+                override_active: true,
+                editable: true,
+                restart_behavior: "persist-live-override".to_string(),
+            }],
+        };
+
+        let value = serde_json::to_value(response).expect("serialize settings config response");
+        assert_eq!(value["entries"][0]["key"], json!("merge_strategy"));
+        assert_eq!(value["entries"][0]["default"], json!("squash"));
+        assert_eq!(
+            value["entries"][0]["restart_behavior"],
+            json!("persist-live-override")
+        );
+    }
+
+    #[test]
+    fn settings_write_response_serializes_ok_contract() {
+        let value =
+            serde_json::to_value(SettingsOkResponse::ok()).expect("serialize settings ok response");
+        assert_eq!(value, json!({"ok": true}));
     }
 }

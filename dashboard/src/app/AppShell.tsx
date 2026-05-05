@@ -246,6 +246,34 @@ const ACCENT_OPTIONS: Array<{
   { id: "lime", label: "Lime", token: "--accent-lime" },
 ];
 
+function assertKanbanDispatchMutationComplete(
+  result: api.KanbanDispatchMutationResponse,
+  label: string,
+) {
+  if (result.next_action !== "none_required") {
+    throw new Error(`${label} requires follow-up: ${result.next_action}`);
+  }
+  if (!result.new_dispatch_id) {
+    throw new Error(`${label} response did not include a new dispatch id.`);
+  }
+}
+
+function assertAssignIssueTransitionComplete(
+  result: api.AssignKanbanIssueResponse,
+) {
+  if (result.transition.ok && result.transition.next_action === "none_required") {
+    return;
+  }
+  if (result.transition.error) {
+    throw new Error(
+      `Issue assigned, but transition failed: ${result.transition.error}`,
+    );
+  }
+  throw new Error(
+    `Issue assigned, but follow-up is required: ${result.transition.next_action}`,
+  );
+}
+
 export default function AppShell({
   wsConnected,
   notifications,
@@ -1180,25 +1208,21 @@ export default function AppShell({
                       onAssignIssue={async (payload) => {
                         const result = await api.assignKanbanIssue(payload);
                         upsertKanbanCard(result.card);
-                        if (result.transition?.attempted && !result.transition.ok) {
-                          throw new Error(
-                            result.transition.error
-                              ? `Issue assigned, but transition failed: ${result.transition.error}`
-                              : "Issue assigned, but transition failed.",
-                          );
-                        }
+                        assertAssignIssueTransitionComplete(result);
                       }}
                       onUpdateCard={async (id, patch) => {
                         const updated = await api.updateKanbanCard(id, patch);
                         upsertKanbanCard(updated);
                       }}
                       onRetryCard={async (id, payload) => {
-                        const updated = await api.retryKanbanCard(id, payload);
-                        upsertKanbanCard(updated);
+                        const result = await api.retryKanbanCard(id, payload);
+                        upsertKanbanCard(result.card);
+                        assertKanbanDispatchMutationComplete(result, "Retry");
                       }}
                       onRedispatchCard={async (id, payload) => {
-                        const updated = await api.redispatchKanbanCard(id, payload);
-                        upsertKanbanCard(updated);
+                        const result = await api.redispatchKanbanCard(id, payload);
+                        upsertKanbanCard(result.card);
+                        assertKanbanDispatchMutationComplete(result, "Redispatch");
                       }}
                       onDeleteCard={async (id: string) => {
                         await api.deleteKanbanCard(id);

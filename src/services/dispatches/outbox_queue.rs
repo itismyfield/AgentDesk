@@ -8,15 +8,16 @@
 //! route layer no longer mixes raw SQL + queue semantics +
 //! `crate::services::*` calls (route SRP audit, #1282).
 //!
-//! All persistence goes through `crate::db::dispatches::outbox`; this module
+//! Claim eligibility is delegated to `crate::services::dispatches::outbox_claiming`.
+//! Persistence still goes through `crate::db::dispatches::outbox`; this module
 //! holds no SQL of its own.
 
 use crate::db::dispatches::outbox::{
-    DispatchOutboxRow, claim_pending_dispatch_outbox_batch_pg,
-    dispatch_notify_delivery_suppressed_pg, mark_dispatch_dispatched_pg, mark_outbox_done_pg,
-    mark_outbox_failed_pg, schedule_outbox_retry_pg,
+    DispatchOutboxRow, dispatch_notify_delivery_suppressed_pg, mark_dispatch_dispatched_pg,
+    mark_outbox_done_pg, mark_outbox_failed_pg, schedule_outbox_retry_pg,
 };
 use crate::services::dispatches::discord_delivery::DispatchNotifyDeliveryResult;
+use crate::services::dispatches::outbox_claiming::claim_pending_dispatch_outbox_batch_pg;
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -87,7 +88,7 @@ impl OutboxNotifier for RealOutboxNotifier {
         db: Option<crate::db::Db>,
         dispatch_id: String,
     ) -> Result<(), String> {
-        crate::server::routes::dispatches::handle_completed_dispatch_followups_with_pg(
+        crate::services::dispatches::outbox_route::handle_completed_dispatch_followups_with_pg(
             db.as_ref(),
             Some(self.pg_pool.as_ref()),
             &dispatch_id,

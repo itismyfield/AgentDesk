@@ -501,6 +501,9 @@ export default function OfficeManagerView({
                       {OFFICE_COLORS.map((color) => (
                         <button
                           key={color}
+                          type="button"
+                          aria-label={`Color ${color}`}
+                          aria-pressed={draft.color === color}
                           onClick={() => setDraft((prev) => ({ ...prev, color }))}
                           className="h-9 w-9 rounded-full border-2 transition-transform hover:scale-105"
                           style={{

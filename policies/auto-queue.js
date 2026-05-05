@@ -408,6 +408,8 @@ var autoQueue = {
     var tickReview = agentdesk.pipeline.nextGatedTarget(tickInProgress, tickCfg);
     var tickActiveStates = [tickKickoff, tickInProgress, tickReview].filter(function(s) { return s; });
     var tickPlaceholders = tickActiveStates.map(function() { return "?"; }).join(",");
+    var tickTerminalStates = terminalStatesFromConfig(tickCfg);
+    var tickTerminalPlaceholders = tickTerminalStates.map(function() { return "?"; }).join(",");
 
     // Recovery path 1 (#295): terminal cards should never remain pending in
     // active/paused runs. Clean them before dispatch recovery so they do not
@@ -417,8 +419,10 @@ var autoQueue = {
       "FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
       "JOIN kanban_cards kc ON kc.id = e.kanban_card_id " +
-      "WHERE e.status = 'pending' AND r.status IN ('active', 'paused')",
-      []
+      "WHERE e.status = 'pending' AND r.status IN ('active', 'paused') " +
+      "AND kc.status IN (" + tickTerminalPlaceholders + ") " +
+      "ORDER BY e.updated_at ASC LIMIT 100",
+      tickTerminalStates
     );
     for (var tp = 0; tp < terminalPending.length; tp++) {
       var pending = terminalPending[tp];
@@ -458,16 +462,21 @@ var autoQueue = {
     // represent an explicit operator stop and must never be resurrected by
     // the tick. Only `pending` entries are re-dispatchable.
     var activeRuns = agentdesk.db.query(
-      "SELECT DISTINCT r.id " +
+      "SELECT r.id " +
       "FROM auto_queue_runs r " +
       "JOIN auto_queue_entries e ON e.run_id = r.id " +
-      "WHERE r.status = 'active' AND e.status = 'pending'",
+      "WHERE r.status = 'active' AND e.status = 'pending' " +
+      "GROUP BY r.id " +
+      "ORDER BY MIN(e.updated_at) ASC LIMIT 50",
       []
     );
 
     for (var ri = 0; ri < activeRuns.length; ri++) {
       var run = activeRuns[ri];
-      activateRun(run.id, null);
+      var activation = activateRun(run.id, null);
+      if (!activationWasDeferred(activation) && activationDispatchCount(activation) === 0) {
+        rotateActiveRunSweepCursor(run.id);
+      }
     }
 
     // Recovery path 2 (#179/#191/#214/#952): dispatched entries whose dispatch is stuck.
@@ -482,7 +491,8 @@ var autoQueue = {
       "WHERE e.status = 'dispatched' AND r.status = 'active' " +
       "AND e.dispatched_at IS NOT NULL " +
       "AND e.dispatched_at < datetime('now', '-" + staleDispatchedGraceMinutes + " minutes') " +
-      "AND (" + staleDispatchedConditions + ")",
+      "AND (" + staleDispatchedConditions + ") " +
+      "ORDER BY e.dispatched_at ASC LIMIT 50",
       []
     );
 
@@ -507,6 +517,50 @@ var autoQueue = {
     }
   }
 };
+
+function terminalStatesFromConfig(cfg) {
+  var terminalStates = [];
+  if (cfg && cfg.states) {
+    for (var i = 0; i < cfg.states.length; i++) {
+      var state = cfg.states[i];
+      if (state && state.terminal && state.id) {
+        terminalStates.push(state.id);
+      }
+    }
+  }
+  if (terminalStates.length === 0) {
+    terminalStates.push("done");
+  }
+  return terminalStates;
+}
+
+function activationDispatchCount(result) {
+  if (!result) return null;
+  if (typeof result.count === "number") return result.count;
+  if (typeof result.dispatched_count === "number") return result.dispatched_count;
+  if (typeof result.dispatchedCount === "number") return result.dispatchedCount;
+  if (typeof result.activated_count === "number") return result.activated_count;
+  if (typeof result.activatedCount === "number") return result.activatedCount;
+  return null;
+}
+
+function activationWasDeferred(result) {
+  return result && result.deferred === true;
+}
+
+function rotateActiveRunSweepCursor(runId) {
+  if (!runId) return;
+  try {
+    agentdesk.db.execute(
+      "UPDATE auto_queue_entries SET updated_at = datetime('now') WHERE run_id = ? AND status = 'pending'",
+      [runId]
+    );
+  } catch (e) {
+    autoQueueLog("warn", "failed to rotate active run sweep cursor for " + runId + ": " + e, {
+      run_id: runId
+    });
+  }
+}
 
 function _isDispatchableState(state, cfg) {
   if (!cfg || !cfg.transitions) return false;

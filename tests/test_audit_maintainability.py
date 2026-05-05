@@ -1,6 +1,6 @@
 """Unit tests for scripts/audit_maintainability.py and its check modules.
 
-Each of the 8 checks gets a focused fixture: a temporary ``src/`` tree is
+Each of the 9 checks gets a focused fixture: a temporary ``src/`` tree is
 created with files designed to trigger (or specifically not trigger) the
 rule, and we assert the harness emits the expected findings.
 """
@@ -41,6 +41,7 @@ from audit_maintainability.checks import (  # noqa: E402
     legacy_sqlite,
     limit_clamp_duplication,
     manual_json_mapping,
+    namespace_size_caps,
     route_srp,
     source_of_truth_alias,
 )
@@ -137,6 +138,86 @@ class GiantFilesCheck(unittest.TestCase):
             hits = list(giant_files.CHECK.runner(set()))
         self.assertEqual(hits, [])
 
+    def test_namespace_caps_own_matching_giant_files(self) -> None:
+        big = "fn x() {}\n" * (giant_files.THRESHOLD + 5)
+        with _FakeSrcTree(
+            {
+                "src/services/discord/commands/inspect/render_last.rs": big,
+                "src/other_giant.rs": big,
+            }
+        ) as root:
+            _write(
+                root,
+                "scripts/audit_maintainability_config.toml",
+                """
+                [namespace_size_caps]
+                "src/services/discord/commands/inspect/**" = 700
+                """,
+            )
+            hits = list(giant_files.CHECK.runner(set()))
+        self.assertEqual(_files(hits), {"src/other_giant.rs"})
+
+
+class NamespaceSizeCapsCheck(unittest.TestCase):
+    def test_flags_files_over_configured_namespace_cap(self) -> None:
+        over = "fn x() {}\n" * 4
+        at_cap = "fn y() {}\n" * 3
+        with _FakeSrcTree(
+            {
+                "src/services/discord/commands/inspect/mod.rs": over,
+                "src/services/discord/commands/inspect/query.rs": at_cap,
+                "src/services/discord/commands/inspect/tests.rs": over,
+                "src/other.rs": over,
+            }
+        ) as root:
+            _write(
+                root,
+                "scripts/audit_maintainability_config.toml",
+                """
+                [namespace_size_caps]
+                "src/services/discord/commands/inspect/**" = 3
+                """,
+            )
+            hits = list(namespace_size_caps.CHECK.runner(set()))
+        self.assertEqual(_files(hits), {"src/services/discord/commands/inspect/mod.rs"})
+        self.assertEqual(hits[0].extra["max_lines"], "3")
+
+    def test_allowlist_suppresses_namespace_cap(self) -> None:
+        over = "fn x() {}\n" * 4
+        rel = "src/services/discord/prompt_builder/mod.rs"
+        with _FakeSrcTree({rel: over}) as root:
+            _write(
+                root,
+                "scripts/audit_maintainability_config.toml",
+                """
+                [namespace_size_caps]
+                "src/services/discord/prompt_builder/**" = 3
+                """,
+            )
+            hits = list(namespace_size_caps.CHECK.runner({rel}))
+        self.assertEqual(hits, [])
+
+    def test_loads_all_configured_caps(self) -> None:
+        with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}) as root:
+            config = root / "scripts" / "audit_maintainability_config.toml"
+            _write(
+                root,
+                "scripts/audit_maintainability_config.toml",
+                """
+                [namespace_size_caps]
+                "src/a/**" = 10
+                "src/b/**" = 20
+                """,
+            )
+            caps = namespace_size_caps.load_namespace_size_caps(config)
+        self.assertEqual(
+            caps,
+            (
+                namespace_size_caps.NamespaceSizeCap("src/a/**", 10),
+                namespace_size_caps.NamespaceSizeCap("src/b/**", 20),
+            ),
+        )
+
 
 class RouteSrpCheck(unittest.TestCase):
     def test_flags_route_with_sql_json_and_domain(self) -> None:
@@ -161,6 +242,60 @@ class RouteSrpCheck(unittest.TestCase):
         ):
             hits = list(route_srp.CHECK.runner(set()))
         self.assertEqual(_files(hits), {"src/server/routes/dirty.rs"})
+
+    def test_baseline_gate_allows_committed_file_counts(self) -> None:
+        body = """
+        use crate::services::auto_queue;
+        async fn handler() {
+            let _ = sqlx::query("SELECT * FROM agents").fetch_all(&db).await;
+            return json!({"ok": true});
+        }
+        """
+        with _FakeSrcTree({"src/server/routes/legacy.rs": body}) as root:
+            _write(
+                root,
+                route_srp.BASELINE_REL_PATH,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rule": "route_srp_violations",
+                        "total_count": 1,
+                        "files": {"src/server/routes/legacy.rs": {"count": 1}},
+                    }
+                ),
+            )
+            hits = list(route_srp.CHECK.runner(set()))
+            baseline_gate = route_srp.CHECK.baseline_gate
+            self.assertIsNotNone(baseline_gate)
+            failures = list(baseline_gate(hits)) if baseline_gate else []
+        self.assertEqual(failures, [])
+
+    def test_baseline_gate_flags_cross_file_regression_when_total_matches(self) -> None:
+        body = """
+        use crate::services::auto_queue;
+        async fn handler() {
+            let _ = sqlx::query("SELECT * FROM agents").fetch_all(&db).await;
+            return json!({"ok": true});
+        }
+        """
+        with _FakeSrcTree({"src/server/routes/new.rs": body}) as root:
+            _write(
+                root,
+                route_srp.BASELINE_REL_PATH,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rule": "route_srp_violations",
+                        "total_count": 1,
+                        "files": {"src/server/routes/old.rs": {"count": 1}},
+                    }
+                ),
+            )
+            hits = list(route_srp.CHECK.runner(set()))
+            baseline_gate = route_srp.CHECK.baseline_gate
+            self.assertIsNotNone(baseline_gate)
+            failures = list(baseline_gate(hits)) if baseline_gate else []
+        self.assertEqual(_files(failures), {"src/server/routes/new.rs"})
 
 
 class DirectDiscordSendsCheck(unittest.TestCase):
@@ -338,7 +473,7 @@ class SourceOfTruthAliasCheck(unittest.TestCase):
 
 
 class HarnessCli(unittest.TestCase):
-    def test_runs_all_eight_checks_and_emits_yaml_keys(self) -> None:
+    def test_runs_all_nine_checks_and_emits_yaml_keys(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
             specs = HARNESS.load_check_specs()
             findings = HARNESS.run_all(specs, {})
@@ -347,6 +482,7 @@ class HarnessCli(unittest.TestCase):
             md_text = HARNESS.render_markdown(specs, findings)
         for key in (
             "giant_files",
+            "namespace_size_caps",
             "route_srp_violations",
             "direct_discord_sends",
             "manual_json_row_mapping",
@@ -362,16 +498,19 @@ class HarnessCli(unittest.TestCase):
     def test_only_selected_checks_are_hard_gated(self) -> None:
         specs = HARNESS.load_check_specs()
         hard_gated = {spec.key for spec in specs if spec.hard_gate}
+        baseline_gated = {spec.key for spec in specs if spec.baseline_gate}
         self.assertEqual(
             hard_gated,
             {
                 "giant_files",
+                "namespace_size_caps",
                 "direct_discord_sends",
                 "legacy_sqlite_refs",
                 "source_of_truth_alias_writes",
                 "git_subprocess_callsites",
             },
         )
+        self.assertEqual(baseline_gated, {"route_srp_violations"})
         warning_only = {
             "route_srp_violations",
             "manual_json_row_mapping",
@@ -386,9 +525,11 @@ class HarnessCli(unittest.TestCase):
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
-        self.assertIn("hard_gate_count: 5", yaml_text)
+        self.assertIn("hard_gate_count: 6", yaml_text)
+        self.assertIn("baseline_gate_count: 1", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
-        self.assertEqual(json_payload["hard_gate_count"], 5)
+        self.assertEqual(json_payload["hard_gate_count"], 6)
+        self.assertEqual(json_payload["baseline_gate_count"], 1)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
@@ -403,6 +544,35 @@ class HarnessCli(unittest.TestCase):
         }
         """
         with _FakeSrcTree({"src/services/agents.rs": body}) as root:
+            allowlist = root / "empty.toml"
+            allowlist.write_text("", encoding="utf-8")
+            with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(
+                sys, "stderr", new=mock.MagicMock()
+            ):
+                rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
+        self.assertEqual(rc, 1)
+
+    def test_check_mode_fails_on_route_srp_baseline_regression(self) -> None:
+        body = """
+        use crate::services::auto_queue;
+        async fn handler() {
+            let _ = sqlx::query("SELECT * FROM agents").fetch_all(&db).await;
+            return json!({"ok": true});
+        }
+        """
+        with _FakeSrcTree({"src/server/routes/new.rs": body}) as root:
+            _write(
+                root,
+                route_srp.BASELINE_REL_PATH,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rule": "route_srp_violations",
+                        "total_count": 0,
+                        "files": {},
+                    }
+                ),
+            )
             allowlist = root / "empty.toml"
             allowlist.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(

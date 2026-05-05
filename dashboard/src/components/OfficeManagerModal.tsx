@@ -383,6 +383,9 @@ export default function OfficeManagerModal({
                       {OFFICE_COLORS.map((c) => (
                         <button
                           key={c}
+                          type="button"
+                          aria-label={`Color ${c}`}
+                          aria-pressed={formColor === c}
                           onClick={() => setFormColor(c)}
                           className={`w-7 h-7 rounded-full transition-all ${
                             formColor === c

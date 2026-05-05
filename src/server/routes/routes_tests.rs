@@ -6613,6 +6613,9 @@ async fn kanban_assign_card_pg_only_without_sqlite_mirror() {
     assert_eq!(json["transition"]["from"], "backlog");
     assert_eq!(json["transition"]["to"], "requested");
     assert_eq!(json["transition"]["target"], "requested");
+    assert_eq!(json["transition"]["target_status"], "requested");
+    assert_eq!(json["transition"]["next_action"], "none_required");
+    assert!(json["transition"]["error"].is_null());
 
     let sqlite_card_count: i64 = db
         .lock()
@@ -6714,6 +6717,11 @@ async fn kanban_assign_card_reports_transition_failure_in_response() {
     assert_eq!(json["transition"]["from"], "done");
     assert_eq!(json["transition"]["to"], "done");
     assert_eq!(json["transition"]["target"], "requested");
+    assert_eq!(json["transition"]["target_status"], "requested");
+    assert_eq!(
+        json["transition"]["next_action"],
+        "inspect_transition_error"
+    );
     assert_eq!(json["transition"]["steps"], json!(["requested"]));
     assert_eq!(json["transition"]["failed_step"], "requested");
     assert!(
@@ -8422,6 +8430,49 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
             .contains("/api/kanban-cards/{id}/transition"),
         "PATCH error example must route force transitions to /transition"
     );
+
+    let assign = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/{id}/assign")
+        .expect("kanban assign endpoint must be present");
+    assert_eq!(
+        assign["example"]["response"]["transition"]["target_status"],
+        "requested"
+    );
+    assert_eq!(
+        assign["example"]["response"]["transition"]["next_action"],
+        "none_required"
+    );
+    assert!(
+        assign["example"]["response"]["transition"]["error"].is_null(),
+        "assign docs must document a stable null error field on success"
+    );
+
+    for path in [
+        "/api/kanban-cards/{id}/retry",
+        "/api/kanban-cards/{id}/redispatch",
+    ] {
+        let endpoint = endpoints
+            .iter()
+            .find(|ep| ep["method"] == "POST" && ep["path"] == path)
+            .unwrap_or_else(|| panic!("{path} endpoint must be present"));
+        assert_eq!(
+            endpoint["example"]["response"]["next_action"],
+            "none_required"
+        );
+        assert!(
+            endpoint["example"]["response"]
+                .get("new_dispatch_id")
+                .is_some(),
+            "{path} must document new_dispatch_id"
+        );
+        assert!(
+            endpoint["example"]["response"]
+                .get("cancelled_dispatch_id")
+                .is_some(),
+            "{path} must document cancelled_dispatch_id"
+        );
+    }
 
     let rereview = endpoints
         .iter()
@@ -15369,6 +15420,117 @@ async fn redispatch_response_includes_dispatch_ids_and_next_action_pg_1442() {
     assert_ne!(
         new_dispatch_id, "dispatch-redispatch-1442-old",
         "new_dispatch_id must be a brand-new UUID, not the cancelled one"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// #1733 — `/retry` response must surface dispatch ids and `next_action` with
+/// field presence even when the previous failed dispatch did not need cancel.
+#[tokio::test]
+async fn retry_response_includes_dispatch_ids_and_next_action_pg_1733() {
+    let (_repo, _repo_guard) = setup_test_repo();
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-retry-1733").await;
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, latest_dispatch_id, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+         )",
+    )
+    .bind("card-retry-1733")
+    .bind("Retry 1733")
+    .bind("requested")
+    .bind("medium")
+    .bind("agent-retry-1733")
+    .bind("test-repo")
+    .bind(1733_i64)
+    .bind("dispatch-retry-1733-old")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '5 minutes'
+         )",
+    )
+    .bind("dispatch-retry-1733-old")
+    .bind("card-retry-1733")
+    .bind("agent-retry-1733")
+    .bind("implementation")
+    .bind("failed")
+    .bind("[Impl] Issue #1733")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-retry-1733/retry")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"request_now":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "retry must succeed; got {body_text}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json.get("card").is_some(),
+        "response must keep existing 'card' field for backward compat: {body_text}"
+    );
+    assert_eq!(
+        json["next_action"], "none_required",
+        "happy-path retry must report next_action=none_required: {body_text}"
+    );
+    assert!(
+        json.get("cancelled_dispatch_id").is_some(),
+        "cancelled_dispatch_id key must be present even when null: {body_text}"
+    );
+    assert!(
+        json["cancelled_dispatch_id"].is_null(),
+        "failed old dispatch should not be reported as newly cancelled: {body_text}"
+    );
+    let new_dispatch_id = json["new_dispatch_id"]
+        .as_str()
+        .expect("new_dispatch_id must be a string when create_dispatch succeeds");
+    assert!(
+        !new_dispatch_id.is_empty(),
+        "new_dispatch_id must not be empty when a dispatch was created"
+    );
+    assert_ne!(
+        new_dispatch_id, "dispatch-retry-1733-old",
+        "new_dispatch_id must be a brand-new UUID, not the failed one"
     );
 
     pool.close().await;

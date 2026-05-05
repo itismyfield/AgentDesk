@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, RefreshCw, Wifi } from "lucide-react";
-import { getHealth, type HealthResponse } from "../api";
+import { AlertTriangle, Database, RefreshCw, Wifi } from "lucide-react";
+import {
+  getHealth,
+  getPromptManifestRetention,
+  type HealthResponse,
+  type PromptManifestRetentionStatus,
+} from "../api";
 import type { Agent, Office, WSEvent } from "../types";
 import OfficeManagerView from "./OfficeManagerView";
 import { describeDegradedReason } from "./dashboard/HealthWidget";
@@ -384,6 +389,14 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US").format(value);
 }
 
+function formatBytes(value: number): string {
+  const safe = Math.max(0, value);
+  if (safe >= 1024 * 1024 * 1024) return `${(safe / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
+  if (safe >= 1024 * 1024) return `${(safe / (1024 * 1024)).toFixed(1)} MiB`;
+  if (safe >= 1024) return `${(safe / 1024).toFixed(1)} KiB`;
+  return `${formatNumber(safe)} B`;
+}
+
 function formatDurationCompact(seconds: number): string {
   const safe = Math.max(0, Math.round(seconds));
   if (safe >= 3600) {
@@ -557,6 +570,10 @@ function formatBottleneckLabel(kind: string): string {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export default function OpsPageView({
   wsConnected,
   offices,
@@ -569,6 +586,8 @@ export default function OpsPageView({
   const localeTag = isKo ? "ko-KR" : "en-US";
 
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [promptRetention, setPromptRetention] = useState<PromptManifestRetentionStatus | null>(null);
+  const [promptRetentionError, setPromptRetentionError] = useState<string | null>(null);
   const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -580,19 +599,30 @@ export default function OpsPageView({
     if (refreshInFlightRef.current) return;
     refreshInFlightRef.current = true;
     setIsRefreshing(true);
-    try {
-      const next = await getHealth();
-      setHealth(next);
+    const [healthResult, retentionResult] = await Promise.allSettled([
+      getHealth(),
+      getPromptManifestRetention(),
+    ]);
+
+    if (retentionResult.status === "fulfilled") {
+      setPromptRetention(retentionResult.value);
+      setPromptRetentionError(null);
+    } else {
+      setPromptRetentionError(errorMessage(retentionResult.reason));
+    }
+
+    if (healthResult.status === "fulfilled") {
+      setHealth(healthResult.value);
       setLastSuccessAt(Date.now());
       setError(null);
       setFailureCount(0);
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } else {
+      setError(errorMessage(healthResult.reason));
       setFailureCount((current) => current + 1);
-    } finally {
-      refreshInFlightRef.current = false;
-      setIsRefreshing(false);
     }
+
+    refreshInFlightRef.current = false;
+    setIsRefreshing(false);
   }, []);
 
   useEffect(() => {
@@ -742,6 +772,32 @@ export default function OpsPageView({
       : health?.status === "degraded"
         ? "warn"
         : "success";
+  const promptRetentionTone = promptRetentionError
+    ? "warn"
+    : promptRetention?.enabled === false
+      ? "info"
+      : "success";
+  const promptRetentionValue = promptRetention
+    ? promptRetention.enabled
+      ? `${formatNumber(promptRetention.retention_days)}d`
+      : tr("꺼짐", "Off")
+    : "--";
+  const promptRetentionConfigNote = promptRetentionError
+    ? tr("retention 상태 요청 실패", "Retention status unavailable")
+    : promptRetention
+      ? promptRetention.restart_required_for_config_changes
+        ? tr(
+            "retention config 변경은 재시작 필요 · boot snapshot",
+            "restart required for retention config changes · boot snapshot",
+          )
+        : tr("retention config hot reload 활성", "retention config hot reload enabled")
+      : tr("retention 상태 수신 대기", "Waiting for retention status");
+  const promptRetentionStorageNote = promptRetention
+    ? tr(
+        `${formatBytes(promptRetention.total_stored_bytes)} 저장 · layer ${formatNumber(promptRetention.layer_count)} · truncated ${formatNumber(promptRetention.truncated_count)}`,
+        `${formatBytes(promptRetention.total_stored_bytes)} stored · ${formatNumber(promptRetention.layer_count)} layers · ${formatNumber(promptRetention.truncated_count)} truncated`,
+      )
+    : promptRetentionError ?? tr("storage snapshot 없음", "No storage snapshot");
 
   return (
     <div
@@ -1084,6 +1140,41 @@ export default function OpsPageView({
                       )}
                     </div>
                   </div>
+                </div>
+              </div>
+
+              <div data-testid="ops-prompt-retention-card" className="card ops-mini-card">
+                <div className="card-body">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="metric-label">
+                        <Database size={12} />
+                        prompt_manifest_retention
+                      </div>
+                      <div className="metric-value" style={{ marginTop: 8, fontSize: 22, color: "var(--th-text-primary)" }}>
+                        {promptRetentionValue}
+                      </div>
+                      <div className="metric-sub" style={{ marginTop: 6, fontSize: 12 }}>
+                        {promptRetentionConfigNote}
+                      </div>
+                      <div className="metric-sub" style={{ marginTop: 4, fontSize: 12 }}>
+                        {promptRetentionStorageNote}
+                      </div>
+                    </div>
+                    <span className={chipClassFromTone(promptRetentionTone)}>
+                      {promptRetention?.hot_reload ? "HOT" : promptRetention?.config_applied_at?.toUpperCase() ?? "BOOT"}
+                    </span>
+                  </div>
+                  {promptRetention?.config_source ? (
+                    <div className="mt-3 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+                      {promptRetention.config_source}
+                    </div>
+                  ) : null}
+                  {promptRetentionError ? (
+                    <div className="mt-2 text-[11px] leading-5" style={{ color: "var(--color-warning)" }}>
+                      {promptRetentionError}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>

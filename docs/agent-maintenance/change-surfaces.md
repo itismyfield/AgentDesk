@@ -6,7 +6,8 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-05-02 (against #1515 dispatched session SRP split).
+> Last refreshed: 2026-05-05 (against #1742 deployment-blocking migration
+> checksum hotfix and current maintainability audit baseline).
 
 ## Read This First
 
@@ -85,6 +86,8 @@
   - `src/dispatch/dispatch_context.rs` (3987 lines).
   - `src/dispatch/dispatch_create.rs` (2877 lines).
   - `src/dispatch/dispatch_status.rs` (1875 lines).
+  - `src/services/dispatches/outbox_route.rs` (1074 lines; route extraction
+    orchestration surface from #1722, split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
 - invariants: dispatch creation is the only writer for `dispatched_sessions`;
   status transitions go through `dispatch_status`.
@@ -248,6 +251,8 @@
 The remaining giant-file modules under `src/services/` not covered above:
 
 - `src/services/api_friction.rs` (1808).
+- `src/services/analytics.rs` (1049) — dashboard analytics query surface;
+  split before adding non-bugfix behavior.
 - `src/services/auto_queue.rs` (1047) and
   `src/services/auto_queue/activate_command.rs` (1012); auto-queue route
   behavior is split across `src/services/auto_queue/*` slices, with
@@ -255,6 +260,9 @@ The remaining giant-file modules under `src/services/` not covered above:
 - `src/services/onboarding.rs` (5279), `src/services/dispatched_sessions.rs`
   (2954), and `src/services/settings.rs` (1015) — service-layer route support
   surfaces split out of the large dashboard route modules.
+- `src/services/dispatches/outbox_route.rs` (1074) — dispatch outbox route
+  support extracted from the route layer; split before adding non-bugfix
+  behavior.
 - `src/services/claude.rs` (2477), `src/services/gemini.rs` (2565),
   `src/services/qwen.rs` (2466), `src/services/codex.rs` (1665),
   `src/services/opencode.rs` (2133), `src/services/provider.rs` (2177) —

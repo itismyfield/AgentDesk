@@ -10,11 +10,22 @@ use super::thread_reuse::{
 use crate::db::dispatches::SlotThreadBinding;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::dispatch::dispatch_destination_provider_override;
-pub(crate) use crate::services::discord_delivery::{
+pub(crate) use crate::server::dto::dispatches::{
     DispatchMessagePostError, DispatchMessagePostErrorKind, DispatchMessagePostOutcome,
-    DispatchNotifyDeliveryResult, DispatchTransport, ReviewFollowupKind,
-    dispatch_delivery_correlation_id, dispatch_delivery_semantic_event_id,
+    DispatchNotifyDeliveryResult, ReviewFollowupKind,
+};
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(super) use crate::services::discord_delivery::add_thread_member_to_dispatch_thread;
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(super) use crate::services::discord_delivery::post_dispatch_message_to_channel;
+pub(super) use crate::services::discord_delivery::post_dispatch_message_to_channel_with_delivery;
+pub(crate) use crate::services::discord_delivery::{
+    DispatchTransport, edit_raw_message_once, post_raw_message_once,
     send_dispatch_with_delivery_guard,
+};
+use crate::services::discord_delivery::{
+    archive_duplicate_slot_threads, maybe_add_owner_to_dispatch_thread,
+    reset_stale_slot_thread_if_needed,
 };
 use crate::services::discord_delivery_metadata::{
     CardIssueInfo, DispatchDeliveryMetadata, dispatch_context_value, load_card_issue_info,
@@ -24,8 +35,6 @@ use crate::services::discord_delivery_metadata::{
 use sqlx::PgPool;
 use std::sync::OnceLock;
 
-const SLOT_THREAD_RESET_MESSAGE_LIMIT: u64 = 500;
-const SLOT_THREAD_RESET_MAX_AGE_DAYS: i64 = 7;
 const SLOT_THREAD_MAX_SLOTS: i64 = 32;
 
 pub(crate) fn discord_api_base_url() -> String {
@@ -415,196 +424,6 @@ async fn persist_dispatch_message_target_on_pg(
     .await
 }
 
-fn is_discord_length_error(status: reqwest::StatusCode, body: &str) -> bool {
-    crate::services::discord_delivery::is_discord_length_error(status, body)
-}
-
-/// Pure POST helper — no pre-truncation. Used by the unified outbound API
-/// (see `crate::services::discord::outbound`) which owns the length policy.
-pub(crate) async fn post_raw_message_once(
-    client: &reqwest::Client,
-    token: &str,
-    base_url: &str,
-    channel_id: &str,
-    message: &str,
-) -> Result<String, DispatchMessagePostError> {
-    crate::services::discord_delivery::post_raw_message_once(
-        client, token, base_url, channel_id, message,
-    )
-    .await
-}
-
-/// Pure PATCH helper used by the unified outbound API for edit operations.
-pub(crate) async fn edit_raw_message_once(
-    client: &reqwest::Client,
-    token: &str,
-    base_url: &str,
-    channel_id: &str,
-    message_id: &str,
-    content: &str,
-) -> Result<String, DispatchMessagePostError> {
-    crate::services::discord_delivery::edit_raw_message_once(
-        client, token, base_url, channel_id, message_id, content,
-    )
-    .await
-}
-
-pub(super) async fn post_dispatch_message_to_channel(
-    client: &reqwest::Client,
-    token: &str,
-    base_url: &str,
-    channel_id: &str,
-    message: &str,
-    minimal_message: &str,
-) -> Result<String, DispatchMessagePostError> {
-    post_dispatch_message_to_channel_with_delivery(
-        client,
-        token,
-        base_url,
-        channel_id,
-        message,
-        minimal_message,
-        None,
-    )
-    .await
-    .map(|outcome| outcome.message_id)
-}
-
-pub(super) async fn post_dispatch_message_to_channel_with_delivery(
-    client: &reqwest::Client,
-    token: &str,
-    base_url: &str,
-    channel_id: &str,
-    message: &str,
-    minimal_message: &str,
-    dispatch_id: Option<&str>,
-) -> Result<DispatchMessagePostOutcome, DispatchMessagePostError> {
-    // #1436: dispatch_outbox is the first production callsite using the v3
-    // outbound envelope directly. The compatibility re-export remains for
-    // older producers while this path exercises message/policy/decision/result.
-    use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
-    use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
-    use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
-    use crate::services::discord::outbound::result::{DeliveryResult, FallbackUsed};
-    use crate::services::discord::outbound::{HttpOutboundClient, OutboundDeduper};
-    use poise::serenity_prelude::ChannelId;
-
-    let outbound_client =
-        HttpOutboundClient::new(client.clone(), token.to_string(), base_url.to_string());
-    let dedup = OutboundDeduper::new();
-    let correlation_id = dispatch_id.map(dispatch_delivery_correlation_id);
-    let semantic_event_id = dispatch_id.map(dispatch_delivery_semantic_event_id);
-    let mut policy = DiscordOutboundPolicy::dispatch_outbox();
-    let (delivery_correlation_id, delivery_semantic_event_id) =
-        match (correlation_id.as_ref(), semantic_event_id.as_ref()) {
-            (Some(correlation_id), Some(semantic_event_id)) => {
-                (correlation_id.clone(), semantic_event_id.clone())
-            }
-            _ => {
-                policy = policy.without_idempotency();
-                (
-                    "dispatch:adhoc".to_string(),
-                    "dispatch:adhoc:notify".to_string(),
-                )
-            }
-        };
-    let target_channel_id = channel_id
-        .parse::<u64>()
-        .map(ChannelId::new)
-        .map_err(|error| {
-            DispatchMessagePostError::new(
-                DispatchMessagePostErrorKind::Other,
-                format!("invalid dispatch outbound channel id {channel_id}: {error}"),
-            )
-        })?;
-    let outbound_msg = DiscordOutboundMessage::new(
-        delivery_correlation_id,
-        delivery_semantic_event_id,
-        message,
-        OutboundTarget::Channel(target_channel_id),
-        policy,
-    )
-    .with_summary(minimal_message.to_string());
-
-    match deliver_outbound(&outbound_client, &dedup, outbound_msg).await {
-        DeliveryResult::Sent { messages, .. } => {
-            let message_id = first_raw_message_id(&messages).unwrap_or_default();
-            Ok(DispatchMessagePostOutcome {
-                message_id: message_id.clone(),
-                delivery: DispatchNotifyDeliveryResult {
-                    status: "success".to_string(),
-                    dispatch_id: dispatch_id.unwrap_or("").to_string(),
-                    action: "notify".to_string(),
-                    correlation_id,
-                    semantic_event_id,
-                    target_channel_id: Some(channel_id.to_string()),
-                    message_id: Some(message_id),
-                    fallback_kind: None,
-                    detail: None,
-                },
-            })
-        }
-        DeliveryResult::Fallback {
-            messages,
-            fallback_used,
-            ..
-        } => {
-            let message_id = first_raw_message_id(&messages).unwrap_or_default();
-            if matches!(fallback_used, FallbackUsed::MinimalFallback) {
-                tracing::warn!(
-                    "[dispatch] Message too long for channel {channel_id}; retried with minimal fallback"
-                );
-            }
-            Ok(DispatchMessagePostOutcome {
-                message_id: message_id.clone(),
-                delivery: DispatchNotifyDeliveryResult {
-                    status: "fallback".to_string(),
-                    dispatch_id: dispatch_id.unwrap_or("").to_string(),
-                    action: "notify".to_string(),
-                    correlation_id,
-                    semantic_event_id,
-                    target_channel_id: Some(channel_id.to_string()),
-                    message_id: Some(message_id),
-                    fallback_kind: Some(match fallback_used {
-                        FallbackUsed::MinimalFallback => "MinimalFallback".to_string(),
-                        FallbackUsed::LengthCompacted => "Truncated".to_string(),
-                        other => format!("{other:?}"),
-                    }),
-                    detail: Some("shared outbound API used degraded delivery".to_string()),
-                },
-            })
-        }
-        DeliveryResult::Duplicate { .. } => Ok(DispatchMessagePostOutcome {
-            message_id: String::new(),
-            delivery: DispatchNotifyDeliveryResult {
-                status: "duplicate".to_string(),
-                dispatch_id: dispatch_id.unwrap_or("").to_string(),
-                action: "notify".to_string(),
-                correlation_id,
-                semantic_event_id,
-                target_channel_id: Some(channel_id.to_string()),
-                message_id: None,
-                fallback_kind: None,
-                detail: Some("shared outbound API deduplicated delivery".to_string()),
-            },
-        }),
-        DeliveryResult::Skip { .. } => Err(DispatchMessagePostError::new(
-            DispatchMessagePostErrorKind::Other,
-            format!("unexpected skip for channel {channel_id}"),
-        )),
-        DeliveryResult::PermanentFailure { reason } => {
-            let kind = if reason.to_ascii_lowercase().contains("base_type_max_length")
-                || reason.contains("length")
-            {
-                DispatchMessagePostErrorKind::MessageTooLong
-            } else {
-                DispatchMessagePostErrorKind::Other
-            };
-            Err(DispatchMessagePostError::new(kind, reason))
-        }
-    }
-}
-
 /// #750: persists the posted dispatch message target (channel_id + message_id)
 /// so downstream consumers can locate the original dispatch post, but no
 /// longer adds the `⏳` pending emoji reaction. The announce bot reaction
@@ -777,199 +596,6 @@ async fn clear_slot_thread_id_pg(
     crate::db::dispatches::clear_slot_thread_id_pg(pool, agent_id, slot_index, channel_id).await
 }
 
-fn discord_thread_created_at(
-    thread_id: &str,
-    thread_info: &serde_json::Value,
-) -> Option<chrono::DateTime<chrono::Utc>> {
-    if let Some(timestamp) = thread_info
-        .get("thread_metadata")
-        .and_then(|metadata| metadata.get("create_timestamp"))
-        .and_then(|value| value.as_str())
-    {
-        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(timestamp) {
-            return Some(parsed.with_timezone(&chrono::Utc));
-        }
-    }
-
-    let raw_id = thread_id.parse::<u64>().ok()?;
-    let timestamp_ms = (raw_id >> 22) + 1_420_070_400_000;
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms as i64)
-}
-
-async fn reset_stale_slot_thread_if_needed(
-    _db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
-    client: &reqwest::Client,
-    token: &str,
-    discord_api_base: &str,
-    dispatch_id: &str,
-    slot_binding: &SlotThreadBinding,
-) -> Result<bool, String> {
-    let Some(thread_id) = slot_binding.thread_id.as_deref() else {
-        return Ok(false);
-    };
-
-    let thread_info_url = discord_api_url(discord_api_base, &format!("/channels/{thread_id}"));
-    let response = client
-        .get(&thread_info_url)
-        .header("Authorization", format!("Bot {}", token))
-        .send()
-        .await
-        .map_err(|err| format!("failed to inspect slot thread {thread_id}: {err}"))?;
-
-    if !response.status().is_success() {
-        return Ok(false);
-    }
-
-    let thread_info = response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|err| format!("failed to parse slot thread {thread_id}: {err}"))?;
-    let total_message_sent = thread_info
-        .get("total_message_sent")
-        .and_then(|value| value.as_u64())
-        .or_else(|| {
-            thread_info
-                .get("message_count")
-                .and_then(|value| value.as_u64())
-        })
-        .unwrap_or(0);
-    let message_limit_hit = total_message_sent > SLOT_THREAD_RESET_MESSAGE_LIMIT;
-    let age_limit_hit = discord_thread_created_at(thread_id, &thread_info)
-        .map(|created_at| {
-            chrono::Utc::now().signed_duration_since(created_at)
-                > chrono::Duration::days(SLOT_THREAD_RESET_MAX_AGE_DAYS)
-        })
-        .unwrap_or(false);
-
-    if !message_limit_hit && !age_limit_hit {
-        return Ok(false);
-    }
-
-    tracing::info!(
-        "[dispatch] resetting stale slot thread before dispatch {}: agent={} slot={} messages={} age_limit_hit={}",
-        dispatch_id,
-        slot_binding.agent_id,
-        slot_binding.slot_index,
-        total_message_sent,
-        age_limit_hit,
-    );
-    let pool = pg_pool.ok_or_else(|| {
-        format!("postgres pool required while resetting stale slot thread for {dispatch_id}")
-    })?;
-    crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding_pg(
-        pool,
-        &slot_binding.agent_id,
-        slot_binding.slot_index,
-        Some(dispatch_id),
-    )
-    .await?;
-    Ok(true)
-}
-
-async fn archive_duplicate_slot_threads(
-    client: &reqwest::Client,
-    token: &str,
-    discord_api_base: &str,
-    pg_pool: Option<&PgPool>,
-    expected_parent: u64,
-    keep_thread_id: &str,
-    candidate_thread_ids: &[String],
-) {
-    for thread_id in candidate_thread_ids {
-        if thread_id == keep_thread_id {
-            continue;
-        }
-
-        let thread_info_url = discord_api_url(discord_api_base, &format!("/channels/{thread_id}"));
-        let response = match client
-            .get(&thread_info_url)
-            .header("Authorization", format!("Bot {}", token))
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                tracing::warn!(
-                    "[dispatch] Failed to inspect duplicate slot thread {thread_id}: {err}"
-                );
-                continue;
-            }
-        };
-
-        if !response.status().is_success() {
-            continue;
-        }
-
-        let thread_info = match response.json::<serde_json::Value>().await {
-            Ok(thread_info) => thread_info,
-            Err(err) => {
-                tracing::warn!(
-                    "[dispatch] Failed to parse duplicate slot thread {thread_id}: {err}"
-                );
-                continue;
-            }
-        };
-
-        let parent_id = thread_info
-            .get("parent_id")
-            .and_then(|value| value.as_str())
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or_default();
-        if parent_id != expected_parent {
-            continue;
-        }
-
-        let already_archived = thread_info
-            .get("thread_metadata")
-            .and_then(|metadata| metadata.get("archived"))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        if already_archived {
-            continue;
-        }
-
-        match super::thread_reuse::should_defer_thread_archive_pg(pg_pool, thread_id).await {
-            Ok(true) => {
-                tracing::warn!(
-                    "[dispatch] Skipping duplicate slot thread archive for {thread_id}: active turn or fresh inflight still present"
-                );
-                continue;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                tracing::warn!(
-                    "[dispatch] Skipping duplicate slot thread archive for {thread_id}: active-check failed: {err}"
-                );
-                continue;
-            }
-        }
-
-        match client
-            .patch(&thread_info_url)
-            .header("Authorization", format!("Bot {}", token))
-            .json(&serde_json::json!({"archived": true}))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("[dispatch] Archived duplicate slot thread {thread_id}");
-            }
-            Ok(resp) => {
-                tracing::warn!(
-                    "[dispatch] Failed to archive duplicate slot thread {thread_id}: {}",
-                    resp.status()
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "[dispatch] Failed to archive duplicate slot thread {thread_id}: {err}"
-                );
-            }
-        }
-    }
-}
-
 async fn build_slot_thread_name_pg(
     pool: &PgPool,
     dispatch_id: &str,
@@ -1048,104 +674,6 @@ pub(super) fn resolve_dispatch_delivery_channel_on_conn(
 // #1693: `latest_completed_review_provider_on_conn` (legacy-sqlite-tests only)
 // moved to `crate::db::dispatches::latest_completed_review_provider_on_conn`
 // so the route layer no longer holds raw SQL strings.
-
-async fn add_thread_member_to_dispatch_thread(
-    client: &reqwest::Client,
-    token: &str,
-    base_url: &str,
-    thread_id: &str,
-    user_id: u64,
-) -> Result<(), String> {
-    let thread_info_url = discord_api_url(base_url, &format!("/channels/{thread_id}"));
-    let response = client
-        .get(&thread_info_url)
-        .header("Authorization", format!("Bot {}", token))
-        .send()
-        .await
-        .map_err(|err| format!("failed to inspect thread {thread_id}: {err}"))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "failed to inspect thread {thread_id}: {status} {body}"
-        ));
-    }
-
-    let thread_info = response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|err| format!("failed to parse thread {thread_id}: {err}"))?;
-    let is_archived = thread_info
-        .get("thread_metadata")
-        .and_then(|metadata| metadata.get("archived"))
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-
-    if is_archived {
-        let response = client
-            .patch(&thread_info_url)
-            .header("Authorization", format!("Bot {}", token))
-            .json(&serde_json::json!({"archived": false}))
-            .send()
-            .await
-            .map_err(|err| format!("failed to unarchive thread {thread_id}: {err}"))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!(
-                "failed to unarchive thread {thread_id}: {status} {body}"
-            ));
-        }
-    }
-
-    let member_url = discord_api_url(
-        base_url,
-        &format!("/channels/{thread_id}/thread-members/{user_id}"),
-    );
-    let response = client
-        .put(&member_url)
-        .header("Authorization", format!("Bot {}", token))
-        .send()
-        .await
-        .map_err(|err| format!("failed to add user {user_id} to thread {thread_id}: {err}"))?;
-
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        Err(format!(
-            "failed to add user {user_id} to thread {thread_id}: {status} {body}"
-        ))
-    }
-}
-
-async fn maybe_add_owner_to_dispatch_thread(
-    client: &reqwest::Client,
-    token: &str,
-    base_url: &str,
-    thread_id: &str,
-    dispatch_id: &str,
-    owner_user_id: Option<u64>,
-) {
-    let Some(owner_user_id) = owner_user_id else {
-        return;
-    };
-
-    if let Err(err) =
-        add_thread_member_to_dispatch_thread(client, token, base_url, thread_id, owner_user_id)
-            .await
-    {
-        tracing::warn!(
-            "[dispatch] Failed to add owner {} to thread {} for dispatch {}: {}",
-            owner_user_id,
-            thread_id,
-            dispatch_id,
-            err
-        );
-    }
-}
 
 /// Send a dispatch notification to the target agent's Discord channel.
 /// Message format: `DISPATCH:<dispatch_id> - <title>\n<issue_url>`
@@ -1426,7 +954,6 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     }
     if let Some(binding) = slot_binding.clone() {
         if reset_stale_slot_thread_if_needed(
-            db,
             Some(pool),
             &client,
             token,
@@ -1651,7 +1178,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
             // Thread creation failed — fall back to sending directly to the channel
             let status = tr.status();
             let body = tr.text().await.unwrap_or_default();
-            if is_discord_length_error(status, &body) {
+            if crate::services::discord_delivery::is_discord_length_error(status, &body) {
                 return Err(format!(
                     "thread creation rejected for dispatch {dispatch_id} due to Discord length limits: {status} {body}"
                 ));
@@ -1841,7 +1368,7 @@ pub(super) async fn send_review_result_to_primary(
     .await
 }
 
-pub(super) async fn send_review_result_to_primary_with_transport<T: DispatchTransport>(
+pub(crate) async fn send_review_result_to_primary_with_transport<T: DispatchTransport>(
     db: Option<&crate::db::Db>,
     card_id: &str,
     review_dispatch_id: &str,

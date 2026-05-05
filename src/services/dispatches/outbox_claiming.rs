@@ -1,0 +1,195 @@
+//! Dispatch outbox claim orchestration.
+//!
+//! This service owns capability matching and routing diagnostics semantics.
+//! The DB outbox repository only selects locked claim candidates, marks
+//! claimed rows, and persists the diagnostics payload this module builds.
+
+use serde_json::Value;
+use sqlx::PgPool;
+
+use crate::db::dispatches::outbox::{
+    DispatchOutboxRow, mark_dispatch_outbox_claimed_pg, record_routing_diagnostics_pg,
+    select_pending_dispatch_outbox_claim_candidates_pg,
+};
+use crate::server::cluster::CapabilityRouteDecision;
+
+pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
+    pool: &PgPool,
+    claim_owner: &str,
+) -> Vec<DispatchOutboxRow> {
+    let owner_node =
+        match crate::server::cluster::worker_node_snapshot_by_instance(pool, claim_owner, 60).await
+        {
+            Ok(node) => node,
+            Err(error) => {
+                tracing::warn!(
+                    claim_owner,
+                    error,
+                    "[dispatch-outbox] failed to load claim owner capabilities"
+                );
+                None
+            }
+        };
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!("[dispatch-outbox] failed to begin postgres claim transaction: {error}");
+            return Vec::new();
+        }
+    };
+
+    let candidates = match select_pending_dispatch_outbox_claim_candidates_pg(&mut tx).await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!("[dispatch-outbox] failed to select postgres outbox rows: {error}");
+            let _ = tx.rollback().await;
+            return Vec::new();
+        }
+    };
+
+    let mut pending = Vec::new();
+    for candidate in candidates {
+        if let Some(required) =
+            non_empty_required_capabilities(candidate.required_capabilities.as_ref())
+        {
+            let decision =
+                capability_decision_for_claim_owner(owner_node.as_ref(), claim_owner, required);
+            if !decision.eligible {
+                let diagnostics = routing_diagnostics(claim_owner, &decision, required);
+                record_routing_diagnostics_pg(
+                    &mut tx,
+                    candidate.id,
+                    &candidate.dispatch_id,
+                    &diagnostics,
+                )
+                .await;
+                continue;
+            }
+        }
+
+        if let Err(error) =
+            mark_dispatch_outbox_claimed_pg(&mut tx, candidate.id, claim_owner).await
+        {
+            tracing::warn!(
+                outbox_id = candidate.id,
+                dispatch_id = candidate.dispatch_id,
+                error = %error,
+                "[dispatch-outbox] failed to claim postgres outbox row"
+            );
+            continue;
+        }
+
+        pending.push(candidate.into_outbox_row());
+        if pending.len() >= 5 {
+            break;
+        }
+    }
+
+    if let Err(error) = tx.commit().await {
+        tracing::warn!("[dispatch-outbox] failed to commit postgres outbox claims: {error}");
+        return Vec::new();
+    }
+
+    pending.sort_by_key(|row| row.0);
+    pending
+}
+
+fn non_empty_required_capabilities(required: Option<&Value>) -> Option<&Value> {
+    match required {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(map)) if map.is_empty() => None,
+        Some(required) => Some(required),
+    }
+}
+
+fn capability_decision_for_claim_owner(
+    owner_node: Option<&Value>,
+    claim_owner: &str,
+    required_capabilities: &Value,
+) -> CapabilityRouteDecision {
+    owner_node
+        .map(|node| crate::server::cluster::explain_capability_match(node, required_capabilities))
+        .unwrap_or_else(|| CapabilityRouteDecision {
+            instance_id: Some(claim_owner.to_string()),
+            eligible: false,
+            reasons: vec!["claim owner is not registered in worker_nodes".to_string()],
+        })
+}
+
+fn routing_diagnostics(
+    claim_owner: &str,
+    decision: &CapabilityRouteDecision,
+    required_capabilities: &Value,
+) -> Value {
+    serde_json::json!({
+        "claim_owner": claim_owner,
+        "decision": decision,
+        "required_capabilities": required_capabilities,
+        "checked_at": chrono::Utc::now(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::dispatches::outbox::DispatchOutboxClaimCandidate;
+    use serde_json::json;
+
+    #[test]
+    fn non_empty_required_capabilities_handles_null_and_empty_object() {
+        assert!(non_empty_required_capabilities(None).is_none());
+        assert!(non_empty_required_capabilities(Some(&Value::Null)).is_none());
+        assert!(non_empty_required_capabilities(Some(&json!({}))).is_none());
+        assert!(non_empty_required_capabilities(Some(&json!({"provider": "codex"}))).is_some());
+        assert!(non_empty_required_capabilities(Some(&json!(["codex"]))).is_some());
+    }
+
+    #[test]
+    fn unregistered_claim_owner_is_ineligible() {
+        let decision =
+            capability_decision_for_claim_owner(None, "missing-node", &json!({"labels": ["mac"]}));
+        assert!(!decision.eligible);
+        assert_eq!(decision.instance_id.as_deref(), Some("missing-node"));
+        assert_eq!(
+            decision.reasons,
+            vec!["claim owner is not registered in worker_nodes".to_string()]
+        );
+    }
+
+    #[test]
+    fn routing_diagnostics_contains_required_payload() {
+        let decision = CapabilityRouteDecision {
+            instance_id: Some("worker-a".to_string()),
+            eligible: false,
+            reasons: vec!["missing required label mac-book".to_string()],
+        };
+        let required = json!({"labels": ["mac-book"]});
+        let diagnostics = routing_diagnostics("worker-a", &decision, &required);
+
+        assert_eq!(diagnostics["claim_owner"], "worker-a");
+        assert_eq!(diagnostics["decision"]["eligible"], false);
+        assert_eq!(diagnostics["required_capabilities"], required);
+        assert!(diagnostics["checked_at"].is_string());
+    }
+
+    #[test]
+    fn claim_candidate_converts_to_legacy_row_shape() {
+        let candidate = DispatchOutboxClaimCandidate {
+            id: 7,
+            dispatch_id: "dispatch-7".to_string(),
+            action: "notify".to_string(),
+            agent_id: Some("agent".to_string()),
+            card_id: Some("card".to_string()),
+            title: Some("title".to_string()),
+            retry_count: 2,
+            required_capabilities: Some(json!({"providers": ["codex"]})),
+        };
+
+        let row = candidate.into_outbox_row();
+        assert_eq!(row.0, 7);
+        assert_eq!(row.1, "dispatch-7");
+        assert_eq!(row.2, "notify");
+        assert_eq!(row.6, 2);
+        assert_eq!(row.7, Some(json!({"providers": ["codex"]})));
+    }
+}

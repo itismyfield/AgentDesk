@@ -255,7 +255,7 @@ pub(super) async fn clear_thread_for_channel_pg(
     Ok(())
 }
 
-pub(super) async fn should_defer_thread_archive_pg(
+pub(crate) async fn should_defer_thread_archive_pg(
     pg_pool: Option<&PgPool>,
     thread_id: &str,
 ) -> Result<bool, String> {

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "rule": "route_srp_violations",
+  "description": "No-regression baseline for route files that still mix raw SQL, json!() shaping, and crate::services calls.",
+  "captured_at": "2026-05-05",
+  "total_count": 16,
+  "files": {
+    "src/server/routes/agents.rs": {
+      "count": 1
+    },
+    "src/server/routes/agents_crud.rs": {
+      "count": 1
+    },
+    "src/server/routes/agents_setup.rs": {
+      "count": 1
+    },
+    "src/server/routes/cron_api.rs": {
+      "count": 1
+    },
+    "src/server/routes/dispatches/thread_reuse.rs": {
+      "count": 1
+    },
+    "src/server/routes/escalation.rs": {
+      "count": 1
+    },
+    "src/server/routes/github.rs": {
+      "count": 1
+    },
+    "src/server/routes/health_api.rs": {
+      "count": 1
+    },
+    "src/server/routes/meetings.rs": {
+      "count": 1
+    },
+    "src/server/routes/memory_api.rs": {
+      "count": 1
+    },
+    "src/server/routes/pipeline.rs": {
+      "count": 1
+    },
+    "src/server/routes/provider_cli_api.rs": {
+      "count": 1
+    },
+    "src/server/routes/queue_api.rs": {
+      "count": 1
+    },
+    "src/server/routes/review_verdict/decision_route.rs": {
+      "count": 1
+    },
+    "src/server/routes/review_verdict/verdict_route.rs": {
+      "count": 1
+    },
+    "src/server/routes/stats.rs": {
+      "count": 1
+    }
+  }
+}

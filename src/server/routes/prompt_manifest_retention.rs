@@ -19,7 +19,11 @@
 //!   "retention_days": 30,
 //!   "per_layer_max_bytes_adk_provided": 65536,
 //!   "per_layer_max_bytes_user_derived": 16384,
-//!   "enabled": true
+//!   "enabled": true,
+//!   "restart_required_for_config_changes": true,
+//!   "config_applied_at": "boot",
+//!   "config_source": "agentdesk.yaml boot snapshot",
+//!   "hot_reload": false
 //! }
 //! ```
 

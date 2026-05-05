@@ -1,5 +1,9 @@
 use super::*;
 use crate::server::routes::dispatches::discord_delivery;
+use crate::server::routes::dispatches::discord_delivery::{
+    DispatchNotifyDeliveryResult, DispatchTransport,
+};
+use sqlx::PgPool;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 

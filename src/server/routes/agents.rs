@@ -3,21 +3,35 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use chrono::{DateTime, TimeZone, Utc};
-use regex::Regex;
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
+use serde::Deserialize;
 use serde_json::json;
-use sqlx::Row;
-use std::sync::OnceLock;
 
 use super::AppState;
-use super::session_activity::SessionActivityResolver;
+use crate::services::agents::query::{
+    agent_exists_pg, block_active_card_for_agent_pg, find_agent_turn_session_pg,
+    find_diag_session_pg, list_agent_dispatched_sessions_pg_json, list_agent_offices_pg_json,
+    list_agent_skills_pg_json, list_agent_timeline_pg_json, list_agent_transcripts_pg_json,
+    mark_session_disconnected_pg,
+};
+use crate::services::agents::turn::{
+    TurnToolEvent, capture_recent_tmux_output, collect_turn_tool_events, extract_tmux_name,
+    inflight_recent_output, load_inflight_snapshot, loop_suspicion, parse_local_timestamp_to_unix,
+    sanitize_status_line,
+};
 use crate::services::observability::session_inventory::{
     derive_visual_status, load_child_inventory_by_parent_key_pg,
 };
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
-use crate::utils::api::{bad_request, clamp_api_limit, internal_error, not_found};
+use crate::utils::api::{bad_request, internal_error, not_found};
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use crate::server::dto::agents::{build_channel_deeplinks, dedup_dispatched_sessions};
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use crate::services::agents::query::pg_timestamp_to_rfc3339;
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use crate::services::agents::turn::normalize_recent_output;
 
 // ── Query types ──────────────────────────────────────────────
 
@@ -83,10 +97,6 @@ pub struct AgentMessageBody {
     pub prefix: Option<bool>,
 }
 
-const TURN_CAPTURE_SCROLLBACK_LINES: i32 = -80;
-const TURN_CAPTURE_TAIL_LINES: usize = 60;
-const TURN_OUTPUT_MAX_CHARS: usize = 4000;
-
 fn pg_required_response() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -136,61 +146,6 @@ pub async fn agents_quality_ranking(
     }
 }
 
-#[derive(Debug, Clone)]
-struct AgentTurnSession {
-    session_key: String,
-    provider: Option<String>,
-    last_heartbeat: Option<String>,
-    created_at: Option<String>,
-    thread_channel_id: Option<String>,
-    runtime_channel_id: Option<String>,
-    effective_status: &'static str,
-    effective_active_dispatch_id: Option<String>,
-    is_working: bool,
-}
-
-#[derive(Debug, Clone)]
-struct AgentDiagSession {
-    session_key: String,
-    agent_id: Option<String>,
-    agent_name: Option<String>,
-    provider: Option<String>,
-    status: Option<String>,
-    last_tool_at: Option<DateTime<Utc>>,
-    active_children: i32,
-    thread_channel_id: Option<String>,
-    created_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct InflightTurnSnapshot {
-    started_at: Option<String>,
-    updated_at: Option<String>,
-    current_tool_line: Option<String>,
-    prev_tool_status: Option<String>,
-    full_response: Option<String>,
-    /// #1671: persisted notification kind (`subagent`/`background`/
-    /// `monitor_auto_turn`) for the live turn, surfaced through `agentdesk
-    /// diag` so operators do not have to hit the watcher-state endpoint.
-    task_notification_kind: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct TurnToolEvent {
-    kind: &'static str,
-    status: &'static str,
-    tool_name: Option<String>,
-    summary: String,
-    line: String,
-}
-
-#[derive(Debug, Clone)]
-struct ParsedTurnToolEvent {
-    event: TurnToolEvent,
-    identity_kind: &'static str,
-    identity_value: String,
-}
-
 fn resolve_channel_identifier(value: &str) -> Option<u64> {
     super::dispatches::resolve_channel_alias_pub(value).or_else(|| value.trim().parse::<u64>().ok())
 }
@@ -219,498 +174,6 @@ fn channel_override_is_allowed(
         .all_channels()
         .into_iter()
         .any(|channel| channel_identifier_matches(&channel, override_channel))
-}
-
-fn extract_tmux_name(session_key: &str) -> Option<String> {
-    session_key
-        .split_once(':')
-        .map(|(_, tmux_name)| tmux_name.trim())
-        .filter(|tmux_name| !tmux_name.is_empty())
-        .map(str::to_string)
-}
-
-fn ansi_escape_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\x1B\[[0-?]*[ -/]*[@-~]").expect("valid ANSI regex"))
-}
-
-fn bearer_token_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)(authorization\s*:\s*bearer\s+)[^\s]+").expect("valid bearer regex")
-    })
-}
-
-fn secret_assignment_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r"(?i)\b([A-Z0-9_]*(?:TOKEN|API[_-]?KEY|SECRET)[A-Z0-9_]*)\b(\s*[:=]\s*)([^\s]+)",
-        )
-        .expect("valid secret assignment regex")
-    })
-}
-
-fn strip_ansi(text: &str) -> String {
-    ansi_escape_re().replace_all(text, "").replace('\r', "")
-}
-
-fn sanitize_sensitive_text(text: &str) -> String {
-    let masked_bearer = bearer_token_re().replace_all(text, "$1[REDACTED]");
-    secret_assignment_re()
-        .replace_all(&masked_bearer, "$1$2[REDACTED]")
-        .into_owned()
-}
-
-fn tail_chars(text: &str, max_chars: usize) -> String {
-    let total = text.chars().count();
-    if total <= max_chars {
-        return text.to_string();
-    }
-    let tail: String = text.chars().skip(total - max_chars).collect();
-    format!("…{tail}")
-}
-
-fn normalize_recent_output(text: &str) -> Option<String> {
-    let stripped = strip_ansi(text);
-    let lines: Vec<&str> = stripped.lines().collect();
-    let start = lines.len().saturating_sub(TURN_CAPTURE_TAIL_LINES);
-    let mut out = String::new();
-    let mut prev_blank = false;
-
-    for line in &lines[start..] {
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
-            if prev_blank {
-                continue;
-            }
-            prev_blank = true;
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            continue;
-        }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&sanitize_sensitive_text(trimmed));
-        prev_blank = false;
-    }
-
-    let normalized = out.trim();
-    (!normalized.is_empty()).then(|| tail_chars(normalized, TURN_OUTPUT_MAX_CHARS))
-}
-
-fn sanitize_status_line(text: &str) -> Option<String> {
-    let stripped = strip_ansi(text);
-    let sanitized = sanitize_sensitive_text(stripped.trim());
-    let normalized = sanitized.trim();
-    (!normalized.is_empty()).then(|| normalized.to_string())
-}
-
-fn capture_recent_tmux_output(tmux_name: &str) -> Option<String> {
-    let capture =
-        crate::services::platform::tmux::capture_pane(tmux_name, TURN_CAPTURE_SCROLLBACK_LINES)?;
-    normalize_recent_output(&capture)
-}
-
-fn load_inflight_snapshot(
-    provider: Option<&str>,
-    tmux_name: Option<&str>,
-) -> Option<InflightTurnSnapshot> {
-    let tmux_name = tmux_name?.trim();
-    if tmux_name.is_empty() {
-        return None;
-    }
-
-    let inflight_root = crate::config::runtime_root()?
-        .join("runtime")
-        .join("discord_inflight");
-    let provider_dirs: Vec<std::path::PathBuf> =
-        match provider.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(provider) => vec![inflight_root.join(provider)],
-            None => std::fs::read_dir(&inflight_root)
-                .ok()?
-                .flatten()
-                .map(|entry| entry.path())
-                .collect(),
-        };
-
-    for dir in provider_dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(data) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(state) = serde_json::from_str::<serde_json::Value>(&data) else {
-                continue;
-            };
-            if state
-                .get("tmux_session_name")
-                .and_then(|value| value.as_str())
-                != Some(tmux_name)
-            {
-                continue;
-            }
-            return Some(InflightTurnSnapshot {
-                started_at: state
-                    .get("started_at")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                updated_at: state
-                    .get("updated_at")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                current_tool_line: state
-                    .get("current_tool_line")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                prev_tool_status: state
-                    .get("prev_tool_status")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                full_response: state
-                    .get("full_response")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                task_notification_kind: state
-                    .get("task_notification_kind")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-            });
-        }
-    }
-
-    None
-}
-
-fn inflight_recent_output(snapshot: &InflightTurnSnapshot) -> Option<String> {
-    let mut sections = Vec::new();
-    if let Some(tool_line) = snapshot
-        .prev_tool_status
-        .as_deref()
-        .and_then(sanitize_status_line)
-    {
-        sections.push(tool_line);
-    }
-    if let Some(tool_line) = snapshot
-        .current_tool_line
-        .as_deref()
-        .and_then(sanitize_status_line)
-    {
-        sections.push(tool_line);
-    }
-    if let Some(response) = snapshot
-        .full_response
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        sections.push(response.to_string());
-    }
-    (!sections.is_empty())
-        .then(|| normalize_recent_output(&sections.join("\n\n")))
-        .flatten()
-}
-
-fn parse_turn_tool_event(line: &str) -> Option<ParsedTurnToolEvent> {
-    let trimmed = sanitize_status_line(line)?;
-
-    if trimmed.starts_with("💭") {
-        return Some(ParsedTurnToolEvent {
-            event: TurnToolEvent {
-                kind: "thinking",
-                status: "info",
-                tool_name: None,
-                summary: trimmed.trim_start_matches("💭").trim().to_string(),
-                line: trimmed.to_string(),
-            },
-            identity_kind: "thinking",
-            identity_value: "thinking".to_string(),
-        });
-    }
-
-    let (status, stripped) = if let Some(rest) = trimmed.strip_prefix("⚙") {
-        ("running", rest)
-    } else if let Some(rest) = trimmed.strip_prefix("✓") {
-        ("success", rest)
-    } else if let Some(rest) = trimmed.strip_prefix("✗") {
-        ("error", rest)
-    } else {
-        return None;
-    };
-
-    let stripped = stripped.trim();
-    if stripped.is_empty() {
-        return None;
-    }
-    let (tool_name, summary) = match stripped.split_once(':') {
-        Some((name, summary)) => (
-            Some(name.trim().to_string()).filter(|value| !value.is_empty()),
-            summary.trim().to_string(),
-        ),
-        None => (Some(stripped.to_string()), String::new()),
-    };
-    let summary = if summary.is_empty() {
-        tool_name.clone().unwrap_or_else(|| stripped.to_string())
-    } else {
-        summary
-    };
-
-    Some(ParsedTurnToolEvent {
-        event: TurnToolEvent {
-            kind: "tool",
-            status,
-            tool_name,
-            summary,
-            line: trimmed.to_string(),
-        },
-        identity_kind: "tool",
-        identity_value: stripped.to_string(),
-    })
-}
-
-fn collect_turn_tool_events(
-    recent_output: Option<&str>,
-    inflight: Option<&InflightTurnSnapshot>,
-) -> Vec<TurnToolEvent> {
-    let mut parsed = Vec::<ParsedTurnToolEvent>::new();
-    let mut push_line = |line: &str| {
-        let Some(event) = parse_turn_tool_event(line) else {
-            return;
-        };
-
-        if let Some(last) = parsed.last_mut() {
-            if last.identity_kind == event.identity_kind
-                && last.identity_value == event.identity_value
-            {
-                *last = event;
-                return;
-            }
-        }
-
-        parsed.push(event);
-    };
-
-    if let Some(previous) = inflight
-        .and_then(|snapshot| snapshot.prev_tool_status.as_deref())
-        .and_then(sanitize_status_line)
-    {
-        push_line(&previous);
-    }
-
-    if let Some(output) = recent_output {
-        for line in output.lines() {
-            push_line(line);
-        }
-    }
-
-    if let Some(current) = inflight
-        .and_then(|snapshot| snapshot.current_tool_line.as_deref())
-        .and_then(sanitize_status_line)
-    {
-        push_line(&current);
-    }
-
-    let len = parsed.len();
-    parsed
-        .into_iter()
-        .skip(len.saturating_sub(24))
-        .map(|entry| entry.event)
-        .collect()
-}
-
-async fn agent_exists_pg(pool: &sqlx::PgPool, id: &str) -> Result<bool, sqlx::Error> {
-    let row = sqlx::query("SELECT COUNT(*)::BIGINT AS count FROM agents WHERE id = $1")
-        .bind(id)
-        .fetch_one(pool)
-        .await?;
-    Ok(row.try_get::<i64, _>("count").unwrap_or(0) > 0)
-}
-
-fn pg_timestamp_to_rfc3339(value: Option<DateTime<Utc>>) -> Option<String> {
-    value.map(|value| value.to_rfc3339())
-}
-
-async fn find_agent_turn_session_pg(
-    pool: &sqlx::PgPool,
-    agent_id: &str,
-) -> Result<Option<AgentTurnSession>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT COALESCE(s.session_key, '') AS session_key,
-                s.provider,
-                s.status,
-                s.active_dispatch_id,
-                s.last_heartbeat,
-                s.created_at,
-                s.thread_channel_id::TEXT AS thread_channel_id,
-                COALESCE(
-                    s.thread_channel_id::TEXT,
-                    a.discord_channel_id,
-                    a.discord_channel_alt,
-                    a.discord_channel_cc,
-                    a.discord_channel_cdx
-                ) AS runtime_channel_id
-         FROM sessions s
-         LEFT JOIN agents a ON a.id = s.agent_id
-         WHERE s.agent_id = $1
-         ORDER BY s.last_heartbeat DESC NULLS LAST, s.created_at DESC NULLS LAST, s.id DESC",
-    )
-    .bind(agent_id)
-    .fetch_all(pool)
-    .await?;
-
-    let mut resolver = SessionActivityResolver::new();
-    let mut latest = None;
-
-    for row in rows {
-        let session_key: String = row.try_get("session_key")?;
-        let provider: Option<String> = row.try_get("provider")?;
-        let raw_status: Option<String> = row.try_get("status")?;
-        let active_dispatch_id: Option<String> = row.try_get("active_dispatch_id")?;
-        let last_heartbeat = pg_timestamp_to_rfc3339(row.try_get("last_heartbeat")?);
-        let created_at = pg_timestamp_to_rfc3339(row.try_get("created_at")?);
-        let thread_channel_id: Option<String> = row.try_get("thread_channel_id")?;
-        let runtime_channel_id: Option<String> = row.try_get("runtime_channel_id")?;
-        let session_key_ref = (!session_key.trim().is_empty()).then_some(session_key.as_str());
-        let effective = resolver.resolve(
-            session_key_ref,
-            raw_status.as_deref(),
-            active_dispatch_id.as_deref(),
-            last_heartbeat.as_deref(),
-        );
-        let candidate = AgentTurnSession {
-            session_key,
-            provider,
-            last_heartbeat,
-            created_at,
-            thread_channel_id,
-            runtime_channel_id,
-            effective_status: effective.status,
-            effective_active_dispatch_id: effective.active_dispatch_id,
-            is_working: effective.is_working,
-        };
-        if latest.is_none() {
-            latest = Some(candidate.clone());
-        }
-        if candidate.is_working {
-            return Ok(Some(candidate));
-        }
-    }
-
-    Ok(latest)
-}
-
-async fn find_diag_session_pg(
-    pool: &sqlx::PgPool,
-    identifier: &str,
-) -> Result<Option<AgentDiagSession>, sqlx::Error> {
-    let identifier = identifier.trim();
-    if identifier.is_empty() {
-        return Ok(None);
-    }
-
-    let row = sqlx::query(
-        "SELECT COALESCE(s.session_key, '') AS session_key,
-                s.agent_id,
-                a.name AS agent_name,
-                s.provider,
-                s.status,
-                s.last_tool_at,
-                COALESCE(s.active_children, 0) AS active_children,
-                s.thread_channel_id::TEXT AS thread_channel_id,
-                s.created_at
-           FROM sessions s
-           LEFT JOIN agents a ON a.id = s.agent_id
-          WHERE s.agent_id = $1
-             OR s.thread_channel_id::TEXT = $1
-             OR a.discord_channel_id = $1
-             OR a.discord_channel_alt = $1
-             OR a.discord_channel_cc = $1
-             OR a.discord_channel_cdx = $1
-          ORDER BY CASE
-                       WHEN s.status IN ('turn_active', 'working') THEN 0
-                       WHEN s.status = 'awaiting_bg' THEN 1
-                       ELSE 2
-                   END,
-                   s.last_heartbeat DESC NULLS LAST,
-                   s.last_tool_at DESC NULLS LAST,
-                   s.created_at DESC NULLS LAST,
-                   s.id DESC
-          LIMIT 1",
-    )
-    .bind(identifier)
-    .fetch_optional(pool)
-    .await?;
-
-    row.map(|row| {
-        Ok(AgentDiagSession {
-            session_key: row.try_get("session_key")?,
-            agent_id: row.try_get("agent_id").ok().flatten(),
-            agent_name: row.try_get("agent_name").ok().flatten(),
-            provider: row.try_get("provider").ok().flatten(),
-            status: row.try_get("status").ok().flatten(),
-            last_tool_at: row.try_get("last_tool_at").ok().flatten(),
-            active_children: row.try_get("active_children").unwrap_or(0),
-            thread_channel_id: row.try_get("thread_channel_id").ok().flatten(),
-            created_at: row.try_get("created_at").ok().flatten(),
-        })
-    })
-    .transpose()
-}
-
-fn loop_suspicion(events: &[TurnToolEvent]) -> serde_json::Value {
-    let mut tail = events
-        .iter()
-        .rev()
-        .filter(|event| event.kind == "tool")
-        .filter_map(|event| {
-            let tool = event.tool_name.as_deref()?.trim();
-            if tool.is_empty() {
-                return None;
-            }
-            let prefix: String = event.summary.chars().take(80).collect();
-            Some((tool.to_ascii_lowercase(), prefix))
-        });
-
-    let Some((tool, prefix)) = tail.next() else {
-        return json!({
-            "suspected": false,
-            "reason": null,
-            "repeat_count": 0,
-            "tool": null,
-        });
-    };
-    let mut count = 1usize;
-    for (next_tool, next_prefix) in tail {
-        if next_tool == tool && next_prefix == prefix {
-            count += 1;
-        } else {
-            break;
-        }
-    }
-
-    if count >= 5 {
-        json!({
-            "suspected": true,
-            "reason": format!("same tool/input prefix repeated {count} times"),
-            "repeat_count": count,
-            "tool": tool,
-        })
-    } else {
-        json!({
-            "suspected": false,
-            "reason": null,
-            "repeat_count": count,
-            "tool": tool,
-        })
-    }
 }
 
 // ── Handlers ─────────────────────────────────────────────────
@@ -850,17 +313,6 @@ pub async fn agent_diag(
     )
 }
 
-/// #1671 — parse the inflight `started_at`/`updated_at` localtime encoding
-/// (`YYYY-MM-DD HH:MM:SS`) into a Unix timestamp without pulling in the
-/// service-side helper (which is not exposed at the route layer).
-pub(super) fn parse_local_timestamp_to_unix(value: &str) -> Option<i64> {
-    let naive = chrono::NaiveDateTime::parse_from_str(value.trim(), "%Y-%m-%d %H:%M:%S").ok()?;
-    chrono::Local
-        .from_local_datetime(&naive)
-        .single()
-        .map(|local| local.with_timezone(&Utc).timestamp())
-}
-
 /// GET /api/agents/:id/offices
 pub async fn agent_offices(
     State(state): State<AppState>,
@@ -885,41 +337,13 @@ pub async fn agent_offices(
         }
     }
 
-    let rows = match sqlx::query(
-        "SELECT o.id, o.name, o.layout, oa.department_id, oa.joined_at
-         FROM office_agents oa
-         INNER JOIN offices o ON o.id = oa.office_id
-         WHERE oa.agent_id = $1
-         ORDER BY o.id",
-    )
-    .bind(&id)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
-            );
-        }
-    };
-
-    let offices: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| {
-            json!({
-                "id": row.try_get::<String, _>("id").unwrap_or_default(),
-                "name": row.try_get::<Option<String>, _>("name").ok().flatten(),
-                "layout": row.try_get::<Option<String>, _>("layout").ok().flatten(),
-                "assigned": true,
-                "office_department_id": row.try_get::<Option<String>, _>("department_id").ok().flatten(),
-                "joined_at": pg_timestamp_to_rfc3339(row.try_get("joined_at").ok().flatten()),
-            })
-        })
-        .collect();
-
-    (StatusCode::OK, Json(json!({"offices": offices})))
+    match list_agent_offices_pg_json(pool, &id).await {
+        Ok(offices) => (StatusCode::OK, Json(json!({"offices": offices}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query: {e}")})),
+        ),
+    }
 }
 
 /// GET /api/agents/:id/cron
@@ -975,50 +399,23 @@ pub async fn agent_skills(
         }
     }
 
-    let rows = match sqlx::query(
-        "SELECT DISTINCT s.id, s.name, s.description, s.source_path, s.trigger_patterns, s.updated_at
-         FROM skills s
-         INNER JOIN skill_usage su ON su.skill_id = s.id
-         WHERE su.agent_id = $1
-         ORDER BY s.id",
-    )
-    .bind(&id)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
+    match list_agent_skills_pg_json(pool, &id).await {
+        Ok(skills) => {
+            let total_count = skills.len();
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "skills": skills,
+                    "sharedSkills": [],
+                    "totalCount": total_count,
+                })),
             )
         }
-    };
-
-    let skills: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| {
-            json!({
-                "id": row.try_get::<String, _>("id").unwrap_or_default(),
-                "name": row.try_get::<Option<String>, _>("name").ok().flatten(),
-                "description": row.try_get::<Option<String>, _>("description").ok().flatten(),
-                "source_path": row.try_get::<Option<String>, _>("source_path").ok().flatten(),
-                "trigger_patterns": row.try_get::<Option<String>, _>("trigger_patterns").ok().flatten(),
-                "updated_at": pg_timestamp_to_rfc3339(row.try_get("updated_at").ok().flatten()),
-            })
-        })
-        .collect();
-
-    let total_count = skills.len();
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "skills": skills,
-            "sharedSkills": [],
-            "totalCount": total_count,
-        })),
-    )
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query: {e}")})),
+        ),
+    }
 }
 
 /// GET /api/agents/:id/dispatched-sessions
@@ -1045,201 +442,13 @@ pub async fn agent_dispatched_sessions(
         }
     }
 
-    // SQL only orders by recency now. Dedupe + activity-aware ranking are
-    // both done in application code below using SessionActivityResolver,
-    // because raw status='working' can lag behind the resolver's view
-    // (Codex review PR #1258, 9th pass).
-    // LEFT JOIN task_dispatches via active_dispatch_id so the response can
-    // expose the kanban_card_id this session is currently working on. The
-    // dashboard's restored "감사 / Audit" panel uses that mapping to
-    // deeplink each audit row to the most recent Discord turn for the same
-    // card without a separate API round-trip.
-    let rows = match sqlx::query(
-        "SELECT s.id, s.session_key, s.agent_id, s.provider, s.status, s.active_dispatch_id,
-                s.model, s.tokens, s.cwd, s.last_heartbeat, s.thread_channel_id,
-                td.kanban_card_id AS kanban_card_id
-         FROM sessions s
-         LEFT JOIN task_dispatches td ON td.id = s.active_dispatch_id
-         WHERE s.agent_id = $1
-         ORDER BY COALESCE(s.last_heartbeat, s.created_at) DESC NULLS LAST, s.id DESC",
-    )
-    .bind(&id)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
-            );
-        }
-    };
-
-    let guild_id = state
-        .config
-        .discord
-        .guild_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    // Resolve every row first — SessionActivityResolver translates raw
-    // status + active_dispatch_id + heartbeat freshness into the effective
-    // status the dashboard renders. We need that view *before* the dedupe
-    // so the live row beats a stale 'working' sibling for the same
-    // (thread_channel_id, provider).
-    let mut resolver = SessionActivityResolver::new();
-    let resolved: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| {
-            let session_key = row
-                .try_get::<Option<String>, _>("session_key")
-                .ok()
-                .flatten();
-            let status = row.try_get::<Option<String>, _>("status").ok().flatten();
-            let active_dispatch_id = row
-                .try_get::<Option<String>, _>("active_dispatch_id")
-                .ok()
-                .flatten();
-            let last_heartbeat =
-                pg_timestamp_to_rfc3339(row.try_get("last_heartbeat").ok().flatten());
-            let provider = row.try_get::<Option<String>, _>("provider").ok().flatten();
-            let thread_channel_id = row
-                .try_get::<Option<String>, _>("thread_channel_id")
-                .ok()
-                .flatten();
-
-            let effective = resolver.resolve(
-                session_key.as_deref(),
-                status.as_deref(),
-                active_dispatch_id.as_deref(),
-                last_heartbeat.as_deref(),
-            );
-
-            let (channel_web_url, channel_deeplink_url) =
-                build_channel_deeplinks(thread_channel_id.as_deref(), guild_id.as_deref());
-            let kanban_card_id = row
-                .try_get::<Option<String>, _>("kanban_card_id")
-                .ok()
-                .flatten();
-
-            // Issue #1241: expose canonical {channel_id, deeplink_url, thread_id,
-            // thread_deeplink_url} so the dashboard can drop the field straight
-            // into an anchor `href` without rebuilding Discord URLs client-side.
-            // Legacy thread_channel_id / channel_web_url / channel_deeplink_url
-            // remain for backwards compatibility — every dispatched session
-            // lives inside its agent thread, so channel_id === thread_id and
-            // deeplink_url === thread web URL.
-            json!({
-                "id": row.try_get::<i64, _>("id").unwrap_or(0),
-                "session_key": session_key,
-                "agent_id": row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
-                "provider": provider,
-                "status": effective.status,
-                "active_dispatch_id": effective.active_dispatch_id,
-                "model": row.try_get::<Option<String>, _>("model").ok().flatten(),
-                "tokens": row.try_get::<i64, _>("tokens").unwrap_or(0),
-                "cwd": row.try_get::<Option<String>, _>("cwd").ok().flatten(),
-                "last_heartbeat": last_heartbeat,
-                "thread_channel_id": thread_channel_id.clone(),
-                "channel_id": thread_channel_id.clone(),
-                "thread_id": thread_channel_id,
-                "guild_id": guild_id.clone(),
-                "channel_web_url": channel_web_url.clone(),
-                "channel_deeplink_url": channel_deeplink_url.clone(),
-                "deeplink_url": channel_web_url,
-                "thread_deeplink_url": channel_deeplink_url,
-                "kanban_card_id": kanban_card_id,
-            })
-        })
-        .collect();
-
-    let sessions = dedup_dispatched_sessions(resolved);
-
-    (StatusCode::OK, Json(json!({"sessions": sessions})))
-}
-
-/// Issue #1241: dedupe dispatched-session rows by `(channel_id, agent_id)`.
-///
-/// The previous key was `(channel_id, provider)`; that let two rows for the
-/// same agent in the same Discord channel survive whenever a stale alt-provider
-/// session lingered, which surfaced as the duplicated "#agent-manager
-/// #agent-manager" labels the issue calls out. Using `(channel_id, agent_id)`
-/// collapses each agent ↔ channel pairing to a single canonical row even when
-/// the legacy session row carries a different provider snapshot.
-///
-/// Within each (channel, agent) bucket we keep the row with the highest
-/// effective priority — Codex review (PR #1258, 9th pass): dedupe AFTER the
-/// SessionActivityResolver translation so the resolved 'working' row outranks
-/// a stale sibling that still has raw status='working' but no fresh heartbeat
-/// / no active dispatch.
-fn dedup_dispatched_sessions(resolved: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
-    fn effective_priority(value: &serde_json::Value) -> u8 {
-        let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("");
-        let has_dispatch = value
-            .get("active_dispatch_id")
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
-        match status {
-            "working" => 0,
-            _ if has_dispatch => 1,
-            "idle" => 2,
-            _ => 3,
-        }
-    }
-
-    let mut best_index_for_key: std::collections::HashMap<(String, String), usize> =
-        std::collections::HashMap::new();
-    let mut keep: Vec<bool> = vec![true; resolved.len()];
-    for (idx, value) in resolved.iter().enumerate() {
-        let channel = value
-            .get("channel_id")
-            .and_then(|v| v.as_str())
-            .or_else(|| value.get("thread_channel_id").and_then(|v| v.as_str()));
-        let agent_id = value.get("agent_id").and_then(|v| v.as_str());
-        if let (Some(cid), Some(aid)) = (channel, agent_id) {
-            let key = (cid.to_string(), aid.to_string());
-            match best_index_for_key.get(&key) {
-                None => {
-                    best_index_for_key.insert(key, idx);
-                }
-                Some(&prev_idx) => {
-                    let prev_priority = effective_priority(&resolved[prev_idx]);
-                    let curr_priority = effective_priority(value);
-                    if curr_priority < prev_priority {
-                        keep[prev_idx] = false;
-                        best_index_for_key.insert(key, idx);
-                    } else {
-                        keep[idx] = false;
-                    }
-                }
-            }
-        }
-    }
-
-    resolved
-        .into_iter()
-        .enumerate()
-        .filter_map(|(idx, value)| if keep[idx] { Some(value) } else { None })
-        .collect()
-}
-
-/// Build Discord web + deep-link URLs for a channel. Returns (None, None) when either
-/// channel_id or guild_id is missing so the caller can render plain text fallback.
-fn build_channel_deeplinks(
-    channel_id: Option<&str>,
-    guild_id: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    let channel = channel_id.map(str::trim).filter(|s| !s.is_empty());
-    let guild = guild_id.map(str::trim).filter(|s| !s.is_empty());
-    match (channel, guild) {
-        (Some(c), Some(g)) => (
-            Some(format!("https://discord.com/channels/{g}/{c}")),
-            Some(format!("discord://discord.com/channels/{g}/{c}")),
+    let guild_id = state.config.discord.guild_id.as_deref();
+    match list_agent_dispatched_sessions_pg_json(pool, &id, guild_id).await {
+        Ok(sessions) => (StatusCode::OK, Json(json!({"sessions": sessions}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query: {e}")})),
         ),
-        _ => (None, None),
     }
 }
 
@@ -1711,18 +920,7 @@ pub async fn stop_agent_turn(
     )
     .await;
 
-    sqlx::query(
-        "UPDATE sessions
-         SET status = 'disconnected',
-             active_dispatch_id = NULL,
-             claude_session_id = NULL,
-             raw_provider_session_id = NULL
-         WHERE session_key = $1",
-    )
-    .bind(&session_key)
-    .execute(pool)
-    .await
-    .ok();
+    mark_session_disconnected_pg(pool, &session_key).await;
 
     let status = StatusCode::OK;
     let Json(mut body) = Json(json!({
@@ -1770,88 +968,13 @@ pub async fn agent_timeline(
     }
 
     let limit = params.limit.unwrap_or(30);
-
-    let sql = "
-        SELECT id, source, type, title, status, timestamp, duration_ms FROM (
-            SELECT
-                id,
-                'dispatch' AS source,
-                COALESCE(dispatch_type, 'task') AS type,
-                title,
-                status,
-                (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS timestamp,
-                CASE
-                    WHEN updated_at IS NOT NULL AND created_at IS NOT NULL
-                    THEN ((EXTRACT(EPOCH FROM updated_at) - EXTRACT(EPOCH FROM created_at)) * 1000)::BIGINT
-                    ELSE NULL
-                END AS duration_ms
-            FROM task_dispatches
-            WHERE to_agent_id = $1 OR from_agent_id = $1
-
-            UNION ALL
-
-            SELECT
-                id::TEXT,
-                'session' AS source,
-                'session' AS type,
-                COALESCE(session_key, 'session') AS title,
-                status,
-                (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS timestamp,
-                CASE
-                    WHEN last_heartbeat IS NOT NULL AND created_at IS NOT NULL
-                    THEN ((EXTRACT(EPOCH FROM last_heartbeat) - EXTRACT(EPOCH FROM created_at)) * 1000)::BIGINT
-                    ELSE NULL
-                END AS duration_ms
-            FROM sessions
-            WHERE agent_id = $1
-
-            UNION ALL
-
-            SELECT
-                id,
-                'kanban' AS source,
-                'card' AS type,
-                title,
-                status,
-                (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS timestamp,
-                CASE
-                    WHEN updated_at IS NOT NULL AND created_at IS NOT NULL
-                    THEN ((EXTRACT(EPOCH FROM updated_at) - EXTRACT(EPOCH FROM created_at)) * 1000)::BIGINT
-                    ELSE NULL
-                END AS duration_ms
-            FROM kanban_cards
-            WHERE assigned_agent_id = $1
-        )
-        ORDER BY timestamp DESC
-        LIMIT $2
-    ";
-
-    let rows = match sqlx::query(sql).bind(&id).bind(limit).fetch_all(pool).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
-            );
-        }
-    };
-
-    let events: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| {
-            json!({
-                "id": row.try_get::<String, _>("id").unwrap_or_default(),
-                "source": row.try_get::<String, _>("source").unwrap_or_default(),
-                "type": row.try_get::<String, _>("type").unwrap_or_default(),
-                "title": row.try_get::<Option<String>, _>("title").ok().flatten(),
-                "status": row.try_get::<Option<String>, _>("status").ok().flatten(),
-                "timestamp": row.try_get::<Option<i64>, _>("timestamp").ok().flatten(),
-                "duration_ms": row.try_get::<Option<i64>, _>("duration_ms").ok().flatten(),
-            })
-        })
-        .collect();
-
-    (StatusCode::OK, Json(json!({"events": events})))
+    match list_agent_timeline_pg_json(pool, &id, limit).await {
+        Ok(events) => (StatusCode::OK, Json(json!({"events": events}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query: {e}")})),
+        ),
+    }
 }
 
 /// GET /api/agents/:id/transcripts?limit=10
@@ -1894,76 +1017,6 @@ pub async fn agent_transcripts(
     }
 }
 
-async fn list_agent_transcripts_pg_json(
-    pool: &sqlx::PgPool,
-    agent_id: &str,
-    limit: usize,
-) -> Result<Vec<serde_json::Value>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT st.id,
-                st.turn_id,
-                st.session_key,
-                st.channel_id,
-                st.agent_id,
-                st.provider,
-                st.dispatch_id,
-                td.kanban_card_id,
-                td.title AS dispatch_title,
-                kc.title AS card_title,
-                kc.github_issue_number,
-                st.user_message,
-                st.assistant_message,
-                st.events_json::text AS events_json,
-                st.duration_ms::BIGINT AS duration_ms,
-                to_char(st.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
-         FROM session_transcripts st
-         LEFT JOIN sessions s ON s.session_key = st.session_key
-         LEFT JOIN task_dispatches td ON td.id = st.dispatch_id
-         LEFT JOIN kanban_cards kc ON kc.id = td.kanban_card_id
-         WHERE COALESCE(NULLIF(BTRIM(st.agent_id), ''), NULLIF(BTRIM(s.agent_id), '')) = $1
-            OR (
-                COALESCE(NULLIF(BTRIM(st.agent_id), ''), NULLIF(BTRIM(s.agent_id), '')) IS NULL
-                AND td.to_agent_id = $1
-            )
-         ORDER BY st.created_at DESC, st.id DESC
-         LIMIT $2",
-    )
-    .bind(agent_id)
-    .bind(clamp_api_limit(Some(limit)) as i64)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let events = row
-                .try_get::<Option<String>, _>("events_json")
-                .ok()
-                .flatten()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .unwrap_or_else(|| json!([]));
-            json!({
-                "id": row.try_get::<i64, _>("id").unwrap_or(0),
-                "turn_id": row.try_get::<String, _>("turn_id").unwrap_or_default(),
-                "session_key": row.try_get::<Option<String>, _>("session_key").ok().flatten(),
-                "channel_id": row.try_get::<Option<String>, _>("channel_id").ok().flatten(),
-                "agent_id": row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
-                "provider": row.try_get::<Option<String>, _>("provider").ok().flatten(),
-                "dispatch_id": row.try_get::<Option<String>, _>("dispatch_id").ok().flatten(),
-                "kanban_card_id": row.try_get::<Option<String>, _>("kanban_card_id").ok().flatten(),
-                "dispatch_title": row.try_get::<Option<String>, _>("dispatch_title").ok().flatten(),
-                "card_title": row.try_get::<Option<String>, _>("card_title").ok().flatten(),
-                "github_issue_number": row.try_get::<Option<i64>, _>("github_issue_number").ok().flatten(),
-                "user_message": row.try_get::<String, _>("user_message").unwrap_or_default(),
-                "assistant_message": row.try_get::<String, _>("assistant_message").unwrap_or_default(),
-                "events": events,
-                "duration_ms": row.try_get::<Option<i64>, _>("duration_ms").ok().flatten(),
-                "created_at": row.try_get::<String, _>("created_at").unwrap_or_default(),
-            })
-        })
-        .collect())
-}
-
 /// POST /api/agents/:id/signal
 /// Agent sends an operational signal (e.g., "blocked" with reason).
 pub async fn agent_signal(
@@ -1982,17 +1035,7 @@ pub async fn agent_signal(
         return pg_required_response();
     };
 
-    let card_id: Option<String> = match sqlx::query_scalar(
-        "SELECT id
-         FROM kanban_cards
-         WHERE assigned_agent_id = $1 AND status = 'in_progress'
-         ORDER BY updated_at DESC
-         LIMIT 1",
-    )
-    .bind(&agent_id)
-    .fetch_optional(pool)
-    .await
-    {
+    let card_id = match block_active_card_for_agent_pg(pool, &agent_id, reason).await {
         Ok(card_id) => card_id,
         Err(error) => {
             return (
@@ -2008,13 +1051,6 @@ pub async fn agent_signal(
             Json(json!({"error": "no active card for agent"})),
         );
     };
-
-    sqlx::query("UPDATE kanban_cards SET blocked_reason = $1, updated_at = NOW() WHERE id = $2")
-        .bind(reason)
-        .bind(&card_id)
-        .execute(pool)
-        .await
-        .ok();
 
     (
         StatusCode::OK,
