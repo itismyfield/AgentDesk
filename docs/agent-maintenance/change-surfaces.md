@@ -6,7 +6,8 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-05-02 (against #1515 dispatched session SRP split).
+> Last refreshed: 2026-05-05 (against #1740 deployment-blocking migration
+> checksum hotfix).
 
 ## Read This First
 
@@ -257,6 +258,9 @@ The remaining giant-file modules under `src/services/` not covered above:
 - `src/services/onboarding.rs` (5279), `src/services/dispatched_sessions.rs`
   (2954), and `src/services/settings.rs` (1015) — service-layer route support
   surfaces split out of the large dashboard route modules.
+- `src/services/dispatches/outbox_route.rs` (1074) — dispatch outbox route
+  support extracted from the route layer; split before adding non-bugfix
+  behavior.
 - `src/services/claude.rs` (2477), `src/services/gemini.rs` (2565),
   `src/services/qwen.rs` (2466), `src/services/codex.rs` (1665),
   `src/services/opencode.rs` (2133), `src/services/provider.rs` (2177) —
