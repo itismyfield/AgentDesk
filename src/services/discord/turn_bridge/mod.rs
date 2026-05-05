@@ -223,6 +223,16 @@ fn merge_task_notification_kind(
     }
 }
 
+fn release_task_notification_kind(
+    current: Option<TaskNotificationKind>,
+    closed_kind: TaskNotificationKind,
+) -> Option<TaskNotificationKind> {
+    match current {
+        Some(existing) if existing == closed_kind => None,
+        other => other,
+    }
+}
+
 async fn close_next_tracked_background_child(
     pg_pool: Option<&sqlx::PgPool>,
     child_session_ids: &mut Vec<i64>,
@@ -1872,22 +1882,18 @@ pub(super) fn spawn_turn_bridge(
                                 // suppression decisions and persists into the
                                 // saved inflight when the watcher takes over.
                                 //
-                                // codex P2 followup: only reset the kind once
-                                // ALL tracked children have closed.
-                                // `active_background_child_session_ids` is a
-                                // queue and `close_next_tracked_background_child`
-                                // pops a single entry, so when concurrent
-                                // subagent children are tracked and only one
-                                // emits a terminal status we must keep the
-                                // outer kind so the remaining child still
-                                // routes through the ExplicitBackground/
-                                // Subagent classification path. A stack/multiset
-                                // of kinds would be the proper structural fix;
-                                // here we approximate by gating reset on the
-                                // remaining-children count, which covers the
-                                // single-kind concurrent-children regression.
+                                // codex P2 followup: only release the closed
+                                // child's kind once ALL tracked children have
+                                // closed. If a lower-priority child is the
+                                // last tracked one while a higher-priority
+                                // active classification is absorbed, keep the
+                                // higher-priority kind instead of clearing it.
                                 if active_background_child_session_ids.is_empty() {
-                                    inflight_state.task_notification_kind = None;
+                                    inflight_state.task_notification_kind =
+                                        release_task_notification_kind(
+                                            inflight_state.task_notification_kind,
+                                            kind,
+                                        );
                                 }
                             }
                             push_transcript_event(
@@ -4262,7 +4268,7 @@ pub(super) fn spawn_turn_bridge(
 #[cfg(test)]
 mod task_notification_kind_lifecycle_tests {
     use super::{
-        TaskNotificationKind, merge_task_notification_kind,
+        TaskNotificationKind, merge_task_notification_kind, release_task_notification_kind,
         task_notification_closes_background_child,
     };
 
@@ -4280,7 +4286,7 @@ mod task_notification_kind_lifecycle_tests {
             // `close_next_tracked_background_child` at the call site.
             let _ = child_ids.remove(0);
             if child_ids.is_empty() {
-                kind = None;
+                kind = release_task_notification_kind(kind, new_kind);
             }
         }
 
@@ -4298,7 +4304,7 @@ mod task_notification_kind_lifecycle_tests {
         if task_notification_closes_background_child(new_kind, status) {
             let _ = child_ids.remove(0);
             if child_ids.is_empty() {
-                kind = None;
+                kind = release_task_notification_kind(kind, new_kind);
             }
         }
         assert!(child_ids.is_empty());
@@ -4319,7 +4325,7 @@ mod task_notification_kind_lifecycle_tests {
         if task_notification_closes_background_child(new_kind, status) {
             let _ = child_ids.remove(0);
             if child_ids.is_empty() {
-                kind = None;
+                kind = release_task_notification_kind(kind, new_kind);
             }
         }
 
@@ -4342,7 +4348,7 @@ mod task_notification_kind_lifecycle_tests {
         if task_notification_closes_background_child(new_kind, status) {
             let _ = child_ids.remove(0);
             if child_ids.is_empty() {
-                kind = None;
+                kind = release_task_notification_kind(kind, new_kind);
             }
         }
 
@@ -4351,6 +4357,28 @@ mod task_notification_kind_lifecycle_tests {
             kind,
             Some(TaskNotificationKind::Subagent),
             "non-terminal must keep kind"
+        );
+    }
+
+    #[test]
+    fn lower_priority_child_close_preserves_higher_priority_kind() {
+        let mut child_ids: Vec<i64> = vec![7];
+        let mut kind: Option<TaskNotificationKind> = Some(TaskNotificationKind::MonitorAutoTurn);
+
+        let new_kind = TaskNotificationKind::Subagent;
+        kind = merge_task_notification_kind(kind, new_kind);
+        if task_notification_closes_background_child(new_kind, "completed") {
+            let _ = child_ids.remove(0);
+            if child_ids.is_empty() {
+                kind = release_task_notification_kind(kind, new_kind);
+            }
+        }
+
+        assert!(child_ids.is_empty());
+        assert_eq!(
+            kind,
+            Some(TaskNotificationKind::MonitorAutoTurn),
+            "#1683: lower-priority child terminal notification must not clear a higher-priority active kind"
         );
     }
 }

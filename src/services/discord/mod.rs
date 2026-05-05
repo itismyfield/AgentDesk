@@ -137,9 +137,9 @@ pub(crate) use runtime_bootstrap::run_bot;
 
 use crate::services::turn_orchestrator::{
     CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot, ClearChannelResult,
-    FinishTurnResult, QueueExitEvent, QueueExitKind, QueuePersistenceContext,
-    RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult, load_pending_queues,
-    warn_legacy_pending_queue_files,
+    FinishTurnResult, HydratePendingQueueResult, QueueExitEvent, QueueExitKind,
+    QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult,
+    load_pending_queues, warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, INTERVENTION_TTL, Intervention, InterventionMode,
@@ -2633,21 +2633,18 @@ async fn mailbox_replace_queue(
         .await;
 }
 
-/// codex review round-4 P2-1 (#1672): atomic disk → in-memory hydration
-/// helper. See `ChannelMailboxHandle::hydrate_pending_queue` for the
-/// race-free merge contract.
-async fn mailbox_hydrate_pending_queue(
+/// #1683: actor-local disk -> in-memory hydration helper. The mailbox
+/// actor reads the queue file and merges it in one serialized message,
+/// preventing stale out-of-actor disk snapshots from reintroducing an
+/// item that another actor message already dequeued and removed from disk.
+async fn mailbox_hydrate_pending_queue_from_disk(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
-    disk_items: Vec<Intervention>,
-) -> usize {
+) -> HydratePendingQueueResult {
     shared
         .mailbox(channel_id)
-        .hydrate_pending_queue(
-            disk_items,
-            queue_persistence_context(shared, provider, channel_id),
-        )
+        .hydrate_pending_queue_from_disk(queue_persistence_context(shared, provider, channel_id))
         .await
 }
 

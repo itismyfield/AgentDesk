@@ -25,8 +25,8 @@ use super::stale_resume::{
 };
 use super::{
     advance_tmux_relay_confirmed_end, merge_task_notification_kind, monitor_handoff_tool_context,
-    should_delegate_bridge_relay_to_watcher, task_notification_closes_background_child,
-    turn_bridge_replace_outcome_committed,
+    release_task_notification_kind, should_delegate_bridge_relay_to_watcher,
+    task_notification_closes_background_child, turn_bridge_replace_outcome_committed,
 };
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{StreamMessage, TaskNotificationKind};
@@ -3181,7 +3181,7 @@ fn shared_data_exposes_placeholder_controller() {
 ///
 /// This test pins the contract that the
 /// `StreamMessage::TaskNotification` arm in `mod.rs` resets
-/// `inflight_state.task_notification_kind = None` whenever
+/// `inflight_state.task_notification_kind` releases the closed kind whenever
 /// `task_notification_closes_background_child` returns true.
 #[test]
 fn task_notification_kind_resets_after_terminal_status() {
@@ -3197,7 +3197,7 @@ fn task_notification_kind_resets_after_terminal_status() {
     let status = "completed";
     kind = merge_task_notification_kind(kind, new_kind);
     if task_notification_closes_background_child(new_kind, status) {
-        kind = None;
+        kind = release_task_notification_kind(kind, new_kind);
     }
     assert_eq!(
         kind, None,
@@ -3210,7 +3210,7 @@ fn task_notification_kind_resets_after_terminal_status() {
         let new_kind = TaskNotificationKind::Subagent;
         kind = merge_task_notification_kind(kind, new_kind);
         if task_notification_closes_background_child(new_kind, status) {
-            kind = None;
+            kind = release_task_notification_kind(kind, new_kind);
         }
         assert_eq!(
             kind, None,
@@ -3225,7 +3225,7 @@ fn task_notification_kind_resets_after_terminal_status() {
     let status = "started";
     kind = merge_task_notification_kind(kind, new_kind);
     if task_notification_closes_background_child(new_kind, status) {
-        kind = None;
+        kind = release_task_notification_kind(kind, new_kind);
     }
     assert_eq!(
         kind,
@@ -3241,7 +3241,7 @@ fn task_notification_kind_resets_after_terminal_status() {
     let status = "completed";
     kind = merge_task_notification_kind(kind, new_kind);
     if task_notification_closes_background_child(new_kind, status) {
-        kind = None;
+        kind = release_task_notification_kind(kind, new_kind);
     }
     assert_eq!(
         kind,
@@ -3284,7 +3284,7 @@ fn task_notification_kind_persists_while_other_children_remain() {
         // `close_next_tracked_background_child`'s removal of `child_ids[0]`.
         let _popped = child_ids.remove(0);
         if child_ids.is_empty() {
-            kind = None;
+            kind = release_task_notification_kind(kind, new_kind);
         }
     }
 
@@ -3306,7 +3306,7 @@ fn task_notification_kind_persists_while_other_children_remain() {
     if task_notification_closes_background_child(new_kind, status) {
         let _popped = child_ids.remove(0);
         if child_ids.is_empty() {
-            kind = None;
+            kind = release_task_notification_kind(kind, new_kind);
         }
     }
     assert!(
@@ -3327,12 +3327,35 @@ fn task_notification_kind_persists_while_other_children_remain() {
     if task_notification_closes_background_child(new_kind, status) {
         let _popped = child_ids.remove(0);
         if child_ids.is_empty() {
-            kind = None;
+            kind = release_task_notification_kind(kind, new_kind);
         }
     }
     assert_eq!(
         kind,
         Some(TaskNotificationKind::Subagent),
         "#1670 P2: aborted on one child must NOT clear the kind while the other child remains"
+    );
+}
+
+#[test]
+fn task_notification_kind_release_preserves_higher_priority_active_kind() {
+    let mut child_ids: Vec<i64> = vec![300];
+    let mut kind: Option<TaskNotificationKind> = Some(TaskNotificationKind::MonitorAutoTurn);
+
+    let new_kind = TaskNotificationKind::Subagent;
+    let status = "completed";
+    kind = merge_task_notification_kind(kind, new_kind);
+    if task_notification_closes_background_child(new_kind, status) {
+        let _popped = child_ids.remove(0);
+        if child_ids.is_empty() {
+            kind = release_task_notification_kind(kind, new_kind);
+        }
+    }
+
+    assert!(child_ids.is_empty());
+    assert_eq!(
+        kind,
+        Some(TaskNotificationKind::MonitorAutoTurn),
+        "#1683: closing a lower-priority child must not clear a higher-priority active kind"
     );
 }

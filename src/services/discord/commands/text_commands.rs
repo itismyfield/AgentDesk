@@ -51,6 +51,17 @@ fn schedule_text_stop_pending_queue_drain(
     let shared = shared.clone();
     let provider = provider.clone();
     tokio::spawn(async move {
+        if let Some(registry) = shared.health_registry() {
+            let _ = super::super::health::schedule_pending_queue_drain_after_cancel(
+                registry.as_ref(),
+                provider.as_str(),
+                channel_id,
+                stop_source,
+            )
+            .await;
+            return;
+        }
+
         let snapshot = shared
             .mailbox(channel_id)
             .snapshot()
