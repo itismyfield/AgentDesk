@@ -3272,28 +3272,28 @@ where
                     // future turns are not permanently blocked after delivery fails.
                     // Guard: lifecycle notifications may fail during a live turn; resetting the
                     // session in that case would desync runtime state for an in-flight turn.
-                    let is_turn_delivery = row.source
-                        != crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE;
+                    let is_turn_delivery =
+                        row.source != crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE;
                     if is_turn_delivery {
-                    if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
-                        sqlx::query(
-                            "UPDATE sessions
+                        if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
+                            sqlx::query(
+                                "UPDATE sessions
                                 SET status = 'idle',
                                     updated_at = NOW()
                               WHERE thread_channel_id = $1
                                 AND status IN ('turn_active', 'working')",
-                        )
-                        .bind(channel_id_str)
-                        .execute(pg_pool)
-                        .await
-                        .ok();
-                        tracing::warn!(
-                            "[outbox] ❌ permanent delivery failure for channel {} (msg {}): {}",
-                            channel_id_str,
-                            row.id,
-                            error_text,
-                        );
-                    }
+                            )
+                            .bind(channel_id_str)
+                            .execute(pg_pool)
+                            .await
+                            .ok();
+                            tracing::warn!(
+                                "[outbox] ❌ permanent delivery failure for channel {} (msg {}): {}",
+                                channel_id_str,
+                                row.id,
+                                error_text,
+                            );
+                        }
                     }
                 }
                 MessageOutboxFailureAction::Retry {
