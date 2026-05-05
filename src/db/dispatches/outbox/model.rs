@@ -1,0 +1,27 @@
+use serde_json::Value;
+
+/// Tuple shape returned by `claim_pending_dispatch_outbox_batch_pg`.
+/// Mirrors the (id, dispatch_id, action, agent_id, card_id, title,
+/// retry_count, required_capabilities) column layout of `dispatch_outbox`.
+pub(crate) type DispatchOutboxRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<Value>,
+);
+
+/// Snapshot of a completed dispatch row used to build followup summaries.
+#[derive(Clone, Debug)]
+pub(crate) struct CompletedDispatchInfo {
+    pub(crate) dispatch_type: String,
+    pub(crate) status: String,
+    pub(crate) card_id: String,
+    pub(crate) result_json: Option<String>,
+    pub(crate) context_json: Option<String>,
+    pub(crate) thread_id: Option<String>,
+    pub(crate) duration_seconds: Option<i64>,
+}
