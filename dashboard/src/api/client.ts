@@ -756,32 +756,101 @@ export async function deleteKanbanCard(id: string): Promise<void> {
   await request(`/api/kanban-cards/${id}`, { method: "DELETE" });
 }
 
+export interface KanbanDispatchMutationResponse {
+  card: KanbanCard;
+  new_dispatch_id: string | null;
+  cancelled_dispatch_id: string | null;
+  next_action: string;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function requireFields(
+  endpoint: string,
+  value: Record<string, unknown>,
+  keys: string[],
+): void {
+  for (const key of keys) {
+    if (!hasOwn(value, key)) {
+      throw new Error(
+        `${endpoint} response contract invalid: missing required field '${key}'`,
+      );
+    }
+  }
+}
+
+function parseKanbanDispatchMutationResponse(
+  endpoint: string,
+  raw: unknown,
+): KanbanDispatchMutationResponse {
+  if (!isObjectRecord(raw)) {
+    throw new Error(`${endpoint} response contract invalid: expected object`);
+  }
+  requireFields(endpoint, raw, [
+    "card",
+    "new_dispatch_id",
+    "cancelled_dispatch_id",
+    "next_action",
+  ]);
+  if (!isObjectRecord(raw.card)) {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'card' must be an object`,
+    );
+  }
+  if (raw.new_dispatch_id !== null && typeof raw.new_dispatch_id !== "string") {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'new_dispatch_id' must be string or null`,
+    );
+  }
+  if (
+    raw.cancelled_dispatch_id !== null &&
+    typeof raw.cancelled_dispatch_id !== "string"
+  ) {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'cancelled_dispatch_id' must be string or null`,
+    );
+  }
+  if (typeof raw.next_action !== "string" || raw.next_action.trim() === "") {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'next_action' must be a non-empty string`,
+    );
+  }
+  return {
+    card: raw.card as unknown as KanbanCard,
+    new_dispatch_id: raw.new_dispatch_id,
+    cancelled_dispatch_id: raw.cancelled_dispatch_id,
+    next_action: raw.next_action,
+  };
+}
+
 export async function retryKanbanCard(
   id: string,
   payload?: { assignee_agent_id?: string | null; request_now?: boolean },
-): Promise<KanbanCard> {
-  const res = await request<{ card: KanbanCard }>(
-    `/api/kanban-cards/${id}/retry`,
-    {
-      method: "POST",
-      body: JSON.stringify(payload ?? {}),
-    },
-  );
-  return res.card;
+): Promise<KanbanDispatchMutationResponse> {
+  const endpoint = `/api/kanban-cards/${id}/retry`;
+  const res = await request<unknown>(endpoint, {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+  return parseKanbanDispatchMutationResponse(endpoint, res);
 }
 
 export async function redispatchKanbanCard(
   id: string,
   payload?: { reason?: string | null },
-): Promise<KanbanCard> {
-  const res = await request<{ card: KanbanCard }>(
-    `/api/kanban-cards/${id}/redispatch`,
-    {
-      method: "POST",
-      body: JSON.stringify(payload ?? {}),
-    },
-  );
-  return res.card;
+): Promise<KanbanDispatchMutationResponse> {
+  const endpoint = `/api/kanban-cards/${id}/redispatch`;
+  const res = await request<unknown>(endpoint, {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+  return parseKanbanDispatchMutationResponse(endpoint, res);
 }
 
 export async function patchKanbanDeferDod(
@@ -805,7 +874,7 @@ export async function patchKanbanDeferDod(
 
 export interface AssignmentResult {
   ok: boolean;
-  agent_id?: string;
+  agent_id: string;
 }
 
 export interface AssignmentTransitionResult {
@@ -814,17 +883,107 @@ export interface AssignmentTransitionResult {
   from?: string;
   to?: string;
   target?: string;
+  target_status: string;
+  next_action: string;
   steps?: string[];
   completed_steps?: Array<{ from?: string; to?: string; changed?: boolean }>;
   failed_step?: string;
-  error?: string;
+  error: string | null;
 }
 
 export interface AssignKanbanIssueResponse {
   card: KanbanCard;
   deduplicated?: boolean;
-  assignment?: AssignmentResult;
-  transition?: AssignmentTransitionResult;
+  assignment: AssignmentResult;
+  transition: AssignmentTransitionResult;
+}
+
+function parseAssignKanbanIssueResponse(
+  endpoint: string,
+  raw: unknown,
+): AssignKanbanIssueResponse {
+  if (!isObjectRecord(raw)) {
+    throw new Error(`${endpoint} response contract invalid: expected object`);
+  }
+  requireFields(endpoint, raw, ["card", "assignment", "transition"]);
+
+  const assignment = raw.assignment;
+  const transition = raw.transition;
+  if (!isObjectRecord(raw.card)) {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'card' must be an object`,
+    );
+  }
+  if (!isObjectRecord(assignment)) {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'assignment' must be an object`,
+    );
+  }
+  if (!isObjectRecord(transition)) {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'transition' must be an object`,
+    );
+  }
+
+  requireFields(endpoint, assignment, ["ok", "agent_id"]);
+  requireFields(endpoint, transition, [
+    "attempted",
+    "ok",
+    "target_status",
+    "error",
+    "next_action",
+  ]);
+
+  if (typeof assignment.ok !== "boolean") {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'assignment.ok' must be boolean`,
+    );
+  }
+  if (
+    typeof assignment.agent_id !== "string" ||
+    assignment.agent_id.trim() === ""
+  ) {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'assignment.agent_id' must be a non-empty string`,
+    );
+  }
+  if (
+    typeof transition.attempted !== "boolean" ||
+    typeof transition.ok !== "boolean"
+  ) {
+    throw new Error(
+      `${endpoint} response contract invalid: transition booleans must be boolean`,
+    );
+  }
+  if (
+    typeof transition.target_status !== "string" ||
+    transition.target_status.trim() === ""
+  ) {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'transition.target_status' must be a non-empty string`,
+    );
+  }
+  if (transition.error !== null && typeof transition.error !== "string") {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'transition.error' must be string or null`,
+    );
+  }
+  if (
+    typeof transition.next_action !== "string" ||
+    transition.next_action.trim() === ""
+  ) {
+    throw new Error(
+      `${endpoint} response contract invalid: field 'transition.next_action' must be a non-empty string`,
+    );
+  }
+
+  return {
+    card: raw.card as unknown as KanbanCard,
+    deduplicated:
+      typeof raw.deduplicated === "boolean" ? raw.deduplicated : undefined,
+    assignment: assignment as unknown as AssignmentResult,
+    transition: transition as unknown as AssignmentTransitionResult,
+  };
 }
 
 export async function assignKanbanIssue(payload: {
@@ -835,13 +994,12 @@ export async function assignKanbanIssue(payload: {
   description?: string | null;
   assignee_agent_id: string;
 }): Promise<AssignKanbanIssueResponse> {
-  return request<AssignKanbanIssueResponse>(
-    "/api/kanban-cards/assign-issue",
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-    },
-  );
+  const endpoint = "/api/kanban-cards/assign-issue";
+  const res = await request<unknown>(endpoint, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return parseAssignKanbanIssueResponse(endpoint, res);
 }
 
 export async function getStalledCards(): Promise<KanbanCard[]> {

@@ -40,6 +40,11 @@ pub(super) fn render_prompt_manifest_report(manifest: &PromptManifest) -> String
             manifest.layers.len()
         ),
     );
+    push_kv(
+        &mut out,
+        "storage",
+        &format_prompt_manifest_storage(manifest),
+    );
     push_line(&mut out, "");
     push_line(&mut out, "Layers");
     for layer in &manifest.layers {
@@ -90,6 +95,33 @@ fn format_prompt_layer_summary(layer: &PromptManifestLayer) -> String {
         source,
         format_tokens(layer.tokens_est),
         visibility_label(layer.content_visibility)
+    )
+}
+
+fn format_prompt_manifest_storage(manifest: &PromptManifest) -> String {
+    let stored_bytes: usize = manifest
+        .layers
+        .iter()
+        .map(|layer| {
+            layer.full_content.as_ref().map_or(0, |value| value.len())
+                + layer
+                    .redacted_preview
+                    .as_ref()
+                    .map_or(0, |value| value.len())
+        })
+        .sum();
+    let original_bytes: i64 = manifest
+        .layers
+        .iter()
+        .map(|layer| layer.original_bytes.unwrap_or(layer.chars as i64))
+        .sum();
+    let truncated_count = manifest
+        .layers
+        .iter()
+        .filter(|layer| layer.is_truncated)
+        .count();
+    format!(
+        "{stored_bytes} stored bytes / {original_bytes} original bytes / {truncated_count} truncated"
     )
 }
 

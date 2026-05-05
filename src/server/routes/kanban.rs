@@ -1316,6 +1316,9 @@ async fn assign_transition_to_dispatchable_pg(
             "from": old_status,
             "to": old_status,
             "target": ready_state,
+            "target_status": ready_state,
+            "next_action": "none_required",
+            "error": null,
             "steps": [],
             "completed_steps": [],
         });
@@ -1358,6 +1361,8 @@ async fn assign_transition_to_dispatchable_pg(
                     "from": old_status,
                     "to": current_status,
                     "target": ready_state,
+                    "target_status": ready_state,
+                    "next_action": "inspect_transition_error",
                     "steps": steps,
                     "completed_steps": completed_steps,
                     "failed_step": step,
@@ -1373,6 +1378,9 @@ async fn assign_transition_to_dispatchable_pg(
         "from": old_status,
         "to": current_status,
         "target": ready_state,
+        "target_status": ready_state,
+        "next_action": "none_required",
+        "error": null,
         "steps": steps,
         "completed_steps": completed_steps,
     })

@@ -92,6 +92,9 @@ mod prompt {
         assert!(report.contains("redacted user preview"));
         assert!(!report.contains("SECRET USER BODY"));
         assert!(report.contains("``\u{200B}` fence"));
+        assert!(report.contains("storage:"));
+        assert!(report.contains("58 original bytes"));
+        assert!(report.contains("0 truncated"));
     }
 }
 

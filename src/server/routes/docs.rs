@@ -222,6 +222,7 @@ pub(crate) const TOP_40_PAIRED_PATHS: &[(&str, &str)] = &[
     ("POST", "/api/kanban-cards"),
     ("GET", "/api/kanban-cards/{id}"),
     ("PATCH", "/api/kanban-cards/{id}"),
+    ("POST", "/api/kanban-cards/{id}/assign"),
     ("POST", "/api/kanban-cards/{id}/transition"),
     ("POST", "/api/kanban-cards/{id}/retry"),
     ("POST", "/api/kanban-cards/{id}/redispatch"),
@@ -1740,7 +1741,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "card": {"id": "card-426", "status": "requested", "github_issue_number": 426, "assigned_agent_id": "project-agentdesk"},
                 "deduplicated": false,
                 "assignment": {"ok": true, "agent_id": "project-agentdesk"},
-                "transition": {"attempted": true, "ok": true, "from": "backlog", "to": "requested", "target": "requested"}
+                "transition": {"attempted": true, "ok": true, "from": "backlog", "to": "requested", "target": "requested", "target_status": "requested", "error": null, "next_action": "none_required"}
             }),
         )
         .with_error_example(
@@ -1856,7 +1857,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({
                 "card": {"id": "card-1", "assigned_agent_id": "ch-td", "status": "requested"},
                 "assignment": {"ok": true, "agent_id": "ch-td"},
-                "transition": {"attempted": true, "ok": true, "from": "backlog", "to": "requested", "target": "requested"}
+                "transition": {"attempted": true, "ok": true, "from": "backlog", "to": "requested", "target": "requested", "target_status": "requested", "error": null, "next_action": "none_required"}
             }),
         ),
         ep(
@@ -4925,6 +4926,57 @@ mod tests {
         assert_eq!(response["config_applied_at"], "boot");
         assert_eq!(response["config_source"], "agentdesk.yaml boot snapshot");
         assert_eq!(response["hot_reload"], false);
+    }
+
+    #[test]
+    fn kanban_response_contracts_document_stable_fields() {
+        let endpoints = all_endpoints();
+        let find = |method: &str, path: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.method == method && endpoint.path == path)
+                .unwrap_or_else(|| panic!("{method} {path} must be documented"))
+        };
+
+        let assign = find("POST", "/api/kanban-cards/{id}/assign");
+        let assign_response = &assign
+            .example
+            .as_ref()
+            .expect("assign docs must include a response example")
+            .response;
+        assert_eq!(assign_response["assignment"]["ok"], true);
+        assert_eq!(assign_response["assignment"]["agent_id"], "ch-td");
+        assert_eq!(assign_response["transition"]["target_status"], "requested");
+        assert_eq!(
+            assign_response["transition"]["next_action"],
+            "none_required"
+        );
+        assert!(assign_response["transition"]["error"].is_null());
+
+        for path in [
+            "/api/kanban-cards/{id}/retry",
+            "/api/kanban-cards/{id}/redispatch",
+        ] {
+            let endpoint = find("POST", path);
+            let response = &endpoint
+                .example
+                .as_ref()
+                .unwrap_or_else(|| panic!("{path} docs must include a response example"))
+                .response;
+            assert!(response.get("card").is_some(), "{path} must document card");
+            assert!(
+                response.get("new_dispatch_id").is_some(),
+                "{path} must document new_dispatch_id"
+            );
+            assert!(
+                response.get("cancelled_dispatch_id").is_some(),
+                "{path} must document cancelled_dispatch_id"
+            );
+            assert_eq!(
+                response["next_action"], "none_required",
+                "{path} must document next_action"
+            );
+        }
     }
 
     #[test]
