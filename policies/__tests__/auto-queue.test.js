@@ -263,6 +263,43 @@ test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
   assert.deepEqual(Array.from(state.executions[0].params), ["run-saturated"]);
 });
 
+test("auto-queue does not rotate deferred active run activations", () => {
+  const { policy, state } = loadPolicy("policies/auto-queue.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "JOIN kanban_cards kc ON kc.id = e.kanban_card_id",
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("user_cancelled");
+        },
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("JOIN auto_queue_entries e ON e.run_id = r.id") &&
+            sql.includes("GROUP BY r.id") &&
+            sql.includes("ORDER BY MIN(e.updated_at) ASC LIMIT 50");
+        },
+        result: [{ id: "run-deferred" }]
+      },
+      {
+        match: "e.status = 'dispatched'",
+        result: []
+      }
+    ]),
+    autoQueueActivate: () => ({ ok: true, deferred: true, count: 0, dispatched: [] })
+  });
+
+  policy.onTick1min();
+
+  assert.deepEqual(state.autoQueueActivations, [{ runId: "run-deferred", threadGroup: null }]);
+  assert.equal(state.executions.length, 0);
+});
+
 test("auto-queue marks pending entries skipped when a card progresses externally into a dispatchable state", () => {
   const { policy, state } = loadPolicy("policies/auto-queue.js", {
     dbQuery: createSqlRouter([

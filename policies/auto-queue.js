@@ -474,7 +474,7 @@ var autoQueue = {
     for (var ri = 0; ri < activeRuns.length; ri++) {
       var run = activeRuns[ri];
       var activation = activateRun(run.id, null);
-      if (activationDispatchCount(activation) === 0) {
+      if (!activationWasDeferred(activation) && activationDispatchCount(activation) === 0) {
         rotateActiveRunSweepCursor(run.id);
       }
     }
@@ -542,6 +542,10 @@ function activationDispatchCount(result) {
   if (typeof result.activated_count === "number") return result.activated_count;
   if (typeof result.activatedCount === "number") return result.activatedCount;
   return null;
+}
+
+function activationWasDeferred(result) {
+  return result && result.deferred === true;
 }
 
 function rotateActiveRunSweepCursor(runId) {
