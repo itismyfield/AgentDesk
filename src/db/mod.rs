@@ -19,7 +19,7 @@ pub mod turns;
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use sqlite_test::Connection;
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 use std::sync::Arc;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -33,37 +33,37 @@ pub struct TestSqliteDb {
     write_gate: Mutex<()>,
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 #[derive(Debug)]
 pub enum LegacySqliteDisabled {}
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 #[derive(Debug, Clone, Copy)]
 pub struct LegacySqliteError;
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 impl std::fmt::Display for LegacySqliteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "legacy sqlite backend is unavailable in production")
     }
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 impl std::error::Error for LegacySqliteError {}
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub struct LegacySqliteConnection;
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub struct LegacySqliteStatement;
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub struct LegacySqliteRows;
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub struct LegacySqliteRow;
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 impl LegacySqliteDisabled {
     pub fn lock(&self) -> Result<LegacySqliteConnection, LegacySqliteError> {
         Err(LegacySqliteError)
@@ -78,7 +78,7 @@ impl LegacySqliteDisabled {
     }
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 impl LegacySqliteConnection {
     pub fn execute<P>(&self, _sql: &str, _params: P) -> Result<usize, LegacySqliteError> {
         Err(LegacySqliteError)
@@ -100,7 +100,7 @@ impl LegacySqliteConnection {
     }
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 impl LegacySqliteStatement {
     pub fn query<P>(&mut self, _params: P) -> Result<LegacySqliteRows, LegacySqliteError> {
         Err(LegacySqliteError)
@@ -118,14 +118,14 @@ impl LegacySqliteStatement {
     }
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 impl LegacySqliteRows {
     pub fn next(&mut self) -> Result<Option<LegacySqliteRow>, LegacySqliteError> {
         Err(LegacySqliteError)
     }
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 impl LegacySqliteRow {
     pub fn get<I, T: Default>(&self, _idx: I) -> Result<T, LegacySqliteError> {
         Err(LegacySqliteError)
@@ -236,7 +236,7 @@ pub(crate) fn open_write_connection(
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub type Db = Arc<TestSqliteDb>;
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub type Db = Arc<LegacySqliteDisabled>;
 
 /// Create an in-memory Db for tests.

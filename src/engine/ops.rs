@@ -62,7 +62,7 @@ pub fn register_globals_with_supervisor_and_pg(
         register_globals_with_test_backends(ctx, None, pg_pool, supervisor_bridge)
     }
 
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         register_globals_pg_only(ctx, pg_pool, supervisor_bridge)
     }
@@ -178,7 +178,7 @@ fn register_globals_with_test_backends(
     Ok(())
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn register_globals_pg_only(
     ctx: &Ctx<'_>,
     pg_pool: Option<sqlx::PgPool>,

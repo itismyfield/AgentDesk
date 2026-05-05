@@ -1939,6 +1939,7 @@ mod tests {
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
+            cluster_instance_id: None,
         };
 
         let (status, _) = crate::server::routes::dispatched_sessions::hook_session(
@@ -2635,6 +2636,7 @@ mod tests {
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
+            cluster_instance_id: None,
         };
         let (status, body) = crate::server::routes::auto_queue::activate(
             axum::extract::State(state),
@@ -6435,6 +6437,7 @@ mod tests {
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
+            cluster_instance_id: None,
         };
 
         // Call the review-decision handler with accept
@@ -6560,6 +6563,7 @@ mod tests {
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
+            cluster_instance_id: None,
         };
 
         let (status, json) = crate::server::routes::review_verdict::submit_review_decision(
@@ -6638,6 +6642,7 @@ mod tests {
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
+            cluster_instance_id: None,
         };
 
         let (status, json) = crate::server::routes::review_verdict::submit_review_decision(

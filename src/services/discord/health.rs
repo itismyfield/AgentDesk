@@ -815,7 +815,7 @@ fn runtime_stop_wait_timeout() -> std::time::Duration {
     {
         std::time::Duration::from_millis(150)
     }
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         std::time::Duration::from_secs(3)
     }
@@ -2917,7 +2917,7 @@ async fn resolve_send_target_channel_id_with_backends(
                 return resolve_agent_target_channel_id_sqlite(db, agent_id);
             }
 
-            #[cfg(not(feature = "legacy-sqlite-tests"))]
+            #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
             {
                 let _ = db;
                 Err(SendTargetResolutionError::Internal(
@@ -6890,9 +6890,8 @@ mod tests {
         // Advance offset so unread_bytes == 0 against the seeded capture.
         inflight.last_offset = capture_bytes;
         // Backdate `updated_at` past the orphan threshold (10 min).
-        let stale_unix = chrono::Utc::now().timestamp()
-            - (super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS as i64)
-            - 60;
+        let stale_unix =
+            chrono::Utc::now().timestamp() - (super::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 60;
         let stale_local = chrono::Local
             .timestamp_opt(stale_unix, 0)
             .single()
@@ -6921,7 +6920,7 @@ mod tests {
             .confirmed_end_offset
             .store(capture_bytes, std::sync::atomic::Ordering::Release);
         let stale_outbound_ms = chrono::Utc::now().timestamp_millis()
-            - ((super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_OUTBOUND_THRESHOLD_SECS as i64) * 1000)
+            - ((super::STALL_WATCHDOG_THRESHOLD_SECS as i64) * 1000)
             - 60_000;
         coord
             .last_relay_ts_ms
@@ -7032,9 +7031,8 @@ mod tests {
         inflight.last_offset = capture_bytes;
         // Stale inflight updated_at — but we'll keep last_relay_ts_ms FRESH
         // to mimic an actively-streaming background turn.
-        let stale_unix = chrono::Utc::now().timestamp()
-            - (super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS as i64)
-            - 60;
+        let stale_unix =
+            chrono::Utc::now().timestamp() - (super::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 60;
         let stale_local = chrono::Local
             .timestamp_opt(stale_unix, 0)
             .single()
@@ -7141,9 +7139,8 @@ mod tests {
         inflight.task_notification_kind =
             Some(crate::services::agent_protocol::TaskNotificationKind::Background);
         inflight.last_offset = capture_bytes;
-        let stale_unix = chrono::Utc::now().timestamp()
-            - (super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS as i64)
-            - 60;
+        let stale_unix =
+            chrono::Utc::now().timestamp() - (super::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 60;
         let stale_local = chrono::Local
             .timestamp_opt(stale_unix, 0)
             .single()
@@ -7166,7 +7163,7 @@ mod tests {
             .confirmed_end_offset
             .store(capture_bytes, std::sync::atomic::Ordering::Release);
         let stale_outbound_ms = chrono::Utc::now().timestamp_millis()
-            - ((super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_OUTBOUND_THRESHOLD_SECS as i64) * 1000)
+            - ((super::STALL_WATCHDOG_THRESHOLD_SECS as i64) * 1000)
             - 60_000;
         coord
             .last_relay_ts_ms

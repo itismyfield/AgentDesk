@@ -188,7 +188,7 @@ impl TurnEvent {
         self.meta().notify_user
     }
 
-    fn details_json(&self) -> Value {
+    pub(crate) fn details_json(&self) -> Value {
         match self {
             Self::SessionResumeFailedWithRecovery(details) => {
                 serde_json::to_value(details).unwrap_or_else(|_| json!({}))

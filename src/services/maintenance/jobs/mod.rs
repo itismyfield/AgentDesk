@@ -50,7 +50,7 @@ pub mod worktree_orphan_sweep;
 pub const STORAGE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Register all storage maintenance jobs. Call from server boot under
-/// `#[cfg(not(feature = "legacy-sqlite-tests"))]`.
+/// `#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]`.
 ///
 /// The PG pool is optional — worktree orphan sweep degrades to a no-op when
 /// Postgres is not configured, and the db_retention job is skipped entirely

@@ -581,7 +581,7 @@ fn load_memento_feedback_counts_legacy(state: &AppState) -> Option<(i64, i64)> {
     ))
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn load_memento_feedback_counts_legacy(_state: &AppState) -> Option<(i64, i64)> {
     None
 }

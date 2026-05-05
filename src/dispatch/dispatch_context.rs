@@ -538,7 +538,7 @@ pub(crate) fn commit_belongs_to_card_issue(
     subject.contains(&pattern)
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub(crate) fn commit_belongs_to_card_issue(
     _db: &Db,
     card_id: &str,

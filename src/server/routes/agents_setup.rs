@@ -1377,7 +1377,7 @@ fn maybe_forced_failure(step: &str) -> Result<(), SetupError> {
     }
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn maybe_forced_failure(_step: &str) -> Result<(), SetupError> {
     Ok(())
 }
