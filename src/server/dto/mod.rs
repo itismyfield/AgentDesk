@@ -3,3 +3,4 @@
 pub mod agents;
 pub mod dispatches;
 pub mod kanban;
+pub mod settings;
