@@ -544,6 +544,38 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl http://localhost:8787/api/health/detail"),
         ep(
             "GET",
+            "/api/prompt-manifest/retention",
+            "monitoring",
+            "Prompt-manifest storage stats and the boot-time retention config snapshot; retention config changes require process restart and are not hot-reloaded.",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "total_stored_bytes": 1234,
+                "total_original_bytes": 5678,
+                "manifest_count": 42,
+                "layer_count": 168,
+                "truncated_count": 3,
+                "oldest_full_content_at": "2026-04-04T01:23:45Z",
+                "retention_horizon_at": "2026-04-04T01:23:45Z",
+                "retention_days": 30,
+                "per_layer_max_bytes_adk_provided": 65536,
+                "per_layer_max_bytes_user_derived": 16384,
+                "enabled": true,
+                "restart_required_for_config_changes": true,
+                "config_applied_at": "boot",
+                "config_source": "agentdesk.yaml boot snapshot",
+                "hot_reload": false
+            }),
+        )
+        .with_error_example(
+            503,
+            json!({}),
+            json!({"error": "postgres pool unavailable"}),
+        )
+        .with_curl("curl http://localhost:8787/api/prompt-manifest/retention"),
+        ep(
+            "GET",
             "/api/cluster/nodes",
             "cluster",
             "Protected multinode worker registry view with configured/effective role, heartbeat, labels, and capabilities.",
@@ -4865,6 +4897,34 @@ mod tests {
         let (status, _headers, routed) = resolve_docs_segment("api-friction-markers", false);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(routed["path"], "/api/docs/api-friction-markers");
+    }
+
+    #[test]
+    fn prompt_manifest_retention_docs_surface_boot_snapshot_semantics() {
+        let endpoints = all_endpoints();
+        let retention = endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.method == "GET" && endpoint.path == "/api/prompt-manifest/retention"
+            })
+            .expect("GET /api/prompt-manifest/retention must be documented");
+
+        assert_eq!(effective_category(retention), "monitoring");
+        assert!(
+            retention
+                .description
+                .contains("boot-time retention config snapshot")
+        );
+        assert!(retention.description.contains("require process restart"));
+        let response = &retention
+            .example
+            .as_ref()
+            .expect("retention docs must include an example")
+            .response;
+        assert_eq!(response["restart_required_for_config_changes"], true);
+        assert_eq!(response["config_applied_at"], "boot");
+        assert_eq!(response["config_source"], "agentdesk.yaml boot snapshot");
+        assert_eq!(response["hot_reload"], false);
     }
 
     #[test]

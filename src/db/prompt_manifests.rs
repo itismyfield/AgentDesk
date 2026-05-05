@@ -22,6 +22,9 @@ const TRUNCATION_MARKER: &str = "...[truncated by retention policy]";
 /// caller-supplied `from_content_with_retention` still works.
 static PROMPT_MANIFEST_RETENTION_CONFIG: OnceLock<PromptManifestRetentionConfig> = OnceLock::new();
 
+pub const PROMPT_MANIFEST_RETENTION_CONFIG_APPLIED_AT: &str = "boot";
+pub const PROMPT_MANIFEST_RETENTION_CONFIG_SOURCE: &str = "agentdesk.yaml boot snapshot";
+
 /// Install the process-wide retention config snapshot. Called once from
 /// `crate::bootstrap` after `Config` is parsed. Subsequent calls are ignored
 /// (the OnceLock is set-once); restart is required to change retention bounds.
@@ -654,6 +657,16 @@ pub struct PromptManifestStorageStats {
     pub per_layer_max_bytes_adk_provided: u64,
     pub per_layer_max_bytes_user_derived: u64,
     pub enabled: bool,
+    /// Retention bounds are installed into a process-wide OnceLock at startup;
+    /// runtime config edits do not change write-time caps until restart.
+    pub restart_required_for_config_changes: bool,
+    /// Human-readable point in the process lifecycle when this config is
+    /// captured. Kept flat in the API response for dashboard consumers.
+    pub config_applied_at: String,
+    /// Source and semantics of the surfaced retention config.
+    pub config_source: String,
+    /// Explicit negative capability so clients do not infer hot reload support.
+    pub hot_reload: bool,
 }
 
 /// Outcome of a single retention pass.
@@ -774,6 +787,10 @@ pub async fn manifest_storage_stats(
         per_layer_max_bytes_adk_provided: config.per_layer_max_bytes_adk_provided,
         per_layer_max_bytes_user_derived: config.per_layer_max_bytes_user_derived,
         enabled: config.enabled,
+        restart_required_for_config_changes: true,
+        config_applied_at: PROMPT_MANIFEST_RETENTION_CONFIG_APPLIED_AT.to_string(),
+        config_source: PROMPT_MANIFEST_RETENTION_CONFIG_SOURCE.to_string(),
+        hot_reload: false,
     })
 }
 
@@ -1210,6 +1227,10 @@ mod tests {
         );
         assert_eq!(stats.retention_days, 30);
         assert!(stats.retention_horizon_at.is_some());
+        assert!(stats.restart_required_for_config_changes);
+        assert_eq!(stats.config_applied_at, "boot");
+        assert_eq!(stats.config_source, "agentdesk.yaml boot snapshot");
+        assert!(!stats.hot_reload);
 
         crate::db::postgres::close_test_pool(pool, "prompt manifest pg")
             .await

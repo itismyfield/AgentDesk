@@ -612,6 +612,28 @@ export function getCachedHealth(): CachedGetEntry<HealthResponse> | null {
   return readCachedGet<HealthResponse>("/api/health");
 }
 
+export interface PromptManifestRetentionStatus {
+  total_stored_bytes: number;
+  total_original_bytes: number;
+  truncated_count: number;
+  manifest_count: number;
+  layer_count: number;
+  oldest_full_content_at: string | null;
+  retention_horizon_at: string | null;
+  retention_days: number;
+  per_layer_max_bytes_adk_provided: number;
+  per_layer_max_bytes_user_derived: number;
+  enabled: boolean;
+  restart_required_for_config_changes: boolean;
+  config_applied_at: string;
+  config_source: string;
+  hot_reload: boolean;
+}
+
+export async function getPromptManifestRetention(): Promise<PromptManifestRetentionStatus> {
+  return request("/api/prompt-manifest/retention");
+}
+
 // ── Dispatches ──
 
 export async function createDispatch(body: {
