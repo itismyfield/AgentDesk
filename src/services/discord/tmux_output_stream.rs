@@ -196,6 +196,7 @@ pub(in crate::services::discord) fn process_watcher_lines(
                                             block.get("text").and_then(|t| t.as_str())
                                         {
                                             full_response.push_str(text);
+                                            outcome.assistant_text_seen = true;
                                             push_transcript_event(
                                                 &mut tool_state.transcript_events,
                                                 SessionTranscriptEvent {
@@ -275,6 +276,7 @@ pub(in crate::services::discord) fn process_watcher_lines(
                             tool_state.mark_thinking();
                         } else if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
                             full_response.push_str(text);
+                            outcome.assistant_text_seen = true;
                             if tool_state.any_tool_used {
                                 tool_state.has_post_tool_text = true;
                             }

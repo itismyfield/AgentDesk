@@ -125,6 +125,7 @@ pub(super) struct WatcherLineOutcome {
     pub stale_resume_detected: bool,
     pub auto_compacted: bool,
     pub task_notification_kind: Option<TaskNotificationKind>,
+    pub assistant_text_seen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -384,6 +385,7 @@ struct TerminalRelayDecision {
 fn terminal_relay_decision(
     has_assistant_response: bool,
     task_notification_kind: Option<TaskNotificationKind>,
+    assistant_text_seen: bool,
 ) -> TerminalRelayDecision {
     match task_notification_kind {
         Some(TaskNotificationKind::MonitorAutoTurn) => TerminalRelayDecision {
@@ -404,12 +406,14 @@ fn terminal_relay_decision(
             suppressed: !has_assistant_response,
         },
         Some(TaskNotificationKind::Subagent) => TerminalRelayDecision {
-            // Subagent turn = internal sub-agent reporting to parent. Not routed
-            // to the user-facing channel.
-            should_direct_send: false,
+            // A pure subagent completion only has the task notification/result
+            // fallback and must stay internal. If the parent turn emits real
+            // assistant text after the child closes, that text is user-facing
+            // and must be relayed.
+            should_direct_send: has_assistant_response && assistant_text_seen,
             should_tag_monitor_origin: false,
             should_enqueue_notify_outbox: false,
-            suppressed: true,
+            suppressed: !(has_assistant_response && assistant_text_seen),
         },
         None => TerminalRelayDecision {
             should_direct_send: has_assistant_response,
@@ -5280,7 +5284,7 @@ mod tests {
     #[test]
     fn terminal_relay_decision_suppresses_internal_task_notifications_without_notify_outbox() {
         assert_eq!(
-            terminal_relay_decision(true, None),
+            terminal_relay_decision(true, None, true),
             super::TerminalRelayDecision {
                 should_direct_send: true,
                 should_tag_monitor_origin: false,
@@ -5289,7 +5293,7 @@ mod tests {
             }
         );
         assert_eq!(
-            terminal_relay_decision(true, Some(TaskNotificationKind::MonitorAutoTurn)),
+            terminal_relay_decision(true, Some(TaskNotificationKind::MonitorAutoTurn), true),
             super::TerminalRelayDecision {
                 should_direct_send: true,
                 should_tag_monitor_origin: true,
@@ -5298,7 +5302,7 @@ mod tests {
             }
         );
         assert_eq!(
-            terminal_relay_decision(false, Some(TaskNotificationKind::MonitorAutoTurn)),
+            terminal_relay_decision(false, Some(TaskNotificationKind::MonitorAutoTurn), false),
             super::TerminalRelayDecision {
                 should_direct_send: false,
                 should_tag_monitor_origin: false,
@@ -5307,18 +5311,27 @@ mod tests {
             }
         );
         assert_eq!(
-            terminal_relay_decision(true, Some(TaskNotificationKind::Subagent)),
+            terminal_relay_decision(true, Some(TaskNotificationKind::Subagent), false),
             super::TerminalRelayDecision {
                 should_direct_send: false,
                 should_tag_monitor_origin: false,
                 should_enqueue_notify_outbox: false,
                 suppressed: true,
+            }
+        );
+        assert_eq!(
+            terminal_relay_decision(true, Some(TaskNotificationKind::Subagent), true),
+            super::TerminalRelayDecision {
+                should_direct_send: true,
+                should_tag_monitor_origin: false,
+                should_enqueue_notify_outbox: false,
+                suppressed: false,
             }
         );
         // Background kind with assistant response = user-facing content after a
         // mid-turn background event (e.g. Monitor completion). Must relay (#1058).
         assert_eq!(
-            terminal_relay_decision(true, Some(TaskNotificationKind::Background)),
+            terminal_relay_decision(true, Some(TaskNotificationKind::Background), true),
             super::TerminalRelayDecision {
                 should_direct_send: true,
                 should_tag_monitor_origin: false,
@@ -5329,7 +5342,7 @@ mod tests {
         // Background kind without any assistant response = only the tag arrived,
         // nothing to show user. Suppress.
         assert_eq!(
-            terminal_relay_decision(false, Some(TaskNotificationKind::Background)),
+            terminal_relay_decision(false, Some(TaskNotificationKind::Background), false),
             super::TerminalRelayDecision {
                 should_direct_send: false,
                 should_tag_monitor_origin: false,
@@ -5471,7 +5484,8 @@ mod tests {
         // #1009 DoD regression lock: when the monitor auto-turn produces an
         // assistant response text, the terminal relay MUST take the direct-send
         // path (suppressed=false) — no suppression, no placeholder rewrite.
-        let decision = terminal_relay_decision(true, Some(TaskNotificationKind::MonitorAutoTurn));
+        let decision =
+            terminal_relay_decision(true, Some(TaskNotificationKind::MonitorAutoTurn), true);
         assert_eq!(
             decision,
             super::TerminalRelayDecision {
@@ -5897,7 +5911,8 @@ mod tests {
     #[tokio::test]
     async fn monitor_auto_turn_normal_relay_does_not_request_notify_outbox() {
         let db = crate::db::test_db();
-        let decision = terminal_relay_decision(true, Some(TaskNotificationKind::MonitorAutoTurn));
+        let decision =
+            terminal_relay_decision(true, Some(TaskNotificationKind::MonitorAutoTurn), true);
 
         assert!(decision.should_direct_send);
         assert!(!decision.suppressed);
@@ -6082,6 +6097,7 @@ mod tests {
             outcome.task_notification_kind,
             Some(TaskNotificationKind::Background)
         );
+        assert!(outcome.assistant_text_seen);
         assert_eq!(full_response, "PR #825 리뷰 반영 완료");
     }
 
@@ -6105,7 +6121,46 @@ mod tests {
             outcome.task_notification_kind,
             Some(TaskNotificationKind::Subagent)
         );
+        assert!(!outcome.assistant_text_seen);
         assert_eq!(full_response, "done");
+    }
+
+    #[test]
+    fn process_watcher_lines_keeps_parent_assistant_text_after_subagent_notification() {
+        let mut buffer = concat!(
+            "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"sub-1\",\"task_type\":\"local_agent\"}\n",
+            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"sub-1\",\"status\":\"completed\",\"summary\":\"Subagent finished\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"최종 사용자 응답\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert_eq!(
+            outcome.task_notification_kind,
+            Some(TaskNotificationKind::Subagent)
+        );
+        assert!(outcome.assistant_text_seen);
+        assert_eq!(full_response, "최종 사용자 응답");
+        assert_eq!(
+            terminal_relay_decision(
+                true,
+                outcome.task_notification_kind,
+                outcome.assistant_text_seen
+            ),
+            super::TerminalRelayDecision {
+                should_direct_send: true,
+                should_tag_monitor_origin: false,
+                should_enqueue_notify_outbox: false,
+                suppressed: false,
+            }
+        );
     }
 
     #[test]

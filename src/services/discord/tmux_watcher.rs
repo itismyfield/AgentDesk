@@ -452,6 +452,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut stale_resume_detected = initial_outcome.stale_resume_detected;
         let mut auto_compaction_lifecycle_attempted = false;
         let mut task_notification_kind = stream_seed.task_notification_kind;
+        let mut assistant_text_seen = initial_outcome.assistant_text_seen;
         if let Some(kind) = initial_outcome.task_notification_kind {
             task_notification_kind = merge_task_notification_kind(task_notification_kind, kind);
         }
@@ -608,6 +609,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             task_notification_kind =
                                 merge_task_notification_kind(task_notification_kind, kind);
                         }
+                        assistant_text_seen |= outcome.assistant_text_seen;
                         if matches!(
                             task_notification_kind,
                             Some(TaskNotificationKind::MonitorAutoTurn)
@@ -2038,8 +2040,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
 
         // Send the terminal response to Discord.
-        let relay_decision =
-            terminal_relay_decision(has_assistant_response, task_notification_kind);
+        let relay_decision = terminal_relay_decision(
+            has_assistant_response,
+            task_notification_kind,
+            assistant_text_seen,
+        );
         debug_assert!(
             !relay_decision.should_enqueue_notify_outbox,
             "monitor/task-notification watcher relays must not use notify-bot outbox"
@@ -2550,9 +2555,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             true
         };
 
-        // #225 P1-2: Only mark relayed + clear inflight if Discord relay succeeded.
-        // If relay failed, preserve retry/handoff path for next startup.
-        if relay_ok {
+        // #225 P1-2 / #1708 follow-up: clear inflight when the terminal output
+        // was either delivered to Discord or intentionally suppressed as an
+        // internal task notification. Only genuine delivery failure preserves
+        // retry/handoff state for next startup.
+        if terminal_output_committed {
             if has_assistant_response
                 && let Some(state) = inflight_state.as_ref().filter(|state| !state.rebind_origin)
             {
@@ -2572,8 +2579,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 drop(data);
             }
             turn_result_relayed = true;
-            // #1670: Always consume the handoff debt and clear inflight when the
-            // relay succeeded — the bridge's `bridge_relay_delegated_to_watcher`
+            // #1670/#1708: Always consume the handoff debt and clear inflight
+            // when terminal output was committed — the bridge's
+            // `bridge_relay_delegated_to_watcher`
             // arm in `turn_bridge/mod.rs` (the `else if` at ~line 4071) saves
             // inflight and immediately returns, so the bridge will NOT come back
             // to revoke the debt or clear the inflight even if dispatch
@@ -2585,10 +2593,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // forever. The decoupling rule is:
             //
             //   * `clear_inflight_state` + `finish_restored_watcher_active_turn`
-            //     fire whenever the watcher relayed the terminal response
-            //     successfully — both bridge and watcher are now safe to call
-            //     them concurrently because `mailbox_finish_turn` is idempotent
-            //     (the second caller observes an empty active slot).
+            //     fire whenever the watcher committed terminal output
+            //     (delivered or intentionally suppressed) — both bridge and
+            //     watcher are now safe to call them concurrently because
+            //     `mailbox_finish_turn` is idempotent (the second caller
+            //     observes an empty active slot).
             //   * Anything that genuinely depends on the dispatch lifecycle
             //     having completed (queue kickoff, dispatch followup,
             //     terminal-stop decision) remains gated on `dispatch_ok` further
