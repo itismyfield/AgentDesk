@@ -51,14 +51,31 @@ src/
 │   └── mod.rs
 ├── db/
 │   ├── dispatches/
-│   │   ├── mod.rs
-│   │   └── outbox.rs
+│   │   ├── outbox/
+│   │   │   ├── claim.rs
+│   │   │   ├── delivery.rs
+│   │   │   ├── diagnostics.rs
+│   │   │   ├── followup.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── model.rs
+│   │   │   ├── notify.rs
+│   │   │   └── retry.rs
+│   │   └── mod.rs
 │   ├── kanban_cards/
 │   │   ├── crud.rs
 │   │   ├── listing.rs
 │   │   ├── metadata.rs
 │   │   ├── mod.rs
 │   │   └── transitions.rs
+│   ├── prompt_manifests/
+│   │   ├── builder.rs
+│   │   ├── mod.rs
+│   │   ├── model.rs
+│   │   ├── redaction.rs
+│   │   ├── repository.rs
+│   │   ├── retention.rs
+│   │   ├── storage_stats.rs
+│   │   └── tests.rs
 │   ├── agents.rs
 │   ├── auto_queue.rs
 │   ├── cancel_tombstones.rs
@@ -67,7 +84,6 @@ src/
 │   ├── memento_feedback_stats.rs
 │   ├── mod.rs
 │   ├── postgres.rs
-│   ├── prompt_manifests.rs
 │   ├── schema.rs
 │   ├── session_agent_resolution.rs
 │   ├── session_observability.rs
@@ -134,9 +150,12 @@ src/
 │   └── skill_sync.rs
 ├── server/
 │   ├── dto/
+│   │   ├── agents.rs
+│   │   ├── analytics.rs
 │   │   ├── dispatches.rs
 │   │   ├── kanban.rs
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   └── settings.rs
 │   ├── routes/
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
@@ -168,6 +187,7 @@ src/
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
 │   │   ├── analytics.rs
+│   │   ├── analytics_tests.rs
 │   │   ├── auth.rs
 │   │   ├── auto_queue.rs
 │   │   ├── cluster.rs
@@ -204,6 +224,7 @@ src/
 │   │   ├── routines.rs
 │   │   ├── session_activity.rs
 │   │   ├── settings.rs
+│   │   ├── settings_tests.rs
 │   │   ├── skill_usage_analytics.rs
 │   │   ├── skills_api.rs
 │   │   ├── stats.rs
@@ -226,6 +247,10 @@ src/
 │   ├── agent_quality/
 │   │   ├── mod.rs
 │   │   └── regression_alerts.rs
+│   ├── agents/
+│   │   ├── mod.rs
+│   │   ├── query.rs
+│   │   └── turn.rs
 │   ├── auto_queue/
 │   │   ├── activate_bridge.rs
 │   │   ├── activate_command.rs
@@ -251,13 +276,23 @@ src/
 │   │   └── view_admin_routes.rs
 │   ├── discord/
 │   │   ├── commands/
+│   │   │   ├── inspect/
+│   │   │   │   ├── formatting.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── model.rs
+│   │   │   │   ├── query.rs
+│   │   │   │   ├── render_context.rs
+│   │   │   │   ├── render_last.rs
+│   │   │   │   ├── render_prompt.rs
+│   │   │   │   ├── render_recovery.rs
+│   │   │   │   ├── render_session.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
 │   │   │   ├── control.rs
 │   │   │   ├── diagnostics.rs
 │   │   │   ├── fast_mode.rs
 │   │   │   ├── help.rs
-│   │   │   ├── inspect.rs
 │   │   │   ├── meeting_cmd.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── model_picker.rs
@@ -389,7 +424,8 @@ src/
 │   ├── dispatches/
 │   │   ├── discord_delivery.rs
 │   │   ├── mod.rs
-│   │   └── outbox_queue.rs
+│   │   ├── outbox_queue.rs
+│   │   └── outbox_route.rs
 │   ├── git/
 │   │   ├── branch_resolver.rs
 │   │   ├── commit_resolver.rs
@@ -454,6 +490,7 @@ src/
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── agent_protocol.rs
+│   ├── analytics.rs
 │   ├── api_friction.rs
 │   ├── auto_queue.rs
 │   ├── claude.rs
