@@ -12,7 +12,7 @@ deprecated_note: "Legacy architecture/config references are retained for context
 
 1. **Single Binary** — Rust 바이너리 하나로 설치/배포
 2. **Single Process** — 프로세스 간 통신 없음, 장애 지점 최소화
-3. **Single DB** — SQLite 하나에 모든 상태
+3. **Single Operational DB** — 운영 상태는 Postgres가 권위 소스이며, SQLite는 legacy test/compat 경로에만 남김
 4. **Hot-Reloadable Policies** — 비즈니스 로직은 JS 파일로 분리, 재빌드 없이 변경
 5. **Self-Contained** — Node.js, Python 등 외부 런타임 불필요
 
@@ -36,8 +36,8 @@ deprecated_note: "Legacy architecture/config references are retained for context
 │       │              │             │             │       │
 │  ┌────┴─────┐  ┌─────┴────┐  ┌────┴─────┐  ┌───┴────┐  │
 │  │ Dispatch │  │  Policy   │  │ Database │  │   WS   │  │
-│  │ Engine   │  │  Engine   │  │ (SQLite) │  │Broadcast│  │
-│  │          │  │(QuickJS)  │  │(rusqlite)│  │        │  │
+│  │ Engine   │  │  Engine   │  │(Postgres)│  │Broadcast│  │
+│  │          │  │(QuickJS)  │  │  (sqlx)  │  │        │  │
 │  └──────────┘  └──────────┘  └──────────┘  └────────┘  │
 │                     │                                    │
 │              ┌──────┴──────┐                             │
@@ -555,8 +555,10 @@ policies:
   hot_reload: true               # 파일 변경 시 자동 리로드
 
 data:
-  dir: "~/.adk"                 # DB, 로그, 캐시 저장소
-  db_name: "agentdesk.sqlite"
+  dir: "~/.adk/release/data"    # 로그, 캐시, legacy compat data
+
+database:
+  url: "postgres://127.0.0.1:5432/agentdesk"
 
 kanban:
   timeout_requested_minutes: 45
@@ -701,11 +703,11 @@ PCD SQLite (agents, kanban_cards, task_dispatches, sessions, ...)
     + RCC org.yaml (agent 정의)
     + RCC role_map.json (채널 매핑)
     + PCD .env (봇 토큰)
-    → AgentDesk SQLite + agentdesk.yaml
+    → AgentDesk Postgres + agentdesk.yaml
 ```
 
 ### Phase 2: 이관 스크립트
-1. PCD SQLite 테이블 → AgentDesk 스키마로 매핑 (대부분 1:1)
+1. PCD SQLite 테이블 → AgentDesk Postgres 스키마로 매핑 (대부분 1:1)
 2. org.yaml agents → agentdesk.yaml agents 섹션
 3. role_map.json channels → agents[].channels 필드
 4. .env 토큰 → agentdesk.yaml discord.bots 섹션

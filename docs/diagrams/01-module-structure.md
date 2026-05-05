@@ -18,7 +18,7 @@ title AgentDesk — Full Module Structure
 cloud "External Systems" {
     [Discord API] as DiscordAPI #LightSkyBlue
     [GitHub API\n(gh CLI)] as GitHubAPI #LightSkyBlue
-    database "SQLite" as SQLiteDB #Wheat
+    database "Postgres\n(sqlx)" as PostgresDB #Wheat
 }
 
 ' ============================================================
@@ -299,8 +299,8 @@ OpsDispatch --> DbMod
 OpsReview --> DbMod
 OpsKv --> DbMod
 
-' --- DB -> SQLite ---
-DbMod --> SQLiteDB : rusqlite
+' --- DB -> Postgres ---
+DbMod --> PostgresDB : sqlx
 
 ' --- Discord Service -> External ---
 Gateway --> DiscordAPI : Serenity/Poise
