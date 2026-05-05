@@ -6,8 +6,8 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-05-05 (against #1740 deployment-blocking migration
-> checksum hotfix).
+> Last refreshed: 2026-05-05 (against #1742 deployment-blocking migration
+> checksum hotfix and current maintainability audit baseline).
 
 ## Read This First
 
