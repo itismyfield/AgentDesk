@@ -3647,15 +3647,42 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/queue/resume",
             "auto-queue",
-            "Resume paused runs and dispatch next entries: continues a run from its paused checkpoint (vs. /retry which re-executes a failed step, /redispatch which creates a new dispatch id, or /reopen which re-admits a closed card).",
+            "Resume paused runs and dispatch next entries. Runs blocked by pending/failed phase-gate rows remain paused and return blocked_runs with message='No resumable runs'.",
         )
-        .with_example(json!({}), json!({"ok": true, "resumed_runs": 1, "dispatched": 1}))
+        .with_example(json!({}), json!({"ok": true, "resumed_runs": 1, "blocked_runs": 0, "dispatched": 1}))
         .with_error_example(
-            409,
+            200,
             json!({}),
-            json!({"error": "no paused runs to resume"}),
+            json!({"ok": true, "resumed_runs": 0, "blocked_runs": 1, "message": "No resumable runs"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/queue/resume"),
+        ep(
+            "POST",
+            "/api/queue/runs/{id}/restore",
+            "auto-queue",
+            "Restore a cancelled or restoring run by re-evaluating skipped entries. Paused runs are rejected; use /api/queue/resume unless the run is cancelled/restoring.",
+        )
+        .with_params([("id", path_param("Auto-queue run ID"))])
+        .with_example(
+            json!({"path": {"id": "run-1"}}),
+            json!({
+                "ok": true,
+                "run_id": "run-1",
+                "run_status": "active",
+                "restored_pending": 1,
+                "restored_done": 0,
+                "restored_dispatched": 0,
+                "rebound_slots": 0,
+                "created_dispatches": 0,
+                "unbound_dispatches": 0
+            }),
+        )
+        .with_error_example(
+            400,
+            json!({"path": {"id": "run-1"}}),
+            json!({"error": "only cancelled or restoring runs can be restored (status=paused)", "run_id": "run-1", "status": "paused"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/queue/runs/run-1/restore"),
         ep(
             "POST",
             "/api/queue/cancel",
@@ -4062,23 +4089,26 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/reviews/verdict",
             "reviews",
-            "Submit review verdict",
+            "Submit counter-model review verdict for a review dispatch",
         )
         .with_params([
-            ("card_id", body_param("string", true, "Kanban card under review")),
-            ("verdict", body_param("string", true, "approved | rejected | needs_changes")),
-            ("summary", body_param("string", false, "Short reviewer summary")),
+            ("dispatch_id", body_param("string", true, "Review dispatch ID")),
+            ("overall", body_param("string", true, "pass | improve | reject | rework | approved")),
+            ("notes", body_param("string", false, "Reviewer notes")),
+            ("feedback", body_param("string", false, "Reviewer feedback")),
+            ("commit", body_param("string", false, "Reviewed commit SHA")),
+            ("provider", body_param("string", false, "Verdict submitter provider")),
         ])
         .with_example(
-            json!({"body": {"card_id": "card-1", "verdict": "approved", "summary": "LGTM"}}),
-            json!({"ok": true, "review_id": "review-1", "card": {"id": "card-1", "review_status": "approved"}}),
+            json!({"body": {"dispatch_id": "review-1", "overall": "pass", "notes": "LGTM"}}),
+            json!({"ok": true, "dispatch_id": "review-1", "overall": "pass"}),
         )
         .with_error_example(
             400,
-            json!({"body": {"card_id": "card-1"}}),
-            json!({"error": "verdict is required"}),
+            json!({"body": {"dispatch_id": "review-1"}}),
+            json!({"error": "overall must be one of: pass, improve, reject, rework, approved"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/reviews/verdict -H 'Content-Type: application/json' -d '{\"card_id\":\"card-1\",\"verdict\":\"approved\",\"summary\":\"LGTM\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/reviews/verdict -H 'Content-Type: application/json' -d '{\"dispatch_id\":\"review-1\",\"overall\":\"pass\",\"notes\":\"LGTM\"}'"),
         ep(
             "POST",
             "/api/reviews/decision",
