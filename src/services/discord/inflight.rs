@@ -920,19 +920,6 @@ mod stall_recovery_tests {
         assert_eq!(loaded[0].status_message_id, Some(123_456));
         assert_eq!(loaded[0].current_msg_id, 99);
     }
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::{
-        CreateNewInflightError, InflightTurnState, latest_request_owner_user_id_for_channel,
-        load_inflight_states, load_inflight_states_from_root,
-        mark_all_inflight_states_restart_mode, save_inflight_state_create_new_in_root,
-        save_inflight_state_in_root, stale_removal_reason,
-    };
-    use crate::services::discord::InflightRestartMode;
-    use crate::services::provider::ProviderKind;
-    use tempfile::TempDir;
 
     #[test]
     fn inflight_malformed_json_graceful_skip() {
@@ -942,7 +929,6 @@ mod tests {
         let dir = root.join(ProviderKind::Claude.as_str());
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Write valid JSON
         let valid_state = InflightTurnState::new(
             ProviderKind::Claude,
             111,
@@ -960,22 +946,29 @@ mod tests {
         let valid_path = dir.join("111.json");
         std::fs::write(&valid_path, serde_json::to_string(&valid_state).unwrap()).unwrap();
 
-        // Write malformed JSON
         let malformed_path = dir.join("999.json");
         std::fs::write(&malformed_path, "{ malformed json ]").unwrap();
 
-        // Load states
         let loaded = load_inflight_states_from_root(root, &ProviderKind::Claude);
 
-        // Assert: should load valid state, ignore malformed state, and delete the malformed file
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].channel_id, 111);
-
-        // Valid file should still exist
         assert!(valid_path.exists());
-        // Malformed file should be deleted by the load function
         assert!(!malformed_path.exists());
     }
+}
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+mod tests {
+    use super::{
+        CreateNewInflightError, InflightTurnState, latest_request_owner_user_id_for_channel,
+        load_inflight_states, load_inflight_states_from_root,
+        mark_all_inflight_states_restart_mode, save_inflight_state_create_new_in_root,
+        save_inflight_state_in_root, stale_removal_reason,
+    };
+    use crate::services::discord::InflightRestartMode;
+    use crate::services::provider::ProviderKind;
+    use tempfile::TempDir;
 
     #[test]
     fn test_save_and_load_inflight_state() {
