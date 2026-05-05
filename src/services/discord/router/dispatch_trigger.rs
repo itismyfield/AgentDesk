@@ -111,13 +111,13 @@ pub(super) fn dispatch_session_path_should_update(
     if bootstrapped_fresh_thread_session && !has_worktree_path {
         return false;
     }
+    if has_worktree_path {
+        return true;
+    }
     if crate::dispatch::dispatch_type_requires_fresh_worktree(dispatch_type)
         && bootstrapped_fresh_thread_session
     {
         return false;
-    }
-    if has_worktree_path {
-        return true;
     }
     dispatch_effective_path != current_path
 }

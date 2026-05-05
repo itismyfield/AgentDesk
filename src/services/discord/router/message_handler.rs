@@ -6292,14 +6292,14 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_session_path_should_not_override_fresh_bootstrap_for_implementation() {
-        assert!(!dispatch_session_path_should_update(
+    fn dispatch_session_path_should_update_fresh_bootstrap_for_worktree_dispatch() {
+        assert!(dispatch_session_path_should_update(
             true,
             Some("implementation"),
             true,
             true,
-            "/tmp/worktrees/dispatch-934",
             "/tmp/workspaces/agentdesk",
+            "/tmp/worktrees/dispatch-934",
         ));
     }
 
