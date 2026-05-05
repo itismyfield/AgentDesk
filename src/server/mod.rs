@@ -3262,12 +3262,33 @@ where
                                 claim_owner = NULL
                           WHERE id = $3",
                     )
-                    .bind(error_text)
+                    .bind(&error_text)
                     .bind(retry_count)
                     .bind(row.id)
                     .execute(pg_pool)
                     .await
                     .ok();
+                    // Release any session that is still turn_active for this channel so
+                    // future turns are not permanently blocked after delivery fails.
+                    if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
+                        sqlx::query(
+                            "UPDATE sessions
+                                SET status = 'idle',
+                                    updated_at = NOW()
+                              WHERE thread_channel_id = $1
+                                AND status IN ('turn_active', 'working')",
+                        )
+                        .bind(channel_id_str)
+                        .execute(pg_pool)
+                        .await
+                        .ok();
+                        tracing::warn!(
+                            "[outbox] ❌ permanent delivery failure for channel {} (msg {}): {}",
+                            channel_id_str,
+                            row.id,
+                            error_text,
+                        );
+                    }
                 }
                 MessageOutboxFailureAction::Retry {
                     retry_count,

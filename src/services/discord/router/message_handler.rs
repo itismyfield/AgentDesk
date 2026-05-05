@@ -770,9 +770,13 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
             .get(&channel_id)
             .and_then(|session| session.channel_name.clone())
             .or_else(|| channel_name_hint.clone());
-        let tmux_session_name = channel_name
-            .as_ref()
-            .map(|name| provider.build_tmux_session_name(name));
+        let tmux_session_name = if provider.uses_managed_tmux_backend() {
+            channel_name
+                .as_ref()
+                .map(|name| provider.build_tmux_session_name(name))
+        } else {
+            None
+        };
         let category_name = data
             .sessions
             .get(&channel_id)
@@ -2366,9 +2370,13 @@ pub(in crate::services::discord) async fn handle_text_message(
             .sessions
             .get(&channel_id)
             .and_then(|s| s.channel_name.clone());
-        let tmux_session_name = channel_name
-            .as_ref()
-            .map(|name| provider.build_tmux_session_name(name));
+        let tmux_session_name = if provider.uses_managed_tmux_backend() {
+            channel_name
+                .as_ref()
+                .map(|name| provider.build_tmux_session_name(name))
+        } else {
+            None
+        };
         (channel_name, tmux_session_name)
     };
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
