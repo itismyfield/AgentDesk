@@ -8,8 +8,8 @@ pub(in crate::services::discord) use super::authorization::{
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use super::dispatch_trigger::evaluate_dispatch_cwd_policy;
 use super::dispatch_trigger::{
-    dispatch_session_path_should_update, parse_dispatch_context_hints,
-    resolve_dispatch_target_repo_dir,
+    dispatch_session_path_should_update, dispatch_should_recover_session_worktree,
+    parse_dispatch_context_hints, resolve_dispatch_target_repo_dir,
 };
 use super::response_format::{
     build_headless_trigger_context, build_memory_injection_plan, build_race_requeued_intervention,
@@ -1822,7 +1822,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 .filter(|p| std::path::Path::new(p).is_dir())
         })
         .unwrap_or_else(|| current_path.clone());
-    let dispatch_effective_path = dispatch_worktree_path
+    let mut dispatch_effective_path = dispatch_worktree_path
         .clone()
         .unwrap_or_else(|| dispatch_default_path.clone());
     if dispatch_worktree_path.is_none() && dispatch_id_for_thread.is_some() {
@@ -2018,6 +2018,31 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         channel_id
     };
+    if dispatch_should_recover_session_worktree(
+        dispatch_id_for_thread.is_some(),
+        dispatch_type_str.as_deref(),
+        dispatch_worktree_path.is_some(),
+    ) {
+        let session_worktree_path = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .and_then(|session| session.worktree.as_ref())
+                .map(|worktree| worktree.worktree_path.clone())
+                .filter(|path| std::path::Path::new(path).is_dir())
+        };
+        if let Some(worktree_path) = session_worktree_path {
+            if dispatch_effective_path != worktree_path {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🌿 Dispatch recovered thread worktree CWD: {} → {}",
+                    dispatch_effective_path,
+                    worktree_path
+                );
+                dispatch_effective_path = worktree_path;
+            }
+        }
+    }
     let active_dispatch_id_for_prompt =
         super::super::adk_session::lookup_pending_dispatch_for_thread(
             shared.api_port,

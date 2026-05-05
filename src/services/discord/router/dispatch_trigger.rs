@@ -122,6 +122,16 @@ pub(super) fn dispatch_session_path_should_update(
     dispatch_effective_path != current_path
 }
 
+pub(super) fn dispatch_should_recover_session_worktree(
+    has_dispatch: bool,
+    dispatch_type: Option<&str>,
+    has_worktree_path: bool,
+) -> bool {
+    has_dispatch
+        && !has_worktree_path
+        && crate::dispatch::dispatch_type_requires_fresh_worktree(dispatch_type)
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DispatchCwdPolicyDecision {
@@ -183,6 +193,30 @@ mod tests {
             false,
             "/tmp/stale-impl-repo",
             "/tmp/external-target-repo",
+        ));
+    }
+
+    #[test]
+    fn dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches() {
+        assert!(super::dispatch_should_recover_session_worktree(
+            true,
+            Some("implementation"),
+            false,
+        ));
+        assert!(!super::dispatch_should_recover_session_worktree(
+            true,
+            Some("implementation"),
+            true,
+        ));
+        assert!(!super::dispatch_should_recover_session_worktree(
+            true,
+            Some("review"),
+            false,
+        ));
+        assert!(!super::dispatch_should_recover_session_worktree(
+            false,
+            Some("implementation"),
+            false,
         ));
     }
 }
