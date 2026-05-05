@@ -743,6 +743,23 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    pub(crate) async fn cancel_active_turn_if_current(
+        &self,
+        expected_token: Arc<CancelToken>,
+    ) -> CancelActiveTurnResult {
+        self.request(
+            |reply| ChannelMailboxMsg::CancelActiveTurnIfCurrent {
+                expected_token,
+                reply,
+            },
+            CancelActiveTurnResult {
+                token: None,
+                already_stopping: false,
+            },
+        )
+        .await
+    }
+
     pub(crate) async fn try_start_turn(
         &self,
         cancel_token: Arc<CancelToken>,
@@ -1105,6 +1122,10 @@ enum ChannelMailboxMsg {
     CancelActiveTurn {
         reply: oneshot::Sender<CancelActiveTurnResult>,
     },
+    CancelActiveTurnIfCurrent {
+        expected_token: Arc<CancelToken>,
+        reply: oneshot::Sender<CancelActiveTurnResult>,
+    },
     TryStartTurn {
         cancel_token: Arc<CancelToken>,
         request_owner: UserId,
@@ -1366,6 +1387,29 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::CancelActiveTurn { reply } => {
                     let token = state.cancel_token.clone();
+                    let already_stopping = token.as_ref().is_some_and(|token| {
+                        token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                    });
+                    if let Some(token) = token.as_ref()
+                        && !already_stopping
+                    {
+                        token
+                            .cancelled
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let _ = reply.send(CancelActiveTurnResult {
+                        token,
+                        already_stopping,
+                    });
+                }
+                ChannelMailboxMsg::CancelActiveTurnIfCurrent {
+                    expected_token,
+                    reply,
+                } => {
+                    let token = state
+                        .cancel_token
+                        .clone()
+                        .filter(|token| Arc::ptr_eq(token, &expected_token));
                     let already_stopping = token.as_ref().is_some_and(|token| {
                         token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
                     });
@@ -1687,6 +1731,38 @@ mod actor_hydrate_regression_tests {
         );
         assert_eq!(hydrate.queue_len_after, 0);
         assert!(handle.snapshot().await.intervention_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_active_turn_if_current_ignores_stale_watchdog_token() {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(46));
+        let active_token = Arc::new(CancelToken::new());
+        let stale_token = Arc::new(CancelToken::new());
+
+        handle
+            .try_start_turn(active_token.clone(), UserId::new(9), MessageId::new(91))
+            .await;
+
+        let stale = handle.cancel_active_turn_if_current(stale_token).await;
+        assert!(stale.token.is_none());
+        assert!(!stale.already_stopping);
+        assert!(
+            !active_token
+                .cancelled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        let current = handle
+            .cancel_active_turn_if_current(active_token.clone())
+            .await;
+        assert!(current.token.is_some());
+        assert!(!current.already_stopping);
+        assert!(
+            active_token
+                .cancelled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 }
 

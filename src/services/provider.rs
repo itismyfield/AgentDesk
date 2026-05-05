@@ -523,6 +523,7 @@ pub fn is_readonly_tool_policy(allowed_tools: Option<&[String]>) -> bool {
 pub struct CancelToken {
     pub cancelled: AtomicBool,
     pub child_pid: Mutex<Option<u32>>,
+    cancel_source: Mutex<Option<String>>,
     /// SSH cancel flag — set to true to signal remote execution to close the channel
     #[allow(dead_code)]
     pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
@@ -543,6 +544,7 @@ impl CancelToken {
         Self {
             cancelled: AtomicBool::new(false),
             child_pid: Mutex::new(None),
+            cancel_source: Mutex::new(None),
             ssh_cancel: Mutex::new(None),
             tmux_session: Mutex::new(None),
             watchdog_deadline_ms: AtomicI64::new(0),
@@ -585,6 +587,14 @@ impl CancelToken {
         crate::services::discord::InflightRestartMode::from_u8(
             self.restart_mode.load(Ordering::Relaxed),
         )
+    }
+
+    pub fn set_cancel_source(&self, source: impl Into<String>) {
+        *self.cancel_source.lock().unwrap() = Some(source.into());
+    }
+
+    pub fn cancel_source(&self) -> Option<String> {
+        self.cancel_source.lock().unwrap().clone()
     }
 }
 
@@ -1057,6 +1067,30 @@ fn codex_model_context_window(model: &str) -> Option<u64> {
         .find(|m| m.get("slug").and_then(|s| s.as_str()) == Some(model))
         .and_then(|m| m.get("context_window"))
         .and_then(|v| v.as_u64())
+}
+
+#[cfg(test)]
+mod cancel_token_tests {
+    use super::{CancelToken, cancel_requested, register_child_pid};
+
+    #[test]
+    fn cancel_token_helpers_register_source_and_state() {
+        let token = CancelToken::new();
+        assert!(!cancel_requested(Some(&token)));
+        assert!(!cancel_requested(None));
+        assert_eq!(token.cancel_source(), None);
+
+        register_child_pid(Some(&token), 4242);
+        assert_eq!(*token.child_pid.lock().unwrap(), Some(4242));
+
+        token.set_cancel_source("watchdog_timeout");
+        assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
+
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(cancel_requested(Some(&token)));
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -1607,9 +1641,13 @@ mod tests {
         let token = CancelToken::new();
         assert!(!cancel_requested(Some(&token)));
         assert!(!cancel_requested(None));
+        assert_eq!(token.cancel_source(), None);
 
         register_child_pid(Some(&token), 4242);
         assert_eq!(*token.child_pid.lock().unwrap(), Some(4242));
+
+        token.set_cancel_source("watchdog_timeout");
+        assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
 
         token
             .cancelled

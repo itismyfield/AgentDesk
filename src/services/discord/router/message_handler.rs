@@ -46,6 +46,8 @@ use std::sync::Arc;
 
 const WATCHDOG_DEADLOCK_PREALERT_MS: i64 = 5 * 60 * 1000;
 const WATCHDOG_DEADLOCK_PREALERT_BOT: &str = "announce";
+const WATCHDOG_TIMEOUT_REASON: &str = "watchdog timeout";
+const WATCHDOG_TIMEOUT_CANCEL_SOURCE: &str = "watchdog_timeout";
 
 fn watchdog_deadlock_prealert_bot_name() -> &'static str {
     WATCHDOG_DEADLOCK_PREALERT_BOT
@@ -282,6 +284,97 @@ async fn maybe_send_watchdog_deadlock_prealert(
             false
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchdogTimeoutCancelDisposition {
+    Cancelled,
+    AlreadyStopping,
+    StaleToken,
+}
+
+fn watchdog_timeout_turn_id(inflight: &InflightTurnState) -> Option<String> {
+    (inflight.user_msg_id != 0)
+        .then(|| format!("discord:{}:{}", inflight.channel_id, inflight.user_msg_id))
+}
+
+fn watchdog_timeout_cancel_request(
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    inflight: Option<&InflightTurnState>,
+    queue_depth: Option<usize>,
+    termination_recorded: bool,
+) -> crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest {
+    let turn_id = inflight.and_then(watchdog_timeout_turn_id);
+    crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest {
+        correlation: crate::services::turn_cancel_finalizer::TurnCancelCorrelation {
+            provider: Some(provider.clone()),
+            channel_id: Some(channel_id),
+            dispatch_id: inflight.and_then(|state| state.dispatch_id.clone()),
+            session_key: inflight.and_then(|state| state.session_key.clone()),
+            turn_id,
+        },
+        reason: WATCHDOG_TIMEOUT_REASON.to_string(),
+        surface: WATCHDOG_TIMEOUT_CANCEL_SOURCE.to_string(),
+        lifecycle_path: "mailbox_cancel_active_turn.watchdog_timeout".to_string(),
+        tmux_killed: false,
+        inflight_cleared: false,
+        queue_depth,
+        queue_preserved: true,
+        termination_recorded,
+        completed_at: chrono::Utc::now(),
+    }
+}
+
+async fn reconcile_watchdog_timeout(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    watchdog_token: &Arc<CancelToken>,
+) -> WatchdogTimeoutCancelDisposition {
+    let inflight = super::super::inflight::load_inflight_state(provider, channel_id.get());
+    let result = super::super::mailbox_cancel_active_turn_if_current_with_reason(
+        shared,
+        channel_id,
+        watchdog_token.clone(),
+        WATCHDOG_TIMEOUT_CANCEL_SOURCE,
+    )
+    .await;
+    super::super::clear_watchdog_deadline_override(channel_id.get()).await;
+
+    let Some(token) = result.token else {
+        return WatchdogTimeoutCancelDisposition::StaleToken;
+    };
+    if result.already_stopping {
+        return WatchdogTimeoutCancelDisposition::AlreadyStopping;
+    }
+
+    super::super::ensure_cancel_token_bound_from_inflight(
+        provider,
+        channel_id,
+        &token,
+        "watchdog timeout mailbox cancel",
+    );
+    let termination_recorded = super::super::turn_bridge::stop_active_turn(
+        provider,
+        &token,
+        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
+        WATCHDOG_TIMEOUT_REASON,
+    )
+    .await;
+    let queue_depth = super::super::mailbox_snapshot(shared, channel_id)
+        .await
+        .intervention_queue
+        .len();
+    crate::services::turn_cancel_finalizer::finalize_turn_cancel(watchdog_timeout_cancel_request(
+        provider,
+        channel_id,
+        inflight.as_ref(),
+        Some(queue_depth),
+        termination_recorded,
+    ));
+
+    WatchdogTimeoutCancelDisposition::Cancelled
 }
 
 fn attach_paused_turn_watcher(
@@ -1081,29 +1174,20 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
                     continue;
                 }
 
-                let is_current_token =
-                    super::super::mailbox_cancel_token(&watchdog_shared, channel_id)
-                        .await
-                        .is_some_and(|current| std::sync::Arc::ptr_eq(&watchdog_token, &current));
-                if !is_current_token {
-                    super::super::clear_watchdog_deadline_override(watchdog_channel_id_num).await;
-                    return;
-                }
-
-                // #1218: send abort key first, then SIGKILL — see
-                // `stop_active_turn` doc comment.
-                super::super::turn_bridge::stop_active_turn(
+                let disposition = reconcile_watchdog_timeout(
+                    &watchdog_shared,
                     &watchdog_provider,
+                    channel_id,
                     &watchdog_token,
-                    super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                    "watchdog timeout",
                 )
                 .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⏰ Headless watchdog timeout fired for channel {}",
-                    channel_id
-                );
+                if disposition == WatchdogTimeoutCancelDisposition::Cancelled {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⏰ Headless watchdog timeout reconciled via cancel path for channel {}",
+                        channel_id
+                    );
+                }
                 return;
             }
         });
@@ -3192,7 +3276,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         provider_label,
         session_id.is_some(),
     );
-    // Spawn turn watchdog — cancels the turn if it exceeds the deadline.
+    // Spawn turn watchdog — detects deadline expiry and hands off to cancel reconciliation.
     // The deadline is stored in cancel_token.watchdog_deadline_ms and can be
     // extended via POST /api/turns/{channel_id}/extend-timeout.
     {
@@ -3349,31 +3433,22 @@ pub(in crate::services::discord) async fn handle_text_message(
                     continue; // Not yet — deadline may have been extended
                 }
 
-                // Deadline reached — fire watchdog
-                // Verify this watchdog's token is still the CURRENT active token for this channel.
-                let is_current_token =
-                    super::super::mailbox_cancel_token(&watchdog_shared, channel_id)
-                        .await
-                        .is_some_and(|current| std::sync::Arc::ptr_eq(&watchdog_token, &current));
-                if is_current_token {
+                // Deadline reached — fire watchdog through the cancel/reconcile path.
+                let disposition = reconcile_watchdog_timeout(
+                    &watchdog_shared,
+                    &watchdog_provider,
+                    channel_id,
+                    &watchdog_token,
+                )
+                .await;
+                if disposition == WatchdogTimeoutCancelDisposition::Cancelled {
                     let elapsed_mins =
                         (now - (current_deadline - timeout.as_millis() as i64)) / 1000 / 60;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
-                        "  [{ts}] ⏰ WATCHDOG: turn timeout (~{elapsed_mins}m) for channel {}, cancelling",
+                        "  [{ts}] ⏰ WATCHDOG: turn timeout (~{elapsed_mins}m) for channel {}, reconciled via cancel path",
                         channel_id
                     );
-                    // #441: stop_active_turn → token.cancelled triggers turn_bridge loop exit
-                    // → mailbox_finish_turn canonical cleanup
-                    // #1218: send abort key first, then SIGKILL — see
-                    // `stop_active_turn` doc comment.
-                    super::super::turn_bridge::stop_active_turn(
-                        &watchdog_provider,
-                        &watchdog_token,
-                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                        "watchdog timeout",
-                    )
-                    .await;
 
                     // Notify Discord
                     let has_queued = super::super::mailbox_has_pending_soft_queue(
@@ -5244,6 +5319,57 @@ mod session_strategy_lifecycle_tests {
         assert!(cli_just_spawned_for_emit(None));
         assert!(cli_just_spawned_for_emit(Some("")));
         assert!(cli_just_spawned_for_emit(Some("   ")));
+    }
+
+    #[test]
+    fn watchdog_timeout_cancel_request_uses_canonical_cancel_source() {
+        let channel_id = serenity::ChannelId::new(1479671301387059200);
+        let mut inflight = InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id.get(),
+            Some("adk-cdx".to_string()),
+            343742347365974026,
+            1501205715878936748,
+            1501205715878936749,
+            "work on issue".to_string(),
+            Some("provider-session".to_string()),
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/agentdesk-output.jsonl".to_string()),
+            None,
+            0,
+        );
+        inflight.dispatch_id = Some("dispatch-1748".to_string());
+        inflight.session_key = Some("mac-mini:AgentDesk-codex-adk-cdx".to_string());
+
+        let request = watchdog_timeout_cancel_request(
+            &ProviderKind::Codex,
+            channel_id,
+            Some(&inflight),
+            Some(2),
+            true,
+        );
+
+        assert_eq!(request.reason, WATCHDOG_TIMEOUT_REASON);
+        assert_eq!(request.surface, WATCHDOG_TIMEOUT_CANCEL_SOURCE);
+        assert_eq!(
+            request.lifecycle_path,
+            "mailbox_cancel_active_turn.watchdog_timeout"
+        );
+        assert_eq!(request.queue_depth, Some(2));
+        assert!(request.queue_preserved);
+        assert!(request.termination_recorded);
+        assert_eq!(
+            request.correlation.dispatch_id.as_deref(),
+            Some("dispatch-1748")
+        );
+        assert_eq!(
+            request.correlation.session_key.as_deref(),
+            Some("mac-mini:AgentDesk-codex-adk-cdx")
+        );
+        assert_eq!(
+            request.correlation.turn_id.as_deref(),
+            Some("discord:1479671301387059200:1501205715878936748")
+        );
     }
 
     #[test]

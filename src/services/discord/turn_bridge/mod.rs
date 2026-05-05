@@ -3006,11 +3006,14 @@ pub(super) fn spawn_turn_bridge(
                 },
                 None => TmuxCleanupPolicy::PreserveSession,
             };
+            let cancel_source = cancel_token
+                .cancel_source()
+                .unwrap_or_else(|| "turn_bridge_cancelled".to_string());
             stop_active_turn(
                 &provider,
                 &cancel_token,
                 cleanup_policy,
-                "turn_bridge_cancelled",
+                &cancel_source,
             )
             .await;
 
@@ -3019,7 +3022,7 @@ pub(super) fn spawn_turn_bridge(
                     if let Err(error) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
                         pg_pool,
                         dispatch_id,
-                        Some("turn_bridge_cancelled"),
+                        Some(cancel_source.as_str()),
                     )
                     .await
                     {
@@ -3037,7 +3040,7 @@ pub(super) fn spawn_turn_bridge(
                                 crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
                                     &conn,
                                     dispatch_id,
-                                    Some("turn_bridge_cancelled"),
+                                    Some(cancel_source.as_str()),
                                 )
                             {
                                 tracing::warn!(

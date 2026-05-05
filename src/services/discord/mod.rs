@@ -1980,6 +1980,14 @@ async fn mailbox_cancel_active_turn(
     shared: &SharedData,
     channel_id: ChannelId,
 ) -> CancelActiveTurnResult {
+    mailbox_cancel_active_turn_with_reason(shared, channel_id, "mailbox_cancel_active_turn").await
+}
+
+async fn mailbox_cancel_active_turn_with_reason(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    reason: &str,
+) -> CancelActiveTurnResult {
     let tmux_session_name = shared
         .tmux_watchers
         .channel_binding(&channel_id)
@@ -1991,12 +1999,30 @@ async fn mailbox_cancel_active_turn(
         // #1309: in-memory publish is synchronous (instant suppression);
         // PG mirror is awaited with a 500 ms cap so a quick dcserver
         // restart cannot drop the durable copy.
-        tmux::record_recent_turn_stop(
-            channel_id,
-            tmux_session_name.as_deref(),
-            "mailbox_cancel_active_turn",
-        )
+        tmux::record_recent_turn_stop(channel_id, tmux_session_name.as_deref(), reason).await;
+    }
+    result
+}
+
+async fn mailbox_cancel_active_turn_if_current_with_reason(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    expected_token: Arc<CancelToken>,
+    reason: &str,
+) -> CancelActiveTurnResult {
+    expected_token.set_cancel_source(reason);
+    let tmux_session_name = shared
+        .tmux_watchers
+        .channel_binding(&channel_id)
+        .map(|binding| binding.tmux_session_name)
+        .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
+    let result = shared
+        .mailbox(channel_id)
+        .cancel_active_turn_if_current(expected_token)
         .await;
+    #[cfg(unix)]
+    if result.token.is_some() {
+        tmux::record_recent_turn_stop(channel_id, tmux_session_name.as_deref(), reason).await;
     }
     result
 }
