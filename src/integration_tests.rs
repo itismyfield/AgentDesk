@@ -2853,6 +2853,107 @@ mod tests {
         pg_db.drop().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_queue_activate_create_dispatch_failure_counts_retries_pg() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value) \
+             VALUES ('runtime-config', '{\"maxEntryRetries\":2}') \
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-bad-channel', 'Bad Channel Agent', 'not-a-channel', NULL) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
+             VALUES ('card-aq-create-fail', 'AQ Create Failure', 'ready', 'agent-bad-channel', 'repo-1', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-aq-create-fail', 'repo-1', 'agent-bad-channel', 'active', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at) \
+             VALUES ('entry-aq-create-fail', 'run-aq-create-fail', 'card-aq-create-fail', 'agent-bad-channel', 'pending', 0, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
+            test_db(),
+            engine.clone(),
+        );
+
+        for expected_retry_count in 1..=2 {
+            let (status, _body) = crate::server::routes::auto_queue::activate_with_deps_pg(
+                &deps,
+                crate::server::routes::auto_queue::ActivateBody {
+                    run_id: Some("run-aq-create-fail".to_string()),
+                    repo: Some("repo-1".to_string()),
+                    agent_id: Some("agent-bad-channel".to_string()),
+                    thread_group: None,
+                    unified_thread: None,
+                    active_only: Some(true),
+                },
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+
+            let row: (String, i64, Option<String>, Option<i64>) = sqlx::query_as(
+                "SELECT status, retry_count, dispatch_id, slot_index \
+                 FROM auto_queue_entries \
+                 WHERE id = 'entry-aq-create-fail'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            let expected_status = if expected_retry_count >= 2 {
+                "failed"
+            } else {
+                "pending"
+            };
+            assert_eq!(row.0, expected_status);
+            assert_eq!(row.1, expected_retry_count);
+            assert_eq!(row.2, None);
+            assert_eq!(row.3, None);
+        }
+
+        let dispatch_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT \
+             FROM task_dispatches \
+             WHERE kanban_card_id = 'card-aq-create-fail'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            dispatch_count, 0,
+            "failed create_dispatch attempts must not leave phantom dispatch rows"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     // #1239: migrated to PG fixtures because `activate_with_deps` is now
     // PG-only — the SQLite fallback was removed in favor of `activate_with_deps_pg`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
