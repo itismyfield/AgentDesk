@@ -108,6 +108,9 @@ pub(super) fn dispatch_session_path_should_update(
     if !has_dispatch {
         return false;
     }
+    if bootstrapped_fresh_thread_session && !has_worktree_path {
+        return false;
+    }
     if crate::dispatch::dispatch_type_requires_fresh_worktree(dispatch_type)
         && bootstrapped_fresh_thread_session
     {
@@ -144,5 +147,42 @@ pub(super) fn evaluate_dispatch_cwd_policy(
         reject_for_missing_fresh_worktree: requires_fresh_worktree
             && worktrees_root.is_some()
             && !is_managed_worktree,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_session_path_should_update;
+
+    #[test]
+    fn dispatch_session_path_preserves_fresh_bootstrap_without_worktree_hint() {
+        assert!(!dispatch_session_path_should_update(
+            true,
+            None,
+            false,
+            true,
+            "/tmp/worktrees/thread-wt",
+            "/tmp/workspaces/agentdesk",
+        ));
+        assert!(!dispatch_session_path_should_update(
+            true,
+            Some("review"),
+            false,
+            true,
+            "/tmp/worktrees/thread-wt",
+            "/tmp/external-target-repo",
+        ));
+    }
+
+    #[test]
+    fn dispatch_session_path_reused_thread_still_updates_divergent_fallback() {
+        assert!(dispatch_session_path_should_update(
+            true,
+            Some("review"),
+            false,
+            false,
+            "/tmp/stale-impl-repo",
+            "/tmp/external-target-repo",
+        ));
     }
 }
