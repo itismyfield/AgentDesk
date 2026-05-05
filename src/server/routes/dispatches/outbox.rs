@@ -5,13 +5,18 @@
 //! `crate::db::dispatches::outbox`; queue processing lives in
 //! `crate::services::dispatches::outbox_queue`.
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(crate) use crate::db::dispatches::outbox::claim_pending_dispatch_outbox_batch_pg;
 pub(crate) use crate::db::dispatches::outbox::requeue_dispatch_notify_pg;
 pub(crate) use crate::server::dto::dispatches::DispatchFollowupConfig;
 pub(crate) use crate::services::dispatches::outbox_queue::dispatch_outbox_loop;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use crate::services::dispatches::outbox_queue::{
-    OutboxNotifier, process_outbox_batch, process_outbox_batch_with_real_notifier,
+    OutboxNotifier, process_outbox_batch, process_outbox_batch_with_pg,
+    process_outbox_batch_with_real_notifier,
 };
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(crate) use crate::services::dispatches::outbox_route::parse_json_value;
 pub use crate::services::dispatches::outbox_route::resolve_channel_alias_pub;
 pub(crate) use crate::services::dispatches::outbox_route::{
     DISPATCH_MESSAGE_HARD_LIMIT, build_minimal_dispatch_message, extract_review_verdict,

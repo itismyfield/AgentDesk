@@ -64,7 +64,10 @@ pub(crate) fn extract_review_verdict(result_json: Option<&str>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn parse_json_value(raw: Option<&str>, field_name: &'static str) -> Option<serde_json::Value> {
+pub(crate) fn parse_json_value(
+    raw: Option<&str>,
+    field_name: &'static str,
+) -> Option<serde_json::Value> {
     let value = raw?;
     match serde_json::from_str::<serde_json::Value>(value) {
         Ok(value) => Some(value),
