@@ -65,6 +65,10 @@ import {
   formatDispatchSummary,
 } from "./card-detail-activity";
 
+interface AssignIssueOutcome {
+  warning?: string;
+}
+
 interface KanbanTabProps {
   tr: (ko: string, en: string) => string;
   locale: UiLanguage;
@@ -79,7 +83,7 @@ interface KanbanTabProps {
     title: string;
     description?: string | null;
     assignee_agent_id: string;
-  }) => Promise<void>;
+  }) => Promise<AssignIssueOutcome | void>;
   onUpdateCard: (
     id: string,
     patch: Partial<KanbanCard> & { before_card_id?: string | null },
@@ -197,6 +201,7 @@ export default function KanbanTab({
   const [assigningIssue, setAssigningIssue] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionWarning, setActionWarning] = useState<string | null>(null);
   const [compactBoard, setCompactBoard] = useState(false);
   const [mobileColumnStatus, setMobileColumnStatus] = useState<KanbanCardStatus | KanbanBoardColumnStatus>("backlog");
   const [retryAssigneeId, setRetryAssigneeId] = useState("");
@@ -1016,8 +1021,9 @@ export default function KanbanTab({
     if (!selectedRepo) return;
     setAssigningIssue(true);
     setActionError(null);
+    setActionWarning(null);
     try {
-      await onAssignIssue({
+      const outcome = await onAssignIssue({
         github_repo: selectedRepo,
         github_issue_number: issue.number,
         github_issue_url: issue.url,
@@ -1025,7 +1031,9 @@ export default function KanbanTab({
         description: issue.body || null,
         assignee_agent_id: agentId,
       });
+      if (outcome?.warning) setActionWarning(outcome.warning);
     } catch (error) {
+      setActionWarning(null);
       setActionError(error instanceof Error ? error.message : tr("이슈 할당에 실패했습니다.", "Failed to assign issue."));
     } finally {
       setAssigningIssue(false);
@@ -1154,8 +1162,9 @@ export default function KanbanTab({
     if (!assignIssue || !selectedRepo || !assignAssigneeId) return;
     setAssigningIssue(true);
     setActionError(null);
+    setActionWarning(null);
     try {
-      await onAssignIssue({
+      const outcome = await onAssignIssue({
         github_repo: selectedRepo,
         github_issue_number: assignIssue.number,
         github_issue_url: assignIssue.url,
@@ -1163,9 +1172,11 @@ export default function KanbanTab({
         description: assignIssue.body || null,
         assignee_agent_id: assignAssigneeId,
       });
+      if (outcome?.warning) setActionWarning(outcome.warning);
       setAssignIssue(null);
       setAssignAssigneeId("");
     } catch (error) {
+      setActionWarning(null);
       setActionError(error instanceof Error ? error.message : tr("issue 할당에 실패했습니다.", "Failed to assign issue."));
     } finally {
       setAssigningIssue(false);
@@ -1740,6 +1751,12 @@ export default function KanbanTab({
         {actionError && (
           <SurfaceNotice tone="danger" className="mt-4">
             {actionError}
+          </SurfaceNotice>
+        )}
+
+        {actionWarning && !actionError && (
+          <SurfaceNotice tone="warn" className="mt-4">
+            {actionWarning}
           </SurfaceNotice>
         )}
 

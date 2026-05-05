@@ -1709,7 +1709,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/kanban-cards/assign-issue",
             "kanban",
-            "Create or update a card from a GitHub issue",
+            "Create or update a card from a GitHub issue. Partial success is valid: assignment may succeed while the automatic transition fails, so callers must inspect transition.ok independently before treating the operation as fully complete.",
         )
         .with_params([
             (
@@ -1845,7 +1845,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/kanban-cards/{id}/assign",
             "kanban",
-            "Assign card to agent",
+            "Assign card to agent, then attempt the automatic transition to the dispatchable state. Partial success is valid: assignment may succeed while transition.ok=false, so callers must inspect assignment.ok and transition.ok independently and surface transition failures as a warning.",
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
@@ -1854,9 +1854,19 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"path": {"id": "card-1"}, "body": {"agent_id": "ch-td"}}),
             json!({
-                "card": {"id": "card-1", "assigned_agent_id": "ch-td", "status": "requested"},
+                "card": {"id": "card-1", "assigned_agent_id": "ch-td", "status": "done"},
                 "assignment": {"ok": true, "agent_id": "ch-td"},
-                "transition": {"attempted": true, "ok": true, "from": "backlog", "to": "requested", "target": "requested"}
+                "transition": {
+                    "attempted": true,
+                    "ok": false,
+                    "from": "done",
+                    "to": "done",
+                    "target": "requested",
+                    "steps": ["requested"],
+                    "completed_steps": [],
+                    "failed_step": "requested",
+                    "error": "transition from done to requested is not allowed"
+                }
             }),
         ),
         ep(
@@ -4871,6 +4881,65 @@ mod tests {
                 .as_ref()
                 .and_then(|example| example.status),
             Some(409)
+        );
+    }
+
+    #[test]
+    fn assign_card_partial_success_contract_is_documented() {
+        let endpoints = all_endpoints();
+
+        let assign = endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.method == "POST" && endpoint.path == "/api/kanban-cards/{id}/assign"
+            })
+            .expect("POST /api/kanban-cards/{id}/assign must be documented");
+        assert!(
+            assign.description.contains("Partial success is valid")
+                && assign.description.contains("assignment may succeed")
+                && assign.description.contains("transition.ok=false")
+                && assign
+                    .description
+                    .contains("inspect assignment.ok and transition.ok independently")
+                && assign
+                    .description
+                    .contains("surface transition failures as a warning"),
+            "assign docs must describe partial-success semantics: {}",
+            assign.description
+        );
+        let assign_response = &assign
+            .example
+            .as_ref()
+            .expect("assign docs must include a response example")
+            .response;
+        assert_eq!(assign_response["assignment"]["ok"], true);
+        assert_eq!(assign_response["transition"]["attempted"], true);
+        assert_eq!(assign_response["transition"]["ok"], false);
+        assert_eq!(assign_response["transition"]["target"], "requested");
+        assert_eq!(assign_response["transition"]["failed_step"], "requested");
+        assert!(
+            assign_response["transition"]["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()),
+            "assign partial-success example must include a transition error"
+        );
+
+        let assign_issue = endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.method == "POST" && endpoint.path == "/api/kanban-cards/assign-issue"
+            })
+            .expect("POST /api/kanban-cards/assign-issue must be documented");
+        assert!(
+            assign_issue
+                .description
+                .contains("Partial success is valid")
+                && assign_issue.description.contains("assignment may succeed")
+                && assign_issue
+                    .description
+                    .contains("inspect transition.ok independently"),
+            "assign-issue docs must describe partial-success semantics: {}",
+            assign_issue.description
         );
     }
 

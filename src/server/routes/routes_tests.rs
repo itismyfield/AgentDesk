@@ -8386,6 +8386,39 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
     assert_eq!(create["params"]["title"]["type"], "string");
     assert_eq!(create["example"]["response"]["card"]["status"], "backlog");
 
+    let assign = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/{id}/assign")
+        .expect("kanban assign endpoint must be present");
+    let assign_description = assign["description"].as_str().unwrap_or_default();
+    assert!(
+        assign_description.contains("Partial success is valid")
+            && assign_description.contains("assignment may succeed")
+            && assign_description.contains("transition.ok=false")
+            && assign_description.contains("inspect assignment.ok and transition.ok independently"),
+        "assign docs must describe partial-success semantics: {assign_description}"
+    );
+    assert_eq!(assign["example"]["response"]["assignment"]["ok"], true);
+    assert_eq!(assign["example"]["response"]["transition"]["ok"], false);
+    assert!(
+        assign["example"]["response"]["transition"]["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "assign partial-success example must include a transition error"
+    );
+
+    let assign_issue = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/assign-issue")
+        .expect("kanban assign-issue endpoint must be present");
+    let assign_issue_description = assign_issue["description"].as_str().unwrap_or_default();
+    assert!(
+        assign_issue_description.contains("Partial success is valid")
+            && assign_issue_description.contains("assignment may succeed")
+            && assign_issue_description.contains("inspect transition.ok independently"),
+        "assign-issue docs must describe partial-success semantics: {assign_issue_description}"
+    );
+
     let resume = endpoints
         .iter()
         .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/{id}/resume")

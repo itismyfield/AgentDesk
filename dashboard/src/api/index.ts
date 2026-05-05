@@ -111,6 +111,7 @@ export {
   getCardAuditLog,
   getCardGitHubComments,
   onApiError,
+  formatAssignmentTransitionWarning,
 } from "./client";
 
 export type {

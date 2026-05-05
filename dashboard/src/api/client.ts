@@ -818,6 +818,24 @@ export interface AssignmentTransitionResult {
   completed_steps?: Array<{ from?: string; to?: string; changed?: boolean }>;
   failed_step?: string;
   error?: string;
+  next_action?: string;
+}
+
+export function formatAssignmentTransitionWarning(
+  transition?: AssignmentTransitionResult | null,
+): string | null {
+  if (!transition?.attempted || transition.ok) return null;
+
+  const details = (
+    transition.error?.trim()
+    || (transition.failed_step ? `failed at step ${transition.failed_step}` : "")
+  ).replace(/[.!?]+$/, "");
+  const followup = transition.next_action?.trim()
+    || "inspect the pipeline or transition manually";
+  const prefix = "Assignment succeeded, but transition failed";
+  const detailText = details ? `: ${details}.` : ".";
+  const followupText = followup ? ` Next action: ${followup}.` : "";
+  return `${prefix}${detailText}${followupText}`;
 }
 
 export interface AssignKanbanIssueResponse {
