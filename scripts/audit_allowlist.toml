@@ -15,6 +15,12 @@
 giant_files = [
 ]
 
+# Namespace size caps: per-namespace production Rust file limits configured in
+# scripts/audit_maintainability_config.toml. Keep this empty unless a follow-up
+# extraction issue explicitly owns a short-lived exception.
+namespace_size_caps = [
+]
+
 # Route SRP: temporary tolerated mixed-concerns route handlers.
 route_srp_violations = [
 ]

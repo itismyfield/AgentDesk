@@ -251,6 +251,8 @@
 The remaining giant-file modules under `src/services/` not covered above:
 
 - `src/services/api_friction.rs` (1808).
+- `src/services/analytics.rs` (1049) — dashboard analytics query surface;
+  split before adding non-bugfix behavior.
 - `src/services/auto_queue.rs` (1047) and
   `src/services/auto_queue/activate_command.rs` (1012); auto-queue route
   behavior is split across `src/services/auto_queue/*` slices, with

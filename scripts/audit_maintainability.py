@@ -11,11 +11,12 @@ Stdlib only; Python 3.11+.
 
 Hard gates
 ----------
-Five checks are blocking in ``--check`` mode: direct Discord send regressions,
+Six checks are blocking in ``--check`` mode: direct Discord send regressions,
 direct git subprocess regressions, runtime SQLite/legacy DB references,
-source-of-truth alias writes, and giant files missing from
-``docs/agent-maintenance/change-surfaces.md``. Existing findings from the
-enablement commit are captured in ``scripts/audit_allowlist.toml``.
+source-of-truth alias writes, giant files missing from
+``docs/agent-maintenance/change-surfaces.md``, and configured namespace size
+cap regressions. Existing findings from the enablement commit are captured in
+``scripts/audit_allowlist.toml``.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from audit_maintainability.common import REPO_ROOT, Finding  # noqa: E402
 
 CHECK_MODULES = (
     "audit_maintainability.checks.giant_files",
+    "audit_maintainability.checks.namespace_size_caps",
     "audit_maintainability.checks.route_srp",
     "audit_maintainability.checks.direct_discord_sends",
     "audit_maintainability.checks.manual_json_mapping",
@@ -208,8 +210,9 @@ def render_markdown(specs: list[CheckSpec], findings: dict[str, list[Finding]]) 
     buf.write(
         "Automated audit of giant files, route SRP violations, direct Discord "
         "sends, manual JSON row mapping, limit/days clamp duplication, git "
-        "subprocess callsites, legacy SQLite references, and source-of-truth "
-        "alias writes. See `scripts/audit_maintainability.py` (#1282).\n\n"
+        "subprocess callsites, legacy SQLite references, source-of-truth "
+        "alias writes, and namespace size caps. See "
+        "`scripts/audit_maintainability.py` (#1282).\n\n"
     )
     if hard_gate_keys:
         buf.write(
@@ -263,7 +266,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run maintainability audit checks (giant files, SRP, legacy, "
-            "duplicate helpers, etc.) and emit a structured report."
+            "duplicate helpers, namespace caps, etc.) and emit a structured "
+            "report."
         )
     )
     parser.add_argument(

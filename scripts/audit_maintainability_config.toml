@@ -1,0 +1,10 @@
+# Configuration for scripts/audit_maintainability.py.
+#
+# Namespace caps apply to production Rust files under src/. Test-only Rust
+# files remain excluded by the shared production_rust_files() filter.
+
+[namespace_size_caps]
+"src/services/discord/commands/inspect/**" = 700
+"src/db/prompt_manifests/**" = 700
+"src/services/discord/placeholder_live_events/**" = 700
+"src/services/discord/prompt_builder/**" = 700

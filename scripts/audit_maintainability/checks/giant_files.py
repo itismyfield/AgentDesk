@@ -15,6 +15,11 @@ from ..common import (
     rel_posix,
 )
 from . import CheckSpec
+from .namespace_size_caps import (
+    count_lines,
+    load_namespace_size_caps,
+    matching_namespace_cap,
+)
 
 THRESHOLD = 1000
 CHANGE_SURFACES_DOC = "docs/agent-maintenance/change-surfaces.md"
@@ -67,12 +72,15 @@ def documented_change_surface_paths() -> set[str]:
 def _run(allowlist: set[str]) -> Iterable[Finding]:
     findings: list[Finding] = []
     documented = documented_change_surface_paths()
+    namespace_caps = load_namespace_size_caps()
     for path in production_rust_files():
         text = read_text(path)
-        loc = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+        loc = count_lines(text)
         if loc < THRESHOLD:
             continue
         rel = rel_posix(path)
+        if matching_namespace_cap(rel, namespace_caps) is not None:
+            continue
         if rel in documented or is_allowlisted(allowlist, rel):
             continue
         findings.append(
