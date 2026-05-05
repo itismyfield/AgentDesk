@@ -458,7 +458,8 @@ CREATE TABLE IF NOT EXISTS auto_queue_entries (
     batch_phase    INTEGER DEFAULT 0,
     created_at     TIMESTAMPTZ DEFAULT NOW(),
     dispatched_at  TIMESTAMPTZ,
-    completed_at   TIMESTAMPTZ
+    completed_at   TIMESTAMPTZ,
+    updated_at     TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS auto_queue_slots (
