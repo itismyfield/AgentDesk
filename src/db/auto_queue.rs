@@ -1879,8 +1879,24 @@ fn dedupe_phase_gate_dispatch_ids(dispatch_ids: &[String]) -> Vec<String> {
     deduped
 }
 
-async fn valid_phase_gate_dispatch_ids_pg(
-    pool: &PgPool,
+async fn lock_phase_gate_state_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    phase: i64,
+) -> Result<(), String> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2::TEXT))")
+        .bind(run_id)
+        .bind(phase)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            format!("lock postgres phase-gate rows for run {run_id} phase {phase}: {error}")
+        })?;
+    Ok(())
+}
+
+async fn valid_phase_gate_dispatch_ids_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_ids: &[String],
 ) -> Result<Vec<String>, String> {
     if dispatch_ids.is_empty() {
@@ -1889,7 +1905,7 @@ async fn valid_phase_gate_dispatch_ids_pg(
 
     let rows = sqlx::query("SELECT id FROM task_dispatches WHERE id = ANY($1)")
         .bind(dispatch_ids.to_vec())
-        .fetch_all(pool)
+        .fetch_all(&mut **tx)
         .await
         .map_err(|error| format!("load postgres phase-gate dispatch ids: {error}"))?;
 
@@ -1905,24 +1921,27 @@ async fn valid_phase_gate_dispatch_ids_pg(
         .collect())
 }
 
-async fn delete_stale_phase_gate_rows_pg(
-    pool: &PgPool,
+async fn delete_stale_phase_gate_rows_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
     phase: i64,
     dispatch_ids: &[String],
 ) -> Result<usize, String> {
     let rows_affected = if dispatch_ids.is_empty() {
-        sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = $1 AND phase = $2")
-            .bind(run_id)
-            .bind(phase)
-            .execute(pool)
-            .await
-            .map_err(|error| {
-                format!(
-                    "delete postgres stale phase-gate rows for run {run_id} phase {phase}: {error}"
-                )
-            })?
-            .rows_affected()
+        sqlx::query(
+            "DELETE FROM auto_queue_phase_gates
+             WHERE run_id = $1
+               AND phase = $2
+               AND dispatch_id IS NOT NULL",
+        )
+        .bind(run_id)
+        .bind(phase)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            format!("delete postgres stale phase-gate rows for run {run_id} phase {phase}: {error}")
+        })?
+        .rows_affected()
     } else {
         sqlx::query(
             "DELETE FROM auto_queue_phase_gates
@@ -1933,7 +1952,7 @@ async fn delete_stale_phase_gate_rows_pg(
         .bind(run_id)
         .bind(phase)
         .bind(dispatch_ids.to_vec())
-        .execute(pool)
+        .execute(&mut **tx)
         .await
         .map_err(|error| {
             format!("delete postgres stale phase-gate rows for run {run_id} phase {phase}: {error}")
@@ -1951,19 +1970,23 @@ pub async fn save_phase_gate_state_on_pg(
     phase: i64,
     state: &PhaseGateStateWrite,
 ) -> Result<PhaseGateSaveResult, String> {
-    let dispatch_ids = valid_phase_gate_dispatch_ids_pg(
-        pool,
-        &dedupe_phase_gate_dispatch_ids(&state.dispatch_ids),
-    )
-    .await?;
-    let removed_stale_rows =
-        delete_stale_phase_gate_rows_pg(pool, run_id, phase, &dispatch_ids).await?;
     let status = normalize_phase_gate_status(&state.status);
     let verdict = normalize_optional_text(state.verdict.as_deref());
     let pass_verdict = normalize_phase_gate_pass_verdict(&state.pass_verdict);
     let anchor_card_id = normalize_optional_text(state.anchor_card_id.as_deref());
     let failure_reason = normalize_optional_text(state.failure_reason.as_deref());
     let created_at = normalize_optional_text(state.created_at.as_deref());
+    let deduped_dispatch_ids = dedupe_phase_gate_dispatch_ids(&state.dispatch_ids);
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres phase-gate save for run {run_id}: {error}"))?;
+    lock_phase_gate_state_on_pg_tx(&mut tx, run_id, phase).await?;
+    let dispatch_ids =
+        valid_phase_gate_dispatch_ids_on_pg_tx(&mut tx, &deduped_dispatch_ids).await?;
+    let removed_stale_rows =
+        delete_stale_phase_gate_rows_on_pg_tx(&mut tx, run_id, phase, &dispatch_ids).await?;
 
     if dispatch_ids.is_empty() {
         sqlx::query(
@@ -1973,7 +1996,18 @@ pub async fn save_phase_gate_state_on_pg(
              ) VALUES (
                 $1, $2, $3, $4, NULL, $5, $6, $7, $8, $9,
                 COALESCE($10::timestamptz, NOW()), NOW()
-             )",
+             )
+             ON CONFLICT (run_id, phase, COALESCE(dispatch_id, ''))
+             DO UPDATE SET
+                status = EXCLUDED.status,
+                verdict = EXCLUDED.verdict,
+                pass_verdict = EXCLUDED.pass_verdict,
+                next_phase = EXCLUDED.next_phase,
+                final_phase = EXCLUDED.final_phase,
+                anchor_card_id = EXCLUDED.anchor_card_id,
+                failure_reason = EXCLUDED.failure_reason,
+                created_at = COALESCE($10::timestamptz, auto_queue_phase_gates.created_at, NOW()),
+                updated_at = NOW()",
         )
         .bind(run_id)
         .bind(phase)
@@ -1985,22 +2019,28 @@ pub async fn save_phase_gate_state_on_pg(
         .bind(anchor_card_id.as_deref())
         .bind(failure_reason.as_deref())
         .bind(created_at.as_deref())
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| {
-            format!("insert postgres phase-gate row for run {run_id} phase {phase}: {error}")
+            format!("upsert postgres phase-gate row for run {run_id} phase {phase}: {error}")
         })?;
     } else {
         for dispatch_id in &dispatch_ids {
-            sqlx::query("DELETE FROM auto_queue_phase_gates WHERE dispatch_id = $1")
-                .bind(dispatch_id)
-                .execute(pool)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "delete existing postgres phase-gate row for dispatch {dispatch_id}: {error}"
-                    )
-                })?;
+            sqlx::query(
+                "DELETE FROM auto_queue_phase_gates
+                 WHERE dispatch_id = $1
+                   AND NOT (run_id = $2 AND phase = $3)",
+            )
+            .bind(dispatch_id)
+            .bind(run_id)
+            .bind(phase)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!(
+                    "delete existing postgres phase-gate row for dispatch {dispatch_id}: {error}"
+                )
+            })?;
             sqlx::query(
                 "INSERT INTO auto_queue_phase_gates (
                     run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
@@ -2008,7 +2048,19 @@ pub async fn save_phase_gate_state_on_pg(
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                     COALESCE($11::timestamptz, NOW()), NOW()
-                 )",
+                 )
+                 ON CONFLICT (run_id, phase, COALESCE(dispatch_id, ''))
+                 DO UPDATE SET
+                    status = EXCLUDED.status,
+                    verdict = EXCLUDED.verdict,
+                    dispatch_id = EXCLUDED.dispatch_id,
+                    pass_verdict = EXCLUDED.pass_verdict,
+                    next_phase = EXCLUDED.next_phase,
+                    final_phase = EXCLUDED.final_phase,
+                    anchor_card_id = EXCLUDED.anchor_card_id,
+                    failure_reason = EXCLUDED.failure_reason,
+                    created_at = COALESCE($11::timestamptz, auto_queue_phase_gates.created_at, NOW()),
+                    updated_at = NOW()",
             )
             .bind(run_id)
             .bind(phase)
@@ -2021,7 +2073,7 @@ pub async fn save_phase_gate_state_on_pg(
             .bind(anchor_card_id.as_deref())
             .bind(failure_reason.as_deref())
             .bind(created_at.as_deref())
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(|error| {
                 format!(
@@ -2030,6 +2082,10 @@ pub async fn save_phase_gate_state_on_pg(
             })?;
         }
     }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres phase-gate save for run {run_id}: {error}"))?;
 
     Ok(PhaseGateSaveResult {
         persisted_dispatch_ids: dispatch_ids,
@@ -2042,16 +2098,24 @@ pub async fn clear_phase_gate_state_on_pg(
     run_id: &str,
     phase: i64,
 ) -> Result<bool, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres phase-gate clear for run {run_id}: {error}"))?;
+    lock_phase_gate_state_on_pg_tx(&mut tx, run_id, phase).await?;
     let deleted =
         sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = $1 AND phase = $2")
             .bind(run_id)
             .bind(phase)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(|error| {
                 format!("clear postgres phase-gate rows for run {run_id} phase {phase}: {error}")
             })?
             .rows_affected();
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres phase-gate clear for run {run_id}: {error}"))?;
     Ok(deleted > 0)
 }
 
@@ -3059,7 +3123,8 @@ mod resume_session_context_tests {
 mod dispatch_terminal_sync_pg_tests {
     use super::{
         ENTRY_STATUS_DONE, ENTRY_STATUS_SKIPPED, ENTRY_STATUS_USER_CANCELLED,
-        EntryStatusUpdateOptions, finalize_completed_dispatch_terminal_entry_on_pg_tx,
+        EntryStatusUpdateOptions, PhaseGateStateWrite, clear_phase_gate_state_on_pg,
+        finalize_completed_dispatch_terminal_entry_on_pg_tx, save_phase_gate_state_on_pg,
         sync_dispatch_terminal_entries_on_pg_tx, update_entry_status_on_pg,
     };
     use chrono::{DateTime, Utc};
@@ -3271,6 +3336,246 @@ mod dispatch_terminal_sync_pg_tests {
             .fetch_one(pool)
             .await
             .expect("message outbox count")
+    }
+
+    async fn seed_phase_gate_dispatches(pool: &PgPool, dispatch_ids: &[&str]) {
+        for dispatch_id in dispatch_ids {
+            sqlx::query(
+                "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+                 VALUES ($1, 'agent-1', 'dispatched', '{}')",
+            )
+            .bind(dispatch_id)
+            .execute(pool)
+            .await
+            .expect("seed phase gate dispatch");
+        }
+    }
+
+    async fn phase_gate_row_ids(pool: &PgPool, phase: i64) -> Vec<i64> {
+        sqlx::query(
+            "SELECT id
+             FROM auto_queue_phase_gates
+             WHERE run_id = 'run-1' AND phase = $1
+             ORDER BY COALESCE(dispatch_id, '') ASC",
+        )
+        .bind(phase)
+        .fetch_all(pool)
+        .await
+        .expect("phase gate row ids")
+        .into_iter()
+        .map(|row| row.try_get::<i64, _>("id").expect("phase gate id"))
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn phase_gate_state_save_is_idempotent_for_dispatch_rows_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        seed_phase_gate_dispatches(&pool, &["dispatch-gate-1", "dispatch-gate-2"]).await;
+        let state = PhaseGateStateWrite {
+            status: "pending".to_string(),
+            verdict: None,
+            dispatch_ids: vec!["dispatch-gate-1".to_string(), "dispatch-gate-2".to_string()],
+            pass_verdict: "phase_gate_passed".to_string(),
+            next_phase: Some(6),
+            final_phase: false,
+            anchor_card_id: None,
+            failure_reason: None,
+            created_at: Some("2026-05-05 00:00:00+00".to_string()),
+        };
+
+        let first = save_phase_gate_state_on_pg(&pool, "run-1", 5, &state)
+            .await
+            .expect("first save phase gate state");
+        let first_row_ids = phase_gate_row_ids(&pool, 5).await;
+        let second = save_phase_gate_state_on_pg(&pool, "run-1", 5, &state)
+            .await
+            .expect("second save phase gate state");
+        let second_row_ids = phase_gate_row_ids(&pool, 5).await;
+
+        assert_eq!(
+            first.persisted_dispatch_ids,
+            vec!["dispatch-gate-1".to_string(), "dispatch-gate-2".to_string()]
+        );
+        assert_eq!(first.removed_stale_rows, 0);
+        assert_eq!(second, first);
+        assert_eq!(first_row_ids.len(), 2);
+        assert_eq!(second_row_ids, first_row_ids);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn phase_gate_state_save_is_idempotent_for_empty_dispatch_set_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        let state = PhaseGateStateWrite {
+            status: "pending".to_string(),
+            verdict: None,
+            dispatch_ids: Vec::new(),
+            pass_verdict: "phase_gate_passed".to_string(),
+            next_phase: None,
+            final_phase: true,
+            anchor_card_id: None,
+            failure_reason: None,
+            created_at: Some("2026-05-05 00:00:00+00".to_string()),
+        };
+
+        let first = save_phase_gate_state_on_pg(&pool, "run-1", 6, &state)
+            .await
+            .expect("first save empty phase gate state");
+        let first_row_ids = phase_gate_row_ids(&pool, 6).await;
+        let second = save_phase_gate_state_on_pg(&pool, "run-1", 6, &state)
+            .await
+            .expect("second save empty phase gate state");
+        let second_row_ids = phase_gate_row_ids(&pool, 6).await;
+
+        assert_eq!(first.persisted_dispatch_ids, Vec::<String>::new());
+        assert_eq!(first.removed_stale_rows, 0);
+        assert_eq!(second, first);
+        assert_eq!(first_row_ids.len(), 1);
+        assert_eq!(second_row_ids, first_row_ids);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn phase_gate_state_save_rolls_back_stale_cleanup_when_write_fails_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        seed_phase_gate_dispatches(&pool, &["dispatch-valid", "dispatch-stale"]).await;
+        sqlx::query(
+            "INSERT INTO auto_queue_phase_gates
+                (run_id, phase, status, dispatch_id, pass_verdict)
+             VALUES ('run-1', 7, 'pending', 'dispatch-stale', 'phase_gate_passed')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed stale phase gate row");
+
+        let error = save_phase_gate_state_on_pg(
+            &pool,
+            "run-1",
+            7,
+            &PhaseGateStateWrite {
+                status: "pending".to_string(),
+                verdict: None,
+                dispatch_ids: vec!["dispatch-valid".to_string()],
+                pass_verdict: "phase_gate_passed".to_string(),
+                next_phase: None,
+                final_phase: false,
+                anchor_card_id: None,
+                failure_reason: None,
+                created_at: Some("not-a-timestamp".to_string()),
+            },
+        )
+        .await
+        .expect_err("invalid timestamp must fail the write");
+        assert!(
+            error.contains("upsert postgres phase-gate row"),
+            "unexpected error: {error}"
+        );
+
+        let stale_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM auto_queue_phase_gates
+             WHERE run_id = 'run-1' AND phase = 7 AND dispatch_id = 'dispatch-stale'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("stale count");
+        let valid_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM auto_queue_phase_gates
+             WHERE run_id = 'run-1' AND phase = 7 AND dispatch_id = 'dispatch-valid'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("valid count");
+        assert_eq!(stale_count, 1);
+        assert_eq!(valid_count, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn phase_gate_state_concurrent_clear_waits_for_atomic_save_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        seed_phase_gate_dispatches(&pool, &["dispatch-slow-1", "dispatch-slow-2"]).await;
+        sqlx::query(
+            r#"
+            CREATE OR REPLACE FUNCTION slow_phase_gate_insert_for_test()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_sleep(0.08);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("install slow phase gate insert function");
+        sqlx::query(
+            "CREATE TRIGGER slow_phase_gate_insert_for_test
+             BEFORE INSERT ON auto_queue_phase_gates
+             FOR EACH ROW EXECUTE FUNCTION slow_phase_gate_insert_for_test()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install slow phase gate insert trigger");
+
+        let pool_for_save = pool.clone();
+        let save_state = PhaseGateStateWrite {
+            status: "pending".to_string(),
+            verdict: None,
+            dispatch_ids: vec!["dispatch-slow-1".to_string(), "dispatch-slow-2".to_string()],
+            pass_verdict: "phase_gate_passed".to_string(),
+            next_phase: Some(10),
+            final_phase: false,
+            anchor_card_id: None,
+            failure_reason: None,
+            created_at: Some("2026-05-05 00:00:00+00".to_string()),
+        };
+        let save_task = tokio::spawn(async move {
+            save_phase_gate_state_on_pg(&pool_for_save, "run-1", 9, &save_state).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let pool_for_clear = pool.clone();
+        let clear_task =
+            tokio::spawn(
+                async move { clear_phase_gate_state_on_pg(&pool_for_clear, "run-1", 9).await },
+            );
+
+        let save_result = save_task
+            .await
+            .expect("save task join")
+            .expect("save phase gate state");
+        let cleared = clear_task
+            .await
+            .expect("clear task join")
+            .expect("clear phase gate state");
+        assert_eq!(
+            save_result.persisted_dispatch_ids,
+            vec!["dispatch-slow-1".to_string(), "dispatch-slow-2".to_string()]
+        );
+        assert!(cleared);
+        let remaining = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM auto_queue_phase_gates
+             WHERE run_id = 'run-1' AND phase = 9",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("remaining phase gate count");
+        assert_eq!(remaining, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
