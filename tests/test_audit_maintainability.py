@@ -243,6 +243,60 @@ class RouteSrpCheck(unittest.TestCase):
             hits = list(route_srp.CHECK.runner(set()))
         self.assertEqual(_files(hits), {"src/server/routes/dirty.rs"})
 
+    def test_baseline_gate_allows_committed_file_counts(self) -> None:
+        body = """
+        use crate::services::auto_queue;
+        async fn handler() {
+            let _ = sqlx::query("SELECT * FROM agents").fetch_all(&db).await;
+            return json!({"ok": true});
+        }
+        """
+        with _FakeSrcTree({"src/server/routes/legacy.rs": body}) as root:
+            _write(
+                root,
+                route_srp.BASELINE_REL_PATH,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rule": "route_srp_violations",
+                        "total_count": 1,
+                        "files": {"src/server/routes/legacy.rs": {"count": 1}},
+                    }
+                ),
+            )
+            hits = list(route_srp.CHECK.runner(set()))
+            baseline_gate = route_srp.CHECK.baseline_gate
+            self.assertIsNotNone(baseline_gate)
+            failures = list(baseline_gate(hits)) if baseline_gate else []
+        self.assertEqual(failures, [])
+
+    def test_baseline_gate_flags_cross_file_regression_when_total_matches(self) -> None:
+        body = """
+        use crate::services::auto_queue;
+        async fn handler() {
+            let _ = sqlx::query("SELECT * FROM agents").fetch_all(&db).await;
+            return json!({"ok": true});
+        }
+        """
+        with _FakeSrcTree({"src/server/routes/new.rs": body}) as root:
+            _write(
+                root,
+                route_srp.BASELINE_REL_PATH,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rule": "route_srp_violations",
+                        "total_count": 1,
+                        "files": {"src/server/routes/old.rs": {"count": 1}},
+                    }
+                ),
+            )
+            hits = list(route_srp.CHECK.runner(set()))
+            baseline_gate = route_srp.CHECK.baseline_gate
+            self.assertIsNotNone(baseline_gate)
+            failures = list(baseline_gate(hits)) if baseline_gate else []
+        self.assertEqual(_files(failures), {"src/server/routes/new.rs"})
+
 
 class DirectDiscordSendsCheck(unittest.TestCase):
     def test_flags_direct_send_outside_outbound(self) -> None:
@@ -444,6 +498,7 @@ class HarnessCli(unittest.TestCase):
     def test_only_selected_checks_are_hard_gated(self) -> None:
         specs = HARNESS.load_check_specs()
         hard_gated = {spec.key for spec in specs if spec.hard_gate}
+        baseline_gated = {spec.key for spec in specs if spec.baseline_gate}
         self.assertEqual(
             hard_gated,
             {
@@ -455,6 +510,7 @@ class HarnessCli(unittest.TestCase):
                 "git_subprocess_callsites",
             },
         )
+        self.assertEqual(baseline_gated, {"route_srp_violations"})
         warning_only = {
             "route_srp_violations",
             "manual_json_row_mapping",
@@ -470,8 +526,10 @@ class HarnessCli(unittest.TestCase):
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
         self.assertIn("hard_gate_count: 6", yaml_text)
+        self.assertIn("baseline_gate_count: 1", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
         self.assertEqual(json_payload["hard_gate_count"], 6)
+        self.assertEqual(json_payload["baseline_gate_count"], 1)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
@@ -486,6 +544,35 @@ class HarnessCli(unittest.TestCase):
         }
         """
         with _FakeSrcTree({"src/services/agents.rs": body}) as root:
+            allowlist = root / "empty.toml"
+            allowlist.write_text("", encoding="utf-8")
+            with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(
+                sys, "stderr", new=mock.MagicMock()
+            ):
+                rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
+        self.assertEqual(rc, 1)
+
+    def test_check_mode_fails_on_route_srp_baseline_regression(self) -> None:
+        body = """
+        use crate::services::auto_queue;
+        async fn handler() {
+            let _ = sqlx::query("SELECT * FROM agents").fetch_all(&db).await;
+            return json!({"ok": true});
+        }
+        """
+        with _FakeSrcTree({"src/server/routes/new.rs": body}) as root:
+            _write(
+                root,
+                route_srp.BASELINE_REL_PATH,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "rule": "route_srp_violations",
+                        "total_count": 0,
+                        "files": {},
+                    }
+                ),
+            )
             allowlist = root / "empty.toml"
             allowlist.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(
