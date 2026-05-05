@@ -86,7 +86,13 @@ test("auto-queue onTick1min honors stale dispatched runtime config", () => {
         result: []
       },
       {
-        match: "FROM auto_queue_runs r JOIN auto_queue_entries e ON e.run_id = r.id",
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("JOIN auto_queue_entries e ON e.run_id = r.id") &&
+            sql.includes("GROUP BY r.id") &&
+            sql.includes("ORDER BY MIN(e.updated_at) ASC LIMIT 50") &&
+            !sql.includes("SELECT DISTINCT r.id");
+        },
         result: []
       },
       {
@@ -144,6 +150,154 @@ test("auto-queue onTick1min honors stale dispatched runtime config", () => {
   assert.deepEqual(recordedFailures, [
     { entryId: "entry-stale-1", retryLimit: 7, source: "tick_recovery" }
   ]);
+});
+
+test("auto-queue terminal cleanup uses pipeline terminal states", () => {
+  const { policy, state } = loadPolicy("policies/auto-queue.js", {
+    pipelineConfig: {
+      states: [
+        { id: "backlog" },
+        { id: "requested" },
+        { id: "shipped", terminal: true }
+      ],
+      transitions: [
+        { from: "backlog", to: "requested", type: "free" },
+        { from: "requested", to: "shipped", type: "gated" }
+      ]
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "JOIN kanban_cards kc ON kc.id = e.kanban_card_id",
+        result: [{ id: "entry-terminal", kanban_card_id: "card-terminal", status: "shipped", run_id: "run-terminal" }]
+      },
+      {
+        match: "SELECT run_id, id as entry_id, kanban_card_id as card_id",
+        result: [{
+          run_id: "run-terminal",
+          entry_id: "entry-terminal",
+          card_id: "card-terminal",
+          dispatch_id: null,
+          agent_id: "agent-terminal",
+          thread_group: 0,
+          batch_phase: 0,
+          slot_index: null
+        }]
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("user_cancelled");
+        },
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("JOIN auto_queue_entries e ON e.run_id = r.id") &&
+            sql.includes("GROUP BY r.id") &&
+            sql.includes("ORDER BY MIN(e.updated_at) ASC LIMIT 50") &&
+            !sql.includes("SELECT DISTINCT r.id");
+        },
+        result: []
+      },
+      {
+        match: "e.status = 'dispatched'",
+        result: []
+      }
+    ])
+  });
+
+  policy.onTick1min();
+
+  assert.deepEqual(Array.from(state.queries[0].params), ["shipped"]);
+  assert.deepEqual(state.autoQueueStatusUpdates, [
+    {
+      entryId: "entry-terminal",
+      status: "skipped",
+      reason: "tick_terminal_cleanup",
+      extra: null
+    }
+  ]);
+});
+
+test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
+  const { policy, state } = loadPolicy("policies/auto-queue.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "JOIN kanban_cards kc ON kc.id = e.kanban_card_id",
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("user_cancelled");
+        },
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("JOIN auto_queue_entries e ON e.run_id = r.id") &&
+            sql.includes("GROUP BY r.id") &&
+            sql.includes("ORDER BY MIN(e.updated_at) ASC LIMIT 50") &&
+            !sql.includes("SELECT DISTINCT r.id");
+        },
+        result: [{ id: "run-saturated" }]
+      },
+      {
+        match: "e.status = 'dispatched'",
+        result: []
+      }
+    ]),
+    autoQueueActivate: () => ({ count: 0 })
+  });
+
+  policy.onTick1min();
+
+  assert.deepEqual(state.autoQueueActivations, [{ runId: "run-saturated", threadGroup: null }]);
+  assert.equal(state.executions.length, 1);
+  assert.equal(
+    state.executions[0].sql,
+    "UPDATE auto_queue_entries SET updated_at = datetime('now') WHERE run_id = ? AND status = 'pending'"
+  );
+  assert.deepEqual(Array.from(state.executions[0].params), ["run-saturated"]);
+});
+
+test("auto-queue does not rotate deferred active run activations", () => {
+  const { policy, state } = loadPolicy("policies/auto-queue.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "JOIN kanban_cards kc ON kc.id = e.kanban_card_id",
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("user_cancelled");
+        },
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("JOIN auto_queue_entries e ON e.run_id = r.id") &&
+            sql.includes("GROUP BY r.id") &&
+            sql.includes("ORDER BY MIN(e.updated_at) ASC LIMIT 50");
+        },
+        result: [{ id: "run-deferred" }]
+      },
+      {
+        match: "e.status = 'dispatched'",
+        result: []
+      }
+    ]),
+    autoQueueActivate: () => ({ ok: true, deferred: true, count: 0, dispatched: [] })
+  });
+
+  policy.onTick1min();
+
+  assert.deepEqual(state.autoQueueActivations, [{ runId: "run-deferred", threadGroup: null }]);
+  assert.equal(state.executions.length, 0);
 });
 
 test("auto-queue marks pending entries skipped when a card progresses externally into a dispatchable state", () => {

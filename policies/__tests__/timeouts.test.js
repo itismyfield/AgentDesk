@@ -524,6 +524,7 @@ test("timeouts idle-kill module calls force-kill API for expired idle sessions",
       {
         match(sql) {
           return sql.includes("WHERE status = 'idle'") &&
+            sql.includes("active_dispatch_id IS NOT NULL") &&
             sql.includes("-180 minutes");
         },
         result: []
