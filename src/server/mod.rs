@@ -3270,6 +3270,11 @@ where
                     .ok();
                     // Release any session that is still turn_active for this channel so
                     // future turns are not permanently blocked after delivery fails.
+                    // Guard: lifecycle notifications may fail during a live turn; resetting the
+                    // session in that case would desync runtime state for an in-flight turn.
+                    let is_turn_delivery = row.source
+                        != crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE;
+                    if is_turn_delivery {
                     if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
                         sqlx::query(
                             "UPDATE sessions
@@ -3288,6 +3293,7 @@ where
                             row.id,
                             error_text,
                         );
+                    }
                     }
                 }
                 MessageOutboxFailureAction::Retry {
