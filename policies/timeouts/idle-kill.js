@@ -51,6 +51,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         "FROM sessions " +
         "WHERE status = 'idle' " +
         "AND provider IN ('claude', 'codex', 'qwen') " +
+        "AND active_dispatch_id IS NOT NULL " +
         "AND COALESCE(last_heartbeat, created_at) < datetime('now', '-180 minutes') " +
         "ORDER BY COALESCE(last_heartbeat, created_at) ASC LIMIT 10"
       );
