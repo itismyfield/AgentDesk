@@ -3425,8 +3425,7 @@ mod tests {
     // #1342: migrated to PG fixtures because the dispatch/auto_queue/github
     // sync paths now route through PG when the engine has a pg_pool.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn implementation_completion_for_auto_queue_review_mode_disabled_skips_review_and_mainline_sync_completes_entry_pg()
-     {
+    async fn review_disabled_completion_finalizer_completes_entry_and_run_pg() {
         let (repo, _remote, _repo_guard) = setup_test_repo_with_origin();
         let repo_id = repo.path().to_string_lossy().to_string();
         let pg_db = IntegrationPgDatabase::create().await;
@@ -3578,9 +3577,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(review_dispatch_count, 0);
-        assert_eq!(entry_status, "dispatched");
-        assert_eq!(run_status, "active");
-        assert_eq!(slot_run_id.as_deref(), Some("run-966-review-disabled"));
+        assert_eq!(entry_status, "done");
+        assert_eq!(run_status, "completed");
+        assert_eq!(slot_run_id, None);
 
         crate::github::sync::sync_github_issues_for_repo_pg(
             &pool,

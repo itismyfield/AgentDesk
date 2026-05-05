@@ -91,9 +91,18 @@ fn auto_queue_review_disabled_for_dispatch_on_conn(
          FROM auto_queue_entries e
          JOIN auto_queue_runs r ON r.id = e.run_id
          WHERE e.dispatch_id = ?1
-           AND e.status = 'dispatched'
-           AND r.status IN ('active', 'paused')
-           AND COALESCE(r.review_mode, 'enabled') = 'disabled'",
+           AND r.status IN ('active', 'paused', 'completed')
+           AND COALESCE(r.review_mode, 'enabled') = 'disabled'
+           AND (
+                e.status = 'dispatched'
+                OR (
+                    e.status = 'done'
+                    AND COALESCE(
+                        (SELECT status FROM task_dispatches WHERE id = e.dispatch_id),
+                        ''
+                    ) = 'completed'
+                )
+           )",
         [dispatch_id],
         |row| row.get(0),
     )
@@ -161,9 +170,18 @@ async fn auto_queue_review_disabled_for_dispatch_on_pg(
             FROM auto_queue_entries e
             JOIN auto_queue_runs r ON r.id = e.run_id
             WHERE e.dispatch_id = $1
-              AND e.status = 'dispatched'
-              AND r.status IN ('active', 'paused')
+              AND r.status IN ('active', 'paused', 'completed')
               AND COALESCE(r.review_mode, 'enabled') = 'disabled'
+              AND (
+                    e.status = 'dispatched'
+                    OR (
+                        e.status = 'done'
+                        AND COALESCE(
+                            (SELECT status FROM task_dispatches WHERE id = e.dispatch_id),
+                            ''
+                        ) = 'completed'
+                    )
+              )
         )",
     )
     .bind(dispatch_id)
@@ -184,9 +202,18 @@ async fn auto_queue_review_disabled_for_dispatch_pg(
             FROM auto_queue_entries e
             JOIN auto_queue_runs r ON r.id = e.run_id
             WHERE e.dispatch_id = $1
-              AND e.status = 'dispatched'
-              AND r.status IN ('active', 'paused')
               AND COALESCE(r.review_mode, 'enabled') = 'disabled'
+              AND r.status IN ('active', 'paused', 'completed')
+              AND (
+                    e.status = 'dispatched'
+                    OR (
+                        e.status = 'done'
+                        AND COALESCE(
+                            (SELECT status FROM task_dispatches WHERE id = e.dispatch_id),
+                            ''
+                        ) = 'completed'
+                    )
+              )
         )",
     )
     .bind(dispatch_id)
@@ -279,7 +306,7 @@ fn should_skip_auto_queue_terminal_sync(
     match dispatch_type {
         Some("consultation") => true,
         Some("implementation" | "rework") => {
-            is_noop_completion_result(result) || auto_queue_review_disabled
+            is_noop_completion_result(result) && !auto_queue_review_disabled
         }
         _ => false,
     }
@@ -618,24 +645,43 @@ async fn set_dispatch_status_on_pg_with_sync(
         if matches!(to_status, "completed" | "failed" | "cancelled")
             && !skip_auto_queue_terminal_sync
         {
-            let entry_status = match to_status {
-                "completed" => crate::db::auto_queue::ENTRY_STATUS_DONE,
-                "failed" => crate::db::auto_queue::ENTRY_STATUS_FAILED,
-                _ => crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
-            };
-            crate::db::auto_queue::sync_dispatch_terminal_entries_on_pg_tx(
-                &mut tx,
-                dispatch_id,
-                entry_status,
-                transition_source,
-                true,
-            )
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "sync auto_queue_entries on dispatch terminal {dispatch_id}: {error}"
-                )
-            })?;
+            match to_status {
+                "completed" => {
+                    crate::db::auto_queue::finalize_completed_dispatch_terminal_entry_on_pg_tx(
+                        &mut tx,
+                        dispatch_id,
+                        transition_source,
+                        true,
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "finalize auto_queue entry on dispatch completion {dispatch_id}: {error}"
+                        )
+                    })?;
+                }
+                "failed" | "cancelled" => {
+                    let entry_status = if to_status == "failed" {
+                        crate::db::auto_queue::ENTRY_STATUS_FAILED
+                    } else {
+                        crate::db::auto_queue::ENTRY_STATUS_SKIPPED
+                    };
+                    crate::db::auto_queue::sync_dispatch_terminal_entries_on_pg_tx(
+                        &mut tx,
+                        dispatch_id,
+                        entry_status,
+                        transition_source,
+                        true,
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "sync auto_queue_entries on dispatch terminal {dispatch_id}: {error}"
+                        )
+                    })?;
+                }
+                _ => {}
+            }
         }
 
         if matches!(to_status, "completed" | "failed" | "cancelled") {

@@ -1,4 +1,5 @@
 use sqlx::{PgPool, Row as SqlxRow};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 pub const ENTRY_STATUS_PENDING: &str = "pending";
@@ -54,6 +55,13 @@ pub struct EntryDispatchFailureResult {
 pub struct ConsultationDispatchRecordResult {
     pub metadata_json: String,
     pub entry_status_changed: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DispatchTerminalEntrySyncResult {
+    pub changed_entries: usize,
+    pub affected_run_ids: Vec<String>,
+    pub finalized_run_ids: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -829,6 +837,24 @@ pub async fn sync_dispatch_terminal_entries_on_pg_tx(
     trigger_source: &str,
     preserve_dispatch_link: bool,
 ) -> Result<usize, String> {
+    Ok(sync_dispatch_terminal_entries_on_pg_tx_result(
+        tx,
+        dispatch_id,
+        new_status,
+        trigger_source,
+        preserve_dispatch_link,
+    )
+    .await?
+    .changed_entries)
+}
+
+async fn sync_dispatch_terminal_entries_on_pg_tx_result(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    new_status: &str,
+    trigger_source: &str,
+    preserve_dispatch_link: bool,
+) -> Result<DispatchTerminalEntrySyncResult, String> {
     // #1562 RC8: also match entries via kanban_card_id when the agent has
     // performed a self-recovery (replaced a cancelled dispatch with a fresh
     // one on the same card). The entry's `dispatch_id` pointer still
@@ -839,7 +865,7 @@ pub async fn sync_dispatch_terminal_entries_on_pg_tx(
     // entry's previously-tracked dispatch is in a terminal non-completed
     // state — i.e. genuine self-recovery, not normal lifecycle.
     let rows = sqlx::query(
-        "SELECT e.id, e.dispatch_id, e.slot_index
+        "SELECT e.id, e.run_id, e.dispatch_id, e.slot_index
          FROM auto_queue_entries e
          WHERE e.status = 'dispatched'
            AND (
@@ -865,9 +891,13 @@ pub async fn sync_dispatch_terminal_entries_on_pg_tx(
     })?;
 
     let mut changed = 0usize;
+    let mut affected_run_ids = BTreeSet::new();
     for row in rows {
         let entry_id: String = row.try_get("id").map_err(|error| {
             format!("decode postgres auto-queue entry id for {dispatch_id}: {error}")
+        })?;
+        let run_id: String = row.try_get("run_id").map_err(|error| {
+            format!("decode postgres auto-queue entry run_id for {dispatch_id}: {error}")
         })?;
         let linked_dispatch_id: String = row.try_get("dispatch_id").map_err(|error| {
             format!("decode postgres auto-queue entry dispatch_id for {dispatch_id}: {error}")
@@ -900,11 +930,49 @@ pub async fn sync_dispatch_terminal_entries_on_pg_tx(
                     format!("restore postgres auto-queue entry lineage for {entry_id}: {error}")
                 })?;
             }
+            affected_run_ids.insert(run_id);
             changed += 1;
         }
     }
 
-    Ok(changed)
+    Ok(DispatchTerminalEntrySyncResult {
+        changed_entries: changed,
+        affected_run_ids: affected_run_ids.into_iter().collect(),
+        finalized_run_ids: Vec::new(),
+    })
+}
+
+/// Canonical completed-dispatch entry finalizer.
+///
+/// Normal dispatch completion reaches `task_dispatches.status = completed`
+/// first, then derives the linked auto-queue entry terminal state here. Runs
+/// with review disabled have no review/card-terminal hook left to close them,
+/// so this helper is also responsible for invoking the only run completion
+/// writer, `maybe_finalize_run_if_ready_pg`, after the entry reaches `done`.
+pub async fn finalize_completed_dispatch_terminal_entry_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    trigger_source: &str,
+    preserve_dispatch_link: bool,
+) -> Result<DispatchTerminalEntrySyncResult, String> {
+    let mut result = sync_dispatch_terminal_entries_on_pg_tx_result(
+        tx,
+        dispatch_id,
+        ENTRY_STATUS_DONE,
+        trigger_source,
+        preserve_dispatch_link,
+    )
+    .await?;
+
+    for run_id in result.affected_run_ids.clone() {
+        if auto_queue_run_review_disabled_on_pg_tx(tx, &run_id).await?
+            && maybe_finalize_run_if_ready_pg(tx, &run_id).await?
+        {
+            result.finalized_run_ids.push(run_id);
+        }
+    }
+
+    Ok(result)
 }
 
 /// Transaction-scoped equivalent of [`load_entry_status_row_pg`] used by
@@ -2656,6 +2724,22 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
     Ok(true)
 }
 
+async fn auto_queue_run_review_disabled_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<bool, String> {
+    let review_mode = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT review_mode FROM auto_queue_runs WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("load auto-queue review mode for run {run_id}: {error}"))?
+    .flatten();
+
+    Ok(review_mode.as_deref().unwrap_or("enabled") == "disabled")
+}
+
 pub async fn pause_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
     let mut tx = pool
         .begin()
@@ -2973,7 +3057,11 @@ mod resume_session_context_tests {
 
 #[cfg(test)]
 mod dispatch_terminal_sync_pg_tests {
-    use super::{ENTRY_STATUS_DONE, ENTRY_STATUS_SKIPPED, sync_dispatch_terminal_entries_on_pg_tx};
+    use super::{
+        ENTRY_STATUS_DONE, ENTRY_STATUS_SKIPPED, ENTRY_STATUS_USER_CANCELLED,
+        EntryStatusUpdateOptions, finalize_completed_dispatch_terminal_entry_on_pg_tx,
+        sync_dispatch_terminal_entries_on_pg_tx, update_entry_status_on_pg,
+    };
     use chrono::{DateTime, Utc};
     use sqlx::{PgPool, Row};
 
@@ -3166,6 +3254,25 @@ mod dispatch_terminal_sync_pg_tests {
         .expect("slot row")
     }
 
+    async fn count_transitions(pool: &PgPool, entry_id: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM auto_queue_entry_transitions
+             WHERE entry_id = $1",
+        )
+        .bind(entry_id)
+        .fetch_one(pool)
+        .await
+        .expect("transition count")
+    }
+
+    async fn count_message_outbox(pool: &PgPool) -> i64 {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM message_outbox")
+            .fetch_one(pool)
+            .await
+            .expect("message outbox count")
+    }
+
     #[tokio::test]
     async fn dispatch_terminal_sync_marks_entry_done_without_finalizing_active_run_pg() {
         let pg_db = TestPostgresDb::create().await;
@@ -3220,6 +3327,187 @@ mod dispatch_terminal_sync_pg_tests {
             slot_run(&pool, "agent-1", 0).await.as_deref(),
             Some("run-1")
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn completed_dispatch_terminal_finalizer_completes_review_disabled_run_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query("UPDATE auto_queue_runs SET review_mode = 'disabled' WHERE id = 'run-1'")
+            .execute(&pool)
+            .await
+            .expect("disable review mode");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES ('card-finalizer-done', 'Card Finalizer Done', 'in_progress', 'agent-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed card");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, context)
+             VALUES ('dispatch-finalizer-done', 'card-finalizer-done', 'agent-1',
+                     'implementation', 'completed', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index,
+                 thread_group, batch_phase)
+             VALUES ('entry-finalizer-done', 'run-1', 'card-finalizer-done', 'agent-1',
+                     'dispatched', 'dispatch-finalizer-done', 0, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed entry");
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        let result = finalize_completed_dispatch_terminal_entry_on_pg_tx(
+            &mut tx,
+            "dispatch-finalizer-done",
+            "watcher_streaming_final",
+            true,
+        )
+        .await
+        .expect("finalize completed dispatch entry");
+        tx.commit().await.expect("commit tx");
+
+        assert_eq!(result.changed_entries, 1);
+        assert_eq!(result.affected_run_ids, vec!["run-1".to_string()]);
+        assert_eq!(result.finalized_run_ids, vec!["run-1".to_string()]);
+        assert_eq!(
+            entry_row_status_dispatch_completed(&pool, "entry-finalizer-done")
+                .await
+                .0,
+            ENTRY_STATUS_DONE
+        );
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
+        assert_eq!(count_transitions(&pool, "entry-finalizer-done").await, 1);
+        assert_eq!(count_message_outbox(&pool).await, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn completed_dispatch_terminal_finalizer_is_idempotent_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query("UPDATE auto_queue_runs SET review_mode = 'disabled' WHERE id = 'run-1'")
+            .execute(&pool)
+            .await
+            .expect("disable review mode");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES ('card-finalizer-repeat', 'Card Finalizer Repeat', 'in_progress', 'agent-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed card");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, context)
+             VALUES ('dispatch-finalizer-repeat', 'card-finalizer-repeat', 'agent-1',
+                     'implementation', 'completed', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index,
+                 thread_group, batch_phase)
+             VALUES ('entry-finalizer-repeat', 'run-1', 'card-finalizer-repeat', 'agent-1',
+                     'dispatched', 'dispatch-finalizer-repeat', 0, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed entry");
+
+        let mut tx = pool.begin().await.expect("begin first tx");
+        let first = finalize_completed_dispatch_terminal_entry_on_pg_tx(
+            &mut tx,
+            "dispatch-finalizer-repeat",
+            "watcher_streaming_final",
+            true,
+        )
+        .await
+        .expect("first finalize");
+        tx.commit().await.expect("commit first tx");
+        assert_eq!(first.changed_entries, 1);
+        assert_eq!(first.finalized_run_ids, vec!["run-1".to_string()]);
+
+        let transition_count = count_transitions(&pool, "entry-finalizer-repeat").await;
+        let outbox_count = count_message_outbox(&pool).await;
+
+        let mut tx = pool.begin().await.expect("begin second tx");
+        let second = finalize_completed_dispatch_terminal_entry_on_pg_tx(
+            &mut tx,
+            "dispatch-finalizer-repeat",
+            "watcher_streaming_final",
+            true,
+        )
+        .await
+        .expect("second finalize");
+        tx.commit().await.expect("commit second tx");
+
+        assert_eq!(second.changed_entries, 0);
+        assert!(second.affected_run_ids.is_empty());
+        assert!(second.finalized_run_ids.is_empty());
+        assert_eq!(
+            count_transitions(&pool, "entry-finalizer-repeat").await,
+            transition_count
+        );
+        assert_eq!(count_message_outbox(&pool).await, outbox_count);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn user_cancelled_entry_does_not_finalize_review_disabled_run_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query("UPDATE auto_queue_runs SET review_mode = 'disabled' WHERE id = 'run-1'")
+            .execute(&pool)
+            .await
+            .expect("disable review mode");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index,
+                 thread_group, batch_phase)
+             VALUES ('entry-user-cancelled', 'run-1', NULL, 'agent-1',
+                     'dispatched', NULL, 0, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed entry");
+
+        let result = update_entry_status_on_pg(
+            &pool,
+            "entry-user-cancelled",
+            ENTRY_STATUS_USER_CANCELLED,
+            "dispatch_cancel_user",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .await
+        .expect("user cancel entry");
+
+        assert!(result.changed);
+        assert_eq!(result.to_status, ENTRY_STATUS_USER_CANCELLED);
+        assert_eq!(run_status(&pool, "run-1").await, "active");
+        assert_eq!(
+            slot_run(&pool, "agent-1", 0).await.as_deref(),
+            Some("run-1")
+        );
+        assert_eq!(count_message_outbox(&pool).await, 0);
 
         pool.close().await;
         pg_db.drop().await;
