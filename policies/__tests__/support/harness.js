@@ -343,6 +343,9 @@ function createAgentdeskMock(options) {
       },
       activate(runId, threadGroup) {
         state.autoQueueActivations.push({ runId, threadGroup });
+        if (typeof settings.autoQueueActivate === "function") {
+          return clone(settings.autoQueueActivate(runId, threadGroup, state));
+        }
         return { activated: true };
       },
       completeRun(runId, reason, optionsArg) {

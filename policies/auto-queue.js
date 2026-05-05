@@ -408,6 +408,8 @@ var autoQueue = {
     var tickReview = agentdesk.pipeline.nextGatedTarget(tickInProgress, tickCfg);
     var tickActiveStates = [tickKickoff, tickInProgress, tickReview].filter(function(s) { return s; });
     var tickPlaceholders = tickActiveStates.map(function() { return "?"; }).join(",");
+    var tickTerminalStates = terminalStatesFromConfig(tickCfg);
+    var tickTerminalPlaceholders = tickTerminalStates.map(function() { return "?"; }).join(",");
 
     // Recovery path 1 (#295): terminal cards should never remain pending in
     // active/paused runs. Clean them before dispatch recovery so they do not
@@ -418,9 +420,9 @@ var autoQueue = {
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
       "JOIN kanban_cards kc ON kc.id = e.kanban_card_id " +
       "WHERE e.status = 'pending' AND r.status IN ('active', 'paused') " +
-      "AND kc.status IN ('done', 'failed', 'cancelled') " +
+      "AND kc.status IN (" + tickTerminalPlaceholders + ") " +
       "ORDER BY e.updated_at ASC LIMIT 100",
-      []
+      tickTerminalStates
     );
     for (var tp = 0; tp < terminalPending.length; tp++) {
       var pending = terminalPending[tp];
@@ -470,7 +472,10 @@ var autoQueue = {
 
     for (var ri = 0; ri < activeRuns.length; ri++) {
       var run = activeRuns[ri];
-      activateRun(run.id, null);
+      var activation = activateRun(run.id, null);
+      if (activationDispatchCount(activation) === 0) {
+        rotateActiveRunSweepCursor(run.id);
+      }
     }
 
     // Recovery path 2 (#179/#191/#214/#952): dispatched entries whose dispatch is stuck.
@@ -511,6 +516,46 @@ var autoQueue = {
     }
   }
 };
+
+function terminalStatesFromConfig(cfg) {
+  var terminalStates = [];
+  if (cfg && cfg.states) {
+    for (var i = 0; i < cfg.states.length; i++) {
+      var state = cfg.states[i];
+      if (state && state.terminal && state.id) {
+        terminalStates.push(state.id);
+      }
+    }
+  }
+  if (terminalStates.length === 0) {
+    terminalStates.push("done");
+  }
+  return terminalStates;
+}
+
+function activationDispatchCount(result) {
+  if (!result) return null;
+  if (typeof result.count === "number") return result.count;
+  if (typeof result.dispatched_count === "number") return result.dispatched_count;
+  if (typeof result.dispatchedCount === "number") return result.dispatchedCount;
+  if (typeof result.activated_count === "number") return result.activated_count;
+  if (typeof result.activatedCount === "number") return result.activatedCount;
+  return null;
+}
+
+function rotateActiveRunSweepCursor(runId) {
+  if (!runId) return;
+  try {
+    agentdesk.db.execute(
+      "UPDATE auto_queue_runs SET updated_at = datetime('now') WHERE id = ? AND status = 'active'",
+      [runId]
+    );
+  } catch (e) {
+    autoQueueLog("warn", "failed to rotate active run sweep cursor for " + runId + ": " + e, {
+      run_id: runId
+    });
+  }
+}
 
 function _isDispatchableState(state, cfg) {
   if (!cfg || !cfg.transitions) return false;
