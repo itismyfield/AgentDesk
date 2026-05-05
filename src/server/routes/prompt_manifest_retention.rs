@@ -3,6 +3,8 @@
 //! Surfaces the current storage cost of the `prompt_manifests` /
 //! `prompt_manifest_layers` tables plus the retention-policy snapshot from
 //! `agentdesk.yaml::prompt_manifest_retention`.
+//! `total_stored_bytes` and `total_original_bytes` are UTF-8 byte counts, not
+//! character counts.
 //!
 //! Response shape:
 //! ```json
