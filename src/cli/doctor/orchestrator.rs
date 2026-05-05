@@ -889,6 +889,7 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
         check_config_audit(snapshot),
         check_runtime_root(),
         check_data_dir(cfg),
+        check_policies_dir(cfg),
         check_tmux(),
         check_service_manager(),
         check_postgres_connection(cfg),
@@ -2778,6 +2779,29 @@ fn check_mailbox_consistency(snapshot: &HealthSnapshot) -> Vec<Check> {
             ])
         })
         .collect()
+}
+
+fn check_policies_dir(cfg: &config::Config) -> Check {
+    if cfg.policies.dir.exists() && cfg.policies.dir.is_dir() {
+        Check::ok(
+            "policies_directory",
+            CheckGroup::Core,
+            "Policies Directory",
+            format!("{}", cfg.policies.dir.display()),
+        )
+        .with_path(cfg.policies.dir.display().to_string())
+        .with_expected_actual("policies directory exists", "policies directory exists")
+    } else {
+        Check::fail(
+            "policies_directory",
+            CheckGroup::Core,
+            "Policies Directory",
+            format!("{} — missing", cfg.policies.dir.display()),
+            "Create a policies folder at this path or correct the policies.dir path in agentdesk.yaml.",
+        )
+        .with_path(cfg.policies.dir.display().to_string())
+        .with_expected_actual("policies directory exists", "policies directory missing")
+    }
 }
 
 fn check_data_dir(cfg: &config::Config) -> Check {
