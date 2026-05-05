@@ -88,8 +88,9 @@ test("auto-queue onTick1min honors stale dispatched runtime config", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("AND EXISTS (") &&
-            sql.includes("e.status = 'pending'") &&
+            sql.includes("JOIN auto_queue_entries e ON e.run_id = r.id") &&
+            sql.includes("GROUP BY r.id") &&
+            sql.includes("ORDER BY MIN(e.updated_at) ASC LIMIT 50") &&
             !sql.includes("SELECT DISTINCT r.id");
         },
         result: []
@@ -192,9 +193,9 @@ test("auto-queue terminal cleanup uses pipeline terminal states", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("AND EXISTS (") &&
-            sql.includes("e.status = 'pending'") &&
-            sql.includes("ORDER BY r.updated_at ASC LIMIT 50") &&
+            sql.includes("JOIN auto_queue_entries e ON e.run_id = r.id") &&
+            sql.includes("GROUP BY r.id") &&
+            sql.includes("ORDER BY MIN(e.updated_at) ASC LIMIT 50") &&
             !sql.includes("SELECT DISTINCT r.id");
         },
         result: []
@@ -236,9 +237,9 @@ test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("AND EXISTS (") &&
-            sql.includes("e.status = 'pending'") &&
-            sql.includes("ORDER BY r.updated_at ASC LIMIT 50") &&
+            sql.includes("JOIN auto_queue_entries e ON e.run_id = r.id") &&
+            sql.includes("GROUP BY r.id") &&
+            sql.includes("ORDER BY MIN(e.updated_at) ASC LIMIT 50") &&
             !sql.includes("SELECT DISTINCT r.id");
         },
         result: [{ id: "run-saturated" }]
@@ -257,7 +258,7 @@ test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
   assert.equal(state.executions.length, 1);
   assert.equal(
     state.executions[0].sql,
-    "UPDATE auto_queue_runs SET updated_at = datetime('now') WHERE id = ? AND status = 'active'"
+    "UPDATE auto_queue_entries SET updated_at = datetime('now') WHERE run_id = ? AND status = 'pending'"
   );
   assert.deepEqual(Array.from(state.executions[0].params), ["run-saturated"]);
 });

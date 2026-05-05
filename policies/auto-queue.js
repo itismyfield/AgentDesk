@@ -464,12 +464,10 @@ var autoQueue = {
     var activeRuns = agentdesk.db.query(
       "SELECT r.id " +
       "FROM auto_queue_runs r " +
-      "WHERE r.status = 'active' " +
-      "AND EXISTS (" +
-      "  SELECT 1 FROM auto_queue_entries e " +
-      "  WHERE e.run_id = r.id AND e.status = 'pending'" +
-      ") " +
-      "ORDER BY r.updated_at ASC LIMIT 50",
+      "JOIN auto_queue_entries e ON e.run_id = r.id " +
+      "WHERE r.status = 'active' AND e.status = 'pending' " +
+      "GROUP BY r.id " +
+      "ORDER BY MIN(e.updated_at) ASC LIMIT 50",
       []
     );
 
@@ -550,7 +548,7 @@ function rotateActiveRunSweepCursor(runId) {
   if (!runId) return;
   try {
     agentdesk.db.execute(
-      "UPDATE auto_queue_runs SET updated_at = datetime('now') WHERE id = ? AND status = 'active'",
+      "UPDATE auto_queue_entries SET updated_at = datetime('now') WHERE run_id = ? AND status = 'pending'",
       [runId]
     );
   } catch (e) {
