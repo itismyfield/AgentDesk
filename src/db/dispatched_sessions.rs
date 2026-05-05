@@ -341,10 +341,23 @@ pub(crate) async fn list_dispatched_sessions_pg(
             d.name AS department_name,
             d.name_ko AS department_name_ko,
             d.color AS department_color,
-            s.thread_channel_id
+            s.thread_channel_id,
+            td.thread_id AS dispatch_thread_id,
+            aqe.id AS auto_queue_entry_id,
+            aqe.run_id AS auto_queue_run_id,
+            aqe.slot_index::BIGINT AS auto_queue_slot_index,
+            aqe.thread_group::BIGINT AS auto_queue_thread_group
          FROM sessions s
          LEFT JOIN agents a ON s.agent_id = a.id
          LEFT JOIN departments d ON a.department = d.id
+         LEFT JOIN task_dispatches td ON td.id = s.active_dispatch_id
+         LEFT JOIN LATERAL (
+            SELECT id, run_id, slot_index, thread_group
+            FROM auto_queue_entries
+            WHERE dispatch_id = s.active_dispatch_id
+            ORDER BY created_at DESC, id ASC
+            LIMIT 1
+         ) aqe ON TRUE
          ORDER BY s.id"
     } else {
         "SELECT
@@ -367,10 +380,23 @@ pub(crate) async fn list_dispatched_sessions_pg(
             d.name AS department_name,
             d.name_ko AS department_name_ko,
             d.color AS department_color,
-            s.thread_channel_id
+            s.thread_channel_id,
+            td.thread_id AS dispatch_thread_id,
+            aqe.id AS auto_queue_entry_id,
+            aqe.run_id AS auto_queue_run_id,
+            aqe.slot_index::BIGINT AS auto_queue_slot_index,
+            aqe.thread_group::BIGINT AS auto_queue_thread_group
          FROM sessions s
          LEFT JOIN agents a ON s.agent_id = a.id
          LEFT JOIN departments d ON a.department = d.id
+         LEFT JOIN task_dispatches td ON td.id = s.active_dispatch_id
+         LEFT JOIN LATERAL (
+            SELECT id, run_id, slot_index, thread_group
+            FROM auto_queue_entries
+            WHERE dispatch_id = s.active_dispatch_id
+            ORDER BY created_at DESC, id ASC
+            LIMIT 1
+         ) aqe ON TRUE
          WHERE s.active_dispatch_id IS NOT NULL
          ORDER BY s.id"
     };
@@ -450,6 +476,34 @@ pub(crate) async fn list_dispatched_sessions_pg(
             row.try_get("thread_channel_id").map_err(|error| {
                 format!("decode postgres thread_channel_id for session {id}: {error}")
             })?;
+        let dispatch_thread_id: Option<String> =
+            row.try_get("dispatch_thread_id").map_err(|error| {
+                format!("decode postgres dispatch_thread_id for session {id}: {error}")
+            })?;
+        let auto_queue_entry_id: Option<String> =
+            row.try_get("auto_queue_entry_id").map_err(|error| {
+                format!("decode postgres auto_queue_entry_id for session {id}: {error}")
+            })?;
+        let auto_queue_run_id: Option<String> =
+            row.try_get("auto_queue_run_id").map_err(|error| {
+                format!("decode postgres auto_queue_run_id for session {id}: {error}")
+            })?;
+        let auto_queue_slot_index: Option<i64> =
+            row.try_get("auto_queue_slot_index").map_err(|error| {
+                format!("decode postgres auto_queue_slot_index for session {id}: {error}")
+            })?;
+        let auto_queue_thread_group: Option<i64> =
+            row.try_get("auto_queue_thread_group").map_err(|error| {
+                format!("decode postgres auto_queue_thread_group for session {id}: {error}")
+            })?;
+        let tmux_session = tmux_session_name_from_session_key(session_key.as_deref());
+        let resolved_thread_channel_id = normalize_thread_channel_id(dispatch_thread_id.as_deref())
+            .or_else(|| normalize_thread_channel_id(thread_channel_id.as_deref()))
+            .or_else(|| {
+                session_key
+                    .as_deref()
+                    .and_then(parse_thread_channel_id_from_session_key)
+            });
 
         let effective = resolver.resolve(
             session_key.as_deref(),
@@ -489,10 +543,54 @@ pub(crate) async fn list_dispatched_sessions_pg(
             "department_name_ko": department_name_ko,
             "department_color": department_color,
             "thread_channel_id": thread_channel_id,
+            "dispatch_thread_id": dispatch_thread_id,
+            "resolved_thread_channel_id": resolved_thread_channel_id,
+            "tmux_session": tmux_session,
+            "auto_queue_entry_id": auto_queue_entry_id,
+            "auto_queue_run_id": auto_queue_run_id,
+            "auto_queue_slot_index": auto_queue_slot_index,
+            "auto_queue_thread_group": auto_queue_thread_group,
+            "recovery_identifiers": {
+                "session_key": session_key,
+                "tmux_session": tmux_session,
+                "active_dispatch_id": effective.active_dispatch_id,
+                "thread_channel_id": resolved_thread_channel_id,
+                "auto_queue_entry_id": auto_queue_entry_id,
+                "auto_queue_run_id": auto_queue_run_id,
+                "auto_queue_slot_index": auto_queue_slot_index,
+                "auto_queue_thread_group": auto_queue_thread_group,
+            },
         }));
     }
 
     Ok(sessions)
+}
+
+fn tmux_session_name_from_session_key(session_key: Option<&str>) -> Option<String> {
+    let (_, tmux_session) = session_key?.split_once(':')?;
+    let tmux_session = tmux_session.trim();
+    (!tmux_session.is_empty()).then(|| tmux_session.to_string())
+}
+
+#[cfg(test)]
+mod recovery_identifier_tests {
+    use super::tmux_session_name_from_session_key;
+
+    #[test]
+    fn tmux_session_name_from_session_key_preserves_provider_prefixed_hosts() {
+        assert_eq!(
+            tmux_session_name_from_session_key(Some(
+                "codex/hash123/mac-mini:AgentDesk-codex-adk-cdx"
+            ))
+            .as_deref(),
+            Some("AgentDesk-codex-adk-cdx")
+        );
+        assert_eq!(
+            tmux_session_name_from_session_key(Some("missing-colon")),
+            None
+        );
+        assert_eq!(tmux_session_name_from_session_key(Some("host:   ")), None);
+    }
 }
 
 pub(crate) async fn load_session_event_payload_pg(

@@ -2825,7 +2825,30 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/dispatched-sessions",
             "dispatched-sessions",
-            "List dispatched sessions // TODO: example",
+            "List dispatched sessions with recovery identifiers for active dispatch, tmux session, thread channel, and linked auto-queue entry/run/slot when available.",
+        )
+        .with_example(
+            json!({"query": {"all": false}}),
+            json!({"sessions": [{
+                "session_key": "mac-mini:AgentDesk-codex-adk-cdx",
+                "status": "turn_active",
+                "active_dispatch_id": "dispatch-1",
+                "tmux_session": "AgentDesk-codex-adk-cdx",
+                "resolved_thread_channel_id": "1501205715878936748",
+                "auto_queue_entry_id": "entry-1",
+                "auto_queue_run_id": "run-1",
+                "auto_queue_slot_index": 0,
+                "recovery_identifiers": {
+                    "session_key": "mac-mini:AgentDesk-codex-adk-cdx",
+                    "tmux_session": "AgentDesk-codex-adk-cdx",
+                    "active_dispatch_id": "dispatch-1",
+                    "thread_channel_id": "1501205715878936748",
+                    "auto_queue_entry_id": "entry-1",
+                    "auto_queue_run_id": "run-1",
+                    "auto_queue_slot_index": 0,
+                    "auto_queue_thread_group": 0
+                }
+            }]}),
         ),
         ep(
             "DELETE",
@@ -3398,7 +3421,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/queue/status",
             "auto-queue",
-            "Get latest auto-queue run state",
+            "Get latest auto-queue run state. When auto_queue_slot_single_active_entry is violated, diagnostics.slot_invariant_violations identifies run_id, agent_id, slot_index, conflicting entry_ids, related dispatch_ids, and recovery endpoints. Recommended recovery: choose the entry that should retain the active slot, complete/cancel/skip stale entries, then use /api/queue/slots/{agent_id}/{slot_index}/reset-thread or /api/queue/slots/{agent_id}/{slot_index}/rebind if the slot binding points at the wrong thread group.",
         )
         .with_params([
             (
@@ -3559,6 +3582,40 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"error": "ordered_ids is required"}),
         )
         .with_curl("curl -X PATCH http://localhost:8787/api/queue/reorder -H 'Content-Type: application/json' -d '{\"ordered_ids\":[\"entry-2\",\"entry-1\"],\"agent_id\":\"agent-1\"}'"),
+        ep(
+            "POST",
+            "/api/queue/slots/{agent_id}/{slot_index}/rebind",
+            "auto-queue",
+            "Rebind one auto-queue slot to a run/thread group after the active dispatch has been completed, cancelled, or skipped.",
+        )
+        .with_params([
+            ("agent_id", path_param("Agent ID")),
+            (
+                "slot_index",
+                ParamDoc {
+                    location: "path",
+                    kind: "number",
+                    required: true,
+                    description: "Slot pool index",
+                    enum_values: None,
+                    default: None,
+                },
+            ),
+            ("run_id", body_param("string", true, "Active or paused auto-queue run ID")),
+            (
+                "thread_group",
+                body_param("number", true, "Thread group that should own this slot"),
+            ),
+        ])
+        .with_example(
+            json!({"path": {"agent_id": "agent-1", "slot_index": 0}, "body": {"run_id": "run-1", "thread_group": 0}}),
+            json!({"ok": true, "agent_id": "agent-1", "slot_index": 0, "run_id": "run-1", "thread_group": 0, "rebound": true, "updated_entries": 1}),
+        )
+        .with_error_example(
+            409,
+            json!({"path": {"agent_id": "agent-1", "slot_index": 0}, "body": {"run_id": "run-1", "thread_group": 0}}),
+            json!({"error": "slot 0 for agent-1 has an active dispatch; reset or complete it before rebind"}),
+        ),
         ep(
             "POST",
             "/api/queue/slots/{agent_id}/{slot_index}/reset-thread",
@@ -4898,6 +4955,73 @@ mod tests {
         let (status, _headers, routed) = resolve_docs_segment("api-friction-markers", false);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(routed["path"], "/api/docs/api-friction-markers");
+    }
+
+    #[test]
+    fn auto_queue_docs_surface_slot_recovery_identifiers() {
+        let endpoints = all_endpoints();
+        let find = |method: &str, path: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.method == method && endpoint.path == path)
+                .unwrap_or_else(|| panic!("{method} {path} must be documented"))
+        };
+
+        let status = find("GET", "/api/queue/status");
+        assert!(
+            status
+                .description
+                .contains("diagnostics.slot_invariant_violations"),
+            "status docs must describe slot invariant recovery diagnostics"
+        );
+        assert!(
+            status.description.contains("entry_ids")
+                && status.description.contains("dispatch_ids")
+                && status
+                    .description
+                    .contains("/api/queue/slots/{agent_id}/{slot_index}/rebind"),
+            "status docs must expose actionable identifiers and repair endpoints"
+        );
+
+        let rebind = find("POST", "/api/queue/slots/{agent_id}/{slot_index}/rebind");
+        assert_eq!(
+            rebind
+                .params
+                .get("run_id")
+                .expect("rebind docs must include run_id")
+                .required,
+            true
+        );
+        assert_eq!(
+            rebind
+                .params
+                .get("thread_group")
+                .expect("rebind docs must include thread_group")
+                .required,
+            true
+        );
+        assert_eq!(
+            rebind
+                .example
+                .as_ref()
+                .expect("rebind docs must include an example")
+                .response["rebound"],
+            true
+        );
+
+        let sessions = find("GET", "/api/dispatched-sessions");
+        let session = &sessions
+            .example
+            .as_ref()
+            .expect("dispatched-sessions docs must include an example")
+            .response["sessions"][0];
+        assert_eq!(session["auto_queue_entry_id"], "entry-1");
+        assert_eq!(session["auto_queue_run_id"], "run-1");
+        assert_eq!(session["auto_queue_slot_index"], 0);
+        assert_eq!(
+            session["recovery_identifiers"]["auto_queue_thread_group"],
+            0
+        );
     }
 
     #[test]
