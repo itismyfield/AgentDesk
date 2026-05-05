@@ -1,37 +1,13 @@
-use serde_json::Value;
-use sqlx::{PgPool, Row as SqlxRow};
+use sqlx::{Postgres, Row as SqlxRow, Transaction};
 
-use super::diagnostics::{record_routing_diagnostics_pg, required_capabilities_empty};
-use super::model::DispatchOutboxRow;
+use super::model::DispatchOutboxClaimCandidate;
 
 const DISPATCH_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
 
-pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
-    pool: &PgPool,
-    claim_owner: &str,
-) -> Vec<DispatchOutboxRow> {
-    let owner_node =
-        match crate::server::cluster::worker_node_snapshot_by_instance(pool, claim_owner, 60).await
-        {
-            Ok(node) => node,
-            Err(error) => {
-                tracing::warn!(
-                    claim_owner,
-                    error,
-                    "[dispatch-outbox] failed to load claim owner capabilities"
-                );
-                None
-            }
-        };
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(error) => {
-            tracing::warn!("[dispatch-outbox] failed to begin postgres claim transaction: {error}");
-            return Vec::new();
-        }
-    };
-
-    let rows = match sqlx::query(
+pub(crate) async fn select_pending_dispatch_outbox_claim_candidates_pg(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<Vec<DispatchOutboxClaimCandidate>, sqlx::Error> {
+    let rows = sqlx::query(
         "SELECT
             o.id,
             o.dispatch_id,
@@ -59,101 +35,40 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
          LIMIT 20",
     )
     .bind(DISPATCH_OUTBOX_CLAIM_STALE_SECS)
-    .fetch_all(&mut *tx)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!("[dispatch-outbox] failed to select postgres outbox rows: {error}");
-            let _ = tx.rollback().await;
-            return Vec::new();
-        }
-    };
+    .fetch_all(&mut **tx)
+    .await?;
 
-    let mut pending = Vec::new();
-    for row in rows {
-        let id = match row.try_get::<i64, _>("id") {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-        let dispatch_id = match row.try_get::<String, _>("dispatch_id") {
-            Ok(dispatch_id) => dispatch_id,
-            Err(_) => continue,
-        };
-        let required_capabilities = row
-            .try_get::<Option<Value>, _>("required_capabilities")
-            .ok()
-            .flatten();
+    rows.into_iter()
+        .map(|row| {
+            Ok(DispatchOutboxClaimCandidate {
+                id: row.try_get("id")?,
+                dispatch_id: row.try_get("dispatch_id")?,
+                action: row.try_get("action")?,
+                agent_id: row.try_get("agent_id")?,
+                card_id: row.try_get("card_id")?,
+                title: row.try_get("title")?,
+                retry_count: row.try_get("retry_count")?,
+                required_capabilities: row.try_get("required_capabilities")?,
+            })
+        })
+        .collect()
+}
 
-        if !required_capabilities_empty(required_capabilities.as_ref()) {
-            let required = required_capabilities
-                .as_ref()
-                .expect("required capabilities checked above");
-            let decision = owner_node
-                .as_ref()
-                .map(|node| crate::server::cluster::explain_capability_match(node, required))
-                .unwrap_or_else(|| crate::server::cluster::CapabilityRouteDecision {
-                    instance_id: Some(claim_owner.to_string()),
-                    eligible: false,
-                    reasons: vec!["claim owner is not registered in worker_nodes".to_string()],
-                });
-            if !decision.eligible {
-                record_routing_diagnostics_pg(
-                    &mut tx,
-                    id,
-                    &dispatch_id,
-                    claim_owner,
-                    &decision,
-                    required,
-                )
-                .await;
-                continue;
-            }
-        }
-
-        if let Err(error) = sqlx::query(
-            "UPDATE dispatch_outbox
-                SET status = 'processing',
-                    claimed_at = NOW(),
-                    claim_owner = $2
-              WHERE id = $1",
-        )
-        .bind(id)
-        .bind(claim_owner)
-        .execute(&mut *tx)
-        .await
-        {
-            tracing::warn!(
-                outbox_id = id,
-                dispatch_id,
-                error = %error,
-                "[dispatch-outbox] failed to claim postgres outbox row"
-            );
-            continue;
-        }
-
-        pending.push((
-            id,
-            dispatch_id,
-            row.try_get::<String, _>("action").ok().unwrap_or_default(),
-            row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
-            row.try_get::<Option<String>, _>("card_id").ok().flatten(),
-            row.try_get::<Option<String>, _>("title").ok().flatten(),
-            row.try_get::<i64, _>("retry_count")
-                .ok()
-                .unwrap_or_default(),
-            required_capabilities,
-        ));
-        if pending.len() >= 5 {
-            break;
-        }
-    }
-
-    if let Err(error) = tx.commit().await {
-        tracing::warn!("[dispatch-outbox] failed to commit postgres outbox claims: {error}");
-        return Vec::new();
-    }
-
-    pending.sort_by_key(|row| row.0);
-    pending
+pub(crate) async fn mark_dispatch_outbox_claimed_pg(
+    tx: &mut Transaction<'_, Postgres>,
+    outbox_id: i64,
+    claim_owner: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE dispatch_outbox
+            SET status = 'processing',
+                claimed_at = NOW(),
+                claim_owner = $2
+          WHERE id = $1",
+    )
+    .bind(outbox_id)
+    .bind(claim_owner)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }

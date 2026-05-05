@@ -1,28 +1,11 @@
-use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 
-pub(crate) fn required_capabilities_empty(required: Option<&Value>) -> bool {
-    match required {
-        None | Some(Value::Null) => true,
-        Some(Value::Object(map)) => map.is_empty(),
-        _ => false,
-    }
-}
-
-pub(super) async fn record_routing_diagnostics_pg(
+pub(crate) async fn record_routing_diagnostics_pg(
     tx: &mut Transaction<'_, Postgres>,
     outbox_id: i64,
     dispatch_id: &str,
-    claim_owner: &str,
-    decision: &crate::server::cluster::CapabilityRouteDecision,
-    required_capabilities: &Value,
+    diagnostics: &serde_json::Value,
 ) {
-    let diagnostics = serde_json::json!({
-        "claim_owner": claim_owner,
-        "decision": decision,
-        "required_capabilities": required_capabilities,
-        "checked_at": chrono::Utc::now(),
-    });
     if let Err(error) = sqlx::query(
         "UPDATE dispatch_outbox
             SET routing_diagnostics = $2,
@@ -30,7 +13,7 @@ pub(super) async fn record_routing_diagnostics_pg(
           WHERE id = $1",
     )
     .bind(outbox_id)
-    .bind(&diagnostics)
+    .bind(diagnostics)
     .execute(&mut **tx)
     .await
     {
@@ -48,7 +31,7 @@ pub(super) async fn record_routing_diagnostics_pg(
           WHERE id = $1",
     )
     .bind(dispatch_id)
-    .bind(&diagnostics)
+    .bind(diagnostics)
     .execute(&mut **tx)
     .await
     {
@@ -57,22 +40,5 @@ pub(super) async fn record_routing_diagnostics_pg(
             error = %error,
             "[dispatch-outbox] failed to record dispatch routing diagnostics"
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn required_capabilities_empty_handles_null_and_empty_object() {
-        assert!(required_capabilities_empty(None));
-        assert!(required_capabilities_empty(Some(&Value::Null)));
-        assert!(required_capabilities_empty(Some(&json!({}))));
-        assert!(!required_capabilities_empty(Some(
-            &json!({"provider": "codex"})
-        )));
-        assert!(!required_capabilities_empty(Some(&json!(["codex"]))));
     }
 }

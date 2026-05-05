@@ -14,6 +14,33 @@ pub(crate) type DispatchOutboxRow = (
     Option<Value>,
 );
 
+#[derive(Clone, Debug)]
+pub(crate) struct DispatchOutboxClaimCandidate {
+    pub(crate) id: i64,
+    pub(crate) dispatch_id: String,
+    pub(crate) action: String,
+    pub(crate) agent_id: Option<String>,
+    pub(crate) card_id: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) retry_count: i64,
+    pub(crate) required_capabilities: Option<Value>,
+}
+
+impl DispatchOutboxClaimCandidate {
+    pub(crate) fn into_outbox_row(self) -> DispatchOutboxRow {
+        (
+            self.id,
+            self.dispatch_id,
+            self.action,
+            self.agent_id,
+            self.card_id,
+            self.title,
+            self.retry_count,
+            self.required_capabilities,
+        )
+    }
+}
+
 /// Snapshot of a completed dispatch row used to build followup summaries.
 #[derive(Clone, Debug)]
 pub(crate) struct CompletedDispatchInfo {

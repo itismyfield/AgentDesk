@@ -8,8 +8,9 @@
 //!
 //! - `crate::services::dispatches::outbox_queue` — `OutboxNotifier`,
 //!   `RealOutboxNotifier`, `process_outbox_batch_*`, `dispatch_outbox_loop`.
-//! - `crate::db::dispatches::outbox` — `claim_pending_dispatch_outbox_batch_pg`,
-//!   `mark_outbox_*`, `requeue_dispatch_notify_pg`,
+//! - `crate::services::dispatches::outbox_claiming` —
+//!   `claim_pending_dispatch_outbox_batch_pg`.
+//! - `crate::db::dispatches::outbox` — `mark_outbox_*`, `requeue_dispatch_notify_pg`,
 //!   `load_completed_dispatch_info_pg`, etc.
 
 use sqlx::PgPool;

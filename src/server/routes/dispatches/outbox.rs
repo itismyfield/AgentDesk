@@ -5,10 +5,10 @@
 //! `crate::db::dispatches::outbox`; queue processing lives in
 //! `crate::services::dispatches::outbox_queue`.
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub(crate) use crate::db::dispatches::outbox::claim_pending_dispatch_outbox_batch_pg;
 pub(crate) use crate::db::dispatches::outbox::requeue_dispatch_notify_pg;
 pub(crate) use crate::server::dto::dispatches::DispatchFollowupConfig;
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(crate) use crate::services::dispatches::outbox_claiming::claim_pending_dispatch_outbox_batch_pg;
 pub(crate) use crate::services::dispatches::outbox_queue::dispatch_outbox_loop;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use crate::services::dispatches::outbox_queue::{
