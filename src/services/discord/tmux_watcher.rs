@@ -1,5 +1,47 @@
 use super::*;
 
+async fn persist_watcher_provider_session_id(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    session_id: Option<&str>,
+) {
+    let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+
+    {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id)
+            && !session.cleared
+        {
+            session.restore_provider_session(Some(session_id.to_string()));
+        }
+    }
+
+    let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+        &shared.token_hash,
+        provider,
+        tmux_session_name,
+    );
+    crate::services::discord::adk_session::save_provider_session_id(
+        &session_key,
+        session_id,
+        Some(session_id),
+        provider,
+        shared.api_port,
+    )
+    .await;
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] 👁 watcher persisted provider session selector for {} channel {}",
+        tmux_session_name,
+        channel_id.get()
+    );
+}
+
 pub(in crate::services::discord) async fn tmux_output_watcher(
     channel_id: ChannelId,
     http: Arc<serenity::Http>,
@@ -2388,6 +2430,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             channel_id.get(),
         );
         let watcher_session_id = state.last_session_id.clone();
+        if terminal_output_committed {
+            persist_watcher_provider_session_id(
+                &shared,
+                channel_id,
+                &provider_kind,
+                &tmux_session_name,
+                watcher_session_id.as_deref(),
+            )
+            .await;
+        }
         let result_usage = stream_line_state_token_usage(&state);
         if inflight_state.is_none() {
             let ts = chrono::Local::now().format("%H:%M:%S");

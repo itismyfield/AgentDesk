@@ -1036,19 +1036,38 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Send a Discord channel message",
         )
         .with_params([
-            ("channel_id", body_param("string", true, "Target Discord channel snowflake")),
-            ("message", body_param("string", true, "Message body (markdown supported)")),
+            (
+                "target",
+                body_param("string", false, "Target channel:<id>|channel:<name>|agent:<roleId>"),
+            ),
+            (
+                "content",
+                body_param("string", false, "Message body (markdown supported)"),
+            ),
+            (
+                "channel_id",
+                body_param("string", false, "Alias for target=channel:<id>"),
+            ),
+            ("message", body_param("string", false, "Alias for content")),
+            (
+                "source",
+                body_param("string", false, "Known agent role_id or internal source; defaults to system"),
+            ),
+            (
+                "bot",
+                body_param("string", false, "Delivery bot: announce (default) or notify"),
+            ),
         ])
         .with_example(
-            json!({"body": {"channel_id": "1473922824350601297", "message": "hello"}}),
+            json!({"body": {"target": "channel:1473922824350601297", "content": "hello", "source": "system", "bot": "notify"}}),
             json!({"ok": true, "message_id": "1500000000000000000"}),
         )
         .with_error_example(
             400,
-            json!({"body": {"message": "hello"}}),
-            json!({"error": "channel_id is required"}),
+            json!({"body": {"target": "channel:1473922824350601297"}}),
+            json!({"error": "content is required", "ok": false}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -d '{\"channel_id\":\"1473922824350601297\",\"message\":\"hello\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -d '{\"target\":\"channel:1473922824350601297\",\"content\":\"hello\",\"source\":\"system\",\"bot\":\"notify\"}'"),
         ep(
             "POST",
             "/api/discord/send-to-agent",
@@ -4846,5 +4865,50 @@ mod tests {
         let (status, _headers, routed) = resolve_docs_segment("api-friction-markers", false);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(routed["path"], "/api/docs/api-friction-markers");
+    }
+
+    #[test]
+    fn discord_send_docs_include_canonical_fields_and_legacy_aliases() {
+        let endpoints = all_endpoints();
+        let send = endpoints
+            .iter()
+            .find(|endpoint| endpoint.method == "POST" && endpoint.path == "/api/discord/send")
+            .expect("POST /api/discord/send must be documented");
+
+        for param in [
+            "target",
+            "content",
+            "channel_id",
+            "message",
+            "source",
+            "bot",
+        ] {
+            assert!(
+                send.params.contains_key(param),
+                "send docs must include {param}"
+            );
+        }
+        assert_eq!(
+            send.params
+                .get("channel_id")
+                .expect("channel_id alias should be documented")
+                .description,
+            "Alias for target=channel:<id>"
+        );
+        assert_eq!(
+            send.params
+                .get("message")
+                .expect("message alias should be documented")
+                .description,
+            "Alias for content"
+        );
+        let example_body = &send
+            .example
+            .as_ref()
+            .expect("send docs must include an example")
+            .request["body"];
+        assert_eq!(example_body["target"], "channel:1473922824350601297");
+        assert_eq!(example_body["content"], "hello");
+        assert_eq!(example_body["source"], "system");
     }
 }

@@ -2961,6 +2961,38 @@ pub(crate) async fn send_message_with_backends_and_delivery_id(
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
 ) -> (&'static str, String) {
+    send_message_with_backends_and_delivery_options(
+        registry,
+        db,
+        pg_pool,
+        target,
+        content,
+        source,
+        bot,
+        summary,
+        delivery_id,
+        ManualOutboundOptions::default(),
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ManualOutboundOptions {
+    pub(crate) allow_unbound_internal_channel: bool,
+}
+
+pub(crate) async fn send_message_with_backends_and_delivery_options(
+    registry: &HealthRegistry,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+    summary: Option<&str>,
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    options: ManualOutboundOptions,
+) -> (&'static str, String) {
     if content.is_empty() {
         return (
             "400 Bad Request",
@@ -3010,9 +3042,11 @@ pub(crate) async fn send_message_with_backends_and_delivery_id(
     if super::settings::resolve_role_binding(channel_id, None).is_none() {
         let routine_parent_hint = routine_thread_parent_hint(pg_pool, channel_id).await;
         let mut authorized = false;
+        let mut target_channel_accessible = false;
         // Try resolving as a thread: fetch channel info and check parent_id
         if let Ok(http) = resolve_bot_http(registry, bot).await {
             if let Ok(channel) = channel_id.to_channel(&*http).await {
+                target_channel_accessible = true;
                 if let Some(guild_channel) = channel.guild() {
                     if let Some(parent_id) = guild_channel.parent_id {
                         if let Some(expected_parent) = routine_parent_hint {
@@ -3040,6 +3074,20 @@ pub(crate) async fn send_message_with_backends_and_delivery_id(
                     }
                 }
             }
+        }
+        if !authorized
+            && options.allow_unbound_internal_channel
+            && is_allowed_send_source(source)
+            && target.trim_start().starts_with("channel:")
+            && target_channel_accessible
+        {
+            authorized = true;
+            tracing::warn!(
+                target_channel_id = channel_id.get(),
+                source,
+                bot,
+                "allowing trusted internal Discord relay to unbound but accessible channel"
+            );
         }
         if !authorized {
             return (
@@ -3085,6 +3133,8 @@ fn is_allowed_send_source(source: &str) -> bool {
         "routine-runtime",
         "headless_turn",
         "slo_alerter",
+        "auto-queue-monitor",
+        "inventory",
     ];
     INTERNAL_SOURCES.contains(&source) || super::settings::is_known_agent(source)
 }
@@ -3099,6 +3149,8 @@ mod send_source_tests {
         assert!(is_allowed_send_source("lifecycle_notifier"));
         assert!(is_allowed_send_source("routine-runtime"));
         assert!(is_allowed_send_source("slo_alerter"));
+        assert!(is_allowed_send_source("auto-queue-monitor"));
+        assert!(is_allowed_send_source("inventory"));
         assert!(!is_allowed_send_source("not-a-real-source"));
     }
 }
@@ -3583,12 +3635,28 @@ pub async fn handle_send<'a>(
         );
     };
 
-    let target = json.get("target").and_then(|v| v.as_str()).unwrap_or("");
-    let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let raw_target = json
+        .get("target")
+        .and_then(|v| v.as_str())
+        .or_else(|| json.get("channel_id").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let target = if json.get("target").and_then(|v| v.as_str()).is_none()
+        && !raw_target.trim().is_empty()
+        && !raw_target.trim_start().starts_with("channel:")
+    {
+        format!("channel:{raw_target}")
+    } else {
+        raw_target.to_string()
+    };
+    let content = json
+        .get("content")
+        .and_then(|v| v.as_str())
+        .or_else(|| json.get("message").and_then(|v| v.as_str()))
+        .unwrap_or("");
     let source = json
         .get("source")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+        .unwrap_or("system");
     let bot = json
         .get("bot")
         .and_then(|v| v.as_str())
@@ -3613,7 +3681,7 @@ pub async fn handle_send<'a>(
         registry,
         sqlite,
         pg_pool,
-        target,
+        &target,
         content,
         source,
         bot,
@@ -4614,20 +4682,28 @@ fn parse_send_body(body: &str) -> Result<(String, String, String), &'static str>
     let content = json
         .get("content")
         .and_then(|v| v.as_str())
+        .or_else(|| json.get("message").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
     if content.is_empty() {
         return Err("content is required");
     }
-    let target = json
+    let mut target = json
         .get("target")
         .and_then(|v| v.as_str())
+        .or_else(|| json.get("channel_id").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
+    if !target.trim().is_empty()
+        && json.get("target").and_then(|v| v.as_str()).is_none()
+        && !target.trim_start().starts_with("channel:")
+    {
+        target = format!("channel:{target}");
+    }
     let source = json
         .get("source")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
+        .unwrap_or("system")
         .to_string();
     Ok((target, content, source))
 }
@@ -4831,16 +4907,27 @@ mod tests {
         let (target, content, source) = result.unwrap();
         assert_eq!(target, "");
         assert_eq!(content, "hello world");
-        assert_eq!(source, "unknown");
+        assert_eq!(source, "system");
     }
 
     #[test]
-    fn test_parse_send_request_missing_source_defaults_unknown() {
+    fn test_parse_send_request_missing_source_defaults_system() {
         let body = r#"{"target":"channel:999","content":"msg"}"#;
         let result = parse_send_body(body);
         assert!(result.is_ok());
         let (_, _, source) = result.unwrap();
-        assert_eq!(source, "unknown");
+        assert_eq!(source, "system");
+    }
+
+    #[test]
+    fn test_parse_send_request_accepts_documented_aliases() {
+        let body = r#"{"channel_id":"999","message":"msg"}"#;
+        let result = parse_send_body(body);
+        assert!(result.is_ok());
+        let (target, content, source) = result.unwrap();
+        assert_eq!(target, "channel:999");
+        assert_eq!(content, "msg");
+        assert_eq!(source, "system");
     }
 
     #[test]
@@ -4849,6 +4936,8 @@ mod tests {
         assert!(is_allowed_send_source("lifecycle_notifier"));
         assert!(is_allowed_send_source("routine-runtime"));
         assert!(is_allowed_send_source("slo_alerter"));
+        assert!(is_allowed_send_source("auto-queue-monitor"));
+        assert!(is_allowed_send_source("inventory"));
         assert!(!is_allowed_send_source("not-a-real-source"));
     }
 

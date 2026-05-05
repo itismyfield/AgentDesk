@@ -31,6 +31,8 @@ const MEMORY_HEALTH_STARTUP_REASON: &str = "startup";
 const MEMORY_HEALTH_FIVE_MIN_REASON: &str = "OnTick5min";
 const FIVE_MIN_POLICY_TICK_INTERVAL: u64 = 10;
 const MESSAGE_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
+const MESSAGE_OUTBOX_MAX_RETRY_COUNT: i64 = 4;
+const MESSAGE_OUTBOX_RETRY_BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
 const POLICY_TICK_ADVISORY_LOCK_ID: i64 = 7_801_001;
 const GITHUB_SYNC_ADVISORY_LOCK_ID: i64 = 7_801_002;
 const POLICY_TICK_WARN_MS: u128 = 500;
@@ -2110,6 +2112,65 @@ mod tests {
         pg_db.drop().await;
     }
 
+    #[tokio::test]
+    async fn drain_message_outbox_batch_pg_retries_failed_rows_with_backoff() {
+        let _guard = server_test_lock();
+        let pg_db = TestPostgresDb::create().await;
+        let pg_pool = pg_db.connect_and_migrate().await;
+
+        let message_id: i64 = sqlx::query_scalar(
+            "INSERT INTO message_outbox (target, content, bot, source)
+             VALUES ($1, $2, 'notify', 'system')
+             RETURNING id",
+        )
+        .bind("channel:1492506767085801535")
+        .bind("retry-pg")
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+
+        let processed =
+            drain_message_outbox_batch_once(&pg_pool, Some("test-owner"), |_row| async {
+                (
+                    "500 Internal Server Error".to_string(),
+                    json!({"error": "mock failure"}).to_string(),
+                )
+            })
+            .await;
+
+        assert_eq!(processed, 1);
+        let row = sqlx::query(
+            "SELECT status,
+                    retry_count,
+                    next_attempt_at IS NOT NULL AS has_next_attempt_at,
+                    claimed_at IS NULL AS claim_cleared,
+                    claim_owner IS NULL AS owner_cleared,
+                    error
+             FROM message_outbox
+             WHERE id = $1",
+        )
+        .bind(message_id)
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+        let status: String = row.get("status");
+        let retry_count: i64 = row.get("retry_count");
+        let has_next_attempt_at: bool = row.get("has_next_attempt_at");
+        let claim_cleared: bool = row.get("claim_cleared");
+        let owner_cleared: bool = row.get("owner_cleared");
+        let error: Option<String> = row.get("error");
+
+        assert_eq!(status, "pending");
+        assert_eq!(retry_count, 1);
+        assert!(has_next_attempt_at);
+        assert!(claim_cleared);
+        assert!(owner_cleared);
+        assert!(error.unwrap_or_default().contains("mock failure"));
+
+        pg_pool.close().await;
+        pg_db.drop().await;
+    }
+
     /// #835 split-brain regression: when two machines share the same Postgres
     /// `agentdesk` DB, the policy-tick singleton lock (`POLICY_TICK_ADVISORY_LOCK_ID`
     /// = 7,801,001) must keep at most one tick loop active. The standby's
@@ -2972,6 +3033,59 @@ struct PendingMessageOutboxRow {
     source: String,
     reason_code: Option<String>,
     session_key: Option<String>,
+    retry_count: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MessageOutboxFailureAction {
+    Retry { retry_count: i64, backoff_secs: i64 },
+    Fail { retry_count: i64 },
+}
+
+fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction {
+    let next_retry_count = retry_count.saturating_add(1);
+    if next_retry_count > MESSAGE_OUTBOX_MAX_RETRY_COUNT {
+        return MessageOutboxFailureAction::Fail {
+            retry_count: next_retry_count,
+        };
+    }
+
+    let backoff_idx = (next_retry_count - 1) as usize;
+    let backoff_secs = MESSAGE_OUTBOX_RETRY_BACKOFF_SECS
+        .get(backoff_idx)
+        .copied()
+        .unwrap_or(3600);
+    MessageOutboxFailureAction::Retry {
+        retry_count: next_retry_count,
+        backoff_secs,
+    }
+}
+
+#[cfg(test)]
+mod message_outbox_retry_tests {
+    use super::{MessageOutboxFailureAction, message_outbox_failure_action};
+
+    #[test]
+    fn message_outbox_failure_action_retries_then_fails() {
+        assert_eq!(
+            message_outbox_failure_action(0),
+            MessageOutboxFailureAction::Retry {
+                retry_count: 1,
+                backoff_secs: 60,
+            }
+        );
+        assert_eq!(
+            message_outbox_failure_action(3),
+            MessageOutboxFailureAction::Retry {
+                retry_count: 4,
+                backoff_secs: 3600,
+            }
+        );
+        assert_eq!(
+            message_outbox_failure_action(4),
+            MessageOutboxFailureAction::Fail { retry_count: 5 }
+        );
+    }
 }
 
 impl PendingMessageOutboxRow {
@@ -3019,6 +3133,7 @@ fn load_pending_message_outbox_batch_sqlite(
             source: row.get(4)?,
             reason_code: row.get(5)?,
             session_key: row.get(6)?,
+            retry_count: 0,
         })
     })
     .ok()
@@ -3034,7 +3149,13 @@ async fn claim_pending_message_outbox_batch_pg(
         "WITH claimed AS (
             SELECT id
               FROM message_outbox
-             WHERE status = 'pending'
+             WHERE (
+                    status = 'pending'
+                    AND (
+                        next_attempt_at IS NULL
+                        OR next_attempt_at <= NOW()
+                    )
+                 )
                 OR (
                     status = 'processing'
                     AND (
@@ -3053,7 +3174,7 @@ async fn claim_pending_message_outbox_batch_pg(
                error = NULL
           FROM claimed
          WHERE mo.id = claimed.id
-        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source, mo.reason_code, mo.session_key",
+        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source, mo.reason_code, mo.session_key, mo.retry_count",
     )
     .bind(MESSAGE_OUTBOX_CLAIM_STALE_SECS)
     .bind(claim_owner)
@@ -3078,6 +3199,7 @@ async fn claim_pending_message_outbox_batch_pg(
                 source: row.try_get::<String, _>("source").ok()?,
                 reason_code: row.try_get::<Option<String>, _>("reason_code").ok()?,
                 session_key: row.try_get::<Option<String>, _>("session_key").ok()?,
+                retry_count: row.try_get::<i64, _>("retry_count").unwrap_or(0),
             })
         })
         .collect::<Vec<_>>();
@@ -3109,6 +3231,8 @@ where
                     SET status = 'sent',
                         sent_at = NOW(),
                         error = NULL,
+                        retry_count = 0,
+                        next_attempt_at = NULL,
                         claimed_at = NULL,
                         claim_owner = NULL
                   WHERE id = $1",
@@ -3125,21 +3249,51 @@ where
             );
         } else {
             let error_text = format!("{status}: {err_text}");
-            sqlx::query(
-                "UPDATE message_outbox
-                    SET status = 'failed',
-                        error = $1,
-                        claimed_at = NULL,
-                        claim_owner = NULL
-                  WHERE id = $2",
-            )
-            .bind(error_text)
-            .bind(row.id)
-            .execute(pg_pool)
-            .await
-            .ok();
+            let action = message_outbox_failure_action(row.retry_count);
+            match action {
+                MessageOutboxFailureAction::Fail { retry_count } => {
+                    sqlx::query(
+                        "UPDATE message_outbox
+                            SET status = 'failed',
+                                error = $1,
+                                retry_count = $2,
+                                next_attempt_at = NULL,
+                                claimed_at = NULL,
+                                claim_owner = NULL
+                          WHERE id = $3",
+                    )
+                    .bind(error_text)
+                    .bind(retry_count)
+                    .bind(row.id)
+                    .execute(pg_pool)
+                    .await
+                    .ok();
+                }
+                MessageOutboxFailureAction::Retry {
+                    retry_count,
+                    backoff_secs,
+                } => {
+                    sqlx::query(
+                        "UPDATE message_outbox
+                            SET status = 'pending',
+                                error = $1,
+                                retry_count = $2,
+                                next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 second'),
+                                claimed_at = NULL,
+                                claim_owner = NULL
+                          WHERE id = $4",
+                    )
+                    .bind(error_text)
+                    .bind(retry_count)
+                    .bind(backoff_secs)
+                    .bind(row.id)
+                    .execute(pg_pool)
+                    .await
+                    .ok();
+                }
+            }
             tracing::warn!(
-                "[outbox] ❌ msg {} → {} failed: {status}",
+                "[outbox] ❌ msg {} → {} failed: {status} ({action:?})",
                 row.id,
                 row.target
             );
@@ -3242,7 +3396,7 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
                 async move {
                     let (correlation_id, semantic_event_id) = row.delivery_ids();
                     let (status, err_text) =
-                        crate::services::discord::health::send_message_with_backends_and_delivery_id(
+                        crate::services::discord::health::send_message_with_backends_and_delivery_options(
                             &health_registry,
                             None,
                             Some(pg_pool.as_ref()),
@@ -3255,6 +3409,9 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
                                 correlation_id: &correlation_id,
                                 semantic_event_id: &semantic_event_id,
                             }),
+                            crate::services::discord::health::ManualOutboundOptions {
+                                allow_unbound_internal_channel: true,
+                            },
                         )
                         .await;
                     (status.to_string(), err_text)

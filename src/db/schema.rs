@@ -627,6 +627,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             created_at DATETIME DEFAULT (datetime('now')),
             sent_at    DATETIME,
             error      TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at DATETIME,
             claimed_at DATETIME,
             claim_owner TEXT
         );",
@@ -652,6 +654,32 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          ON message_outbox(target, reason_code, session_key, created_at);",
     )?;
 
+    {
+        let has_retry_count: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('message_outbox') WHERE name = 'retry_count'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_retry_count {
+            conn.execute_batch(
+                "ALTER TABLE message_outbox ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+    }
+    {
+        let has_next_attempt_at: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('message_outbox') WHERE name = 'next_attempt_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_next_attempt_at {
+            conn.execute_batch("ALTER TABLE message_outbox ADD COLUMN next_attempt_at DATETIME;")?;
+        }
+    }
     {
         let has_claimed_at: bool = conn
             .query_row(
