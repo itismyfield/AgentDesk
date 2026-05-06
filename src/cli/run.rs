@@ -373,6 +373,7 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             ConfigAction::Get => super::client::cmd_config_get(),
             ConfigAction::Set { json } => super::client::cmd_config_set(&json),
             ConfigAction::Audit { dry_run } => super::client::cmd_config_audit(dry_run),
+            ConfigAction::SyncMcp => super::client::cmd_config_sync_mcp(),
         }),
         Commands::Api { method, path, body } => {
             exit_for_cli(super::client::cmd_api(&method, &path, body.as_deref()))
