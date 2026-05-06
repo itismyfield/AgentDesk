@@ -856,6 +856,63 @@ pub fn cmd_config_audit(dry_run: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// `agentdesk config sync-mcp`
+pub fn cmd_config_sync_mcp() -> Result<(), String> {
+    let root = crate::config::runtime_root()
+        .ok_or_else(|| "Failed to resolve AGENTDESK_ROOT_DIR".to_string())?;
+    crate::runtime_layout::ensure_runtime_layout(&root)?;
+    let loaded = crate::services::discord_config_audit::load_runtime_config(&root)?;
+    let config = loaded.config;
+
+    let mut providers = Vec::new();
+    let mut failures = Vec::new();
+    for (provider, result) in [
+        (
+            "codex",
+            crate::services::mcp_config::sync_codex_mcp_servers(&config),
+        ),
+        (
+            "opencode",
+            crate::services::mcp_config::sync_opencode_mcp_servers(&config),
+        ),
+        (
+            "qwen",
+            crate::services::mcp_config::sync_qwen_mcp_servers(&config),
+        ),
+        (
+            "gemini",
+            crate::services::mcp_config::sync_gemini_mcp_servers(&config),
+        ),
+    ] {
+        match result {
+            Ok(()) => providers.push(serde_json::json!({
+                "provider": provider,
+                "ok": true,
+            })),
+            Err(error) => {
+                failures.push(provider.to_string());
+                providers.push(serde_json::json!({
+                    "provider": provider,
+                    "ok": false,
+                    "error": error,
+                }));
+            }
+        }
+    }
+
+    print_json(&serde_json::json!({
+        "ok": failures.is_empty(),
+        "config_path": loaded.path,
+        "providers": providers,
+    }));
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("MCP sync failed for {}", failures.join(", ")))
+    }
+}
+
 /// `agentdesk api <method> <path> [body]`
 pub fn cmd_api(method: &str, path: &str, body: Option<&str>) -> Result<(), String> {
     let value = api_call(method, path, body)?;

@@ -10,6 +10,8 @@ use crate::services::provider::ProviderKind;
 
 const CODEX_SYNC_STATE_FILE: &str = "codex-mcp-sync-state.json";
 const OPENCODE_SYNC_STATE_FILE: &str = "opencode-mcp-sync-state.json";
+const QWEN_SYNC_STATE_FILE: &str = "qwen-mcp-sync-state.json";
+const GEMINI_SYNC_STATE_FILE: &str = "gemini-mcp-sync-state.json";
 const MEMENTO_SERVER_NAME: &str = "memento";
 const REVIEW_MCP_ALLOWLIST_ENV: &str = "AGENTDESK_REVIEW_MCP_ALLOWLIST";
 const DEFAULT_REVIEW_MCP_ALLOWLIST: &[&str] = &[
@@ -50,6 +52,18 @@ struct OpenCodeMcpSyncState {
     managed_servers: Vec<String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct QwenMcpSyncState {
+    #[serde(default)]
+    managed_servers: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct GeminiMcpSyncState {
+    #[serde(default)]
+    managed_servers: Vec<String>,
+}
+
 pub(crate) fn provider_has_memento_mcp(provider: &ProviderKind) -> bool {
     provider_has_mcp_server(provider, MEMENTO_SERVER_NAME)
 }
@@ -71,6 +85,12 @@ pub(crate) fn provider_has_mcp_server(provider: &ProviderKind, server_name: &str
         ProviderKind::OpenCode => {
             runtime_config_contains_server(normalized)
                 || opencode_config_contains_server(normalized)
+        }
+        ProviderKind::Qwen => {
+            runtime_config_contains_server(normalized) || qwen_config_contains_server(normalized)
+        }
+        ProviderKind::Gemini => {
+            runtime_config_contains_server(normalized) || gemini_config_contains_server(normalized)
         }
         _ => false,
     }
@@ -199,6 +219,82 @@ pub(crate) fn sync_opencode_mcp_servers(config: &Config) -> Result<(), String> {
     };
     let serialized = serde_json::to_string_pretty(&next_state)
         .map_err(|error| format!("Failed to serialize OpenCode MCP sync state: {error}"))?;
+    atomic_write(&sync_state_path, &serialized)?;
+    Ok(())
+}
+
+pub(crate) fn sync_qwen_mcp_servers(config: &Config) -> Result<(), String> {
+    let runtime_root = crate::config::runtime_root()
+        .ok_or_else(|| "AGENTDESK_ROOT_DIR is unavailable".to_string())?;
+    let sync_state_path =
+        crate::runtime_layout::config_dir(&runtime_root).join(QWEN_SYNC_STATE_FILE);
+    let desired = resolved_mcp_servers(config, None);
+    let previous = load_qwen_sync_state_from_path(&sync_state_path);
+    let desired_names = desired.keys().cloned().collect::<BTreeSet<_>>();
+    let previous_names = previous
+        .managed_servers
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+    if desired_names.is_empty() && previous_names.is_empty() {
+        return Ok(());
+    }
+
+    let Some(config_path) = qwen_config_path() else {
+        return Err("Qwen config path unavailable".to_string());
+    };
+    sync_json_mcp_servers(
+        &config_path,
+        &desired,
+        &desired_names,
+        &previous_names,
+        qwen_mcp_entry,
+        "Qwen",
+    )?;
+
+    let next_state = QwenMcpSyncState {
+        managed_servers: desired_names.into_iter().collect(),
+    };
+    let serialized = serde_json::to_string_pretty(&next_state)
+        .map_err(|error| format!("Failed to serialize Qwen MCP sync state: {error}"))?;
+    atomic_write(&sync_state_path, &serialized)?;
+    Ok(())
+}
+
+pub(crate) fn sync_gemini_mcp_servers(config: &Config) -> Result<(), String> {
+    let runtime_root = crate::config::runtime_root()
+        .ok_or_else(|| "AGENTDESK_ROOT_DIR is unavailable".to_string())?;
+    let sync_state_path =
+        crate::runtime_layout::config_dir(&runtime_root).join(GEMINI_SYNC_STATE_FILE);
+    let desired = resolved_mcp_servers(config, None);
+    let previous = load_gemini_sync_state_from_path(&sync_state_path);
+    let desired_names = desired.keys().cloned().collect::<BTreeSet<_>>();
+    let previous_names = previous
+        .managed_servers
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+    if desired_names.is_empty() && previous_names.is_empty() {
+        return Ok(());
+    }
+
+    let Some(config_path) = gemini_config_path() else {
+        return Err("Gemini config path unavailable".to_string());
+    };
+    sync_json_mcp_servers(
+        &config_path,
+        &desired,
+        &desired_names,
+        &previous_names,
+        gemini_mcp_entry,
+        "Gemini",
+    )?;
+
+    let next_state = GeminiMcpSyncState {
+        managed_servers: desired_names.into_iter().collect(),
+    };
+    let serialized = serde_json::to_string_pretty(&next_state)
+        .map_err(|error| format!("Failed to serialize Gemini MCP sync state: {error}"))?;
     atomic_write(&sync_state_path, &serialized)?;
     Ok(())
 }
@@ -499,6 +595,20 @@ fn load_opencode_sync_state_from_path(path: &Path) -> OpenCodeMcpSyncState {
         .unwrap_or_default()
 }
 
+fn load_qwen_sync_state_from_path(path: &Path) -> QwenMcpSyncState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<QwenMcpSyncState>(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn load_gemini_sync_state_from_path(path: &Path) -> GeminiMcpSyncState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<GeminiMcpSyncState>(&raw).ok())
+        .unwrap_or_default()
+}
+
 fn claude_global_mcp_config_contains_server(server_name: &str) -> bool {
     let Some(path) = current_home_dir().map(|home| home.join(".claude").join(".mcp.json")) else {
         return false;
@@ -531,21 +641,82 @@ fn opencode_config_path() -> Option<PathBuf> {
     current_home_dir().map(|home| home.join(".config").join("opencode").join("opencode.json"))
 }
 
+fn qwen_config_path() -> Option<PathBuf> {
+    std::env::var_os("QWEN_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(current_home_dir)
+        .map(|home| home.join(".qwen").join("settings.json"))
+}
+
+fn gemini_config_path() -> Option<PathBuf> {
+    std::env::var_os("GEMINI_CLI_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(current_home_dir)
+        .map(|home| home.join(".gemini").join("settings.json"))
+}
+
 fn load_opencode_config_value(path: &Path) -> Result<Value, String> {
+    load_json_object_config_value(path, "OpenCode")
+}
+
+fn load_json_object_config_value(path: &Path, label: &str) -> Result<Value, String> {
     match std::fs::read_to_string(path) {
         Ok(raw) if raw.trim().is_empty() => Ok(Value::Object(Map::new())),
-        Ok(raw) => serde_json::from_str::<Value>(&raw).map_err(|error| {
-            format!(
-                "Failed to parse OpenCode config {}: {error}",
-                path.display()
-            )
-        }),
+        Ok(raw) => serde_json::from_str::<Value>(&raw)
+            .map_err(|error| format!("Failed to parse {label} config {}: {error}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Value::Object(Map::new())),
         Err(error) => Err(format!(
-            "Failed to read OpenCode config {}: {error}",
+            "Failed to read {label} config {}: {error}",
             path.display()
         )),
     }
+}
+
+fn sync_json_mcp_servers(
+    config_path: &Path,
+    desired: &BTreeMap<String, ResolvedMcpServer>,
+    desired_names: &BTreeSet<String>,
+    previous_names: &BTreeSet<String>,
+    entry_fn: fn(&ResolvedMcpServer) -> Value,
+    label: &str,
+) -> Result<(), String> {
+    let mut root = load_json_object_config_value(config_path, label)?;
+    let root_object = root.as_object_mut().ok_or_else(|| {
+        format!(
+            "{label} config must be a JSON object: {}",
+            config_path.display()
+        )
+    })?;
+
+    let mcp_value = root_object
+        .entry("mcpServers".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let mcp_servers = mcp_value
+        .as_object_mut()
+        .ok_or_else(|| format!("{label} config field `mcpServers` must be a JSON object"))?;
+
+    for removed in previous_names.difference(desired_names) {
+        mcp_servers.remove(removed);
+    }
+
+    for server in desired.values() {
+        mcp_servers.insert(server.name.clone(), entry_fn(server));
+    }
+
+    let serialized = serde_json::to_string_pretty(&root)
+        .map_err(|error| format!("Failed to serialize {label} config: {error}"))?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create {label} config directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    atomic_write(config_path, &serialized)?;
+    Ok(())
 }
 
 fn opencode_mcp_entry(server: &ResolvedMcpServer) -> Value {
@@ -569,6 +740,46 @@ fn opencode_mcp_entry(server: &ResolvedMcpServer) -> Value {
     Value::Object(entry)
 }
 
+fn qwen_mcp_entry(server: &ResolvedMcpServer) -> Value {
+    let mut entry = Map::new();
+    entry.insert("httpUrl".to_string(), Value::String(server.url.clone()));
+    entry.insert("trust".to_string(), Value::Bool(true));
+    if let Some(headers) = bearer_headers(server, "${", "}") {
+        entry.insert("headers".to_string(), Value::Object(headers));
+    }
+    Value::Object(entry)
+}
+
+fn gemini_mcp_entry(server: &ResolvedMcpServer) -> Value {
+    let mut entry = Map::new();
+    entry.insert("httpUrl".to_string(), Value::String(server.url.clone()));
+    entry.insert("trust".to_string(), Value::Bool(true));
+    if let Some(headers) = bearer_headers(server, "${", "}") {
+        entry.insert("headers".to_string(), Value::Object(headers));
+    }
+    Value::Object(entry)
+}
+
+fn bearer_headers(
+    server: &ResolvedMcpServer,
+    env_var_prefix: &str,
+    env_var_suffix: &str,
+) -> Option<Map<String, Value>> {
+    let token_env_var = server
+        .bearer_token_env_var
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let mut headers = Map::new();
+    headers.insert(
+        "Authorization".to_string(),
+        Value::String(format!(
+            "Bearer {env_var_prefix}{token_env_var}{env_var_suffix}"
+        )),
+    );
+    Some(headers)
+}
+
 fn opencode_config_contains_server(server_name: &str) -> bool {
     let Some(path) = opencode_config_path() else {
         return false;
@@ -586,6 +797,33 @@ fn opencode_config_contains_server(server_name: &str) -> bool {
             .and_then(|servers| servers.get(server_name))
             .is_some_and(opencode_mcp_entry_enabled)
     })
+}
+
+fn qwen_config_contains_server(server_name: &str) -> bool {
+    let Some(path) = qwen_config_path() else {
+        return false;
+    };
+    json_mcp_config_contains_server(&path, server_name)
+}
+
+fn gemini_config_contains_server(server_name: &str) -> bool {
+    let Some(path) = gemini_config_path() else {
+        return false;
+    };
+    json_mcp_config_contains_server(&path, server_name)
+}
+
+fn json_mcp_config_contains_server(path: &Path, server_name: &str) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    value
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .is_some_and(|servers| servers.contains_key(server_name))
 }
 
 fn opencode_mcp_entry_enabled(value: &Value) -> bool {
@@ -667,11 +905,15 @@ mod tests {
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_path = std::env::var_os("PATH");
         let previous_review_mcp_allowlist = std::env::var_os(REVIEW_MCP_ALLOWLIST_ENV);
+        let previous_qwen_home = std::env::var_os("QWEN_HOME");
+        let previous_gemini_cli_home = std::env::var_os("GEMINI_CLI_HOME");
         unsafe {
             std::env::set_var("AGENTDESK_ROOT_DIR", &runtime_root);
             std::env::set_var("HOME", temp.path());
             std::env::set_var("USERPROFILE", temp.path());
             std::env::remove_var(REVIEW_MCP_ALLOWLIST_ENV);
+            std::env::set_var("QWEN_HOME", temp.path());
+            std::env::set_var("GEMINI_CLI_HOME", temp.path());
         }
         f(temp.path());
         match previous_root {
@@ -693,6 +935,14 @@ mod tests {
         match previous_review_mcp_allowlist {
             Some(value) => unsafe { std::env::set_var(REVIEW_MCP_ALLOWLIST_ENV, value) },
             None => unsafe { std::env::remove_var(REVIEW_MCP_ALLOWLIST_ENV) },
+        }
+        match previous_qwen_home {
+            Some(value) => unsafe { std::env::set_var("QWEN_HOME", value) },
+            None => unsafe { std::env::remove_var("QWEN_HOME") },
+        }
+        match previous_gemini_cli_home {
+            Some(value) => unsafe { std::env::set_var("GEMINI_CLI_HOME", value) },
+            None => unsafe { std::env::remove_var("GEMINI_CLI_HOME") },
         }
     }
 
@@ -736,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_has_memento_mcp_reflects_runtime_config_for_claude_codex_and_opencode() {
+    fn provider_has_memento_mcp_reflects_runtime_config_for_mcp_aware_providers() {
         with_test_env(|temp_root| {
             let runtime_root = temp_root.join(".adk").join("release");
             let config_path = crate::runtime_layout::config_file_path(&runtime_root);
@@ -753,6 +1003,8 @@ mod tests {
             assert!(provider_has_memento_mcp(&ProviderKind::Claude));
             assert!(provider_has_memento_mcp(&ProviderKind::Codex));
             assert!(provider_has_memento_mcp(&ProviderKind::OpenCode));
+            assert!(provider_has_memento_mcp(&ProviderKind::Qwen));
+            assert!(provider_has_memento_mcp(&ProviderKind::Gemini));
         });
     }
 
@@ -806,6 +1058,29 @@ mod tests {
                 &ProviderKind::OpenCode,
                 "disabled"
             ));
+        });
+    }
+
+    #[test]
+    fn provider_has_mcp_server_detects_manual_qwen_and_gemini_config() {
+        with_test_env(|temp_root| {
+            let qwen_dir = temp_root.join(".qwen");
+            let gemini_dir = temp_root.join(".gemini");
+            fs::create_dir_all(&qwen_dir).unwrap();
+            fs::create_dir_all(&gemini_dir).unwrap();
+            fs::write(
+                qwen_dir.join("settings.json"),
+                r#"{"mcpServers":{"manual":{"httpUrl":"http://manual.local/mcp"}}}"#,
+            )
+            .unwrap();
+            fs::write(
+                gemini_dir.join("settings.json"),
+                r#"{"mcpServers":{"manual":{"httpUrl":"http://manual.local/mcp"}}}"#,
+            )
+            .unwrap();
+
+            assert!(provider_has_mcp_server(&ProviderKind::Qwen, "manual"));
+            assert!(provider_has_mcp_server(&ProviderKind::Gemini, "manual"));
         });
     }
 
@@ -1067,6 +1342,144 @@ exit 1
             let err = sync_opencode_mcp_servers(&config).unwrap_err();
             assert!(err.contains("Failed to parse OpenCode config"));
             assert_eq!(fs::read_to_string(config_path).unwrap(), "{not-json");
+        });
+    }
+
+    #[test]
+    fn sync_qwen_mcp_servers_updates_managed_servers_without_touching_others() {
+        with_test_env(|temp_root| {
+            let runtime_root = temp_root.join(".adk").join("release");
+            let qwen_dir = temp_root.join(".qwen");
+            fs::create_dir_all(&qwen_dir).unwrap();
+            fs::write(
+                qwen_dir.join("settings.json"),
+                r#"{"mcpServers":{"serena":{"command":"serena","args":["start-mcp-server"]},"old":{"httpUrl":"http://old.local/mcp"}},"tools":{"approvalMode":"yolo"}}"#,
+            )
+            .unwrap();
+            let sync_state_path =
+                crate::runtime_layout::config_dir(&runtime_root).join(QWEN_SYNC_STATE_FILE);
+            fs::write(
+                &sync_state_path,
+                serde_json::to_string(&QwenMcpSyncState {
+                    managed_servers: vec!["old".to_string()],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+            let mut config = Config::default();
+            config.mcp_servers.insert(
+                "memento".to_string(),
+                McpServerConfig {
+                    url: "http://localhost:57332/mcp".to_string(),
+                    auth: Some(crate::config::McpServerAuthConfig {
+                        auth_type: McpServerAuthType::Bearer,
+                        token_env_var: Some("MEMENTO_ACCESS_KEY".to_string()),
+                    }),
+                },
+            );
+            config.mcp_servers.insert(
+                "context7".to_string(),
+                McpServerConfig {
+                    url: "https://mcp.context7.com/mcp".to_string(),
+                    auth: Some(crate::config::McpServerAuthConfig {
+                        auth_type: McpServerAuthType::Bearer,
+                        token_env_var: Some("CONTEXT7_API_KEY".to_string()),
+                    }),
+                },
+            );
+
+            sync_qwen_mcp_servers(&config).unwrap();
+
+            let rendered = fs::read_to_string(qwen_dir.join("settings.json")).unwrap();
+            let value: Value = serde_json::from_str(&rendered).unwrap();
+            assert!(value["mcpServers"]["serena"].is_object());
+            assert!(value["mcpServers"]["old"].is_null());
+            assert_eq!(
+                value["mcpServers"]["memento"]["httpUrl"],
+                json!("http://localhost:57332/mcp")
+            );
+            assert_eq!(
+                value["mcpServers"]["context7"]["headers"]["Authorization"],
+                json!("Bearer ${CONTEXT7_API_KEY}")
+            );
+            assert_eq!(value["tools"]["approvalMode"], json!("yolo"));
+
+            let state = load_qwen_sync_state_from_path(&sync_state_path);
+            assert_eq!(
+                state.managed_servers,
+                vec!["context7".to_string(), "memento".to_string()]
+            );
+            assert!(provider_has_mcp_server(&ProviderKind::Qwen, "context7"));
+        });
+    }
+
+    #[test]
+    fn sync_gemini_mcp_servers_updates_managed_servers_without_touching_others() {
+        with_test_env(|temp_root| {
+            let runtime_root = temp_root.join(".adk").join("release");
+            let gemini_dir = temp_root.join(".gemini");
+            fs::create_dir_all(&gemini_dir).unwrap();
+            fs::write(
+                gemini_dir.join("settings.json"),
+                r#"{"mcpServers":{"serena":{"command":"serena","args":["start-mcp-server"]},"old":{"httpUrl":"http://old.local/mcp"}},"approvalMode":"yolo"}"#,
+            )
+            .unwrap();
+            let sync_state_path =
+                crate::runtime_layout::config_dir(&runtime_root).join(GEMINI_SYNC_STATE_FILE);
+            fs::write(
+                &sync_state_path,
+                serde_json::to_string(&GeminiMcpSyncState {
+                    managed_servers: vec!["old".to_string()],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+            let mut config = Config::default();
+            config.mcp_servers.insert(
+                "memento".to_string(),
+                McpServerConfig {
+                    url: "http://localhost:57332/mcp".to_string(),
+                    auth: Some(crate::config::McpServerAuthConfig {
+                        auth_type: McpServerAuthType::Bearer,
+                        token_env_var: Some("MEMENTO_ACCESS_KEY".to_string()),
+                    }),
+                },
+            );
+            config.mcp_servers.insert(
+                "context7".to_string(),
+                McpServerConfig {
+                    url: "https://mcp.context7.com/mcp".to_string(),
+                    auth: Some(crate::config::McpServerAuthConfig {
+                        auth_type: McpServerAuthType::Bearer,
+                        token_env_var: Some("CONTEXT7_API_KEY".to_string()),
+                    }),
+                },
+            );
+
+            sync_gemini_mcp_servers(&config).unwrap();
+
+            let rendered = fs::read_to_string(gemini_dir.join("settings.json")).unwrap();
+            let value: Value = serde_json::from_str(&rendered).unwrap();
+            assert!(value["mcpServers"]["serena"].is_object());
+            assert!(value["mcpServers"]["old"].is_null());
+            assert_eq!(
+                value["mcpServers"]["memento"]["httpUrl"],
+                json!("http://localhost:57332/mcp")
+            );
+            assert_eq!(
+                value["mcpServers"]["context7"]["headers"]["Authorization"],
+                json!("Bearer ${CONTEXT7_API_KEY}")
+            );
+            assert_eq!(value["approvalMode"], json!("yolo"));
+
+            let state = load_gemini_sync_state_from_path(&sync_state_path);
+            assert_eq!(
+                state.managed_servers,
+                vec!["context7".to_string(), "memento".to_string()]
+            );
+            assert!(provider_has_mcp_server(&ProviderKind::Gemini, "context7"));
         });
     }
 }

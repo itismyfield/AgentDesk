@@ -51,6 +51,12 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     if let Err(error) = crate::services::mcp_config::sync_opencode_mcp_servers(&config) {
         tracing::warn!("  [mcp] Failed to sync OpenCode MCP servers: {error}");
     }
+    if let Err(error) = crate::services::mcp_config::sync_qwen_mcp_servers(&config) {
+        tracing::warn!("  [mcp] Failed to sync Qwen MCP servers: {error}");
+    }
+    if let Err(error) = crate::services::mcp_config::sync_gemini_mcp_servers(&config) {
+        tracing::warn!("  [mcp] Failed to sync Gemini MCP servers: {error}");
+    }
 
     // #1699: install the prompt-manifest retention snapshot so write-time
     // truncation in `db::prompt_manifests::save_prompt_manifest_pg` reflects
