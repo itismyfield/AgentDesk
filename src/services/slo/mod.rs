@@ -75,6 +75,24 @@ impl SloMetric {
             SloMetric::AvgTurnLatencyMs => "avg_turn_latency_ms",
         }
     }
+
+    /// Whether a threshold breach should enqueue a Discord alert.
+    ///
+    /// `TurnSuccessRate` and `AvgTurnLatencyMs` were demoted to record-only
+    /// after operational review showed both produced predominantly noise: the
+    /// 5-minute success-rate window flips to 0%/50% on `sample=1..2` even when
+    /// nothing is wrong, and average latency over the same window is dominated
+    /// by a single legitimately-long coding turn (often 5–20 min). Aggregates
+    /// are still persisted into `slo_aggregates` for dashboards / postmortems;
+    /// only the Discord page-out is suppressed. Stuck-turn detection lives in
+    /// `dispatch_watchdog` where `idle_minutes >= 60` is genuinely actionable.
+    pub fn alerts_enabled(&self) -> bool {
+        match self {
+            SloMetric::TurnSuccessRate => false,
+            SloMetric::AvgTurnLatencyMs => false,
+            SloMetric::DuplicateRelayCount => true,
+        }
+    }
 }
 
 impl fmt::Display for SloMetric {
@@ -436,6 +454,16 @@ pub async fn run_aggregation_tick(
         }
 
         if let ThresholdVerdict::Breach { threshold } = verdict {
+            if !aggregate.metric.alerts_enabled() {
+                tracing::debug!(
+                    metric = %aggregate.metric,
+                    value = aggregate.value,
+                    threshold = threshold,
+                    "[slo] threshold breach recorded (alerts disabled for metric)"
+                );
+                aggregates.push(aggregate);
+                continue;
+            }
             let cooldown_ok = cooldown_allows_alert_pg(
                 pool,
                 aggregate.metric,
@@ -495,6 +523,18 @@ mod avg_latency_tests {
         assert!(AVG_LATENCY_SQL.contains("d.dispatch_type"));
         assert!(AVG_LATENCY_SQL.contains("d.context"));
         assert_eq!(AUTO_QUEUE_CONTEXT_RE, r#""auto_queue"\s*:\s*true"#);
+    }
+
+    #[test]
+    fn noisy_metrics_have_alerts_disabled() {
+        // The two metrics demoted to record-only after the post-#1750 noise
+        // review. Re-enabling either should be an explicit, reviewed change —
+        // this test guards against accidental regressions.
+        assert!(!SloMetric::TurnSuccessRate.alerts_enabled());
+        assert!(!SloMetric::AvgTurnLatencyMs.alerts_enabled());
+        // Duplicate-relay remains a real signal: the guard only fires when an
+        // upstream invariant is broken, so a 5-min spike is actionable.
+        assert!(SloMetric::DuplicateRelayCount.alerts_enabled());
     }
 }
 
