@@ -1,4 +1,5 @@
 use super::dto::{AchievementsResponse, ActivityHeatmapResponse, StreaksResponse};
+use chrono::{Datelike, NaiveDate};
 use serde_json::{Value, json};
 use sqlx::{PgPool, QueryBuilder, Row};
 use std::collections::HashMap;
@@ -83,27 +84,13 @@ fn compute_streak_from_today(sorted_dates_desc: &[&str], today: i64) -> i64 {
 }
 
 fn parse_date(s: &str) -> Option<i64> {
-    let parts: Vec<&str> = s.trim().split('-').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let y: i64 = parts[0].parse().ok()?;
-    let m: i64 = parts[1].parse().ok()?;
-    let d: i64 = parts[2].parse().ok()?;
-    Some(y * 365 + m * 30 + d)
+    NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+        .ok()
+        .map(|date| i64::from(date.num_days_from_ce()))
 }
 
 fn chrono_today() -> i64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = (now / 86400) as i64;
-    let approx_year = 1970 + days / 365;
-    let remaining = days % 365;
-    let approx_month = 1 + remaining / 30;
-    let approx_day = 1 + remaining % 30;
-    approx_year * 365 + approx_month * 30 + approx_day
+    i64::from(chrono::Utc::now().date_naive().num_days_from_ce())
 }
 
 pub async fn achievements_pg(
@@ -238,6 +225,24 @@ mod tests {
         let today = parse_date("2026-05-06").expect("valid today");
 
         let streak = compute_streak_from_today(&["2026-05-06", "2026-05-05", "2026-05-03"], today);
+
+        assert_eq!(streak, 2);
+    }
+
+    #[test]
+    fn compute_streak_counts_adjacent_days_across_month_boundary() {
+        let today = parse_date("2026-06-01").expect("valid today");
+
+        let streak = compute_streak_from_today(&["2026-06-01", "2026-05-31"], today);
+
+        assert_eq!(streak, 2);
+    }
+
+    #[test]
+    fn compute_streak_counts_adjacent_days_across_year_boundary() {
+        let today = parse_date("2027-01-01").expect("valid today");
+
+        let streak = compute_streak_from_today(&["2027-01-01", "2026-12-31"], today);
 
         assert_eq!(streak, 2);
     }
