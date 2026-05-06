@@ -51,7 +51,7 @@ pub struct AtomicCounters {
     /// #1136: watcher hit the "inflight missing → DB dispatch fallback" path AND
     /// the DB fallback failed to resolve a `dispatch_id`. Each increment marks
     /// one occurrence where the legacy code would have silently dropped the
-    /// watcher; the runtime now answers each one with an explicit re-attach.
+    /// watcher; the runtime now keeps the live watcher attached and observable.
     pub watcher_db_fallback_resolve_failed: AtomicU64,
 }
 
@@ -103,7 +103,7 @@ pub struct CounterSnapshotRow {
     /// #1085: ratio `session_reused / (session_reused + session_new)`; 0.0 when both zero.
     pub session_reuse_rate: f64,
     /// #1136: cumulative count of watcher DB-dispatch-fallback resolve failures
-    /// for which an explicit re-attach was triggered (formerly a silent drop).
+    /// for which the live watcher was kept attached instead of silently dropping.
     pub watcher_db_fallback_resolve_failed: u64,
 }
 
@@ -165,8 +165,8 @@ impl ObservabilityCounters {
     /// #1136: increment the watcher DB-fallback resolve-failure counter for
     /// `(channel_id, provider)`. Called whenever the watcher detects that the
     /// `inflight` state is missing AND the DB-side `dispatch_id` resolve also
-    /// failed, in which case the runtime triggers an explicit re-attach
-    /// instead of the legacy silent-drop behavior.
+    /// failed, in which case the runtime keeps the live watcher attached and
+    /// marks the observation instead of silently dropping it.
     pub fn record_watcher_db_fallback_resolve_failed(&self, channel_id: u64, provider: &str) {
         self.slot(channel_id, provider)
             .watcher_db_fallback_resolve_failed

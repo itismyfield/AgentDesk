@@ -60,11 +60,7 @@ mod tmux_session_files;
 #[path = "watchers/lifecycle.rs"]
 mod watcher_lifecycle;
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use self::tmux_reattach_offsets::clear_recent_watcher_reattach_offsets_for_tests;
-use self::tmux_reattach_offsets::{
-    matching_recent_watcher_reattach_offset, record_recent_watcher_reattach_offset,
-};
+use self::tmux_reattach_offsets::matching_recent_watcher_reattach_offset;
 pub(super) use self::tmux_session_files::read_generation_file_mtime_ns;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use self::tmux_session_files::watermark_after_output_regression;
@@ -96,9 +92,6 @@ const READY_FOR_INPUT_STUCK_REASON: &str = "agent ended at Ready for input witho
 const SUPPRESSED_INTERNAL_LABEL: &str = "(자동으로 처리된 내부 작업이라 여기서 멈췄어요)";
 const SUPPRESSED_RESTART_LABEL: &str =
     "(서버가 재시작되면서 답변이 중간에 멈췄어요 — 필요하시면 다시 질문해 주세요)";
-const MISSING_INFLIGHT_REATTACH_GRACE_ATTEMPTS: usize = 3;
-const MISSING_INFLIGHT_REATTACH_GRACE_DELAY: tokio::time::Duration =
-    tokio::time::Duration::from_millis(200);
 #[path = "tmux_kill_policy.rs"]
 mod tmux_kill_policy;
 #[allow(unused_imports)]
@@ -2100,13 +2093,12 @@ mod tests {
     use super::{
         CANCEL_TEARDOWN_GRACE_BYTES, DeadSessionCleanupPlan,
         MONITOR_AUTO_TURN_DEFERRED_REASON_CODE, MONITOR_AUTO_TURN_PREAMBLE_HINT,
-        MONITOR_AUTO_TURN_REASON_CODE, MissingInflightReattachOutcome, OffsetAdvanceDecision,
-        PlaceholderSuppressContext, PlaceholderSuppressDecision, PlaceholderSuppressOrigin,
-        READY_FOR_INPUT_STUCK_REASON, SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL,
-        SuppressedPlaceholderAction, TmuxWatcherHandle, TmuxWatcherRegistry, WatcherClaimAction,
-        WatcherToolState, build_bg_trigger_session_key, cancel_induced_watcher_death,
-        claim_or_reuse_watcher, clear_recent_turn_stops_for_tests,
-        clear_recent_watcher_reattach_offsets_for_tests, consume_monitor_auto_turn_preamble_once,
+        MONITOR_AUTO_TURN_REASON_CODE, OffsetAdvanceDecision, PlaceholderSuppressContext,
+        PlaceholderSuppressDecision, PlaceholderSuppressOrigin, READY_FOR_INPUT_STUCK_REASON,
+        SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL, SuppressedPlaceholderAction,
+        TmuxWatcherHandle, TmuxWatcherRegistry, WatcherClaimAction, WatcherToolState,
+        build_bg_trigger_session_key, cancel_induced_watcher_death, claim_or_reuse_watcher,
+        clear_recent_turn_stops_for_tests, consume_monitor_auto_turn_preamble_once,
         dead_session_cleanup_plan, decide_placeholder_suppression,
         enqueue_background_trigger_response_to_notify_outbox,
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
@@ -2114,12 +2106,11 @@ mod tests {
         finish_restored_watcher_active_turn, format_monitor_suppressed_body,
         format_monitor_suppressed_label, is_terminal_finalize_stop_candidate,
         lifecycle_reason_code_for_tmux_exit, load_restored_provider_session_id,
-        matching_recent_watcher_reattach_offset, missing_inflight_fallback_plan,
-        notify_path_offset_advance_decision, orphan_suppressed_placeholder_action,
-        parse_bg_trigger_offset_from_session_key, process_watcher_lines,
-        recent_turn_stop_for_channel, recent_turn_stop_for_watcher_range,
+        missing_inflight_fallback_observation, notify_path_offset_advance_decision,
+        orphan_suppressed_placeholder_action, parse_bg_trigger_offset_from_session_key,
+        process_watcher_lines, recent_turn_stop_for_channel, recent_turn_stop_for_watcher_range,
         record_recent_turn_stop_for_tests, record_recent_turn_stop_with_offset_for_tests,
-        record_recent_watcher_reattach_offset, refresh_session_heartbeat_from_tmux_output,
+        refresh_session_heartbeat_from_tmux_output,
         reset_stale_local_relay_offset_if_output_regressed,
         reset_stale_relay_watermark_if_output_regressed, restored_watcher_turn_from_inflight,
         rollback_enqueued_offset_for_reconciled_failures,
@@ -2128,7 +2119,6 @@ mod tests {
         should_suppress_terminal_output_after_recent_stop, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
         tmux_death_is_normal_completion, tmux_death_lifecycle_notification_reason,
-        trigger_missing_inflight_reattach, wait_for_reacquired_turn_bridge_inflight_state,
         watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
         watcher_stream_seed,
     };
@@ -2142,8 +2132,6 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::time::Duration;
-
     fn test_watcher_handle(tmux_session_name: &str) -> TmuxWatcherHandle {
         TmuxWatcherHandle {
             tmux_session_name: tmux_session_name.to_string(),
@@ -2776,7 +2764,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_inflight_reattach_reuses_live_same_tmux_owner() {
+    fn claim_or_reuse_watcher_reuses_live_same_tmux_owner() {
         let watchers = TmuxWatcherRegistry::new();
         let channel_id = ChannelId::new(1485506232256168138);
         let tmux_name = "AgentDesk-codex-adk-cdx-reuse";
@@ -2800,7 +2788,7 @@ mod tests {
         assert!(!outcome.should_spawn());
         assert!(
             !initial_cancel.load(Ordering::Relaxed),
-            "missing-inflight metadata repair must not cancel a live same-tmux watcher"
+            "same-tmux watcher reuse must not cancel the live incumbent"
         );
         assert!(!incoming_cancel.load(Ordering::Relaxed));
         assert_eq!(watchers.len(), 1);
@@ -3156,46 +3144,48 @@ mod tests {
     }
 
     #[test]
-    fn missing_inflight_fallback_warns_and_triggers_reattach_on_db_miss() {
-        let plan = missing_inflight_fallback_plan(true, false, true, false, false, true);
+    fn missing_inflight_fallback_warns_and_marks_live_tmux_degraded_on_db_miss() {
+        let plan = missing_inflight_fallback_observation(true, false, true, false, false, true);
         assert!(plan.warn);
-        assert!(plan.trigger_reattach);
+        assert!(plan.mark_degraded);
         assert!(!plan.suppressed_by_recent_stop);
 
-        let resolved = missing_inflight_fallback_plan(true, true, true, false, false, true);
+        let resolved = missing_inflight_fallback_observation(true, true, true, false, false, true);
         assert!(resolved.warn);
-        assert!(!resolved.trigger_reattach);
+        assert!(!resolved.mark_degraded);
 
-        let uncommitted = missing_inflight_fallback_plan(true, false, false, false, false, true);
+        let uncommitted =
+            missing_inflight_fallback_observation(true, false, false, false, false, true);
         assert!(uncommitted.warn);
-        assert!(!uncommitted.trigger_reattach);
+        assert!(uncommitted.mark_degraded);
 
-        let stopped = missing_inflight_fallback_plan(true, false, true, true, false, true);
+        let stopped = missing_inflight_fallback_observation(true, false, true, true, false, true);
         assert!(stopped.warn);
-        assert!(!stopped.trigger_reattach);
+        assert!(!stopped.mark_degraded);
         assert!(stopped.suppressed_by_recent_stop);
 
-        let cleaned = missing_inflight_fallback_plan(true, false, true, false, true, true);
+        let cleaned = missing_inflight_fallback_observation(true, false, true, false, true, true);
         assert!(cleaned.warn);
-        assert!(cleaned.trigger_reattach);
+        assert!(cleaned.mark_degraded);
         assert!(
             !cleaned.suppressed_by_recent_stop,
-            "terminal placeholder cleanup alone must not suppress live-session reattach"
+            "terminal placeholder cleanup alone must not suppress live-session observation"
         );
 
-        let dead_tmux = missing_inflight_fallback_plan(true, false, true, false, false, false);
+        let dead_tmux =
+            missing_inflight_fallback_observation(true, false, true, false, false, false);
         assert!(dead_tmux.warn);
-        assert!(!dead_tmux.trigger_reattach);
+        assert!(dead_tmux.mark_degraded);
         assert!(!dead_tmux.suppressed_by_recent_stop);
     }
 
     #[test]
-    fn missing_inflight_recent_stop_still_suppresses_placeholder_cleanup_reattach() {
+    fn missing_inflight_recent_stop_still_suppresses_placeholder_cleanup_observation() {
         let stopped_and_cleaned =
-            missing_inflight_fallback_plan(true, false, true, true, true, true);
+            missing_inflight_fallback_observation(true, false, true, true, true, true);
 
         assert!(stopped_and_cleaned.warn);
-        assert!(!stopped_and_cleaned.trigger_reattach);
+        assert!(!stopped_and_cleaned.mark_degraded);
         assert!(
             stopped_and_cleaned.suppressed_by_recent_stop,
             "recent cancel/stop remains the suppression authority for stale output"
@@ -3285,329 +3275,68 @@ mod tests {
     }
 
     #[test]
-    fn db_fallback_resolve_failed_counter_increments_when_reattach_fires() {
-        // #1136: when the watcher hits the "inflight missing → DB dispatch
-        // fallback" path AND the DB-side resolve fails, the runtime must
-        // bump the `watcher_db_fallback_resolve_failed` counter and trigger
-        // an explicit re-attach (instead of silently dropping the watcher).
-        // This test exercises the counter wiring directly so any future
-        // refactor that drops the increment fails loudly.
-        crate::services::observability::metrics::reset_for_tests();
+    fn db_fallback_resolve_failed_counter_increments_when_missing_inflight_is_degraded() {
+        // #1857: when the watcher hits the "inflight missing -> DB dispatch
+        // fallback" path and the DB-side resolve fails, the runtime marks the
+        // live watcher degraded instead of creating synthetic inflight state.
+        // Keep the existing counter increment wired for visibility.
+        let counters = crate::services::observability::metrics::ObservabilityCounters::new();
 
-        let plan = missing_inflight_fallback_plan(true, false, true, false, false, true);
+        let plan = missing_inflight_fallback_observation(true, false, true, false, false, true);
         assert!(
-            plan.trigger_reattach,
-            "DB fallback resolve failure on a committed terminal output should request reattach"
+            plan.mark_degraded,
+            "DB fallback resolve failure on committed terminal output should be observable"
         );
 
         let channel_id = ChannelId::new(987_1136_001);
         let provider = ProviderKind::Codex;
-        crate::services::observability::metrics::record_watcher_db_fallback_resolve_failed(
-            channel_id.get(),
-            provider.as_str(),
-        );
-        crate::services::observability::metrics::record_watcher_db_fallback_resolve_failed(
-            channel_id.get(),
-            provider.as_str(),
-        );
+        counters.record_watcher_db_fallback_resolve_failed(channel_id.get(), provider.as_str());
+        counters.record_watcher_db_fallback_resolve_failed(channel_id.get(), provider.as_str());
 
-        let snapshot = crate::services::observability::metrics::snapshot();
+        let snapshot = counters.snapshot();
         let row = snapshot
             .iter()
             .find(|row| row.channel_id == channel_id.get() && row.provider == provider.as_str())
             .expect("counter row should exist after recording");
         assert_eq!(
             row.watcher_db_fallback_resolve_failed, 2,
-            "each silent-drop avoidance increments the counter exactly once"
+            "each degraded missing-inflight observation increments the counter exactly once"
         );
-
-        crate::services::observability::metrics::reset_for_tests();
-    }
-
-    #[tokio::test]
-    async fn explicit_reattach_returns_session_dead_when_tmux_pane_missing() {
-        // #1136: trigger_missing_inflight_reattach must surface its outcome
-        // so the caller can log / count success-vs-failure. With no live
-        // tmux pane to reattach to, the outcome is `SessionDead` — that is
-        // the explicit "재부착 실패 — 추가 진단 필요" branch.
-        let _lock = match test_env_lock().lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
-
-        let shared = super::super::make_shared_data_for_tests();
-        let http = Arc::new(poise::serenity_prelude::Http::new("Bot test-token"));
-        let provider = ProviderKind::Codex;
-        let channel = ChannelId::new(987_1136_002);
-        // Pick a tmux name that is guaranteed not to exist.
-        let tmux_name = format!(
-            "AgentDesk-codex-test-1136-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-
-        let outcome =
-            trigger_missing_inflight_reattach(&http, &shared, &provider, channel, &tmux_name);
-        assert_eq!(outcome, MissingInflightReattachOutcome::SessionDead);
-
-        // The synthetic inflight state must NOT have been persisted when the
-        // pane is dead — that's the loop-prevention guard at work.
-        assert!(
-            super::super::inflight::load_inflight_state(&provider, channel.get()).is_none(),
-            "no inflight state should leak when reattach is skipped"
-        );
-
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
-    }
-
-    #[tokio::test]
-    async fn missing_inflight_reattach_spawn_increments_reconnect_count() {
-        if !crate::services::claude::is_tmux_available() {
-            eprintln!("skipping live reattach counter test: tmux is unavailable");
-            return;
-        }
-
-        let _lock = match test_env_lock().lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
-        clear_recent_watcher_reattach_offsets_for_tests();
-
-        let tmux_name = format!(
-            "AgentDesk-codex-test-964-count-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        let tmux_created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &tmux_name, "sleep 600"])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !tmux_created {
-            unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
-            panic!("failed to create tmux session for reconnect counter test");
-        }
-
-        let shared = super::super::make_shared_data_for_tests();
-        let http = Arc::new(poise::serenity_prelude::Http::new("Bot test-token"));
-        let provider = ProviderKind::Codex;
-        let channel = ChannelId::new(987_0964_001);
-        let (output_path, _) = super::super::turn_bridge::tmux_runtime_paths(&tmux_name);
-        if let Some(parent) = std::path::Path::new(&output_path).parent() {
-            std::fs::create_dir_all(parent).expect("runtime dir");
-        }
-        std::fs::write(&output_path, b"reattach bytes").expect("seed output file");
-
-        let outcome =
-            trigger_missing_inflight_reattach(&http, &shared, &provider, channel, &tmux_name);
-
-        assert_eq!(
-            outcome,
-            MissingInflightReattachOutcome::Spawned {
-                replaced_existing: false
-            }
-        );
-        assert_eq!(
-            shared
-                .tmux_relay_coord(channel)
-                .reconnect_count
-                .load(Ordering::Acquire),
-            1,
-            "fresh missing-inflight reattach spawn must increment reconnect_count"
-        );
-
-        if let Some(watcher) = shared.tmux_watchers.get(&channel) {
-            watcher.cancel.store(true, Ordering::Relaxed);
-        }
-        let _ = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", &tmux_name])
-            .status();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
-    }
-
-    /// Regression: the synthetic inflight created by
-    /// `trigger_missing_inflight_reattach` must claim
-    /// `watcher_owns_live_relay = true` so that the freshly re-attached watcher
-    /// does NOT self-yield via `watcher_should_yield_to_inflight_state`. Before
-    /// the fix, the synthetic state defaulted to `false`, making the watcher
-    /// treat its own state as a competing active bridge turn and overwrite the
-    /// placeholder with `SUPPRESSED_INTERNAL_LABEL` once new tmux output
-    /// arrived (observed on adk-cdx thread 1501392749239468032 at 15:13 KST
-    /// 2026-05-06).
-    #[tokio::test]
-    async fn missing_inflight_reattach_marks_watcher_as_live_relay_owner() {
-        if !crate::services::claude::is_tmux_available() {
-            eprintln!("skipping synthetic-inflight ownership test: tmux is unavailable");
-            return;
-        }
-
-        let _lock = match test_env_lock().lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
-        clear_recent_watcher_reattach_offsets_for_tests();
-
-        let tmux_name = format!(
-            "AgentDesk-codex-test-self-yield-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        let tmux_created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &tmux_name, "sleep 600"])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !tmux_created {
-            unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
-            panic!("failed to create tmux session for self-yield regression test");
-        }
-
-        let shared = super::super::make_shared_data_for_tests();
-        let http = Arc::new(poise::serenity_prelude::Http::new("Bot test-token"));
-        let provider = ProviderKind::Codex;
-        let channel = ChannelId::new(987_0964_002);
-        let (output_path, _) = super::super::turn_bridge::tmux_runtime_paths(&tmux_name);
-        if let Some(parent) = std::path::Path::new(&output_path).parent() {
-            std::fs::create_dir_all(parent).expect("runtime dir");
-        }
-        std::fs::write(&output_path, b"initial bytes").expect("seed output file");
-
-        let outcome =
-            trigger_missing_inflight_reattach(&http, &shared, &provider, channel, &tmux_name);
-        assert_eq!(
-            outcome,
-            MissingInflightReattachOutcome::Spawned {
-                replaced_existing: false
-            }
-        );
-
-        let state = super::super::inflight::load_inflight_state(&provider, channel.get())
-            .expect("synthetic inflight must be persisted");
-        assert!(
-            state.watcher_owns_live_relay,
-            "synthetic inflight must claim live-relay ownership for the re-attached watcher"
-        );
-        assert!(state.rebind_origin);
-        assert_eq!(state.tmux_session_name.as_deref(), Some(tmux_name.as_str()));
-
-        let initial_offset = state.last_offset;
-        let new_output_offset = initial_offset + 4096;
-        assert!(
-            !watcher_should_yield_to_inflight_state(
-                Some(&state),
-                &tmux_name,
-                initial_offset,
-                new_output_offset,
-            ),
-            "watcher must not yield to its own synthetic inflight when fresh tmux output arrives"
-        );
-
-        if let Some(watcher) = shared.tmux_watchers.get(&channel) {
-            watcher.cancel.store(true, Ordering::Relaxed);
-        }
-        let _ = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", &tmux_name])
-            .status();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
-    }
-
-    #[tokio::test]
-    async fn missing_inflight_reattach_reuses_live_self_watcher() {
-        if !crate::services::claude::is_tmux_available() {
-            eprintln!("skipping live reattach regression: tmux is unavailable");
-            return;
-        }
-
-        let _lock = match test_env_lock().lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let tmp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
-        clear_recent_watcher_reattach_offsets_for_tests();
-
-        let tmux_name = format!(
-            "AgentDesk-codex-test-1135-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        let tmux_created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &tmux_name, "sleep 30"])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !tmux_created {
-            unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
-            panic!("failed to create tmux session for live reattach regression");
-        }
-
-        let (output_path, _) = super::super::turn_bridge::tmux_runtime_paths(&tmux_name);
-        if let Some(parent) = std::path::Path::new(&output_path).parent() {
-            std::fs::create_dir_all(parent).expect("runtime dir");
-        }
-        std::fs::write(&output_path, b"already relayed bytes").expect("seed output file");
-        let expected_offset = std::fs::metadata(&output_path).expect("metadata").len();
-
-        let shared = super::super::make_shared_data_for_tests();
-        let http = Arc::new(poise::serenity_prelude::Http::new("Bot test-token"));
-        let provider = ProviderKind::Codex;
-        let channel = ChannelId::new(987_1135_002);
-        let initial = test_watcher_handle(&tmux_name);
-        let initial_cancel = initial.cancel.clone();
-        assert!(super::try_claim_watcher(
-            &shared.tmux_watchers,
-            channel,
-            initial
-        ));
-
-        let outcome =
-            trigger_missing_inflight_reattach(&http, &shared, &provider, channel, &tmux_name);
-        assert_eq!(
-            outcome,
-            MissingInflightReattachOutcome::ReusedExisting {
-                owner_channel_id: channel
-            }
-        );
-        assert!(
-            !initial_cancel.load(Ordering::Relaxed),
-            "reattach metadata repair must preserve the already-running self watcher"
-        );
-        assert!(
-            matching_recent_watcher_reattach_offset(channel, &tmux_name, expected_offset).is_none(),
-            "no fresh watcher generation should be recorded when the live watcher is reused"
-        );
-
-        let state = super::super::inflight::load_inflight_state(&provider, channel.get())
-            .expect("synthetic reattach inflight state");
-        assert!(state.rebind_origin);
-        assert_eq!(state.last_offset, expected_offset);
-        assert_eq!(state.tmux_session_name.as_deref(), Some(tmux_name.as_str()));
-
-        if let Some(watcher) = shared.tmux_watchers.get(&channel) {
-            watcher.cancel.store(true, Ordering::Relaxed);
-        }
-        let _ = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", &tmux_name])
-            .status();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
 
     #[test]
-    fn recent_turn_stop_suppresses_missing_inflight_reattach() {
+    fn missing_inflight_live_tmux_observation_does_not_create_synthetic_inflight() {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(987_1857_001);
+        assert!(super::super::inflight::load_inflight_state(&provider, channel.get()).is_none());
+
+        let plan = missing_inflight_fallback_observation(true, false, true, false, false, true);
+        assert!(plan.warn);
+        assert!(plan.mark_degraded);
+        assert!(!plan.suppressed_by_recent_stop);
+
+        crate::services::observability::metrics::record_watcher_db_fallback_resolve_failed(
+            channel.get(),
+            provider.as_str(),
+        );
+        assert!(
+            super::super::inflight::load_inflight_state(&provider, channel.get()).is_none(),
+            "missing inflight + live tmux observation must not synthesize an inflight file"
+        );
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+        crate::services::observability::metrics::reset_for_tests();
+    }
+
+    #[test]
+    fn recent_turn_stop_suppresses_missing_inflight_degraded_observation() {
         let _lock = match test_env_lock().lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -3627,8 +3356,8 @@ mod tests {
             "cancelled turn range should match the stop tombstone"
         );
 
-        let plan = missing_inflight_fallback_plan(true, false, true, true, false, true);
-        assert!(!plan.trigger_reattach);
+        let plan = missing_inflight_fallback_observation(true, false, true, true, false, true);
+        assert!(!plan.mark_degraded);
         assert!(plan.suppressed_by_recent_stop);
 
         clear_recent_turn_stops_for_tests();
@@ -3659,7 +3388,7 @@ mod tests {
             "a later turn in the same channel/tmux must not be suppressed by the old TTL"
         );
 
-        let stopped = missing_inflight_fallback_plan(
+        let stopped = missing_inflight_fallback_observation(
             true,
             false,
             true,
@@ -3667,10 +3396,10 @@ mod tests {
             false,
             true,
         );
-        assert!(!stopped.trigger_reattach);
+        assert!(!stopped.mark_degraded);
         assert!(stopped.suppressed_by_recent_stop);
 
-        let later = missing_inflight_fallback_plan(
+        let later = missing_inflight_fallback_observation(
             true,
             false,
             true,
@@ -3678,7 +3407,7 @@ mod tests {
             false,
             true,
         );
-        assert!(later.trigger_reattach);
+        assert!(later.mark_degraded);
         assert!(!later.suppressed_by_recent_stop);
 
         clear_recent_turn_stops_for_tests();
@@ -3704,7 +3433,7 @@ mod tests {
             recent_turn_stop_for_watcher_range(channel, tmux_name, 2048).is_none(),
             "ranges starting exactly at cancel EOF belong to the next turn"
         );
-        let later = missing_inflight_fallback_plan(
+        let later = missing_inflight_fallback_observation(
             true,
             false,
             true,
@@ -3712,7 +3441,7 @@ mod tests {
             false,
             true,
         );
-        assert!(later.trigger_reattach);
+        assert!(later.mark_degraded);
         assert!(!later.suppressed_by_recent_stop);
 
         clear_recent_turn_stops_for_tests();
@@ -3956,7 +3685,7 @@ mod tests {
             recent_turn_stop_for_watcher_range(channel, tmux_name, 4096).is_some(),
             "fresh same-channel tombstones without metadata should still suppress the stop race"
         );
-        let fallback = missing_inflight_fallback_plan(
+        let fallback = missing_inflight_fallback_observation(
             true,
             false,
             true,
@@ -3964,7 +3693,7 @@ mod tests {
             false,
             true,
         );
-        assert!(!fallback.trigger_reattach);
+        assert!(!fallback.mark_degraded);
         assert!(fallback.suppressed_by_recent_stop);
 
         clear_recent_turn_stops_for_tests();
@@ -3981,7 +3710,7 @@ mod tests {
             recent_turn_stop_for_watcher_range(channel, tmux_name, 4097).is_none(),
             "metadata-free fallback must expire before it can suppress unrelated later turns"
         );
-        let later = missing_inflight_fallback_plan(
+        let later = missing_inflight_fallback_observation(
             true,
             false,
             true,
@@ -3989,7 +3718,7 @@ mod tests {
             false,
             true,
         );
-        assert!(later.trigger_reattach);
+        assert!(later.mark_degraded);
         assert!(!later.suppressed_by_recent_stop);
 
         clear_recent_turn_stops_for_tests();
@@ -4066,202 +3795,6 @@ mod tests {
         ));
 
         clear_recent_turn_stops_for_tests();
-    }
-
-    #[tokio::test]
-    async fn missing_inflight_reattach_grace_preserves_same_offset_bridge_placeholder()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let _lock = match test_env_lock().lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let tmp = tempfile::tempdir()?;
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
-
-        let provider = ProviderKind::Codex;
-        let channel = ChannelId::new(987_1044_001);
-        let channel_name = "adk-cdx-issue-1044";
-        let tmux_name = provider.build_tmux_session_name(channel_name);
-        let turn_offset = 44_096_u64;
-
-        let terminal_success_plan =
-            missing_inflight_fallback_plan(true, false, true, false, false, true);
-        assert!(terminal_success_plan.trigger_reattach);
-        assert!(super::super::inflight::load_inflight_state(&provider, channel.get()).is_none());
-
-        let writer_provider = provider.clone();
-        let writer_tmux_name = tmux_name.clone();
-        let writer = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            let mut state = InflightTurnState::new(
-                writer_provider,
-                channel.get(),
-                Some(channel_name.to_string()),
-                7,
-                9,
-                11,
-                "next turn at same offset".to_string(),
-                Some("session-1044".to_string()),
-                Some(writer_tmux_name),
-                Some("/tmp/issue-1044.jsonl".to_string()),
-                Some("/tmp/issue-1044.fifo".to_string()),
-                turn_offset,
-            );
-            state.turn_start_offset = Some(turn_offset);
-            state.full_response = "already visible bridge placeholder body".to_string();
-            state.response_sent_offset = state.full_response.len();
-            let _ = super::super::inflight::save_inflight_state(&state);
-        });
-
-        let bridge_reacquired = wait_for_reacquired_turn_bridge_inflight_state(
-            &provider,
-            channel,
-            &tmux_name,
-            3,
-            Duration::from_millis(50),
-        )
-        .await;
-        let _ = writer.await;
-
-        assert!(
-            bridge_reacquired,
-            "next turn should reacquire inflight during the missing-inflight reattach grace window"
-        );
-        let next_turn_state = super::super::inflight::load_inflight_state(&provider, channel.get())
-            .ok_or_else(|| std::io::Error::other("expected next turn inflight state"))?;
-        assert!(watcher_should_yield_to_inflight_state(
-            Some(&next_turn_state),
-            &tmux_name,
-            turn_offset,
-            turn_offset + 128,
-        ));
-
-        let placeholder_body = "already visible bridge placeholder body";
-        let final_placeholder_body = if bridge_reacquired {
-            placeholder_body.to_string()
-        } else {
-            match suppressed_placeholder_action(true, placeholder_body.len(), placeholder_body) {
-                SuppressedPlaceholderAction::Edit(content) => content,
-                _ => String::new(),
-            }
-        };
-
-        assert_eq!(final_placeholder_body, placeholder_body);
-        assert!(!final_placeholder_body.contains(SUPPRESSED_INTERNAL_LABEL));
-        assert!(!final_placeholder_body.contains(SUPPRESSED_RESTART_LABEL));
-
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn bridge_guard_preserves_placeholder_when_range_matches_recent_reattach()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let _lock = match test_env_lock().lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        clear_recent_watcher_reattach_offsets_for_tests();
-        let tmp = tempfile::tempdir()?;
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
-
-        let provider = ProviderKind::Codex;
-        let channel = ChannelId::new(987_1044_002);
-        let channel_name = "adk-cdx-issue-1044b";
-        let tmux_name = provider.build_tmux_session_name(channel_name);
-        let reattach_offset = 7_628_900_u64;
-        let suppressed_end_offset = 7_636_322_u64;
-        let placeholder_body = "real response body already delivered by watcher reattach";
-
-        let test_result = async {
-            super::super::inflight::clear_inflight_state(&provider, channel.get());
-            let terminal_success_plan =
-                missing_inflight_fallback_plan(true, false, true, false, false, true);
-            assert!(terminal_success_plan.trigger_reattach);
-            assert!(
-                super::super::inflight::load_inflight_state(&provider, channel.get()).is_none()
-            );
-
-            let bridge_reacquired = wait_for_reacquired_turn_bridge_inflight_state(
-                &provider,
-                channel,
-                &tmux_name,
-                1,
-                Duration::from_millis(1),
-            )
-            .await;
-            assert!(
-                !bridge_reacquired,
-                "grace window should still see no bridge-owned inflight state"
-            );
-
-            record_recent_watcher_reattach_offset(channel, &tmux_name, reattach_offset);
-
-            let mut state = InflightTurnState::new(
-                provider.clone(),
-                channel.get(),
-                Some(channel_name.to_string()),
-                0,
-                0,
-                44,
-                "watcher missing-inflight reattach".to_string(),
-                None,
-                Some(tmux_name.clone()),
-                Some("/tmp/issue-1044b.jsonl".to_string()),
-                Some("/tmp/issue-1044b.fifo".to_string()),
-                reattach_offset,
-            );
-            state.rebind_origin = true;
-            state.full_response = placeholder_body.to_string();
-            state.response_sent_offset = placeholder_body.len();
-            super::super::inflight::save_inflight_state_create_new(&state).map_err(|error| {
-                std::io::Error::other(format!("failed to save reattach inflight state: {error}"))
-            })?;
-
-            assert!(watcher_should_yield_to_inflight_state(
-                Some(&state),
-                &tmux_name,
-                reattach_offset,
-                suppressed_end_offset,
-            ));
-            let matched_reattach =
-                matching_recent_watcher_reattach_offset(channel, &tmux_name, reattach_offset);
-            assert!(
-                matched_reattach.is_some(),
-                "suppressed range start should match the recent watcher reattach offset"
-            );
-
-            let final_placeholder_body = if matched_reattach.is_some() {
-                placeholder_body.to_string()
-            } else {
-                match suppressed_placeholder_action(true, placeholder_body.len(), placeholder_body)
-                {
-                    SuppressedPlaceholderAction::Edit(content) => content,
-                    SuppressedPlaceholderAction::Delete | SuppressedPlaceholderAction::None => {
-                        String::new()
-                    }
-                }
-            };
-
-            assert_eq!(final_placeholder_body, placeholder_body);
-            assert!(!final_placeholder_body.contains(SUPPRESSED_INTERNAL_LABEL));
-
-            let non_reattach_suppress =
-                suppressed_placeholder_action(true, placeholder_body.len(), placeholder_body);
-            assert!(matches!(
-                non_reattach_suppress,
-                SuppressedPlaceholderAction::Edit(ref content)
-                    if content.contains(SUPPRESSED_INTERNAL_LABEL)
-            ));
-
-            Ok::<(), Box<dyn std::error::Error>>(())
-        }
-        .await;
-
-        super::super::inflight::clear_inflight_state(&provider, channel.get());
-        clear_recent_watcher_reattach_offsets_for_tests();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
-        test_result
     }
 
     #[test]
@@ -5881,6 +5414,19 @@ mod tests {
             Some(TaskNotificationKind::Background)
         );
         assert!(seed.finish_mailbox_on_completion);
+    }
+
+    #[test]
+    fn watcher_stream_seed_without_inflight_starts_fresh_message_state() {
+        let seed = watcher_stream_seed(None);
+
+        assert_eq!(seed.placeholder_msg_id, None);
+        assert_eq!(seed.status_panel_msg_id, None);
+        assert_eq!(seed.response_sent_offset, 0);
+        assert!(seed.full_response.is_empty());
+        assert!(seed.last_edit_text.is_empty());
+        assert_eq!(seed.task_notification_kind, None);
+        assert!(!seed.finish_mailbox_on_completion);
     }
 
     #[test]

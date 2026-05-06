@@ -142,14 +142,11 @@ pub(super) fn watcher_output_poll_decision(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MissingInflightFallbackPlan {
     pub(super) warn: bool,
-    pub(super) trigger_reattach: bool,
-    // Forward-compatible with relay recovery actions; current callers only need
-    // the warn/reattach/suppression parts of the decision.
     pub(super) mark_degraded: bool,
     pub(super) suppressed_by_recent_stop: bool,
 }
 
-pub(super) fn missing_inflight_fallback_plan(
+pub(super) fn missing_inflight_fallback_observation(
     inflight_missing: bool,
     dispatch_resolved: bool,
     terminal_output_committed: bool,
@@ -157,14 +154,13 @@ pub(super) fn missing_inflight_fallback_plan(
     _placeholder_cleanup_committed: bool,
     tmux_alive: bool,
 ) -> MissingInflightFallbackPlan {
-    let would_trigger =
+    let unresolved_live_tmux =
         inflight_missing && !dispatch_resolved && terminal_output_committed && tmux_alive;
-    let suppressed = recent_turn_stop;
+    let suppressed = unresolved_live_tmux && recent_turn_stop;
     MissingInflightFallbackPlan {
         warn: inflight_missing,
-        trigger_reattach: would_trigger && !suppressed,
-        mark_degraded: inflight_missing && !dispatch_resolved && !would_trigger && !suppressed,
-        suppressed_by_recent_stop: would_trigger && suppressed,
+        mark_degraded: inflight_missing && !dispatch_resolved && !suppressed,
+        suppressed_by_recent_stop: suppressed,
     }
 }
 
@@ -237,18 +233,16 @@ mod tests {
     }
 
     #[test]
-    fn missing_inflight_committed_output_triggers_reattach() {
-        let plan = missing_inflight_fallback_plan(true, false, true, false, false, true);
+    fn missing_inflight_committed_output_marks_live_tmux_degraded() {
+        let plan = missing_inflight_fallback_observation(true, false, true, false, false, true);
         assert!(plan.warn);
-        assert!(plan.trigger_reattach);
-        assert!(!plan.mark_degraded);
+        assert!(plan.mark_degraded);
     }
 
     #[test]
-    fn missing_inflight_without_safe_reattach_marks_degraded() {
-        let plan = missing_inflight_fallback_plan(true, false, false, false, false, true);
+    fn missing_inflight_without_resolved_dispatch_marks_degraded() {
+        let plan = missing_inflight_fallback_observation(true, false, false, false, false, true);
         assert!(plan.warn);
-        assert!(!plan.trigger_reattach);
         assert!(plan.mark_degraded);
     }
 
