@@ -3042,6 +3042,10 @@ enum MessageOutboxFailureAction {
     Fail { retry_count: i64 },
 }
 
+fn is_terminal_turn_delivery_outbox_source(source: &str) -> bool {
+    matches!(source, "headless_turn" | "turn_bridge_tmux_handoff")
+}
+
 fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction {
     let next_retry_count = retry_count.saturating_add(1);
     if next_retry_count > MESSAGE_OUTBOX_MAX_RETRY_COUNT {
@@ -3063,7 +3067,10 @@ fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction
 
 #[cfg(test)]
 mod message_outbox_retry_tests {
-    use super::{MessageOutboxFailureAction, message_outbox_failure_action};
+    use super::{
+        MessageOutboxFailureAction, is_terminal_turn_delivery_outbox_source,
+        message_outbox_failure_action,
+    };
 
     #[test]
     fn message_outbox_failure_action_retries_then_fails() {
@@ -3085,6 +3092,26 @@ mod message_outbox_retry_tests {
             message_outbox_failure_action(4),
             MessageOutboxFailureAction::Fail { retry_count: 5 }
         );
+    }
+
+    #[test]
+    fn session_release_is_limited_to_terminal_turn_delivery_sources() {
+        assert!(is_terminal_turn_delivery_outbox_source("headless_turn"));
+        assert!(is_terminal_turn_delivery_outbox_source(
+            "turn_bridge_tmux_handoff"
+        ));
+
+        assert!(!is_terminal_turn_delivery_outbox_source(
+            crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE
+        ));
+        assert!(!is_terminal_turn_delivery_outbox_source("routine-runtime"));
+        assert!(!is_terminal_turn_delivery_outbox_source(
+            "quality_regression_alerter"
+        ));
+        assert!(!is_terminal_turn_delivery_outbox_source(
+            "agent_quality_rollup"
+        ));
+        assert!(!is_terminal_turn_delivery_outbox_source("system"));
     }
 }
 
@@ -3268,13 +3295,9 @@ where
                     .execute(pg_pool)
                     .await
                     .ok();
-                    // Release any session that is still turn_active for this channel so
-                    // future turns are not permanently blocked after delivery fails.
-                    // Guard: lifecycle notifications may fail during a live turn; resetting the
-                    // session in that case would desync runtime state for an in-flight turn.
-                    let is_turn_delivery =
-                        row.source != crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE;
-                    if is_turn_delivery {
+                    // Release only terminal turn-delivery rows; unrelated channel outbox
+                    // notifications may fail while a turn is still legitimately active.
+                    if is_terminal_turn_delivery_outbox_source(&row.source) {
                         if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
                             sqlx::query(
                                 "UPDATE sessions
