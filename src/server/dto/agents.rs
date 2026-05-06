@@ -1,4 +1,115 @@
+use serde::Serialize;
 use serde_json::{Value, json};
+
+#[derive(Debug, Serialize)]
+pub struct AgentOfficesResponse {
+    pub offices: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentCronResponse {
+    pub jobs: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentSkillsResponse {
+    pub skills: Vec<Value>,
+    #[serde(rename = "sharedSkills")]
+    pub shared_skills: Vec<Value>,
+    #[serde(rename = "totalCount")]
+    pub total_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentDispatchedSessionsResponse {
+    pub sessions: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentTimelineResponse {
+    pub events: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentTranscriptsResponse {
+    pub agent_id: String,
+    pub transcripts: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentOfficeView {
+    pub id: String,
+    pub name: Option<String>,
+    pub layout: Option<String>,
+    pub assigned: bool,
+    pub office_department_id: Option<String>,
+    pub joined_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentSkillView {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub source_path: Option<String>,
+    pub trigger_patterns: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DispatchedSessionView {
+    pub id: i64,
+    pub session_key: Option<String>,
+    pub agent_id: Option<String>,
+    pub provider: Option<String>,
+    pub status: String,
+    pub active_dispatch_id: Option<String>,
+    pub model: Option<String>,
+    pub tokens: i64,
+    pub cwd: Option<String>,
+    pub last_heartbeat: Option<String>,
+    pub thread_channel_id: Option<String>,
+    pub channel_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub guild_id: Option<String>,
+    pub channel_web_url: Option<String>,
+    pub channel_deeplink_url: Option<String>,
+    pub deeplink_url: Option<String>,
+    pub thread_deeplink_url: Option<String>,
+    pub kanban_card_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TimelineEventView {
+    pub id: String,
+    pub source: String,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub title: Option<String>,
+    pub status: Option<String>,
+    pub timestamp: Option<i64>,
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TranscriptView {
+    pub id: i64,
+    pub turn_id: String,
+    pub session_key: Option<String>,
+    pub channel_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub provider: Option<String>,
+    pub dispatch_id: Option<String>,
+    pub kanban_card_id: Option<String>,
+    pub dispatch_title: Option<String>,
+    pub card_title: Option<String>,
+    pub github_issue_number: Option<i64>,
+    pub user_message: String,
+    pub assistant_message: String,
+    pub events: Value,
+    pub duration_ms: Option<i64>,
+    pub created_at: String,
+}
 
 pub fn agent_office_json(
     id: String,
@@ -7,13 +118,13 @@ pub fn agent_office_json(
     office_department_id: Option<String>,
     joined_at: Option<String>,
 ) -> Value {
-    json!({
-        "id": id,
-        "name": name,
-        "layout": layout,
-        "assigned": true,
-        "office_department_id": office_department_id,
-        "joined_at": joined_at,
+    json!(AgentOfficeView {
+        id,
+        name,
+        layout,
+        assigned: true,
+        office_department_id,
+        joined_at,
     })
 }
 
@@ -25,13 +136,13 @@ pub fn agent_skill_json(
     trigger_patterns: Option<String>,
     updated_at: Option<String>,
 ) -> Value {
-    json!({
-        "id": id,
-        "name": name,
-        "description": description,
-        "source_path": source_path,
-        "trigger_patterns": trigger_patterns,
-        "updated_at": updated_at,
+    json!(AgentSkillView {
+        id,
+        name,
+        description,
+        source_path,
+        trigger_patterns,
+        updated_at,
     })
 }
 
@@ -53,26 +164,26 @@ pub fn dispatched_session_json(
     channel_deeplink_url: Option<String>,
     kanban_card_id: Option<String>,
 ) -> Value {
-    json!({
-        "id": id,
-        "session_key": session_key,
-        "agent_id": agent_id,
-        "provider": provider,
-        "status": status,
-        "active_dispatch_id": active_dispatch_id,
-        "model": model,
-        "tokens": tokens,
-        "cwd": cwd,
-        "last_heartbeat": last_heartbeat,
-        "thread_channel_id": thread_channel_id.clone(),
-        "channel_id": thread_channel_id.clone(),
-        "thread_id": thread_channel_id,
-        "guild_id": guild_id,
-        "channel_web_url": channel_web_url.clone(),
-        "channel_deeplink_url": channel_deeplink_url.clone(),
-        "deeplink_url": channel_web_url,
-        "thread_deeplink_url": channel_deeplink_url,
-        "kanban_card_id": kanban_card_id,
+    json!(DispatchedSessionView {
+        id,
+        session_key,
+        agent_id,
+        provider,
+        status: status.to_string(),
+        active_dispatch_id,
+        model,
+        tokens,
+        cwd,
+        last_heartbeat,
+        thread_channel_id: thread_channel_id.clone(),
+        channel_id: thread_channel_id.clone(),
+        thread_id: thread_channel_id,
+        guild_id,
+        channel_web_url: channel_web_url.clone(),
+        channel_deeplink_url: channel_deeplink_url.clone(),
+        deeplink_url: channel_web_url,
+        thread_deeplink_url: channel_deeplink_url,
+        kanban_card_id,
     })
 }
 
@@ -85,14 +196,14 @@ pub fn timeline_event_json(
     timestamp: Option<i64>,
     duration_ms: Option<i64>,
 ) -> Value {
-    json!({
-        "id": id,
-        "source": source,
-        "type": event_type,
-        "title": title,
-        "status": status,
-        "timestamp": timestamp,
-        "duration_ms": duration_ms,
+    json!(TimelineEventView {
+        id,
+        source,
+        event_type,
+        title,
+        status,
+        timestamp,
+        duration_ms,
     })
 }
 
@@ -115,23 +226,23 @@ pub fn transcript_json(
     duration_ms: Option<i64>,
     created_at: String,
 ) -> Value {
-    json!({
-        "id": id,
-        "turn_id": turn_id,
-        "session_key": session_key,
-        "channel_id": channel_id,
-        "agent_id": agent_id,
-        "provider": provider,
-        "dispatch_id": dispatch_id,
-        "kanban_card_id": kanban_card_id,
-        "dispatch_title": dispatch_title,
-        "card_title": card_title,
-        "github_issue_number": github_issue_number,
-        "user_message": user_message,
-        "assistant_message": assistant_message,
-        "events": events,
-        "duration_ms": duration_ms,
-        "created_at": created_at,
+    json!(TranscriptView {
+        id,
+        turn_id,
+        session_key,
+        channel_id,
+        agent_id,
+        provider,
+        dispatch_id,
+        kanban_card_id,
+        dispatch_title,
+        card_title,
+        github_issue_number,
+        user_message,
+        assistant_message,
+        events,
+        duration_ms,
+        created_at,
     })
 }
 
@@ -259,5 +370,124 @@ mod tests {
         let (web_none, deep_none) = build_channel_deeplinks(Some("1485506232256168011"), None);
         assert!(web_none.is_none());
         assert!(deep_none.is_none());
+    }
+
+    #[test]
+    fn agent_container_response_shapes_are_stable() {
+        let skills = serde_json::to_value(AgentSkillsResponse {
+            skills: vec![json!({"id": "skill-1"})],
+            shared_skills: Vec::new(),
+            total_count: 1,
+        })
+        .unwrap();
+        assert_eq!(
+            skills,
+            json!({
+                "skills": [{"id": "skill-1"}],
+                "sharedSkills": [],
+                "totalCount": 1,
+            })
+        );
+
+        let transcripts = serde_json::to_value(AgentTranscriptsResponse {
+            agent_id: "agent-1".to_string(),
+            transcripts: vec![json!({"turn_id": "turn-1"})],
+        })
+        .unwrap();
+        assert_eq!(
+            transcripts,
+            json!({
+                "agent_id": "agent-1",
+                "transcripts": [{"turn_id": "turn-1"}],
+            })
+        );
+    }
+
+    #[test]
+    fn agent_leaf_response_shapes_are_stable() {
+        assert_eq!(
+            agent_office_json(
+                "office-1".to_string(),
+                Some("Ops".to_string()),
+                Some("grid".to_string()),
+                Some("dept-1".to_string()),
+                Some("2026-05-06T01:00:00+00:00".to_string()),
+            ),
+            json!({
+                "id": "office-1",
+                "name": "Ops",
+                "layout": "grid",
+                "assigned": true,
+                "office_department_id": "dept-1",
+                "joined_at": "2026-05-06T01:00:00+00:00",
+            })
+        );
+
+        assert_eq!(
+            timeline_event_json(
+                "dispatch-1".to_string(),
+                "dispatch".to_string(),
+                "implementation".to_string(),
+                Some("Build".to_string()),
+                Some("completed".to_string()),
+                Some(1777777000),
+                Some(4200),
+            ),
+            json!({
+                "id": "dispatch-1",
+                "source": "dispatch",
+                "type": "implementation",
+                "title": "Build",
+                "status": "completed",
+                "timestamp": 1777777000,
+                "duration_ms": 4200,
+            })
+        );
+    }
+
+    #[test]
+    fn dispatched_session_response_shape_keeps_dashboard_aliases() {
+        let session = dispatched_session_json(
+            7,
+            Some("host:session".to_string()),
+            Some("agent-1".to_string()),
+            Some("codex".to_string()),
+            "working",
+            Some("dispatch-1".to_string()),
+            Some("gpt-5.3-codex".to_string()),
+            123,
+            Some("/work/repo".to_string()),
+            Some("2026-05-06T01:00:00+00:00".to_string()),
+            Some("channel-1".to_string()),
+            Some("guild-1".to_string()),
+            Some("https://discord.com/channels/guild-1/channel-1".to_string()),
+            Some("discord://discord.com/channels/guild-1/channel-1".to_string()),
+            Some("card-1".to_string()),
+        );
+
+        assert_eq!(
+            session,
+            json!({
+                "id": 7,
+                "session_key": "host:session",
+                "agent_id": "agent-1",
+                "provider": "codex",
+                "status": "working",
+                "active_dispatch_id": "dispatch-1",
+                "model": "gpt-5.3-codex",
+                "tokens": 123,
+                "cwd": "/work/repo",
+                "last_heartbeat": "2026-05-06T01:00:00+00:00",
+                "thread_channel_id": "channel-1",
+                "channel_id": "channel-1",
+                "thread_id": "channel-1",
+                "guild_id": "guild-1",
+                "channel_web_url": "https://discord.com/channels/guild-1/channel-1",
+                "channel_deeplink_url": "discord://discord.com/channels/guild-1/channel-1",
+                "deeplink_url": "https://discord.com/channels/guild-1/channel-1",
+                "thread_deeplink_url": "discord://discord.com/channels/guild-1/channel-1",
+                "kanban_card_id": "card-1",
+            })
+        );
     }
 }
