@@ -1,23 +1,7 @@
-use serde::Serialize;
+use super::dto::{AchievementsResponse, ActivityHeatmapResponse, StreaksResponse};
 use serde_json::{Value, json};
 use sqlx::{PgPool, QueryBuilder, Row};
 use std::collections::HashMap;
-
-#[derive(Debug, Serialize)]
-pub struct StreaksResponse {
-    pub streaks: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AchievementsResponse {
-    pub achievements: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ActivityHeatmapResponse {
-    pub hours: Vec<Value>,
-    pub date: String,
-}
 
 pub async fn streaks_pg(pool: &PgPool) -> Result<StreaksResponse, sqlx::Error> {
     let rows = sqlx::query(

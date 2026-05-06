@@ -1,4 +1,4 @@
-use serde::Serialize;
+use super::dto::RateLimitsResponse;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use std::collections::HashSet;
@@ -14,11 +14,6 @@ const UNSUPPORTED_RATE_LIMIT_PROVIDERS: &[(&str, &str)] = &[
     ),
 ];
 const UNSUPPORTED_RATE_LIMIT_USAGE_LOOKBACK_SECONDS: i64 = 30 * 24 * 60 * 60;
-
-#[derive(Debug, Serialize)]
-pub struct RateLimitsResponse {
-    pub providers: Vec<Value>,
-}
 
 pub async fn rate_limits_pg(pool: &PgPool, now: i64) -> RateLimitsResponse {
     RateLimitsResponse {

@@ -1,12 +1,7 @@
-use serde::Serialize;
+use super::dto::MachineStatusResponse;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::process::Command;
-
-#[derive(Debug, Serialize)]
-pub struct MachineStatusResponse {
-    pub machines: Vec<Value>,
-}
 
 fn parse_machine_config(value: &str) -> Option<Vec<(String, String)>> {
     serde_json::from_str::<Vec<Value>>(value)

@@ -1,68 +1,11 @@
-use serde::Serialize;
+use super::dto::{
+    AnalyticsResponse, AuditLogsParams, AuditLogsResponse, InvariantsResponse,
+    ObservabilityResponse, PolicyHooksParams, PolicyHooksResponse, QualityEventsResponse,
+    SkillsTrendResponse,
+};
 use serde_json::{Value, json};
 use sqlx::{PgPool, QueryBuilder, Row};
 use std::collections::BTreeMap;
-
-#[derive(Debug, Serialize)]
-pub struct AnalyticsResponse {
-    pub generated_at: String,
-    pub counters: Vec<Value>,
-    pub events: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct QualityEventsResponse {
-    pub events: Vec<Value>,
-    pub generated_at_ms: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct InvariantsResponse {
-    pub generated_at: String,
-    pub total_violations: i64,
-    pub counts: Vec<Value>,
-    pub recent: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ObservabilityResponse {
-    pub counters: Value,
-    pub recent_events: Value,
-    pub watcher_first_relay: Value,
-    pub generated_at_ms: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PolicyHooksResponse {
-    pub events: Vec<Value>,
-    pub generated_at_ms: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AuditLogsResponse {
-    pub logs: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SkillsTrendResponse {
-    pub trend: Vec<Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PolicyHooksParams {
-    pub policy_name: Option<String>,
-    pub hook_name: Option<String>,
-    pub last_minutes: Option<i64>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct AuditLogsParams<'a> {
-    pub limit: i64,
-    pub entity_type: Option<&'a str>,
-    pub entity_id: Option<&'a str>,
-    pub agent_id: Option<&'a str>,
-}
 
 pub async fn query_analytics_pg(
     pool: &PgPool,
