@@ -871,12 +871,17 @@ fn normalize_global_active_counter(
     provider_active_turns: usize,
     global_finalizing: usize,
 ) -> (usize, Option<String>) {
-    let max_plausible_active = provider_active_turns.saturating_add(global_finalizing);
-    if raw_global_active <= max_plausible_active {
+    // Snapshot-derived active turns and the global atomic are observed at
+    // different instants. Only clamp clear wraparound values, not ordinary
+    // races where a new turn starts after provider snapshots were collected.
+    const WRAPPED_COUNTER_THRESHOLD: usize = usize::MAX / 2;
+    if raw_global_active < WRAPPED_COUNTER_THRESHOLD {
         return (raw_global_active, None);
     }
 
     (
+        // `global_active` intentionally excludes finalizing turns; keep the
+        // corrected value aligned with the provider active-turn count.
         provider_active_turns,
         Some(format!(
             "global_active_counter_out_of_bounds:raw={raw_global_active}:provider_active_turns={provider_active_turns}:global_finalizing={global_finalizing}"
@@ -4365,6 +4370,26 @@ mod tests {
                 .iter()
                 .any(|reason| reason == "provider:claude:pending_queue_depth:3")
         );
+    }
+
+    #[test]
+    fn normalize_global_active_counter_preserves_ordinary_snapshot_races() {
+        let (global_active, reason) = normalize_global_active_counter(3, 2, 0);
+
+        assert_eq!(global_active, 3);
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn normalize_global_active_counter_bounds_wrapped_values_only() {
+        let (global_active, reason) = normalize_global_active_counter(usize::MAX, 2, 1);
+
+        assert_eq!(global_active, 2);
+        assert!(reason.is_some_and(|reason| {
+            reason.contains("raw=")
+                && reason.contains("provider_active_turns=2")
+                && reason.contains("global_finalizing=1")
+        }));
     }
 
     #[tokio::test]
