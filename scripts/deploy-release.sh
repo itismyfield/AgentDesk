@@ -193,6 +193,18 @@ _resolve_default_release_binary() {
     printf '%s/release/agentdesk\n' "$target_dir"
 }
 
+_clean_release_build_cache_after_staging() {
+    [ "${AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP:-0}" != "1" ] || return 0
+    [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
+
+    echo "▸ Cleaning release build cache after staging binary..."
+    if (cd "$REPO" && cargo clean --release); then
+        echo "  ✓ release build cache cleaned"
+    else
+        echo "⚠ cargo clean --release failed; continuing with staged release artifact"
+    fi
+}
+
 _check_repo_remote_freshness() {
     [ "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}" != "1" ] || return 0
     [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] || return 0
@@ -633,6 +645,7 @@ cp "$SOURCE_BINARY" "$STAGED_BINARY"
 chmod +x "$STAGED_BINARY"
 xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
 sign_binary_with_fallback "$STAGED_BINARY"
+_clean_release_build_cache_after_staging
 
 # Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
