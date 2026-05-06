@@ -14,6 +14,9 @@
 
 ## Pages
 
+- [`api-friction-extraction-plan.md`](api-friction-extraction-plan.md) —
+  subdomain map and ordered extraction issues for splitting the giant
+  `src/services/api_friction.rs` service module (#1789).
 - [`auto-queue-db-extraction-plan.md`](auto-queue-db-extraction-plan.md) —
   subdomain map and ordered extraction issues for splitting the giant
   `src/db/auto_queue.rs` persistence module (#1783).

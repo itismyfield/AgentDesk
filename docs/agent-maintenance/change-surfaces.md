@@ -254,7 +254,9 @@
 
 The remaining giant-file modules under `src/services/` not covered above:
 
-- `src/services/api_friction.rs` (1808).
+- `src/services/api_friction.rs` (1709) — extraction scoped by
+  `docs/agent-maintenance/api-friction-extraction-plan.md` (#1788, #1789,
+  #1830-#1837); bugfix only outside that plan.
 - `src/services/analytics.rs` (1049) — dashboard analytics query surface;
   split before adding non-bugfix behavior.
 - `src/services/auto_queue.rs` (1047) and
