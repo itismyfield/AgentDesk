@@ -137,7 +137,10 @@ du -sh target/
 ### 3.4 Verify steady state
 
 After cleanup, one round-trip build + typical dev activity should stabilize
-`target/` in the **~10–20 GB** band.
+`target/` in the **~10–20 GB** band. Campaign worktrees inherit
+`.cargo/config.toml`, which uses `sccache` and disables Cargo incremental
+builds so one-off debug/test runs do not leave a separate
+`target/debug/incremental/` cache in every worktree.
 
 ```bash
 # Force a full rebuild to seed the new baseline.
