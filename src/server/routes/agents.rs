@@ -8,6 +8,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::server::dto::agents::{
+    AgentCronResponse, AgentDispatchedSessionsResponse, AgentOfficesResponse, AgentSkillsResponse,
+    AgentTimelineResponse, AgentTranscriptsResponse,
+};
 use crate::services::agents::query::{
     AgentQueryLookupError, agent_exists_pg, block_active_card_for_agent_pg, find_diag_session_pg,
     list_agent_offices_pg_json, list_agent_skills_pg_json, load_agent_dispatched_sessions_pg_json,
@@ -340,7 +344,10 @@ pub async fn agent_offices(
     }
 
     match list_agent_offices_pg_json(pool, &id).await {
-        Ok(offices) => (StatusCode::OK, Json(json!({"offices": offices}))),
+        Ok(offices) => (
+            StatusCode::OK,
+            Json(json!(AgentOfficesResponse { offices })),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("query: {e}")})),
@@ -374,7 +381,10 @@ pub async fn agent_cron(
     }
 
     // Stub: no cron table yet
-    (StatusCode::OK, Json(json!({"jobs": []})))
+    (
+        StatusCode::OK,
+        Json(json!(AgentCronResponse { jobs: Vec::new() })),
+    )
 }
 
 /// GET /api/agents/:id/skills
@@ -406,10 +416,10 @@ pub async fn agent_skills(
             let total_count = skills.len();
             (
                 StatusCode::OK,
-                Json(json!({
-                    "skills": skills,
-                    "sharedSkills": [],
-                    "totalCount": total_count,
+                Json(json!(AgentSkillsResponse {
+                    skills,
+                    shared_skills: Vec::new(),
+                    total_count,
                 })),
             )
         }
@@ -431,7 +441,10 @@ pub async fn agent_dispatched_sessions(
 
     let guild_id = state.config.discord.guild_id.as_deref();
     match load_agent_dispatched_sessions_pg_json(pool, &id, guild_id).await {
-        Ok(sessions) => (StatusCode::OK, Json(json!({"sessions": sessions}))),
+        Ok(sessions) => (
+            StatusCode::OK,
+            Json(json!(AgentDispatchedSessionsResponse { sessions })),
+        ),
         Err(AgentQueryLookupError::AgentNotFound) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "agent not found"})),
@@ -832,7 +845,10 @@ pub async fn agent_timeline(
 
     let limit = params.limit.unwrap_or(30);
     match load_agent_timeline_pg_json(pool, &id, limit).await {
-        Ok(events) => (StatusCode::OK, Json(json!({"events": events}))),
+        Ok(events) => (
+            StatusCode::OK,
+            Json(json!(AgentTimelineResponse { events })),
+        ),
         Err(AgentQueryLookupError::AgentNotFound) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "agent not found"})),
@@ -872,9 +888,9 @@ pub async fn agent_transcripts(
     match list_agent_turn_history_pg_json(pool, &id, params.limit.unwrap_or(8)).await {
         Ok(transcripts) => (
             StatusCode::OK,
-            Json(json!({
-                "agent_id": id,
-                "transcripts": transcripts,
+            Json(json!(AgentTranscriptsResponse {
+                agent_id: id,
+                transcripts,
             })),
         ),
         Err(e) => (
