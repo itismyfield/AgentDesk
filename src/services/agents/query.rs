@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::Row;
+use sqlx::{Row, postgres::PgRow};
 
 use crate::server::dto::agents::{
     agent_office_json, agent_skill_json, build_channel_deeplinks, dedup_dispatched_sessions,
@@ -18,6 +18,45 @@ pub struct AgentDiagSession {
     pub active_children: i32,
     pub thread_channel_id: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug)]
+pub enum AgentQueryLookupError {
+    AgentNotFound,
+    Query(sqlx::Error),
+}
+
+impl From<sqlx::Error> for AgentQueryLookupError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Query(error)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct AgentDispatchedSessionRow {
+    id: i64,
+    session_key: Option<String>,
+    agent_id: Option<String>,
+    provider: Option<String>,
+    raw_status: Option<String>,
+    active_dispatch_id: Option<String>,
+    model: Option<String>,
+    tokens: i64,
+    cwd: Option<String>,
+    last_heartbeat: Option<String>,
+    thread_channel_id: Option<String>,
+    kanban_card_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AgentTimelineEventRow {
+    id: String,
+    source: String,
+    event_type: String,
+    title: Option<String>,
+    status: Option<String>,
+    timestamp: Option<i64>,
+    duration_ms: Option<i64>,
 }
 
 pub async fn agent_exists_pg(pool: &sqlx::PgPool, id: &str) -> Result<bool, sqlx::Error> {
@@ -185,69 +224,104 @@ pub async fn list_agent_dispatched_sessions_pg_json(
     .fetch_all(pool)
     .await?;
 
+    let rows = rows
+        .iter()
+        .map(agent_dispatched_session_row_from_pg)
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+    Ok(build_agent_dispatched_sessions_json(rows, guild_id))
+}
+
+pub async fn load_agent_dispatched_sessions_pg_json(
+    pool: &sqlx::PgPool,
+    agent_id: &str,
+    guild_id: Option<&str>,
+) -> Result<Vec<serde_json::Value>, AgentQueryLookupError> {
+    if !agent_exists_pg(pool, agent_id).await? {
+        return Err(AgentQueryLookupError::AgentNotFound);
+    }
+
+    Ok(list_agent_dispatched_sessions_pg_json(pool, agent_id, guild_id).await?)
+}
+
+fn agent_dispatched_session_row_from_pg(
+    row: &PgRow,
+) -> Result<AgentDispatchedSessionRow, sqlx::Error> {
+    Ok(AgentDispatchedSessionRow {
+        id: row.try_get::<i64, _>("id").unwrap_or(0),
+        session_key: row
+            .try_get::<Option<String>, _>("session_key")
+            .ok()
+            .flatten(),
+        agent_id: row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
+        provider: row.try_get::<Option<String>, _>("provider").ok().flatten(),
+        raw_status: row.try_get::<Option<String>, _>("status").ok().flatten(),
+        active_dispatch_id: row
+            .try_get::<Option<String>, _>("active_dispatch_id")
+            .ok()
+            .flatten(),
+        model: row.try_get::<Option<String>, _>("model").ok().flatten(),
+        tokens: row.try_get::<i64, _>("tokens").unwrap_or(0),
+        cwd: row.try_get::<Option<String>, _>("cwd").ok().flatten(),
+        last_heartbeat: pg_timestamp_to_rfc3339(
+            row.try_get::<Option<DateTime<Utc>>, _>("last_heartbeat")
+                .ok()
+                .flatten(),
+        ),
+        thread_channel_id: row
+            .try_get::<Option<String>, _>("thread_channel_id")
+            .ok()
+            .flatten(),
+        kanban_card_id: row
+            .try_get::<Option<String>, _>("kanban_card_id")
+            .ok()
+            .flatten(),
+    })
+}
+
+fn build_agent_dispatched_sessions_json(
+    rows: Vec<AgentDispatchedSessionRow>,
+    guild_id: Option<&str>,
+) -> Vec<serde_json::Value> {
     let guild_id = guild_id
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     let mut resolver = SessionActivityResolver::new();
     let resolved: Vec<serde_json::Value> = rows
-        .iter()
+        .into_iter()
         .map(|row| {
-            let session_key = row
-                .try_get::<Option<String>, _>("session_key")
-                .ok()
-                .flatten();
-            let status = row.try_get::<Option<String>, _>("status").ok().flatten();
-            let active_dispatch_id = row
-                .try_get::<Option<String>, _>("active_dispatch_id")
-                .ok()
-                .flatten();
-            let last_heartbeat = pg_timestamp_to_rfc3339(
-                row.try_get::<Option<DateTime<Utc>>, _>("last_heartbeat")
-                    .ok()
-                    .flatten(),
-            );
-            let provider = row.try_get::<Option<String>, _>("provider").ok().flatten();
-            let thread_channel_id = row
-                .try_get::<Option<String>, _>("thread_channel_id")
-                .ok()
-                .flatten();
-
             let effective = resolver.resolve(
-                session_key.as_deref(),
-                status.as_deref(),
-                active_dispatch_id.as_deref(),
-                last_heartbeat.as_deref(),
+                row.session_key.as_deref(),
+                row.raw_status.as_deref(),
+                row.active_dispatch_id.as_deref(),
+                row.last_heartbeat.as_deref(),
             );
 
             let (channel_web_url, channel_deeplink_url) =
-                build_channel_deeplinks(thread_channel_id.as_deref(), guild_id.as_deref());
-            let kanban_card_id = row
-                .try_get::<Option<String>, _>("kanban_card_id")
-                .ok()
-                .flatten();
+                build_channel_deeplinks(row.thread_channel_id.as_deref(), guild_id.as_deref());
 
             dispatched_session_json(
-                row.try_get::<i64, _>("id").unwrap_or(0),
-                session_key,
-                row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
-                provider,
+                row.id,
+                row.session_key,
+                row.agent_id,
+                row.provider,
                 effective.status,
                 effective.active_dispatch_id,
-                row.try_get::<Option<String>, _>("model").ok().flatten(),
-                row.try_get::<i64, _>("tokens").unwrap_or(0),
-                row.try_get::<Option<String>, _>("cwd").ok().flatten(),
-                last_heartbeat,
-                thread_channel_id,
+                row.model,
+                row.tokens,
+                row.cwd,
+                row.last_heartbeat,
+                row.thread_channel_id,
                 guild_id.clone(),
                 channel_web_url,
                 channel_deeplink_url,
-                kanban_card_id,
+                row.kanban_card_id,
             )
         })
         .collect();
 
-    Ok(dedup_dispatched_sessions(resolved))
+    dedup_dispatched_sessions(resolved)
 }
 
 pub async fn list_agent_timeline_pg_json(
@@ -316,20 +390,52 @@ pub async fn list_agent_timeline_pg_json(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
+    let rows = rows
         .iter()
+        .map(agent_timeline_event_row_from_pg)
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+    Ok(build_agent_timeline_json(rows))
+}
+
+pub async fn load_agent_timeline_pg_json(
+    pool: &sqlx::PgPool,
+    agent_id: &str,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, AgentQueryLookupError> {
+    if !agent_exists_pg(pool, agent_id).await? {
+        return Err(AgentQueryLookupError::AgentNotFound);
+    }
+
+    Ok(list_agent_timeline_pg_json(pool, agent_id, limit).await?)
+}
+
+fn agent_timeline_event_row_from_pg(row: &PgRow) -> Result<AgentTimelineEventRow, sqlx::Error> {
+    Ok(AgentTimelineEventRow {
+        id: row.try_get::<String, _>("id").unwrap_or_default(),
+        source: row.try_get::<String, _>("source").unwrap_or_default(),
+        event_type: row.try_get::<String, _>("type").unwrap_or_default(),
+        title: row.try_get::<Option<String>, _>("title").ok().flatten(),
+        status: row.try_get::<Option<String>, _>("status").ok().flatten(),
+        timestamp: row.try_get::<Option<i64>, _>("timestamp").ok().flatten(),
+        duration_ms: row.try_get::<Option<i64>, _>("duration_ms").ok().flatten(),
+    })
+}
+
+fn build_agent_timeline_json(rows: Vec<AgentTimelineEventRow>) -> Vec<serde_json::Value> {
+    rows.into_iter()
         .map(|row| {
             timeline_event_json(
-                row.try_get::<String, _>("id").unwrap_or_default(),
-                row.try_get::<String, _>("source").unwrap_or_default(),
-                row.try_get::<String, _>("type").unwrap_or_default(),
-                row.try_get::<Option<String>, _>("title").ok().flatten(),
-                row.try_get::<Option<String>, _>("status").ok().flatten(),
-                row.try_get::<Option<i64>, _>("timestamp").ok().flatten(),
-                row.try_get::<Option<i64>, _>("duration_ms").ok().flatten(),
+                row.id,
+                row.source,
+                row.event_type,
+                row.title,
+                row.status,
+                row.timestamp,
+                row.duration_ms,
             )
         })
-        .collect())
+        .collect()
 }
 
 pub async fn mark_session_disconnected_pg(pool: &sqlx::PgPool, session_key: &str) {
@@ -375,4 +481,89 @@ pub async fn block_active_card_for_agent_pg(
     }
 
     Ok(card_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatched_session_service_maps_happy_row() {
+        let sessions = build_agent_dispatched_sessions_json(
+            vec![AgentDispatchedSessionRow {
+                id: 7,
+                session_key: Some("remote:agentdesk-1".to_string()),
+                agent_id: Some("project-agentdesk".to_string()),
+                provider: Some("codex".to_string()),
+                raw_status: Some("awaiting_bg".to_string()),
+                active_dispatch_id: Some("dispatch-1".to_string()),
+                model: Some("gpt-5.3-codex".to_string()),
+                tokens: 42,
+                cwd: Some("/work/repo".to_string()),
+                last_heartbeat: Some("2026-05-06T01:00:00+00:00".to_string()),
+                thread_channel_id: Some("1501429790727606332".to_string()),
+                kanban_card_id: Some("card-1".to_string()),
+            }],
+            Some("1490141479707086938"),
+        );
+
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session["id"], 7);
+        assert_eq!(session["session_key"], "remote:agentdesk-1");
+        assert_eq!(session["agent_id"], "project-agentdesk");
+        assert_eq!(session["provider"], "codex");
+        assert_eq!(session["status"], "awaiting_bg");
+        assert_eq!(session["model"], "gpt-5.3-codex");
+        assert_eq!(session["tokens"], 42);
+        assert_eq!(session["cwd"], "/work/repo");
+        assert_eq!(session["last_heartbeat"], "2026-05-06T01:00:00+00:00");
+        assert_eq!(session["thread_channel_id"], "1501429790727606332");
+        assert_eq!(session["kanban_card_id"], "card-1");
+        assert_eq!(
+            session["channel_web_url"],
+            "https://discord.com/channels/1490141479707086938/1501429790727606332"
+        );
+        assert_eq!(
+            session["channel_deeplink_url"],
+            "discord://discord.com/channels/1490141479707086938/1501429790727606332"
+        );
+    }
+
+    #[test]
+    fn dispatched_session_service_maps_empty_rows() {
+        let sessions = build_agent_dispatched_sessions_json(Vec::new(), Some("guild-1"));
+
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn timeline_service_maps_happy_row() {
+        let events = build_agent_timeline_json(vec![AgentTimelineEventRow {
+            id: "dispatch-1".to_string(),
+            source: "dispatch".to_string(),
+            event_type: "implementation".to_string(),
+            title: Some("Implement service split".to_string()),
+            status: Some("completed".to_string()),
+            timestamp: Some(1_777_777_000),
+            duration_ms: Some(4200),
+        }]);
+
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event["id"], "dispatch-1");
+        assert_eq!(event["source"], "dispatch");
+        assert_eq!(event["type"], "implementation");
+        assert_eq!(event["title"], "Implement service split");
+        assert_eq!(event["status"], "completed");
+        assert_eq!(event["timestamp"], 1_777_777_000);
+        assert_eq!(event["duration_ms"], 4200);
+    }
+
+    #[test]
+    fn timeline_service_maps_empty_rows() {
+        let events = build_agent_timeline_json(Vec::new());
+
+        assert!(events.is_empty());
+    }
 }

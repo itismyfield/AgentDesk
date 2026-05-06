@@ -9,9 +9,9 @@ use serde_json::json;
 
 use super::AppState;
 use crate::services::agents::query::{
-    agent_exists_pg, block_active_card_for_agent_pg, find_diag_session_pg,
-    list_agent_dispatched_sessions_pg_json, list_agent_offices_pg_json, list_agent_skills_pg_json,
-    list_agent_timeline_pg_json, mark_session_disconnected_pg,
+    AgentQueryLookupError, agent_exists_pg, block_active_card_for_agent_pg, find_diag_session_pg,
+    list_agent_offices_pg_json, list_agent_skills_pg_json, load_agent_dispatched_sessions_pg_json,
+    load_agent_timeline_pg_json, mark_session_disconnected_pg,
 };
 use crate::services::agents::turn::{
     AgentTurnLookupError, capture_recent_tmux_output, collect_turn_tool_events, extract_tmux_name,
@@ -445,9 +445,13 @@ pub async fn agent_dispatched_sessions(
     }
 
     let guild_id = state.config.discord.guild_id.as_deref();
-    match list_agent_dispatched_sessions_pg_json(pool, &id, guild_id).await {
+    match load_agent_dispatched_sessions_pg_json(pool, &id, guild_id).await {
         Ok(sessions) => (StatusCode::OK, Json(json!({"sessions": sessions}))),
-        Err(e) => (
+        Err(AgentQueryLookupError::AgentNotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "agent not found"})),
+        ),
+        Err(AgentQueryLookupError::Query(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("query: {e}")})),
         ),
@@ -857,9 +861,13 @@ pub async fn agent_timeline(
     }
 
     let limit = params.limit.unwrap_or(30);
-    match list_agent_timeline_pg_json(pool, &id, limit).await {
+    match load_agent_timeline_pg_json(pool, &id, limit).await {
         Ok(events) => (StatusCode::OK, Json(json!({"events": events}))),
-        Err(e) => (
+        Err(AgentQueryLookupError::AgentNotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "agent not found"})),
+        ),
+        Err(AgentQueryLookupError::Query(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("query: {e}")})),
         ),
