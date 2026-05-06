@@ -61,6 +61,7 @@ src/
 │   │   │   ├── model.rs
 │   │   │   ├── notify.rs
 │   │   │   └── retry.rs
+│   │   ├── delivery_events.rs
 │   │   ├── metadata.rs
 │   │   └── mod.rs
 │   ├── kanban_cards/
@@ -255,7 +256,10 @@ src/
 │   │   └── turn.rs
 │   ├── analytics/
 │   │   ├── api_usage.rs
-│   │   └── dispatch_metrics.rs
+│   │   ├── dispatch_metrics.rs
+│   │   ├── dto.rs
+│   │   ├── queue_metrics.rs
+│   │   └── session_metrics.rs
 │   ├── auto_queue/
 │   │   ├── activate_bridge.rs
 │   │   ├── activate_command.rs
