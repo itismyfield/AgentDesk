@@ -73,7 +73,7 @@
 | `credential` | `src/credential.rs` | 106 |  |
 | `db` | `src/db/mod.rs` | 341 |  |
 | `db::agents` | `src/db/agents.rs` | 1128 | giant-file |
-| `db::auto_queue` | `src/db/auto_queue.rs` | 5935 | giant-file |
+| `db::auto_queue` | `src/db/auto_queue.rs` | 6576 | giant-file |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
 | `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1332 | giant-file |
 | `db::dispatches` | `src/db/dispatches/mod.rs` | 991 |  |
@@ -352,7 +352,7 @@
 | `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 1237 | giant-file |
 | `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 590 |  |
 | `services::discord::placeholder_live_events::common` | `src/services/discord/placeholder_live_events/common.rs` | 119 |  |
-| `services::discord::placeholder_live_events::context_panel` | `src/services/discord/placeholder_live_events/context_panel.rs` | 43 |  |
+| `services::discord::placeholder_live_events::context_panel` | `src/services/discord/placeholder_live_events/context_panel.rs` | 58 |  |
 | `services::discord::placeholder_live_events::prompt_panel` | `src/services/discord/placeholder_live_events/prompt_panel.rs` | 138 |  |
 | `services::discord::placeholder_live_events::recent_events` | `src/services/discord/placeholder_live_events/recent_events.rs` | 236 |  |
 | `services::discord::placeholder_live_events::session_panel` | `src/services/discord/placeholder_live_events/session_panel.rs` | 190 |  |
