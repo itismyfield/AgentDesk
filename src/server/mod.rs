@@ -3378,7 +3378,7 @@ where
             let action = message_outbox_failure_action(row.retry_count);
             match action {
                 MessageOutboxFailureAction::Fail { retry_count } => {
-                    sqlx::query(
+                    let failed_update = sqlx::query(
                         "UPDATE message_outbox
                             SET status = 'failed',
                                 error = $1,
@@ -3392,11 +3392,25 @@ where
                     .bind(retry_count)
                     .bind(row.id)
                     .execute(pg_pool)
-                    .await
-                    .ok();
+                    .await;
                     // Release only terminal turn-delivery rows, and only if no newer
                     // session heartbeat proves another turn has since taken the channel.
-                    if is_terminal_turn_delivery_outbox_source(&row.source) {
+                    if let Err(error) = &failed_update {
+                        tracing::warn!(
+                            "[outbox] failed to mark msg {} failed; skipping terminal session release: {}",
+                            row.id,
+                            error
+                        );
+                    } else if failed_update
+                        .as_ref()
+                        .map(|result| result.rows_affected() == 0)
+                        .unwrap_or(true)
+                    {
+                        tracing::warn!(
+                            "[outbox] failed-state update affected no rows for msg {}; skipping terminal session release",
+                            row.id
+                        );
+                    } else if is_terminal_turn_delivery_outbox_source(&row.source) {
                         if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
                             let released_sessions =
                                 match release_session_for_terminal_outbox_failure(

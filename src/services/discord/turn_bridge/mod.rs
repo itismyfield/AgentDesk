@@ -874,12 +874,9 @@ async fn enqueue_headless_delivery(
                     let mut tx = match pool.begin().await {
                         Ok(tx) => tx,
                         Err(error) => {
-                            tracing::warn!(
-                                "[outbox] failed to begin terminal delivery marker update for session {}: {}",
-                                session_key,
-                                error
-                            );
-                            return Ok(());
+                            return Err(format!(
+                                "terminal delivery marker transaction begin failed for session {session_key}: {error}"
+                            ));
                         }
                     };
                     if let Err(error) =
@@ -888,13 +885,10 @@ async fn enqueue_headless_delivery(
                             .execute(&mut *tx)
                             .await
                     {
-                        tracing::warn!(
-                            "[outbox] failed to lock terminal delivery marker update for session {}: {}",
-                            session_key,
-                            error
-                        );
                         let _ = tx.rollback().await;
-                        return Ok(());
+                        return Err(format!(
+                            "terminal delivery marker lock failed for session {session_key}: {error}"
+                        ));
                     }
 
                     let active_user_message_id =
@@ -924,19 +918,15 @@ async fn enqueue_headless_delivery(
                     .execute(&mut *tx)
                     .await
                     {
-                        tracing::warn!(
-                            "[outbox] failed to mark terminal delivery row {} for session {}: {}",
-                            outbox_id,
-                            session_key,
-                            error
-                        );
+                        let _ = tx.rollback().await;
+                        return Err(format!(
+                            "terminal delivery marker write failed for session {session_key} row {outbox_id}: {error}"
+                        ));
                     }
                     if let Err(error) = tx.commit().await {
-                        tracing::warn!(
-                            "[outbox] failed to commit terminal delivery marker update for session {}: {}",
-                            session_key,
-                            error
-                        );
+                        return Err(format!(
+                            "terminal delivery marker commit failed for session {session_key}: {error}"
+                        ));
                     }
                 }
                 return Ok(());
