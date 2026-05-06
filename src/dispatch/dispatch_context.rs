@@ -479,6 +479,24 @@ fn resolve_card_repo_dir(db: &Db, card_id: &str, purpose: &str) -> Result<Option
 /// design ensures the fallback chain always reaches `resolve_card_worktree()` or
 /// `resolve_card_issue_commit_target()` when the dispatch-history commit can't
 /// be confirmed as belonging to this issue.
+fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
+    let needle = format!("#{issue_number}");
+    subject.match_indices(&needle).any(|(start, _)| {
+        let before_ok = subject[..start]
+            .chars()
+            .next_back()
+            .map(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+            .unwrap_or(true);
+        let end = start + needle.len();
+        let after_ok = subject[end..]
+            .chars()
+            .next()
+            .map(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+            .unwrap_or(true);
+        before_ok && after_ok
+    })
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn commit_belongs_to_card_issue(
     db: &Db,
@@ -534,8 +552,7 @@ pub(crate) fn commit_belongs_to_card_issue(
         }
     };
     let subject = String::from_utf8_lossy(&output.stdout);
-    let pattern = format!("(#{})", issue_number);
-    subject.contains(&pattern)
+    commit_subject_references_issue(&subject, issue_number)
 }
 
 #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
@@ -1941,8 +1958,7 @@ pub(crate) async fn commit_belongs_to_card_issue_pg(
         }
     };
     let subject = String::from_utf8_lossy(&output.stdout);
-    let pattern = format!("(#{})", issue_number);
-    subject.contains(&pattern)
+    commit_subject_references_issue(&subject, issue_number)
 }
 
 async fn refresh_review_target_worktree_pg(
@@ -2618,6 +2634,37 @@ pub(super) async fn build_review_context(
     }
 
     Ok(serde_json::to_string(&serde_json::Value::Object(obj))?)
+}
+
+#[cfg(test)]
+mod issue_reference_tests {
+    use super::commit_subject_references_issue;
+
+    #[test]
+    fn commit_subject_references_issue_accepts_common_github_forms() {
+        assert!(commit_subject_references_issue(
+            "(#1794) dispatch delivery events",
+            1794
+        ));
+        assert!(commit_subject_references_issue(
+            "#1794 dispatch delivery events",
+            1794
+        ));
+        assert!(commit_subject_references_issue(
+            "dispatch delivery events (#1794)",
+            1794
+        ));
+    }
+
+    #[test]
+    fn commit_subject_references_issue_rejects_partial_matches() {
+        assert!(!commit_subject_references_issue("#17940 unrelated", 1794));
+        assert!(!commit_subject_references_issue("ABC#1794 unrelated", 1794));
+        assert!(!commit_subject_references_issue(
+            "#1794suffix unrelated",
+            1794
+        ));
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
