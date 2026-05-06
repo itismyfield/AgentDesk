@@ -718,6 +718,7 @@ async fn build_health_snapshot_with_options(
     let mut watcher_count = 0usize;
     let mut recovery_duration = 0.0f64;
     let mut mailbox_entries = Vec::new();
+    let mut provider_active_turns = 0usize;
 
     if providers.is_empty() {
         degraded_reasons.push("no_providers_registered".to_string());
@@ -813,6 +814,8 @@ async fn build_health_snapshot_with_options(
         if !provider_probe.fully_recovered {
             fully_recovered = false;
         }
+        provider_active_turns =
+            provider_active_turns.saturating_add(count_active_turns(&provider_probe));
         degraded_reasons.extend(provider_probe.degraded_reasons);
         provider_entries.push(provider_probe.snapshot);
     }
@@ -831,14 +834,20 @@ async fn build_health_snapshot_with_options(
     } else {
         0
     };
+    let (global_active, global_counter_degraded_reason) =
+        normalize_global_active_counter(global_active, provider_active_turns, global_finalizing);
+    if let Some(reason) = global_counter_degraded_reason {
+        status = status.worsen(HealthStatus::Degraded);
+        degraded_reasons.push(reason);
+    }
 
     DiscordHealthSnapshot {
         status,
         fully_recovered,
         version,
         uptime_secs,
-        global_active: global_active as usize,
-        global_finalizing: global_finalizing as usize,
+        global_active,
+        global_finalizing,
         deferred_hooks,
         queue_depth,
         watcher_count,
@@ -847,6 +856,32 @@ async fn build_health_snapshot_with_options(
         providers: provider_entries,
         mailboxes: mailbox_entries,
     }
+}
+
+fn count_active_turns(provider_probe: &provider_probe::ProviderProbe) -> usize {
+    provider_probe
+        .mailbox_snapshots
+        .values()
+        .filter(|snapshot| snapshot.cancel_token.is_some())
+        .count()
+}
+
+fn normalize_global_active_counter(
+    raw_global_active: usize,
+    provider_active_turns: usize,
+    global_finalizing: usize,
+) -> (usize, Option<String>) {
+    let max_plausible_active = provider_active_turns.saturating_add(global_finalizing);
+    if raw_global_active <= max_plausible_active {
+        return (raw_global_active, None);
+    }
+
+    (
+        provider_active_turns,
+        Some(format!(
+            "global_active_counter_out_of_bounds:raw={raw_global_active}:provider_active_turns={provider_active_turns}:global_finalizing={global_finalizing}"
+        )),
+    )
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -4329,6 +4364,38 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|reason| reason == "provider:claude:pending_queue_depth:3")
+        );
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_bounds_wrapped_global_active_counter() {
+        let harness = TestHealthHarness::new().await;
+        harness
+            .seed_active_turn(713_000_000_000_000_010, 42, 9_001)
+            .await;
+        harness
+            .seed_active_turn(713_000_000_000_000_011, 43, 9_002)
+            .await;
+        harness
+            .shared
+            .global_active
+            .store(usize::MAX, Ordering::Relaxed);
+
+        let snapshot = build_health_snapshot(&harness.registry()).await;
+        let json = serde_json::to_value(&snapshot).unwrap();
+
+        assert_eq!(snapshot.status(), HealthStatus::Degraded);
+        assert_eq!(json["global_active"], 2);
+        assert_eq!(json["global_finalizing"], 0);
+        assert_eq!(json["providers"][0]["active_turns"], 2);
+        assert!(
+            json["degraded_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason.as_str().is_some_and(
+                    |reason| reason.starts_with("global_active_counter_out_of_bounds:raw=")
+                ))
         );
     }
 
