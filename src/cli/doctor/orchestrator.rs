@@ -854,20 +854,16 @@ fn stale_zero_byte_db_candidates(
     runtime_root: &std::path::Path,
     canonical_db_path: &std::path::Path,
 ) -> Vec<PathBuf> {
-    [
-        runtime_root.join("agentdesk.db"),
-        runtime_root.join("data.db"),
-        runtime_root.join("db.sqlite3"),
-        runtime_root.join("agentdesk.sqlite"),
-    ]
-    .into_iter()
-    .filter(|candidate| candidate != canonical_db_path)
-    .filter(|candidate| {
-        fs::metadata(candidate)
-            .map(|meta| meta.is_file() && meta.len() == 0)
-            .unwrap_or(false)
-    })
-    .collect()
+    crate::compat::legacy_db_paths::LEGACY_LOCAL_DB_FILENAMES
+        .iter()
+        .map(|name| runtime_root.join(name))
+        .filter(|candidate| candidate != canonical_db_path)
+        .filter(|candidate| {
+            fs::metadata(candidate)
+                .map(|meta| meta.is_file() && meta.len() == 0)
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 fn provider_check_id(provider: &ProviderKind) -> &'static str {
