@@ -23,6 +23,9 @@
 - [`dispatch-mod-extraction-plan.md`](dispatch-mod-extraction-plan.md) —
   subdomain map and ordered extraction issues for shrinking
   `src/dispatch/mod.rs` into a facade (#1785).
+- [`kanban-extraction-plan.md`](kanban-extraction-plan.md) — subdomain map and
+  ordered extraction issues for shrinking `src/kanban.rs` into a facade
+  (#1787).
 - [`discord-outbound-migration.md`](discord-outbound-migration.md) — five
   production callsite families for Discord outbound (#1006). Each row marks
   `migrated | legacy | unknown`. New sends MUST use the v3 outbound; legacy

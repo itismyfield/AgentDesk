@@ -218,8 +218,13 @@
   persistence, and GitHub sync must keep their existing owner-specific
   contracts; split work needs a dedicated extraction issue before new feature
   logic lands here.
-- allowed_changes: `bugfix` only; new feature logic must land in smaller
-  owner-specific modules or a scoped extraction branch.
+- allowed_changes: `bugfix` only; `src/kanban.rs` extraction is scoped by
+  `docs/agent-maintenance/kanban-extraction-plan.md`; new feature logic must
+  land in smaller owner-specific modules or a scoped extraction branch.
+- tests: owner-specific tests, with `src/kanban.rs` inline tests moving per
+  `docs/agent-maintenance/kanban-extraction-plan.md`.
+- related_issues: #1786, #1787, #1818-#1825 for `src/kanban.rs`; other runtime
+  giant-file split issues TBD.
 
 ### `db_layer`
 
