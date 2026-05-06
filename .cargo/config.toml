@@ -1,6 +1,9 @@
 [build]
 # Keep per-worktree target/ directories, but share rustc output through sccache.
 rustc-wrapper = "sccache"
+# Campaign worktrees are build-once-and-discard; disabling incremental avoids
+# multi-GB target/debug/incremental caches in every parallel worktree.
+incremental = false
 
 [target.x86_64-pc-windows-msvc]
 linker = "lld-link"

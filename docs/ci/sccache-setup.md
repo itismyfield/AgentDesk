@@ -43,11 +43,15 @@ binary is absent — no hard-fail.
 [build]
 # Keep per-worktree target/ directories, but share rustc output through sccache.
 rustc-wrapper = "sccache"
+# Campaign worktrees are build-once-and-discard; disabling incremental avoids
+# multi-GB target/debug/incremental caches in every parallel worktree.
+incremental = false
 ```
 
 Every `cargo` invocation inside this repo — whether from a human shell, a
 campaign worktree, or an agent session — automatically picks this up. There is
-no way to scope this to just release builds; dev builds also benefit.
+no way to scope this to just release builds; dev builds also use the shared
+sccache wrapper and non-incremental Cargo profile.
 
 > **Gotcha**: `SCCACHE_CACHE_SIZE` cannot be set via `config.toml [env]` in a
 > way that reaches `sccache` itself — the wrapper reads its own env from the
@@ -91,13 +95,13 @@ action) — no manual GCS/S3 wiring needed.
 
 ## 3. Env Var Matrix
 
-| Scope | `RUSTC_WRAPPER` | `SCCACHE_DIR` | `SCCACHE_CACHE_SIZE` | Source |
-|-------|-----------------|---------------|----------------------|--------|
-| Local dev (bare `cargo build`) | `sccache` | `$HOME/.cache/sccache` (sccache default) | sccache default (10G advised) | `.cargo/config.toml` (wrapper only) |
-| Campaign worktree build | `sccache` | `$HOME/.cache/sccache` | sccache default | `.cargo/config.toml` (wrapper only) |
-| `scripts/build-release.sh` | resolved `sccache` path | `$HOME/.cache/sccache` | `10G` | `setup_sccache_env` |
-| `scripts/deploy-release.sh` | resolved `sccache` path | `$HOME/.cache/sccache` | `10G` | `setup_sccache_env` |
-| CI (`ci-*.yml`) | `sccache` | provided by `sccache-action` | provided by `sccache-action` | workflow `env:` + action |
+| Scope | `RUSTC_WRAPPER` | Incremental | `SCCACHE_DIR` | `SCCACHE_CACHE_SIZE` | Source |
+|-------|-----------------|-------------|---------------|----------------------|--------|
+| Local dev (bare `cargo build`) | `sccache` | disabled | `$HOME/.cache/sccache` (sccache default) | sccache default (10G advised) | `.cargo/config.toml` |
+| Campaign worktree build | `sccache` | disabled | `$HOME/.cache/sccache` | sccache default | `.cargo/config.toml` |
+| `scripts/build-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `10G` | `.cargo/config.toml` + `setup_sccache_env` |
+| `scripts/deploy-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `10G` | `.cargo/config.toml` + `setup_sccache_env` |
+| CI (`ci-*.yml`) | `sccache` | disabled | provided by `sccache-action` | provided by `sccache-action` | `.cargo/config.toml` + workflow `env:` + action |
 
 To override per-session: `SCCACHE_DIR=/path SCCACHE_CACHE_SIZE=20G cargo build`.
 
