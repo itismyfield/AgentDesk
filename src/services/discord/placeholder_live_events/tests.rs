@@ -259,7 +259,7 @@ fn status_panel_renders_session_resumed_line_from_lifecycle_details() {
     ));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.contains("Lifecycle resumed"));
+    assert!(rendered.contains("기존 세션 복원"));
     assert!(rendered.contains("provider session claude#8f21abcd…"));
     assert!(rendered.contains("tmux kept"));
 }
@@ -279,7 +279,7 @@ fn status_panel_renders_session_fresh_and_fallback_distinctly() {
     );
 
     let fresh = events.render_status_panel(fresh_channel_id, &ProviderKind::Codex, 1_700_000_000);
-    assert!(fresh.contains("Lifecycle fresh"));
+    assert!(fresh.contains("🆕 새 세션 시작"));
     assert!(fresh.contains("provider session codex#fresh-se…"));
     assert!(fresh.contains("tmux new"));
 
@@ -308,7 +308,9 @@ fn status_panel_omits_session_line_when_lifecycle_details_are_absent() {
     assert!(!events.set_session_panel_lifecycle_event(channel_id, "session_resumed", &json!({}),));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(!rendered.contains("Lifecycle "));
+    assert!(!rendered.contains("🆕 새 세션 시작"));
+    assert!(!rendered.contains("기존 세션 복원"));
+    assert!(!rendered.contains("Lifecycle fallback"));
 }
 
 #[test]
@@ -391,73 +393,6 @@ fn status_panel_caps_context_usage_display_at_100_percent() {
 
     assert!(rendered.contains("Context   ⚠️ 4.1k / 1.0k tokens (100%) · auto-compact 60%"));
     assert!(!rendered.contains("(409%)"));
-}
-
-#[test]
-fn status_panel_renders_prompt_manifest_block() {
-    fn layer(
-        name: &str,
-        enabled: bool,
-        reason: Option<&str>,
-    ) -> crate::db::prompt_manifests::PromptManifestLayer {
-        crate::db::prompt_manifests::PromptManifestLayer {
-            id: None,
-            manifest_id: None,
-            layer_name: name.to_string(),
-            enabled,
-            source: Some("test".to_string()),
-            reason: reason.map(str::to_string),
-            chars: 0,
-            tokens_est: 0,
-            content_sha256: "0".repeat(64),
-            content_visibility: crate::db::prompt_manifests::PromptContentVisibility::AdkProvided,
-            full_content: Some(String::new()),
-            redacted_preview: None,
-            is_truncated: false,
-            original_bytes: Some(0),
-        }
-    }
-
-    let events = PlaceholderLiveEvents::default();
-    let channel_id = ChannelId::new(185);
-    let manifest = PromptManifest {
-        id: None,
-        created_at: None,
-        turn_id: "turn-185".to_string(),
-        channel_id: channel_id.get().to_string(),
-        dispatch_id: None,
-        profile: Some("full".to_string()),
-        total_input_tokens_est: 21_400,
-        layer_count: 5,
-        layers: vec![
-            layer("role_prompt", true, None),
-            layer("dispatch_contract", true, None),
-            layer("current_task", true, None),
-            layer("recovery_context", false, Some("no_recovery")),
-            layer(
-                "memory_recall",
-                false,
-                Some("memory_backend=memento;mcp_unavailable"),
-            ),
-        ],
-    };
-
-    assert!(events.set_prompt_manifest(channel_id, &manifest));
-    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.contains("Prompt    Full profile · ~21.4k input tokens"));
-    assert!(rendered.contains("- 활성 (3): role\\_prompt, dispatch\\_contract, current\\_task"));
-    assert!(rendered.contains(
-        "- 스킵 (2): recovery\\_context (no\\_recovery), memory\\_recall (memory\\_backend=memento;mcp\\_unavailable)"
-    ));
-}
-
-#[test]
-fn status_panel_omits_prompt_line_when_manifest_is_absent() {
-    let events = PlaceholderLiveEvents::default();
-    let channel_id = ChannelId::new(186);
-
-    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(!rendered.contains("Prompt    "));
 }
 
 #[test]

@@ -136,7 +136,7 @@ pub enum TurnEvent {
 
 impl TurnEvent {
     pub const SESSION_FRESH_PERSIST: bool = true;
-    pub const SESSION_FRESH_NOTIFY_USER: bool = true;
+    pub const SESSION_FRESH_NOTIFY_USER: bool = false;
     pub const SESSION_RESUMED_PERSIST: bool = true;
     pub const SESSION_RESUMED_NOTIFY_USER: bool = false;
     pub const SESSION_RESUME_FAILED_WITH_RECOVERY_PERSIST: bool = true;
@@ -206,8 +206,7 @@ impl TurnEvent {
 
     pub const fn notification_reason_code(&self) -> Option<&'static str> {
         match self {
-            Self::SessionFresh(_) => Some("lifecycle.session_fresh"),
-            Self::SessionResumed(_) => None,
+            Self::SessionFresh(_) | Self::SessionResumed(_) => None,
             Self::SessionResumeFailedWithRecovery(_) => Some("lifecycle.session_resume_failed"),
             Self::ContextCompacted(_) => Some("lifecycle.context_compacted"),
         }
@@ -215,11 +214,7 @@ impl TurnEvent {
 
     pub fn notification_content(&self) -> Option<String> {
         match self {
-            Self::SessionFresh(_) => Some(
-                "🆕 새 세션 시작\n이전 대화 컨텍스트 없음. 필요한 정보는 다시 알려주세요."
-                    .to_string(),
-            ),
-            Self::SessionResumed(_) => None,
+            Self::SessionFresh(_) | Self::SessionResumed(_) => None,
             Self::SessionResumeFailedWithRecovery(details) => {
                 let reason = non_empty_or(&details.reason, "provider 응답 요약 없음");
                 let recovery = non_empty_or(&details.recovery_action, "복구 없음");
@@ -553,7 +548,7 @@ mod tests {
     #[test]
     fn turn_event_metadata_is_compile_time_constant_backed() {
         assert!(TurnEvent::SESSION_FRESH_PERSIST);
-        assert!(TurnEvent::SESSION_FRESH_NOTIFY_USER);
+        assert!(!TurnEvent::SESSION_FRESH_NOTIFY_USER);
         assert!(!TurnEvent::SESSION_RESUMED_NOTIFY_USER);
         assert!(TurnEvent::SESSION_RESUME_FAILED_WITH_RECOVERY_NOTIFY_USER);
         assert!(TurnEvent::CONTEXT_COMPACTED_NOTIFY_USER);
@@ -594,14 +589,9 @@ mod tests {
     #[test]
     fn turn_event_notification_policy_and_copy_match_lifecycle_contract() {
         let fresh = TurnEvent::SessionFresh(SessionStrategyDetails::fresh("first_turn"));
-        assert_eq!(
-            fresh.notification_reason_code(),
-            Some("lifecycle.session_fresh")
-        );
-        assert_eq!(
-            fresh.notification_content().as_deref(),
-            Some("🆕 새 세션 시작\n이전 대화 컨텍스트 없음. 필요한 정보는 다시 알려주세요.")
-        );
+        assert_eq!(fresh.notification_reason_code(), None);
+        assert_eq!(fresh.notification_content(), None);
+        assert!(!fresh.notify_user());
         assert_eq!(fresh.details_json()["reason"], "first_turn");
 
         let resumed = TurnEvent::SessionResumed(SessionStrategyDetails::resumed(
@@ -814,7 +804,8 @@ mod tests {
         )
         .await?
         .expect("fresh event persists");
-        assert_eq!(fresh_first.notification_enqueued, Some(true));
+        assert!(!fresh_first.notify_user);
+        assert_eq!(fresh_first.notification_enqueued, None);
 
         let fresh_duplicate = emit_turn_lifecycle(
             &pool,
@@ -830,7 +821,7 @@ mod tests {
         )
         .await?
         .expect("duplicate fresh event still persists");
-        assert_eq!(fresh_duplicate.notification_enqueued, Some(false));
+        assert_eq!(fresh_duplicate.notification_enqueued, None);
 
         let resumed = emit_turn_lifecycle(
             &pool,
@@ -883,22 +874,13 @@ mod tests {
         .fetch_all(&pool)
         .await?;
 
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].try_get::<Option<String>, _>("reason_code")?,
-            Some("lifecycle.session_fresh".to_string())
-        );
-        assert!(
-            rows[0]
-                .try_get::<String, _>("content")?
-                .contains("🆕 새 세션 시작")
-        );
-        assert_eq!(
-            rows[1].try_get::<Option<String>, _>("reason_code")?,
             Some("lifecycle.context_compacted".to_string())
         );
         assert!(
-            rows[1]
+            rows[0]
                 .try_get::<String, _>("content")?
                 .contains("이전 88% → 이후 41%")
         );
