@@ -103,7 +103,7 @@ function _mergeCardMetadata(cardId, patch) {
   }
   agentdesk.db.execute(
     "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
-    [JSON.stringify(meta), cardId]
+    [meta, cardId]
   );
   return meta;
 }
@@ -534,7 +534,7 @@ var rules = {
         meta.preflight_summary = "Consultation resolved: " + (consultResult.summary || "clarified");
         agentdesk.db.execute(
           "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
-          [JSON.stringify(meta), dispatch.kanban_card_id]
+          [meta, dispatch.kanban_card_id]
         );
         var aqEntries = _findAutoQueueEntriesByDispatch(dispatch.id, false);
         if (aqEntries.length > 0) {
@@ -570,7 +570,7 @@ var rules = {
         meta.preflight_summary = "Consultation did not resolve: " + (consultResult.summary || "still ambiguous");
         agentdesk.db.execute(
           "UPDATE kanban_cards SET metadata = ?, blocked_reason = ? WHERE id = ?",
-          [JSON.stringify(meta), "Consultation did not resolve ambiguity", dispatch.kanban_card_id]
+          [meta, "Consultation did not resolve ambiguity", dispatch.kanban_card_id]
         );
         escalateToManualIntervention(dispatch.kanban_card_id, "Consultation did not resolve ambiguity");
         agentdesk.log.warn("[preflight] Consultation unresolved for " + dispatch.kanban_card_id + " → manual intervention");
@@ -714,7 +714,7 @@ var rules = {
         metaBeforePreflight.preflight_checked_at = new Date().toISOString();
         agentdesk.db.execute(
           "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
-          [JSON.stringify(metaBeforePreflight), payload.card_id]
+          [metaBeforePreflight, payload.card_id]
         );
         agentdesk.log.info("[preflight] Skipped for API reopen: " + payload.card_id);
         return;

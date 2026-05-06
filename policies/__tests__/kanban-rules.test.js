@@ -62,7 +62,8 @@ test("kanban-rules skips preflight once for api_reopen cards and preserves other
 
   assert.equal(state.executions.length, 1);
   assert.match(state.executions[0].sql, /UPDATE kanban_cards SET metadata = \?/);
-  const written = JSON.parse(state.executions[0].params[0]);
+  const written = state.executions[0].params[0];
+  assert.equal(typeof written, "object");
   assert.equal(written.keep, "value");
   assert.equal(written.preflight_status, "skipped");
   assert.equal(written.preflight_summary, "Skipped for API reopen");
