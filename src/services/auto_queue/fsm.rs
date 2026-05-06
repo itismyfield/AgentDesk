@@ -25,6 +25,13 @@ pub(super) fn attempt_restore_dispatch(
                 entry.entry_id
             )
         })?;
+        crate::auto_queue_log!(
+            info,
+            "restore_run_attach_existing_dispatch",
+            entry_log_ctx.clone().dispatch(&dispatch_id),
+            "[auto-queue] restore_run reattached entry {} to existing live dispatch; duplicate dispatch suppressed",
+            entry.entry_id
+        );
         let slot_allocation = allocate_slot_for_group_agent_prefer_pg(
             deps,
             run_id,
