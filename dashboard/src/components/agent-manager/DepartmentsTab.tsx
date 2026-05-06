@@ -205,6 +205,7 @@ export default function DepartmentsTab({
                       tone="neutral"
                       compact
                       className="h-7 min-w-7 px-0 py-0"
+                      aria-label={tr("위로 이동", "Move up")}
                     >
                       ▲
                     </SurfaceActionButton>
@@ -214,6 +215,7 @@ export default function DepartmentsTab({
                       tone="neutral"
                       compact
                       className="h-7 min-w-7 px-0 py-0"
+                      aria-label={tr("아래로 이동", "Move down")}
                     >
                       ▼
                     </SurfaceActionButton>
