@@ -842,6 +842,7 @@ fn maybe_refresh_active_turn_activity_heartbeat_at(
 async fn enqueue_headless_delivery(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
+    owning_user_msg_id: MessageId,
     session_key: Option<&str>,
     delivery_bot: Option<&str>,
     content: &str,
@@ -870,22 +871,69 @@ async fn enqueue_headless_delivery(
                     session_key.map(str::trim).filter(|value| !value.is_empty())
                 {
                     let thread_channel_id = channel_id.get().to_string();
-                    if let Err(error) = sqlx::query(
+                    let mut tx = match pool.begin().await {
+                        Ok(tx) => tx,
+                        Err(error) => {
+                            tracing::warn!(
+                                "[outbox] failed to begin terminal delivery marker update for session {}: {}",
+                                session_key,
+                                error
+                            );
+                            return Ok(());
+                        }
+                    };
+                    if let Err(error) =
+                        sqlx::query("SELECT pg_advisory_xact_lock(1752, hashtext($1))")
+                            .bind(&thread_channel_id)
+                            .execute(&mut *tx)
+                            .await
+                    {
+                        tracing::warn!(
+                            "[outbox] failed to lock terminal delivery marker update for session {}: {}",
+                            session_key,
+                            error
+                        );
+                        let _ = tx.rollback().await;
+                        return Ok(());
+                    }
+
+                    let active_user_message_id =
+                        super::mailbox_snapshot(shared.as_ref(), channel_id)
+                            .await
+                            .active_user_message_id;
+                    if let Some(active_user_message_id) = active_user_message_id
+                        && active_user_message_id != owning_user_msg_id
+                    {
+                        tracing::warn!(
+                            "[outbox] skipped terminal delivery marker {} for session {} because active turn message changed from {} to {}",
+                            outbox_id,
+                            session_key,
+                            owning_user_msg_id.get(),
+                            active_user_message_id.get()
+                        );
+                    } else if let Err(error) = sqlx::query(
                         "UPDATE sessions
-                            SET active_turn_delivery_outbox_id = $1
-                          WHERE session_key = $2
-                            AND thread_channel_id = $3
-                            AND status IN ('turn_active', 'working')",
+                                SET active_turn_delivery_outbox_id = $1
+                              WHERE session_key = $2
+                                AND thread_channel_id = $3
+                                AND status IN ('turn_active', 'working')",
                     )
                     .bind(outbox_id)
                     .bind(session_key)
                     .bind(&thread_channel_id)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await
                     {
                         tracing::warn!(
                             "[outbox] failed to mark terminal delivery row {} for session {}: {}",
                             outbox_id,
+                            session_key,
+                            error
+                        );
+                    }
+                    if let Err(error) = tx.commit().await {
+                        tracing::warn!(
+                            "[outbox] failed to commit terminal delivery marker update for session {}: {}",
                             session_key,
                             error
                         );
@@ -3637,6 +3685,7 @@ pub(super) fn spawn_turn_bridge(
                     match enqueue_headless_delivery(
                         &shared_owned,
                         channel_id,
+                        user_msg_id,
                         adk_session_key.as_deref(),
                         inflight_state.delivery_bot.as_deref(),
                         &delivery_response,
