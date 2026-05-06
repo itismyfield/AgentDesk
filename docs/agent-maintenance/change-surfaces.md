@@ -6,8 +6,7 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-05-05 (against #1742 deployment-blocking migration
-> checksum hotfix and current maintainability audit baseline).
+> Last refreshed: 2026-05-05 (against #1742 deployment-blocking migration checksum hotfix and current maintainability audit baseline).
 
 ## Read This First
 
@@ -227,7 +226,7 @@
 - canonical_modules: `src/db/{mod,postgres,schema}.rs` and per-domain modules.
 - legacy_modules: SQLite path through `libsql_rusqlite` (see `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/db/auto_queue.rs` (4533 lines).
+  - `src/db/auto_queue.rs` (5691 lines).
   - `src/db/schema.rs` (3194 lines).
   - `src/db/kanban_cards.rs` (1903 lines; kanban card persistence and GitHub
     sync lookup surface).
