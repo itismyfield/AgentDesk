@@ -254,7 +254,8 @@ src/
 │   │   ├── query.rs
 │   │   └── turn.rs
 │   ├── analytics/
-│   │   └── api_usage.rs
+│   │   ├── api_usage.rs
+│   │   └── dispatch_metrics.rs
 │   ├── auto_queue/
 │   │   ├── activate_bridge.rs
 │   │   ├── activate_command.rs
@@ -296,6 +297,7 @@ src/
 │   │   │   ├── control.rs
 │   │   │   ├── diagnostics.rs
 │   │   │   ├── fast_mode.rs
+│   │   │   ├── goals.rs
 │   │   │   ├── help.rs
 │   │   │   ├── meeting_cmd.rs
 │   │   │   ├── mod.rs
