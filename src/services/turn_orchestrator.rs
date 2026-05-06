@@ -1,11 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
@@ -17,6 +15,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 pub(crate) const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
 pub(crate) const INTERVENTION_TTL: Duration = Duration::from_secs(10 * 60);
 pub(crate) const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
+const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterventionMode {
@@ -301,6 +300,124 @@ fn pending_queue_file_path(
     )
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingQueueTmpCleanupAudit {
+    pub(crate) channel_id: Option<u64>,
+    pub(crate) path: PathBuf,
+    pub(crate) age_secs: Option<u64>,
+    pub(crate) action: &'static str,
+    pub(crate) error: Option<String>,
+}
+
+fn pending_queue_tmp_channel_id(path: &Path) -> Option<u64> {
+    let file_name = path.file_name()?.to_str()?;
+    let trimmed = file_name.strip_prefix('.').unwrap_or(file_name);
+    let channel_part = trimmed
+        .split_once(".json.")
+        .map(|(channel, _)| channel)
+        .or_else(|| trimmed.split_once(".json.tmp").map(|(channel, _)| channel))
+        .or_else(|| trimmed.split_once(".json").map(|(channel, _)| channel))?;
+    channel_part.parse().ok()
+}
+
+fn pending_queue_tmp_file_age(path: &Path, now: SystemTime) -> Option<Duration> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| now.duration_since(modified).ok())
+}
+
+fn cleanup_stale_pending_queue_tmp_files_in_dir(
+    provider: &ProviderKind,
+    token_hash: &str,
+    dir: &Path,
+    now: SystemTime,
+    stale_after: Duration,
+) -> Vec<PendingQueueTmpCleanupAudit> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut audits = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("tmp") {
+            continue;
+        }
+
+        let channel_id = pending_queue_tmp_channel_id(&path);
+        let age = pending_queue_tmp_file_age(&path, now);
+        let age_secs = age.map(|age| age.as_secs());
+        let should_remove = age.map(|age| age >= stale_after).unwrap_or(false);
+
+        let (action, error) = if should_remove {
+            match fs::remove_file(&path) {
+                Ok(()) => ("removed_stale", None),
+                Err(error) => ("remove_failed", Some(error.to_string())),
+            }
+        } else {
+            ("preserved_active", None)
+        };
+
+        let audit = PendingQueueTmpCleanupAudit {
+            channel_id,
+            path,
+            age_secs,
+            action,
+            error,
+        };
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        match audit.action {
+            "removed_stale" => tracing::warn!(
+                "  [{ts}] 🧹 PENDING-QUEUE-TMP: provider={} token_hash={} channel_id={:?} path='{}' age_secs={:?} action={}",
+                provider.as_str(),
+                token_hash,
+                audit.channel_id,
+                audit.path.display(),
+                audit.age_secs,
+                audit.action
+            ),
+            "remove_failed" => tracing::warn!(
+                "  [{ts}] ⚠ PENDING-QUEUE-TMP: provider={} token_hash={} channel_id={:?} path='{}' age_secs={:?} action={} error={:?}",
+                provider.as_str(),
+                token_hash,
+                audit.channel_id,
+                audit.path.display(),
+                audit.age_secs,
+                audit.action,
+                audit.error
+            ),
+            _ => tracing::info!(
+                "  [{ts}] 🧹 PENDING-QUEUE-TMP: provider={} token_hash={} channel_id={:?} path='{}' age_secs={:?} action={}",
+                provider.as_str(),
+                token_hash,
+                audit.channel_id,
+                audit.path.display(),
+                audit.age_secs,
+                audit.action
+            ),
+        }
+        audits.push(audit);
+    }
+    audits
+}
+
+pub(crate) fn cleanup_stale_pending_queue_tmp_files(
+    provider: &ProviderKind,
+    token_hash: &str,
+) -> Vec<PendingQueueTmpCleanupAudit> {
+    let Some(root) = pending_queue_root() else {
+        return Vec::new();
+    };
+    let dir = root.join(provider.as_str()).join(token_hash);
+    cleanup_stale_pending_queue_tmp_files_in_dir(
+        provider,
+        token_hash,
+        &dir,
+        SystemTime::now(),
+        STALE_PENDING_QUEUE_TMP_AGE,
+    )
+}
+
 /// Write-through: save a single channel's queue to disk.
 /// If the queue is empty the file is removed.
 pub(crate) fn save_channel_queue(
@@ -441,6 +558,13 @@ pub(crate) fn load_pending_queues(
         return (HashMap::new(), HashMap::new());
     };
     let dir = root.join(provider.as_str()).join(token_hash);
+    let _ = cleanup_stale_pending_queue_tmp_files_in_dir(
+        provider,
+        token_hash,
+        &dir,
+        SystemTime::now(),
+        STALE_PENDING_QUEUE_TMP_AGE,
+    );
     let Ok(entries) = fs::read_dir(&dir) else {
         return (HashMap::new(), HashMap::new());
     };
@@ -1645,6 +1769,7 @@ mod actor_hydrate_regression_tests {
     use super::*;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard};
+    use std::time::SystemTime;
 
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
     static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -1763,6 +1888,67 @@ mod actor_hydrate_regression_tests {
                 .cancelled
                 .load(std::sync::atomic::Ordering::Relaxed)
         );
+    }
+
+    #[test]
+    fn cleanup_stale_pending_queue_tmp_files_removes_only_stale_tmp_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = ProviderKind::Claude;
+        let token_hash = "tmp-cleanup-direct";
+        let stale_tmp_a = tmp.path().join(".12345.json.interrupted.tmp");
+        let stale_tmp_b = tmp.path().join(".23456.json.interrupted.tmp");
+        let queue_json = tmp.path().join("34567.json");
+        std::fs::write(&stale_tmp_a, b"partial").unwrap();
+        std::fs::write(&stale_tmp_b, b"partial").unwrap();
+        std::fs::write(&queue_json, b"[]").unwrap();
+
+        let audits = cleanup_stale_pending_queue_tmp_files_in_dir(
+            &provider,
+            token_hash,
+            tmp.path(),
+            SystemTime::now() + Duration::from_secs(120),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(audits.len(), 2);
+        assert!(
+            audits.iter().any(|audit| {
+                audit.channel_id == Some(12345) && audit.action == "removed_stale"
+            })
+        );
+        assert!(
+            audits.iter().any(|audit| {
+                audit.channel_id == Some(23456) && audit.action == "removed_stale"
+            })
+        );
+        assert!(!stale_tmp_a.exists());
+        assert!(!stale_tmp_b.exists());
+        assert!(
+            queue_json.exists(),
+            "cleanup must not touch real queue files"
+        );
+    }
+
+    #[test]
+    fn cleanup_stale_pending_queue_tmp_files_preserves_active_tmp_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = ProviderKind::Claude;
+        let token_hash = "tmp-cleanup-active";
+        let active_tmp = tmp.path().join(".45678.json.inflight.tmp");
+        std::fs::write(&active_tmp, b"partial").unwrap();
+
+        let audits = cleanup_stale_pending_queue_tmp_files_in_dir(
+            &provider,
+            token_hash,
+            tmp.path(),
+            SystemTime::now(),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].channel_id, Some(45678));
+        assert_eq!(audits[0].action, "preserved_active");
+        assert!(active_tmp.exists(), "fresh tmp writes must be preserved");
     }
 }
 
