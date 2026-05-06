@@ -170,6 +170,81 @@ fn status_panel_renders_derived_tool_state_under_limit() {
     assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
 }
 
+fn status_for(events: &PlaceholderLiveEvents, channel_id: ChannelId) -> DerivedStatus {
+    events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state")
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .status
+        .clone()
+}
+
+#[test]
+fn status_panel_turn_completed_renders_foreground_completion() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(171);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use("Bash", &json!({"command": "cargo test"}).to_string()),
+    );
+    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
+
+    assert_eq!(
+        status_for(&events, channel_id),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Foreground
+        }
+    );
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.starts_with("✅ **응답 완료** — claude"));
+    assert!(!rendered.contains("🟢 진행 중"));
+}
+
+#[test]
+fn status_panel_turn_completed_after_monitor_wait_renders_background_completion() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(172);
+    events.push_status_event(channel_id, StatusEvent::MonitorWait);
+    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: true });
+
+    assert_eq!(
+        status_for(&events, channel_id),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Background
+        }
+    );
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.starts_with("✅ **백그라운드 완료** — claude"));
+    assert!(!rendered.contains("💤 monitor 대기"));
+}
+
+#[test]
+fn status_panel_turn_completed_after_aborted_tool_renders_terminal_completion() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(173);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use("Task", &json!({"description": "Investigate"}).to_string()),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result(Some("Task"), true),
+    );
+    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
+
+    assert_eq!(
+        status_for(&events, channel_id),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Foreground
+        }
+    );
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.starts_with("✅ **응답 완료** — claude"));
+    assert!(!rendered.contains("🟢 진행 중"));
+}
+
 #[test]
 fn status_panel_renders_session_resumed_line_from_lifecycle_details() {
     let events = PlaceholderLiveEvents::default();

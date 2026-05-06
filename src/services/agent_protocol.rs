@@ -164,6 +164,9 @@ pub enum StatusEvent {
     ScheduleWakeup {
         eta_secs: Option<u64>,
     },
+    TurnCompleted {
+        background: bool,
+    },
     Heartbeat,
 }
 

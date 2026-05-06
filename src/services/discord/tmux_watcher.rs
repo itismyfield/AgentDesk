@@ -42,6 +42,56 @@ async fn persist_watcher_provider_session_id(
     );
 }
 
+async fn complete_watcher_status_panel_v2(
+    http: &serenity::Http,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    status_panel_msg_id: Option<serenity::MessageId>,
+    provider: &ProviderKind,
+    started_at_unix: i64,
+    last_status_panel_text: &mut String,
+    background: bool,
+) {
+    if !shared.status_panel_v2_enabled {
+        return;
+    }
+    let Some(status_msg_id) = status_panel_msg_id else {
+        return;
+    };
+    shared
+        .placeholder_live_events
+        .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
+    let panel_text =
+        shared
+            .placeholder_live_events
+            .render_status_panel(channel_id, provider, started_at_unix);
+    if panel_text == *last_status_panel_text {
+        return;
+    }
+    rate_limit_wait(shared, channel_id).await;
+    match crate::services::discord::http::edit_channel_message(
+        http,
+        channel_id,
+        status_msg_id,
+        &panel_text,
+    )
+    .await
+    {
+        Ok(_) => {
+            *last_status_panel_text = panel_text;
+        }
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ tmux status-panel-v2 completion edit failed for msg {} in channel {}: {}",
+                status_msg_id.get(),
+                channel_id.get(),
+                error
+            );
+        }
+    }
+}
+
 pub(in crate::services::discord) async fn tmux_output_watcher(
     channel_id: ChannelId,
     http: Arc<serenity::Http>,
@@ -2393,6 +2443,23 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
+
+        if terminal_output_committed {
+            complete_watcher_status_panel_v2(
+                &http,
+                &shared,
+                channel_id,
+                status_panel_msg_id,
+                &watcher_provider,
+                status_panel_started_at,
+                &mut last_status_panel_text,
+                matches!(
+                    task_notification_kind,
+                    Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
+                ),
+            )
+            .await;
+        }
 
         // Advance the shared confirmed-delivery watermark on any committed
         // direct emission or empty-turn cleanup. CAS loop ensures we only ever move the

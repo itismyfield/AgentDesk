@@ -508,6 +508,52 @@ fn record_status_panel_events(
     }
 }
 
+async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
+    shared: &SharedData,
+    gateway: &G,
+    channel_id: ChannelId,
+    status_panel_msg_id: Option<MessageId>,
+    provider: &ProviderKind,
+    started_at_unix: i64,
+    last_status_panel_text: &mut String,
+    background: bool,
+    source: &'static str,
+) {
+    if !shared.status_panel_v2_enabled {
+        return;
+    }
+    let Some(status_msg_id) = status_panel_msg_id else {
+        return;
+    };
+    shared
+        .placeholder_live_events
+        .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
+    let panel_text =
+        shared
+            .placeholder_live_events
+            .render_status_panel(channel_id, provider, started_at_unix);
+    if panel_text == *last_status_panel_text {
+        return;
+    }
+    match gateway
+        .edit_message(channel_id, status_msg_id, &panel_text)
+        .await
+    {
+        Ok(()) => {
+            *last_status_panel_text = panel_text;
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[turn_bridge] failed to finalize status-panel-v2 message {} in channel {} from {}: {}",
+                status_msg_id,
+                channel_id,
+                source,
+                error
+            );
+        }
+    }
+}
+
 fn should_open_long_running_placeholder_controller(status_panel_v2_enabled: bool) -> bool {
     !status_panel_v2_enabled
 }
@@ -2916,6 +2962,7 @@ pub(super) fn spawn_turn_bridge(
         };
         let mut preserve_inflight_for_cleanup_retry = false;
         let mut terminal_delivery_committed = false;
+        let mut status_panel_terminal_committed = false;
 
         // Remove ⏳ only if NOT handing off to tmux watcher.
         // When tmux watcher is handling the response, it will do ⏳→✅ after delivery.
@@ -3091,6 +3138,7 @@ pub(super) fn spawn_turn_bridge(
                 "turn_bridge_cancelled_terminal_replace",
             );
             if replace_committed {
+                status_panel_terminal_committed = true;
                 advance_tmux_relay_confirmed_end(
                     shared_owned.as_ref(),
                     watcher_owner_channel_id,
@@ -3127,6 +3175,7 @@ pub(super) fn spawn_turn_bridge(
                 "turn_bridge_prompt_too_long_replace",
             );
             if replace_committed {
+                status_panel_terminal_committed = true;
                 advance_tmux_relay_confirmed_end(
                     shared_owned.as_ref(),
                     watcher_owner_channel_id,
@@ -3627,6 +3676,23 @@ pub(super) fn spawn_turn_bridge(
             if let Ok(mut last) = shared_owned.last_turn_at.lock() {
                 *last = Some(chrono::Local::now().to_rfc3339());
             }
+            status_panel_terminal_committed =
+                terminal_delivery_committed && !preserve_inflight_for_cleanup_retry;
+        }
+
+        if status_panel_terminal_committed {
+            complete_status_panel_v2(
+                shared_owned.as_ref(),
+                gateway.as_ref(),
+                channel_id,
+                status_panel_msg_id,
+                &provider,
+                status_panel_started_at,
+                &mut last_status_panel_text,
+                false,
+                "turn_terminal_delivery",
+            )
+            .await;
         }
 
         if !bridge_relay_delegated_to_watcher

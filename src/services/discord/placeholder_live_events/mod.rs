@@ -300,6 +300,9 @@ enum DerivedStatus {
     Running,
     MonitorWait,
     ScheduleWakeup(Option<u64>),
+    Completed {
+        kind: CompletedKind,
+    },
     ToolRunning {
         name: String,
         summary: Option<String>,
@@ -307,6 +310,22 @@ enum DerivedStatus {
     SubagentRunning {
         desc: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletedKind {
+    Foreground,
+    Background,
+}
+
+impl CompletedKind {
+    fn from_background(background: bool) -> Self {
+        if background {
+            Self::Background
+        } else {
+            Self::Foreground
+        }
+    }
 }
 
 impl Default for DerivedStatus {
@@ -406,6 +425,11 @@ impl StatusPanelState {
             }
             StatusEvent::ScheduleWakeup { eta_secs } => {
                 self.status = DerivedStatus::ScheduleWakeup(eta_secs);
+            }
+            StatusEvent::TurnCompleted { background } => {
+                self.status = DerivedStatus::Completed {
+                    kind: CompletedKind::from_background(background),
+                };
             }
             StatusEvent::Heartbeat => {
                 if matches!(self.status, DerivedStatus::Running) {
@@ -507,6 +531,12 @@ fn render_derived_status(status: &DerivedStatus) -> String {
             format!("⏰ scheduled wakeup ({eta_secs}s 후)")
         }
         DerivedStatus::ScheduleWakeup(None) => "⏰ scheduled wakeup".to_string(),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Background,
+        } => "✅ **백그라운드 완료**".to_string(),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Foreground,
+        } => "✅ **응답 완료**".to_string(),
         DerivedStatus::ToolRunning { name, summary } => {
             let mut rendered = tool_prefix(name);
             if let Some(summary) = summary.as_deref().filter(|value| !value.trim().is_empty()) {
