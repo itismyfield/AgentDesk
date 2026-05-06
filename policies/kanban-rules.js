@@ -97,11 +97,19 @@ function _mergeCardMetadata(cardId, patch) {
       meta[key] = patch[key];
     }
   }
+  _writeCardMetadata(cardId, meta);
+  return meta;
+}
+
+function _metadataParam(metadata) {
+  return metadata && typeof metadata === "object" ? metadata : {};
+}
+
+function _writeCardMetadata(cardId, metadata) {
   agentdesk.db.execute(
     "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
-    [meta, cardId]
+    [_metadataParam(metadata), cardId]
   );
-  return meta;
 }
 
 var INVENTORY_DOC_PATHS = [
@@ -528,10 +536,7 @@ var rules = {
       if (consultResult.verdict === "clear" || consultResult.verdict === "proceed") {
         meta.preflight_status = "clear";
         meta.preflight_summary = "Consultation resolved: " + (consultResult.summary || "clarified");
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
-          [meta, dispatch.kanban_card_id]
-        );
+        _writeCardMetadata(dispatch.kanban_card_id, meta);
         var aqEntries = _findAutoQueueEntriesByDispatch(dispatch.id, false);
         if (aqEntries.length > 0) {
           try {
@@ -566,7 +571,7 @@ var rules = {
         meta.preflight_summary = "Consultation did not resolve: " + (consultResult.summary || "still ambiguous");
         agentdesk.db.execute(
           "UPDATE kanban_cards SET metadata = ?, blocked_reason = ? WHERE id = ?",
-          [meta, "Consultation did not resolve ambiguity", dispatch.kanban_card_id]
+          [_metadataParam(meta), "Consultation did not resolve ambiguity", dispatch.kanban_card_id]
         );
         escalateToManualIntervention(dispatch.kanban_card_id, "Consultation did not resolve ambiguity");
         agentdesk.log.warn("[preflight] Consultation unresolved for " + dispatch.kanban_card_id + " → manual intervention");
@@ -708,10 +713,7 @@ var rules = {
         metaBeforePreflight.preflight_status = "skipped";
         metaBeforePreflight.preflight_summary = "Skipped for API reopen";
         metaBeforePreflight.preflight_checked_at = new Date().toISOString();
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
-          [metaBeforePreflight, payload.card_id]
-        );
+        _writeCardMetadata(payload.card_id, metaBeforePreflight);
         agentdesk.log.info("[preflight] Skipped for API reopen: " + payload.card_id);
         return;
       }

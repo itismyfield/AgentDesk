@@ -3,6 +3,21 @@ const assert = require("node:assert/strict");
 
 const { createExecRouter, createSqlRouter, loadPolicy, toPlain } = require("./support/harness");
 
+function findMetadataExecution(state, extraPredicate) {
+  return state.executions.find((execution) => (
+    /UPDATE kanban_cards SET metadata = \?/.test(execution.sql) &&
+    (!extraPredicate || extraPredicate(execution))
+  ));
+}
+
+function assertMetadataObjectParam(execution) {
+  assert.ok(execution, "expected a metadata UPDATE execution");
+  const written = execution.params[0];
+  assert.equal(typeof written, "object");
+  assert.equal(Array.isArray(written), false);
+  return written;
+}
+
 test("kanban-rules preflight returns already_applied when the linked GitHub issue is closed", () => {
   const { module } = loadPolicy("policies/kanban-rules.js", {
     dbQuery: createSqlRouter([
@@ -70,6 +85,162 @@ test("kanban-rules skips preflight once for api_reopen cards and preserves other
   assert.ok(typeof written.preflight_checked_at === "string" && written.preflight_checked_at.length > 0);
   assert.equal(written.skip_preflight_once, undefined);
   assert.equal(state.statusCalls.length, 0);
+});
+
+test("kanban-rules writes consultation-clear metadata as a JSON object param", () => {
+  const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "dispatch-consult",
+            kanban_card_id: "card-consult",
+            to_agent_id: "agent-1",
+            dispatch_type: "consultation",
+            chain_depth: 0,
+            created_at: "2026-05-06 09:00:00",
+            result: JSON.stringify({ verdict: "clear", summary: "ready" }),
+            context: "{}",
+            status: "completed"
+          }
+        ]
+      },
+      {
+        match: "SELECT id, title, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
+        result: [
+          {
+            id: "card-consult",
+            title: "Consulted card",
+            status: "in_progress",
+            priority: "medium",
+            assigned_agent_id: "agent-1",
+            deferred_dod_json: null
+          }
+        ]
+      },
+      {
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: [{ metadata: JSON.stringify({ keep: "yes" }) }]
+      },
+      { match: "FROM auto_queue_entries e", result: [] }
+    ])
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-consult" });
+
+  const written = assertMetadataObjectParam(findMetadataExecution(state));
+  assert.equal(written.keep, "yes");
+  assert.equal(written.consultation_status, "completed");
+  assert.deepEqual(written.consultation_result, { verdict: "clear", summary: "ready" });
+  assert.equal(written.preflight_status, "clear");
+  assert.equal(written.preflight_summary, "Consultation resolved: ready");
+});
+
+test("kanban-rules writes consultation-escalated metadata as a JSON object param", () => {
+  const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "dispatch-consult-blocked",
+            kanban_card_id: "card-consult-blocked",
+            to_agent_id: "agent-1",
+            dispatch_type: "consultation",
+            chain_depth: 0,
+            created_at: "2026-05-06 09:00:00",
+            result: JSON.stringify({ verdict: "blocked", summary: "ambiguous" }),
+            context: "{}",
+            status: "completed"
+          }
+        ]
+      },
+      {
+        match: "SELECT id, title, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
+        result: [
+          {
+            id: "card-consult-blocked",
+            title: "Blocked consultation card",
+            status: "in_progress",
+            priority: "medium",
+            assigned_agent_id: "agent-1",
+            deferred_dod_json: null
+          }
+        ]
+      },
+      {
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: [{ metadata: JSON.stringify({ keep: "yes" }) }]
+      }
+    ])
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-consult-blocked" });
+
+  const written = assertMetadataObjectParam(
+    findMetadataExecution(state, (execution) => execution.sql.includes("blocked_reason = ?"))
+  );
+  assert.equal(written.keep, "yes");
+  assert.equal(written.consultation_status, "completed");
+  assert.deepEqual(written.consultation_result, { verdict: "blocked", summary: "ambiguous" });
+  assert.equal(written.preflight_status, "escalated");
+  assert.equal(written.preflight_summary, "Consultation did not resolve: ambiguous");
+  assert.equal(state.manualInterventions.length, 1);
+});
+
+test("kanban-rules writes noop work-resolution metadata as a JSON object param", () => {
+  const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "dispatch-noop",
+            kanban_card_id: "card-noop",
+            to_agent_id: "agent-1",
+            dispatch_type: "implementation",
+            chain_depth: 0,
+            created_at: "2026-05-06 09:00:00",
+            result: JSON.stringify({
+              work_outcome: "noop",
+              completed_without_changes: true,
+              card_status_target: "review"
+            }),
+            context: "{}",
+            status: "completed"
+          }
+        ]
+      },
+      {
+        match: "SELECT id, title, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
+        result: [
+          {
+            id: "card-noop",
+            title: "Noop card",
+            status: "in_progress",
+            priority: "medium",
+            assigned_agent_id: "agent-1",
+            deferred_dod_json: null
+          }
+        ]
+      },
+      {
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: [{ metadata: JSON.stringify({ keep: "yes" }) }]
+      }
+    ])
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-noop" });
+
+  const written = assertMetadataObjectParam(findMetadataExecution(state));
+  assert.equal(written.keep, "yes");
+  assert.equal(written.work_resolution_status, "noop");
+  assert.equal(written.work_resolution_result.work_outcome, "noop");
+  assert.equal(written.work_resolution_result.completed_without_changes, true);
+  assert.equal(written.preflight_status, null);
+  assert.equal(written.consultation_status, null);
 });
 
 test("kanban-rules preflight already_applied transitions the card to done and skips pending queue entries", () => {
