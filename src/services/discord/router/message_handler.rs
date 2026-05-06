@@ -512,36 +512,87 @@ fn should_add_turn_pending_reaction(_dispatch_id: Option<&str>) -> bool {
     true
 }
 
-async fn clear_terminal_delivery_marker_for_new_turn(
+async fn mailbox_try_start_turn_after_terminal_marker_cleanup(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: UserId,
+    user_msg_id: MessageId,
     session_key: Option<&str>,
-) {
-    // A request that loses the mailbox race must not clear the currently
-    // running turn's terminal-delivery marker. Pre-start cleanup is only safe
-    // when the mailbox has no active turn; concurrent starters may all clear
-    // the same stale marker, but none can clear a marker owned by a live turn.
-    if super::super::mailbox_has_active_turn(shared, channel_id).await {
-        return;
-    }
+) -> bool {
     let Some(pool) = shared.pg_pool.as_ref() else {
-        return;
+        return super::super::mailbox_try_start_turn(
+            shared,
+            channel_id,
+            cancel_token,
+            request_owner,
+            user_msg_id,
+        )
+        .await;
     };
     let Some(session_key) = session_key.map(str::trim).filter(|value| !value.is_empty()) else {
-        return;
+        return super::super::mailbox_try_start_turn(
+            shared,
+            channel_id,
+            cancel_token,
+            request_owner,
+            user_msg_id,
+        )
+        .await;
     };
     let thread_channel_id = channel_id.get().to_string();
-    if let Err(error) = sqlx::query(
-        "UPDATE sessions
-            SET active_turn_delivery_outbox_id = NULL
-          WHERE session_key = $1
-            AND thread_channel_id = $2
-            AND active_turn_delivery_outbox_id IS NOT NULL",
-    )
-    .bind(session_key)
-    .bind(&thread_channel_id)
-    .execute(pool)
-    .await
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(
+                "[outbox] failed to begin terminal delivery marker cleanup before turn start for channel {}: {}",
+                channel_id,
+                error
+            );
+            return super::super::mailbox_try_start_turn(
+                shared,
+                channel_id,
+                cancel_token,
+                request_owner,
+                user_msg_id,
+            )
+            .await;
+        }
+    };
+
+    if let Err(error) = sqlx::query("SELECT pg_advisory_xact_lock(1752, hashtext($1))")
+        .bind(&thread_channel_id)
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::warn!(
+            "[outbox] failed to lock terminal delivery marker before turn start for channel {}: {}",
+            channel_id,
+            error
+        );
+        let _ = tx.rollback().await;
+        return super::super::mailbox_try_start_turn(
+            shared,
+            channel_id,
+            cancel_token,
+            request_owner,
+            user_msg_id,
+        )
+        .await;
+    }
+
+    if !super::super::mailbox_has_active_turn(shared, channel_id).await
+        && let Err(error) = sqlx::query(
+            "UPDATE sessions
+                SET active_turn_delivery_outbox_id = NULL
+              WHERE session_key = $1
+                AND thread_channel_id = $2
+                AND active_turn_delivery_outbox_id IS NOT NULL",
+        )
+        .bind(session_key)
+        .bind(&thread_channel_id)
+        .execute(&mut *tx)
+        .await
     {
         tracing::warn!(
             "[outbox] failed to clear terminal delivery marker before new turn for channel {}: {}",
@@ -549,6 +600,23 @@ async fn clear_terminal_delivery_marker_for_new_turn(
             error
         );
     }
+
+    let started = super::super::mailbox_try_start_turn(
+        shared,
+        channel_id,
+        cancel_token,
+        request_owner,
+        user_msg_id,
+    )
+    .await;
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(
+            "[outbox] failed to commit terminal delivery marker cleanup before turn start for channel {}: {}",
+            channel_id,
+            error
+        );
+    }
+    started
 }
 
 fn native_fast_mode_override_for_turn(
@@ -873,14 +941,13 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     }
 
     let cancel_token = Arc::new(CancelToken::new());
-    clear_terminal_delivery_marker_for_new_turn(shared, channel_id, adk_session_key.as_deref())
-        .await;
-    let started = super::super::mailbox_try_start_turn(
+    let started = mailbox_try_start_turn_after_terminal_marker_cleanup(
         shared,
         channel_id,
         cancel_token.clone(),
         request_owner,
         user_msg_id,
+        adk_session_key.as_deref(),
     )
     .await;
     if !started {
@@ -2509,14 +2576,13 @@ pub(in crate::services::discord) async fn handle_text_message(
     // because the async gap between check and insert allows interleaving.
     // If another message won the race, queue ourselves and clean up.
     let cancel_token = Arc::new(CancelToken::new());
-    clear_terminal_delivery_marker_for_new_turn(shared, channel_id, adk_session_key.as_deref())
-        .await;
-    let started = super::super::mailbox_try_start_turn(
+    let started = mailbox_try_start_turn_after_terminal_marker_cleanup(
         shared,
         channel_id,
         cancel_token.clone(),
         request_owner,
         user_msg_id,
+        adk_session_key.as_deref(),
     )
     .await;
 

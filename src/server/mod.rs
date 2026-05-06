@@ -3072,7 +3072,10 @@ async fn release_session_for_terminal_outbox_failure(
     // Keep these predicates in sync with
     // `session_can_be_released_for_terminal_outbox_failure`.
     let result = sqlx::query(
-        "WITH failed_outbox AS (
+        "WITH lock_guard AS (
+            SELECT pg_advisory_xact_lock(1752, hashtext($1))
+         ),
+         failed_outbox AS (
             SELECT id, session_key
               FROM message_outbox
              WHERE id = $2
@@ -3080,7 +3083,7 @@ async fn release_session_for_terminal_outbox_failure(
          UPDATE sessions
             SET status = 'idle',
                 active_turn_delivery_outbox_id = NULL
-           FROM failed_outbox
+           FROM failed_outbox, lock_guard
           WHERE sessions.thread_channel_id = $1
             AND sessions.status IN ('turn_active', 'working')
             AND sessions.active_turn_delivery_outbox_id = failed_outbox.id
