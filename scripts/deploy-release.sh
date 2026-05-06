@@ -157,6 +157,29 @@ _resolve_dashboard_source() {
     return 1
 }
 
+_ensure_dashboard_dependencies() {
+    local dashboard_dir="$REPO/dashboard"
+    [ -d "$dashboard_dir" ] || return 0
+
+    if ! command -v node >/dev/null 2>&1; then
+        echo "✗ node is required to build dashboard before deploy"
+        exit 1
+    fi
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "✗ npm is required to build dashboard before deploy"
+        exit 1
+    fi
+    if [ ! -f "$dashboard_dir/package-lock.json" ]; then
+        echo "✗ dashboard/package-lock.json missing — cannot install deterministic dashboard dependencies"
+        exit 1
+    fi
+
+    if [ ! -x "$dashboard_dir/node_modules/.bin/tsc" ]; then
+        echo "▸ Installing dashboard dependencies (npm ci)..."
+        (cd "$dashboard_dir" && npm ci --no-audit --no-fund)
+    fi
+}
+
 _resolve_default_release_binary() {
     local target_dir
     target_dir="$(cd "$REPO" && cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r '.target_directory // empty' 2>/dev/null || true)"
@@ -432,6 +455,7 @@ fi
 # Build the release binary from the current workspace by default so deploy
 # always ships code compiled from the current HEAD. When a validated external
 # artifact is provided explicitly, keep the existing override behavior.
+_ensure_dashboard_dependencies
 _check_repo_remote_freshness
 if [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     SOURCE_BINARY="$AGENTDESK_DEPLOY_BINARY"
