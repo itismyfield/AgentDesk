@@ -23,17 +23,13 @@ function emitQualityEvent(event) {
 }
 
 function _loadCardAlertContext(cardId) {
-  var rows = agentdesk.db.query(
-    "SELECT assigned_agent_id, COALESCE(title, id) as title, github_issue_number " +
-    "FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  if (rows.length === 0) return null;
+  var card = agentdesk.cards.get(cardId);
+  if (!card) return null;
   return {
     card_id: cardId,
-    assigned_agent_id: rows[0].assigned_agent_id || null,
-    title: rows[0].title || cardId,
-    github_issue_number: rows[0].github_issue_number || null
+    assigned_agent_id: card.assigned_agent_id || null,
+    title: card.title || cardId,
+    github_issue_number: card.github_issue_number || null
   };
 }
 
@@ -793,8 +789,10 @@ if (typeof agentdesk !== "undefined" && agentdesk && typeof agentdesk.registerPo
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     policy: rules,
+    _loadCardAlertContext: _loadCardAlertContext,
     __test: {
-      runPreflight: _runPreflight
+      runPreflight: _runPreflight,
+      _loadCardAlertContext: _loadCardAlertContext
     }
   };
 }

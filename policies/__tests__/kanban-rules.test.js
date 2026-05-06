@@ -208,3 +208,36 @@ test("kanban-rules marks DoD-only gate failures as awaiting_dod instead of escal
     }
   ]);
 });
+
+test("kanban-rules _loadCardAlertContext uses typed facade agentdesk.cards.get", () => {
+  const { module } = loadPolicy("policies/kanban-rules.js", {
+    dbQuery: createSqlRouter([]),
+    cards: {
+      "card-minimal": { id: "card-minimal" },
+      "card-full": {
+        id: "card-full",
+        assigned_agent_id: "agent-123",
+        title: "My Full Title",
+        github_issue_number: 456
+      }
+    }
+  });
+
+  const loadAlertContext = module._loadCardAlertContext;
+
+  assert.equal(loadAlertContext("card-missing"), null);
+
+  assert.deepEqual(Object.assign({}, loadAlertContext("card-minimal")), {
+    card_id: "card-minimal",
+    assigned_agent_id: null,
+    title: "card-minimal",
+    github_issue_number: null
+  });
+
+  assert.deepEqual(Object.assign({}, loadAlertContext("card-full")), {
+    card_id: "card-full",
+    assigned_agent_id: "agent-123",
+    title: "My Full Title",
+    github_issue_number: 456
+  });
+});
