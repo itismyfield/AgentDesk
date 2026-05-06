@@ -640,6 +640,55 @@ fn codex_goals_override_for_turn(
     }
 }
 
+fn is_codex_goal_start_request(text: &str) -> bool {
+    let Some(first_line) = text.trim_start().lines().next() else {
+        return false;
+    };
+    let first_line = first_line.trim_end();
+    let Some(rest) = first_line.strip_prefix("/goal") else {
+        return false;
+    };
+    rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)
+}
+
+fn should_start_fresh_codex_goal_session(
+    provider: &ProviderKind,
+    text: &str,
+    channel_codex_goals_setting: Option<bool>,
+) -> bool {
+    matches!(provider, ProviderKind::Codex)
+        && channel_codex_goals_setting.unwrap_or(true)
+        && is_codex_goal_start_request(text)
+}
+
+async fn clear_codex_goal_start_provider_session(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    adk_session_key: Option<&str>,
+    session_id: &mut Option<String>,
+    memento_context_loaded: &mut bool,
+    session_strategy_reason: &mut &'static str,
+) {
+    let session_id_to_clear = session_id.clone();
+    {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.clear_provider_session();
+        }
+    }
+
+    if let Some(key) = adk_session_key {
+        super::super::adk_session::clear_provider_session_id(key, shared.api_port).await;
+    }
+    if let Some(ref stale_session_id) = session_id_to_clear {
+        let _ = super::super::internal_api::clear_stale_session_id(stale_session_id).await;
+    }
+
+    *session_id = None;
+    *memento_context_loaded = false;
+    *session_strategy_reason = "codex_goal_start_fresh_session";
+}
+
 fn effective_fast_mode_channel_id(
     channel_id: ChannelId,
     thread_parent: Option<(ChannelId, Option<String>)>,
@@ -898,8 +947,30 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
             let _ = super::super::internal_api::clear_stale_session_id(session_id_to_clear).await;
         }
     }
+    let fresh_codex_goal_session_requested = should_start_fresh_codex_goal_session(
+        &provider,
+        prompt,
+        super::super::commands::channel_codex_goals_setting(shared, fast_mode_channel_id).await,
+    );
+    if fresh_codex_goal_session_requested {
+        clear_codex_goal_start_provider_session(
+            shared,
+            channel_id,
+            adk_session_key.as_deref(),
+            &mut session_id,
+            &mut memento_context_loaded,
+            &mut session_strategy_reason,
+        )
+        .await;
+    }
     if session_id.is_none() {
-        if let Some(reason) = session_reset_reason {
+        if fresh_codex_goal_session_requested {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ Skipping DB provider session restore for headless channel {} due to /goal fresh session request",
+                channel_id.get()
+            );
+        } else if let Some(reason) = session_reset_reason {
             let ts = chrono::Local::now().format("%H:%M:%S");
             session_strategy_reason = session_reset_reason_lifecycle_code(reason);
             let display_reason = match reason {
@@ -2495,8 +2566,32 @@ pub(in crate::services::discord) async fn handle_text_message(
             let _ = super::super::internal_api::clear_stale_session_id(session_id_to_clear).await;
         }
     }
+    let fresh_codex_goal_session_requested = !dispatch_reset_provider_state
+        && !dispatch_recreate_tmux
+        && should_start_fresh_codex_goal_session(
+            &provider,
+            user_text,
+            super::super::commands::channel_codex_goals_setting(shared, fast_mode_channel_id).await,
+        );
+    if fresh_codex_goal_session_requested {
+        clear_codex_goal_start_provider_session(
+            shared,
+            channel_id,
+            adk_session_key.as_deref(),
+            &mut session_id,
+            &mut memento_context_loaded,
+            &mut session_strategy_reason,
+        )
+        .await;
+    }
     if session_id.is_none() {
-        if dispatch_reset_provider_state || dispatch_recreate_tmux {
+        if fresh_codex_goal_session_requested {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to /goal fresh session request",
+                channel_id.get()
+            );
+        } else if dispatch_reset_provider_state || dispatch_recreate_tmux {
             session_strategy_reason = dispatch_reset_lifecycle_code(
                 dispatch_reset_provider_state,
                 dispatch_recreate_tmux,
@@ -6037,6 +6132,48 @@ mod tests {
             codex_goals_override_for_turn(&ProviderKind::Claude, Some(true)),
             None
         );
+    }
+
+    #[test]
+    fn codex_goal_start_request_matches_only_goal_command_prefix() {
+        assert!(is_codex_goal_start_request("/goal"));
+        assert!(is_codex_goal_start_request("  /goal 지금 문서 검토"));
+        assert!(is_codex_goal_start_request("/goal\n다음 줄"));
+        assert!(is_codex_goal_start_request("/goal\t탭 뒤 내용"));
+
+        assert!(!is_codex_goal_start_request("/goals"));
+        assert!(!is_codex_goal_start_request("/goalkeeper"));
+        assert!(!is_codex_goal_start_request("질문 /goal"));
+        assert!(!is_codex_goal_start_request(""));
+    }
+
+    #[test]
+    fn fresh_codex_goal_session_requires_codex_and_enabled_goals() {
+        assert!(should_start_fresh_codex_goal_session(
+            &ProviderKind::Codex,
+            "/goal 새 목표",
+            None
+        ));
+        assert!(should_start_fresh_codex_goal_session(
+            &ProviderKind::Codex,
+            "/goal 새 목표",
+            Some(true)
+        ));
+        assert!(!should_start_fresh_codex_goal_session(
+            &ProviderKind::Codex,
+            "/goal 새 목표",
+            Some(false)
+        ));
+        assert!(!should_start_fresh_codex_goal_session(
+            &ProviderKind::Claude,
+            "/goal 새 목표",
+            Some(true)
+        ));
+        assert!(!should_start_fresh_codex_goal_session(
+            &ProviderKind::Codex,
+            "/goals",
+            Some(true)
+        ));
     }
 
     #[test]

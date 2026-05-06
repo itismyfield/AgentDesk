@@ -146,6 +146,39 @@ pub(in crate::services::discord) fn codex_goals_supported(provider: &ProviderKin
     matches!(provider, ProviderKind::Codex)
 }
 
+pub(in crate::services::discord) fn session_toggle_reset_line(reset_pending: bool) -> &'static str {
+    if reset_pending {
+        "다음 사용자 턴 시작 전에 기존 세션을 정리한 뒤 반영됩니다."
+    } else {
+        "현재 세션부터 반영됩니다."
+    }
+}
+
+pub(in crate::services::discord) async fn fallback_channel_name_for_feature_toggle(
+    ctx: Context<'_>,
+    channel_id: serenity::ChannelId,
+) -> Option<String> {
+    let http = ctx.serenity_context().http.clone();
+    if let Some((parent_id, parent_name)) =
+        super::super::resolve_thread_parent(&http, channel_id).await
+    {
+        let parent_name = parent_name.unwrap_or_else(|| parent_id.get().to_string());
+        return Some(super::super::synthetic_thread_channel_name(
+            &parent_name,
+            channel_id,
+        ));
+    }
+
+    channel_id
+        .to_channel(&http)
+        .await
+        .ok()
+        .and_then(|channel| match channel {
+            serenity::Channel::Guild(guild_channel) => Some(guild_channel.name),
+            _ => None,
+        })
+}
+
 pub(in crate::services::discord) async fn channel_fast_mode_setting(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
