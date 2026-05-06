@@ -2305,6 +2305,15 @@ fn active_dispatch_slot_guard_sql(agent_expr: &str, slot_expr: &str) -> String {
                AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'slot_index', '')::BIGINT, -1) = {slot_expr}
                AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
                AND (COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->'phase_gate' IS NULL
+               AND (
+                   COALESCE(d.dispatch_type, 'implementation') NOT IN ('review', 'review-decision', 'create-pr')
+                   OR EXISTS (
+                       SELECT 1
+                       FROM sessions s
+                       WHERE s.active_dispatch_id = d.id
+                         AND COALESCE(s.status, '') NOT IN ('disconnected', 'completed', 'failed', 'cancelled')
+                   )
+               )
          )"
     )
 }
@@ -2319,6 +2328,15 @@ fn active_dispatch_slot_exists_sql(agent_expr: &str, slot_expr: &str) -> String 
                AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'slot_index', '')::BIGINT, -1) = {slot_expr}
                AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
                AND (COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->'phase_gate' IS NULL
+               AND (
+                   COALESCE(d.dispatch_type, 'implementation') NOT IN ('review', 'review-decision', 'create-pr')
+                   OR EXISTS (
+                       SELECT 1
+                       FROM sessions s
+                       WHERE s.active_dispatch_id = d.id
+                         AND COALESCE(s.status, '') NOT IN ('disconnected', 'completed', 'failed', 'cancelled')
+                   )
+               )
          )"
     )
 }
@@ -2785,7 +2803,16 @@ pub async fn slot_has_active_dispatch_excluding_pg(
            AND COALESCE(NULLIF((COALESCE(NULLIF(context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = $2
            AND COALESCE(((COALESCE(NULLIF(context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
            AND (COALESCE(NULLIF(context, ''), '{}')::jsonb)->'phase_gate' IS NULL
-           AND id != $3",
+           AND id != $3
+           AND (
+               COALESCE(dispatch_type, 'implementation') NOT IN ('review', 'review-decision', 'create-pr')
+               OR EXISTS (
+                   SELECT 1
+                   FROM sessions s
+                   WHERE s.active_dispatch_id = task_dispatches.id
+                     AND COALESCE(s.status, '') NOT IN ('disconnected', 'completed', 'failed', 'cancelled')
+               )
+           )",
     )
     .bind(agent_id)
     .bind(slot_index)
@@ -6236,6 +6263,104 @@ mod tests {
                 .expect("query active primary dispatch"),
             "primary dispatches must still block slot reuse"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn slot_has_active_dispatch_ignores_orphaned_review_dispatches_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, to_agent_id, dispatch_type, status, context)
+             VALUES ($1, $2, 'review', 'dispatched', $3)",
+        )
+        .bind("dispatch-orphan-review")
+        .bind("agent-1")
+        .bind(serde_json::json!({"slot_index": 0}).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed orphan review dispatch");
+
+        assert!(
+            !slot_has_active_dispatch_pg(&pool, "agent-1", 0)
+                .await
+                .expect("query orphan review dispatch"),
+            "review dispatches without an active provider session must not block slot reuse"
+        );
+
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, to_agent_id, dispatch_type, status, context)
+             VALUES ($1, $2, 'review', 'dispatched', $3)",
+        )
+        .bind("dispatch-live-review")
+        .bind("agent-1")
+        .bind(serde_json::json!({"slot_index": 0}).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed live review dispatch");
+        sqlx::query(
+            "INSERT INTO sessions (session_key, agent_id, status, active_dispatch_id)
+             VALUES ('session-live-review', 'agent-1', 'turn_active', 'dispatch-live-review')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed live review session");
+
+        assert!(
+            slot_has_active_dispatch_pg(&pool, "agent-1", 0)
+                .await
+                .expect("query live review dispatch"),
+            "review dispatches with an active provider session must still block slot reuse"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn allocate_slot_for_group_agent_pg_ignores_orphaned_review_slot_blocker() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, context)
+             VALUES ('dispatch-orphan-review-slot', NULL, 'agent-1', 'review', 'dispatched', $1)",
+        )
+        .bind(
+            serde_json::json!({
+                "slot_index": 0,
+                "review_target_reject_reason": "latest_work_target_issue_mismatch"
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .expect("seed orphan review slot dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase)
+             VALUES ('entry-next-after-orphan-review', 'run-1', NULL, 'agent-1', 'pending', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed pending entry");
+
+        let allocation = allocate_slot_for_group_agent_pg(&pool, "run-1", 0, "agent-1")
+            .await
+            .expect("allocate slot past orphan review dispatch")
+            .expect("existing slot should be reusable");
+        assert_eq!(allocation.slot_index, 0);
+        assert!(!allocation.newly_assigned);
+
+        let next_slot: Option<i64> = sqlx::query_scalar(
+            "SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-next-after-orphan-review'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("next entry slot");
+        assert_eq!(next_slot, Some(0));
 
         pool.close().await;
         pg_db.drop().await;
