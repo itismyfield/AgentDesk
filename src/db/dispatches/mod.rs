@@ -2,6 +2,7 @@
 // `outbox` re-exports the per-dispatch outbox-shaped queries so the route
 // layer / service layer / future #1694 work can depend on a narrow API
 // without further extraction.
+pub(crate) mod delivery_events;
 mod metadata;
 pub(crate) mod outbox;
 
