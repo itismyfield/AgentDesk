@@ -165,15 +165,24 @@ pub(super) async fn update_entry_with_pg(
 
     let mut effective_status = status.clone();
     if let Some(new_status) = requested_status {
-        match crate::db::auto_queue::update_entry_status_on_pg(
-            pool,
-            id,
-            new_status,
-            "manual_update",
-            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-        )
-        .await
-        {
+        let update_result = if new_status == crate::db::auto_queue::ENTRY_STATUS_DONE {
+            crate::db::auto_queue::reconcile_failed_entry_done_on_pg(
+                pool,
+                id,
+                "manual_terminal_reconcile",
+            )
+            .await
+        } else {
+            crate::db::auto_queue::update_entry_status_on_pg(
+                pool,
+                id,
+                new_status,
+                "manual_update",
+                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+            )
+            .await
+        };
+        match update_result {
             Ok(result) => effective_status = result.to_status,
             Err(error) if error.contains("not found") => {
                 return (
@@ -321,12 +330,14 @@ pub async fn update_entry(
         Some(crate::db::auto_queue::ENTRY_STATUS_SKIPPED) => {
             Some(crate::db::auto_queue::ENTRY_STATUS_SKIPPED)
         }
-        Some(crate::db::auto_queue::ENTRY_STATUS_DISPATCHED)
-        | Some(crate::db::auto_queue::ENTRY_STATUS_DONE) => {
+        Some(crate::db::auto_queue::ENTRY_STATUS_DONE) => {
+            Some(crate::db::auto_queue::ENTRY_STATUS_DONE)
+        }
+        Some(crate::db::auto_queue::ENTRY_STATUS_DISPATCHED) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "error": "manual entry status updates only support pending or skipped"
+                    "error": "manual entry status updates only support pending, skipped, or terminal done reconciliation"
                 })),
             );
         }
