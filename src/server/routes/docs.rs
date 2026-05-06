@@ -248,6 +248,7 @@ pub(crate) const TOP_40_PAIRED_PATHS: &[(&str, &str)] = &[
     ("GET", "/api/dispatches"),
     ("POST", "/api/dispatches"),
     ("GET", "/api/dispatches/{id}"),
+    ("GET", "/api/dispatches/{id}/events"),
     ("PATCH", "/api/dispatches/{id}"),
     ("POST", "/api/queue/generate"),
     ("POST", "/api/queue/dispatch-next"),
@@ -2298,6 +2299,45 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"error": "dispatch not found: dispatch-ghost"}),
         )
         .with_curl("curl http://localhost:8787/api/dispatches/dispatch-1"),
+        ep(
+            "GET",
+            "/api/dispatches/{id}/events",
+            "dispatches",
+            "List read-only dispatch delivery events recorded in the typed delivery table for one dispatch. Returns events newest-first and never reads kv_meta.",
+        )
+        .with_params([("id", path_param("Dispatch ID"))])
+        .with_example(
+            json!({"path": {"id": "dispatch-1"}}),
+            json!({
+                "dispatch_id": "dispatch-1",
+                "events": [{
+                    "id": 1,
+                    "dispatch_id": "dispatch-1",
+                    "correlation_id": "dispatch:dispatch-1",
+                    "semantic_event_id": "dispatch:dispatch-1:notify",
+                    "operation": "send",
+                    "target_kind": "channel",
+                    "target_channel_id": "1500000000000000000",
+                    "target_thread_id": null,
+                    "status": "sent",
+                    "attempt": 1,
+                    "message_id": "1500000000000000001",
+                    "messages_json": [{"channel_id": "1500000000000000000", "message_id": "1500000000000000001"}],
+                    "fallback_kind": null,
+                    "error": null,
+                    "result_json": {"status": "success"},
+                    "reserved_until": null,
+                    "created_at": "2026-05-06T08:00:00Z",
+                    "updated_at": "2026-05-06T08:00:01Z"
+                }]
+            }),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"id": "dispatch-ghost"}}),
+            json!({"error": "dispatch not found"}),
+        )
+        .with_curl("curl http://localhost:8787/api/dispatches/dispatch-1/events"),
         ep(
             "PATCH",
             "/api/dispatches/{id}",
@@ -5074,6 +5114,29 @@ mod tests {
                 .as_ref()
                 .and_then(|example| example.status),
             Some(409)
+        );
+
+        let delivery_events = endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.method == "GET" && endpoint.path == "/api/dispatches/{id}/events"
+            })
+            .expect("GET /api/dispatches/{id}/events must be documented");
+        assert_eq!(effective_category(delivery_events), "dispatches");
+        assert!(
+            delivery_events.description.contains("newest-first")
+                && delivery_events.description.contains("typed delivery table")
+                && delivery_events.description.contains("never reads kv_meta"),
+            "delivery event docs must describe typed read-only semantics: {}",
+            delivery_events.description
+        );
+        assert_eq!(
+            delivery_events
+                .example
+                .as_ref()
+                .expect("delivery event docs must include example")
+                .response["events"][0]["status"],
+            "sent"
         );
     }
 

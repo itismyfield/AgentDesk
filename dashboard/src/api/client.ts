@@ -12,11 +12,18 @@ import type {
   RoundTableMeeting,
   RoundTableMeetingChannelOption,
   SkillCatalogEntry,
+  DispatchDeliveryEvent,
   TaskDispatch,
 } from "../types";
 import { resolveAvatarSeed } from "../lib/pixel-avatar";
 
-export type { AuditLogEntry, KanbanCard, KanbanRepoSource, TokenAnalyticsResponse } from "../types";
+export type {
+  AuditLogEntry,
+  DispatchDeliveryEvent,
+  KanbanCard,
+  KanbanRepoSource,
+  TokenAnalyticsResponse,
+} from "../types";
 
 const BASE = "";
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -1244,6 +1251,17 @@ export async function getTaskDispatches(filters?: {
     `/api/dispatches${q ? `?${q}` : ""}`,
   );
   return data.dispatches;
+}
+
+export interface DispatchDeliveryEventsResponse {
+  dispatch_id: string;
+  events: DispatchDeliveryEvent[];
+}
+
+export async function getDispatchDeliveryEvents(
+  dispatchId: string,
+): Promise<DispatchDeliveryEventsResponse> {
+  return request(`/api/dispatches/${encodeURIComponent(dispatchId)}/events`);
 }
 
 // ── Dispatched Sessions ──

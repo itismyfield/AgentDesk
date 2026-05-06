@@ -197,12 +197,15 @@ The typed table can become authoritative only after all of these are true:
   prior delivery metadata instead of sending again.
 - API and dashboard views can diagnose a stuck, failed, fallback, duplicate, and
   successful delivery without direct DB inspection.
+- `GET /api/dispatches/{id}/events` and the Kanban detail delivery-events panel
+  have been deployed in release long enough for operators to use them during at
+  least one real dispatch incident or routine verification pass.
 - The rollout has an explicit rollback: re-enable `kv_meta` as the authority and
   ignore typed read decisions without deleting typed rows.
 
 Once those criteria pass, switch runtime reads and dedupe claims to
 `dispatch_delivery_events`, keep shadow `kv_meta` writes for one release, then
-remove the legacy guard in a follow-up issue.
+remove the legacy guard in follow-up issue #1864.
 
 ## Implementation Checklist
 

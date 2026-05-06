@@ -442,6 +442,35 @@ export interface TaskDispatch {
   completed_at: number | null;
 }
 
+export type DispatchDeliveryEventStatus =
+  | "reserved"
+  | "sent"
+  | "fallback"
+  | "duplicate"
+  | "skipped"
+  | "failed";
+
+export interface DispatchDeliveryEvent {
+  id: number;
+  dispatch_id: string;
+  correlation_id: string;
+  semantic_event_id: string;
+  operation: string;
+  target_kind: string;
+  target_channel_id: string | null;
+  target_thread_id: string | null;
+  status: DispatchDeliveryEventStatus;
+  attempt: number;
+  message_id: string | null;
+  messages_json: unknown;
+  fallback_kind: string | null;
+  error: string | null;
+  result_json: unknown;
+  reserved_until: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export type KanbanCardStatus =
   | "backlog"
   | "ready"

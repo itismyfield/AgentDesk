@@ -206,6 +206,38 @@ pub(crate) async fn finalize_dispatch_delivery_event_pg(
     Ok(insert.rows_affected() > 0)
 }
 
+pub(crate) async fn list_dispatch_delivery_events_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<Vec<DispatchDeliveryEvent>, sqlx::Error> {
+    sqlx::query_as::<_, DispatchDeliveryEvent>(
+        "SELECT id,
+                dispatch_id,
+                correlation_id,
+                semantic_event_id,
+                operation,
+                target_kind,
+                target_channel_id,
+                target_thread_id,
+                status,
+                attempt,
+                message_id,
+                messages_json,
+                fallback_kind,
+                error,
+                result_json,
+                reserved_until,
+                created_at,
+                updated_at
+           FROM dispatch_delivery_events
+          WHERE dispatch_id = $1
+          ORDER BY created_at DESC, id DESC",
+    )
+    .bind(dispatch_id)
+    .fetch_all(pool)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DispatchDeliveryEvent, DispatchDeliveryEventStatus};

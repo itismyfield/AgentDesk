@@ -93,6 +93,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(dispatches::get_dispatch).patch(dispatches::update_dispatch),
             )
             .route(
+                "/dispatches/{id}/events",
+                get(dispatches::get_dispatch_delivery_events),
+            )
+            .route(
                 "/internal/link-dispatch-thread",
                 post(dispatches::link_dispatch_thread),
             )

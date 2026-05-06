@@ -85,6 +85,36 @@ pub async fn get_dispatch(
     }
 }
 
+/// GET /api/dispatches/:id/events
+pub async fn get_dispatch_delivery_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<DispatchRouteResponse>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+
+    if let Err(error) = crate::dispatch::query_dispatch_row_pg(pool, &id).await {
+        return if error.to_string().contains("Query returned no rows") {
+            (
+                StatusCode::NOT_FOUND,
+                Json(DispatchRouteResponse::error("dispatch not found")),
+            )
+        } else {
+            internal_error(format!("{error}"))
+        };
+    }
+
+    match crate::db::dispatches::delivery_events::list_dispatch_delivery_events_pg(pool, &id).await
+    {
+        Ok(events) => (
+            StatusCode::OK,
+            Json(DispatchRouteResponse::delivery_events(id, events)),
+        ),
+        Err(error) => internal_error(format!("{error}")),
+    }
+}
+
 /// POST /api/dispatches
 pub async fn create_dispatch(
     State(state): State<AppState>,
@@ -480,4 +510,195 @@ async fn update_dispatch_result_pg(
     .await
     .map_err(|error| format!("update postgres dispatch result {dispatch_id}: {error}"))?;
     Ok(updated.rows_affected() as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_dispatch_delivery_events;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+
+    struct TestPostgresDb {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let lock = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!(
+                "agentdesk_dispatch_route_events_{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "dispatch delivery events route test",
+            )
+            .await
+            .unwrap();
+
+            Self {
+                _lock: lock,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "dispatch delivery events route test",
+            )
+            .await
+            .unwrap()
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "dispatch delivery events route test",
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
+    fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> crate::engine::PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        crate::engine::PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    fn test_state_with_pg(pg_pool: sqlx::PgPool) -> crate::server::routes::AppState {
+        let tx = crate::server::ws::new_broadcast();
+        let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
+        crate::server::routes::AppState {
+            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+            legacy_db_override: None,
+            pg_pool: Some(pg_pool.clone()),
+            engine: test_engine_with_pg(pg_pool),
+            config: std::sync::Arc::new(crate::config::Config::default()),
+            broadcast_tx: tx,
+            batch_buffer: buf,
+            health_registry: None,
+            cluster_instance_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_delivery_events_route_returns_typed_rows_newest_first() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let state = test_state_with_pg(pool.clone());
+
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, status, title, created_at, updated_at)
+             VALUES ($1, 'completed', 'Delivery event route test', NOW(), NOW())",
+        )
+        .bind("dispatch-events-route")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO dispatch_delivery_events (
+                dispatch_id, correlation_id, semantic_event_id, operation, target_kind,
+                status, attempt, error, result_json, created_at, updated_at
+             ) VALUES (
+                $1, 'dispatch:dispatch-events-route', 'dispatch:dispatch-events-route:notify',
+                'send', 'channel', 'failed', 1, 'first failure',
+                '{\"status\":\"failed\"}'::jsonb,
+                NOW() - INTERVAL '1 minute',
+                NOW() - INTERVAL '1 minute'
+             )",
+        )
+        .bind("dispatch-events-route")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO dispatch_delivery_events (
+                dispatch_id, correlation_id, semantic_event_id, operation, target_kind,
+                target_channel_id, status, attempt, message_id, messages_json, result_json,
+                created_at, updated_at
+             ) VALUES (
+                $1, 'dispatch:dispatch-events-route', 'dispatch:dispatch-events-route:notify',
+                'send', 'channel', '1500000000000000000', 'sent', 2,
+                '1500000000000000001',
+                '[{\"channel_id\":\"1500000000000000000\",\"message_id\":\"1500000000000000001\"}]'::jsonb,
+                '{\"status\":\"success\"}'::jsonb, NOW(), NOW()
+             )",
+        )
+        .bind("dispatch-events-route")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (status, body) =
+            get_dispatch_delivery_events(State(state), Path("dispatch-events-route".to_string()))
+                .await;
+        let body = serde_json::to_value(body.0).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["dispatch_id"], "dispatch-events-route");
+        assert_eq!(body["events"].as_array().unwrap().len(), 2);
+        assert_eq!(body["events"][0]["status"], "sent");
+        assert_eq!(body["events"][0]["attempt"], 2);
+        assert_eq!(body["events"][0]["message_id"], "1500000000000000001");
+        assert_eq!(body["events"][1]["status"], "failed");
+        assert_eq!(body["events"][1]["error"], "first failure");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }

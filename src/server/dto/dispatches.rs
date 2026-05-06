@@ -167,6 +167,12 @@ pub(crate) struct DispatchResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct DispatchDeliveryEventsResponse {
+    pub(crate) dispatch_id: String,
+    pub(crate) events: Vec<crate::db::dispatches::delivery_events::DispatchDeliveryEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) struct DispatchCreateResponse {
     pub(crate) dispatch: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -185,6 +191,7 @@ pub(crate) struct DispatchErrorResponse {
 pub(crate) enum DispatchRouteResponse {
     List(DispatchListResponse),
     Dispatch(DispatchResponse),
+    DeliveryEvents(DispatchDeliveryEventsResponse),
     Create(DispatchCreateResponse),
     Error(DispatchErrorResponse),
 }
@@ -196,6 +203,16 @@ impl DispatchRouteResponse {
 
     pub(crate) fn dispatch(dispatch: serde_json::Value) -> Self {
         Self::Dispatch(DispatchResponse { dispatch })
+    }
+
+    pub(crate) fn delivery_events(
+        dispatch_id: impl Into<String>,
+        events: Vec<crate::db::dispatches::delivery_events::DispatchDeliveryEvent>,
+    ) -> Self {
+        Self::DeliveryEvents(DispatchDeliveryEventsResponse {
+            dispatch_id: dispatch_id.into(),
+            events,
+        })
     }
 
     pub(crate) fn created_dispatch(dispatch: serde_json::Value) -> Self {

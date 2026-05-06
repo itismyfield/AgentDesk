@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   assignKanbanIssue,
+  getDispatchDeliveryEvents,
   redispatchKanbanCard,
   retryKanbanCard,
 } from "./client";
@@ -87,5 +88,46 @@ describe("kanban dispatch mutation responses", () => {
     await expect(redispatchKanbanCard("card-1")).rejects.toThrow(
       "missing required field 'next_action'",
     );
+  });
+});
+
+describe("dispatch delivery events", () => {
+  it("requests the read-only dispatch events endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockJsonResponse({
+        dispatch_id: "dispatch-1",
+        events: [
+          {
+            id: 1,
+            dispatch_id: "dispatch-1",
+            correlation_id: "dispatch:dispatch-1",
+            semantic_event_id: "dispatch:dispatch-1:notify",
+            operation: "send",
+            target_kind: "channel",
+            target_channel_id: "1500000000000000000",
+            target_thread_id: null,
+            status: "sent",
+            attempt: 1,
+            message_id: "1500000000000000001",
+            messages_json: [],
+            fallback_kind: null,
+            error: null,
+            result_json: { status: "success" },
+            reserved_until: null,
+            created_at: "2026-05-06T08:00:00Z",
+            updated_at: "2026-05-06T08:00:01Z",
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getDispatchDeliveryEvents("dispatch/needs encode");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/dispatches/dispatch%2Fneeds%20encode/events",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(result.events[0].status).toBe("sent");
   });
 });
