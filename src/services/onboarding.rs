@@ -263,7 +263,7 @@ pub async fn status(state: &AppState) -> (StatusCode, Json<serde_json::Value>) {
         };
     }
 
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         return match status_config() {
             Ok(value) => (StatusCode::OK, Json(value)),
@@ -524,7 +524,7 @@ async fn status_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
     }))
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn status_config() -> Result<serde_json::Value, String> {
     let runtime_root = crate::cli::agentdesk_runtime_root();
     let config = match runtime_root.as_ref() {
@@ -611,7 +611,7 @@ pub async fn draft_get(state: &AppState) -> (StatusCode, Json<serde_json::Value>
             }
         }
     } else {
-        #[cfg(not(feature = "legacy-sqlite-tests"))]
+        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         {
             crate::cli::agentdesk_runtime_root()
                 .as_ref()
@@ -901,7 +901,7 @@ async fn load_channels(
     (StatusCode::OK, Json(json!({"guilds": result_guilds})))
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn saved_onboarding_bot_token_without_pg(_state: &AppState) -> Option<String> {
     crate::cli::agentdesk_runtime_root()
         .as_ref()
@@ -3117,7 +3117,7 @@ async fn complete_with_options(
         collect_onboarding_conflicts_pg(pool, &root, provider, &resolved_channels, rerun_policy)
             .await
     } else {
-        #[cfg(not(feature = "legacy-sqlite-tests"))]
+        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         {
             Err("Postgres pool is required to check onboarding database conflicts".to_string())
         }
@@ -3460,7 +3460,7 @@ async fn complete_with_options(
             );
         }
     } else {
-        #[cfg(not(feature = "legacy-sqlite-tests"))]
+        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         {
             completion_state.last_error =
                 Some("Postgres pool is required to persist onboarding state".to_string());

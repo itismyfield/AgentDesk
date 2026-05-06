@@ -41,7 +41,7 @@ pub fn upsert_turn_stat(db: &Db, stat: &MementoFeedbackTurnStat) -> Result<()> {
     upsert_turn_stat_on_conn(&mut conn, stat)
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub fn upsert_turn_stat(_db: &Db, _stat: &MementoFeedbackTurnStat) -> Result<()> {
     Err(anyhow!(
         "sqlite memento feedback stats backend is unavailable in production"

@@ -197,7 +197,7 @@ pub fn list_maintenance_jobs() -> Vec<MaintenanceJobInfo> {
 }
 
 /// Spawn the maintenance scheduler task. The task runs until the tokio
-/// runtime shuts down. Call once during server boot (under `#[cfg(not(feature = "legacy-sqlite-tests"))]`).
+/// runtime shuts down. Call once during server boot (under `#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]`).
 ///
 /// Scheduling model: every [`DEFAULT_TICK_INTERVAL`] the scheduler iterates
 /// the registry; for each job whose `last_run + interval <= now` (or which

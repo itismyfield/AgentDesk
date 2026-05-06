@@ -1311,7 +1311,7 @@ fn sync_terminal_transition_followups(db: &Db, card_id: &str) {
 }
 
 fn sync_terminal_card_state_with_scope(db: &Db, card_id: &str, cancel_implementation: bool) {
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         let _ = (db, card_id, cancel_implementation);
         return;
@@ -1521,7 +1521,7 @@ fn resolve_effective_pipeline_for_hooks(
             crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
         })
     }
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         let _ = db;
         None
@@ -1603,7 +1603,7 @@ pub fn fire_transition_hooks_with_backends(
         return;
     }
 
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         let _ = (db, engine, card_id, from, to);
         return;

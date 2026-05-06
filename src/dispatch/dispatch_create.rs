@@ -1240,7 +1240,7 @@ pub fn create_dispatch_with_options(
             options,
         );
     }
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         Err(anyhow::anyhow!(
             "Postgres pool required for create_dispatch_with_options"

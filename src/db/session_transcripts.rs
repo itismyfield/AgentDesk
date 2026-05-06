@@ -125,7 +125,7 @@ pub async fn persist_turn_db(
                 db.ok_or_else(|| anyhow!("sqlite db is required when postgres pool is absent"))?;
             return persist_turn(db, entry);
         }
-        #[cfg(not(feature = "legacy-sqlite-tests"))]
+        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         {
             let _ = db;
             return Err(anyhow!(
@@ -351,7 +351,7 @@ pub fn dispatch_has_assistant_response_db(
                 )
                 .map_err(|e| anyhow!("session transcript lookup failed: {e}"));
         }
-        #[cfg(not(feature = "legacy-sqlite-tests"))]
+        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         {
             let _ = db;
             return Ok(false);

@@ -889,7 +889,7 @@ pub(super) fn review_state_sync_with_backends(
     if let Some(db) = db {
         return review_state_sync_sqlite(db, json_str);
     }
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let _ = db;
     r#"{"error":"postgres backend is required for review_state_sync"}"#.to_string()
 }

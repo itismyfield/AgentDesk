@@ -757,7 +757,7 @@ pub(super) async fn auto_restore_session_force(
                     })
                 })
             }
-            #[cfg(not(feature = "legacy-sqlite-tests"))]
+            #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
             {
                 None
             }

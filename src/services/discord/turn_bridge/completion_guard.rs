@@ -885,7 +885,7 @@ pub(in crate::services::discord) async fn store_reconcile_marker_with_handles(
         }
     }
 
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let _ = db;
 
     false

@@ -1531,7 +1531,7 @@ pub fn load_dispatch_row_with_backends(
                 return query_dispatch_row(&conn, dispatch_id).map(Some);
             }
         }
-        #[cfg(not(feature = "legacy-sqlite-tests"))]
+        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to load dispatch row {dispatch_id}"
@@ -1572,7 +1572,7 @@ fn complete_dispatch_inner_with_backends(
         if let Some(db) = db {
             return complete_dispatch_inner_sqlite(db, engine, dispatch_id, result);
         }
-        #[cfg(not(feature = "legacy-sqlite-tests"))]
+        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to complete dispatch {dispatch_id}"

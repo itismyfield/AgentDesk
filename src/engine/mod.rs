@@ -340,7 +340,7 @@ impl PolicyEngine {
                 )
                 .map_err(|e| anyhow::anyhow!("Failed to register bridge ops: {e}"));
             }
-            #[cfg(not(feature = "legacy-sqlite-tests"))]
+            #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
             ops::register_globals_with_supervisor_and_pg(
                 &ctx,
                 runtime_deps.pg_pool.clone(),
@@ -376,7 +376,7 @@ impl PolicyEngine {
                         anyhow::anyhow!("Failed to register bridge ops in reload ctx: {e}")
                     });
                 }
-                #[cfg(not(feature = "legacy-sqlite-tests"))]
+                #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
                 ops::register_globals_with_supervisor_and_pg(
                     &ctx,
                     runtime_deps.pg_pool.clone(),
@@ -560,7 +560,7 @@ impl PolicyEngine {
             return;
         }
 
-        #[cfg(not(feature = "legacy-sqlite-tests"))]
+        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         {
             return;
         }
@@ -853,7 +853,7 @@ impl PolicyEngine {
                 crate::kanban::fire_transition_hooks_with_backends(
                     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
                     self.legacy_db(),
-                    #[cfg(not(feature = "legacy-sqlite-tests"))]
+                    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
                     None,
                     self.pg_pool(),
                     self,
@@ -1231,7 +1231,7 @@ impl PolicyEngine {
             intent::execute_intents_with_backends(
                 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
                 self.legacy_db(),
-                #[cfg(not(feature = "legacy-sqlite-tests"))]
+                #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
                 None,
                 self.pg_pool(),
                 Some(self),

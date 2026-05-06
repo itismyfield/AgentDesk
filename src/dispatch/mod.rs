@@ -2112,11 +2112,11 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_type_thread_routing_keeps_phase_gate_in_primary_channel() {
+    fn dispatch_type_thread_routing_includes_phase_gate() {
         assert!(dispatch_type_uses_thread_routing(Some("implementation")));
         assert!(dispatch_type_uses_thread_routing(Some("review")));
         assert!(dispatch_type_uses_thread_routing(Some("rework")));
-        assert!(!dispatch_type_uses_thread_routing(Some("phase-gate")));
+        assert!(dispatch_type_uses_thread_routing(Some("phase-gate")));
         assert!(dispatch_type_uses_thread_routing(Some("review-decision")));
         assert!(dispatch_type_uses_thread_routing(None));
     }

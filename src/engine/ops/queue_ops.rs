@@ -8,10 +8,10 @@ pub(super) fn register_queue_ops<'js>(
     #[cfg(all(test, feature = "legacy-sqlite-tests"))] db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let db: Option<Db> = None;
 
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let _ = &db;
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let queue_obj = Object::new(ctx.clone())?;
