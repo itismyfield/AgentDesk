@@ -495,6 +495,25 @@ class HarnessCli(unittest.TestCase):
             self.assertIn(f'"{key}"', json_text, f"missing json section for {key}")
             self.assertIn(f"`{key}`", md_text, f"missing markdown section for {key}")
 
+    def test_markdown_summary_includes_every_registered_check(self) -> None:
+        with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
+            specs = HARNESS.load_check_specs()
+            findings = HARNESS.run_all(specs, {})
+            md_text = HARNESS.render_markdown(specs, findings)
+
+        summary_keys: list[str] = []
+        in_summary = False
+        for line in md_text.splitlines():
+            if line == "## Summary":
+                in_summary = True
+                continue
+            if in_summary and line.startswith("## "):
+                break
+            if in_summary and line.startswith("| `"):
+                summary_keys.append(line.split("`", 2)[1])
+
+        self.assertEqual(summary_keys, [spec.key for spec in specs])
+
     def test_only_selected_checks_are_hard_gated(self) -> None:
         specs = HARNESS.load_check_specs()
         hard_gated = {spec.key for spec in specs if spec.hard_gate}
