@@ -260,6 +260,14 @@ src/
 │   │   ├── dto.rs
 │   │   ├── queue_metrics.rs
 │   │   └── session_metrics.rs
+│   ├── api_friction/
+│   │   └── tests/
+│   │       ├── helpers.rs
+│   │       ├── memory_sync.rs
+│   │       ├── mod.rs
+│   │       ├── parser.rs
+│   │       ├── pg_storage.rs
+│   │       └── processing.rs
 │   ├── auto_queue/
 │   │   ├── activate_bridge.rs
 │   │   ├── activate_command.rs
@@ -313,10 +321,12 @@ src/
 │   │   │   ├── skill.rs
 │   │   │   └── text_commands.rs
 │   │   ├── health/
+│   │   │   ├── mailbox.rs
 │   │   │   ├── provider_probe.rs
 │   │   │   ├── recovery.rs
 │   │   │   ├── redaction.rs
-│   │   │   └── session_enrichment.rs
+│   │   │   ├── session_enrichment.rs
+│   │   │   └── snapshot.rs
 │   │   ├── outbound/
 │   │   │   ├── decision.rs
 │   │   │   ├── delivery.rs
