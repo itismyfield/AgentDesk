@@ -512,7 +512,7 @@ fn should_add_turn_pending_reaction(_dispatch_id: Option<&str>) -> bool {
     true
 }
 
-async fn mailbox_try_start_turn_after_terminal_marker_cleanup(
+async fn mailbox_try_start_turn_with_terminal_marker_cleanup(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     cancel_token: Arc<CancelToken>,
@@ -581,7 +581,15 @@ async fn mailbox_try_start_turn_after_terminal_marker_cleanup(
         .await;
     }
 
-    if !super::super::mailbox_has_active_turn(shared, channel_id).await
+    let started = super::super::mailbox_try_start_turn(
+        shared,
+        channel_id,
+        cancel_token,
+        request_owner,
+        user_msg_id,
+    )
+    .await;
+    if started
         && let Err(error) = sqlx::query(
             "UPDATE sessions
                 SET active_turn_delivery_outbox_id = NULL
@@ -595,23 +603,14 @@ async fn mailbox_try_start_turn_after_terminal_marker_cleanup(
         .await
     {
         tracing::warn!(
-            "[outbox] failed to clear terminal delivery marker before new turn for channel {}: {}",
+            "[outbox] failed to clear terminal delivery marker after new turn start for channel {}: {}",
             channel_id,
             error
         );
     }
-
-    let started = super::super::mailbox_try_start_turn(
-        shared,
-        channel_id,
-        cancel_token,
-        request_owner,
-        user_msg_id,
-    )
-    .await;
     if let Err(error) = tx.commit().await {
         tracing::warn!(
-            "[outbox] failed to commit terminal delivery marker cleanup before turn start for channel {}: {}",
+            "[outbox] failed to commit terminal delivery marker cleanup after turn start for channel {}: {}",
             channel_id,
             error
         );
@@ -941,7 +940,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     }
 
     let cancel_token = Arc::new(CancelToken::new());
-    let started = mailbox_try_start_turn_after_terminal_marker_cleanup(
+    let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
         shared,
         channel_id,
         cancel_token.clone(),
@@ -2576,7 +2575,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     // because the async gap between check and insert allows interleaving.
     // If another message won the race, queue ourselves and clean up.
     let cancel_token = Arc::new(CancelToken::new());
-    let started = mailbox_try_start_turn_after_terminal_marker_cleanup(
+    let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
         shared,
         channel_id,
         cancel_token.clone(),
