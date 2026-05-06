@@ -2,6 +2,8 @@
 
 # Maintainability audit
 
+> Drift policy: see [docs/generated/README.md](README.md#generated-docs-drift-policy).
+
 Automated audit of giant files, route SRP violations, direct Discord sends, manual JSON row mapping, limit/days clamp duplication, git subprocess callsites, legacy SQLite references, source-of-truth alias writes, and namespace size caps. See `scripts/audit_maintainability.py` (#1282).
 
 Hard-gating is **enabled** for 6 checks: `giant_files`, `namespace_size_caps`, `direct_discord_sends`, `git_subprocess_callsites`, `legacy_sqlite_refs`, `source_of_truth_alias_writes`.
