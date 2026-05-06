@@ -19,7 +19,7 @@ use crate::services::provider_cli::upgrade::{
 };
 use crate::services::provider_cli::{build_retention_set, cleanup_dry_run};
 
-const SUPPORTED_PROVIDERS: &[&str] = &["codex", "claude", "gemini", "qwen"];
+const SUPPORTED_PROVIDERS: &[&str] = &["codex", "claude", "gemini", "opencode", "qwen"];
 
 #[derive(Args)]
 pub struct ProviderCliArgs {
@@ -31,7 +31,7 @@ pub struct ProviderCliArgs {
 pub enum ProviderCliAction {
     /// Show current registry channels and migration states
     Status {
-        /// Restrict output to a single provider (codex, claude, gemini, qwen)
+        /// Restrict output to a single provider (codex, claude, gemini, opencode, qwen)
         provider: Option<String>,
         /// Output raw JSON instead of the default table
         #[arg(long)]
@@ -39,7 +39,7 @@ pub enum ProviderCliAction {
     },
     /// Show what a migration would do without running it
     Plan {
-        /// Provider to plan (codex, claude, gemini, qwen)
+        /// Provider to plan (codex, claude, gemini, opencode, qwen)
         provider: String,
     },
     /// [step] Snapshot current binary and run upgrade
@@ -667,7 +667,7 @@ fn cmd_cleanup(provider: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
 
-    let migration_states: Vec<_> = ["codex", "claude", "gemini", "qwen"]
+    let migration_states: Vec<_> = SUPPORTED_PROVIDERS
         .iter()
         .filter_map(|p| load_migration_state(&root, p).ok().flatten())
         .collect();
