@@ -897,6 +897,51 @@ pub(crate) enum MissingInflightReattachOutcome {
     SaveFailed,
 }
 
+/// Defensive recovery path for the "lost dispatch_id but tmux pane still
+/// alive" edge. **This is not a designed feature** — it is a watcher-only
+/// streaming scratchpad created so that codex output produced after a turn
+/// terminally finished does not silently disappear when ADK could neither
+/// resolve the prior dispatch from the DB nor wait out the
+/// `wait_for_reacquired_turn_bridge_inflight_state` grace window
+/// (`tmux_watcher.rs:2874-2916`).
+///
+/// What the synthetic inflight is:
+/// - A `rebind_origin = true` `InflightTurnState` persisted to disk so that
+///   `persist_watcher_stream_progress` (`tmux.rs:1899`) has a target file to
+///   write to. Without it, every progress write early-returns and the
+///   watcher's streaming state stays purely in-memory.
+/// - An anchor for the `current_msg_id` placeholder that the watcher edits
+///   while relaying post-terminal-success continuation chunks
+///   (`tmux_watcher.rs:486-571`).
+/// - The `watcher_owns_live_relay = true` claim that prevents the watcher
+///   from self-yielding via `watcher_should_yield_to_inflight_state`
+///   (`tmux.rs:1844`); leaving the default `false` triggered the
+///   2026-05-06 adk-cdx self-yield bug where the placeholder was overwritten
+///   with `SUPPRESSED_INTERNAL_LABEL` after a one-hour silence.
+///
+/// What the synthetic inflight is **not**:
+/// - It is **not** a queue lock. The mailbox `cancel_token` (set by
+///   `mailbox_try_start_turn` / `mailbox_recovery_kickoff`) is the source of
+///   truth for `mailbox_has_active_turn`, and this path does not bind one.
+/// - It is **not** durable across dcserver restarts. `recovery_engine`
+///   explicitly skips `rebind_origin = true` inflights post-restart and
+///   logs `recovery: skipping rebind-origin inflight … operator must
+///   re-invoke /api/inflight/rebind post-restart`.
+/// - It is **not** the protection mechanism for monitor / scheduled-wakeup
+///   auto-turns. Those go through `turn_bridge` and create real,
+///   non-synthetic inflights with proper cancel_tokens.
+///
+/// The `rebind_origin = true` marker also guards against an infinite
+/// re-attach loop: when this synthetic state is later observed by
+/// `wait_for_reacquired_turn_bridge_inflight_state`, the predicate filters
+/// it out so the next watcher generation does not itself re-enter this
+/// fallback path.
+///
+/// Removal candidate: see #1857. If the design follow-up agrees that
+/// post-terminal continuation may be relayed as fresh new messages instead
+/// of edited into the synthetic placeholder, this whole path can be
+/// deleted along with its 11+ `load_inflight_state` consumers in
+/// `tmux_watcher.rs`.
 pub(super) fn trigger_missing_inflight_reattach(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -944,6 +989,16 @@ pub(super) fn trigger_missing_inflight_reattach(
         initial_offset,
     );
     state.rebind_origin = true;
+    // The synthetic inflight represents a "watcher-only streaming" state: the
+    // prior turn was terminally finished, dispatch_id resolution failed, and
+    // we are re-attaching the watcher to a still-live tmux pane. In the
+    // current architecture the watcher is the sole relay owner, so the
+    // synthetic state's relay-owner is — by definition — this watcher itself.
+    // Leaving the field at its `false` default makes
+    // `watcher_should_yield_to_inflight_state` (tmux.rs) treat the watcher as
+    // racing a non-existent active bridge turn and edit the placeholder with
+    // the SUPPRESSED_INTERNAL_LABEL when subsequent codex output arrives.
+    state.watcher_owns_live_relay = true;
 
     match super::super::inflight::save_inflight_state_create_new(&state) {
         Ok(()) => {}
