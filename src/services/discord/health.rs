@@ -30,7 +30,11 @@ use crate::services::discord::outbound::{
 };
 use crate::services::provider::ProviderKind;
 
-const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
+mod session_enrichment;
+
+use session_enrichment::SessionEnrichment;
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use session_enrichment::WATCHER_STATE_DESYNC_STALE_MS;
 
 /// Per-provider snapshot for the health response.
 struct ProviderEntry {
@@ -544,35 +548,8 @@ impl HealthRegistry {
                 continue;
             }
             let shared = entry.shared.clone();
-            let watcher_binding = shared.tmux_watchers.channel_binding(&channel);
             let provider_kind = ProviderKind::from_str(&entry.name);
-            let inflight = provider_kind
-                .as_ref()
-                .and_then(|pk| super::inflight::load_inflight_state(pk, channel_id));
-            let inflight_tmux_session = inflight
-                .as_ref()
-                .and_then(|state| state.tmux_session_name.clone());
-            let inflight_owner_channel_id = inflight_tmux_session
-                .as_deref()
-                .and_then(|tmux| shared.tmux_watchers.owner_channel_for_tmux_session(tmux));
-            let inflight_owner_matches_channel = inflight_owner_channel_id == Some(channel);
-            let attached = watcher_binding.is_some() || inflight_owner_matches_channel;
-            let watcher_binding_tmux_session = watcher_binding
-                .as_ref()
-                .map(|binding| binding.tmux_session_name.clone());
-            let relay_state_matches_inflight = match (
-                inflight_tmux_session.as_deref(),
-                watcher_binding_tmux_session.as_deref(),
-            ) {
-                (Some(inflight_tmux), Some(binding_tmux)) => inflight_tmux == binding_tmux,
-                _ => true,
-            };
-            let has_relay_coord = shared.tmux_relay_coords.contains_key(&channel);
-            let inflight_state_present = inflight.is_some();
-            let tmux_session_mismatch = inflight_state_present
-                && !relay_state_matches_inflight
-                && watcher_binding_tmux_session.is_some()
-                && inflight_tmux_session.is_some();
+            let session = SessionEnrichment::load(&shared, provider_kind.as_ref(), channel).await;
             let mailbox_snapshot = super::mailbox_snapshot(&shared, channel).await;
             let mailbox_has_cancel_token = mailbox_snapshot.cancel_token.is_some();
             let mailbox_active_user_msg_id =
@@ -584,111 +561,25 @@ impl HealthRegistry {
                     .dispatch_thread_parents
                     .iter()
                     .any(|entry| *entry.value() == channel);
-            if !attached
-                && !has_relay_coord
-                && !inflight_state_present
+            if !session.attached
+                && !session.has_relay_coord
+                && !session.inflight_state_present
                 && !mailbox_engaged
                 && !has_thread_proof
             {
                 continue;
             }
-            let (last_relay_offset, last_relay_ts_ms, reconnect_count) = shared
-                .tmux_relay_coords
-                .get(&channel)
-                .map(|coord| {
-                    (
-                        coord
-                            .confirmed_end_offset
-                            .load(std::sync::atomic::Ordering::Acquire),
-                        coord
-                            .last_relay_ts_ms
-                            .load(std::sync::atomic::Ordering::Acquire),
-                        coord
-                            .reconnect_count
-                            .load(std::sync::atomic::Ordering::Acquire),
-                    )
-                })
-                .unwrap_or((0, 0, 0));
-            let watcher_owner_channel_id = watcher_binding
-                .as_ref()
-                .map(|binding| binding.owner_channel_id)
-                .or(inflight_owner_channel_id)
-                .map(|id| id.get());
-            let tmux_session = watcher_binding
-                .map(|binding| binding.tmux_session_name)
-                .or(inflight_tmux_session);
-            let inflight_started_at = inflight.as_ref().map(|state| state.started_at.clone());
-            let inflight_updated_at = inflight.as_ref().map(|state| state.updated_at.clone());
-            let inflight_user_msg_id = inflight
-                .as_ref()
-                .map(|state| state.user_msg_id)
-                .filter(|id| *id != 0);
-            let inflight_current_msg_id = inflight
-                .as_ref()
-                .map(|state| state.current_msg_id)
-                .filter(|id| *id != 0);
-            let tmux_session_alive = match tmux_session.as_ref() {
-                Some(name) => {
-                    let probe_target = name.clone();
-                    let alive = tokio::task::spawn_blocking(move || {
-                        crate::services::platform::tmux::has_session(&probe_target)
-                    })
-                    .await
-                    .unwrap_or(false);
-                    Some(alive)
-                }
-                None => None,
-            };
-            let output_path_for_metadata = inflight
-                .as_ref()
-                .and_then(|state| state.output_path.as_deref())
-                .map(str::to_string);
-            let last_capture_offset = match output_path_for_metadata {
-                Some(path) => tokio::task::spawn_blocking(move || {
-                    std::fs::metadata(path).ok().map(|meta| meta.len())
-                })
-                .await
-                .unwrap_or(None),
-                None => None,
-            };
-            let unread_bytes = relay_state_matches_inflight
-                .then(|| {
-                    last_capture_offset.map(|capture| capture.saturating_sub(last_relay_offset))
-                })
-                .flatten();
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            let relay_stale_anchor_ms = if last_relay_ts_ms > 0 {
-                Some(last_relay_ts_ms)
-            } else {
-                inflight
-                    .as_ref()
-                    .and_then(|state| super::inflight::parse_started_at_unix(&state.started_at))
-                    .and_then(|seconds| seconds.checked_mul(1000))
-            };
-            let relay_stale = relay_stale_anchor_ms
-                .map(|anchor_ms| now_ms.saturating_sub(anchor_ms) >= WATCHER_STATE_DESYNC_STALE_MS)
-                .unwrap_or(false);
-            let capture_lagged = last_capture_offset
-                .map(|capture| {
-                    relay_state_matches_inflight
-                        && inflight_state_present
-                        && capture != last_relay_offset
-                        && relay_stale
-                })
-                .unwrap_or(false);
-            let live_tmux_orphaned = tmux_session_alive == Some(true)
-                && inflight_state_present
-                && !attached
-                && relay_stale;
-            let desynced =
-                capture_lagged || live_tmux_orphaned || (tmux_session_mismatch && relay_stale);
-            let active_turn =
-                relay_active_turn_from_inflight(mailbox_has_cancel_token, inflight.as_ref());
+            let tmux_session_alive = session.tmux_session_alive().await;
+            let desynced = session.desynced(tmux_session_alive == Some(true), session.attached);
+            let active_turn = relay_active_turn_from_inflight(
+                mailbox_has_cancel_token,
+                session.inflight.as_ref(),
+            );
             let relay_thread_proof = relay_thread_proof_for_channel(
                 &shared,
                 provider_kind.as_ref(),
                 channel,
-                mailbox_has_cancel_token || inflight_state_present || attached,
+                mailbox_has_cancel_token || session.inflight_state_present || session.attached,
             )
             .await;
             let relay_health = build_relay_health_snapshot(RelayHealthBuildInput {
@@ -697,45 +588,43 @@ impl HealthRegistry {
                 mailbox_has_cancel_token,
                 mailbox_active_user_msg_id,
                 queue_depth: mailbox_snapshot.intervention_queue.len(),
-                watcher_attached: attached,
-                watcher_owner_channel_id,
-                tmux_session: tmux_session.clone(),
+                watcher_attached: session.attached,
+                watcher_owner_channel_id: session.watcher_owner_channel_id,
+                tmux_session: session.tmux_session.clone(),
                 tmux_alive: tmux_session_alive,
-                bridge_inflight_present: inflight_state_present,
-                bridge_current_msg_id: inflight_current_msg_id,
-                watcher_owns_live_relay: inflight
-                    .as_ref()
-                    .is_some_and(|state| state.watcher_owns_live_relay),
-                last_relay_ts_ms,
-                last_relay_offset,
-                last_capture_offset,
-                unread_bytes,
+                bridge_inflight_present: session.inflight_state_present,
+                bridge_current_msg_id: session.inflight_current_msg_id(),
+                watcher_owns_live_relay: session.watcher_owns_live_relay(),
+                last_relay_ts_ms: session.last_relay_ts_ms,
+                last_relay_offset: session.last_relay_offset,
+                last_capture_offset: session.last_capture_offset,
+                unread_bytes: session.unread_bytes,
                 desynced,
                 thread_proof: relay_thread_proof,
                 active_turn,
                 last_outbound_activity_ms: last_outbound_activity_ms(
-                    last_relay_ts_ms,
-                    inflight.as_ref(),
+                    session.last_relay_ts_ms,
+                    session.inflight.as_ref(),
                 ),
             });
             let relay_stall_state = RelayStallClassifier::classify(&relay_health);
             trace_relay_health_classification(&relay_health, relay_stall_state);
             return Some(WatcherStateSnapshot {
                 provider: entry.name.clone(),
-                attached,
-                tmux_session,
-                watcher_owner_channel_id,
-                last_relay_offset,
-                inflight_state_present,
-                last_relay_ts_ms,
-                last_capture_offset,
-                unread_bytes,
+                attached: session.attached,
+                tmux_session: session.tmux_session.clone(),
+                watcher_owner_channel_id: session.watcher_owner_channel_id,
+                last_relay_offset: session.last_relay_offset,
+                inflight_state_present: session.inflight_state_present,
+                last_relay_ts_ms: session.last_relay_ts_ms,
+                last_capture_offset: session.last_capture_offset,
+                unread_bytes: session.unread_bytes,
                 desynced,
-                reconnect_count,
-                inflight_started_at,
-                inflight_updated_at,
-                inflight_user_msg_id,
-                inflight_current_msg_id,
+                reconnect_count: session.reconnect_count,
+                inflight_started_at: session.inflight_started_at(),
+                inflight_updated_at: session.inflight_updated_at(),
+                inflight_user_msg_id: session.inflight_user_msg_id(),
+                inflight_current_msg_id: session.inflight_current_msg_id(),
                 tmux_session_alive,
                 has_pending_queue,
                 mailbox_active_user_msg_id,
@@ -1563,99 +1452,11 @@ async fn build_health_snapshot_with_options(
             let provider_kind = ProviderKind::from_str(&entry.name);
             for (channel_id, snapshot) in &mailbox_snapshots {
                 let channel = *channel_id;
-                let inflight_state = provider_kind
-                    .as_ref()
-                    .and_then(|pk| super::inflight::load_inflight_state(pk, channel.get()));
-                let watcher_binding = entry.shared.tmux_watchers.channel_binding(&channel);
-                let watcher_attached = watcher_binding.is_some();
-                let watcher_binding_tmux_session = watcher_binding
-                    .as_ref()
-                    .map(|binding| binding.tmux_session_name.clone());
-                let inflight_tmux_session = inflight_state
-                    .as_ref()
-                    .and_then(|state| state.tmux_session_name.clone());
-                let inflight_owner_channel_id = inflight_tmux_session.as_deref().and_then(|tmux| {
-                    entry
-                        .shared
-                        .tmux_watchers
-                        .owner_channel_for_tmux_session(tmux)
-                });
-                let watcher_owner_channel_id = watcher_binding
-                    .as_ref()
-                    .map(|binding| binding.owner_channel_id)
-                    .or(inflight_owner_channel_id)
-                    .map(|id| id.get());
-                let tmux_session_name = watcher_binding_tmux_session
-                    .clone()
-                    .or_else(|| inflight_tmux_session.clone());
-                let relay_state_matches_inflight = match (
-                    inflight_tmux_session.as_deref(),
-                    watcher_binding_tmux_session.as_deref(),
-                ) {
-                    (Some(inflight_tmux), Some(binding_tmux)) => inflight_tmux == binding_tmux,
-                    _ => true,
-                };
-                let inflight_state_present = inflight_state.is_some();
-                let tmux_session_mismatch = inflight_state_present
-                    && !relay_state_matches_inflight
-                    && watcher_binding_tmux_session.is_some()
-                    && inflight_tmux_session.is_some();
-                let tmux_present = tmux_session_name
-                    .as_deref()
-                    .is_some_and(crate::services::platform::tmux::has_session);
-                let process_present = tmux_session_name
-                    .as_deref()
-                    .is_some_and(|name| crate::services::platform::tmux::pane_pid(name).is_some());
-                let (last_relay_offset, last_relay_ts_ms) = entry
-                    .shared
-                    .tmux_relay_coords
-                    .get(&channel)
-                    .map(|coord| {
-                        (
-                            coord
-                                .confirmed_end_offset
-                                .load(std::sync::atomic::Ordering::Acquire),
-                            coord
-                                .last_relay_ts_ms
-                                .load(std::sync::atomic::Ordering::Acquire),
-                        )
-                    })
-                    .unwrap_or((0, 0));
-                let last_capture_offset = inflight_state
-                    .as_ref()
-                    .and_then(|state| state.output_path.as_deref())
-                    .and_then(|path| std::fs::metadata(path).ok().map(|meta| meta.len()));
-                let unread_bytes = relay_state_matches_inflight
-                    .then(|| {
-                        last_capture_offset.map(|capture| capture.saturating_sub(last_relay_offset))
-                    })
-                    .flatten();
-                let now_ms = chrono::Utc::now().timestamp_millis();
-                let relay_stale_anchor_ms = if last_relay_ts_ms > 0 {
-                    Some(last_relay_ts_ms)
-                } else {
-                    inflight_state
-                        .as_ref()
-                        .and_then(|state| super::inflight::parse_started_at_unix(&state.started_at))
-                        .and_then(|seconds| seconds.checked_mul(1000))
-                };
-                let relay_stale = relay_stale_anchor_ms
-                    .map(|anchor_ms| {
-                        now_ms.saturating_sub(anchor_ms) >= WATCHER_STATE_DESYNC_STALE_MS
-                    })
-                    .unwrap_or(false);
-                let capture_lagged = last_capture_offset
-                    .map(|capture| {
-                        relay_state_matches_inflight
-                            && inflight_state_present
-                            && capture != last_relay_offset
-                            && relay_stale
-                    })
-                    .unwrap_or(false);
-                let live_tmux_orphaned =
-                    tmux_present && inflight_state_present && !watcher_attached && relay_stale;
-                let desynced =
-                    capture_lagged || live_tmux_orphaned || (tmux_session_mismatch && relay_stale);
+                let session =
+                    SessionEnrichment::load(&entry.shared, provider_kind.as_ref(), channel).await;
+                let tmux_present = session.tmux_session_present();
+                let process_present = session.process_present();
+                let desynced = session.desynced(tmux_present, session.watcher_attached);
                 let mailbox_has_cancel_token = snapshot.cancel_token.is_some();
                 let queue_depth = snapshot.intervention_queue.len();
                 let mailbox_active_user_msg_id = snapshot.active_user_message_id.map(|id| id.get());
@@ -1663,12 +1464,14 @@ async fn build_health_snapshot_with_options(
                     &entry.shared,
                     provider_kind.as_ref(),
                     channel,
-                    mailbox_has_cancel_token || inflight_state_present || watcher_attached,
+                    mailbox_has_cancel_token
+                        || session.inflight_state_present
+                        || session.watcher_attached,
                 )
                 .await;
                 let active_turn = relay_active_turn_from_inflight(
                     mailbox_has_cancel_token,
-                    inflight_state.as_ref(),
+                    session.inflight.as_ref(),
                 );
                 let relay_health = build_relay_health_snapshot(RelayHealthBuildInput {
                     provider: entry.name.clone(),
@@ -1676,28 +1479,23 @@ async fn build_health_snapshot_with_options(
                     mailbox_has_cancel_token,
                     mailbox_active_user_msg_id,
                     queue_depth,
-                    watcher_attached,
-                    watcher_owner_channel_id,
-                    tmux_session: tmux_session_name.clone(),
-                    tmux_alive: tmux_session_name.as_ref().map(|_| tmux_present),
-                    bridge_inflight_present: inflight_state_present,
-                    bridge_current_msg_id: inflight_state
-                        .as_ref()
-                        .map(|state| state.current_msg_id)
-                        .filter(|id| *id != 0),
-                    watcher_owns_live_relay: inflight_state
-                        .as_ref()
-                        .is_some_and(|state| state.watcher_owns_live_relay),
-                    last_relay_ts_ms,
-                    last_relay_offset,
-                    last_capture_offset,
-                    unread_bytes,
+                    watcher_attached: session.watcher_attached,
+                    watcher_owner_channel_id: session.watcher_owner_channel_id,
+                    tmux_session: session.tmux_session.clone(),
+                    tmux_alive: session.tmux_session.as_ref().map(|_| tmux_present),
+                    bridge_inflight_present: session.inflight_state_present,
+                    bridge_current_msg_id: session.inflight_current_msg_id(),
+                    watcher_owns_live_relay: session.watcher_owns_live_relay(),
+                    last_relay_ts_ms: session.last_relay_ts_ms,
+                    last_relay_offset: session.last_relay_offset,
+                    last_capture_offset: session.last_capture_offset,
+                    unread_bytes: session.unread_bytes,
                     desynced,
                     thread_proof: relay_thread_proof,
                     active_turn,
                     last_outbound_activity_ms: last_outbound_activity_ms(
-                        last_relay_ts_ms,
-                        inflight_state.as_ref(),
+                        session.last_relay_ts_ms,
+                        session.inflight.as_ref(),
                     ),
                 });
                 let relay_stall_state = RelayStallClassifier::classify(&relay_health);
@@ -1715,14 +1513,11 @@ async fn build_health_snapshot_with_options(
                     } else {
                         "idle"
                     },
-                    watcher_attached,
-                    inflight_state_present,
+                    watcher_attached: session.watcher_attached,
+                    inflight_state_present: session.inflight_state_present,
                     tmux_present,
                     process_present,
-                    active_dispatch_present: inflight_state
-                        .as_ref()
-                        .and_then(|state| state.dispatch_id.as_deref())
-                        .is_some(),
+                    active_dispatch_present: session.active_dispatch_present(),
                     relay_stall_state,
                     relay_health,
                 });
