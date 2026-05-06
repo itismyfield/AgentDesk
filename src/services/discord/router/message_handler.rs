@@ -517,6 +517,13 @@ async fn clear_terminal_delivery_marker_for_new_turn(
     channel_id: ChannelId,
     session_key: Option<&str>,
 ) {
+    // A request that loses the mailbox race must not clear the currently
+    // running turn's terminal-delivery marker. Pre-start cleanup is only safe
+    // when the mailbox has no active turn; concurrent starters may all clear
+    // the same stale marker, but none can clear a marker owned by a live turn.
+    if super::super::mailbox_has_active_turn(shared, channel_id).await {
+        return;
+    }
     let Some(pool) = shared.pg_pool.as_ref() else {
         return;
     };
