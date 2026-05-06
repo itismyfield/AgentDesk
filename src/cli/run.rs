@@ -136,6 +136,19 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 dispatch_id.as_deref(),
             ),
         )),
+        Commands::ReviewRecoverTarget {
+            dispatch_id,
+            card_id,
+            target_commit,
+            worktree_path,
+            reason,
+        } => exit_for_cli(super::client::cmd_review_recover_target(
+            dispatch_id.as_deref(),
+            card_id.as_deref(),
+            target_commit.as_deref(),
+            worktree_path.as_deref(),
+            reason.as_deref(),
+        )),
         Commands::Docs { category, flat } => exit_for_cli(super::direct::run_async(
             super::direct::cmd_docs(category.as_deref(), flat),
         )),

@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::Row;
 
+use crate::services as services_layer;
+
 use super::AppState;
 
 // ── Body types ─────────────────────────────────────────────────
@@ -22,8 +24,396 @@ pub struct UpdateDecisionsBody {
     pub decisions: Vec<DecisionItem>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ReviewTargetRecoveryBody {
+    pub dispatch_id: Option<String>,
+    pub card_id: Option<String>,
+    pub target_commit: Option<String>,
+    pub worktree_path: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct ReviewRecoveryDispatch {
+    id: String,
+    card_id: String,
+    status: String,
+    context: serde_json::Value,
+}
+
 fn validate_review_decision(decision: &str) -> bool {
     decision == "accept" || decision == "reject"
+}
+
+fn trimmed_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn json_object_from_text(
+    raw: Option<String>,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return Ok(serde_json::Map::new());
+    };
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("dispatch context is not valid JSON: {error}"))?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "dispatch context must be a JSON object".to_string())
+}
+
+async fn load_review_recovery_dispatch_pg(
+    pool: &sqlx::PgPool,
+    dispatch_id: Option<&str>,
+    card_id: Option<&str>,
+) -> Result<Option<ReviewRecoveryDispatch>, String> {
+    let row = if let Some(dispatch_id) = dispatch_id {
+        sqlx::query(
+            "SELECT id, kanban_card_id, dispatch_type, status, context
+             FROM task_dispatches
+             WHERE id = $1",
+        )
+        .bind(dispatch_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load review dispatch {dispatch_id}: {error}"))?
+    } else if let Some(card_id) = card_id {
+        sqlx::query(
+            "SELECT id, kanban_card_id, dispatch_type, status, context
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = 'review'
+               AND status IN ('pending', 'dispatched', 'failed')
+             ORDER BY updated_at DESC, created_at DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load latest review dispatch for card {card_id}: {error}"))?
+    } else {
+        return Err("provide dispatch_id or card_id".to_string());
+    };
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let loaded_dispatch_id: String = row
+        .try_get("id")
+        .map_err(|error| format!("decode dispatch id: {error}"))?;
+    let loaded_card_id: Option<String> = row
+        .try_get("kanban_card_id")
+        .map_err(|error| format!("decode dispatch card id: {error}"))?;
+    let Some(loaded_card_id) = loaded_card_id.filter(|value| !value.trim().is_empty()) else {
+        return Err(format!(
+            "dispatch {loaded_dispatch_id} is not attached to a card"
+        ));
+    };
+    if let Some(expected_card_id) = card_id {
+        if expected_card_id != loaded_card_id {
+            return Err(format!(
+                "dispatch {loaded_dispatch_id} belongs to card {loaded_card_id}, not {expected_card_id}"
+            ));
+        }
+    }
+
+    let dispatch_type: Option<String> = row
+        .try_get("dispatch_type")
+        .map_err(|error| format!("decode dispatch type: {error}"))?;
+    if dispatch_type.as_deref() != Some("review") {
+        return Err(format!(
+            "review recovery only accepts review dispatches, got {}",
+            dispatch_type.unwrap_or_else(|| "<none>".to_string())
+        ));
+    }
+
+    let status: String = row
+        .try_get("status")
+        .map_err(|error| format!("decode dispatch status: {error}"))?;
+    let context = serde_json::Value::Object(json_object_from_text(
+        row.try_get("context")
+            .map_err(|error| format!("decode dispatch context: {error}"))?,
+    )?);
+
+    Ok(Some(ReviewRecoveryDispatch {
+        id: loaded_dispatch_id,
+        card_id: loaded_card_id,
+        status,
+        context,
+    }))
+}
+
+fn worktree_head(path: &str) -> Result<String, String> {
+    if !std::path::Path::new(path).is_dir() {
+        return Err(format!(
+            "worktree_path does not exist or is not a directory: {path}"
+        ));
+    }
+    services_layer::platform::git_head_commit(path)
+        .ok_or_else(|| format!("cannot resolve git HEAD for worktree_path: {path}"))
+}
+
+fn branch_for_recovery_target(path: Option<&str>, commit: &str) -> Option<String> {
+    let path = path?;
+    let preferred = services_layer::platform::shell::git_branch_name(path);
+    services_layer::platform::shell::git_branch_containing_commit(
+        path,
+        commit,
+        preferred.as_deref(),
+        None,
+    )
+    .or(preferred)
+}
+
+fn context_string_field<'a>(context: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    context
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+async fn active_other_review_dispatch_exists_pg(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    dispatch_id: &str,
+) -> Result<bool, String> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND id <> $2
+               AND dispatch_type = 'review'
+               AND status IN ('pending', 'dispatched')
+         )",
+    )
+    .bind(card_id)
+    .bind(dispatch_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("check active review dispatch conflict: {error}"))
+}
+
+async fn recover_review_target_pg(
+    pool: &sqlx::PgPool,
+    body: ReviewTargetRecoveryBody,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let dispatch_id = trimmed_optional(body.dispatch_id);
+    let card_id = trimmed_optional(body.card_id);
+    let worktree_path = trimmed_optional(body.worktree_path);
+    let requested_commit = trimmed_optional(body.target_commit);
+    let reason = trimmed_optional(body.reason)
+        .unwrap_or_else(|| "manual review target recovery".to_string());
+
+    let dispatch =
+        load_review_recovery_dispatch_pg(pool, dispatch_id.as_deref(), card_id.as_deref())
+            .await
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    "review dispatch not found".to_string(),
+                )
+            })?;
+
+    let mut context_obj = dispatch.context.as_object().cloned().unwrap_or_default();
+    let inferred_worktree_commit = if requested_commit.is_none() {
+        worktree_path
+            .as_deref()
+            .map(worktree_head)
+            .transpose()
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?
+    } else {
+        None
+    };
+    let existing_commit =
+        context_string_field(&dispatch.context, "reviewed_commit").map(str::to_string);
+    let target_commit = requested_commit
+        .or(inferred_worktree_commit)
+        .or(existing_commit)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "provide target_commit, worktree_path, or recover a dispatch with reviewed_commit in context".to_string(),
+            )
+        })?;
+
+    if let Some(path) = worktree_path.as_deref() {
+        let head = worktree_head(path).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        if head != target_commit {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("worktree_path HEAD {head} does not match target_commit {target_commit}"),
+            ));
+        }
+    }
+
+    let validation_repo = worktree_path
+        .as_deref()
+        .or_else(|| context_string_field(&dispatch.context, "target_repo"))
+        .or_else(|| context_string_field(&dispatch.context, "worktree_path"));
+    let belongs = crate::dispatch::commit_belongs_to_card_issue_pg(
+        pool,
+        &dispatch.card_id,
+        &target_commit,
+        validation_repo,
+    )
+    .await;
+    if !belongs {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "target_commit {target_commit} does not reference or belong to card {}",
+                dispatch.card_id
+            ),
+        ));
+    }
+
+    if dispatch.status == "failed"
+        && active_other_review_dispatch_exists_pg(pool, &dispatch.card_id, &dispatch.id)
+            .await
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "cannot requeue failed review dispatch {} while another active review dispatch exists for card {}",
+                dispatch.id, dispatch.card_id
+            ),
+        ));
+    }
+
+    let previous_context = dispatch.context.clone();
+    context_obj.insert("reviewed_commit".to_string(), json!(target_commit));
+    if let Some(path) = worktree_path.as_deref() {
+        context_obj.insert("worktree_path".to_string(), json!(path));
+    } else if let Some(existing_path) = context_string_field(&dispatch.context, "worktree_path") {
+        match worktree_head(existing_path) {
+            Ok(head) if head == target_commit => {}
+            _ => {
+                context_obj.remove("worktree_path");
+            }
+        }
+    }
+    if let Some(branch) = branch_for_recovery_target(worktree_path.as_deref(), &target_commit) {
+        context_obj.insert("branch".to_string(), json!(branch));
+    }
+    let cleared_markers = [
+        context_obj.remove("review_target_reject_reason").is_some(),
+        context_obj.remove("review_target_warning").is_some(),
+    ]
+    .into_iter()
+    .filter(|removed| *removed)
+    .count();
+
+    let new_context = serde_json::Value::Object(context_obj);
+    let from_status = dispatch.status.clone();
+    let to_status = if dispatch.status == "failed" {
+        "pending"
+    } else {
+        dispatch.status.as_str()
+    };
+    let payload = json!({
+        "reason": reason,
+        "previous_context": previous_context,
+        "new_context": new_context,
+        "cleared_failure_markers": cleared_markers,
+        "target_commit": context_string_field(&new_context, "reviewed_commit"),
+        "worktree_path": context_string_field(&new_context, "worktree_path"),
+    });
+
+    let mut tx = pool.begin().await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("begin recovery transaction: {error}"),
+        )
+    })?;
+
+    sqlx::query(
+        "UPDATE task_dispatches
+         SET context = $1,
+             status = $2,
+             result = CASE WHEN status = 'failed' THEN NULL ELSE result END,
+             completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END,
+             updated_at = NOW()
+         WHERE id = $3",
+    )
+    .bind(new_context.to_string())
+    .bind(to_status)
+    .bind(&dispatch.id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("update review dispatch target: {error}"),
+        )
+    })?;
+
+    sqlx::query(
+        "INSERT INTO dispatch_events (
+            dispatch_id,
+            kanban_card_id,
+            dispatch_type,
+            from_status,
+            to_status,
+            transition_source,
+            payload_json
+         ) VALUES ($1, $2, 'review', $3, $4, 'manual_review_target_recovery', $5)",
+    )
+    .bind(&dispatch.id)
+    .bind(&dispatch.card_id)
+    .bind(&from_status)
+    .bind(to_status)
+    .bind(payload.clone())
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("insert dispatch recovery event: {error}"),
+        )
+    })?;
+
+    sqlx::query(
+        "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
+         VALUES ('task_dispatch', $1, 'review_target_recovered', 'operator')",
+    )
+    .bind(&dispatch.id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("insert recovery audit log: {error}"),
+        )
+    })?;
+
+    tx.commit().await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("commit recovery transaction: {error}"),
+        )
+    })?;
+
+    Ok(json!({
+        "ok": true,
+        "dispatch_id": dispatch.id,
+        "card_id": dispatch.card_id,
+        "from_status": from_status,
+        "to_status": to_status,
+        "target": {
+            "reviewed_commit": context_string_field(&new_context, "reviewed_commit"),
+            "worktree_path": context_string_field(&new_context, "worktree_path"),
+            "branch": context_string_field(&new_context, "branch"),
+        },
+        "cleared_failure_markers": cleared_markers,
+    }))
 }
 
 async fn update_decisions_pg(
@@ -165,6 +555,24 @@ pub async fn update_decisions(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": error})),
         ),
+    }
+}
+
+/// POST /api/reviews/recovery
+pub async fn recover_review_target(
+    State(state): State<AppState>,
+    Json(body): Json<ReviewTargetRecoveryBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pg_pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
+
+    match recover_review_target_pg(pg_pool, body).await {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err((status, error)) => (status, Json(json!({"error": error}))),
     }
 }
 
@@ -330,6 +738,88 @@ mod tests {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "postgres".to_string());
         format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = services_layer::git::git_command()
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap_or_else(|error| panic!("run git {args:?}: {error}"));
+        if !output.status.success() {
+            panic!(
+                "git {:?} failed: {}\n{}",
+                args,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn init_repo_with_issue_commit(issue_number: i64) -> (tempfile::TempDir, String) {
+        let tempdir = tempfile::tempdir().unwrap();
+        let repo = tempdir.path();
+        run_git(repo, &["init"]);
+        run_git(repo, &["config", "user.email", "agentdesk@example.invalid"]);
+        run_git(repo, &["config", "user.name", "AgentDesk Test"]);
+        std::fs::write(repo.join("README.md"), format!("issue {issue_number}\n")).unwrap();
+        run_git(repo, &["add", "README.md"]);
+        run_git(
+            repo,
+            &[
+                "commit",
+                "-m",
+                &format!("fix: recovery target (#{issue_number})"),
+            ],
+        );
+        let commit = run_git(repo, &["rev-parse", "HEAD"]);
+        (tempdir, commit)
+    }
+
+    async fn seed_review_recovery_card_and_dispatch(
+        pg_pool: &sqlx::PgPool,
+        card_id: &str,
+        dispatch_id: &str,
+        issue_number: i64,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, review_status, latest_dispatch_id, github_issue_number,
+                created_at, updated_at
+             ) VALUES ($1, $2, 'review', 'reviewing', $3, $4, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(format!("Issue {issue_number}"))
+        .bind(dispatch_id)
+        .bind(issue_number)
+        .execute(pg_pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result,
+                created_at, updated_at
+             ) VALUES ($1, $2, 'project-agentdesk', 'review', $3, 'Review dispatch', $4, $5, NOW(), NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .bind(status)
+        .bind(
+            json!({
+                "reviewed_commit": "1111111111111111111111111111111111111111",
+                "worktree_path": "/tmp/stale-review-target",
+                "review_target_reject_reason": "latest_work_target_issue_mismatch",
+                "review_target_warning": "stale target"
+            })
+            .to_string(),
+        )
+        .bind(json!({"error": "stale target"}).to_string())
+        .execute(pg_pool)
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -524,6 +1014,158 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audit_log_count, 1);
+
+        pg_pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn recover_review_target_updates_context_requeues_failed_dispatch_and_audits() {
+        let pg_db = TestPostgresDb::create().await;
+        let pg_pool = pg_db.migrate().await;
+        let sqlite_db = test_db();
+        let engine = test_engine(&sqlite_db);
+        let state = test_state_with_pg(sqlite_db, engine, pg_pool.clone());
+        let (repo, commit) = init_repo_with_issue_commit(1874);
+
+        seed_review_recovery_card_and_dispatch(
+            &pg_pool,
+            "card-review-recover",
+            "dispatch-review-recover",
+            1874,
+            "failed",
+        )
+        .await;
+
+        let (status, Json(body)) = recover_review_target(
+            State(state),
+            Json(ReviewTargetRecoveryBody {
+                dispatch_id: Some("dispatch-review-recover".to_string()),
+                card_id: None,
+                target_commit: Some(commit.clone()),
+                worktree_path: Some(repo.path().display().to_string()),
+                reason: Some("operator corrected stale cwd".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["from_status"], "failed");
+        assert_eq!(body["to_status"], "pending");
+        assert_eq!(body["cleared_failure_markers"], 2);
+
+        let row = sqlx::query(
+            "SELECT status, context, result
+             FROM task_dispatches
+             WHERE id = $1",
+        )
+        .bind("dispatch-review-recover")
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+        let stored_status: String = row.try_get("status").unwrap();
+        let stored_context_raw: String = row.try_get("context").unwrap();
+        let stored_result: Option<String> = row.try_get("result").unwrap();
+        let stored_context: serde_json::Value = serde_json::from_str(&stored_context_raw).unwrap();
+        assert_eq!(stored_status, "pending");
+        assert!(
+            stored_result.is_none(),
+            "failed result marker should be cleared"
+        );
+        assert_eq!(stored_context["reviewed_commit"], commit);
+        assert_eq!(
+            stored_context["worktree_path"],
+            repo.path().display().to_string()
+        );
+        assert!(stored_context.get("review_target_reject_reason").is_none());
+        assert!(stored_context.get("review_target_warning").is_none());
+
+        let dispatch_event_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT
+             FROM dispatch_events
+             WHERE dispatch_id = $1
+               AND transition_source = 'manual_review_target_recovery'",
+        )
+        .bind("dispatch-review-recover")
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+        assert_eq!(dispatch_event_count, 1);
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT
+             FROM audit_logs
+             WHERE entity_type = 'task_dispatch'
+               AND entity_id = $1
+               AND action = 'review_target_recovered'",
+        )
+        .bind("dispatch-review-recover")
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+        assert_eq!(audit_count, 1);
+
+        pg_pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn recover_review_target_rejects_commit_for_different_issue() {
+        let pg_db = TestPostgresDb::create().await;
+        let pg_pool = pg_db.migrate().await;
+        let sqlite_db = test_db();
+        let engine = test_engine(&sqlite_db);
+        let state = test_state_with_pg(sqlite_db, engine, pg_pool.clone());
+        let (repo, wrong_commit) = init_repo_with_issue_commit(9999);
+
+        seed_review_recovery_card_and_dispatch(
+            &pg_pool,
+            "card-review-reject",
+            "dispatch-review-reject",
+            1874,
+            "failed",
+        )
+        .await;
+
+        let (status, Json(body)) = recover_review_target(
+            State(state),
+            Json(ReviewTargetRecoveryBody {
+                dispatch_id: Some("dispatch-review-reject".to_string()),
+                card_id: None,
+                target_commit: Some(wrong_commit),
+                worktree_path: Some(repo.path().display().to_string()),
+                reason: Some("operator attempted wrong target".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("does not reference or belong")
+        );
+
+        let stored_status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind("dispatch-review-reject")
+                .fetch_one(&pg_pool)
+                .await
+                .unwrap();
+        assert_eq!(stored_status, "failed");
+
+        let event_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT
+             FROM dispatch_events
+             WHERE dispatch_id = $1",
+        )
+        .bind("dispatch-review-reject")
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+        assert_eq!(event_count, 0);
 
         pg_pool.close().await;
         pg_db.drop().await;
