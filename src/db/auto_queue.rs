@@ -2327,6 +2327,15 @@ pub async fn allocate_slot_for_group_agent_pg(
                      AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
                      AND e.status IN ('pending', 'dispatched')
                )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM task_dispatches d
+                   WHERE d.to_agent_id = s.agent_id
+                     AND d.status IN ('pending', 'dispatched')
+                     AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = s.slot_index
+                     AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+                     AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
+               )
              ORDER BY s.slot_index ASC
              LIMIT 1",
         )
@@ -2356,6 +2365,15 @@ pub async fn allocate_slot_for_group_agent_pg(
                          AND e.agent_id = auto_queue_slots.agent_id
                          AND COALESCE(e.thread_group, 0) = COALESCE(auto_queue_slots.assigned_thread_group, 0)
                          AND e.status IN ('pending', 'dispatched')
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM task_dispatches d
+                       WHERE d.to_agent_id = auto_queue_slots.agent_id
+                         AND d.status IN ('pending', 'dispatched')
+                         AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = auto_queue_slots.slot_index
+                         AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+                         AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
                    )",
             )
             .bind(thread_group)
@@ -2398,6 +2416,15 @@ pub async fn allocate_slot_for_group_agent_pg(
              FROM auto_queue_slots
              WHERE agent_id = $1
                AND assigned_run_id IS NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM task_dispatches d
+                   WHERE d.to_agent_id = auto_queue_slots.agent_id
+                     AND d.status IN ('pending', 'dispatched')
+                     AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = auto_queue_slots.slot_index
+                     AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+                     AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
+               )
              ORDER BY slot_index ASC
              LIMIT 1",
         )
@@ -2420,7 +2447,16 @@ pub async fn allocate_slot_for_group_agent_pg(
                  updated_at = NOW()
              WHERE agent_id = $3
                AND slot_index = $4
-               AND assigned_run_id IS NULL",
+               AND assigned_run_id IS NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM task_dispatches d
+                   WHERE d.to_agent_id = auto_queue_slots.agent_id
+                     AND d.status IN ('pending', 'dispatched')
+                     AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = auto_queue_slots.slot_index
+                     AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+                     AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
+               )",
         )
         .bind(run_id)
         .bind(thread_group)
@@ -3127,7 +3163,8 @@ mod resume_session_context_tests {
 mod dispatch_terminal_sync_pg_tests {
     use super::{
         ENTRY_STATUS_DONE, ENTRY_STATUS_SKIPPED, ENTRY_STATUS_USER_CANCELLED,
-        EntryStatusUpdateOptions, PhaseGateStateWrite, clear_phase_gate_state_on_pg,
+        EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation,
+        allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg,
         finalize_completed_dispatch_terminal_entry_on_pg_tx, save_phase_gate_state_on_pg,
         sync_dispatch_terminal_entries_on_pg_tx, update_entry_status_on_pg,
     };
@@ -3369,6 +3406,63 @@ mod dispatch_terminal_sync_pg_tests {
         .into_iter()
         .map(|row| row.try_get::<i64, _>("id").expect("phase gate id"))
         .collect()
+    }
+
+    #[tokio::test]
+    async fn allocate_slot_for_group_agent_pg_skips_reusable_slot_with_active_dispatch() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query("UPDATE auto_queue_runs SET max_concurrent_threads = 2 WHERE id = 'run-1'")
+            .execute(&pool)
+            .await
+            .expect("expand slot pool");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, slot_index, thread_group,
+                 batch_phase, completed_at)
+             VALUES ('entry-complete', 'run-1', NULL, 'agent-1', 'done', 0, 0, 0, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed completed slot entry");
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+             VALUES ('dispatch-review-slot-0', 'agent-1', 'dispatched', $1)",
+        )
+        .bind(serde_json::json!({"slot_index": 0}).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed active dispatch in reusable slot");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase)
+             VALUES ('entry-next', 'run-1', NULL, 'agent-1', 'pending', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed next phase entry");
+
+        let allocation = allocate_slot_for_group_agent_pg(&pool, "run-1", 1, "agent-1")
+            .await
+            .expect("allocation must succeed via a different free slot");
+        assert_eq!(
+            allocation,
+            Some(SlotAllocation {
+                slot_index: 1,
+                newly_assigned: true,
+                reassigned_from_other_group: false,
+            })
+        );
+
+        let slot_index: Option<i64> =
+            sqlx::query_scalar("SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-next'")
+                .fetch_one(&pool)
+                .await
+                .expect("next entry slot");
+        assert_eq!(slot_index, Some(1));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
