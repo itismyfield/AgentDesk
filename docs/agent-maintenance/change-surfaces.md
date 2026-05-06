@@ -81,10 +81,10 @@
 - canonical_modules: `src/dispatch/{mod,dispatch_context,dispatch_create,dispatch_status}.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
-  - `src/dispatch/mod.rs` (5108 lines).
+  - `src/dispatch/mod.rs` (5109 lines).
   - `src/dispatch/dispatch_context.rs` (3987 lines).
   - `src/dispatch/dispatch_create.rs` (2877 lines).
-  - `src/dispatch/dispatch_status.rs` (1875 lines).
+  - `src/dispatch/dispatch_status.rs` (1921 lines).
   - `src/services/dispatches/outbox_route.rs` (1074 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
@@ -92,7 +92,7 @@
   status transitions go through `dispatch_status`.
 - allowed_changes: `bugfix` only.
 - tests: `src/integration_tests/dispatch_flow/*` and per-module unit tests.
-- related_issues: track under #1281-style follow-up if a split is scoped.
+- related_issues: #1784, #1785, #1808-#1814.
 
 ### `tmux_watcher`
 

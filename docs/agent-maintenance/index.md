@@ -20,6 +20,9 @@
 - [`change-surfaces.md`](change-surfaces.md) — change-allowed surfaces, with
   canonical modules, giant-file flags, and `do_not_edit_without_migration_plan`
   list. Use this before adding logic to any new file.
+- [`dispatch-mod-extraction-plan.md`](dispatch-mod-extraction-plan.md) —
+  subdomain map and ordered extraction issues for shrinking
+  `src/dispatch/mod.rs` into a facade (#1785).
 - [`discord-outbound-migration.md`](discord-outbound-migration.md) — five
   production callsite families for Discord outbound (#1006). Each row marks
   `migrated | legacy | unknown`. New sends MUST use the v3 outbound; legacy
