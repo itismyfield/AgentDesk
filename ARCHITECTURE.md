@@ -307,6 +307,7 @@ src/
 │   │   │   ├── skill.rs
 │   │   │   └── text_commands.rs
 │   │   ├── health/
+│   │   │   ├── provider_probe.rs
 │   │   │   ├── recovery.rs
 │   │   │   ├── redaction.rs
 │   │   │   └── session_enrichment.rs
