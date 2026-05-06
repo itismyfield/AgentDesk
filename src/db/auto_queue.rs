@@ -75,6 +75,10 @@ pub enum ConsultationDispatchRecordError {
 }
 
 const SLOT_ALLOCATION_MAX_RETRIES: usize = 16;
+// Give the provider bridge a short cleanup window after a terminal turn before
+// reusing the same slot/thread. The auto-queue tick retries roughly every
+// minute, so 45s avoids immediate same-thread delivery without adding another
+// full tick of avoidable delay in the common case.
 pub const SLOT_TERMINAL_DISPATCH_COOLDOWN_SECONDS: i64 = 45;
 
 #[derive(Debug, Clone)]

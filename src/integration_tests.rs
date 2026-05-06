@@ -3079,6 +3079,202 @@ mod tests {
         pg_db.drop().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_queue_activate_cools_down_recent_terminal_same_slot_dispatch_pg() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        let (_repo, _repo_guard) = setup_test_repo();
+        let repo_id = _repo.path().to_str().unwrap().to_string();
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Test Agent', '111', '222') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, github_issue_number, created_at, updated_at) \
+             VALUES ('card-aq-terminal', 'AQ Terminal', 'done', 'agent-1', $1, 182600, NOW(), NOW())",
+        )
+        .bind(&repo_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, github_issue_number, created_at, updated_at) \
+             VALUES ('card-aq-same-slot-next', 'AQ Same Slot Next', 'ready', 'agent-1', $1, 182601, NOW(), NOW())",
+        )
+        .bind(&repo_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, max_concurrent_threads, thread_group_count, created_at) \
+             VALUES ('run-aq-same-slot-cooldown', $1, 'agent-1', 'active', 1, 1, NOW())",
+        )
+        .bind(&repo_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, completed_at, created_at, updated_at) \
+             VALUES ('dispatch-aq-terminal', 'card-aq-terminal', 'agent-1', 'implementation', 'completed', 'Terminal Dispatch', $1, NOW(), NOW(), NOW())",
+        )
+        .bind(
+            serde_json::json!({
+                "auto_queue": true,
+                "entry_id": "entry-aq-terminal",
+                "thread_group": 0,
+                "slot_index": 0
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
+            .bind("dispatch-aq-terminal")
+            .bind("card-aq-terminal")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, priority_rank, dispatched_at, completed_at, created_at) \
+             VALUES ('entry-aq-terminal', 'run-aq-same-slot-cooldown', 'card-aq-terminal', 'agent-1', 'done', 'dispatch-aq-terminal', 0, 0, 0, NOW(), NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, thread_group, priority_rank, created_at) \
+             VALUES ('entry-aq-same-slot-next', 'run-aq-same-slot-cooldown', 'card-aq-same-slot-next', 'agent-1', 'pending', 0, 1, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at) \
+             VALUES ('agent-1', 0, 'run-aq-same-slot-cooldown', 0, '{}'::jsonb, NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
+            test_db(),
+            engine.clone(),
+        );
+        let (status, body) = crate::server::routes::auto_queue::activate_with_deps_pg(
+            &deps,
+            crate::server::routes::auto_queue::ActivateBody {
+                run_id: Some("run-aq-same-slot-cooldown".to_string()),
+                repo: Some(repo_id.clone()),
+                agent_id: Some("agent-1".to_string()),
+                thread_group: None,
+                unified_thread: None,
+                active_only: Some(true),
+            },
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(
+            body.0["count"].as_u64(),
+            Some(0),
+            "recent terminal same-slot dispatch should be left for a later tick"
+        );
+
+        let next_row: (String, Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT status, slot_index, dispatch_id \
+             FROM auto_queue_entries \
+             WHERE id = 'entry-aq-same-slot-next'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(next_row.0, "pending");
+        assert_eq!(next_row.1, Some(0));
+        assert_eq!(next_row.2, None);
+
+        let slot_row: (Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT assigned_run_id, assigned_thread_group \
+             FROM auto_queue_slots \
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(slot_row.0.as_deref(), Some("run-aq-same-slot-cooldown"));
+        assert_eq!(
+            slot_row.1,
+            Some(0),
+            "cooldown skip should leave the slot binding stable for the retry tick"
+        );
+
+        let new_dispatches = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT \
+             FROM task_dispatches \
+             WHERE kanban_card_id = 'card-aq-same-slot-next'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(new_dispatches, 0);
+
+        sqlx::query(
+            "UPDATE task_dispatches \
+             SET completed_at = NOW() - INTERVAL '2 minutes', \
+                 updated_at = NOW() - INTERVAL '2 minutes' \
+             WHERE id = 'dispatch-aq-terminal'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (status, body) = crate::server::routes::auto_queue::activate_with_deps_pg(
+            &deps,
+            crate::server::routes::auto_queue::ActivateBody {
+                run_id: Some("run-aq-same-slot-cooldown".to_string()),
+                repo: Some(repo_id.clone()),
+                agent_id: Some("agent-1".to_string()),
+                thread_group: None,
+                unified_thread: None,
+                active_only: Some(true),
+            },
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(
+            body.0["count"].as_u64(),
+            Some(1),
+            "aged terminal same-slot dispatch should be eligible on a later tick"
+        );
+
+        kanban::drain_hook_side_effects_with_backends(None, &engine);
+
+        let next_row: (String, Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT status, slot_index, dispatch_id \
+             FROM auto_queue_entries \
+             WHERE id = 'entry-aq-same-slot-next'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(next_row.0, "dispatched");
+        assert_eq!(next_row.1, Some(0));
+        assert!(
+            next_row.2.is_some(),
+            "same-slot entry should dispatch after cooldown expires"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     #[test]
     #[ignore = "obsolete SQLite auto-queue fixture; PR #868 runtime path is PostgreSQL-only"]
     fn auto_queue_on_tick_recovery_counts_failures_and_fails_at_retry_limit() {
