@@ -72,7 +72,7 @@
 | `crate` | `src/main.rs` | 48 |  |
 | `credential` | `src/credential.rs` | 106 |  |
 | `db` | `src/db/mod.rs` | 341 |  |
-| `db::agents` | `src/db/agents.rs` | 1124 | giant-file |
+| `db::agents` | `src/db/agents.rs` | 1128 | giant-file |
 | `db::auto_queue` | `src/db/auto_queue.rs` | 5935 | giant-file |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
 | `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1332 | giant-file |
@@ -181,7 +181,7 @@
 | `server::multinode_regression` | `src/server/multinode_regression.rs` | 419 |  |
 | `server::resource_locks` | `src/server/resource_locks.rs` | 412 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 302 |  |
-| `server::routes::agents` | `src/server/routes/agents.rs` | 1426 | giant-file |
+| `server::routes::agents` | `src/server/routes/agents.rs` | 1181 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1871 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 489 |  |
