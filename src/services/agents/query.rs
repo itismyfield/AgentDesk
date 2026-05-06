@@ -204,7 +204,7 @@ pub async fn list_agent_skills_pg_json(
         .collect())
 }
 
-pub async fn list_agent_dispatched_sessions_pg_json(
+async fn list_agent_dispatched_sessions_pg_json(
     pool: &sqlx::PgPool,
     agent_id: &str,
     guild_id: Option<&str>,
@@ -324,7 +324,7 @@ fn build_agent_dispatched_sessions_json(
     dedup_dispatched_sessions(resolved)
 }
 
-pub async fn list_agent_timeline_pg_json(
+async fn list_agent_timeline_pg_json(
     pool: &sqlx::PgPool,
     agent_id: &str,
     limit: i64,

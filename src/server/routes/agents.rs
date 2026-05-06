@@ -428,21 +428,6 @@ pub async fn agent_dispatched_sessions(
     let Some(pool) = state.pg_pool_ref() else {
         return pg_required_response();
     };
-    match agent_exists_pg(pool, &id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "agent not found"})),
-            );
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
-            );
-        }
-    }
 
     let guild_id = state.config.discord.guild_id.as_deref();
     match load_agent_dispatched_sessions_pg_json(pool, &id, guild_id).await {
@@ -844,21 +829,6 @@ pub async fn agent_timeline(
     let Some(pool) = state.pg_pool_ref() else {
         return pg_required_response();
     };
-    match agent_exists_pg(pool, &id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "agent not found"})),
-            );
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
-            );
-        }
-    }
 
     let limit = params.limit.unwrap_or(30);
     match load_agent_timeline_pg_json(pool, &id, limit).await {
