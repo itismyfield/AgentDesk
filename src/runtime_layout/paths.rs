@@ -132,3 +132,30 @@ pub(super) fn expand_user_path(raw: &str) -> Option<PathBuf> {
     }
     Some(PathBuf::from(trimmed))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_resolve_memory_path_absolute() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let raw = if cfg!(windows) {
+            "C:\\absolute\\path"
+        } else {
+            "/absolute/path"
+        };
+        let resolved = resolve_memory_path(root, raw);
+        assert_eq!(resolved, PathBuf::from(raw));
+    }
+
+    #[test]
+    fn test_resolve_memory_path_relative() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let resolved = resolve_memory_path(root, "relative/path");
+        assert_eq!(resolved, config_dir(root).join("relative/path"));
+    }
+}
