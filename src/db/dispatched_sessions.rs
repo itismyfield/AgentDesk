@@ -130,9 +130,7 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
     sqlx::query(
         "UPDATE sessions
          SET status = 'disconnected',
-             active_dispatch_id = NULL,
-             claude_session_id = NULL,
-             raw_provider_session_id = NULL
+             active_dispatch_id = NULL
          WHERE session_key = $1",
     )
     .bind(session_key)
@@ -593,6 +591,212 @@ mod recovery_identifier_tests {
     }
 }
 
+#[cfg(test)]
+mod selector_cleanup_tests {
+    use super::{
+        disconnect_session_and_prepare_retry_pg, disconnect_stale_fixed_session_by_key_pg,
+        gc_stale_fixed_working_sessions_db_pg,
+    };
+
+    struct TestPostgresDb {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!(
+                "agentdesk_selector_cleanup_{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "selector cleanup tests",
+            )
+            .await
+            .expect("create selector cleanup postgres test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "selector cleanup tests",
+            )
+            .await
+            .expect("apply selector cleanup postgres migrations")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "selector cleanup tests",
+            )
+            .await
+            .expect("drop selector cleanup postgres test db");
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
+    async fn seed_session_with_selectors(
+        pool: &sqlx::PgPool,
+        session_key: &str,
+        status: &str,
+        active_dispatch_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, status, active_dispatch_id, provider, last_heartbeat,
+              claude_session_id, raw_provider_session_id, created_at)
+             VALUES ($1, $2, $3, 'claude', NOW() - INTERVAL '7 hours',
+                     'claude-selector-1841', 'raw-selector-1841',
+                     NOW() - INTERVAL '7 hours')",
+        )
+        .bind(session_key)
+        .bind(status)
+        .bind(active_dispatch_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn session_state(
+        pool: &sqlx::PgPool,
+        session_key: &str,
+    ) -> (String, Option<String>, Option<String>, Option<String>) {
+        sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+            "SELECT status, active_dispatch_id, claude_session_id, raw_provider_session_id
+             FROM sessions
+             WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn assert_cleanup_preserved_selectors(pool: &sqlx::PgPool, session_key: &str) {
+        let (status, active_dispatch_id, claude_session_id, raw_provider_session_id) =
+            session_state(pool, session_key).await;
+
+        assert_eq!(status, "disconnected");
+        assert_eq!(active_dispatch_id, None);
+        assert_eq!(claude_session_id.as_deref(), Some("claude-selector-1841"));
+        assert_eq!(
+            raw_provider_session_id.as_deref(),
+            Some("raw-selector-1841")
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_session_and_prepare_retry_pg_preserves_provider_selectors() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "host:selector-force-kill";
+
+        seed_session_with_selectors(&pool, session_key, "idle", Some("dispatch-1841")).await;
+
+        let retry_meta = disconnect_session_and_prepare_retry_pg(&pool, session_key, None, false)
+            .await
+            .unwrap();
+        assert!(retry_meta.is_none());
+        assert_cleanup_preserved_selectors(&pool, session_key).await;
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn gc_stale_fixed_working_sessions_db_pg_preserves_provider_selectors() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "host:selector-gc-stale";
+
+        seed_session_with_selectors(&pool, session_key, "turn_active", Some("dispatch-1841-gc"))
+            .await;
+
+        assert_eq!(gc_stale_fixed_working_sessions_db_pg(&pool).await, 1);
+        assert_cleanup_preserved_selectors(&pool, session_key).await;
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_stale_fixed_session_by_key_pg_preserves_provider_selectors() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "host:selector-stale-by-key";
+
+        seed_session_with_selectors(&pool, session_key, "turn_active", Some("dispatch-1841-key"))
+            .await;
+
+        assert_eq!(
+            disconnect_stale_fixed_session_by_key_pg(&pool, session_key).await,
+            1
+        );
+        assert_cleanup_preserved_selectors(&pool, session_key).await;
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
 pub(crate) async fn load_session_event_payload_pg(
     pool: &PgPool,
     session_key: &str,
@@ -847,8 +1051,8 @@ pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> usize {
     }
 }
 
-/// Mark stale fixed-channel working sessions as disconnected so they cannot
-/// keep restoring dead provider session IDs after restart.
+/// Mark stale fixed-channel working sessions as disconnected without clearing
+/// provider selectors needed for resume after runtime cleanup.
 pub async fn gc_stale_fixed_working_sessions_db_pg(pool: &PgPool) -> usize {
     let stale_dispatches = match sqlx::query_scalar::<_, String>(
         "SELECT active_dispatch_id
@@ -894,9 +1098,7 @@ pub async fn gc_stale_fixed_working_sessions_db_pg(pool: &PgPool) -> usize {
     match sqlx::query(
         "UPDATE sessions
          SET status = 'disconnected',
-             active_dispatch_id = NULL,
-             claude_session_id = NULL,
-             raw_provider_session_id = NULL
+             active_dispatch_id = NULL
          WHERE thread_channel_id IS NULL
            AND status IN ('working', 'turn_active')
            AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '6 hours'",
@@ -966,9 +1168,7 @@ pub(crate) async fn disconnect_stale_fixed_session_by_key_pg(
     match sqlx::query(
         "UPDATE sessions
          SET status = 'disconnected',
-             active_dispatch_id = NULL,
-             claude_session_id = NULL,
-             raw_provider_session_id = NULL
+             active_dispatch_id = NULL
          WHERE session_key = $1
            AND thread_channel_id IS NULL
            AND status IN ('working', 'turn_active')
