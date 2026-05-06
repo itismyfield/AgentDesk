@@ -75,6 +75,7 @@ pub enum ConsultationDispatchRecordError {
 }
 
 const SLOT_ALLOCATION_MAX_RETRIES: usize = 16;
+pub const SLOT_TERMINAL_DISPATCH_COOLDOWN_SECONDS: i64 = 45;
 
 #[derive(Debug, Clone)]
 struct EntryStatusRow {
@@ -2264,6 +2265,32 @@ async fn bind_slot_index_for_group_entries_pg(
     Ok(result.rows_affected())
 }
 
+pub async fn slot_has_recent_terminal_auto_queue_dispatch_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    slot_index: i64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM task_dispatches d
+             WHERE d.to_agent_id = $1
+               AND d.status IN ('completed', 'failed', 'cancelled')
+               AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = $2
+               AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'auto_queue')::BOOLEAN, FALSE) = TRUE
+               AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+               AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
+               AND COALESCE(d.completed_at, d.updated_at, d.created_at)
+                   >= NOW() - make_interval(secs => $3::INT)
+         )",
+    )
+    .bind(agent_id)
+    .bind(slot_index)
+    .bind(SLOT_TERMINAL_DISPATCH_COOLDOWN_SECONDS)
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn allocate_slot_for_group_agent_pg(
     pool: &PgPool,
     run_id: &str,
@@ -3166,7 +3193,8 @@ mod dispatch_terminal_sync_pg_tests {
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation,
         allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg,
         finalize_completed_dispatch_terminal_entry_on_pg_tx, save_phase_gate_state_on_pg,
-        sync_dispatch_terminal_entries_on_pg_tx, update_entry_status_on_pg,
+        slot_has_recent_terminal_auto_queue_dispatch_pg, sync_dispatch_terminal_entries_on_pg_tx,
+        update_entry_status_on_pg,
     };
     use chrono::{DateTime, Utc};
     use sqlx::{PgPool, Row};
@@ -3671,6 +3699,60 @@ mod dispatch_terminal_sync_pg_tests {
         .await
         .expect("remaining phase gate count");
         assert_eq!(remaining, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn slot_has_recent_terminal_auto_queue_dispatch_pg_respects_cooldown() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context, created_at, updated_at, completed_at)
+             VALUES ('dispatch-recent-terminal-slot-0', 'agent-1', 'completed', $1, NOW(), NOW(), NOW())",
+        )
+        .bind(
+            serde_json::json!({
+                "auto_queue": true,
+                "entry_id": "entry-recent-terminal-slot-0",
+                "thread_group": 0,
+                "slot_index": 0
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .expect("seed recent terminal dispatch");
+
+        assert!(
+            slot_has_recent_terminal_auto_queue_dispatch_pg(&pool, "agent-1", 0)
+                .await
+                .expect("recent terminal cooldown probe"),
+            "recent same-slot terminal auto-queue dispatch must trigger cooldown"
+        );
+        assert!(
+            !slot_has_recent_terminal_auto_queue_dispatch_pg(&pool, "agent-1", 1)
+                .await
+                .expect("other slot cooldown probe"),
+            "dispatches in other slots must not trigger cooldown"
+        );
+
+        sqlx::query(
+            "UPDATE task_dispatches
+             SET completed_at = NOW() - INTERVAL '2 minutes',
+                 updated_at = NOW() - INTERVAL '2 minutes'
+             WHERE id = 'dispatch-recent-terminal-slot-0'",
+        )
+        .execute(&pool)
+        .await
+        .expect("age terminal dispatch");
+        assert!(
+            !slot_has_recent_terminal_auto_queue_dispatch_pg(&pool, "agent-1", 0)
+                .await
+                .expect("aged terminal cooldown probe"),
+            "aged terminal dispatches should be eligible for the next tick"
+        );
 
         pool.close().await;
         pg_db.drop().await;

@@ -644,6 +644,36 @@ pub(crate) async fn activate_with_deps_pg(
             continue;
         };
 
+        match crate::db::auto_queue::slot_has_recent_terminal_auto_queue_dispatch_pg(
+            pool,
+            &agent_id,
+            allocation.slot_index,
+        )
+        .await
+        {
+            Ok(true) => {
+                crate::auto_queue_log!(
+                    info,
+                    "activate_slot_terminal_cooldown_pg",
+                    entry_log_ctx.clone().slot_index(allocation.slot_index),
+                    "[auto-queue] delaying entry {entry_id} for {agent_id} slot {}: previous terminal dispatch is still within {}s bridge cooldown",
+                    allocation.slot_index,
+                    crate::db::auto_queue::SLOT_TERMINAL_DISPATCH_COOLDOWN_SECONDS
+                );
+                continue;
+            }
+            Ok(false) => {}
+            Err(error) => crate::auto_queue_log!(
+                warn,
+                "activate_slot_terminal_cooldown_probe_failed_pg",
+                entry_log_ctx.clone().slot_index(allocation.slot_index),
+                "[auto-queue] failed to inspect terminal dispatch cooldown for {} slot {}: {}",
+                agent_id,
+                allocation.slot_index,
+                error
+            ),
+        }
+
         let reset_slot_thread_before_reuse = match slot_requires_thread_reset_before_reuse_pg(
             pool,
             &agent_id,
