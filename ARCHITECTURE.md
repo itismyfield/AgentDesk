@@ -47,6 +47,7 @@ src/
 │   ├── run.rs
 │   └── utils.rs
 ├── compat/
+│   ├── legacy_db_paths.rs
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── db/
