@@ -308,7 +308,7 @@ async fn prepare_persist_entry_pg(
 
     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
     if prepared.agent_id.is_none() {
-        if let Some(db) = db {
+        if let Some(db) = _db {
             let conn = db
                 .lock()
                 .map_err(|e| anyhow!("db lock failed while preparing transcript fallback: {e}"))?;

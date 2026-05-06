@@ -2087,7 +2087,7 @@ fn record_true_negative_if_pass_with_backends(
 
     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
     {
-        if let Some(db) = db
+        if let Some(db) = _db
             && let Ok(conn) = db.lock()
         {
             // Check if the card's last review verdict was "pass" or "approved"
@@ -2301,7 +2301,7 @@ pub fn correct_tn_to_fn_on_reopen(_db: Option<&Db>, pg_pool: Option<&sqlx::PgPoo
 
     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
     {
-        let Some(db) = db else {
+        let Some(db) = _db else {
             return;
         };
 

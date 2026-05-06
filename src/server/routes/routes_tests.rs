@@ -2504,6 +2504,170 @@ async fn agent_turn_pg_reports_idle_when_agent_has_no_active_session() {
 }
 
 #[tokio::test]
+async fn agent_transcripts_pg_returns_structured_events() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+
+    sqlx::query("INSERT INTO agents (id, name, provider, status, xp) VALUES ($1, $2, $3, $4, $5)")
+        .bind("agent-transcript")
+        .bind("Transcript Agent")
+        .bind("codex")
+        .bind("idle")
+        .bind(0_i32)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let events_json = serde_json::to_string(&json!([{
+        "kind": "tool_use",
+        "tool_name": "Bash",
+        "summary": "cargo test",
+        "content": "cargo test --no-run",
+        "status": "success",
+        "is_error": false,
+    }]))
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO session_transcripts (
+            turn_id, session_key, channel_id, agent_id, provider, dispatch_id,
+            user_message, assistant_message, events_json, duration_ms
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CAST($9 AS jsonb), $10)",
+    )
+    .bind("discord:agent-transcript:1")
+    .bind("host:agent-transcript")
+    .bind("chan-1")
+    .bind("agent-transcript")
+    .bind("codex")
+    .bind(Option::<String>::None)
+    .bind("verify build")
+    .bind("build verified")
+    .bind(events_json)
+    .bind(4200_i32)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/agent-transcript/transcripts?limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "unexpected body: {json}");
+    assert_eq!(json["agent_id"], "agent-transcript");
+    assert_eq!(
+        json["transcripts"][0]["turn_id"],
+        "discord:agent-transcript:1"
+    );
+    assert!(json["transcripts"][0]["card_title"].is_null());
+    assert!(json["transcripts"][0]["github_issue_number"].is_null());
+    assert_eq!(json["transcripts"][0]["duration_ms"], 4200);
+    assert_eq!(json["transcripts"][0]["events"][0]["kind"], "tool_use");
+    assert_eq!(json["transcripts"][0]["events"][0]["tool_name"], "Bash");
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn agent_transcripts_pg_falls_back_to_session_agent_for_legacy_rows() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+
+    sqlx::query("INSERT INTO agents (id, name, provider, status, xp) VALUES ($1, $2, $3, $4, $5)")
+        .bind("agent-transcript-fallback")
+        .bind("Transcript Fallback")
+        .bind("codex")
+        .bind("idle")
+        .bind(0_i32)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (session_key, agent_id, provider, status, last_heartbeat)
+         VALUES ($1, $2, $3, $4, NOW())",
+    )
+    .bind("host:agent-transcript-fallback")
+    .bind("agent-transcript-fallback")
+    .bind("codex")
+    .bind("idle")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO session_transcripts (
+            turn_id, session_key, channel_id, agent_id, provider, dispatch_id,
+            user_message, assistant_message, events_json
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CAST($9 AS jsonb))",
+    )
+    .bind("discord:agent-transcript-fallback:1")
+    .bind("host:agent-transcript-fallback")
+    .bind("chan-fallback")
+    .bind(Option::<String>::None)
+    .bind("codex")
+    .bind(Option::<String>::None)
+    .bind("legacy question")
+    .bind("legacy answer")
+    .bind("[]")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/agent-transcript-fallback/transcripts?limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "unexpected body: {json}");
+    assert_eq!(json["transcripts"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        json["transcripts"][0]["turn_id"],
+        "discord:agent-transcript-fallback:1"
+    );
+    assert_eq!(json["transcripts"][0]["agent_id"], serde_json::Value::Null);
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 #[ignore = "requires tmux"]
 async fn stop_agent_turn_preserves_matching_tmux_session() {
     let _env_lock = env_lock();
@@ -3864,14 +4028,34 @@ async fn claude_session_id_pg_get_keeps_value_on_provider_match() {
 }
 
 #[tokio::test]
-async fn get_agent_pg_found() {
+async fn agent_detail_pg_http_regression_returns_agent_payload() {
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
     let engine = test_engine_with_pg(&db, pool.clone());
 
     sqlx::query(
-        "INSERT INTO agents (id, name, provider, status, xp) VALUES ('a1', 'Agent1', 'claude', 'idle', 0)",
+        "INSERT INTO agents (
+            id, name, name_ko, provider, status, xp, department,
+            discord_channel_id, discord_channel_cdx, created_at, updated_at
+         ) VALUES (
+            'agent-detail', 'Agent Detail', '상세 에이전트', 'codex', 'idle', 7, 'platform',
+            '1485506232256168011', '1485506232256168012',
+            TIMESTAMPTZ '2026-05-06 00:00:00+00', TIMESTAMPTZ '2026-05-06 00:00:00+00'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, agent_id, provider, status, tokens, thread_channel_id, last_heartbeat, created_at
+         ) VALUES (
+            'host:agent-detail', 'agent-detail', 'codex', 'turn_active', 123,
+            '1485506232256168999',
+            TIMESTAMPTZ '2026-05-06 00:02:00+00',
+            TIMESTAMPTZ '2026-05-06 00:01:00+00'
+         )",
     )
     .execute(&pool)
     .await
@@ -3887,18 +4071,119 @@ async fn get_agent_pg_found() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/agents/a1")
+                .uri("/agents/agent-detail")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
+    let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["agent"]["id"], "a1");
+    assert_eq!(status, StatusCode::OK, "unexpected body: {json}");
+    assert_eq!(json["agent"]["id"], "agent-detail");
+    assert_eq!(json["agent"]["name"], "Agent Detail");
+    assert_eq!(json["agent"]["provider"], "codex");
+    assert_eq!(json["agent"]["discord_channel_id"], "1485506232256168011");
+    assert_eq!(
+        json["agent"]["current_thread_channel_id"],
+        "1485506232256168999"
+    );
+    assert_eq!(json["agent"]["stats_tokens"], 123);
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn agent_timeline_pg_http_regression_returns_recent_events() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, status, xp)
+         VALUES ('agent-timeline', 'Agent Timeline', 'codex', 'idle', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, agent_id, provider, status, last_heartbeat, created_at
+         ) VALUES (
+            'host:agent-timeline', 'agent-timeline', 'codex', 'idle',
+            TIMESTAMPTZ '2026-05-06 00:01:30+00',
+            TIMESTAMPTZ '2026-05-06 00:01:00+00'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, created_at, updated_at
+         ) VALUES (
+            'card-agent-timeline', 'Timeline Card', 'in_progress', 'medium', 'agent-timeline',
+            TIMESTAMPTZ '2026-05-06 00:02:00+00',
+            TIMESTAMPTZ '2026-05-06 00:02:30+00'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            'dispatch-agent-timeline', 'card-agent-timeline', 'agent-timeline',
+            'implementation', 'completed', 'Timeline Dispatch',
+            TIMESTAMPTZ '2026-05-06 00:03:00+00',
+            TIMESTAMPTZ '2026-05-06 00:04:00+00'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/agent-timeline/timeline?limit=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "unexpected body: {json}");
+    let events = json["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["id"], "dispatch-agent-timeline");
+    assert_eq!(events[0]["source"], "dispatch");
+    assert_eq!(events[0]["type"], "implementation");
+    assert_eq!(events[0]["title"], "Timeline Dispatch");
+    assert_eq!(events[0]["status"], "completed");
+    assert_eq!(events[0]["duration_ms"], 60000);
+    assert_eq!(events[1]["id"], "card-agent-timeline");
+    assert_eq!(events[1]["source"], "kanban");
+    assert_eq!(events[1]["type"], "card");
 
     pool.close().await;
     pg_db.drop().await;

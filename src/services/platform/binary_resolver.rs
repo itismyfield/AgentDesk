@@ -966,8 +966,8 @@ mod tests {
         write_executable(&current);
         write_executable(&candidate);
 
-        let mut registry = crate::services::provider_cli::ProviderCliRegistry::default();
-        let mut channels = crate::services::provider_cli::ProviderChannels {
+        let mut registry = crate::services::provider_cli::registry::ProviderCliRegistry::default();
+        let mut channels = crate::services::provider_cli::registry::ProviderChannels {
             current: Some(registry_channel(&current)),
             candidate: Some(registry_channel(&candidate)),
             ..Default::default()

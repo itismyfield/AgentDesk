@@ -43,7 +43,7 @@ pub(super) fn register_card_ops<'js>(
                 return card_get_raw_pg(pool, &card_id);
             }
             #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-            if let Some(db) = db_get.as_ref() {
+            if let Some(db) = _db_get.as_ref() {
                 return card_get_raw_sqlite(db, &card_id);
             }
             json_result(Err::<Value, _>(anyhow!(
@@ -61,7 +61,7 @@ pub(super) fn register_card_ops<'js>(
                 return card_list_raw_pg(pool, &filter_json);
             }
             #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-            if let Some(db) = db_list.as_ref() {
+            if let Some(db) = _db_list.as_ref() {
                 return card_list_raw_sqlite(db, &filter_json);
             }
             json_result(Err::<Value, _>(anyhow!(
@@ -81,7 +81,7 @@ pub(super) fn register_card_ops<'js>(
                     return card_assign_raw_pg(pool, &card_id, &agent_id);
                 }
                 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                if let Some(db) = db_assign.as_ref() {
+                if let Some(db) = _db_assign.as_ref() {
                     return card_assign_raw_sqlite(db, &card_id, &agent_id);
                 }
                 json_result(Err::<Value, _>(anyhow!(
@@ -102,7 +102,7 @@ pub(super) fn register_card_ops<'js>(
                     return card_set_priority_raw_pg(pool, &card_id, &priority);
                 }
                 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                if let Some(db) = db_priority.as_ref() {
+                if let Some(db) = _db_priority.as_ref() {
                     return card_set_priority_raw_sqlite(db, &card_id, &priority);
                 }
                 json_result(Err::<Value, _>(anyhow!(

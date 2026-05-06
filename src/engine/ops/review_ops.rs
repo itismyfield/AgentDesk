@@ -23,7 +23,7 @@ pub(super) fn register_review_ops<'js>(
                 Some(pool) => review_get_verdict_raw_pg(pool, &card_id),
                 None => {
                     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                    if let Some(db) = db_verdict.as_ref() {
+                    if let Some(db) = _db_verdict.as_ref() {
                         return review_get_verdict_raw_sqlite(db, &card_id);
                     }
                     json!({
@@ -44,7 +44,7 @@ pub(super) fn register_review_ops<'js>(
                 Some(pool) => review_entry_context_raw_pg(pool, &card_id),
                 None => {
                     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                    if let Some(db) = db_entry.as_ref() {
+                    if let Some(db) = _db_entry.as_ref() {
                         return review_entry_context_raw_sqlite(db, &card_id);
                     }
                     json!({
@@ -67,7 +67,7 @@ pub(super) fn register_review_ops<'js>(
                     Some(pool) => review_record_entry_raw_pg(pool, &card_id, &opts_json),
                     None => {
                         #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                        if let Some(db) = db_record.as_ref() {
+                        if let Some(db) = _db_record.as_ref() {
                             return review_record_entry_raw_sqlite(db, &card_id, &opts_json);
                         }
                         json!({
@@ -89,7 +89,7 @@ pub(super) fn register_review_ops<'js>(
                 Some(pool) => review_has_active_work_raw_pg(pool, &card_id),
                 None => {
                     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                    if let Some(db) = db_active_work.as_ref() {
+                    if let Some(db) = _db_active_work.as_ref() {
                         return review_has_active_work_raw_sqlite(db, &card_id);
                     }
                     json!({

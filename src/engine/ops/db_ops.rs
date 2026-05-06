@@ -182,7 +182,7 @@ fn db_query_raw_with_json_mode(
 
     let Some(pg_pool) = pg_pool else {
         #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = legacy_db {
+        if let Some(db) = _legacy_db {
             return db_query_raw_sqlite(db, sql, &params, started);
         }
         let backend_operation = format!("{origin}.pg_backend");
@@ -380,7 +380,7 @@ fn db_execute_raw(
 
     let Some(pg_pool) = pg_pool else {
         #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-        if let Some(db) = legacy_db {
+        if let Some(db) = _legacy_db {
             return db_execute_raw_sqlite(db, sql, &params, started);
         }
         return policy_db_error_json(

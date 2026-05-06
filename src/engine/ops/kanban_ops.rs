@@ -123,7 +123,7 @@ pub(super) fn register_kanban_ops<'js>(
                     return set_review_status_raw_pg(pool, &card_id, &opts_json);
                 }
                 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-                if let Some(db) = db_review.as_ref() {
+                if let Some(db) = _db_review.as_ref() {
                     return set_review_status_raw_sqlite(db, &card_id, &opts_json);
                 }
                 r#"{"error":"postgres backend is required for kanban.setReviewStatus"}"#.to_string()
