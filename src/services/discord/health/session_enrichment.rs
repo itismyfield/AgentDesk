@@ -182,17 +182,11 @@ impl SessionEnrichment {
     }
 
     pub fn inflight_user_msg_id(&self) -> Option<u64> {
-        self.inflight
-            .as_ref()
-            .map(|state| state.user_msg_id)
-            .filter(|id| *id != 0)
+        super::redaction::visible_inflight_user_msg_id(self.inflight.as_ref())
     }
 
     pub fn inflight_current_msg_id(&self) -> Option<u64> {
-        self.inflight
-            .as_ref()
-            .map(|state| state.current_msg_id)
-            .filter(|id| *id != 0)
+        super::redaction::visible_inflight_current_msg_id(self.inflight.as_ref())
     }
 
     pub fn watcher_owns_live_relay(&self) -> bool {

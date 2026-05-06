@@ -29,6 +29,7 @@ use crate::services::discord::outbound::{
 use crate::services::provider::ProviderKind;
 
 mod recovery;
+mod redaction;
 mod session_enrichment;
 
 pub(crate) use recovery::stop_provider_channel_runtime_with_policy;
@@ -566,7 +567,7 @@ impl HealthRegistry {
             let mailbox_snapshot = super::mailbox_snapshot(&shared, channel).await;
             let mailbox_has_cancel_token = mailbox_snapshot.cancel_token.is_some();
             let mailbox_active_user_msg_id =
-                mailbox_snapshot.active_user_message_id.map(|id| id.get());
+                redaction::visible_serenity_message_id(mailbox_snapshot.active_user_message_id);
             let has_pending_queue = !mailbox_snapshot.intervention_queue.is_empty();
             let mailbox_engaged = mailbox_active_user_msg_id.is_some() || has_pending_queue;
             let has_thread_proof = shared.dispatch_thread_parents.contains_key(&channel)
@@ -794,7 +795,8 @@ async fn build_health_snapshot_with_options(
                 let desynced = session.desynced(tmux_present, session.watcher_attached);
                 let mailbox_has_cancel_token = snapshot.cancel_token.is_some();
                 let queue_depth = snapshot.intervention_queue.len();
-                let mailbox_active_user_msg_id = snapshot.active_user_message_id.map(|id| id.get());
+                let mailbox_active_user_msg_id =
+                    redaction::visible_serenity_message_id(snapshot.active_user_message_id);
                 let relay_thread_proof = relay_thread_proof_for_channel(
                     &entry.shared,
                     provider_kind.as_ref(),
