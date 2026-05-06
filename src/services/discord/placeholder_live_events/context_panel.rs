@@ -10,16 +10,29 @@ pub(super) struct ContextPanelSnapshot {
 }
 
 impl ContextPanelSnapshot {
+    fn used_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.cache_create_tokens)
+            .saturating_add(self.cache_read_tokens)
+    }
+
     fn usage_percent(&self) -> Option<u64> {
         if self.context_window_tokens == 0 {
             return None;
         }
-        let used_tokens = self
-            .input_tokens
-            .saturating_add(self.cache_create_tokens)
-            .saturating_add(self.cache_read_tokens);
-        let percent = (u128::from(used_tokens) * 100) / u128::from(self.context_window_tokens);
+        let percent =
+            (u128::from(self.used_tokens()) * 100) / u128::from(self.context_window_tokens);
         Some(percent.min(100) as u64)
+    }
+}
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
     }
 }
 
@@ -30,8 +43,10 @@ pub(super) fn render_context_panel_line(context: &ContextPanelSnapshot) -> Optio
     } else {
         "📦"
     };
+    let used = format_token_count(context.used_tokens());
+    let window = format_token_count(context.context_window_tokens);
     let mut line = format!(
-        "Context   {icon} {usage_percent}% used · auto-compact {}%",
+        "Context   {icon} {used} / {window} tokens ({usage_percent}%) · auto-compact {}%",
         context.compact_percent
     );
     if usage_percent >= 85 {

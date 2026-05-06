@@ -361,7 +361,7 @@ fn status_panel_renders_context_usage_severity_levels() {
     assert!(events.set_context_panel_usage(normal_channel_id, 740, 0, 0, 1000, 90));
     let normal =
         events.render_status_panel(normal_channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(normal.contains("Context   📦 74% used · auto-compact 90%"));
+    assert!(normal.contains("Context   📦 740 / 1.0k tokens (74%) · auto-compact 90%"));
     assert!(!normal.contains("임박"));
     assert!(!normal.contains("자동 압축 직전"));
 
@@ -369,13 +369,16 @@ fn status_panel_renders_context_usage_severity_levels() {
     events.set_context_panel_usage(approaching_channel_id, 700, 40, 10, 1000, 90);
     let approaching =
         events.render_status_panel(approaching_channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(approaching.contains("Context   📦 75% used · auto-compact 90% (임박)"));
+    assert!(approaching.contains("Context   📦 750 / 1.0k tokens (75%) · auto-compact 90% (임박)"));
 
     let critical_channel_id = ChannelId::new(184);
     events.set_context_panel_usage(critical_channel_id, 700, 100, 50, 1000, 90);
     let critical =
         events.render_status_panel(critical_channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(critical.contains("Context   ⚠️ 85% used · auto-compact 90% — 자동 압축 직전"));
+    assert!(
+        critical
+            .contains("Context   ⚠️ 850 / 1.0k tokens (85%) · auto-compact 90% — 자동 압축 직전")
+    );
 }
 
 #[test]
@@ -386,8 +389,8 @@ fn status_panel_caps_context_usage_display_at_100_percent() {
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
-    assert!(rendered.contains("Context   ⚠️ 100% used · auto-compact 60%"));
-    assert!(!rendered.contains("409% used"));
+    assert!(rendered.contains("Context   ⚠️ 4.1k / 1.0k tokens (100%) · auto-compact 60%"));
+    assert!(!rendered.contains("(409%)"));
 }
 
 #[test]
