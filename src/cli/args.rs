@@ -138,6 +138,24 @@ pub(crate) enum Commands {
         #[arg(long = "dispatch")]
         dispatch_id: Option<String>,
     },
+    /// Recover a review dispatch target commit/worktree through the API
+    ReviewRecoverTarget {
+        /// Review dispatch ID
+        #[arg(long = "dispatch")]
+        dispatch_id: Option<String>,
+        /// Kanban card ID, used to resolve the latest review dispatch when --dispatch is omitted
+        #[arg(long = "card")]
+        card_id: Option<String>,
+        /// Reviewed commit SHA to pin
+        #[arg(long = "commit")]
+        target_commit: Option<String>,
+        /// Worktree path whose HEAD must match the reviewed commit
+        #[arg(long = "worktree")]
+        worktree_path: Option<String>,
+        /// Operator reason stored in the audit event
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Read API documentation without HTTP server dependency
     Docs {
         /// Optional docs category

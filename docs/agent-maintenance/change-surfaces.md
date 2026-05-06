@@ -171,7 +171,8 @@
   - `src/server/routes/meetings.rs` (2158 lines).
   - `src/server/routes/review_verdict/decision_route.rs` (1865 lines).
   - `src/server/routes/{agents,agents_crud,agents_setup,analytics,v1,
-    settings,resume,pipeline,dispatches/thread_reuse}.rs` (all 1000+ lines).
+    settings,resume,pipeline,reviews,dispatches/thread_reuse}.rs` (all 1000+
+    lines).
 - active_callsite_coverage: legacy_db helper coverage tracked separately —
   see `known-legacy.md` row `legacy_db_helper`.
 - invariants:

@@ -771,6 +771,44 @@ pub fn cmd_dispatch_redispatch(card_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `agentdesk review-recover-target --dispatch <id> --commit <sha> --worktree <path>`
+pub fn cmd_review_recover_target(
+    dispatch_id: Option<&str>,
+    card_id: Option<&str>,
+    target_commit: Option<&str>,
+    worktree_path: Option<&str>,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    let mut body = serde_json::Map::new();
+    if let Some(value) = dispatch_id.map(str::trim).filter(|value| !value.is_empty()) {
+        body.insert("dispatch_id".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = card_id.map(str::trim).filter(|value| !value.is_empty()) {
+        body.insert("card_id".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = target_commit
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.insert("target_commit".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = worktree_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.insert("worktree_path".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = reason.map(str::trim).filter(|value| !value.is_empty()) {
+        body.insert("reason".to_string(), serde_json::json!(value));
+    }
+    let value = post_json(
+        "/api/reviews/recovery",
+        Some(serde_json::Value::Object(body)),
+    )?;
+    print_json(&value);
+    Ok(())
+}
+
 /// `agentdesk resume <card_id_or_issue_number>`
 ///
 /// The API handler resolves GitHub issue numbers automatically,

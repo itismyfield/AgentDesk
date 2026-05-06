@@ -18,6 +18,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/kanban-reviews/{id}/trigger-rework",
                 post(reviews::trigger_rework),
             )
+            .route("/reviews/recovery", post(reviews::recover_review_target))
             .route("/reviews/verdict", post(review_verdict::submit_verdict))
             .route(
                 "/reviews/decision",
