@@ -9,15 +9,15 @@ use serde_json::json;
 
 use super::AppState;
 use crate::services::agents::query::{
-    agent_exists_pg, block_active_card_for_agent_pg, find_agent_turn_session_pg,
-    find_diag_session_pg, list_agent_dispatched_sessions_pg_json, list_agent_offices_pg_json,
-    list_agent_skills_pg_json, list_agent_timeline_pg_json, list_agent_transcripts_pg_json,
-    mark_session_disconnected_pg,
+    agent_exists_pg, block_active_card_for_agent_pg, find_diag_session_pg,
+    list_agent_dispatched_sessions_pg_json, list_agent_offices_pg_json, list_agent_skills_pg_json,
+    list_agent_timeline_pg_json, mark_session_disconnected_pg,
 };
 use crate::services::agents::turn::{
-    TurnToolEvent, capture_recent_tmux_output, collect_turn_tool_events, extract_tmux_name,
-    inflight_recent_output, load_inflight_snapshot, loop_suspicion, parse_local_timestamp_to_unix,
-    sanitize_status_line,
+    AgentTurnLookupError, capture_recent_tmux_output, collect_turn_tool_events, extract_tmux_name,
+    find_agent_turn_session_pg, inflight_recent_output, list_agent_turn_history_pg_json,
+    load_agent_turn_status_pg, load_inflight_snapshot, loop_suspicion,
+    parse_local_timestamp_to_unix,
 };
 use crate::services::observability::session_inventory::{
     derive_visual_status, load_child_inventory_by_parent_key_pg,
@@ -30,6 +30,8 @@ use crate::utils::api::{bad_request, internal_error, not_found};
 use crate::server::dto::agents::{build_channel_deeplinks, dedup_dispatched_sessions};
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::services::agents::query::pg_timestamp_to_rfc3339;
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use crate::services::agents::turn::TurnToolEvent;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::services::agents::turn::normalize_recent_output;
 
@@ -460,130 +462,17 @@ pub async fn agent_turn(
     let Some(pool) = state.pg_pool_ref() else {
         return pg_required_response();
     };
-    let session = {
-        match agent_exists_pg(pool, &id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "agent not found"})),
-                );
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("query: {e}")})),
-                );
-            }
-        }
-
-        match find_agent_turn_session_pg(pool, &id).await {
-            Ok(session) => session,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("query: {e}")})),
-                );
-            }
-        }
-    };
-
-    let Some(session) = session else {
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "agent_id": id,
-                "status": "idle",
-                "started_at": serde_json::Value::Null,
-                "updated_at": serde_json::Value::Null,
-                "recent_output": serde_json::Value::Null,
-                "recent_output_source": "none",
-                "session_key": serde_json::Value::Null,
-                "tmux_session": serde_json::Value::Null,
-                "provider": serde_json::Value::Null,
-                "thread_channel_id": serde_json::Value::Null,
-                "active_dispatch_id": serde_json::Value::Null,
-                "last_heartbeat": serde_json::Value::Null,
-                "current_tool_line": serde_json::Value::Null,
-                "prev_tool_status": serde_json::Value::Null,
-                "tool_events": Vec::<TurnToolEvent>::new(),
-                "tool_count": 0,
-            })),
-        );
-    };
-
-    if !session.is_working {
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "agent_id": id,
-                "status": "idle",
-                "started_at": serde_json::Value::Null,
-                "updated_at": serde_json::Value::Null,
-                "recent_output": serde_json::Value::Null,
-                "recent_output_source": "none",
-                "session_key": session.session_key,
-                "tmux_session": extract_tmux_name(&session.session_key),
-                "provider": session.provider,
-                "thread_channel_id": session.thread_channel_id,
-                "active_dispatch_id": serde_json::Value::Null,
-                "last_heartbeat": session.last_heartbeat,
-                "current_tool_line": serde_json::Value::Null,
-                "prev_tool_status": serde_json::Value::Null,
-                "tool_events": Vec::<TurnToolEvent>::new(),
-                "tool_count": 0,
-            })),
-        );
+    match load_agent_turn_status_pg(pool, &id).await {
+        Ok(body) => (StatusCode::OK, Json(body)),
+        Err(AgentTurnLookupError::AgentNotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "agent not found"})),
+        ),
+        Err(AgentTurnLookupError::Query(error)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query: {error}")})),
+        ),
     }
-
-    let tmux_name = extract_tmux_name(&session.session_key);
-    let inflight = load_inflight_snapshot(session.provider.as_deref(), tmux_name.as_deref());
-    let started_at = inflight
-        .as_ref()
-        .and_then(|snapshot| snapshot.started_at.clone())
-        .or(session.created_at.clone());
-    let (recent_output, recent_output_source) = if let Some(ref tmux_name) = tmux_name {
-        let tmux_name = tmux_name.clone();
-        match tokio::task::spawn_blocking(move || capture_recent_tmux_output(&tmux_name)).await {
-            Ok(Some(output)) => (Some(output), "tmux"),
-            _ => match inflight.as_ref().and_then(inflight_recent_output) {
-                Some(output) => (Some(output), "inflight"),
-                None => (None, "none"),
-            },
-        }
-    } else {
-        match inflight.as_ref().and_then(inflight_recent_output) {
-            Some(output) => (Some(output), "inflight"),
-            None => (None, "none"),
-        }
-    };
-    let tool_events = collect_turn_tool_events(recent_output.as_deref(), inflight.as_ref());
-    let tool_count = tool_events
-        .iter()
-        .filter(|event| event.kind == "tool")
-        .count();
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "agent_id": id,
-            "status": session.effective_status,
-            "started_at": started_at,
-            "updated_at": inflight.as_ref().and_then(|snapshot| snapshot.updated_at.clone()),
-            "recent_output": recent_output,
-            "recent_output_source": recent_output_source,
-            "session_key": session.session_key,
-            "tmux_session": tmux_name,
-            "provider": session.provider,
-            "thread_channel_id": session.thread_channel_id,
-            "active_dispatch_id": session.effective_active_dispatch_id,
-            "last_heartbeat": session.last_heartbeat,
-            "current_tool_line": inflight.as_ref().and_then(|snapshot| snapshot.current_tool_line.as_deref()).and_then(sanitize_status_line),
-            "prev_tool_status": inflight.as_ref().and_then(|snapshot| snapshot.prev_tool_status.as_deref()).and_then(sanitize_status_line),
-            "tool_events": tool_events,
-            "tool_count": tool_count,
-        })),
-    )
 }
 
 /// POST /api/agents/:id/turn/start
@@ -1002,7 +891,7 @@ pub async fn agent_transcripts(
         }
     }
 
-    match list_agent_transcripts_pg_json(pool, &id, params.limit.unwrap_or(8)).await {
+    match list_agent_turn_history_pg_json(pool, &id, params.limit.unwrap_or(8)).await {
         Ok(transcripts) => (
             StatusCode::OK,
             Json(json!({

@@ -3,23 +3,9 @@ use sqlx::Row;
 
 use crate::server::dto::agents::{
     agent_office_json, agent_skill_json, build_channel_deeplinks, dedup_dispatched_sessions,
-    dispatched_session_json, timeline_event_json, transcript_json,
+    dispatched_session_json, timeline_event_json,
 };
 use crate::server::routes::session_activity::SessionActivityResolver;
-use crate::utils::api::clamp_api_limit;
-
-#[derive(Debug, Clone)]
-pub struct AgentTurnSession {
-    pub session_key: String,
-    pub provider: Option<String>,
-    pub last_heartbeat: Option<String>,
-    pub created_at: Option<String>,
-    pub thread_channel_id: Option<String>,
-    pub runtime_channel_id: Option<String>,
-    pub effective_status: &'static str,
-    pub effective_active_dispatch_id: Option<String>,
-    pub is_working: bool,
-}
 
 #[derive(Debug, Clone)]
 pub struct AgentDiagSession {
@@ -44,77 +30,6 @@ pub async fn agent_exists_pg(pool: &sqlx::PgPool, id: &str) -> Result<bool, sqlx
 
 pub fn pg_timestamp_to_rfc3339(value: Option<DateTime<Utc>>) -> Option<String> {
     value.map(|value| value.to_rfc3339())
-}
-
-pub async fn find_agent_turn_session_pg(
-    pool: &sqlx::PgPool,
-    agent_id: &str,
-) -> Result<Option<AgentTurnSession>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT COALESCE(s.session_key, '') AS session_key,
-                s.provider,
-                s.status,
-                s.active_dispatch_id,
-                s.last_heartbeat,
-                s.created_at,
-                s.thread_channel_id::TEXT AS thread_channel_id,
-                COALESCE(
-                    s.thread_channel_id::TEXT,
-                    a.discord_channel_id,
-                    a.discord_channel_alt,
-                    a.discord_channel_cc,
-                    a.discord_channel_cdx
-                ) AS runtime_channel_id
-         FROM sessions s
-         LEFT JOIN agents a ON a.id = s.agent_id
-         WHERE s.agent_id = $1
-         ORDER BY s.last_heartbeat DESC NULLS LAST, s.created_at DESC NULLS LAST, s.id DESC",
-    )
-    .bind(agent_id)
-    .fetch_all(pool)
-    .await?;
-
-    let mut resolver = SessionActivityResolver::new();
-    let mut latest = None;
-
-    for row in rows {
-        let session_key: String = row.try_get("session_key")?;
-        let provider: Option<String> = row.try_get("provider")?;
-        let raw_status: Option<String> = row.try_get("status")?;
-        let active_dispatch_id: Option<String> = row.try_get("active_dispatch_id")?;
-        let last_heartbeat =
-            pg_timestamp_to_rfc3339(row.try_get::<Option<DateTime<Utc>>, _>("last_heartbeat")?);
-        let created_at =
-            pg_timestamp_to_rfc3339(row.try_get::<Option<DateTime<Utc>>, _>("created_at")?);
-        let thread_channel_id: Option<String> = row.try_get("thread_channel_id")?;
-        let runtime_channel_id: Option<String> = row.try_get("runtime_channel_id")?;
-        let session_key_ref = (!session_key.trim().is_empty()).then_some(session_key.as_str());
-        let effective = resolver.resolve(
-            session_key_ref,
-            raw_status.as_deref(),
-            active_dispatch_id.as_deref(),
-            last_heartbeat.as_deref(),
-        );
-        let candidate = AgentTurnSession {
-            session_key,
-            provider,
-            last_heartbeat,
-            created_at,
-            thread_channel_id,
-            runtime_channel_id,
-            effective_status: effective.status,
-            effective_active_dispatch_id: effective.active_dispatch_id,
-            is_working: effective.is_working,
-        };
-        if latest.is_none() {
-            latest = Some(candidate.clone());
-        }
-        if candidate.is_working {
-            return Ok(Some(candidate));
-        }
-    }
-
-    Ok(latest)
 }
 
 pub async fn find_diag_session_pg(
@@ -412,91 +327,6 @@ pub async fn list_agent_timeline_pg_json(
                 row.try_get::<Option<String>, _>("status").ok().flatten(),
                 row.try_get::<Option<i64>, _>("timestamp").ok().flatten(),
                 row.try_get::<Option<i64>, _>("duration_ms").ok().flatten(),
-            )
-        })
-        .collect())
-}
-
-pub async fn list_agent_transcripts_pg_json(
-    pool: &sqlx::PgPool,
-    agent_id: &str,
-    limit: usize,
-) -> Result<Vec<serde_json::Value>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT st.id,
-                st.turn_id,
-                st.session_key,
-                st.channel_id,
-                st.agent_id,
-                st.provider,
-                st.dispatch_id,
-                td.kanban_card_id,
-                td.title AS dispatch_title,
-                kc.title AS card_title,
-                kc.github_issue_number,
-                st.user_message,
-                st.assistant_message,
-                st.events_json::text AS events_json,
-                st.duration_ms::BIGINT AS duration_ms,
-                to_char(st.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
-         FROM session_transcripts st
-         LEFT JOIN sessions s ON s.session_key = st.session_key
-         LEFT JOIN task_dispatches td ON td.id = st.dispatch_id
-         LEFT JOIN kanban_cards kc ON kc.id = td.kanban_card_id
-         WHERE COALESCE(NULLIF(BTRIM(st.agent_id), ''), NULLIF(BTRIM(s.agent_id), '')) = $1
-            OR (
-                COALESCE(NULLIF(BTRIM(st.agent_id), ''), NULLIF(BTRIM(s.agent_id), '')) IS NULL
-                AND td.to_agent_id = $1
-            )
-         ORDER BY st.created_at DESC, st.id DESC
-         LIMIT $2",
-    )
-    .bind(agent_id)
-    .bind(clamp_api_limit(Some(limit)) as i64)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let events = row
-                .try_get::<Option<String>, _>("events_json")
-                .ok()
-                .flatten()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-            transcript_json(
-                row.try_get::<i64, _>("id").unwrap_or(0),
-                row.try_get::<String, _>("turn_id").unwrap_or_default(),
-                row.try_get::<Option<String>, _>("session_key")
-                    .ok()
-                    .flatten(),
-                row.try_get::<Option<String>, _>("channel_id")
-                    .ok()
-                    .flatten(),
-                row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
-                row.try_get::<Option<String>, _>("provider").ok().flatten(),
-                row.try_get::<Option<String>, _>("dispatch_id")
-                    .ok()
-                    .flatten(),
-                row.try_get::<Option<String>, _>("kanban_card_id")
-                    .ok()
-                    .flatten(),
-                row.try_get::<Option<String>, _>("dispatch_title")
-                    .ok()
-                    .flatten(),
-                row.try_get::<Option<String>, _>("card_title")
-                    .ok()
-                    .flatten(),
-                row.try_get::<Option<i64>, _>("github_issue_number")
-                    .ok()
-                    .flatten(),
-                row.try_get::<String, _>("user_message").unwrap_or_default(),
-                row.try_get::<String, _>("assistant_message")
-                    .unwrap_or_default(),
-                events,
-                row.try_get::<Option<i64>, _>("duration_ms").ok().flatten(),
-                row.try_get::<String, _>("created_at").unwrap_or_default(),
             )
         })
         .collect())
