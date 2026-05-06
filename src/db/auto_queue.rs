@@ -2291,6 +2291,56 @@ pub async fn slot_has_recent_terminal_auto_queue_dispatch_pg(
     .await
 }
 
+fn active_dispatch_slot_guard_sql(agent_expr: &str, slot_expr: &str) -> String {
+    format!(
+        "NOT EXISTS (
+             SELECT 1
+             FROM task_dispatches d
+             WHERE d.to_agent_id = {agent_expr}
+               AND d.status IN ('pending', 'dispatched')
+               AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'slot_index', '')::BIGINT, -1) = {slot_expr}
+               AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+               AND (COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->'phase_gate' IS NULL
+         )"
+    )
+}
+
+fn active_dispatch_slot_exists_sql(agent_expr: &str, slot_expr: &str) -> String {
+    format!(
+        "EXISTS (
+             SELECT 1
+             FROM task_dispatches d
+             WHERE d.to_agent_id = {agent_expr}
+               AND d.status IN ('pending', 'dispatched')
+               AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'slot_index', '')::BIGINT, -1) = {slot_expr}
+               AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+               AND (COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->'phase_gate' IS NULL
+         )"
+    )
+}
+
+async fn first_free_slot_blocked_by_active_dispatch_pg(
+    pool: &PgPool,
+    agent_id: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    let active_dispatch_exists =
+        active_dispatch_slot_exists_sql("auto_queue_slots.agent_id", "auto_queue_slots.slot_index");
+    let query = format!(
+        "SELECT slot_index::BIGINT
+         FROM auto_queue_slots
+         WHERE agent_id = $1
+           AND assigned_run_id IS NULL
+           AND {active_dispatch_exists}
+         ORDER BY slot_index ASC
+         LIMIT 1"
+    );
+
+    sqlx::query_scalar::<_, i64>(&query)
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await
+}
+
 pub async fn allocate_slot_for_group_agent_pg(
     pool: &PgPool,
     run_id: &str,
@@ -2351,7 +2401,8 @@ pub async fn allocate_slot_for_group_agent_pg(
             }));
         }
 
-        let reusable_slot = sqlx::query_scalar::<_, i64>(
+        let reusable_slot_guard = active_dispatch_slot_guard_sql("s.agent_id", "s.slot_index");
+        let reusable_slot_query = format!(
             "SELECT s.slot_index::BIGINT
              FROM auto_queue_slots s
              WHERE s.agent_id = $1
@@ -2365,18 +2416,11 @@ pub async fn allocate_slot_for_group_agent_pg(
                      AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
                      AND e.status IN ('pending', 'dispatched')
                )
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM task_dispatches d
-                   WHERE d.to_agent_id = s.agent_id
-                     AND d.status IN ('pending', 'dispatched')
-                     AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = s.slot_index
-                     AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
-                     AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
-               )
+               AND {reusable_slot_guard}
              ORDER BY s.slot_index ASC
-             LIMIT 1",
-        )
+             LIMIT 1"
+        );
+        let reusable_slot = sqlx::query_scalar::<_, i64>(&reusable_slot_query)
         .bind(agent_id)
         .bind(run_id)
         .bind(thread_group)
@@ -2388,7 +2432,11 @@ pub async fn allocate_slot_for_group_agent_pg(
             )
         })?;
         if let Some(slot_index) = reusable_slot {
-            let rebound = sqlx::query(
+            let rebound_slot_guard = active_dispatch_slot_guard_sql(
+                "auto_queue_slots.agent_id",
+                "auto_queue_slots.slot_index",
+            );
+            let rebound_query = format!(
                 "UPDATE auto_queue_slots
                  SET assigned_thread_group = $1,
                      updated_at = NOW()
@@ -2404,16 +2452,9 @@ pub async fn allocate_slot_for_group_agent_pg(
                          AND COALESCE(e.thread_group, 0) = COALESCE(auto_queue_slots.assigned_thread_group, 0)
                          AND e.status IN ('pending', 'dispatched')
                    )
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM task_dispatches d
-                       WHERE d.to_agent_id = auto_queue_slots.agent_id
-                         AND d.status IN ('pending', 'dispatched')
-                         AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = auto_queue_slots.slot_index
-                         AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
-                         AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
-                   )",
-            )
+                   AND {rebound_slot_guard}"
+            );
+            let rebound = sqlx::query(&rebound_query)
             .bind(thread_group)
             .bind(agent_id)
             .bind(slot_index)
@@ -2449,23 +2490,20 @@ pub async fn allocate_slot_for_group_agent_pg(
             }));
         }
 
-        let free_slot = sqlx::query_scalar::<_, i64>(
+        let free_slot_guard = active_dispatch_slot_guard_sql(
+            "auto_queue_slots.agent_id",
+            "auto_queue_slots.slot_index",
+        );
+        let free_slot_query = format!(
             "SELECT slot_index::BIGINT
              FROM auto_queue_slots
              WHERE agent_id = $1
                AND assigned_run_id IS NULL
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM task_dispatches d
-                   WHERE d.to_agent_id = auto_queue_slots.agent_id
-                     AND d.status IN ('pending', 'dispatched')
-                     AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = auto_queue_slots.slot_index
-                     AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
-                     AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
-               )
+               AND {free_slot_guard}
              ORDER BY slot_index ASC
-             LIMIT 1",
-        )
+             LIMIT 1"
+        );
+        let free_slot = sqlx::query_scalar::<_, i64>(&free_slot_query)
         .bind(agent_id)
         .fetch_optional(pool)
         .await
@@ -2475,10 +2513,31 @@ pub async fn allocate_slot_for_group_agent_pg(
             )
         })?;
         let Some(slot_index) = free_slot else {
+            match first_free_slot_blocked_by_active_dispatch_pg(pool, agent_id).await {
+                Ok(Some(blocked_slot_index)) => tracing::warn!(
+                    run_id,
+                    agent_id,
+                    thread_group,
+                    slot_index = blocked_slot_index,
+                    "[auto-queue] free-slot fallback refused slot with active dispatch"
+                ),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    run_id,
+                    agent_id,
+                    thread_group,
+                    error = %error,
+                    "[auto-queue] failed to inspect active-dispatch-blocked free slots"
+                ),
+            }
             return Ok(None);
         };
 
-        let claimed = sqlx::query(
+        let claim_slot_guard = active_dispatch_slot_guard_sql(
+            "auto_queue_slots.agent_id",
+            "auto_queue_slots.slot_index",
+        );
+        let claim_query = format!(
             "UPDATE auto_queue_slots
              SET assigned_run_id = $1,
                  assigned_thread_group = $2,
@@ -2486,16 +2545,9 @@ pub async fn allocate_slot_for_group_agent_pg(
              WHERE agent_id = $3
                AND slot_index = $4
                AND assigned_run_id IS NULL
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM task_dispatches d
-                   WHERE d.to_agent_id = auto_queue_slots.agent_id
-                     AND d.status IN ('pending', 'dispatched')
-                     AND COALESCE(NULLIF((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = auto_queue_slots.slot_index
-                     AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
-                     AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
-               )",
-        )
+               AND {claim_slot_guard}"
+        );
+        let claimed = sqlx::query(&claim_query)
         .bind(run_id)
         .bind(thread_group)
         .bind(agent_id)
@@ -2509,6 +2561,24 @@ pub async fn allocate_slot_for_group_agent_pg(
         })?
         .rows_affected();
         if claimed == 0 {
+            match slot_has_active_dispatch_pg(pool, agent_id, slot_index).await {
+                Ok(true) => tracing::warn!(
+                    run_id,
+                    agent_id,
+                    thread_group,
+                    slot_index,
+                    "[auto-queue] free-slot claim refused slot with active dispatch"
+                ),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    run_id,
+                    agent_id,
+                    thread_group,
+                    slot_index,
+                    error = %error,
+                    "[auto-queue] failed to inspect active dispatch after free-slot claim refusal"
+                ),
+            }
             if attempt == SLOT_ALLOCATION_MAX_RETRIES {
                 return Err(format!(
                     "slot allocation retry limit exceeded for run {run_id} agent {agent_id} group {thread_group} after {attempt} attempts"
