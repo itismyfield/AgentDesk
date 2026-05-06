@@ -512,6 +512,112 @@ fn should_add_turn_pending_reaction(_dispatch_id: Option<&str>) -> bool {
     true
 }
 
+async fn mailbox_try_start_turn_with_terminal_marker_cleanup(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: UserId,
+    user_msg_id: MessageId,
+    session_key: Option<&str>,
+) -> bool {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return super::super::mailbox_try_start_turn(
+            shared,
+            channel_id,
+            cancel_token,
+            request_owner,
+            user_msg_id,
+        )
+        .await;
+    };
+    let Some(session_key) = session_key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return super::super::mailbox_try_start_turn(
+            shared,
+            channel_id,
+            cancel_token,
+            request_owner,
+            user_msg_id,
+        )
+        .await;
+    };
+    let thread_channel_id = channel_id.get().to_string();
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(
+                "[outbox] failed to begin terminal delivery marker cleanup before turn start for channel {}: {}",
+                channel_id,
+                error
+            );
+            return super::super::mailbox_try_start_turn(
+                shared,
+                channel_id,
+                cancel_token,
+                request_owner,
+                user_msg_id,
+            )
+            .await;
+        }
+    };
+
+    if let Err(error) = sqlx::query("SELECT pg_advisory_xact_lock(1752, hashtext($1))")
+        .bind(&thread_channel_id)
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::warn!(
+            "[outbox] failed to lock terminal delivery marker before turn start for channel {}: {}",
+            channel_id,
+            error
+        );
+        let _ = tx.rollback().await;
+        return super::super::mailbox_try_start_turn(
+            shared,
+            channel_id,
+            cancel_token,
+            request_owner,
+            user_msg_id,
+        )
+        .await;
+    }
+
+    let started = super::super::mailbox_try_start_turn(
+        shared,
+        channel_id,
+        cancel_token,
+        request_owner,
+        user_msg_id,
+    )
+    .await;
+    if started
+        && let Err(error) = sqlx::query(
+            "UPDATE sessions
+                SET active_turn_delivery_outbox_id = NULL
+              WHERE session_key = $1
+                AND thread_channel_id = $2
+                AND active_turn_delivery_outbox_id IS NOT NULL",
+        )
+        .bind(session_key)
+        .bind(&thread_channel_id)
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::warn!(
+            "[outbox] failed to clear terminal delivery marker after new turn start for channel {}: {}",
+            channel_id,
+            error
+        );
+    }
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(
+            "[outbox] failed to commit terminal delivery marker cleanup after turn start for channel {}: {}",
+            channel_id,
+            error
+        );
+    }
+    started
+}
+
 fn native_fast_mode_override_for_turn(
     provider: &ProviderKind,
     channel_fast_mode_setting: Option<bool>,
@@ -770,9 +876,13 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
             .get(&channel_id)
             .and_then(|session| session.channel_name.clone())
             .or_else(|| channel_name_hint.clone());
-        let tmux_session_name = channel_name
-            .as_ref()
-            .map(|name| provider.build_tmux_session_name(name));
+        let tmux_session_name = if provider.uses_managed_tmux_backend() {
+            channel_name
+                .as_ref()
+                .map(|name| provider.build_tmux_session_name(name))
+        } else {
+            None
+        };
         let category_name = data
             .sessions
             .get(&channel_id)
@@ -830,12 +940,13 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     }
 
     let cancel_token = Arc::new(CancelToken::new());
-    let started = super::super::mailbox_try_start_turn(
+    let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
         shared,
         channel_id,
         cancel_token.clone(),
         request_owner,
         user_msg_id,
+        adk_session_key.as_deref(),
     )
     .await;
     if !started {
@@ -2366,9 +2477,13 @@ pub(in crate::services::discord) async fn handle_text_message(
             .sessions
             .get(&channel_id)
             .and_then(|s| s.channel_name.clone());
-        let tmux_session_name = channel_name
-            .as_ref()
-            .map(|name| provider.build_tmux_session_name(name));
+        let tmux_session_name = if provider.uses_managed_tmux_backend() {
+            channel_name
+                .as_ref()
+                .map(|name| provider.build_tmux_session_name(name))
+        } else {
+            None
+        };
         (channel_name, tmux_session_name)
     };
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
@@ -2460,12 +2575,13 @@ pub(in crate::services::discord) async fn handle_text_message(
     // because the async gap between check and insert allows interleaving.
     // If another message won the race, queue ourselves and clean up.
     let cancel_token = Arc::new(CancelToken::new());
-    let started = super::super::mailbox_try_start_turn(
+    let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
         shared,
         channel_id,
         cancel_token.clone(),
         request_owner,
         user_msg_id,
+        adk_session_key.as_deref(),
     )
     .await;
 

@@ -3042,6 +3042,65 @@ enum MessageOutboxFailureAction {
     Fail { retry_count: i64 },
 }
 
+fn is_terminal_turn_delivery_outbox_source(source: &str) -> bool {
+    matches!(source, "headless_turn" | "turn_bridge_tmux_handoff")
+}
+
+#[cfg(test)]
+fn session_can_be_released_for_terminal_outbox_failure(
+    session_key: Option<&str>,
+    failed_outbox_session_key: Option<&str>,
+    active_turn_delivery_outbox_id: Option<i64>,
+    failed_outbox_id: i64,
+) -> bool {
+    let session_key_matches = match failed_outbox_session_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(failed_session_key) => session_key == Some(failed_session_key),
+        None => true,
+    };
+
+    session_key_matches && active_turn_delivery_outbox_id == Some(failed_outbox_id)
+}
+
+async fn release_session_for_terminal_outbox_failure(
+    pg_pool: &PgPool,
+    channel_id_str: &str,
+    outbox_id: i64,
+) -> Result<u64, sqlx::Error> {
+    // Keep these predicates in sync with
+    // `session_can_be_released_for_terminal_outbox_failure`.
+    let result = sqlx::query(
+        "WITH lock_guard AS (
+            SELECT pg_advisory_xact_lock(1752, hashtext($1))
+         ),
+         failed_outbox AS (
+            SELECT id, session_key
+              FROM message_outbox
+             WHERE id = $2
+         )
+         UPDATE sessions
+            SET status = 'idle',
+                active_turn_delivery_outbox_id = NULL
+           FROM failed_outbox, lock_guard
+          WHERE sessions.thread_channel_id = $1
+            AND sessions.status IN ('turn_active', 'working')
+            AND sessions.active_turn_delivery_outbox_id = failed_outbox.id
+            AND (
+                failed_outbox.session_key IS NULL
+                OR failed_outbox.session_key = ''
+                OR sessions.session_key = failed_outbox.session_key
+            )",
+    )
+    .bind(channel_id_str)
+    .bind(outbox_id)
+    .execute(pg_pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction {
     let next_retry_count = retry_count.saturating_add(1);
     if next_retry_count > MESSAGE_OUTBOX_MAX_RETRY_COUNT {
@@ -3063,7 +3122,10 @@ fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction
 
 #[cfg(test)]
 mod message_outbox_retry_tests {
-    use super::{MessageOutboxFailureAction, message_outbox_failure_action};
+    use super::{
+        MessageOutboxFailureAction, is_terminal_turn_delivery_outbox_source,
+        message_outbox_failure_action, session_can_be_released_for_terminal_outbox_failure,
+    };
 
     #[test]
     fn message_outbox_failure_action_retries_then_fails() {
@@ -3085,6 +3147,70 @@ mod message_outbox_retry_tests {
             message_outbox_failure_action(4),
             MessageOutboxFailureAction::Fail { retry_count: 5 }
         );
+    }
+
+    #[test]
+    fn session_release_is_limited_to_terminal_turn_delivery_sources() {
+        assert!(is_terminal_turn_delivery_outbox_source("headless_turn"));
+        assert!(is_terminal_turn_delivery_outbox_source(
+            "turn_bridge_tmux_handoff"
+        ));
+
+        assert!(!is_terminal_turn_delivery_outbox_source(
+            crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE
+        ));
+        assert!(!is_terminal_turn_delivery_outbox_source("routine-runtime"));
+        assert!(!is_terminal_turn_delivery_outbox_source(
+            "quality_regression_alerter"
+        ));
+        assert!(!is_terminal_turn_delivery_outbox_source(
+            "agent_quality_rollup"
+        ));
+        assert!(!is_terminal_turn_delivery_outbox_source("system"));
+    }
+
+    #[test]
+    fn session_release_requires_same_failed_outbox_session_when_present() {
+        assert!(session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some("session-current"),
+            Some(42),
+            42,
+        ));
+        assert!(!session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some("session-old"),
+            Some(42),
+            42,
+        ));
+        assert!(session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some("  "),
+            Some(42),
+            42,
+        ));
+    }
+
+    #[test]
+    fn session_release_requires_matching_terminal_delivery_outbox_marker() {
+        assert!(!session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some("session-current"),
+            None,
+            42,
+        ));
+        assert!(!session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some("session-current"),
+            Some(41),
+            42,
+        ));
+        assert!(session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some("session-current"),
+            Some(42),
+            42,
+        ));
     }
 }
 
@@ -3252,7 +3378,7 @@ where
             let action = message_outbox_failure_action(row.retry_count);
             match action {
                 MessageOutboxFailureAction::Fail { retry_count } => {
-                    sqlx::query(
+                    let failed_update = sqlx::query(
                         "UPDATE message_outbox
                             SET status = 'failed',
                                 error = $1,
@@ -3262,12 +3388,58 @@ where
                                 claim_owner = NULL
                           WHERE id = $3",
                     )
-                    .bind(error_text)
+                    .bind(&error_text)
                     .bind(retry_count)
                     .bind(row.id)
                     .execute(pg_pool)
-                    .await
-                    .ok();
+                    .await;
+                    // Release only terminal turn-delivery rows, and only if no newer
+                    // session heartbeat proves another turn has since taken the channel.
+                    if let Err(error) = &failed_update {
+                        tracing::warn!(
+                            "[outbox] failed to mark msg {} failed; skipping terminal session release: {}",
+                            row.id,
+                            error
+                        );
+                    } else if failed_update
+                        .as_ref()
+                        .map(|result| result.rows_affected() == 0)
+                        .unwrap_or(true)
+                    {
+                        tracing::warn!(
+                            "[outbox] failed-state update affected no rows for msg {}; skipping terminal session release",
+                            row.id
+                        );
+                    } else if is_terminal_turn_delivery_outbox_source(&row.source) {
+                        if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
+                            let released_sessions =
+                                match release_session_for_terminal_outbox_failure(
+                                    pg_pool,
+                                    channel_id_str,
+                                    row.id,
+                                )
+                                .await
+                                {
+                                    Ok(count) => count,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "[outbox] failed to release session for channel {} after msg {} failure: {}",
+                                            channel_id_str,
+                                            row.id,
+                                            error,
+                                        );
+                                        0
+                                    }
+                                };
+                            tracing::warn!(
+                                "[outbox] ❌ permanent delivery failure for channel {} (msg {}, released_sessions={}): {}",
+                                channel_id_str,
+                                row.id,
+                                released_sessions,
+                                error_text,
+                            );
+                        }
+                    }
                 }
                 MessageOutboxFailureAction::Retry {
                     retry_count,
