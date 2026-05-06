@@ -2326,6 +2326,17 @@ pub async fn allocate_slot_for_group_agent_pg(
             )
         })?;
         if let Some(slot_index) = existing {
+            let slot_busy = slot_has_active_dispatch_pg(pool, agent_id, slot_index)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "inspect existing postgres slot {slot_index} active dispatch for run {run_id} agent {agent_id} group {thread_group}: {error}"
+                    )
+                })?;
+            if slot_busy {
+                return Ok(None);
+            }
+
             bind_slot_index_for_group_entries_pg(pool, run_id, agent_id, thread_group, slot_index)
                 .await
                 .map_err(|error| {
@@ -3753,6 +3764,63 @@ mod dispatch_terminal_sync_pg_tests {
                 .expect("aged terminal cooldown probe"),
             "aged terminal dispatches should be eligible for the next tick"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn allocate_slot_for_group_agent_pg_does_not_reuse_busy_existing_group_slot() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group,
+                 batch_phase)
+             VALUES ('entry-active', 'run-1', NULL, 'agent-1', 'dispatched', 'dispatch-active', 0, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed active same-group entry");
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+             VALUES ('dispatch-active', 'agent-1', 'pending', $1)",
+        )
+        .bind(
+            serde_json::json!({
+                "auto_queue": true,
+                "entry_id": "entry-active",
+                "slot_index": 0,
+                "thread_group": 0
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .expect("seed pending same-slot dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase)
+             VALUES ('entry-next', 'run-1', NULL, 'agent-1', 'pending', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed next same-group entry");
+
+        let allocation = allocate_slot_for_group_agent_pg(&pool, "run-1", 0, "agent-1")
+            .await
+            .expect("busy same-group slot probe must succeed");
+        assert_eq!(
+            allocation, None,
+            "a group must not receive its existing slot while that slot has a pending dispatch"
+        );
+
+        let next_slot: Option<i64> =
+            sqlx::query_scalar("SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-next'")
+                .fetch_one(&pool)
+                .await
+                .expect("next entry slot");
+        assert_eq!(next_slot, None);
 
         pool.close().await;
         pg_db.drop().await;
