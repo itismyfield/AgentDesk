@@ -120,7 +120,8 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
         "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat " +
         "FROM sessions WHERE status IN ('turn_active', 'working') " +
         "AND session_key NOT LIKE '%deadlock-manager%' " +
-        "AND last_heartbeat < datetime('now', '-" + DEADLOCK_MINUTES + " minutes')"
+        "AND last_heartbeat < datetime('now', '-" + DEADLOCK_MINUTES + " minutes') " +
+        "ORDER BY last_heartbeat ASC LIMIT 50"
       );
       for (var dl = 0; dl < staleSessions.length; dl++) {
         var sess = staleSessions[dl];
