@@ -11452,6 +11452,65 @@ mod tests {
         pg_db.drop().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kanban_rules_merge_metadata_binds_json_object_to_pg_jsonb() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_agent_pg(&pool).await;
+        seed_card_pg(&pool, "card-jsonb-bind", "ready").await;
+
+        sqlx::query("UPDATE kanban_cards SET description = $1, metadata = $2::jsonb WHERE id = $3")
+            .bind("too short")
+            .bind(
+                serde_json::json!({
+                    "existing": {
+                        "nested": true
+                    }
+                })
+                .to_string(),
+            )
+            .bind("card-jsonb-bind")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        engine
+            .try_fire_hook_by_name(
+                "OnCardTransition",
+                serde_json::json!({
+                    "card_id": "card-jsonb-bind",
+                    "from": "ready",
+                    "to": "requested"
+                }),
+            )
+            .unwrap();
+
+        let (metadata, metadata_type, metadata_text): (serde_json::Value, String, String) =
+            sqlx::query_as(
+                "SELECT metadata, jsonb_typeof(metadata), metadata::text
+                 FROM kanban_cards
+                 WHERE id = $1",
+            )
+            .bind("card-jsonb-bind")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(metadata_type, "object");
+        assert_eq!(metadata["existing"]["nested"], true);
+        assert_eq!(metadata["preflight_status"], "consult_required");
+        assert!(metadata["preflight_summary"].is_string());
+        assert!(metadata["preflight_checked_at"].is_string());
+        assert!(
+            !metadata_text.starts_with('"'),
+            "metadata must be stored as a jsonb object, not a JSON-encoded string: {metadata_text}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     // #1238: migrated to PG fixtures. The OnTick triage policy reads
     // `kanban_cards` + `kv_meta` and writes `message_outbox` exclusively
     // through the engine's PG-aware bridge ops, so the legacy SQLite seed +
