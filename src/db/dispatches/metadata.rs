@@ -65,13 +65,10 @@ pub(crate) fn parse_pg_dispatch_context(
     Some(value)
 }
 
-pub(crate) async fn load_dispatch_delivery_metadata(
-    _db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
+pub(crate) async fn load_dispatch_delivery_metadata_pg(
+    pool: &PgPool,
     dispatch_id: &str,
 ) -> Result<DispatchDeliveryMetadata, String> {
-    let pool =
-        pg_pool.ok_or_else(|| "dispatch metadata lookup requires postgres pool".to_string())?;
     let row = sqlx::query(
         "SELECT dispatch_type, status, context
          FROM task_dispatches
@@ -98,12 +95,10 @@ pub(crate) async fn load_dispatch_delivery_metadata(
     .ok_or_else(|| format!("dispatch {dispatch_id} not found"))
 }
 
-pub(crate) async fn load_card_issue_info(
-    _db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
+pub(crate) async fn load_card_issue_info_pg(
+    pool: &PgPool,
     card_id: &str,
 ) -> Result<CardIssueInfo, String> {
-    let pool = pg_pool.ok_or_else(|| "issue lookup requires postgres pool".to_string())?;
     let row = sqlx::query(
         "SELECT github_issue_url, github_issue_number
          FROM kanban_cards

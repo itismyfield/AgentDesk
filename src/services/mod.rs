@@ -14,7 +14,6 @@ pub mod discord_config_audit;
 // flat path is preserved as a re-export so existing import sites and
 // tests keep working without churn.
 pub(crate) use dispatches::discord_delivery;
-pub mod discord_delivery_metadata;
 pub mod discord_dm_reply_store;
 pub mod disk_monitor;
 pub mod dispatch_watchdog;
