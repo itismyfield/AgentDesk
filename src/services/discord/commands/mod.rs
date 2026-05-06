@@ -3,6 +3,7 @@ mod config;
 mod control;
 mod diagnostics;
 mod fast_mode;
+mod goals;
 mod help;
 mod inspect;
 mod meeting_cmd;
@@ -44,7 +45,8 @@ pub(super) use diagnostics::{
     cmd_debug, cmd_deletesession, cmd_health, cmd_inflight, cmd_metrics, cmd_queue, cmd_sessions,
     cmd_status,
 };
-pub(super) use fast_mode::{cmd_fast, cmd_goals};
+pub(super) use fast_mode::cmd_fast;
+pub(super) use goals::cmd_goals;
 pub(super) use help::cmd_help;
 pub(super) use inspect::cmd_adk;
 pub(super) use meeting_cmd::cmd_meeting;
