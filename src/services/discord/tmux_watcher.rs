@@ -2863,7 +2863,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 msg_id,
             )
         });
-        let missing_inflight_plan = missing_inflight_fallback_plan(
+        let missing_inflight_plan = missing_inflight_fallback_observation(
             inflight_state.is_none(),
             resolved_did.is_some(),
             terminal_output_committed,
@@ -2871,60 +2871,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             placeholder_cleanup_committed,
             tmux_alive_for_missing_inflight,
         );
-        if missing_inflight_plan.trigger_reattach {
-            if wait_for_reacquired_turn_bridge_inflight_state(
-                &provider_kind,
-                channel_id,
-                &tmux_session_name,
-                MISSING_INFLIGHT_REATTACH_GRACE_ATTEMPTS,
-                MISSING_INFLIGHT_REATTACH_GRACE_DELAY,
-            )
-            .await
-            {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ↻ watcher: explicit reattach skipped for channel {} — turn bridge reacquired inflight state during grace window",
-                    channel_id.get()
-                );
-            } else {
-                // #1136: this is the silent-drop path. The legacy code merely
-                // warned and walked away when the DB-side dispatch_id resolve
-                // failed; we now (a) bump a counter so operators can see the
-                // failure rate in `/api/analytics/observability`, and
-                // (b) explicitly trigger a watcher re-attach. The synthetic
-                // inflight state is tagged `rebind_origin = true` (see
-                // `trigger_missing_inflight_reattach`), so the next watcher
-                // generation will NOT itself re-enter this fallback path —
-                // that's the loop-prevention guard.
-                crate::services::observability::metrics::record_watcher_db_fallback_resolve_failed(
-                    channel_id.get(),
-                    provider_kind.as_str(),
-                );
-                let outcome = trigger_missing_inflight_reattach(
-                    &http,
-                    &shared,
-                    &provider_kind,
-                    channel_id,
-                    &tmux_session_name,
-                );
-                log_missing_inflight_reattach_outcome(
-                    channel_id,
-                    &tmux_session_name,
-                    outcome,
-                    "missing_inflight_db_fallback",
-                );
-            }
-        } else if missing_inflight_plan.suppressed_by_recent_stop {
+        if missing_inflight_plan.suppressed_by_recent_stop {
             if placeholder_cleanup_committed {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] ↻ watcher: explicit reattach skipped for channel {} — terminal placeholder cleanup already committed",
+                    "  [{ts}] ↻ watcher: missing-inflight observation suppressed for channel {} — terminal placeholder cleanup already committed",
                     channel_id.get()
                 );
             } else if let Some(stop) = recent_turn_stop {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
-                    "  [{ts}] ↻ watcher: explicit reattach skipped for channel {} — recent turn stop still active ({})",
+                    "  [{ts}] ↻ watcher: missing-inflight observation suppressed for channel {} — recent turn stop still active ({})",
                     channel_id.get(),
                     stop.reason
                 );
@@ -2951,6 +2908,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             )
             .await;
             break 'watcher_loop;
+        } else if missing_inflight_plan.mark_degraded {
+            crate::services::observability::metrics::record_watcher_db_fallback_resolve_failed(
+                channel_id.get(),
+                provider_kind.as_str(),
+            );
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ watcher: missing inflight with unresolved dispatch for channel {} while tmux is still alive; keeping watcher attached without synthetic inflight (tmux={})",
+                channel_id.get(),
+                tmux_session_name
+            );
         }
 
         // Update session tokens from result event and auto-compact if threshold exceeded
