@@ -78,11 +78,11 @@
 | `POST` | `/api/dispatched-sessions/webhook` | `dispatched_sessions::hook_session` | `src/server/routes/dispatched_sessions.rs:26` | `src/server/routes/domains/ops.rs:155` |
 | `PATCH` | `/api/dispatched-sessions/{id}` | `dispatched_sessions::update_dispatched_session` | `src/server/routes/dispatched_sessions.rs:80` | `src/server/routes/domains/ops.rs:151` |
 | `GET` | `/api/dispatches` | `dispatches::list_dispatches` | `src/server/routes/dispatches/crud.rs:43` | `src/server/routes/domains/ops.rs:17` |
-| `POST` | `/api/dispatches` | `dispatches::create_dispatch` | `src/server/routes/dispatches/crud.rs:83` | `src/server/routes/domains/ops.rs:17` |
+| `POST` | `/api/dispatches` | `dispatches::create_dispatch` | `src/server/routes/dispatches/crud.rs:89` | `src/server/routes/domains/ops.rs:17` |
 | `POST` | `/api/dispatches/cancel-all` | `queue_api::cancel_all_dispatches` | `src/server/routes/queue_api.rs:126` | `src/server/routes/domains/ops.rs:268` |
 | `GET` | `/api/dispatches/pending` | `queue_api::list_pending_dispatches` | `src/server/routes/queue_api.rs:65` | `src/server/routes/domains/ops.rs:263` |
-| `GET` | `/api/dispatches/{id}` | `dispatches::get_dispatch` | `src/server/routes/dispatches/crud.rs:64` | `src/server/routes/domains/ops.rs:91` |
-| `PATCH` | `/api/dispatches/{id}` | `dispatches::update_dispatch` | `src/server/routes/dispatches/crud.rs:147` | `src/server/routes/domains/ops.rs:91` |
+| `GET` | `/api/dispatches/{id}` | `dispatches::get_dispatch` | `src/server/routes/dispatches/crud.rs:67` | `src/server/routes/domains/ops.rs:91` |
+| `PATCH` | `/api/dispatches/{id}` | `dispatches::update_dispatch` | `src/server/routes/dispatches/crud.rs:149` | `src/server/routes/domains/ops.rs:91` |
 | `POST` | `/api/dispatches/{id}/cancel` | `queue_api::cancel_dispatch` | `src/server/routes/queue_api.rs:103` | `src/server/routes/domains/ops.rs:267` |
 | `POST` | `/api/dm-reply/register` | `dm_reply::register_handler` | `src/server/routes/dm_reply.rs:22` | `src/server/routes/domains/integrations.rs:35` |
 | `GET` | `/api/docs` | `docs::api_docs` | `src/server/routes/docs.rs:4401` | `src/server/routes/domains/ops.rs:278` |

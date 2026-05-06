@@ -308,6 +308,7 @@ src/
 │   │   │   └── text_commands.rs
 │   │   ├── health/
 │   │   │   ├── recovery.rs
+│   │   │   ├── redaction.rs
 │   │   │   └── session_enrichment.rs
 │   │   ├── outbound/
 │   │   │   ├── decision.rs

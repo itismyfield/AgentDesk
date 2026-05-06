@@ -4,9 +4,9 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use sqlx::Row;
 
+use crate::server::dto::dispatches::{DispatchListItem, DispatchRouteResponse};
 use crate::server::routes::AppState;
 
 const VALID_DISPATCH_STATUSES: &[&str] =
@@ -43,7 +43,7 @@ pub struct UpdateDispatchBody {
 pub async fn list_dispatches(
     State(state): State<AppState>,
     Query(params): Query<ListDispatchesQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> (StatusCode, Json<DispatchRouteResponse>) {
     let Some(pool) = state.pg_pool_ref() else {
         return pg_unavailable();
     };
@@ -55,7 +55,10 @@ pub async fn list_dispatches(
     )
     .await
     {
-        Ok(dispatches) => (StatusCode::OK, Json(json!({"dispatches": dispatches}))),
+        Ok(dispatches) => (
+            StatusCode::OK,
+            Json(DispatchRouteResponse::list(dispatches)),
+        ),
         Err(error) => internal_error(error),
     }
 }
@@ -64,16 +67,19 @@ pub async fn list_dispatches(
 pub async fn get_dispatch(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> (StatusCode, Json<DispatchRouteResponse>) {
     let Some(pool) = state.pg_pool_ref() else {
         return pg_unavailable();
     };
 
     match crate::dispatch::query_dispatch_row_pg(pool, &id).await {
-        Ok(dispatch) => (StatusCode::OK, Json(json!({"dispatch": dispatch}))),
+        Ok(dispatch) => (
+            StatusCode::OK,
+            Json(DispatchRouteResponse::dispatch(dispatch)),
+        ),
         Err(error) if error.to_string().contains("Query returned no rows") => (
             StatusCode::NOT_FOUND,
-            Json(json!({"error": "dispatch not found"})),
+            Json(DispatchRouteResponse::error("dispatch not found")),
         ),
         Err(error) => internal_error(format!("{error}")),
     }
@@ -83,7 +89,7 @@ pub async fn get_dispatch(
 pub async fn create_dispatch(
     State(state): State<AppState>,
     Json(body): Json<CreateDispatchBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> (StatusCode, Json<DispatchRouteResponse>) {
     let Some(pool) = state.pg_pool_ref() else {
         return pg_unavailable();
     };
@@ -94,13 +100,9 @@ pub async fn create_dispatch(
     let to_agent_id = resolve_dispatch_target_agent_id_pg(pool, &body.to_agent_id)
         .await
         .unwrap_or(body.to_agent_id);
-    let mut context = body.context.unwrap_or_else(|| json!({}));
+    let mut context = body.context.unwrap_or_else(empty_json_object);
     if let Some(required_capabilities) = body.required_capabilities {
-        if let Some(obj) = context.as_object_mut() {
-            obj.insert("required_capabilities".to_string(), required_capabilities);
-        } else {
-            context = json!({"value": context, "required_capabilities": required_capabilities});
-        }
+        context = context_with_required_capabilities(context, required_capabilities);
     }
     let options = crate::dispatch::DispatchCreateOptions {
         skip_outbox: body.skip_outbox.unwrap_or(false),
@@ -134,7 +136,7 @@ pub async fn create_dispatch(
                     } else {
                         StatusCode::CREATED
                     },
-                    Json(create_dispatch_response(dispatch)),
+                    Json(DispatchRouteResponse::created_dispatch(dispatch)),
                 ),
                 Err(error) => internal_error(format!("{error}")),
             }
@@ -148,7 +150,7 @@ pub async fn update_dispatch(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateDispatchBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> (StatusCode, Json<DispatchRouteResponse>) {
     let Some(pool) = state.pg_pool_ref() else {
         return pg_unavailable();
     };
@@ -168,9 +170,9 @@ pub async fn update_dispatch(
             if is_review && !has_verdict {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(
-                        json!({"error": "review dispatch completion requires explicit verdict — use POST /api/reviews/verdict"}),
-                    ),
+                    Json(DispatchRouteResponse::error(
+                        "review dispatch completion requires explicit verdict — use POST /api/reviews/verdict",
+                    )),
                 );
             }
         }
@@ -182,7 +184,10 @@ pub async fn update_dispatch(
             "api",
             body.result.as_ref(),
         ) {
-            Ok(dispatch) => (StatusCode::OK, Json(json!({"dispatch": dispatch}))),
+            Ok(dispatch) => (
+                StatusCode::OK,
+                Json(DispatchRouteResponse::dispatch(dispatch)),
+            ),
             Err(error) => dispatch_update_error(&id, format!("{error}")),
         };
     }
@@ -192,9 +197,11 @@ pub async fn update_dispatch(
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(
-                json!({"error": format!("invalid dispatch status '{}' — allowed values: {}", status, VALID_DISPATCH_STATUSES.join(", "))}),
-            ),
+            Json(DispatchRouteResponse::error(format!(
+                "invalid dispatch status '{}' — allowed values: {}",
+                status,
+                VALID_DISPATCH_STATUSES.join(", ")
+            ))),
         );
     }
 
@@ -213,7 +220,7 @@ pub async fn update_dispatch(
             Ok(0) => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(json!({"error": "dispatch not found"})),
+                    Json(DispatchRouteResponse::error("dispatch not found")),
                 );
             }
             Ok(_) => {}
@@ -224,7 +231,7 @@ pub async fn update_dispatch(
             Ok(0) => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(json!({"error": "dispatch not found"})),
+                    Json(DispatchRouteResponse::error("dispatch not found")),
                 );
             }
             Ok(_) => {}
@@ -233,47 +240,63 @@ pub async fn update_dispatch(
     } else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "no fields to update"})),
+            Json(DispatchRouteResponse::error("no fields to update")),
         );
     }
 
     match crate::dispatch::query_dispatch_row_pg(pool, &id).await {
-        Ok(dispatch) => (StatusCode::OK, Json(json!({"dispatch": dispatch}))),
+        Ok(dispatch) => (
+            StatusCode::OK,
+            Json(DispatchRouteResponse::dispatch(dispatch)),
+        ),
         Err(error) => internal_error(format!("{error}")),
     }
 }
 
-fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
+fn pg_unavailable() -> (StatusCode, Json<DispatchRouteResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
+        Json(DispatchRouteResponse::error("postgres pool unavailable")),
     )
 }
 
-fn create_dispatch_response(dispatch: serde_json::Value) -> serde_json::Value {
-    let reason = dispatch
-        .get("context")
-        .and_then(|context| context.get("counter_model_resolution_reason"))
-        .cloned();
-    let mut response = json!({ "dispatch": dispatch });
-    if let Some(reason) = reason {
-        response["counter_model_resolution_reason"] = reason;
+fn empty_json_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+fn context_with_required_capabilities(
+    mut context: serde_json::Value,
+    required_capabilities: serde_json::Value,
+) -> serde_json::Value {
+    if let Some(obj) = context.as_object_mut() {
+        obj.insert("required_capabilities".to_string(), required_capabilities);
+        context
+    } else {
+        let mut wrapped = serde_json::Map::new();
+        wrapped.insert("value".to_string(), context);
+        wrapped.insert("required_capabilities".to_string(), required_capabilities);
+        serde_json::Value::Object(wrapped)
     }
-    response
 }
 
-fn internal_error(error: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
+fn internal_error(error: impl Into<String>) -> (StatusCode, Json<DispatchRouteResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": error.into()})),
+        Json(DispatchRouteResponse::error(error)),
     )
 }
 
-fn dispatch_create_error(message: String) -> (StatusCode, Json<serde_json::Value>) {
+fn dispatch_create_error(message: String) -> (StatusCode, Json<DispatchRouteResponse>) {
     if message.contains("not found") {
-        (StatusCode::NOT_FOUND, Json(json!({"error": message})))
+        (
+            StatusCode::NOT_FOUND,
+            Json(DispatchRouteResponse::error(message)),
+        )
     } else if message.starts_with("Cannot create ") || message.contains("already exists") {
-        (StatusCode::CONFLICT, Json(json!({"error": message})))
+        (
+            StatusCode::CONFLICT,
+            Json(DispatchRouteResponse::error(message)),
+        )
     } else {
         internal_error(message)
     }
@@ -282,16 +305,16 @@ fn dispatch_create_error(message: String) -> (StatusCode, Json<serde_json::Value
 fn dispatch_update_error(
     dispatch_id: &str,
     message: String,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> (StatusCode, Json<DispatchRouteResponse>) {
     if message.contains("not found") {
         (
             StatusCode::NOT_FOUND,
-            Json(json!({"error": message, "dispatch_id": dispatch_id})),
+            Json(DispatchRouteResponse::dispatch_error(message, dispatch_id)),
         )
     } else if message.contains("no agent execution evidence") {
         (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": message, "dispatch_id": dispatch_id})),
+            Json(DispatchRouteResponse::dispatch_error(message, dispatch_id)),
         )
     } else {
         internal_error(message)
@@ -302,7 +325,7 @@ async fn list_dispatches_pg(
     pool: &sqlx::PgPool,
     status: Option<&str>,
     kanban_card_id: Option<&str>,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<DispatchListItem>, String> {
     let rows = sqlx::query(
         "SELECT
             id,
@@ -367,26 +390,42 @@ async fn list_dispatches_pg(
                 .map_err(|error| format!("decode postgres dispatch completed_at: {error}"))?
                 .or_else(|| (status == "completed").then(|| updated_at.clone()));
 
-            Ok(json!({
-                "id": row.try_get::<String, _>("id").map_err(|error| format!("decode postgres dispatch id: {error}"))?,
-                "kanban_card_id": row.try_get::<Option<String>, _>("kanban_card_id").map_err(|error| format!("decode postgres dispatch kanban_card_id: {error}"))?,
-                "from_agent_id": row.try_get::<Option<String>, _>("from_agent_id").map_err(|error| format!("decode postgres dispatch from_agent_id: {error}"))?,
-                "to_agent_id": row.try_get::<Option<String>, _>("to_agent_id").map_err(|error| format!("decode postgres dispatch to_agent_id: {error}"))?,
-                "dispatch_type": dispatch_type,
-                "status": status,
-                "title": row.try_get::<Option<String>, _>("title").map_err(|error| format!("decode postgres dispatch title: {error}"))?,
-                "context": context,
-                "result": result,
-                "context_file": serde_json::Value::Null,
-                "result_file": serde_json::Value::Null,
-                "result_summary": result_summary,
-                "parent_dispatch_id": row.try_get::<Option<String>, _>("parent_dispatch_id").map_err(|error| format!("decode postgres dispatch parent_dispatch_id: {error}"))?,
-                "chain_depth": row.try_get::<i64, _>("chain_depth").map_err(|error| format!("decode postgres dispatch chain_depth: {error}"))?,
-                "created_at": created_at.clone(),
-                "dispatched_at": Some(created_at),
-                "updated_at": updated_at,
-                "completed_at": completed_at,
-            }))
+            Ok(DispatchListItem {
+                id: row
+                    .try_get::<String, _>("id")
+                    .map_err(|error| format!("decode postgres dispatch id: {error}"))?,
+                kanban_card_id: row
+                    .try_get::<Option<String>, _>("kanban_card_id")
+                    .map_err(|error| format!("decode postgres dispatch kanban_card_id: {error}"))?,
+                from_agent_id: row
+                    .try_get::<Option<String>, _>("from_agent_id")
+                    .map_err(|error| format!("decode postgres dispatch from_agent_id: {error}"))?,
+                to_agent_id: row
+                    .try_get::<Option<String>, _>("to_agent_id")
+                    .map_err(|error| format!("decode postgres dispatch to_agent_id: {error}"))?,
+                dispatch_type,
+                status,
+                title: row
+                    .try_get::<Option<String>, _>("title")
+                    .map_err(|error| format!("decode postgres dispatch title: {error}"))?,
+                context,
+                result,
+                context_file: None,
+                result_file: None,
+                result_summary,
+                parent_dispatch_id: row
+                    .try_get::<Option<String>, _>("parent_dispatch_id")
+                    .map_err(|error| {
+                        format!("decode postgres dispatch parent_dispatch_id: {error}")
+                    })?,
+                chain_depth: row
+                    .try_get::<i64, _>("chain_depth")
+                    .map_err(|error| format!("decode postgres dispatch chain_depth: {error}"))?,
+                created_at: created_at.clone(),
+                dispatched_at: Some(created_at),
+                updated_at,
+                completed_at,
+            })
         })
         .collect()
 }
