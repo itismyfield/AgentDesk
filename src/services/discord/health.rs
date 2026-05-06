@@ -28,10 +28,12 @@ use crate::services::discord::outbound::{
 };
 use crate::services::provider::ProviderKind;
 
+mod provider_probe;
 mod recovery;
 mod redaction;
 mod session_enrichment;
 
+use provider_probe::ProviderHealthSnapshot;
 pub(crate) use recovery::stop_provider_channel_runtime_with_policy;
 #[allow(unused_imports)]
 pub use recovery::{
@@ -159,17 +161,6 @@ impl HealthStatus {
     pub fn is_http_ready(self) -> bool {
         matches!(self, Self::Healthy | Self::Degraded)
     }
-}
-
-#[derive(Debug, Serialize)]
-struct ProviderHealthSnapshot {
-    name: String,
-    connected: bool,
-    active_turns: usize,
-    queue_depth: usize,
-    sessions: usize,
-    restart_pending: bool,
-    last_turn_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -735,58 +726,15 @@ async fn build_health_snapshot_with_options(
     }
 
     for entry in providers.iter() {
-        let session_count = entry
-            .shared
-            .core
-            .try_lock()
-            .map(|data| data.sessions.len())
-            .unwrap_or(0);
-        let mailbox_snapshots = entry.shared.mailboxes.snapshot_all().await;
-        let active_turns = mailbox_snapshots
-            .values()
-            .filter(|snapshot| snapshot.cancel_token.is_some())
-            .count();
-        let provider_queue_depth: usize = mailbox_snapshots
-            .values()
-            .map(|snapshot| snapshot.intervention_queue.len())
-            .sum();
+        let provider_probe = provider_probe::probe_provider(entry).await;
 
-        let restart_pending = entry
-            .shared
-            .restart_pending
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let connected = entry
-            .shared
-            .bot_connected
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let reconcile_done = entry
-            .shared
-            .reconcile_done
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let provider_deferred_hooks = entry
-            .shared
-            .deferred_hook_backlog
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let provider_watchers = entry.shared.tmux_watchers.len();
-        let recovering_channels = mailbox_snapshots
-            .values()
-            .filter(|snapshot| snapshot.recovery_started_at.is_some())
-            .count();
-        let provider_recovery_duration = recovery_duration_secs(&entry.shared);
-        let last_turn_at = entry
-            .shared
-            .last_turn_at
-            .lock()
-            .ok()
-            .and_then(|g| g.clone());
-
-        deferred_hooks += provider_deferred_hooks;
-        queue_depth += provider_queue_depth;
-        watcher_count += provider_watchers;
-        recovery_duration = recovery_duration.max(provider_recovery_duration);
+        deferred_hooks += provider_probe.deferred_hooks;
+        queue_depth += provider_probe.queue_depth;
+        watcher_count += provider_probe.watcher_count;
+        recovery_duration = recovery_duration.max(provider_probe.recovery_duration);
         if include_mailbox_details {
             let provider_kind = ProviderKind::from_str(&entry.name);
-            for (channel_id, snapshot) in &mailbox_snapshots {
+            for (channel_id, snapshot) in &provider_probe.mailbox_snapshots {
                 let channel = *channel_id;
                 let session =
                     SessionEnrichment::load(&entry.shared, provider_kind.as_ref(), channel).await;
@@ -861,51 +809,12 @@ async fn build_health_snapshot_with_options(
             }
         }
 
-        if !connected {
-            status = status.worsen(HealthStatus::Unhealthy);
-            degraded_reasons.push(format!("provider:{}:disconnected", entry.name));
-        }
-        if restart_pending {
-            status = status.worsen(HealthStatus::Unhealthy);
-            degraded_reasons.push(format!("provider:{}:restart_pending", entry.name));
-        }
-        if !reconcile_done {
-            status = status.worsen(HealthStatus::Degraded);
-            degraded_reasons.push(format!("provider:{}:reconcile_in_progress", entry.name));
+        status = status.worsen(provider_probe.status);
+        if !provider_probe.fully_recovered {
             fully_recovered = false;
         }
-        if provider_deferred_hooks > 0 {
-            status = status.worsen(HealthStatus::Degraded);
-            degraded_reasons.push(format!(
-                "provider:{}:deferred_hooks_backlog:{}",
-                entry.name, provider_deferred_hooks
-            ));
-        }
-        if provider_queue_depth > 0 {
-            status = status.worsen(HealthStatus::Degraded);
-            degraded_reasons.push(format!(
-                "provider:{}:pending_queue_depth:{}",
-                entry.name, provider_queue_depth
-            ));
-        }
-        if recovering_channels > 0 {
-            status = status.worsen(HealthStatus::Degraded);
-            degraded_reasons.push(format!(
-                "provider:{}:recovering_channels:{}",
-                entry.name, recovering_channels
-            ));
-            fully_recovered = false;
-        }
-
-        provider_entries.push(ProviderHealthSnapshot {
-            name: entry.name.clone(),
-            connected,
-            active_turns,
-            queue_depth: provider_queue_depth,
-            sessions: session_count,
-            restart_pending,
-            last_turn_at,
-        });
+        degraded_reasons.extend(provider_probe.degraded_reasons);
+        provider_entries.push(provider_probe.snapshot);
     }
 
     let global_active = if let Some(p) = providers.first() {
@@ -938,19 +847,6 @@ async fn build_health_snapshot_with_options(
         providers: provider_entries,
         mailboxes: mailbox_entries,
     }
-}
-
-fn recovery_duration_secs(shared: &SharedData) -> f64 {
-    let recorded_ms = shared
-        .recovery_duration_ms
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let duration_ms = if recorded_ms > 0 {
-        recorded_ms
-    } else {
-        let elapsed_ms = shared.recovery_started_at.elapsed().as_millis();
-        elapsed_ms.min(u64::MAX as u128) as u64
-    };
-    duration_ms as f64 / 1000.0
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
