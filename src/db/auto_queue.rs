@@ -316,6 +316,118 @@ pub async fn record_entry_dispatch_failure_on_pg(
     }
 }
 
+fn dispatch_json_field(document: Option<&str>, field: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(document?).ok()?;
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn dispatch_completed_commit(result: Option<&str>, context: Option<&str>) -> Option<String> {
+    dispatch_json_field(result, "completed_commit")
+        .or_else(|| dispatch_json_field(context, "completed_commit"))
+}
+
+pub async fn reconcile_failed_entry_done_on_pg(
+    pool: &PgPool,
+    entry_id: &str,
+    trigger_source: &str,
+) -> Result<EntryStatusUpdateResult, String> {
+    let row = sqlx::query(
+        "SELECT e.status AS entry_status,
+                c.status AS card_status,
+                d.id AS dispatch_id,
+                d.status AS dispatch_status,
+                d.result AS dispatch_result,
+                d.context AS dispatch_context
+         FROM auto_queue_entries e
+         LEFT JOIN kanban_cards c ON c.id = e.kanban_card_id
+         LEFT JOIN LATERAL (
+             SELECT td.id, td.status, td.result, td.context, td.completed_at, td.created_at
+             FROM task_dispatches td
+             WHERE td.kanban_card_id = e.kanban_card_id
+               AND (
+                   td.id = e.dispatch_id
+                   OR td.id = c.latest_dispatch_id
+                   OR EXISTS (
+                       SELECT 1
+                       FROM auto_queue_entry_dispatch_history h
+                       WHERE h.entry_id = e.id
+                         AND h.dispatch_id = td.id
+                   )
+               )
+             ORDER BY (td.status = 'completed') DESC,
+                      td.completed_at DESC NULLS LAST,
+                      td.created_at DESC
+             LIMIT 1
+         ) d ON TRUE
+         WHERE e.id = $1",
+    )
+    .bind(entry_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load auto-queue entry {entry_id} reconciliation state: {error}"))?;
+
+    let Some(row) = row else {
+        return Err(format!("auto-queue entry not found: {entry_id}"));
+    };
+
+    let entry_status: String = row
+        .try_get("entry_status")
+        .map_err(|error| format!("decode auto-queue entry {entry_id} status: {error}"))?;
+    if entry_status != ENTRY_STATUS_FAILED {
+        return Err(format!(
+            "cannot reconcile auto-queue entry {entry_id} as done from status {entry_status}"
+        ));
+    }
+
+    let card_status: Option<String> = row
+        .try_get("card_status")
+        .map_err(|error| format!("decode auto-queue entry {entry_id} card status: {error}"))?;
+    if card_status.as_deref() != Some(ENTRY_STATUS_DONE) {
+        return Err(format!(
+            "cannot reconcile auto-queue entry {entry_id} as done unless its card is done"
+        ));
+    }
+
+    let dispatch_id: Option<String> = row
+        .try_get("dispatch_id")
+        .map_err(|error| format!("decode auto-queue entry {entry_id} dispatch id: {error}"))?;
+    let dispatch_status: Option<String> = row
+        .try_get("dispatch_status")
+        .map_err(|error| format!("decode auto-queue entry {entry_id} dispatch status: {error}"))?;
+    if dispatch_id.is_none() || dispatch_status.as_deref() != Some("completed") {
+        return Err(format!(
+            "cannot reconcile auto-queue entry {entry_id} as done without a completed dispatch"
+        ));
+    }
+
+    let dispatch_result: Option<String> = row
+        .try_get("dispatch_result")
+        .map_err(|error| format!("decode auto-queue entry {entry_id} dispatch result: {error}"))?;
+    let dispatch_context: Option<String> = row
+        .try_get("dispatch_context")
+        .map_err(|error| format!("decode auto-queue entry {entry_id} dispatch context: {error}"))?;
+    if dispatch_completed_commit(dispatch_result.as_deref(), dispatch_context.as_deref()).is_none()
+    {
+        return Err(format!(
+            "cannot reconcile auto-queue entry {entry_id} as done without completed_commit evidence"
+        ));
+    }
+
+    update_entry_status_on_pg(
+        pool,
+        entry_id,
+        ENTRY_STATUS_DONE,
+        trigger_source,
+        &EntryStatusUpdateOptions::default(),
+    )
+    .await
+}
+
 pub async fn update_entry_status_on_pg(
     pool: &PgPool,
     entry_id: &str,
@@ -2920,6 +3032,12 @@ fn is_allowed_entry_transition(from_status: &str, to_status: &str, trigger_sourc
     {
         return true;
     }
+    if from_status == ENTRY_STATUS_FAILED
+        && to_status == ENTRY_STATUS_DONE
+        && trigger_source == "manual_terminal_reconcile"
+    {
+        return true;
+    }
 
     matches!(
         (from_status, to_status),
@@ -4785,13 +4903,13 @@ mod dispatch_terminal_sync_pg_tests {
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::{
-        ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE, ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED,
-        EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation,
+        ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_DONE, ENTRY_STATUS_FAILED, ENTRY_STATUS_PENDING,
+        ENTRY_STATUS_SKIPPED, EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation,
         allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg,
         latest_entry_phase_codex_session_id_pg, list_entry_dispatch_history_pg,
-        reactivate_done_entry_on_pg, record_consultation_dispatch_on_pg, release_run_slots_pg,
-        release_slot_for_group_agent_pg, save_phase_gate_state_on_pg, slot_has_active_dispatch_pg,
-        update_entry_status_on_pg,
+        reactivate_done_entry_on_pg, reconcile_failed_entry_done_on_pg,
+        record_consultation_dispatch_on_pg, release_run_slots_pg, release_slot_for_group_agent_pg,
+        save_phase_gate_state_on_pg, slot_has_active_dispatch_pg, update_entry_status_on_pg,
     };
     use chrono::{DateTime, Utc};
     use sqlx::{PgPool, Row};
@@ -6573,6 +6691,136 @@ mod tests {
         assert!(restored.changed);
         assert_eq!(restored.from_status, ENTRY_STATUS_DONE);
         assert_eq!(restored.to_status, ENTRY_STATUS_DISPATCHED);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn failed_entry_can_reconcile_done_when_card_done_and_commit_recorded_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed agent");
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-1866', 'repo-1', 'agent-1', 'active')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        sqlx::query(
+            "INSERT INTO kanban_cards
+                (id, repo_id, title, status, assigned_agent_id, latest_dispatch_id, completed_at)
+             VALUES ('card-1866', 'repo-1', 'Issue 1866', 'done', 'agent-1', 'dispatch-1866', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed done card");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, status, result, completed_at)
+             VALUES ('dispatch-1866', 'card-1866', 'agent-1', 'completed', $1, NOW())",
+        )
+        .bind(r#"{"completed_commit":"abc123"}"#)
+        .execute(&pool)
+        .await
+        .expect("seed completed dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, retry_count, thread_group, completed_at)
+             VALUES ('entry-1866', 'run-1866', 'card-1866', 'agent-1', 'failed', 1, 0, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed failed entry");
+        sqlx::query(
+            "INSERT INTO auto_queue_entry_dispatch_history (entry_id, dispatch_id, trigger_source)
+             VALUES ('entry-1866', 'dispatch-1866', 'test')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed dispatch history");
+
+        let result =
+            reconcile_failed_entry_done_on_pg(&pool, "entry-1866", "manual_terminal_reconcile")
+                .await
+                .expect("terminal reconciliation should succeed");
+        assert!(result.changed);
+        assert_eq!(result.from_status, ENTRY_STATUS_FAILED);
+        assert_eq!(result.to_status, ENTRY_STATUS_DONE);
+
+        let entry_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'entry-1866'")
+                .fetch_one(&pool)
+                .await
+                .expect("entry status");
+        assert_eq!(entry_status, ENTRY_STATUS_DONE);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn failed_entry_done_reconcile_requires_completed_commit_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed agent");
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-1866-no-commit', 'repo-1', 'agent-1', 'active')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        sqlx::query(
+            "INSERT INTO kanban_cards
+                (id, repo_id, title, status, assigned_agent_id, latest_dispatch_id, completed_at)
+             VALUES ('card-1866-no-commit', 'repo-1', 'Issue 1866', 'done', 'agent-1', 'dispatch-1866-no-commit', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed done card");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, status, result, completed_at)
+             VALUES ('dispatch-1866-no-commit', 'card-1866-no-commit', 'agent-1', 'completed', $1, NOW())",
+        )
+        .bind(r#"{"summary":"done"}"#)
+        .execute(&pool)
+        .await
+        .expect("seed completed dispatch without commit");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, retry_count, thread_group, completed_at)
+             VALUES ('entry-1866-no-commit', 'run-1866-no-commit', 'card-1866-no-commit', 'agent-1', 'failed', 1, 0, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed failed entry");
+
+        let error = reconcile_failed_entry_done_on_pg(
+            &pool,
+            "entry-1866-no-commit",
+            "manual_terminal_reconcile",
+        )
+        .await
+        .expect_err("missing completed_commit must block reconciliation");
+        assert!(
+            error.contains("completed_commit"),
+            "expected completed_commit error, got: {error}"
+        );
 
         pool.close().await;
         pg_db.drop().await;

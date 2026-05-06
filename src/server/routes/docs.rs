@@ -3592,7 +3592,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "PATCH",
             "/api/queue/entries/{id}",
             "auto-queue",
-            "Update one pending auto-queue entry",
+            "Update one auto-queue entry or reconcile a failed terminal entry",
         )
         .with_params([
             ("id", path_param("Auto-queue entry ID")),
@@ -3608,10 +3608,22 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "priority_rank",
                 body_param("number", false, "Set the entry's rank within its group"),
             ),
+            (
+                "status",
+                body_param(
+                    "string",
+                    false,
+                    "Manual status update: pending, skipped, or done only when reconciling a failed entry whose card is done and completed_commit evidence exists",
+                ),
+            ),
         ])
         .with_example(
             json!({"path": {"id": "entry-1"}, "body": {"thread_group": 1, "batch_phase": 2, "priority_rank": 0}}),
             json!({"ok": true, "entry": {"id": "entry-1", "thread_group": 1, "batch_phase": 2, "priority_rank": 0, "status": "pending"}}),
+        )
+        .with_example(
+            json!({"path": {"id": "entry-failed"}, "body": {"status": "done"}}),
+            json!({"ok": true, "entry": {"id": "entry-failed", "status": "done", "card_id": "card-1794", "github_issue_number": 1794}}),
         ),
         ep(
             "PATCH",
