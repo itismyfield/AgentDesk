@@ -2641,28 +2641,23 @@ mod issue_reference_tests {
     use super::commit_subject_references_issue;
 
     #[test]
-    fn commit_subject_references_issue_accepts_common_github_forms() {
+    fn commit_subject_references_issue_accepts_squash_and_adk_prefix_forms() {
+        assert!(commit_subject_references_issue("#1765 some title", 1765));
+        assert!(commit_subject_references_issue("feat: foo (#1765)", 1765));
         assert!(commit_subject_references_issue(
-            "(#1794) dispatch delivery events",
-            1794
-        ));
-        assert!(commit_subject_references_issue(
-            "#1794 dispatch delivery events",
-            1794
-        ));
-        assert!(commit_subject_references_issue(
-            "dispatch delivery events (#1794)",
-            1794
+            "fix #1765, #1766 multi",
+            1765
         ));
     }
 
     #[test]
-    fn commit_subject_references_issue_rejects_partial_matches() {
-        assert!(!commit_subject_references_issue("#17940 unrelated", 1794));
-        assert!(!commit_subject_references_issue("ABC#1794 unrelated", 1794));
+    fn commit_subject_references_issue_rejects_partial_and_empty_subjects() {
+        assert!(!commit_subject_references_issue("#17650 unrelated", 1765));
+        assert!(!commit_subject_references_issue("", 1765));
+        assert!(!commit_subject_references_issue("ABC#1765 unrelated", 1765));
         assert!(!commit_subject_references_issue(
-            "#1794suffix unrelated",
-            1794
+            "#1765suffix unrelated",
+            1765
         ));
     }
 }
