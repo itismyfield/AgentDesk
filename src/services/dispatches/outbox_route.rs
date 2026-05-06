@@ -17,7 +17,7 @@ use sqlx::PgPool;
 
 use crate::db::dispatches::outbox::CompletedDispatchInfo;
 use crate::server::dto::dispatches::DispatchFollowupConfig;
-use crate::server::routes::dispatches::discord_delivery::{
+use crate::services::dispatches::discord_delivery::{
     DispatchTransport, HttpDispatchTransport, discord_api_url,
     send_review_result_to_primary_with_transport,
 };

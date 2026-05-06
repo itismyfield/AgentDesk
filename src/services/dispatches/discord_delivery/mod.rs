@@ -4,6 +4,17 @@ pub(crate) use crate::server::dto::dispatches::{
 };
 use sqlx::PgPool;
 
+mod orchestration;
+
+pub(crate) use orchestration::{
+    HttpDispatchTransport, persist_dispatch_message_target_and_add_pending_reaction_with_pg,
+    resolve_dispatch_delivery_channel_on_conn, send_dispatch_to_discord,
+    send_dispatch_to_discord_with_pg, send_dispatch_to_discord_with_pg_result,
+    send_dispatch_to_discord_with_transport, send_review_result_to_primary,
+    send_review_result_to_primary_with_transport, sync_dispatch_status_reaction,
+    sync_dispatch_status_reaction_with_pg,
+};
+
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 
 pub(crate) fn dispatch_delivery_correlation_id(dispatch_id: &str) -> String {

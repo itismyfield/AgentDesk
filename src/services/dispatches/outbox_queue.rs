@@ -68,11 +68,7 @@ impl OutboxNotifier for RealOutboxNotifier {
         card_id: String,
         dispatch_id: String,
     ) -> Result<DispatchNotifyDeliveryResult, String> {
-        // The route layer owns the actual Discord transport call (slot
-        // thread reuse, message rendering, two-phase delivery guard).
-        // #1694 keeps that side here as a thin shim so the queue worker
-        // is free of Discord/HTTP detail.
-        crate::server::routes::dispatches::send_dispatch_to_discord_with_pg_result(
+        crate::services::dispatches::discord_delivery::send_dispatch_to_discord_with_pg_result(
             db.as_ref(),
             Some(self.pg_pool.as_ref()),
             &agent_id,
@@ -101,7 +97,7 @@ impl OutboxNotifier for RealOutboxNotifier {
         db: Option<crate::db::Db>,
         dispatch_id: String,
     ) -> Result<(), String> {
-        crate::server::routes::dispatches::sync_dispatch_status_reaction_with_pg(
+        crate::services::dispatches::discord_delivery::sync_dispatch_status_reaction_with_pg(
             db.as_ref(),
             Some(self.pg_pool.as_ref()),
             &dispatch_id,

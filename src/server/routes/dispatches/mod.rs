@@ -3,18 +3,11 @@ pub(crate) mod discord_delivery;
 mod outbox;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests;
-mod thread_reuse;
+pub(crate) mod thread_reuse;
 
 // ── Re-exports: CRUD routes ──────────────────────────────────
 pub use crud::{
     UpdateDispatchBody, create_dispatch, get_dispatch, list_dispatches, update_dispatch,
-};
-
-// ── Re-exports: Discord delivery ─────────────────────────────
-// #1694: re-exports needed by `crate::services::dispatches::outbox_queue`
-// (the queue worker calls back into the route layer for HTTP-bound work).
-pub(crate) use discord_delivery::{
-    send_dispatch_to_discord_with_pg_result, sync_dispatch_status_reaction_with_pg,
 };
 
 // ── Re-exports: Outbox ───────────────────────────────────────

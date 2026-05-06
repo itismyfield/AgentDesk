@@ -110,7 +110,7 @@ pub(super) fn get_thread_for_channel<T>(
     None
 }
 
-pub(super) async fn get_thread_for_channel_pg(
+pub(crate) async fn get_thread_for_channel_pg(
     pool: &PgPool,
     card_id: &str,
     channel_id: u64,
@@ -162,7 +162,7 @@ pub(super) fn set_thread_for_channel<T>(
 ) {
 }
 
-pub(super) async fn set_thread_for_channel_pg(
+pub(crate) async fn set_thread_for_channel_pg(
     pool: &PgPool,
     card_id: &str,
     channel_id: u64,
@@ -188,7 +188,7 @@ pub(super) async fn set_thread_for_channel_pg(
 /// Clear thread mapping for a specific channel.
 pub(super) fn clear_thread_for_channel<T>(_conn: &T, _card_id: &str, _channel_id: u64) {}
 
-pub(super) async fn clear_thread_for_channel_pg(
+pub(crate) async fn clear_thread_for_channel_pg(
     pool: &PgPool,
     card_id: &str,
     channel_id: u64,
@@ -549,7 +549,7 @@ async fn validate_thread_map_validation_row(
 /// Try to reuse an existing Discord thread for a dispatch.
 /// Returns `Some(true)` if reuse succeeded, `Some(false)` if the thread exists but is locked,
 /// or `None` if the thread couldn't be accessed (deleted, wrong parent, etc.).
-pub(super) async fn try_reuse_thread(
+pub(crate) async fn try_reuse_thread(
     client: &reqwest::Client,
     token: &str,
     discord_api_base: &str,

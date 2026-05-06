@@ -19,6 +19,7 @@ pub(crate) use crate::services::dispatches::outbox_queue::{
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use crate::services::dispatches::outbox_route::parse_json_value;
 pub use crate::services::dispatches::outbox_route::resolve_channel_alias_pub;
+pub(crate) use crate::services::dispatches::outbox_route::use_counter_model_channel;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use crate::services::dispatches::outbox_route::{
     DISPATCH_MESSAGE_HARD_LIMIT, extract_review_verdict, handle_completed_dispatch_followups,
@@ -26,9 +27,10 @@ pub(crate) use crate::services::dispatches::outbox_route::{
     handle_completed_dispatch_followups_with_config_and_transport,
     handle_completed_dispatch_followups_with_pg,
 };
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use crate::services::dispatches::outbox_route::{
     build_minimal_dispatch_message, format_dispatch_message, prefix_dispatch_message,
-    review_submission_hint, review_target_hint, use_counter_model_channel,
+    review_submission_hint, review_target_hint,
 };
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

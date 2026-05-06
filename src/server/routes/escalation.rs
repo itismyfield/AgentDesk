@@ -178,7 +178,7 @@ fn merged_settings_pg(pool: &sqlx::PgPool, config: &Config) -> Result<Escalation
     )
 }
 
-pub(in crate::server::routes) fn effective_owner_user_id_with_backends(
+pub(crate) fn effective_owner_user_id_with_backends(
     _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     config: &Config,
