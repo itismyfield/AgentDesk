@@ -1,15 +1,19 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, QueryBuilder, Row};
-use std::{collections::BTreeMap, process::Command};
+use std::collections::BTreeMap;
 
 pub mod api_usage;
 pub mod dispatch_metrics;
+pub mod session_metrics;
 pub use api_usage::{RateLimitsResponse, build_rate_limit_provider_payloads_pg, rate_limits_pg};
 pub use dispatch_metrics::{
     AchievementsResponse, ActivityHeatmapResponse, StreaksResponse, achievements_pg,
     activity_heatmap_pg, streaks_pg,
 };
+#[allow(unused_imports)]
+pub use session_metrics::load_machine_config;
+pub use session_metrics::{MachineStatusResponse, machine_status};
 
 #[derive(Debug, Serialize)]
 pub struct AnalyticsResponse {
@@ -49,11 +53,6 @@ pub struct PolicyHooksResponse {
 #[derive(Debug, Serialize)]
 pub struct AuditLogsResponse {
     pub logs: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct MachineStatusResponse {
-    pub machines: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -543,71 +542,6 @@ fn build_audit_summary(
     } else {
         format!("{entity_type}:{entity_id} {action}")
     }
-}
-
-fn parse_machine_config(value: &str) -> Option<Vec<(String, String)>> {
-    serde_json::from_str::<Vec<Value>>(value)
-        .ok()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| {
-                    let name = m.get("name")?.as_str()?.to_string();
-                    let host = m.get("host").and_then(|h| h.as_str()).unwrap_or_else(|| {
-                        m.get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("localhost")
-                    });
-                    Some((name, format!("{}.local", host)))
-                })
-                .collect()
-        })
-        .filter(|machines: &Vec<(String, String)>| !machines.is_empty())
-}
-
-fn default_machine_config() -> Vec<(String, String)> {
-    let hostname = crate::services::platform::hostname_short();
-    vec![(hostname.clone(), hostname)]
-}
-
-async fn load_machine_config_pg(pool: &PgPool) -> Option<Vec<(String, String)>> {
-    sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
-        .bind("machines")
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|value| parse_machine_config(&value))
-}
-
-pub async fn load_machine_config(pg_pool: Option<&PgPool>) -> Vec<(String, String)> {
-    if let Some(pool) = pg_pool {
-        return load_machine_config_pg(pool)
-            .await
-            .unwrap_or_else(default_machine_config);
-    }
-
-    default_machine_config()
-}
-
-pub async fn machine_status(pg_pool: Option<&PgPool>) -> MachineStatusResponse {
-    let machines_config = load_machine_config(pg_pool).await;
-
-    let machines = tokio::task::spawn_blocking(move || {
-        let mut results = Vec::new();
-        for (name, host) in machines_config {
-            let online = Command::new("ping")
-                .args(["-c1", "-W2", &host])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            results.push(json!({"name": name, "online": online}));
-        }
-        results
-    })
-    .await
-    .unwrap_or_default();
-
-    MachineStatusResponse { machines }
 }
 
 pub fn skills_trend_from_days(days: impl IntoIterator<Item = String>) -> SkillsTrendResponse {
