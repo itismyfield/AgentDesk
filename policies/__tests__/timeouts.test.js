@@ -168,6 +168,11 @@ test("timeouts review auto-accept module creates rework dispatches before transi
 
   policy._section_E();
 
+  const staleSuggestionQuery = state.queries.find((query) =>
+    query.sql.includes("review_status = 'suggestion_pending'")
+  );
+  assert.match(staleSuggestionQuery.sql, /assigned_agent_id IS NOT NULL/);
+
   assert.deepEqual(state.dispatchCreates, [
     {
       cardId: "card-review-1",
