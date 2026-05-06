@@ -206,7 +206,7 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
     {
         return process_outbox_batch_with_pg(Some(db), None, notifier, None).await;
     }
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         let _ = (db, notifier);
         0
@@ -421,7 +421,7 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
         };
     }
 
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let _ = (db, notifier);
     let Some(pool) = pg_pool else {
         return 0;

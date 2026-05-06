@@ -175,6 +175,48 @@ pub struct AutoQueueStatusResponse {
     pub agents: BTreeMap<String, AutoQueueStatusCounts>,
     pub thread_groups: BTreeMap<String, AutoQueueThreadGroupView>,
     pub phase_gates: Vec<PhaseGateView>,
+    #[serde(default, skip_serializing_if = "AutoQueueStatusDiagnostics::is_empty")]
+    pub diagnostics: AutoQueueStatusDiagnostics,
+}
+
+#[derive(Debug, Serialize, Default)]
+pub struct AutoQueueStatusDiagnostics {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slot_invariant_violations: Vec<AutoQueueSlotInvariantViolation>,
+}
+
+impl AutoQueueStatusDiagnostics {
+    fn is_empty(&self) -> bool {
+        self.slot_invariant_violations.is_empty()
+    }
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct AutoQueueSlotInvariantViolation {
+    pub invariant: String,
+    pub run_id: String,
+    pub agent_id: String,
+    pub slot_index: i64,
+    pub entry_ids: Vec<String>,
+    pub dispatch_ids: Vec<String>,
+    pub entries: Vec<AutoQueueSlotInvariantEntryDiagnostic>,
+    pub recovery: AutoQueueSlotInvariantRecovery,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct AutoQueueSlotInvariantEntryDiagnostic {
+    pub entry_id: String,
+    pub card_id: String,
+    pub dispatch_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct AutoQueueSlotInvariantRecovery {
+    pub summary: String,
+    pub status_endpoint: String,
+    pub rebind_slot_endpoint: String,
+    pub reset_slot_thread_endpoint: String,
+    pub skip_entry_endpoint_template: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -211,6 +253,8 @@ pub struct AutoQueueStatusEntryView {
     pub id: String,
     pub agent_id: String,
     pub card_id: String,
+    #[serde(skip)]
+    pub dispatch_id: Option<String>,
     pub priority_rank: i64,
     pub reason: Option<String>,
     pub status: String,
@@ -637,6 +681,7 @@ impl AutoQueueStatusEntryView {
             id: record.id,
             agent_id: record.agent_id,
             card_id: record.card_id,
+            dispatch_id: record.dispatch_id,
             priority_rank: record.priority_rank,
             reason: record.reason,
             status: record.status,
@@ -766,8 +811,46 @@ async fn build_entry_view_pg(
 /// (failed slot release, double-pick) and are observed via
 /// `record_invariant_check` without panicking — release builds must not trip
 /// on transient tick races. See `docs/invariants.md`.
-fn check_auto_queue_slot_single_active_entry(run_id: &str, entries: &[AutoQueueStatusEntryView]) {
-    let mut dispatched_per_slot: HashMap<(String, i64), Vec<String>> = HashMap::new();
+const AUTO_QUEUE_SLOT_SINGLE_ACTIVE_ENTRY_INVARIANT: &str = "auto_queue_slot_single_active_entry";
+
+fn check_auto_queue_slot_single_active_entry(
+    run_id: &str,
+    entries: &[AutoQueueStatusEntryView],
+) -> Vec<AutoQueueSlotInvariantViolation> {
+    let violations = collect_auto_queue_slot_single_active_entry_violations(run_id, entries);
+    for violation in &violations {
+        crate::services::observability::record_invariant_check(
+            false,
+            crate::services::observability::InvariantViolation {
+                provider: None,
+                channel_id: None,
+                dispatch_id: violation.dispatch_ids.first().map(String::as_str),
+                session_key: None,
+                turn_id: None,
+                invariant: AUTO_QUEUE_SLOT_SINGLE_ACTIVE_ENTRY_INVARIANT,
+                code_location: "src/services/auto_queue.rs:check_auto_queue_slot_single_active_entry",
+                message: "auto_queue run has multiple dispatched entries on the same slot",
+                details: json!({
+                    "run_id": &violation.run_id,
+                    "agent_id": &violation.agent_id,
+                    "slot_index": violation.slot_index,
+                    "entry_ids": &violation.entry_ids,
+                    "dispatch_ids": &violation.dispatch_ids,
+                    "entries": &violation.entries,
+                    "recovery": &violation.recovery,
+                }),
+            },
+        );
+    }
+    violations
+}
+
+fn collect_auto_queue_slot_single_active_entry_violations(
+    run_id: &str,
+    entries: &[AutoQueueStatusEntryView],
+) -> Vec<AutoQueueSlotInvariantViolation> {
+    let mut dispatched_per_slot: BTreeMap<(String, i64), Vec<&AutoQueueStatusEntryView>> =
+        BTreeMap::new();
     for entry in entries {
         if entry.status != "dispatched" {
             continue;
@@ -778,29 +861,70 @@ fn check_auto_queue_slot_single_active_entry(run_id: &str, entries: &[AutoQueueS
         dispatched_per_slot
             .entry((entry.agent_id.clone(), slot_index))
             .or_default()
-            .push(entry.id.clone());
+            .push(entry);
     }
-    for ((agent_id, slot_index), entry_ids) in &dispatched_per_slot {
-        let ok = entry_ids.len() <= 1;
-        crate::services::observability::record_invariant_check(
-            ok,
-            crate::services::observability::InvariantViolation {
-                provider: None,
-                channel_id: None,
-                dispatch_id: None,
-                session_key: None,
-                turn_id: None,
-                invariant: "auto_queue_slot_single_active_entry",
-                code_location: "src/services/auto_queue.rs:check_auto_queue_slot_single_active_entry",
-                message: "auto_queue run has multiple dispatched entries on the same slot",
-                details: json!({
-                    "run_id": run_id,
-                    "agent_id": agent_id,
-                    "slot_index": slot_index,
-                    "entry_ids": entry_ids,
-                }),
-            },
-        );
+
+    dispatched_per_slot
+        .into_iter()
+        .filter_map(|((agent_id, slot_index), slot_entries)| {
+            (slot_entries.len() > 1).then(|| {
+                let mut entry_ids = Vec::with_capacity(slot_entries.len());
+                let mut dispatch_ids = Vec::new();
+                let mut entry_diagnostics = Vec::with_capacity(slot_entries.len());
+
+                for entry in slot_entries {
+                    entry_ids.push(entry.id.clone());
+                    let entry_dispatch_ids = related_dispatch_ids(entry);
+                    for dispatch_id in &entry_dispatch_ids {
+                        push_unique_nonempty(&mut dispatch_ids, dispatch_id);
+                    }
+                    entry_diagnostics.push(AutoQueueSlotInvariantEntryDiagnostic {
+                        entry_id: entry.id.clone(),
+                        card_id: entry.card_id.clone(),
+                        dispatch_ids: entry_dispatch_ids,
+                    });
+                }
+
+                AutoQueueSlotInvariantViolation {
+                    invariant: AUTO_QUEUE_SLOT_SINGLE_ACTIVE_ENTRY_INVARIANT.to_string(),
+                    run_id: run_id.to_string(),
+                    agent_id: agent_id.clone(),
+                    slot_index,
+                    entry_ids,
+                    dispatch_ids,
+                    entries: entry_diagnostics,
+                    recovery: slot_invariant_recovery(&agent_id, slot_index),
+                }
+            })
+        })
+        .collect()
+}
+
+fn related_dispatch_ids(entry: &AutoQueueStatusEntryView) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(dispatch_id) = entry.dispatch_id.as_deref() {
+        push_unique_nonempty(&mut ids, dispatch_id);
+    }
+    for dispatch_id in &entry.dispatch_history {
+        push_unique_nonempty(&mut ids, dispatch_id);
+    }
+    ids
+}
+
+fn push_unique_nonempty(ids: &mut Vec<String>, id: &str) {
+    let trimmed = id.trim();
+    if !trimmed.is_empty() && !ids.iter().any(|existing| existing == trimmed) {
+        ids.push(trimmed.to_string());
+    }
+}
+
+fn slot_invariant_recovery(agent_id: &str, slot_index: i64) -> AutoQueueSlotInvariantRecovery {
+    AutoQueueSlotInvariantRecovery {
+        summary: "Choose the entry that should retain the active slot; complete/cancel/skip the stale entry, then reset or rebind the slot if the binding points at the wrong thread group.".to_string(),
+        status_endpoint: format!("/api/queue/status?agent_id={agent_id}"),
+        rebind_slot_endpoint: format!("/api/queue/slots/{agent_id}/{slot_index}/rebind"),
+        reset_slot_thread_endpoint: format!("/api/queue/slots/{agent_id}/{slot_index}/reset-thread"),
+        skip_entry_endpoint_template: "/api/queue/entries/{entry_id}/skip".to_string(),
     }
 }
 
@@ -809,7 +933,7 @@ fn assemble_status_response(
     entries: Vec<AutoQueueStatusEntryView>,
     phase_gates: Vec<PhaseGateView>,
 ) -> AutoQueueStatusResponse {
-    check_auto_queue_slot_single_active_entry(&run.id, &entries);
+    let slot_invariant_violations = check_auto_queue_slot_single_active_entry(&run.id, &entries);
     let mut agents = BTreeMap::<String, AutoQueueStatusCounts>::new();
     let mut thread_groups = BTreeMap::<String, AutoQueueThreadGroupView>::new();
     for entry in &entries {
@@ -857,6 +981,9 @@ fn assemble_status_response(
         agents,
         thread_groups,
         phase_gates,
+        diagnostics: AutoQueueStatusDiagnostics {
+            slot_invariant_violations,
+        },
     }
 }
 
@@ -1195,4 +1322,136 @@ fn normalized_optional(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_record(id: &str) -> AutoQueueRunRecord {
+        AutoQueueRunRecord {
+            id: id.to_string(),
+            repo: Some("test-repo".to_string()),
+            agent_id: Some("agent-slot".to_string()),
+            review_mode: "enabled".to_string(),
+            status: "active".to_string(),
+            timeout_minutes: 30,
+            ai_model: None,
+            ai_rationale: None,
+            created_at: 1_000,
+            completed_at: None,
+            max_concurrent_threads: 2,
+            thread_group_count: 2,
+        }
+    }
+
+    fn status_entry(
+        id: &str,
+        card_id: &str,
+        status: &str,
+        slot_index: Option<i64>,
+        dispatch_id: Option<&str>,
+        dispatch_history: Vec<&str>,
+    ) -> AutoQueueStatusEntryView {
+        AutoQueueStatusEntryView {
+            id: id.to_string(),
+            agent_id: "agent-slot".to_string(),
+            card_id: card_id.to_string(),
+            dispatch_id: dispatch_id.map(str::to_string),
+            priority_rank: 0,
+            reason: None,
+            status: status.to_string(),
+            created_at: 1_000,
+            dispatched_at: None,
+            completed_at: None,
+            card_title: None,
+            github_issue_number: None,
+            github_repo: None,
+            retry_count: 0,
+            thread_group: 0,
+            slot_index,
+            batch_phase: 0,
+            dispatch_history: dispatch_history.into_iter().map(str::to_string).collect(),
+            thread_links: Vec::new(),
+            card_status: None,
+            review_round: 0,
+        }
+    }
+
+    #[test]
+    fn auto_queue_status_omits_diagnostics_without_slot_invariant_violation() {
+        let response = assemble_status_response(
+            run_record("run-clean"),
+            vec![status_entry(
+                "entry-clean",
+                "card-clean",
+                "dispatched",
+                Some(0),
+                Some("dispatch-clean"),
+                vec!["dispatch-clean"],
+            )],
+            Vec::new(),
+        );
+        let value = serde_json::to_value(response).unwrap();
+
+        assert!(
+            value.get("diagnostics").is_none(),
+            "diagnostics must not change the normal status surface"
+        );
+        assert!(
+            value["entries"][0].get("dispatch_id").is_none(),
+            "current dispatch id stays internal unless a diagnostic needs it"
+        );
+    }
+
+    #[test]
+    fn auto_queue_status_reports_actionable_slot_invariant_diagnostics() {
+        let response = assemble_status_response(
+            run_record("run-conflict"),
+            vec![
+                status_entry(
+                    "entry-a",
+                    "card-a",
+                    "dispatched",
+                    Some(1),
+                    Some("dispatch-a"),
+                    vec!["dispatch-a"],
+                ),
+                status_entry(
+                    "entry-b",
+                    "card-b",
+                    "dispatched",
+                    Some(1),
+                    Some("dispatch-b"),
+                    vec!["dispatch-b", "dispatch-b-retry"],
+                ),
+            ],
+            Vec::new(),
+        );
+        let value = serde_json::to_value(response).unwrap();
+        let violation = &value["diagnostics"]["slot_invariant_violations"][0];
+
+        assert_eq!(
+            violation["invariant"],
+            AUTO_QUEUE_SLOT_SINGLE_ACTIVE_ENTRY_INVARIANT
+        );
+        assert_eq!(violation["run_id"], "run-conflict");
+        assert_eq!(violation["agent_id"], "agent-slot");
+        assert_eq!(violation["slot_index"], 1);
+        assert_eq!(violation["entry_ids"], json!(["entry-a", "entry-b"]));
+        assert_eq!(
+            violation["dispatch_ids"],
+            json!(["dispatch-a", "dispatch-b", "dispatch-b-retry"])
+        );
+        assert_eq!(violation["entries"][0]["entry_id"], "entry-a");
+        assert_eq!(violation["entries"][1]["card_id"], "card-b");
+        assert_eq!(
+            violation["recovery"]["rebind_slot_endpoint"],
+            "/api/queue/slots/agent-slot/1/rebind"
+        );
+        assert_eq!(
+            violation["recovery"]["reset_slot_thread_endpoint"],
+            "/api/queue/slots/agent-slot/1/reset-thread"
+        );
+    }
 }

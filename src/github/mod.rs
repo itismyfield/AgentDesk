@@ -575,7 +575,7 @@ pub fn list_repos(db: &Db) -> Result<Vec<RepoRow>, String> {
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub fn list_repos(_db: &Db) -> Result<Vec<RepoRow>, String> {
     Err("sqlite github repo registry is unavailable in production".to_string())
 }
@@ -639,7 +639,7 @@ pub fn register_repo(db: &Db, repo_id: &str) -> Result<RepoRow, String> {
     Ok(row)
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub fn register_repo(_db: &Db, repo_id: &str) -> Result<RepoRow, String> {
     Err(format!(
         "sqlite github repo registry is unavailable in production for {repo_id}"

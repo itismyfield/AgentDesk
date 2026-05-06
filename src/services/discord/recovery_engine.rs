@@ -253,6 +253,24 @@ fn recovery_phase_after_output_scan(
     canonical_recovery_phase(phase)
 }
 
+fn recovery_has_post_work_ready_evidence(state: &inflight::InflightTurnState) -> bool {
+    !state.full_response.trim().is_empty()
+        || state.any_tool_used
+        || state.has_post_tool_text
+        || state
+            .current_tool_line
+            .as_deref()
+            .is_some_and(|line| !line.trim().is_empty())
+        || state
+            .last_tool_name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty())
+        || state
+            .last_tool_summary
+            .as_deref()
+            .is_some_and(|summary| !summary.trim().is_empty())
+}
+
 fn recovery_phase_after_tmux_probe(can_recover: bool, pane_alive: Option<bool>) -> RecoveryPhase {
     let phase = match (can_recover, pane_alive) {
         (false, _) => RecoveryPhase::Done,
@@ -2112,7 +2130,9 @@ pub(super) async fn restore_inflight_turns(
         }
 
         let tmux_ready_without_new_output = tmux_session_name.as_deref().map_or(false, |name| {
-            !output_has_new_bytes && crate::services::provider::tmux_session_ready_for_input(name)
+            !output_has_new_bytes
+                && recovery_has_post_work_ready_evidence(&state)
+                && crate::services::provider::tmux_session_ready_for_input(name)
         });
 
         if matches!(
@@ -3173,6 +3193,48 @@ pub(crate) async fn rebind_inflight_for_channel(
     })
 }
 
+#[cfg(test)]
+mod post_work_evidence_tests {
+    use super::*;
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn tmux_ready_completion_requires_current_turn_work_evidence() {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx".to_string()),
+            123,
+            456,
+            789,
+            "background notification".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.input".to_string()),
+            64,
+        );
+        state.task_notification_kind =
+            Some(crate::services::agent_protocol::TaskNotificationKind::Background);
+
+        assert!(
+            !recovery_has_post_work_ready_evidence(&state),
+            "task-notification-only inflight must not trust a stale tmux Ready for input footer"
+        );
+
+        state.full_response = "completed".to_string();
+        assert!(recovery_has_post_work_ready_evidence(&state));
+
+        state.full_response.clear();
+        state.any_tool_used = true;
+        assert!(recovery_has_post_work_ready_evidence(&state));
+
+        state.any_tool_used = false;
+        state.last_tool_summary = Some("Bash completed".to_string());
+        assert!(recovery_has_post_work_ready_evidence(&state));
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::*;
@@ -4135,6 +4197,7 @@ mod tests {
             has_post_tool_text: false,
             session_key: Some("host:tmux-1".to_string()),
             delivery_bot: None,
+            silent_turn: false,
             dispatch_id: Some("dispatch-from-state".to_string()),
             last_watcher_relayed_offset: None,
             last_watcher_relayed_generation_mtime_ns: None,
@@ -4257,6 +4320,7 @@ mod tests {
             has_post_tool_text: false,
             session_key: None,
             delivery_bot: None,
+            silent_turn: false,
             dispatch_id: None,
             last_watcher_relayed_offset: None,
             last_watcher_relayed_generation_mtime_ns: None,

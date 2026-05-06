@@ -9,7 +9,7 @@ use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed_with_pg};
 
 /// PG-only wrapper for kanban transitions after #1384.
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 async fn transition_status_pg_first(
     state: &AppState,
     card_id: &str,
@@ -92,7 +92,7 @@ fn review_state_db(state: &AppState) -> Option<&crate::db::Db> {
     state.legacy_db()
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn review_state_db(_state: &AppState) -> Option<&crate::db::Db> {
     None
 }
@@ -1302,7 +1302,7 @@ pub async fn submit_review_decision(
                                     },
                                 )
                             }
-                            #[cfg(not(feature = "legacy-sqlite-tests"))]
+                            #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
                             {
                                 Err(anyhow::anyhow!(
                                     "postgres pool unavailable for rework dispatch"
@@ -1397,7 +1397,7 @@ pub async fn submit_review_decision(
             if let Some(ref rd_id) = pending_rd_id {
                 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
                 let status_db = state.legacy_db();
-                #[cfg(not(feature = "legacy-sqlite-tests"))]
+                #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
                 let status_db = None;
                 match crate::dispatch::set_dispatch_status_with_backends(
                     status_db,
@@ -1721,7 +1721,7 @@ pub async fn submit_review_decision(
             if let Some(ref rd_id) = pending_rd_id {
                 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
                 let status_db = state.legacy_db();
-                #[cfg(not(feature = "legacy-sqlite-tests"))]
+                #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
                 let status_db = None;
                 match crate::dispatch::set_dispatch_status_with_backends(
                     status_db,

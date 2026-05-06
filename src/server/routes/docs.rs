@@ -2825,7 +2825,30 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/dispatched-sessions",
             "dispatched-sessions",
-            "List dispatched sessions // TODO: example",
+            "List dispatched sessions with recovery identifiers for active dispatch, tmux session, thread channel, and linked auto-queue entry/run/slot when available.",
+        )
+        .with_example(
+            json!({"query": {"all": false}}),
+            json!({"sessions": [{
+                "session_key": "mac-mini:AgentDesk-codex-adk-cdx",
+                "status": "turn_active",
+                "active_dispatch_id": "dispatch-1",
+                "tmux_session": "AgentDesk-codex-adk-cdx",
+                "resolved_thread_channel_id": "1501205715878936748",
+                "auto_queue_entry_id": "entry-1",
+                "auto_queue_run_id": "run-1",
+                "auto_queue_slot_index": 0,
+                "recovery_identifiers": {
+                    "session_key": "mac-mini:AgentDesk-codex-adk-cdx",
+                    "tmux_session": "AgentDesk-codex-adk-cdx",
+                    "active_dispatch_id": "dispatch-1",
+                    "thread_channel_id": "1501205715878936748",
+                    "auto_queue_entry_id": "entry-1",
+                    "auto_queue_run_id": "run-1",
+                    "auto_queue_slot_index": 0,
+                    "auto_queue_thread_group": 0
+                }
+            }]}),
         ),
         ep(
             "DELETE",
@@ -3398,7 +3421,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/queue/status",
             "auto-queue",
-            "Get latest auto-queue run state",
+            "Get latest auto-queue run state. When auto_queue_slot_single_active_entry is violated, diagnostics.slot_invariant_violations identifies run_id, agent_id, slot_index, conflicting entry_ids, related dispatch_ids, and recovery endpoints. Recommended recovery: choose the entry that should retain the active slot, complete/cancel/skip stale entries, then use /api/queue/slots/{agent_id}/{slot_index}/reset-thread or /api/queue/slots/{agent_id}/{slot_index}/rebind if the slot binding points at the wrong thread group.",
         )
         .with_params([
             (
@@ -3561,6 +3584,40 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl -X PATCH http://localhost:8787/api/queue/reorder -H 'Content-Type: application/json' -d '{\"ordered_ids\":[\"entry-2\",\"entry-1\"],\"agent_id\":\"agent-1\"}'"),
         ep(
             "POST",
+            "/api/queue/slots/{agent_id}/{slot_index}/rebind",
+            "auto-queue",
+            "Rebind one auto-queue slot to a run/thread group after the active dispatch has been completed, cancelled, or skipped.",
+        )
+        .with_params([
+            ("agent_id", path_param("Agent ID")),
+            (
+                "slot_index",
+                ParamDoc {
+                    location: "path",
+                    kind: "number",
+                    required: true,
+                    description: "Slot pool index",
+                    enum_values: None,
+                    default: None,
+                },
+            ),
+            ("run_id", body_param("string", true, "Active or paused auto-queue run ID")),
+            (
+                "thread_group",
+                body_param("number", true, "Thread group that should own this slot"),
+            ),
+        ])
+        .with_example(
+            json!({"path": {"agent_id": "agent-1", "slot_index": 0}, "body": {"run_id": "run-1", "thread_group": 0}}),
+            json!({"ok": true, "agent_id": "agent-1", "slot_index": 0, "run_id": "run-1", "thread_group": 0, "rebound": true, "updated_entries": 1}),
+        )
+        .with_error_example(
+            409,
+            json!({"path": {"agent_id": "agent-1", "slot_index": 0}, "body": {"run_id": "run-1", "thread_group": 0}}),
+            json!({"error": "slot 0 for agent-1 has an active dispatch; reset or complete it before rebind"}),
+        ),
+        ep(
+            "POST",
             "/api/queue/slots/{agent_id}/{slot_index}/reset-thread",
             "auto-queue",
             "Reset a slot-thread binding for an agent",
@@ -3647,15 +3704,42 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/queue/resume",
             "auto-queue",
-            "Resume paused runs and dispatch next entries: continues a run from its paused checkpoint (vs. /retry which re-executes a failed step, /redispatch which creates a new dispatch id, or /reopen which re-admits a closed card).",
+            "Resume paused runs and dispatch next entries. Runs blocked by pending/failed phase-gate rows remain paused and return blocked_runs with message='No resumable runs'.",
         )
-        .with_example(json!({}), json!({"ok": true, "resumed_runs": 1, "dispatched": 1}))
+        .with_example(json!({}), json!({"ok": true, "resumed_runs": 1, "blocked_runs": 0, "dispatched": 1}))
         .with_error_example(
-            409,
+            200,
             json!({}),
-            json!({"error": "no paused runs to resume"}),
+            json!({"ok": true, "resumed_runs": 0, "blocked_runs": 1, "message": "No resumable runs"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/queue/resume"),
+        ep(
+            "POST",
+            "/api/queue/runs/{id}/restore",
+            "auto-queue",
+            "Restore a cancelled or restoring run by re-evaluating skipped entries. Paused runs are rejected; use /api/queue/resume unless the run is cancelled/restoring.",
+        )
+        .with_params([("id", path_param("Auto-queue run ID"))])
+        .with_example(
+            json!({"path": {"id": "run-1"}}),
+            json!({
+                "ok": true,
+                "run_id": "run-1",
+                "run_status": "active",
+                "restored_pending": 1,
+                "restored_done": 0,
+                "restored_dispatched": 0,
+                "rebound_slots": 0,
+                "created_dispatches": 0,
+                "unbound_dispatches": 0
+            }),
+        )
+        .with_error_example(
+            400,
+            json!({"path": {"id": "run-1"}}),
+            json!({"error": "only cancelled or restoring runs can be restored (status=paused)", "run_id": "run-1", "status": "paused"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/queue/runs/run-1/restore"),
         ep(
             "POST",
             "/api/queue/cancel",
@@ -4062,23 +4146,26 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/reviews/verdict",
             "reviews",
-            "Submit review verdict",
+            "Submit counter-model review verdict for a review dispatch",
         )
         .with_params([
-            ("card_id", body_param("string", true, "Kanban card under review")),
-            ("verdict", body_param("string", true, "approved | rejected | needs_changes")),
-            ("summary", body_param("string", false, "Short reviewer summary")),
+            ("dispatch_id", body_param("string", true, "Review dispatch ID")),
+            ("overall", body_param("string", true, "pass | improve | reject | rework | approved")),
+            ("notes", body_param("string", false, "Reviewer notes")),
+            ("feedback", body_param("string", false, "Reviewer feedback")),
+            ("commit", body_param("string", false, "Reviewed commit SHA")),
+            ("provider", body_param("string", false, "Verdict submitter provider")),
         ])
         .with_example(
-            json!({"body": {"card_id": "card-1", "verdict": "approved", "summary": "LGTM"}}),
-            json!({"ok": true, "review_id": "review-1", "card": {"id": "card-1", "review_status": "approved"}}),
+            json!({"body": {"dispatch_id": "review-1", "overall": "pass", "notes": "LGTM"}}),
+            json!({"ok": true, "dispatch_id": "review-1", "overall": "pass"}),
         )
         .with_error_example(
             400,
-            json!({"body": {"card_id": "card-1"}}),
-            json!({"error": "verdict is required"}),
+            json!({"body": {"dispatch_id": "review-1"}}),
+            json!({"error": "overall must be one of: pass, improve, reject, rework, approved"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/reviews/verdict -H 'Content-Type: application/json' -d '{\"card_id\":\"card-1\",\"verdict\":\"approved\",\"summary\":\"LGTM\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/reviews/verdict -H 'Content-Type: application/json' -d '{\"dispatch_id\":\"review-1\",\"overall\":\"pass\",\"notes\":\"LGTM\"}'"),
         ep(
             "POST",
             "/api/reviews/decision",
@@ -4898,6 +4985,73 @@ mod tests {
         let (status, _headers, routed) = resolve_docs_segment("api-friction-markers", false);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(routed["path"], "/api/docs/api-friction-markers");
+    }
+
+    #[test]
+    fn auto_queue_docs_surface_slot_recovery_identifiers() {
+        let endpoints = all_endpoints();
+        let find = |method: &str, path: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.method == method && endpoint.path == path)
+                .unwrap_or_else(|| panic!("{method} {path} must be documented"))
+        };
+
+        let status = find("GET", "/api/queue/status");
+        assert!(
+            status
+                .description
+                .contains("diagnostics.slot_invariant_violations"),
+            "status docs must describe slot invariant recovery diagnostics"
+        );
+        assert!(
+            status.description.contains("entry_ids")
+                && status.description.contains("dispatch_ids")
+                && status
+                    .description
+                    .contains("/api/queue/slots/{agent_id}/{slot_index}/rebind"),
+            "status docs must expose actionable identifiers and repair endpoints"
+        );
+
+        let rebind = find("POST", "/api/queue/slots/{agent_id}/{slot_index}/rebind");
+        assert_eq!(
+            rebind
+                .params
+                .get("run_id")
+                .expect("rebind docs must include run_id")
+                .required,
+            true
+        );
+        assert_eq!(
+            rebind
+                .params
+                .get("thread_group")
+                .expect("rebind docs must include thread_group")
+                .required,
+            true
+        );
+        assert_eq!(
+            rebind
+                .example
+                .as_ref()
+                .expect("rebind docs must include an example")
+                .response["rebound"],
+            true
+        );
+
+        let sessions = find("GET", "/api/dispatched-sessions");
+        let session = &sessions
+            .example
+            .as_ref()
+            .expect("dispatched-sessions docs must include an example")
+            .response["sessions"][0];
+        assert_eq!(session["auto_queue_entry_id"], "entry-1");
+        assert_eq!(session["auto_queue_run_id"], "run-1");
+        assert_eq!(session["auto_queue_slot_index"], 0);
+        assert_eq!(
+            session["recovery_identifiers"]["auto_queue_thread_group"],
+            0
+        );
     }
 
     #[test]

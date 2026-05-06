@@ -63,7 +63,7 @@ fn review_verdict_db(state: &AppState) -> Option<&crate::db::Db> {
     state.legacy_db()
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn review_verdict_db(_state: &AppState) -> Option<&crate::db::Db> {
     None
 }

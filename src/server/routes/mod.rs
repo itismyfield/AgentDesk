@@ -216,7 +216,7 @@ pub fn api_router_with_pg_and_cluster(
         cluster_instance_id,
     };
 
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     crate::services::discord::monitoring_status::spawn_expiry_sweeper(
         state::global_monitoring_store(),
         state.health_registry.clone(),

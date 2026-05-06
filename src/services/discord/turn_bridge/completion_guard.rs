@@ -380,7 +380,7 @@ fn should_sync_runtime_auto_queue_terminal_entry(
     match dispatch_type {
         Some("consultation") => false,
         Some("implementation" | "rework") => {
-            !is_noop_runtime_completion_result(result) && !auto_queue_review_disabled
+            !is_noop_runtime_completion_result(result) || auto_queue_review_disabled
         }
         _ => true,
     }
@@ -509,10 +509,9 @@ fn runtime_pg_complete_dispatch_with_result(
                 &result_value,
                 auto_queue_review_disabled,
             ) {
-                crate::db::auto_queue::sync_dispatch_terminal_entries_on_pg_tx(
+                crate::db::auto_queue::finalize_completed_dispatch_terminal_entry_on_pg_tx(
                     &mut tx,
                     &dispatch_id,
-                    crate::db::auto_queue::ENTRY_STATUS_DONE,
                     &transition_source,
                     true,
                 )
@@ -886,7 +885,7 @@ pub(in crate::services::discord) async fn store_reconcile_marker_with_handles(
         }
     }
 
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let _ = db;
 
     false
@@ -1794,9 +1793,14 @@ mod runtime_completion_policy_tests {
             &noop_result,
             false
         ));
-        assert!(!should_sync_runtime_auto_queue_terminal_entry(
+        assert!(should_sync_runtime_auto_queue_terminal_entry(
             Some("rework"),
             &normal_result,
+            true
+        ));
+        assert!(should_sync_runtime_auto_queue_terminal_entry(
+            Some("implementation"),
+            &noop_result,
             true
         ));
         assert!(!should_sync_runtime_auto_queue_terminal_entry(

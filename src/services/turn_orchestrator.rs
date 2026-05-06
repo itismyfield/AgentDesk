@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use std::path::Path;
@@ -288,6 +288,19 @@ fn pending_queue_root() -> Option<PathBuf> {
     crate::services::discord::runtime_store::discord_pending_queue_root()
 }
 
+fn pending_queue_file_path(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) -> Option<PathBuf> {
+    Some(
+        pending_queue_root()?
+            .join(provider.as_str())
+            .join(token_hash)
+            .join(format!("{}.json", channel_id.get())),
+    )
+}
+
 /// Write-through: save a single channel's queue to disk.
 /// If the queue is empty the file is removed.
 pub(crate) fn save_channel_queue(
@@ -297,16 +310,17 @@ pub(crate) fn save_channel_queue(
     queue: &[Intervention],
     dispatch_role_override: Option<u64>,
 ) {
-    let Some(root) = pending_queue_root() else {
+    let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) else {
         return;
     };
-    let dir = root.join(provider.as_str()).join(token_hash);
-    let path = dir.join(format!("{}.json", channel_id.get()));
     if queue.is_empty() {
         let _ = fs::remove_file(&path);
         return;
     }
-    let _ = fs::create_dir_all(&dir);
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let _ = fs::create_dir_all(dir);
     let items: Vec<PendingQueueItem> = queue
         .iter()
         .map(|i| PendingQueueItem {
@@ -329,6 +343,38 @@ pub(crate) fn save_channel_queue(
     if let Ok(json) = serde_json::to_string_pretty(&items) {
         let _ = crate::services::discord::runtime_store::atomic_write(&path, &json);
     }
+}
+
+fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> Intervention {
+    let mut source_message_ids: Vec<MessageId> = item
+        .source_message_ids
+        .into_iter()
+        .map(MessageId::new)
+        .collect();
+    if source_message_ids.is_empty() {
+        source_message_ids.push(MessageId::new(item.message_id));
+    }
+    Intervention {
+        author_id: UserId::new(item.author_id),
+        message_id: MessageId::new(item.message_id),
+        source_message_ids,
+        text: item.text,
+        mode: InterventionMode::Soft,
+        created_at: now,
+        reply_context: item.reply_context,
+        has_reply_boundary: item.has_reply_boundary,
+        merge_consecutive: item.merge_consecutive,
+    }
+}
+
+fn pending_queue_items_to_interventions(
+    items: Vec<PendingQueueItem>,
+    now: Instant,
+) -> Vec<Intervention> {
+    items
+        .into_iter()
+        .map(|item| pending_queue_item_to_intervention(item, now))
+        .collect()
 }
 
 /// Save all non-empty intervention queues to `{provider}/{token_hash}/`.
@@ -424,35 +470,35 @@ pub(crate) fn load_pending_queues(
         if let Some(override_id) = items.iter().find_map(|item| item.override_channel_id) {
             restored_overrides.insert(ChannelId::new(channel_id), ChannelId::new(override_id));
         }
-        let interventions: Vec<Intervention> = items
-            .into_iter()
-            .map(|item| {
-                let mut source_message_ids: Vec<MessageId> = item
-                    .source_message_ids
-                    .into_iter()
-                    .map(MessageId::new)
-                    .collect();
-                if source_message_ids.is_empty() {
-                    source_message_ids.push(MessageId::new(item.message_id));
-                }
-                Intervention {
-                    author_id: UserId::new(item.author_id),
-                    message_id: MessageId::new(item.message_id),
-                    source_message_ids,
-                    text: item.text,
-                    mode: InterventionMode::Soft,
-                    created_at: now,
-                    reply_context: item.reply_context,
-                    has_reply_boundary: item.has_reply_boundary,
-                    merge_consecutive: item.merge_consecutive,
-                }
-            })
-            .collect();
+        let interventions = pending_queue_items_to_interventions(items, now);
         if !interventions.is_empty() {
             result.insert(ChannelId::new(channel_id), interventions);
         }
     }
     (result, restored_overrides)
+}
+
+fn load_channel_pending_queue(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) -> (Vec<Intervention>, Option<ChannelId>) {
+    let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) else {
+        return (Vec::new(), None);
+    };
+    let Ok(content) = fs::read_to_string(&path) else {
+        return (Vec::new(), None);
+    };
+    let Ok(items) = serde_json::from_str::<Vec<PendingQueueItem>>(&content) else {
+        let _ = fs::remove_file(&path);
+        return (Vec::new(), None);
+    };
+    let restored_override = items
+        .iter()
+        .find_map(|item| item.override_channel_id)
+        .map(ChannelId::new);
+    let interventions = pending_queue_items_to_interventions(items, Instant::now());
+    (interventions, restored_override)
 }
 
 /// Log a structured warning for legacy pending queue files at the old flat path.
@@ -569,6 +615,13 @@ impl QueuePersistenceContext {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HydratePendingQueueResult {
+    pub(crate) absorbed: usize,
+    pub(crate) queue_len_after: usize,
+    pub(crate) restored_override: Option<ChannelId>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ChannelMailboxSnapshot {
     pub(crate) cancel_token: Option<Arc<CancelToken>>,
@@ -682,6 +735,23 @@ impl ChannelMailboxHandle {
     pub(crate) async fn cancel_active_turn(&self) -> CancelActiveTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::CancelActiveTurn { reply },
+            CancelActiveTurnResult {
+                token: None,
+                already_stopping: false,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn cancel_active_turn_if_current(
+        &self,
+        expected_token: Arc<CancelToken>,
+    ) -> CancelActiveTurnResult {
+        self.request(
+            |reply| ChannelMailboxMsg::CancelActiveTurnIfCurrent {
+                expected_token,
+                reply,
+            },
             CancelActiveTurnResult {
                 token: None,
                 already_stopping: false,
@@ -897,28 +967,13 @@ impl ChannelMailboxHandle {
             .await;
     }
 
-    /// codex review round-4 P2-1 (#1672): atomically merge a disk-loaded
-    /// pending queue into the in-memory mailbox without clobbering items
-    /// that arrived concurrently. Disk items are inserted at the *front*
-    /// of the queue (they were enqueued earlier in wall-clock time than
-    /// any in-memory item that survived a cancel-induced empty window),
-    /// and any item whose `message_id` already lives in the mailbox is
-    /// skipped to keep the merge idempotent.
-    ///
-    /// Returns the number of disk items that were absorbed (0 if the
-    /// disk payload was empty, or every entry was already present).
-    pub(crate) async fn hydrate_pending_queue(
+    pub(crate) async fn hydrate_pending_queue_from_disk(
         &self,
-        disk_items: Vec<Intervention>,
         persistence: QueuePersistenceContext,
-    ) -> usize {
+    ) -> HydratePendingQueueResult {
         self.request(
-            |reply| ChannelMailboxMsg::HydratePendingQueue {
-                disk_items,
-                persistence,
-                reply,
-            },
-            0,
+            |reply| ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply },
+            HydratePendingQueueResult::default(),
         )
         .await
     }
@@ -1067,6 +1122,10 @@ enum ChannelMailboxMsg {
     CancelActiveTurn {
         reply: oneshot::Sender<CancelActiveTurnResult>,
     },
+    CancelActiveTurnIfCurrent {
+        expected_token: Arc<CancelToken>,
+        reply: oneshot::Sender<CancelActiveTurnResult>,
+    },
     TryStartTurn {
         cancel_token: Arc<CancelToken>,
         request_owner: UserId,
@@ -1127,10 +1186,9 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<()>,
     },
-    HydratePendingQueue {
-        disk_items: Vec<Intervention>,
+    HydratePendingQueueFromDisk {
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<usize>,
+        reply: oneshot::Sender<HydratePendingQueueResult>,
     },
     RestartDrain {
         persistence: QueuePersistenceContext,
@@ -1177,6 +1235,39 @@ fn persist_queue(
         queue,
         persistence.dispatch_role_override,
     );
+}
+
+fn hydrate_pending_queue_into_state(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    disk_items: Vec<Intervention>,
+    persistence: QueuePersistenceContext,
+    restored_override: Option<ChannelId>,
+) -> HydratePendingQueueResult {
+    state.last_persistence = Some(persistence.clone());
+    let mut existing_ids: HashSet<MessageId> = state
+        .intervention_queue
+        .iter()
+        .map(|item| item.message_id)
+        .collect();
+    let mut absorbed = 0usize;
+    // Walk in reverse so repeated `insert(0, …)` ends up with disk
+    // items in their original order.
+    for item in disk_items.into_iter().rev() {
+        if !existing_ids.insert(item.message_id) {
+            continue;
+        }
+        state.intervention_queue.insert(0, item);
+        absorbed += 1;
+    }
+    if absorbed > 0 {
+        persist_queue(channel_id, &state.intervention_queue, &persistence);
+    }
+    HydratePendingQueueResult {
+        absorbed,
+        queue_len_after: state.intervention_queue.len(),
+        restored_override,
+    }
 }
 
 fn finalize_turn_state(
@@ -1296,6 +1387,29 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::CancelActiveTurn { reply } => {
                     let token = state.cancel_token.clone();
+                    let already_stopping = token.as_ref().is_some_and(|token| {
+                        token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                    });
+                    if let Some(token) = token.as_ref()
+                        && !already_stopping
+                    {
+                        token
+                            .cancelled
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let _ = reply.send(CancelActiveTurnResult {
+                        token,
+                        already_stopping,
+                    });
+                }
+                ChannelMailboxMsg::CancelActiveTurnIfCurrent {
+                    expected_token,
+                    reply,
+                } => {
+                    let token = state
+                        .cancel_token
+                        .clone()
+                        .filter(|token| Arc::ptr_eq(token, &expected_token));
                     let already_stopping = token.as_ref().is_some_and(|token| {
                         token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
                     });
@@ -1476,41 +1590,29 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
                     let _ = reply.send(());
                 }
-                ChannelMailboxMsg::HydratePendingQueue {
-                    disk_items,
-                    persistence,
-                    reply,
-                } => {
-                    // codex review round-4 P2-1 (#1672): merge disk
-                    // payload into the in-memory queue *atomically* —
-                    // running inside the mailbox actor means no other
-                    // ChannelMailboxMsg can interleave between the
-                    // dedup scan and the prepend, so a concurrent
-                    // `mailbox_enqueue_intervention` is serialised
-                    // either fully before (we'll see its message_id
-                    // and skip the dup) or fully after (it appends to
-                    // the end of the merged queue). Either way no
-                    // user message is lost.
-                    state.last_persistence = Some(persistence.clone());
-                    let existing_ids: std::collections::HashSet<MessageId> = state
-                        .intervention_queue
-                        .iter()
-                        .map(|item| item.message_id)
-                        .collect();
-                    let mut absorbed = 0usize;
-                    // Walk in reverse so repeated `insert(0, …)` ends
-                    // up with disk items in their original order.
-                    for item in disk_items.into_iter().rev() {
-                        if existing_ids.contains(&item.message_id) {
-                            continue;
-                        }
-                        state.intervention_queue.insert(0, item);
-                        absorbed += 1;
+                ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply } => {
+                    // #1683: read the disk queue inside the mailbox actor so
+                    // a dequeue that removes the file cannot race with a stale
+                    // out-of-actor disk snapshot and reinsert an already
+                    // processed item.
+                    let (disk_items, restored_override) = load_channel_pending_queue(
+                        &persistence.provider,
+                        &persistence.token_hash,
+                        channel_id,
+                    );
+                    let mut effective_persistence = persistence;
+                    if effective_persistence.dispatch_role_override.is_none() {
+                        effective_persistence.dispatch_role_override =
+                            restored_override.map(|channel| channel.get());
                     }
-                    if absorbed > 0 {
-                        persist_queue(channel_id, &state.intervention_queue, &persistence);
-                    }
-                    let _ = reply.send(absorbed);
+                    let result = hydrate_pending_queue_into_state(
+                        &mut state,
+                        channel_id,
+                        disk_items,
+                        effective_persistence,
+                        restored_override,
+                    );
+                    let _ = reply.send(result);
                 }
                 ChannelMailboxMsg::RestartDrain { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
@@ -1536,6 +1638,132 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
         }
     });
     ChannelMailboxHandle { sender: tx }
+}
+
+#[cfg(test)]
+mod actor_hydrate_regression_tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard};
+
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvGuard;
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+        }
+    }
+
+    fn queue_file_path(
+        root: &Path,
+        provider: &ProviderKind,
+        token_hash: &str,
+        channel_id: ChannelId,
+    ) -> PathBuf {
+        root.join("runtime")
+            .join("discord_pending_queue")
+            .join(provider.as_str())
+            .join(token_hash)
+            .join(format!("{}.json", channel_id.get()))
+    }
+
+    fn make_intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
+        Intervention {
+            author_id: UserId::new(1),
+            message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at,
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+        }
+    }
+
+    fn lock_test_env() -> MutexGuard<'static, ()> {
+        TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[tokio::test]
+    async fn hydrate_from_disk_does_not_reinsert_after_actor_dequeue_removed_file() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "mailbox-hydrate-after-dequeue";
+        let channel_id = ChannelId::new(45);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+
+        handle
+            .replace_queue(
+                vec![make_intervention(10, "already-processed", Instant::now())],
+                persistence.clone(),
+            )
+            .await;
+        let path = queue_file_path(tmp.path(), &provider, token_hash, channel_id);
+        assert!(path.exists(), "queue file must exist before dequeue");
+
+        let taken = handle.take_next_soft(persistence.clone()).await;
+        assert_eq!(
+            taken.intervention.as_ref().map(|item| item.message_id),
+            Some(MessageId::new(10))
+        );
+        assert_eq!(taken.queue_len_after, 0);
+        assert!(
+            !path.exists(),
+            "actor dequeue must remove the disk file once the queue is empty"
+        );
+
+        let hydrate = handle.hydrate_pending_queue_from_disk(persistence).await;
+        assert_eq!(
+            hydrate.absorbed, 0,
+            "#1683: actor-local disk hydrate must see the removed file, not reinsert a stale pre-dequeue snapshot"
+        );
+        assert_eq!(hydrate.queue_len_after, 0);
+        assert!(handle.snapshot().await.intervention_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_active_turn_if_current_ignores_stale_watchdog_token() {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(46));
+        let active_token = Arc::new(CancelToken::new());
+        let stale_token = Arc::new(CancelToken::new());
+
+        handle
+            .try_start_turn(active_token.clone(), UserId::new(9), MessageId::new(91))
+            .await;
+
+        let stale = handle.cancel_active_turn_if_current(stale_token).await;
+        assert!(stale.token.is_none());
+        assert!(!stale.already_stopping);
+        assert!(
+            !active_token
+                .cancelled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        let current = handle
+            .cancel_active_turn_if_current(active_token.clone())
+            .await;
+        assert!(current.token.is_some());
+        assert!(!current.already_stopping);
+        assert!(
+            active_token
+                .cancelled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

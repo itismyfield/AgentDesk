@@ -92,7 +92,7 @@ pub(crate) async fn reconcile_boot_runtime(
                 db.ok_or_else(|| anyhow!("SQLite db required for test boot reconcile"))?,
             )?
         }
-        #[cfg(not(feature = "legacy-sqlite-tests"))]
+        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
         {
             return Err(anyhow!("Postgres pool required for boot reconcile"));
         }

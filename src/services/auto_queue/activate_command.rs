@@ -845,50 +845,44 @@ pub(crate) async fn activate_with_deps_pg(
                     continue;
                 }
 
-                if let Err(update_error) = crate::db::auto_queue::update_entry_status_on_pg(
-                    pool,
+                let failure_result = record_entry_dispatch_failure(
+                    deps,
+                    &run_id,
                     &entry_id,
-                    crate::db::auto_queue::ENTRY_STATUS_PENDING,
-                    "activate_dispatch_reserve_revert_pg",
-                    &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-                )
-                .await
-                {
-                    crate::auto_queue_log!(
-                        warn,
-                        "activate_dispatch_reserve_revert_failed_pg",
-                        entry_log_ctx.clone().maybe_slot_index(slot_index),
-                        "[auto-queue] failed to revert PG reservation for entry {} after create_dispatch error: {}",
-                        entry_id,
-                        update_error
-                    );
-                } else if let Some(assigned_slot) = slot_index
-                    && let Err(release_error) =
-                        crate::db::auto_queue::release_slot_for_group_agent_pg(
-                            pool,
-                            &run_id,
-                            *group,
-                            &agent_id,
-                            assigned_slot,
-                        )
-                        .await
-                {
-                    crate::auto_queue_log!(
-                        warn,
-                        "activate_dispatch_revert_slot_release_failed_pg",
-                        entry_log_ctx.clone().slot_index(assigned_slot),
-                        "[auto-queue] failed to release PG slot {} for entry {} after create_dispatch error: {}",
-                        assigned_slot,
-                        entry_id,
-                        release_error
-                    );
-                }
+                    &card_id,
+                    &agent_id,
+                    *group,
+                    slot_index,
+                    "activate_dispatch_create_failed_pg",
+                    &error.to_string(),
+                    &entry_log_ctx,
+                );
                 crate::auto_queue_log!(
-                    error,
+                    warn,
                     "activate_dispatch_create_failed_pg",
                     entry_log_ctx.clone().maybe_slot_index(slot_index),
-                    "[auto-queue] create_dispatch PG failed for entry {entry_id} (group {group}), leaving as pending for retry: {error}"
+                    "[auto-queue] create_dispatch PG failed for entry {entry_id} (group {group}): {error}"
                 );
+                match failure_result {
+                    Ok(failure) => crate::auto_queue_log!(
+                        warn,
+                        "activate_dispatch_create_failure_recorded_pg",
+                        entry_log_ctx.clone().maybe_slot_index(slot_index),
+                        "[auto-queue] dispatch creation failure recorded for entry {} retry {}/{} -> {}",
+                        entry_id,
+                        failure.retry_count,
+                        failure.retry_limit,
+                        failure.to_status
+                    ),
+                    Err(update_error) => crate::auto_queue_log!(
+                        warn,
+                        "activate_dispatch_create_failure_record_failed_pg",
+                        entry_log_ctx.clone().maybe_slot_index(slot_index),
+                        "[auto-queue] failed to record dispatch creation failure for entry {}: {}",
+                        entry_id,
+                        update_error
+                    ),
+                }
                 continue;
             }
         };

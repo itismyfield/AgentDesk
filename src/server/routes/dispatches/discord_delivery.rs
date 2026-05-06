@@ -624,7 +624,7 @@ async fn latest_work_dispatch_thread_pg(
     crate::db::dispatches::latest_work_dispatch_thread_pg(pool, card_id).await
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 pub(super) fn resolve_dispatch_delivery_channel_on_conn<T>(
     _conn: &T,
     _agent_id: &str,

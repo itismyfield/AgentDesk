@@ -153,7 +153,31 @@ pub(super) async fn create_activate_dispatch_pg(
                 .or_insert_with(|| json!(issue_number));
         }
     }
-    if let Ok(Some((worktree_path, worktree_branch, _))) =
+    if crate::dispatch::dispatch_type_requires_fresh_worktree(Some(dispatch_type)) {
+        let Some((worktree_path, worktree_branch, _, created)) =
+            crate::dispatch::ensure_card_worktree(pool, card_id, Some(&context_with_strategy))
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Cannot create worktree for auto-queue {dispatch_type} dispatch on card {card_id}: {error}"
+                    )
+                })?
+        else {
+            return Err(format!(
+                "Cannot create {dispatch_type} dispatch for card {card_id}: fresh worktree required but issue/repo could not be resolved"
+            ));
+        };
+        if let Some(obj) = context_with_strategy.as_object_mut() {
+            obj.entry("worktree_path".to_string())
+                .or_insert_with(|| json!(worktree_path));
+            obj.entry("worktree_branch".to_string())
+                .or_insert_with(|| json!(worktree_branch));
+            if created {
+                obj.insert("managed_worktree".to_string(), json!(true));
+                obj.insert("managed_worktree_cleanup".to_string(), json!("terminal"));
+            }
+        }
+    } else if let Ok(Some((worktree_path, worktree_branch, _))) =
         crate::dispatch::resolve_card_worktree(pool, card_id, Some(&context_with_strategy)).await
         && let Some(obj) = context_with_strategy.as_object_mut()
     {

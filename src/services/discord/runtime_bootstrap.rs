@@ -88,6 +88,22 @@ fn restored_codex_goals_reset_channels(bot_settings: &DiscordBotSettings) -> Vec
     channels
 }
 
+fn bootstrap_session_reset_pending_channels(
+    restored_model_overrides: &[(ChannelId, String)],
+    restored_fast_mode_reset_channels: &[ChannelId],
+    restored_codex_goals_reset_channels: &[ChannelId],
+) -> dashmap::DashSet<ChannelId> {
+    let _ = restored_model_overrides;
+    let set = dashmap::DashSet::new();
+    for channel_id in restored_fast_mode_reset_channels {
+        set.insert(*channel_id);
+    }
+    for channel_id in restored_codex_goals_reset_channels {
+        set.insert(*channel_id);
+    }
+    set
+}
+
 fn discord_gateway_lock_id(token_hash: &str) -> i64 {
     // `discord_token_hash()` returns "discord_<16hex>". Strip the literal prefix
     // so the first 16 chars we sample are actual hex; otherwise the `is_ascii_hexdigit`
@@ -974,26 +990,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             }
             set
         },
-        model_session_reset_pending: {
-            let set = dashmap::DashSet::new();
-            for (channel_id, _) in &restored_model_overrides {
-                set.insert(*channel_id);
-            }
-            set
-        },
-        session_reset_pending: {
-            let set = dashmap::DashSet::new();
-            for (channel_id, _) in &restored_model_overrides {
-                set.insert(*channel_id);
-            }
-            for channel_id in &restored_fast_mode_reset_channels {
-                set.insert(*channel_id);
-            }
-            for channel_id in &restored_codex_goals_reset_channels {
-                set.insert(*channel_id);
-            }
-            set
-        },
+        model_session_reset_pending: dashmap::DashSet::new(),
+        session_reset_pending: bootstrap_session_reset_pending_channels(
+            &restored_model_overrides,
+            &restored_fast_mode_reset_channels,
+            &restored_codex_goals_reset_channels,
+        ),
         model_picker_pending: dashmap::DashMap::new(),
         dispatch_role_overrides: dashmap::DashMap::new(),
         last_message_ids: dashmap::DashMap::new(),
@@ -1939,6 +1941,32 @@ async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
         tracing::info!(
             "  [{ts}] 🧹 GC: disconnected {cleared} stale fixed-channel working session(s)"
         );
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_session_reset_pending_excludes_restored_model_overrides() {
+        let model_only_channel = ChannelId::new(123);
+        let fast_mode_reset_channel = ChannelId::new(456);
+        let goals_reset_channel = ChannelId::new(789);
+        let restored_model_overrides = vec![(model_only_channel, "gpt-5.5".to_string())];
+
+        let pending = bootstrap_session_reset_pending_channels(
+            &restored_model_overrides,
+            &[fast_mode_reset_channel],
+            &[goals_reset_channel],
+        );
+
+        assert!(
+            !pending.contains(&model_only_channel),
+            "restoring a persisted model override must not force a fresh provider session"
+        );
+        assert!(pending.contains(&fast_mode_reset_channel));
+        assert!(pending.contains(&goals_reset_channel));
     }
 }
 

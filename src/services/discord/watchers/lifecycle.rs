@@ -270,9 +270,46 @@ pub(super) fn sqlite_runtime_db(shared: &SharedData) -> Option<&crate::db::Db> {
 pub(super) fn watcher_has_post_work_ready_evidence(
     full_response: &str,
     tool_state: &WatcherToolState,
-    task_notification_kind: Option<TaskNotificationKind>,
+    _task_notification_kind: Option<TaskNotificationKind>,
 ) -> bool {
-    !full_response.trim().is_empty() || tool_state.any_tool_used || task_notification_kind.is_some()
+    !full_response.trim().is_empty() || tool_state.any_tool_used
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn post_work_ready_evidence_ignores_task_notification_only_turns() {
+        let tool_state = WatcherToolState::new();
+
+        assert!(
+            !watcher_has_post_work_ready_evidence(
+                "",
+                &tool_state,
+                Some(TaskNotificationKind::Background),
+            ),
+            "a task notification alone can be older pane state and must not prove this turn finished"
+        );
+    }
+
+    #[test]
+    fn post_work_ready_evidence_accepts_response_or_tool_output() {
+        let tool_state = WatcherToolState::new();
+        assert!(watcher_has_post_work_ready_evidence(
+            "done",
+            &tool_state,
+            None
+        ));
+
+        let mut tool_state = WatcherToolState::new();
+        tool_state.any_tool_used = true;
+        assert!(watcher_has_post_work_ready_evidence(
+            "",
+            &tool_state,
+            Some(TaskNotificationKind::Subagent),
+        ));
+    }
 }
 
 pub(super) fn normalize_human_alert_target(channel: &str) -> Option<String> {

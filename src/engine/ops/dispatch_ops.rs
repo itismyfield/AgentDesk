@@ -14,7 +14,7 @@ pub(super) fn register_dispatch_ops<'js>(
     #[cfg(all(test, feature = "legacy-sqlite-tests"))] db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     let db: Option<Db> = None;
 
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -415,7 +415,7 @@ fn dispatch_create_raw_sqlite_test(
     }
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn dispatch_create_raw_sqlite_test(
     _db: &Db,
     _card_id: &str,
@@ -473,7 +473,7 @@ fn dispatch_has_active_work_raw_sqlite_test(db: &Db, card_id: &str) -> String {
     }
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn dispatch_has_active_work_raw_sqlite_test(_db: &Db, _card_id: &str) -> String {
     r#"{"error":"sqlite backend is unavailable for dispatch.hasActiveWork in production"}"#
         .to_string()
@@ -518,7 +518,7 @@ fn dispatch_set_retry_count_raw_sqlite_test(db: &Db, dispatch_id: &str, count: i
     }
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn dispatch_set_retry_count_raw_sqlite_test(_db: &Db, _dispatch_id: &str, _count: i32) -> String {
     r#"{"error":"sqlite backend is unavailable for dispatch.setRetryCount in production"}"#
         .to_string()
@@ -745,7 +745,7 @@ fn dispatch_set_status_raw_sqlite_test(
     }
 }
 
-#[cfg(not(feature = "legacy-sqlite-tests"))]
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 fn dispatch_set_status_raw_sqlite_test(
     _db: &Db,
     _dispatch_id: &str,

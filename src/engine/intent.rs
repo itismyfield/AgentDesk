@@ -398,7 +398,7 @@ fn execute_create_dispatch(
                     })
                 })
             }
-            #[cfg(not(feature = "legacy-sqlite-tests"))]
+            #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
             {
                 let _ = db;
                 None

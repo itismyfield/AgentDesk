@@ -815,7 +815,7 @@ fn runtime_stop_wait_timeout() -> std::time::Duration {
     {
         std::time::Duration::from_millis(150)
     }
-    #[cfg(not(feature = "legacy-sqlite-tests"))]
+    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
     {
         std::time::Duration::from_secs(3)
     }
@@ -1030,21 +1030,16 @@ pub async fn schedule_pending_queue_drain_after_cancel(
     // the disk file is present, not just when the in-memory queue is
     // empty. If a concurrent `mailbox_enqueue_intervention` slipped a
     // fresh message in between the cancel and this helper running, we
-    // still need to merge whatever the disk holds — `mailbox_hydrate_pending_queue`
+    // still need to merge whatever the disk holds. Actor-local hydrate
     // dedupes by `message_id` and prepends disk items so neither the
     // surviving disk payload nor the live racer is dropped.
-    if snapshot.disk_present {
-        hydrate_pending_queue_from_disk(&shared, &provider, channel_id).await;
-    }
-    // Re-snapshot after the (possibly skipped) hydrate so the caller
-    // gets the post-merge depth — that is the value the cancel
-    // observability surface should report as `queued_remaining`.
-    let post_depth = shared
-        .mailbox(channel_id)
-        .snapshot()
-        .await
-        .intervention_queue
-        .len();
+    let post_depth = if snapshot.disk_present {
+        let hydrate_result = hydrate_pending_queue_from_disk(&shared, &provider, channel_id).await;
+        let _absorbed = hydrate_result.absorbed;
+        hydrate_result.queue_len_after
+    } else {
+        snapshot.queue_depth
+    };
     if post_depth == 0 {
         return PostCancelDrainOutcome {
             scheduled: false,
@@ -1083,44 +1078,28 @@ impl PostCancelDrainOutcome {
 /// `mailbox_enqueue_intervention` call.
 ///
 /// codex review round-4 P2-1 (#1672): the merge runs through the
-/// mailbox actor's atomic `HydratePendingQueue` message, so a
-/// concurrent `mailbox_enqueue_intervention` racing with this hydrate
-/// (e.g. user fires a fresh message between the cancel completing and
-/// the disk read finishing) is *preserved* rather than clobbered. Disk
-/// items are inserted at the head of the queue (they are chronologically
-/// earlier than any in-memory item that came in after the cancel) and
-/// any `message_id` already present is skipped to keep the merge
-/// idempotent on retry.
+/// mailbox actor, so a concurrent `mailbox_enqueue_intervention`
+/// racing with this hydrate is preserved rather than clobbered. Disk
+/// items are inserted at the head of the queue and any `message_id`
+/// already present is skipped to keep the merge idempotent on retry.
 ///
-/// Returns `true` when at least one intervention was absorbed into the
-/// mailbox; `false` when the disk file is missing, empty, unparseable,
-/// or every entry was already present in memory.
+/// #1683: the disk read also runs inside the actor message. A pending
+/// dequeue can no longer remove the queue file after an out-of-actor
+/// stale read and then have that stale payload reinserted by hydrate.
+///
+/// Returns the post-hydrate queue depth plus any restored role override.
 async fn hydrate_pending_queue_from_disk(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> bool {
-    let (queues, overrides) = super::load_pending_queues(provider, &shared.token_hash);
-    let Some(interventions) =
-        queues.into_iter().find_map(
-            |(cid, items)| {
-                if cid == channel_id { Some(items) } else { None }
-            },
-        )
-    else {
-        return false;
-    };
-    if interventions.is_empty() {
-        return false;
-    }
-    if let Some(alt_channel_id) = overrides.get(&channel_id).copied() {
+) -> crate::services::turn_orchestrator::HydratePendingQueueResult {
+    let result = super::mailbox_hydrate_pending_queue_from_disk(shared, provider, channel_id).await;
+    if let Some(alt_channel_id) = result.restored_override {
         shared
             .dispatch_role_overrides
             .insert(channel_id, alt_channel_id);
     }
-    let absorbed =
-        super::mailbox_hydrate_pending_queue(shared, provider, channel_id, interventions).await;
-    absorbed > 0
+    result
 }
 
 /// #1672: Resolve a usable tmux session name for cancel observability.
@@ -2917,7 +2896,7 @@ async fn resolve_send_target_channel_id_with_backends(
                 return resolve_agent_target_channel_id_sqlite(db, agent_id);
             }
 
-            #[cfg(not(feature = "legacy-sqlite-tests"))]
+            #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
             {
                 let _ = db;
                 Err(SendTargetResolutionError::Internal(
@@ -6890,9 +6869,8 @@ mod tests {
         // Advance offset so unread_bytes == 0 against the seeded capture.
         inflight.last_offset = capture_bytes;
         // Backdate `updated_at` past the orphan threshold (10 min).
-        let stale_unix = chrono::Utc::now().timestamp()
-            - (super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS as i64)
-            - 60;
+        let stale_unix =
+            chrono::Utc::now().timestamp() - (super::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 60;
         let stale_local = chrono::Local
             .timestamp_opt(stale_unix, 0)
             .single()
@@ -6921,7 +6899,7 @@ mod tests {
             .confirmed_end_offset
             .store(capture_bytes, std::sync::atomic::Ordering::Release);
         let stale_outbound_ms = chrono::Utc::now().timestamp_millis()
-            - ((super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_OUTBOUND_THRESHOLD_SECS as i64) * 1000)
+            - ((super::STALL_WATCHDOG_THRESHOLD_SECS as i64) * 1000)
             - 60_000;
         coord
             .last_relay_ts_ms
@@ -7032,9 +7010,8 @@ mod tests {
         inflight.last_offset = capture_bytes;
         // Stale inflight updated_at — but we'll keep last_relay_ts_ms FRESH
         // to mimic an actively-streaming background turn.
-        let stale_unix = chrono::Utc::now().timestamp()
-            - (super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS as i64)
-            - 60;
+        let stale_unix =
+            chrono::Utc::now().timestamp() - (super::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 60;
         let stale_local = chrono::Local
             .timestamp_opt(stale_unix, 0)
             .single()
@@ -7141,9 +7118,8 @@ mod tests {
         inflight.task_notification_kind =
             Some(crate::services::agent_protocol::TaskNotificationKind::Background);
         inflight.last_offset = capture_bytes;
-        let stale_unix = chrono::Utc::now().timestamp()
-            - (super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_INFLIGHT_THRESHOLD_SECS as i64)
-            - 60;
+        let stale_unix =
+            chrono::Utc::now().timestamp() - (super::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 60;
         let stale_local = chrono::Local
             .timestamp_opt(stale_unix, 0)
             .single()
@@ -7166,7 +7142,7 @@ mod tests {
             .confirmed_end_offset
             .store(capture_bytes, std::sync::atomic::Ordering::Release);
         let stale_outbound_ms = chrono::Utc::now().timestamp_millis()
-            - ((super::STALL_WATCHDOG_EXPLICIT_BACKGROUND_OUTBOUND_THRESHOLD_SECS as i64) * 1000)
+            - ((super::STALL_WATCHDOG_THRESHOLD_SECS as i64) * 1000)
             - 60_000;
         coord
             .last_relay_ts_ms

@@ -29,7 +29,7 @@ box "Policies (priority order)" #F0F8FF
   participant "auto-queue\n(p=500)" as P500
 end box
 
-participant "SQLite\n(rusqlite)" as DB
+participant "Postgres\n(sqlx)" as DB
 participant "__pendingTransitions\n(JS array)" as PendQ
 participant "Tick Thread\n(tokio::spawn)" as Tick
 

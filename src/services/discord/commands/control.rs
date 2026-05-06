@@ -681,14 +681,14 @@ mod tests {
     #[test]
     fn pending_session_reset_plan_recreates_claude_and_codex_tmux_for_fast_mode() {
         assert_eq!(
-            pending_session_reset_plan(&ProviderKind::Claude, true, false, false, false),
+            pending_session_reset_plan(&ProviderKind::Claude, true, false, false),
             Some(PendingSessionResetPlan {
                 reset_source: "fast mode reset pending",
                 recreate_tmux: true,
             })
         );
         assert_eq!(
-            pending_session_reset_plan(&ProviderKind::Codex, true, false, false, false),
+            pending_session_reset_plan(&ProviderKind::Codex, true, false, false),
             Some(PendingSessionResetPlan {
                 reset_source: "fast mode reset pending",
                 recreate_tmux: true,
@@ -697,23 +697,16 @@ mod tests {
     }
 
     #[test]
-    fn pending_session_reset_plan_prefers_specific_flags_and_keeps_legacy_fallback() {
+    fn pending_session_reset_plan_prefers_specific_flags() {
         assert_eq!(
-            pending_session_reset_plan(&ProviderKind::Claude, false, false, true, true),
+            pending_session_reset_plan(&ProviderKind::Claude, false, false, true),
             Some(PendingSessionResetPlan {
                 reset_source: "model session reset pending",
                 recreate_tmux: false,
             })
         );
         assert_eq!(
-            pending_session_reset_plan(&ProviderKind::Gemini, false, false, false, true),
-            Some(PendingSessionResetPlan {
-                reset_source: "session reset pending",
-                recreate_tmux: false,
-            })
-        );
-        assert_eq!(
-            pending_session_reset_plan(&ProviderKind::Gemini, false, false, false, false),
+            pending_session_reset_plan(&ProviderKind::Gemini, false, false, false),
             None
         );
     }
@@ -721,14 +714,14 @@ mod tests {
     #[test]
     fn pending_session_reset_plan_recreates_codex_tmux_for_goals() {
         assert_eq!(
-            pending_session_reset_plan(&ProviderKind::Codex, false, true, false, false),
+            pending_session_reset_plan(&ProviderKind::Codex, false, true, false),
             Some(PendingSessionResetPlan {
                 reset_source: "codex goals reset pending",
                 recreate_tmux: true,
             })
         );
         assert_eq!(
-            pending_session_reset_plan(&ProviderKind::Claude, false, true, false, false),
+            pending_session_reset_plan(&ProviderKind::Claude, false, true, false),
             Some(PendingSessionResetPlan {
                 reset_source: "codex goals reset pending",
                 recreate_tmux: false,

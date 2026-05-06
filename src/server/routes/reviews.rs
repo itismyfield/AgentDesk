@@ -244,6 +244,7 @@ mod tests {
             broadcast_tx: tx,
             batch_buffer: buf,
             health_registry: None,
+            cluster_instance_id: None,
         }
     }
 

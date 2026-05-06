@@ -137,9 +137,9 @@ pub(crate) use runtime_bootstrap::run_bot;
 
 use crate::services::turn_orchestrator::{
     CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot, ClearChannelResult,
-    FinishTurnResult, QueueExitEvent, QueueExitKind, QueuePersistenceContext,
-    RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult, load_pending_queues,
-    warn_legacy_pending_queue_files,
+    FinishTurnResult, HydratePendingQueueResult, QueueExitEvent, QueueExitKind,
+    QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult,
+    load_pending_queues, warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, INTERVENTION_TTL, Intervention, InterventionMode,
@@ -1980,6 +1980,14 @@ async fn mailbox_cancel_active_turn(
     shared: &SharedData,
     channel_id: ChannelId,
 ) -> CancelActiveTurnResult {
+    mailbox_cancel_active_turn_with_reason(shared, channel_id, "mailbox_cancel_active_turn").await
+}
+
+async fn mailbox_cancel_active_turn_with_reason(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    reason: &str,
+) -> CancelActiveTurnResult {
     let tmux_session_name = shared
         .tmux_watchers
         .channel_binding(&channel_id)
@@ -1991,12 +1999,30 @@ async fn mailbox_cancel_active_turn(
         // #1309: in-memory publish is synchronous (instant suppression);
         // PG mirror is awaited with a 500 ms cap so a quick dcserver
         // restart cannot drop the durable copy.
-        tmux::record_recent_turn_stop(
-            channel_id,
-            tmux_session_name.as_deref(),
-            "mailbox_cancel_active_turn",
-        )
+        tmux::record_recent_turn_stop(channel_id, tmux_session_name.as_deref(), reason).await;
+    }
+    result
+}
+
+async fn mailbox_cancel_active_turn_if_current_with_reason(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    expected_token: Arc<CancelToken>,
+    reason: &str,
+) -> CancelActiveTurnResult {
+    expected_token.set_cancel_source(reason);
+    let tmux_session_name = shared
+        .tmux_watchers
+        .channel_binding(&channel_id)
+        .map(|binding| binding.tmux_session_name)
+        .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
+    let result = shared
+        .mailbox(channel_id)
+        .cancel_active_turn_if_current(expected_token)
         .await;
+    #[cfg(unix)]
+    if result.token.is_some() {
+        tmux::record_recent_turn_stop(channel_id, tmux_session_name.as_deref(), reason).await;
     }
     result
 }
@@ -2633,21 +2659,18 @@ async fn mailbox_replace_queue(
         .await;
 }
 
-/// codex review round-4 P2-1 (#1672): atomic disk → in-memory hydration
-/// helper. See `ChannelMailboxHandle::hydrate_pending_queue` for the
-/// race-free merge contract.
-async fn mailbox_hydrate_pending_queue(
+/// #1683: actor-local disk -> in-memory hydration helper. The mailbox
+/// actor reads the queue file and merges it in one serialized message,
+/// preventing stale out-of-actor disk snapshots from reintroducing an
+/// item that another actor message already dequeued and removed from disk.
+async fn mailbox_hydrate_pending_queue_from_disk(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
-    disk_items: Vec<Intervention>,
-) -> usize {
+) -> HydratePendingQueueResult {
     shared
         .mailbox(channel_id)
-        .hydrate_pending_queue(
-            disk_items,
-            queue_persistence_context(shared, provider, channel_id),
-        )
+        .hydrate_pending_queue_from_disk(queue_persistence_context(shared, provider, channel_id))
         .await
 }
 

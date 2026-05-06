@@ -362,7 +362,7 @@ async fn spawn_mock_discord_server_with_config(
                 })),
             );
         }
-        let thread_id = "thread-created".to_string();
+        let thread_id = "456".to_string();
         state
             .thread_parents
             .insert(thread_id.clone(), channel_id.clone());
@@ -740,7 +740,7 @@ async fn reused_thread_probe_error_falls_back_to_creating_new_thread_after_phase
     assert!(
         state
             .calls
-            .contains(&"POST /channels/thread-created/messages".to_string())
+            .contains(&"POST /channels/456/messages".to_string())
     );
     // #750: announce bot no longer writes dispatch-lifecycle emoji
     // reactions — no PUT/DELETE reaction calls should have been issued.
@@ -762,7 +762,7 @@ async fn reused_thread_probe_error_falls_back_to_creating_new_thread_after_phase
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(thread_id.as_deref(), Some("thread-created"));
+    assert_eq!(thread_id.as_deref(), Some("456"));
 }
 
 #[tokio::test]
@@ -897,22 +897,18 @@ async fn send_dispatch_to_discord_adds_configured_owner_to_created_thread() {
     assert!(
         state
             .calls
-            .contains(&"POST /channels/thread-created/messages".to_string())
+            .contains(&"POST /channels/456/messages".to_string())
     );
     // #750: no emoji reaction calls — see other tests in this file for rationale.
     assert!(
         !state.calls.iter().any(|call| call.contains("/reactions/")),
         "#750: no emoji reaction HTTP calls expected"
     );
+    assert!(state.calls.contains(&"GET /channels/456".to_string()));
     assert!(
         state
             .calls
-            .contains(&"GET /channels/thread-created".to_string())
-    );
-    assert!(
-        state.calls.contains(
-            &"PUT /channels/thread-created/thread-members/343742347365974026".to_string()
-        )
+            .contains(&"PUT /channels/456/thread-members/343742347365974026".to_string())
     );
 
     let conn = db.lock().unwrap();
@@ -923,7 +919,7 @@ async fn send_dispatch_to_discord_adds_configured_owner_to_created_thread() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(thread_id.as_deref(), Some("thread-created"));
+    assert_eq!(thread_id.as_deref(), Some("456"));
     let context: Option<String> = conn
         .query_row(
             "SELECT context FROM task_dispatches WHERE id = 'dispatch-1'",
@@ -932,55 +928,72 @@ async fn send_dispatch_to_discord_adds_configured_owner_to_created_thread() {
         )
         .unwrap();
     let context = serde_json::from_str::<serde_json::Value>(&context.unwrap()).unwrap();
-    assert_eq!(context["discord_message_channel_id"], "thread-created");
-    assert_eq!(context["discord_message_id"], "message-thread-created");
+    assert_eq!(context["discord_message_channel_id"], "456");
+    assert_eq!(context["discord_message_id"], "message-456");
 }
 
 #[tokio::test]
-async fn send_phase_gate_dispatch_to_discord_posts_to_primary_channel_without_thread() {
+async fn send_phase_gate_dispatch_to_discord_creates_thread() {
+    let _env_lock = env_lock();
     let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
-    let db = test_db();
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
-                [],
-            )
-            .unwrap();
-        conn.execute(
-                "INSERT INTO kanban_cards (
-                    id, title, status, assigned_agent_id, latest_dispatch_id, active_thread_id,
-                    created_at, updated_at
-                ) VALUES (
-                    'card-phase', 'Phase gate', 'review', 'agent-1', 'dispatch-phase', 'thread-existing',
-                    datetime('now'), datetime('now')
-                )",
-                [],
-            )
-            .unwrap();
-        conn.execute(
-                "INSERT INTO task_dispatches (
-                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
-                    created_at, updated_at
-                ) VALUES (
-                    'dispatch-phase', 'card-phase', 'agent-1', 'phase-gate', 'pending', '[phase-gate P2] Final',
-                    '{\"phase_gate\":{\"run_id\":\"run-1\",\"batch_phase\":1}}',
-                    datetime('now'), datetime('now')
-                )",
-                [],
-            )
-            .unwrap();
-    }
+    let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
+    let temp = tempfile::tempdir().unwrap();
+    write_announce_token(temp.path());
+    let _root = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
 
-    send_dispatch_to_discord_inner_with_context(
-        &db,
+    let sqlite = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id)
+             VALUES ($1, $2, $3)",
+    )
+    .bind("agent-1")
+    .bind("Agent 1")
+    .bind("123")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, latest_dispatch_id, github_issue_number,
+                created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+    )
+    .bind("card-phase")
+    .bind("Phase gate")
+    .bind("review")
+    .bind("agent-1")
+    .bind("dispatch-phase")
+    .bind(999_i64)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+    )
+    .bind("dispatch-phase")
+    .bind("card-phase")
+    .bind("agent-1")
+    .bind("phase-gate")
+    .bind("pending")
+    .bind("[phase-gate P2] Final")
+    .bind(r#"{"phase_gate":{"run_id":"run-1","batch_phase":1}}"#)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    send_dispatch_to_discord_with_pg(
+        Some(&sqlite),
+        Some(&pool),
         "agent-1",
         "[phase-gate P2] Final",
         "card-phase",
         "dispatch-phase",
-        "announce-token",
-        &base_url,
-        Some(343742347365974026),
     )
     .await
     .unwrap();
@@ -988,33 +1001,42 @@ async fn send_phase_gate_dispatch_to_discord_posts_to_primary_channel_without_th
     server_handle.abort();
 
     let state = state.lock().unwrap();
-    // #750: phase-gate post → no emoji reaction calls (announce bot
-    // writer retired). Only the message POST should have hit Discord.
-    assert_eq!(state.calls, vec!["POST /channels/123/messages".to_string()]);
     assert!(
-        !state.calls.iter().any(|call| call.contains("/threads")),
-        "phase-gate dispatch must not create or reuse a Discord thread"
+        state
+            .calls
+            .contains(&"POST /channels/123/threads".to_string()),
+        "phase-gate dispatch should create a dispatch thread"
+    );
+    assert!(
+        state
+            .calls
+            .contains(&"POST /channels/456/messages".to_string()),
+        "phase-gate dispatch message should be posted into the created thread"
+    );
+    assert!(
+        !state.calls.iter().any(|call| call.contains("/reactions/")),
+        "#750: phase-gate dispatch must not write lifecycle emoji reactions"
     );
 
-    let conn = db.lock().unwrap();
-    let thread_id: Option<String> = conn
-        .query_row(
-            "SELECT thread_id FROM task_dispatches WHERE id = 'dispatch-phase'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(thread_id, None);
-    let context: Option<String> = conn
-        .query_row(
-            "SELECT context FROM task_dispatches WHERE id = 'dispatch-phase'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let thread_id: Option<String> =
+        sqlx::query_scalar("SELECT thread_id FROM task_dispatches WHERE id = $1")
+            .bind("dispatch-phase")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(thread_id.as_deref(), Some("456"));
+    let context: Option<String> =
+        sqlx::query_scalar("SELECT context::text FROM task_dispatches WHERE id = $1")
+            .bind("dispatch-phase")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let context = serde_json::from_str::<serde_json::Value>(&context.unwrap()).unwrap();
-    assert_eq!(context["discord_message_channel_id"], "123");
-    assert_eq!(context["discord_message_id"], "message-123");
+    assert_eq!(context["discord_message_channel_id"], "456");
+    assert_eq!(context["discord_message_id"], "message-456");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -1086,7 +1108,7 @@ async fn reused_thread_probe_error_falls_back_to_creating_new_thread() {
     assert!(
         state
             .calls
-            .contains(&"POST /channels/thread-created/messages".to_string())
+            .contains(&"POST /channels/456/messages".to_string())
     );
     assert!(
         !state.calls.iter().any(|call| call.contains("/reactions/")),
@@ -1102,7 +1124,7 @@ async fn reused_thread_probe_error_falls_back_to_creating_new_thread() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(thread_id.as_deref(), Some("thread-created"));
+    assert_eq!(thread_id.as_deref(), Some("456"));
 }
 
 #[tokio::test]
@@ -1354,7 +1376,7 @@ async fn send_dispatch_skips_recent_slot_thread_history_when_context_requests_re
     assert!(
         state
             .calls
-            .contains(&"POST /channels/thread-created/messages".to_string())
+            .contains(&"POST /channels/456/messages".to_string())
     );
 
     let conn = db.lock().unwrap();
@@ -1365,7 +1387,7 @@ async fn send_dispatch_skips_recent_slot_thread_history_when_context_requests_re
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(thread_id.as_deref(), Some("thread-created"));
+    assert_eq!(thread_id.as_deref(), Some("456"));
 }
 
 #[tokio::test]
@@ -2256,7 +2278,7 @@ async fn send_dispatch_to_discord_with_pg_creates_thread_and_persists_context() 
     assert!(
         state
             .calls
-            .contains(&"POST /channels/thread-created/messages".to_string()),
+            .contains(&"POST /channels/456/messages".to_string()),
         "pg delivery should post the dispatch message into the created thread"
     );
     assert!(
@@ -2271,7 +2293,7 @@ async fn send_dispatch_to_discord_with_pg_creates_thread_and_persists_context() 
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(thread_id.as_deref(), Some("thread-created"));
+    assert_eq!(thread_id.as_deref(), Some("456"));
 
     let context: Option<String> =
         sqlx::query_scalar("SELECT context FROM task_dispatches WHERE id = $1")
@@ -2280,8 +2302,8 @@ async fn send_dispatch_to_discord_with_pg_creates_thread_and_persists_context() 
             .await
             .unwrap();
     let context = serde_json::from_str::<serde_json::Value>(&context.unwrap()).unwrap();
-    assert_eq!(context["discord_message_channel_id"], "thread-created");
-    assert_eq!(context["discord_message_id"], "message-thread-created");
+    assert_eq!(context["discord_message_channel_id"], "456");
+    assert_eq!(context["discord_message_id"], "message-456");
     assert_eq!(context["slot_index"], 0);
 
     let channel_thread_map: Option<String> =
@@ -2292,7 +2314,7 @@ async fn send_dispatch_to_discord_with_pg_creates_thread_and_persists_context() 
             .unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&channel_thread_map.unwrap()).unwrap()["123"],
-        "thread-created"
+        "456"
     );
 
     let slot_map: Option<String> = sqlx::query_scalar(
@@ -2306,7 +2328,7 @@ async fn send_dispatch_to_discord_with_pg_creates_thread_and_persists_context() 
     .unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&slot_map.unwrap()).unwrap()["123"],
-        "thread-created"
+        "456"
     );
 }
 
