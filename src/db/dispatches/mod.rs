@@ -1,10 +1,16 @@
-use sqlx::{PgPool, Row as SqlxRow};
-
 // #1693: Dispatch outbox repository surface.
 // `outbox` re-exports the per-dispatch outbox-shaped queries so the route
 // layer / service layer / future #1694 work can depend on a narrow API
 // without further extraction.
+mod metadata;
 pub(crate) mod outbox;
+
+pub(crate) use metadata::{
+    CardIssueInfo, DispatchDeliveryMetadata, dispatch_context_value, load_card_issue_info_pg,
+    load_dispatch_delivery_metadata_pg, resolve_dispatch_delivery_channel_pg,
+    resolve_review_followup_channel_pg,
+};
+use sqlx::{PgPool, Row as SqlxRow};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SlotThreadBinding {
@@ -433,7 +439,7 @@ async fn recent_slot_thread_history_pg(
                 continue;
             }
         };
-        let matches_slot = crate::services::discord_delivery_metadata::parse_pg_dispatch_context(
+        let matches_slot = metadata::parse_pg_dispatch_context(
             &dispatch_id,
             context.as_deref(),
             "recent_slot_thread_history_pg",
@@ -866,20 +872,19 @@ pub(crate) async fn latest_work_dispatch_thread_pg(
                 continue;
             }
         };
-        if let Some(thread_id) =
-            crate::services::discord_delivery_metadata::parse_pg_dispatch_context(
-                &dispatch_id,
-                context.as_deref(),
-                "latest_work_dispatch_thread_pg",
-            )
-            .and_then(|value| {
-                value
-                    .get("thread_id")
-                    .and_then(|value| value.as_str())
-                    .map(std::string::ToString::to_string)
-            })
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+        if let Some(thread_id) = metadata::parse_pg_dispatch_context(
+            &dispatch_id,
+            context.as_deref(),
+            "latest_work_dispatch_thread_pg",
+        )
+        .and_then(|value| {
+            value
+                .get("thread_id")
+                .and_then(|value| value.as_str())
+                .map(std::string::ToString::to_string)
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
         {
             return Ok(Some(thread_id));
         }

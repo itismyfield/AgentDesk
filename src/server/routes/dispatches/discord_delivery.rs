@@ -7,7 +7,9 @@ use super::thread_reuse::{
     clear_thread_for_channel_pg, get_thread_for_channel_pg, set_thread_for_channel_pg,
     try_reuse_thread,
 };
-use crate::db::dispatches::SlotThreadBinding;
+use crate::db::dispatches::{
+    CardIssueInfo, DispatchDeliveryMetadata, SlotThreadBinding, dispatch_context_value,
+};
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::dispatch::dispatch_destination_provider_override;
 pub(crate) use crate::server::dto::dispatches::{
@@ -26,11 +28,6 @@ pub(crate) use crate::services::discord_delivery::{
 use crate::services::discord_delivery::{
     archive_duplicate_slot_threads, maybe_add_owner_to_dispatch_thread,
     reset_stale_slot_thread_if_needed,
-};
-use crate::services::discord_delivery_metadata::{
-    CardIssueInfo, DispatchDeliveryMetadata, dispatch_context_value, load_card_issue_info,
-    load_dispatch_delivery_metadata, resolve_dispatch_delivery_channel_pg,
-    resolve_review_followup_channel_pg,
 };
 use sqlx::PgPool;
 use std::sync::OnceLock;
@@ -799,12 +796,15 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     thread_owner_user_id: Option<u64>,
     pg_pool: Option<&PgPool>,
 ) -> Result<DispatchNotifyDeliveryResult, String> {
+    let pool =
+        pg_pool.ok_or_else(|| "dispatch metadata lookup requires postgres pool".to_string())?;
+
     // Determine dispatch type + status before attempting Discord delivery.
     let DispatchDeliveryMetadata {
         dispatch_type,
         status: dispatch_status,
         context: dispatch_context,
-    } = load_dispatch_delivery_metadata(db, pg_pool, dispatch_id).await?;
+    } = crate::db::dispatches::load_dispatch_delivery_metadata_pg(pool, dispatch_id).await?;
 
     if !matches!(
         dispatch_status.as_deref(),
@@ -823,8 +823,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     }
 
     // Look up agent's discord channel
-    let pool = pg_pool.ok_or_else(|| "postgres pool required for channel lookup".to_string())?;
-    let channel_id = resolve_dispatch_delivery_channel_pg(
+    let channel_id = crate::db::dispatches::resolve_dispatch_delivery_channel_pg(
         pool,
         agent_id,
         card_id,
@@ -866,7 +865,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     let CardIssueInfo {
         issue_url,
         issue_number,
-    } = load_card_issue_info(db, pg_pool, card_id).await?;
+    } = crate::db::dispatches::load_card_issue_info_pg(pool, card_id).await?;
 
     let dispatch_context_json = dispatch_context_value(dispatch_context.as_deref());
 
@@ -1503,7 +1502,7 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
         };
     }
 
-    let channel_id = resolve_review_followup_channel_pg(pool, &agent_id)
+    let channel_id = crate::db::dispatches::resolve_review_followup_channel_pg(pool, &agent_id)
         .await?
         .ok_or_else(|| {
             format!("agent {agent_id} missing primary discord channel for review followup")
