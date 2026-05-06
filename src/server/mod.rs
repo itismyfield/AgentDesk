@@ -3046,6 +3046,63 @@ fn is_terminal_turn_delivery_outbox_source(source: &str) -> bool {
     matches!(source, "headless_turn" | "turn_bridge_tmux_handoff")
 }
 
+#[cfg(test)]
+fn session_can_be_released_for_terminal_outbox_failure(
+    session_key: Option<&str>,
+    session_last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
+    failed_outbox_session_key: Option<&str>,
+    failed_outbox_created_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let session_key_matches = match failed_outbox_session_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(failed_session_key) => session_key == Some(failed_session_key),
+        None => true,
+    };
+    let heartbeat_not_newer = session_last_heartbeat
+        .map(|last_heartbeat| last_heartbeat <= failed_outbox_created_at)
+        .unwrap_or(true);
+
+    session_key_matches && heartbeat_not_newer
+}
+
+async fn release_session_for_terminal_outbox_failure(
+    pg_pool: &PgPool,
+    channel_id_str: &str,
+    outbox_id: i64,
+) -> Result<u64, sqlx::Error> {
+    // Keep these predicates in sync with
+    // `session_can_be_released_for_terminal_outbox_failure`.
+    let result = sqlx::query(
+        "WITH failed_outbox AS (
+            SELECT session_key, created_at
+              FROM message_outbox
+             WHERE id = $2
+         )
+         UPDATE sessions
+            SET status = 'idle'
+           FROM failed_outbox
+          WHERE sessions.thread_channel_id = $1
+            AND sessions.status IN ('turn_active', 'working')
+            AND (
+                failed_outbox.session_key IS NULL
+                OR failed_outbox.session_key = ''
+                OR sessions.session_key = failed_outbox.session_key
+            )
+            AND (
+                sessions.last_heartbeat IS NULL
+                OR sessions.last_heartbeat <= failed_outbox.created_at
+            )",
+    )
+    .bind(channel_id_str)
+    .bind(outbox_id)
+    .execute(pg_pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction {
     let next_retry_count = retry_count.saturating_add(1);
     if next_retry_count > MESSAGE_OUTBOX_MAX_RETRY_COUNT {
@@ -3069,8 +3126,9 @@ fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction
 mod message_outbox_retry_tests {
     use super::{
         MessageOutboxFailureAction, is_terminal_turn_delivery_outbox_source,
-        message_outbox_failure_action,
+        message_outbox_failure_action, session_can_be_released_for_terminal_outbox_failure,
     };
+    use chrono::{Duration, TimeZone};
 
     #[test]
     fn message_outbox_failure_action_retries_then_fails() {
@@ -3112,6 +3170,60 @@ mod message_outbox_retry_tests {
             "agent_quality_rollup"
         ));
         assert!(!is_terminal_turn_delivery_outbox_source("system"));
+    }
+
+    #[test]
+    fn session_release_requires_same_failed_outbox_session_when_present() {
+        let failed_created_at = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 6, 12, 0, 0)
+            .single()
+            .unwrap();
+
+        assert!(session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some(failed_created_at - Duration::seconds(1)),
+            Some("session-current"),
+            failed_created_at,
+        ));
+        assert!(!session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some(failed_created_at - Duration::seconds(1)),
+            Some("session-old"),
+            failed_created_at,
+        ));
+        assert!(session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some(failed_created_at - Duration::seconds(1)),
+            Some("  "),
+            failed_created_at,
+        ));
+    }
+
+    #[test]
+    fn session_release_rejects_newer_session_heartbeat() {
+        let failed_created_at = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 6, 12, 0, 0)
+            .single()
+            .unwrap();
+
+        assert!(!session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some(failed_created_at + Duration::seconds(1)),
+            Some("session-current"),
+            failed_created_at,
+        ));
+        assert!(session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some(failed_created_at),
+            Some("session-current"),
+            failed_created_at,
+        ));
+        assert!(session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            None,
+            Some("session-current"),
+            failed_created_at,
+        ));
     }
 }
 
@@ -3295,25 +3407,34 @@ where
                     .execute(pg_pool)
                     .await
                     .ok();
-                    // Release only terminal turn-delivery rows; unrelated channel outbox
-                    // notifications may fail while a turn is still legitimately active.
+                    // Release only terminal turn-delivery rows, and only if no newer
+                    // session heartbeat proves another turn has since taken the channel.
                     if is_terminal_turn_delivery_outbox_source(&row.source) {
                         if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
-                            sqlx::query(
-                                "UPDATE sessions
-                                SET status = 'idle',
-                                    updated_at = NOW()
-                              WHERE thread_channel_id = $1
-                                AND status IN ('turn_active', 'working')",
-                            )
-                            .bind(channel_id_str)
-                            .execute(pg_pool)
-                            .await
-                            .ok();
+                            let released_sessions =
+                                match release_session_for_terminal_outbox_failure(
+                                    pg_pool,
+                                    channel_id_str,
+                                    row.id,
+                                )
+                                .await
+                                {
+                                    Ok(count) => count,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "[outbox] failed to release session for channel {} after msg {} failure: {}",
+                                            channel_id_str,
+                                            row.id,
+                                            error,
+                                        );
+                                        0
+                                    }
+                                };
                             tracing::warn!(
-                                "[outbox] ❌ permanent delivery failure for channel {} (msg {}): {}",
+                                "[outbox] ❌ permanent delivery failure for channel {} (msg {}, released_sessions={}): {}",
                                 channel_id_str,
                                 row.id,
+                                released_sessions,
                                 error_text,
                             );
                         }
