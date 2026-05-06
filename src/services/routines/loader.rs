@@ -1122,12 +1122,15 @@ mod tests {
     fn bundled_sample_routines_load_and_validate() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routines");
         let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(loader.load_dir(&root).unwrap(), 4);
+        assert_eq!(loader.load_dir(&root).unwrap(), 7);
         assert_eq!(
             loader.script_refs().unwrap(),
             vec![
                 "agent-checkpoint-review.js".to_string(),
+                "monitoring/automation-candidate-detector.js".to_string(),
                 "monitoring/automation-candidate-recommender.js".to_string(),
+                "monitoring/automation-executor.js".to_string(),
+                "monitoring/memento-digest-writer.js".to_string(),
                 "monitoring/working-watchdog.js".to_string(),
                 "script-summary.js".to_string(),
             ]
@@ -1250,6 +1253,14 @@ mod tests {
         })
     }
 
+    fn routine_observations(signature: &str, weight: u8, count: usize) -> Vec<serde_json::Value> {
+        (0..count)
+            .map(|index| {
+                routine_observation(signature, weight, &format!("2026-04-30T06:59:{index:02}Z"))
+            })
+            .collect()
+    }
+
     fn categorized_observation(
         signature: &str,
         category: &str,
@@ -1329,7 +1340,9 @@ mod tests {
                 );
                 assert_eq!(
                     result.get("scoring_summary").and_then(Value::as_str),
-                    Some("scored=0, suppressed=6")
+                    Some(
+                        "scored=0, deduped=0, suppressed=6, ema_scored=0.000, saturation_ticks=1, fast_fail_ticks=0, reopt_count=0"
+                    )
                 );
                 let checkpoint = checkpoint.unwrap();
                 assert_eq!(
@@ -1351,9 +1364,7 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-04-30T07:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let observations = (0..5)
-            .map(|_| routine_observation("ops/retry.js:complete", 2, "2026-04-30T06:59:00Z"))
-            .collect::<Vec<_>>();
+        let observations = routine_observations("ops/retry.js:complete", 2, 5);
         let inventory = vec![serde_json::json!({
             "pattern_id": "ops/retry.js:complete",
             "status": "accepted",
@@ -1464,9 +1475,7 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-04-30T07:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let observations = (0..5)
-            .map(|_| routine_observation("ops/retry.js:complete", 2, "2026-04-30T06:59:00Z"))
-            .collect::<Vec<_>>();
+        let observations = routine_observations("ops/retry.js:complete", 2, 5);
 
         let action = loader
             .execute_tick(
@@ -1554,9 +1563,7 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-04-30T07:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let observations = (0..5)
-            .map(|_| routine_observation("ops/retry.js:complete", 2, "2026-04-30T06:59:00Z"))
-            .collect::<Vec<_>>();
+        let observations = routine_observations("ops/retry.js:complete", 2, 5);
 
         let action = loader
             .execute_tick(
@@ -1839,9 +1846,7 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-04-30T07:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let observations = (0..4)
-            .map(|_| routine_observation("ops/bursty.js:complete", 2, "2026-04-30T06:59:00Z"))
-            .collect::<Vec<_>>();
+        let observations = routine_observations("ops/bursty.js:complete", 2, 4);
 
         let action = loader
             .execute_tick(

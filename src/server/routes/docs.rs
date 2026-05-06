@@ -1026,7 +1026,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/channels/{id}/relay-recovery",
             "health",
-            "Local/protected relay recovery dry-run endpoint with bounded apply for safe local auto-heal actions.",
+            "Local/protected relay recovery dry-run endpoint with bounded apply for safe local auto-heal actions, including stale proof cleanup and detached watcher reattach.",
         )
         .with_params([
             ("id", path_param("Discord channel snowflake")),
@@ -1036,7 +1036,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
             (
                 "apply",
-                body_param("boolean", false, "Default false. When true, only eligible bounded local cleanup may run"),
+                body_param("boolean", false, "Default false. When true, only eligible bounded local cleanup or watcher reattach may run"),
             ),
         ])
         .with_example(

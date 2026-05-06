@@ -13,9 +13,9 @@ use super::super::{
     Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_clear_channel,
 };
 use super::config::{
-    any_fast_mode_reset_pending, clear_codex_goals_reset_pending_for_channel,
-    clear_fast_mode_reset_pending_for_channel, clear_fast_mode_reset_pending_for_provider,
-    fast_mode_reset_pending_for_provider, fast_mode_reset_pending_key, sync_session_reset_pending,
+    clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_channel,
+    clear_fast_mode_reset_pending_for_provider, fast_mode_reset_pending_for_provider,
+    fast_mode_reset_pending_key, sync_session_reset_pending,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

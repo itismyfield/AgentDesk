@@ -1,11 +1,10 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use anyhow::Result;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use sqlite_test::{Connection, OptionalExtension};
 use sqlx::{PgPool, Row as SqlxRow};
 
-use crate::config::{AgentChannel, AgentDef};
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::db::Db;
 use crate::services::provider::ProviderKind;

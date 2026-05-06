@@ -289,7 +289,7 @@ fn prepare_persist_entry(
 
 async fn prepare_persist_entry_pg(
     pool: &PgPool,
-    db: Option<&Db>,
+    _db: Option<&Db>,
     entry: &PersistSessionTranscript<'_>,
 ) -> Result<Option<PreparedSessionTranscript>> {
     let Some(mut prepared) = prepare_persist_entry_base(entry)? else {

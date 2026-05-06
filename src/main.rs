@@ -1,4 +1,7 @@
 #![recursion_limit = "256"]
+// AgentDesk currently keeps CLI/API/test support surfaces in one bin crate.
+// Until those move behind library/feature boundaries, dead_code is mostly noise.
+#![allow(dead_code)]
 mod bootstrap;
 mod cli;
 pub(crate) mod compat;

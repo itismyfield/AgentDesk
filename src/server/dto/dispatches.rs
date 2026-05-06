@@ -135,7 +135,6 @@ pub(crate) struct DispatchMessagePostOutcome {
 }
 
 // CRUD body re-exports (current canonical home: routes::dispatches::crud).
-pub use crate::server::routes::dispatches::UpdateDispatchBody;
 
 // #1694: Followup configuration DTO that the outbox followup orchestration
 // uses to thread Discord API base URL + bot tokens through. Lives here so

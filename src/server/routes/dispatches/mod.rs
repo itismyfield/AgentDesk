@@ -11,7 +11,6 @@ pub use crud::{
 };
 
 // ── Re-exports: Discord delivery ─────────────────────────────
-pub(crate) use discord_delivery::send_dispatch_to_discord;
 // #1694: re-exports needed by `crate::services::dispatches::outbox_queue`
 // (the queue worker calls back into the route layer for HTTP-bound work).
 pub(crate) use discord_delivery::{
@@ -26,12 +25,8 @@ pub(crate) use outbox::{
     OutboxNotifier, process_outbox_batch, process_outbox_batch_with_real_notifier,
 };
 pub(crate) use outbox::{dispatch_outbox_loop, requeue_dispatch_notify_pg};
-// #1694: re-exports for `crate::services::dispatches::outbox_queue`
-// (the followup notifier calls back into the route layer).
-pub(crate) use outbox::handle_completed_dispatch_followups_with_pg;
 
 // ── Re-exports: Thread reuse ─────────────────────────────────
-pub(super) use thread_reuse::clear_all_threads;
 pub(crate) use thread_reuse::should_defer_thread_archive_pg;
 pub(crate) use thread_reuse::validate_channel_thread_maps_on_startup_with_backends;
 pub use thread_reuse::{

@@ -113,7 +113,7 @@ pub(super) fn register_kanban_ops<'js>(
     // #155: setReviewStatus — controlled path for review_status + clock updates.
     // Replaces direct SQL UPDATEs so the ExecuteSQL guard can block bare review_status writes.
     let pg_review = pg_pool.clone();
-    let db_review = db;
+    let _db_review = db;
     kanban_obj.set(
         "__setReviewStatusRaw",
         Function::new(

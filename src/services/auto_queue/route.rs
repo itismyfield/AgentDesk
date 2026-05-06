@@ -76,13 +76,10 @@ use dispatch_assignment_command::*;
 use dispatch_command::*;
 use dispatch_query::*;
 use fsm::{
-    ActivatePreflightOutcome, allocate_slot_for_group_agent_prefer_pg,
-    apply_restore_state_changes_pg, attempt_restore_dispatch, clamp_retry_limit,
-    create_activate_dispatch_prefer_pg, decide_restore_transition_pg, finalize_restore_run_pg,
-    load_activate_card_state_prefer_pg, load_kv_meta_value_pg, load_restore_entries_pg,
-    record_consultation_dispatch_prefer_pg, run_activate_blocking,
-    select_consultation_counterpart_pg, select_consultation_counterpart_prefer_pg,
-    slot_requires_thread_reset_before_reuse_prefer_pg, update_entry_status_prefer_pg,
+    ActivatePreflightOutcome, apply_restore_state_changes_pg, attempt_restore_dispatch,
+    clamp_retry_limit, create_activate_dispatch_prefer_pg, finalize_restore_run_pg,
+    load_kv_meta_value_pg, record_consultation_dispatch_prefer_pg,
+    select_consultation_counterpart_prefer_pg, update_entry_status_prefer_pg,
 };
 use phase_gate::*;
 use planning::*;

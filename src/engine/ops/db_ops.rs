@@ -164,7 +164,7 @@ fn db_query_json_raw(
 }
 
 fn db_query_raw_with_json_mode(
-    legacy_db: Option<&Db>,
+    _legacy_db: Option<&Db>,
     pg_pool: Option<PgPool>,
     sql: &str,
     params_json: &str,
@@ -361,7 +361,7 @@ fn db_query_raw_sqlite(
 }
 
 fn db_execute_raw(
-    legacy_db: Option<&Db>,
+    _legacy_db: Option<&Db>,
     pg_pool: Option<PgPool>,
     sql: &str,
     params_json: &str,

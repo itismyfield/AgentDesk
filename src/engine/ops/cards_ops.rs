@@ -34,7 +34,7 @@ pub(super) fn register_card_ops<'js>(
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let cards_obj = Object::new(ctx.clone())?;
 
-    let db_get = db.clone();
+    let _db_get = db.clone();
     let pg_get = pg_pool.clone();
     cards_obj.set(
         "__getRaw",
@@ -52,7 +52,7 @@ pub(super) fn register_card_ops<'js>(
         })?,
     )?;
 
-    let db_list = db.clone();
+    let _db_list = db.clone();
     let pg_list = pg_pool.clone();
     cards_obj.set(
         "__listRaw",
@@ -70,7 +70,7 @@ pub(super) fn register_card_ops<'js>(
         })?,
     )?;
 
-    let db_assign = db.clone();
+    let _db_assign = db.clone();
     let pg_assign = pg_pool.clone();
     cards_obj.set(
         "__assignRaw",
@@ -91,7 +91,7 @@ pub(super) fn register_card_ops<'js>(
         )?,
     )?;
 
-    let db_priority = db;
+    let _db_priority = db;
     let pg_priority = pg_pool;
     cards_obj.set(
         "__setPriorityRaw",

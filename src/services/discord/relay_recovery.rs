@@ -98,6 +98,14 @@ pub(in crate::services::discord) struct RelayRecoveryApplyResult {
     pub removed_mailbox_token: bool,
     pub post_mailbox_has_cancel_token: Option<bool>,
     pub post_mailbox_queue_depth: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reattach_watcher_spawned: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reattach_watcher_replaced: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reattach_initial_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reattach_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -254,6 +262,15 @@ fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot) -> bool {
         && !is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
 }
 
+fn eligible_reattach_watcher(snapshot: &RelayHealthSnapshot) -> bool {
+    snapshot.tmux_alive == Some(true)
+        && snapshot.bridge_inflight_present
+        && snapshot.mailbox_has_cancel_token
+        && !snapshot.watcher_attached
+        && snapshot.desynced
+        && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
+}
+
 fn auto_heal_metadata(
     snapshot: &RelayHealthSnapshot,
     action: RelayRecoveryActionKind,
@@ -297,16 +314,23 @@ pub(in crate::services::discord) fn plan_relay_recovery(
             false,
             Some("explicit_background_work"),
         ),
-        RelayStallState::TmuxAliveRelayDead => (
-            RelayRecoveryActionKind::ReattachWatcher,
-            "tmux is alive but relay state is desynced; reattach requires explicit operator flow",
-            false,
-            Some(if protected_tmux {
-                "protected_agentdesk_tmux_session"
-            } else {
-                "reattach_requires_explicit_rebind"
-            }),
-        ),
+        RelayStallState::TmuxAliveRelayDead => {
+            let eligible = eligible_reattach_watcher(snapshot);
+            (
+                RelayRecoveryActionKind::ReattachWatcher,
+                if eligible {
+                    "tmux is alive but relay watcher is detached; bounded reattach can restore delivery"
+                } else {
+                    "tmux is alive but relay state is desynced; reattach requires explicit operator flow"
+                },
+                eligible,
+                (!eligible).then_some(if protected_tmux {
+                    "reattach_missing_required_live_evidence"
+                } else {
+                    "reattach_requires_explicit_rebind"
+                }),
+            )
+        }
         RelayStallState::StaleThreadProof => {
             let eligible = eligible_stale_thread_proof(snapshot);
             (
@@ -430,7 +454,8 @@ pub(in crate::services::discord) async fn run_relay_recovery(
         }
     }
 
-    let apply_result = apply_relay_recovery_decision(&shared, &provider, &decision).await;
+    let apply_result = apply_relay_recovery_decision(registry, &shared, &provider, &decision).await;
+    let applied = matches!(apply_result.status, "applied" | "reattached_watcher");
     tracing::info!(
         target: "agentdesk::discord::relay_recovery",
         provider = decision.provider.as_str(),
@@ -442,9 +467,9 @@ pub(in crate::services::discord) async fn run_relay_recovery(
         "relay recovery auto-heal applied"
     );
     Ok(RelayRecoveryResponse {
-        ok: true,
+        ok: applied,
         mode: "apply",
-        applied: true,
+        applied,
         skipped: false,
         decision,
         apply_result: Some(apply_result),
@@ -452,6 +477,7 @@ pub(in crate::services::discord) async fn run_relay_recovery(
 }
 
 async fn apply_relay_recovery_decision(
+    registry: &HealthRegistry,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     decision: &RelayRecoveryDecision,
@@ -469,6 +495,10 @@ async fn apply_relay_recovery_decision(
                 removed_mailbox_token: false,
                 post_mailbox_has_cancel_token: None,
                 post_mailbox_queue_depth: None,
+                reattach_watcher_spawned: None,
+                reattach_watcher_replaced: None,
+                reattach_initial_offset: None,
+                reattach_error: None,
             }
         }
         RelayRecoveryActionKind::ClearOrphanPendingToken => {
@@ -488,17 +518,69 @@ async fn apply_relay_recovery_decision(
                 removed_mailbox_token: cleared.removed_token.is_some(),
                 post_mailbox_has_cancel_token: Some(after.cancel_token.is_some()),
                 post_mailbox_queue_depth: Some(after.intervention_queue.len()),
+                reattach_watcher_spawned: None,
+                reattach_watcher_replaced: None,
+                reattach_initial_offset: None,
+                reattach_error: None,
             }
         }
-        RelayRecoveryActionKind::ObserveOnly
-        | RelayRecoveryActionKind::ReattachWatcher
-        | RelayRecoveryActionKind::MarkRelayDegraded => RelayRecoveryApplyResult {
-            status: "skipped",
-            removed_thread_proofs: 0,
-            removed_mailbox_token: false,
-            post_mailbox_has_cancel_token: None,
-            post_mailbox_queue_depth: None,
-        },
+        RelayRecoveryActionKind::ReattachWatcher => {
+            match registry
+                .rebind_inflight(
+                    provider,
+                    decision.channel_id,
+                    decision.affected.tmux_session.clone(),
+                )
+                .await
+            {
+                Some(Ok(outcome)) => RelayRecoveryApplyResult {
+                    status: "reattached_watcher",
+                    removed_thread_proofs: 0,
+                    removed_mailbox_token: false,
+                    post_mailbox_has_cancel_token: None,
+                    post_mailbox_queue_depth: None,
+                    reattach_watcher_spawned: Some(outcome.watcher_spawned),
+                    reattach_watcher_replaced: Some(outcome.watcher_replaced),
+                    reattach_initial_offset: Some(outcome.initial_offset),
+                    reattach_error: None,
+                },
+                Some(Err(error)) => RelayRecoveryApplyResult {
+                    status: "rebind_failed",
+                    removed_thread_proofs: 0,
+                    removed_mailbox_token: false,
+                    post_mailbox_has_cancel_token: None,
+                    post_mailbox_queue_depth: None,
+                    reattach_watcher_spawned: None,
+                    reattach_watcher_replaced: None,
+                    reattach_initial_offset: None,
+                    reattach_error: Some(error.to_string()),
+                },
+                None => RelayRecoveryApplyResult {
+                    status: "provider_unavailable",
+                    removed_thread_proofs: 0,
+                    removed_mailbox_token: false,
+                    post_mailbox_has_cancel_token: None,
+                    post_mailbox_queue_depth: None,
+                    reattach_watcher_spawned: None,
+                    reattach_watcher_replaced: None,
+                    reattach_initial_offset: None,
+                    reattach_error: Some("provider unavailable".to_string()),
+                },
+            }
+        }
+        RelayRecoveryActionKind::ObserveOnly | RelayRecoveryActionKind::MarkRelayDegraded => {
+            RelayRecoveryApplyResult {
+                status: "skipped",
+                removed_thread_proofs: 0,
+                removed_mailbox_token: false,
+                post_mailbox_has_cancel_token: None,
+                post_mailbox_queue_depth: None,
+                reattach_watcher_spawned: None,
+                reattach_watcher_replaced: None,
+                reattach_initial_offset: None,
+                reattach_error: None,
+            }
+        }
     }
 }
 
@@ -619,13 +701,34 @@ mod tests {
     }
 
     #[test]
-    fn live_agentdesk_tmux_relay_dead_is_never_auto_healed() {
+    fn live_agentdesk_tmux_relay_dead_can_reattach_watcher_when_evidence_is_complete() {
         let decision = plan_relay_recovery(
             &RelayHealthSnapshot {
                 tmux_session: Some("AgentDesk-codex-42".to_string()),
                 tmux_alive: Some(true),
                 desynced: true,
                 bridge_inflight_present: true,
+                mailbox_has_cancel_token: true,
+                ..snapshot()
+            },
+            RelayStallState::TmuxAliveRelayDead,
+            1_000,
+        );
+
+        assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
+        assert!(decision.auto_heal.eligible);
+        assert_eq!(decision.auto_heal.skipped_reason, None);
+    }
+
+    #[test]
+    fn live_agentdesk_tmux_relay_dead_without_mailbox_token_needs_operator() {
+        let decision = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                tmux_session: Some("AgentDesk-codex-42".to_string()),
+                tmux_alive: Some(true),
+                desynced: true,
+                bridge_inflight_present: true,
+                mailbox_has_cancel_token: false,
                 ..snapshot()
             },
             RelayStallState::TmuxAliveRelayDead,
@@ -636,7 +739,7 @@ mod tests {
         assert!(!decision.auto_heal.eligible);
         assert_eq!(
             decision.auto_heal.skipped_reason,
-            Some("protected_agentdesk_tmux_session")
+            Some("reattach_missing_required_live_evidence")
         );
     }
 

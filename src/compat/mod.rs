@@ -32,11 +32,11 @@
 //!    with a new row describing the removal condition.
 //! 4. Update the inventory table above.
 
+pub mod legacy_db_paths;
 pub mod legacy_tmp_paths;
 
 // Re-exports so callers can `use crate::compat::legacy_tmp_session_path`
 // directly — mirrors the original symbol names so migration is search/replace.
-pub use legacy_tmp_paths::legacy_tmp_session_path;
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {

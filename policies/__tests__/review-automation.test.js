@@ -92,6 +92,50 @@ test("review-automation keeps canonical review state but defers dispatch creatio
   assert.equal(state.dispatchCreates.length, 0);
 });
 
+test("review-automation carries the completed work slot into review dispatch context", () => {
+  const { policy, state } = loadPolicy("policies/review-automation.js", {
+    cards: {
+      "card-slot-review": {
+        id: "card-slot-review",
+        status: "review",
+        review_status: null,
+        assigned_agent_id: "agent-slot"
+      }
+    },
+    counterChannels: {
+      "agent-slot": "discord://counter-review"
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "AND dispatch_type IN ('implementation', 'rework')",
+        result: [
+          {
+            id: "dispatch-work-slot",
+            dispatch_type: "implementation",
+            result: JSON.stringify({ completed_commit: "abc123" }),
+            context: JSON.stringify({ slot_index: 2 })
+          }
+        ]
+      }
+    ])
+  });
+
+  policy.onReviewEnter({ card_id: "card-slot-review" });
+
+  assert.deepEqual(state.dispatchCreates, [
+    {
+      cardId: "card-slot-review",
+      agentId: "agent-slot",
+      dispatchType: "review",
+      title: "[Review R1] card-slot-review",
+      context: {
+        parent_dispatch_id: "dispatch-work-slot",
+        slot_index: 2
+      }
+    }
+  ]);
+});
+
 test("review-automation creates a review-decision dispatch when an auto-completed review has no verdict", () => {
   const { policy, state } = loadPolicy("policies/review-automation.js", {
     dbQuery: createSqlRouter([
