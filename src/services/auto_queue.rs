@@ -337,6 +337,8 @@ impl AutoQueueService {
         pool: &PgPool,
         input: StatusInput,
     ) -> ServiceResult<AutoQueueStatusResponse> {
+        validate_status_filter_pg(pool, &input).await?;
+
         let run_id = auto_queue::find_latest_run_id_pg(
             pool,
             &StatusFilter {
@@ -635,6 +637,42 @@ impl AutoQueueService {
 
         build_status_response_pg(pool, run, records, input.guild_id.as_deref()).await
     }
+}
+
+fn normalized_status_filter(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+async fn validate_status_filter_pg(pool: &PgPool, input: &StatusInput) -> ServiceResult<()> {
+    let Some(repo) = normalized_status_filter(input.repo.as_deref()) else {
+        return Ok(());
+    };
+
+    let (repo_exists, agent_exists): (bool, bool) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM github_repos WHERE id = $1) AS repo_exists,
+                EXISTS(SELECT 1 FROM agents WHERE id = $1) AS agent_exists",
+    )
+    .bind(repo)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        ServiceError::internal(format!("validate queue status repo filter: {error}"))
+            .with_code(ErrorCode::Database)
+            .with_operation("status.validate_status_filter_pg")
+            .with_context("repo", repo)
+    })?;
+
+    if !repo_exists && agent_exists {
+        return Err(ServiceError::bad_request(format!(
+            "repo filter '{repo}' matches an agent id, not a registered repo; use agent_id={repo} to filter by agent"
+        ))
+        .with_code(ErrorCode::AutoQueue)
+        .with_context("repo", repo)
+        .with_context("agent_id", repo)
+        .with_context("hint", format!("GET /api/queue/status?agent_id={repo}")));
+    }
+
+    Ok(())
 }
 
 impl From<GenerateCandidateRecord> for GenerateCandidate {

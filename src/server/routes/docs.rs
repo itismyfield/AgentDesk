@@ -3523,7 +3523,11 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_params([
             (
                 "repo",
-                query_param("string", false, "Restrict status view to a repo"),
+                query_param(
+                    "string",
+                    false,
+                    "Restrict status view to a repository id; use agent_id for agent filters",
+                ),
             ),
             (
                 "agent_id",
