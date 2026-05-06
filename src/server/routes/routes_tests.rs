@@ -6858,6 +6858,120 @@ async fn kanban_assign_issue_pg_upserts_without_duplicates() {
     pg_db.drop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kanban_assign_issue_reports_transition_failure_in_response() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+
+    sqlx::query("INSERT INTO agents (id, name) VALUES ($1, $2)")
+        .bind("agent-issue-fail")
+        .bind("Agent Issue Fail")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+             id, repo_id, title, status, priority, github_issue_url,
+             github_issue_number, created_at, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+    )
+    .bind("c-issue-transition-fail")
+    .bind("owner/issue-sync")
+    .bind("Terminal issue card")
+    .bind("done")
+    .bind("medium")
+    .bind("https://github.com/owner/issue-sync/issues/78")
+    .bind(78_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/assign-issue")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "github_repo": "owner/issue-sync",
+                        "github_issue_number": 78,
+                        "github_issue_url": "https://github.com/owner/issue-sync/issues/78",
+                        "title": "Terminal issue card updated by assign",
+                        "description": "Assignment can succeed even when transition is blocked.",
+                        "assignee_agent_id": "agent-issue-fail"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["deduplicated"], true);
+    assert_eq!(json["card"]["id"], "c-issue-transition-fail");
+    assert_eq!(json["card"]["status"], "done");
+    assert_eq!(json["card"]["assigned_agent_id"], "agent-issue-fail");
+    assert_eq!(json["assignment"]["ok"], true);
+    assert_eq!(json["assignment"]["agent_id"], "agent-issue-fail");
+    assert_eq!(json["transition"]["attempted"], true);
+    assert_eq!(json["transition"]["ok"], false);
+    assert_eq!(json["transition"]["from"], "done");
+    assert_eq!(json["transition"]["to"], "done");
+    assert_eq!(json["transition"]["target"], "requested");
+    assert_eq!(json["transition"]["target_status"], "requested");
+    assert_eq!(
+        json["transition"]["next_action"],
+        "inspect_transition_error"
+    );
+    assert_eq!(json["transition"]["steps"], json!(["requested"]));
+    assert_eq!(json["transition"]["failed_step"], "requested");
+    assert!(
+        json["transition"]["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "assign-issue transition failure must be visible in the response body"
+    );
+
+    let row = sqlx::query(
+        "SELECT status, assigned_agent_id
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind("c-issue-transition-fail")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(row.try_get::<String, _>("status").unwrap(), "done");
+    assert_eq!(
+        row.try_get::<Option<String>, _>("assigned_agent_id")
+            .unwrap(),
+        Some("agent-issue-fail".to_string())
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
 #[tokio::test]
 async fn kanban_assign_card_not_found() {
     let db = test_db();
@@ -8394,6 +8508,43 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
     assert_eq!(create["params"]["title"]["type"], "string");
     assert_eq!(create["example"]["response"]["card"]["status"], "backlog");
 
+    let assign_issue = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/assign-issue")
+        .expect("kanban assign-issue endpoint must be present");
+    let assign_issue_description = assign_issue["description"].as_str().unwrap_or_default();
+    assert!(
+        assign_issue_description.contains("Assignment is guaranteed")
+            && assign_issue_description.contains("response.transition"),
+        "assign-issue docs must describe assignment/transition partial-success semantics: {assign_issue_description}"
+    );
+    assert_eq!(
+        assign_issue["partial_success_example"]["scenario"],
+        "partial_success"
+    );
+    assert_eq!(
+        assign_issue["partial_success_example"]["status"],
+        json!(200)
+    );
+    assert_eq!(
+        assign_issue["partial_success_example"]["response"]["assignment"]["ok"],
+        true
+    );
+    assert_eq!(
+        assign_issue["partial_success_example"]["response"]["transition"]["ok"],
+        false
+    );
+    assert_eq!(
+        assign_issue["partial_success_example"]["response"]["transition"]["next_action"],
+        "inspect_transition_error"
+    );
+    assert!(
+        assign_issue["partial_success_example"]["response"]["transition"]["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "assign-issue docs must show the transition error field in partial-success responses"
+    );
+
     let resume = endpoints
         .iter()
         .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/{id}/resume")
@@ -8435,6 +8586,12 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
         .iter()
         .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/{id}/assign")
         .expect("kanban assign endpoint must be present");
+    let assign_description = assign["description"].as_str().unwrap_or_default();
+    assert!(
+        assign_description.contains("Assignment is guaranteed")
+            && assign_description.contains("response.transition"),
+        "assign docs must describe assignment/transition partial-success semantics: {assign_description}"
+    );
     assert_eq!(
         assign["example"]["response"]["transition"]["target_status"],
         "requested"
@@ -8446,6 +8603,33 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
     assert!(
         assign["example"]["response"]["transition"]["error"].is_null(),
         "assign docs must document a stable null error field on success"
+    );
+    assert_eq!(
+        assign["partial_success_example"]["scenario"],
+        "partial_success"
+    );
+    assert_eq!(assign["partial_success_example"]["status"], json!(200));
+    assert_eq!(
+        assign["partial_success_example"]["response"]["assignment"]["ok"],
+        true
+    );
+    assert_eq!(
+        assign["partial_success_example"]["response"]["transition"]["ok"],
+        false
+    );
+    assert_eq!(
+        assign["partial_success_example"]["response"]["transition"]["failed_step"],
+        "requested"
+    );
+    assert_eq!(
+        assign["partial_success_example"]["response"]["transition"]["next_action"],
+        "inspect_transition_error"
+    );
+    assert!(
+        assign["partial_success_example"]["response"]["transition"]["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "assign docs must show the transition error field in partial-success responses"
     );
 
     for path in [

@@ -68,6 +68,11 @@ struct EndpointDoc {
     /// see both the success shape and the most common error shape at once.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_example: Option<ExampleDoc>,
+    /// Nested operation-level failure that can still be returned with a
+    /// successful HTTP status. Used for partial-success contracts where callers
+    /// must inspect nested result fields instead of trusting the status code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial_success_example: Option<ExampleDoc>,
     /// #1068 (904-6) curl 1-liner reference. Intentionally a single physical
     /// line so it can be copy-pasted directly into a terminal.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,6 +111,16 @@ impl EndpointDoc {
             response,
             status: Some(status),
             scenario: Some("error"),
+        });
+        self
+    }
+
+    fn with_partial_success_example(mut self, request: Value, response: Value) -> Self {
+        self.partial_success_example = Some(ExampleDoc {
+            request,
+            response,
+            status: Some(200),
+            scenario: Some("partial_success"),
         });
         self
     }
@@ -149,6 +164,7 @@ fn ep(
         params: BTreeMap::new(),
         example: None,
         error_example: None,
+        partial_success_example: None,
         curl_example: None,
         deprecated: false,
         canonical_path: None,
@@ -1710,7 +1726,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/kanban-cards/assign-issue",
             "kanban",
-            "Create or update a card from a GitHub issue",
+            "Create or update a card from a GitHub issue. Assignment is guaranteed once the request succeeds; transition to a dispatchable state is best-effort and must be checked in response.transition.",
         )
         .with_params([
             (
@@ -1742,6 +1758,27 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "deduplicated": false,
                 "assignment": {"ok": true, "agent_id": "project-agentdesk"},
                 "transition": {"attempted": true, "ok": true, "from": "backlog", "to": "requested", "target": "requested", "target_status": "requested", "error": null, "next_action": "none_required"}
+            }),
+        )
+        .with_partial_success_example(
+            json!({"body": {"github_repo": "itismyfield/AgentDesk", "github_issue_number": 427, "title": "Already done issue", "assignee_agent_id": "project-agentdesk"}}),
+            json!({
+                "card": {"id": "card-427", "status": "done", "github_issue_number": 427, "assigned_agent_id": "project-agentdesk"},
+                "deduplicated": true,
+                "assignment": {"ok": true, "agent_id": "project-agentdesk"},
+                "transition": {
+                    "attempted": true,
+                    "ok": false,
+                    "from": "done",
+                    "to": "done",
+                    "target": "requested",
+                    "target_status": "requested",
+                    "steps": ["requested"],
+                    "completed_steps": [],
+                    "failed_step": "requested",
+                    "error": "transition done -> requested is not allowed",
+                    "next_action": "inspect_transition_error"
+                }
             }),
         )
         .with_error_example(
@@ -1846,7 +1883,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/kanban-cards/{id}/assign",
             "kanban",
-            "Assign card to agent",
+            "Assign card to agent. Assignment is guaranteed once the request succeeds; transition to a dispatchable state is best-effort and failures are reported in response.transition.",
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
@@ -1858,6 +1895,26 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "card": {"id": "card-1", "assigned_agent_id": "ch-td", "status": "requested"},
                 "assignment": {"ok": true, "agent_id": "ch-td"},
                 "transition": {"attempted": true, "ok": true, "from": "backlog", "to": "requested", "target": "requested", "target_status": "requested", "error": null, "next_action": "none_required"}
+            }),
+        )
+        .with_partial_success_example(
+            json!({"path": {"id": "card-2"}, "body": {"agent_id": "ch-td"}}),
+            json!({
+                "card": {"id": "card-2", "assigned_agent_id": "ch-td", "status": "done"},
+                "assignment": {"ok": true, "agent_id": "ch-td"},
+                "transition": {
+                    "attempted": true,
+                    "ok": false,
+                    "from": "done",
+                    "to": "done",
+                    "target": "requested",
+                    "target_status": "requested",
+                    "steps": ["requested"],
+                    "completed_steps": [],
+                    "failed_step": "requested",
+                    "error": "transition done -> requested is not allowed",
+                    "next_action": "inspect_transition_error"
+                }
             }),
         ),
         ep(
@@ -4888,6 +4945,64 @@ pub async fn api_docs_group_category(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kanban_assign_docs_expose_assignment_and_partial_transition_results() {
+        let endpoints = all_endpoints();
+
+        for (method, path) in [
+            ("POST", "/api/kanban-cards/assign-issue"),
+            ("POST", "/api/kanban-cards/{id}/assign"),
+        ] {
+            let endpoint = endpoints
+                .iter()
+                .find(|endpoint| endpoint.method == method && endpoint.path == path)
+                .unwrap_or_else(|| panic!("{method} {path} must be documented"));
+
+            assert!(
+                endpoint.description.contains("Assignment is guaranteed")
+                    && endpoint.description.contains("response.transition"),
+                "{method} {path} must describe assignment/transition partial-success semantics: {}",
+                endpoint.description
+            );
+
+            let happy = endpoint
+                .example
+                .as_ref()
+                .unwrap_or_else(|| panic!("{method} {path} must include a happy example"));
+            assert_eq!(happy.response["assignment"]["ok"], true);
+            assert_eq!(happy.response["transition"]["ok"], true);
+            assert!(
+                happy.response["transition"]["error"].is_null(),
+                "{method} {path} success example must keep transition.error null"
+            );
+
+            let partial = endpoint
+                .partial_success_example
+                .as_ref()
+                .unwrap_or_else(|| {
+                    panic!("{method} {path} must include a partial-success example")
+                });
+            assert_eq!(partial.status, Some(200));
+            assert_eq!(partial.scenario, Some("partial_success"));
+            assert_eq!(partial.response["assignment"]["ok"], true);
+            assert_eq!(partial.response["transition"]["ok"], false);
+            assert_eq!(
+                partial.response["transition"]["next_action"],
+                "inspect_transition_error"
+            );
+            assert!(
+                partial.response["transition"]["failed_step"].is_string(),
+                "{method} {path} partial-success example must identify failed_step"
+            );
+            assert!(
+                partial.response["transition"]["error"]
+                    .as_str()
+                    .is_some_and(|message| !message.is_empty()),
+                "{method} {path} partial-success example must include transition.error"
+            );
+        }
+    }
 
     #[test]
     fn dispatch_docs_include_patch_lifecycle_and_cancel_contract() {
