@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::PgPool;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
@@ -12,6 +13,19 @@ pub(crate) enum DispatchDeliveryEventStatus {
     Duplicate,
     Skipped,
     Failed,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DispatchDeliveryEventFinalize<'a> {
+    pub(crate) dispatch_id: &'a str,
+    pub(crate) status: DispatchDeliveryEventStatus,
+    pub(crate) target_channel_id: Option<&'a str>,
+    pub(crate) target_thread_id: Option<&'a str>,
+    pub(crate) message_id: Option<&'a str>,
+    pub(crate) messages_json: Value,
+    pub(crate) fallback_kind: Option<&'a str>,
+    pub(crate) error: Option<&'a str>,
+    pub(crate) result_json: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, sqlx::FromRow)]
@@ -34,6 +48,162 @@ pub(crate) struct DispatchDeliveryEvent {
     pub(crate) reserved_until: Option<DateTime<Utc>>,
     pub(crate) created_at: DateTime<Utc>,
     pub(crate) updated_at: DateTime<Utc>,
+}
+
+fn correlation_id(dispatch_id: &str) -> String {
+    format!("dispatch:{dispatch_id}")
+}
+
+fn semantic_event_id(dispatch_id: &str) -> String {
+    format!("dispatch:{dispatch_id}:notify")
+}
+
+pub(crate) async fn insert_reserved_dispatch_delivery_event_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    target_channel_id: Option<&str>,
+    target_thread_id: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "WITH next_attempt AS (
+            SELECT COALESCE(MAX(attempt), 0) + 1 AS attempt
+              FROM dispatch_delivery_events
+             WHERE correlation_id = $2
+               AND semantic_event_id = $3
+               AND operation = 'send'
+               AND target_kind = 'channel'
+               AND COALESCE(target_channel_id, '') = COALESCE($4, '')
+               AND COALESCE(target_thread_id, '') = COALESCE($5, '')
+        )
+        INSERT INTO dispatch_delivery_events (
+            dispatch_id,
+            correlation_id,
+            semantic_event_id,
+            operation,
+            target_kind,
+            target_channel_id,
+            target_thread_id,
+            status,
+            attempt,
+            result_json,
+            reserved_until
+        ) VALUES (
+            $1, $2, $3, 'send', 'channel', $4, $5, 'reserved',
+            (SELECT attempt FROM next_attempt),
+            '{}'::jsonb, NOW() + INTERVAL '5 minutes'
+        )
+        ON CONFLICT DO NOTHING",
+    )
+    .bind(dispatch_id)
+    .bind(correlation_id(dispatch_id))
+    .bind(semantic_event_id(dispatch_id))
+    .bind(target_channel_id)
+    .bind(target_thread_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub(crate) async fn finalize_dispatch_delivery_event_pg(
+    pool: &PgPool,
+    input: DispatchDeliveryEventFinalize<'_>,
+) -> Result<bool, sqlx::Error> {
+    let correlation_id = correlation_id(input.dispatch_id);
+    let semantic_event_id = semantic_event_id(input.dispatch_id);
+
+    let update = sqlx::query(
+        "WITH reserved AS (
+            SELECT id
+              FROM dispatch_delivery_events
+             WHERE dispatch_id = $1
+               AND correlation_id = $2
+               AND semantic_event_id = $3
+               AND operation = 'send'
+               AND target_kind = 'channel'
+               AND status = 'reserved'
+             ORDER BY attempt DESC
+             LIMIT 1
+        )
+        UPDATE dispatch_delivery_events
+            SET status = $4,
+                target_channel_id = COALESCE($5, target_channel_id),
+                target_thread_id = COALESCE($6, target_thread_id),
+                message_id = $7,
+                messages_json = $8,
+                fallback_kind = $9,
+                error = $10,
+                result_json = $11,
+                reserved_until = NULL,
+                updated_at = NOW()
+          FROM reserved
+         WHERE dispatch_delivery_events.id = reserved.id",
+    )
+    .bind(input.dispatch_id)
+    .bind(&correlation_id)
+    .bind(&semantic_event_id)
+    .bind(input.status)
+    .bind(input.target_channel_id)
+    .bind(input.target_thread_id)
+    .bind(input.message_id)
+    .bind(&input.messages_json)
+    .bind(input.fallback_kind)
+    .bind(input.error)
+    .bind(&input.result_json)
+    .execute(pool)
+    .await?;
+
+    if update.rows_affected() > 0 {
+        return Ok(true);
+    }
+
+    let insert = sqlx::query(
+        "WITH next_attempt AS (
+            SELECT COALESCE(MAX(attempt), 0) + 1 AS attempt
+              FROM dispatch_delivery_events
+             WHERE correlation_id = $2
+               AND semantic_event_id = $3
+               AND operation = 'send'
+               AND target_kind = 'channel'
+               AND COALESCE(target_channel_id, '') = COALESCE($4, '')
+               AND COALESCE(target_thread_id, '') = COALESCE($5, '')
+        )
+        INSERT INTO dispatch_delivery_events (
+            dispatch_id,
+            correlation_id,
+            semantic_event_id,
+            operation,
+            target_kind,
+            target_channel_id,
+            target_thread_id,
+            status,
+            attempt,
+            message_id,
+            messages_json,
+            fallback_kind,
+            error,
+            result_json,
+            reserved_until
+        ) VALUES (
+            $1, $2, $3, 'send', 'channel', $4, $5, $6,
+            (SELECT attempt FROM next_attempt), $7,
+            $8, $9, $10, $11, NULL
+        )
+        ON CONFLICT DO NOTHING",
+    )
+    .bind(input.dispatch_id)
+    .bind(correlation_id)
+    .bind(semantic_event_id)
+    .bind(input.target_channel_id)
+    .bind(input.target_thread_id)
+    .bind(input.status)
+    .bind(input.message_id)
+    .bind(&input.messages_json)
+    .bind(input.fallback_kind)
+    .bind(input.error)
+    .bind(&input.result_json)
+    .execute(pool)
+    .await?;
+    Ok(insert.rows_affected() > 0)
 }
 
 #[cfg(test)]
