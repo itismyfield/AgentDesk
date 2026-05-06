@@ -3049,9 +3049,9 @@ fn is_terminal_turn_delivery_outbox_source(source: &str) -> bool {
 #[cfg(test)]
 fn session_can_be_released_for_terminal_outbox_failure(
     session_key: Option<&str>,
-    session_last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
     failed_outbox_session_key: Option<&str>,
-    failed_outbox_created_at: chrono::DateTime<chrono::Utc>,
+    active_turn_delivery_outbox_id: Option<i64>,
+    failed_outbox_id: i64,
 ) -> bool {
     let session_key_matches = match failed_outbox_session_key
         .map(str::trim)
@@ -3060,11 +3060,8 @@ fn session_can_be_released_for_terminal_outbox_failure(
         Some(failed_session_key) => session_key == Some(failed_session_key),
         None => true,
     };
-    let heartbeat_not_newer = session_last_heartbeat
-        .map(|last_heartbeat| last_heartbeat <= failed_outbox_created_at)
-        .unwrap_or(true);
 
-    session_key_matches && heartbeat_not_newer
+    session_key_matches && active_turn_delivery_outbox_id == Some(failed_outbox_id)
 }
 
 async fn release_session_for_terminal_outbox_failure(
@@ -3076,23 +3073,21 @@ async fn release_session_for_terminal_outbox_failure(
     // `session_can_be_released_for_terminal_outbox_failure`.
     let result = sqlx::query(
         "WITH failed_outbox AS (
-            SELECT session_key, created_at
+            SELECT id, session_key
               FROM message_outbox
              WHERE id = $2
          )
          UPDATE sessions
-            SET status = 'idle'
+            SET status = 'idle',
+                active_turn_delivery_outbox_id = NULL
            FROM failed_outbox
           WHERE sessions.thread_channel_id = $1
             AND sessions.status IN ('turn_active', 'working')
+            AND sessions.active_turn_delivery_outbox_id = failed_outbox.id
             AND (
                 failed_outbox.session_key IS NULL
                 OR failed_outbox.session_key = ''
                 OR sessions.session_key = failed_outbox.session_key
-            )
-            AND (
-                sessions.last_heartbeat IS NULL
-                OR sessions.last_heartbeat <= failed_outbox.created_at
             )",
     )
     .bind(channel_id_str)
@@ -3128,7 +3123,6 @@ mod message_outbox_retry_tests {
         MessageOutboxFailureAction, is_terminal_turn_delivery_outbox_source,
         message_outbox_failure_action, session_can_be_released_for_terminal_outbox_failure,
     };
-    use chrono::{Duration, TimeZone};
 
     #[test]
     fn message_outbox_failure_action_retries_then_fails() {
@@ -3174,55 +3168,45 @@ mod message_outbox_retry_tests {
 
     #[test]
     fn session_release_requires_same_failed_outbox_session_when_present() {
-        let failed_created_at = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 6, 12, 0, 0)
-            .single()
-            .unwrap();
-
         assert!(session_can_be_released_for_terminal_outbox_failure(
             Some("session-current"),
-            Some(failed_created_at - Duration::seconds(1)),
             Some("session-current"),
-            failed_created_at,
+            Some(42),
+            42,
         ));
         assert!(!session_can_be_released_for_terminal_outbox_failure(
             Some("session-current"),
-            Some(failed_created_at - Duration::seconds(1)),
             Some("session-old"),
-            failed_created_at,
+            Some(42),
+            42,
         ));
         assert!(session_can_be_released_for_terminal_outbox_failure(
             Some("session-current"),
-            Some(failed_created_at - Duration::seconds(1)),
             Some("  "),
-            failed_created_at,
+            Some(42),
+            42,
         ));
     }
 
     #[test]
-    fn session_release_rejects_newer_session_heartbeat() {
-        let failed_created_at = chrono::Utc
-            .with_ymd_and_hms(2026, 5, 6, 12, 0, 0)
-            .single()
-            .unwrap();
-
+    fn session_release_requires_matching_terminal_delivery_outbox_marker() {
         assert!(!session_can_be_released_for_terminal_outbox_failure(
             Some("session-current"),
-            Some(failed_created_at + Duration::seconds(1)),
-            Some("session-current"),
-            failed_created_at,
-        ));
-        assert!(session_can_be_released_for_terminal_outbox_failure(
-            Some("session-current"),
-            Some(failed_created_at),
-            Some("session-current"),
-            failed_created_at,
-        ));
-        assert!(session_can_be_released_for_terminal_outbox_failure(
             Some("session-current"),
             None,
+            42,
+        ));
+        assert!(!session_can_be_released_for_terminal_outbox_failure(
             Some("session-current"),
-            failed_created_at,
+            Some("session-current"),
+            Some(41),
+            42,
+        ));
+        assert!(session_can_be_released_for_terminal_outbox_failure(
+            Some("session-current"),
+            Some("session-current"),
+            Some(42),
+            42,
         ));
     }
 }

@@ -182,10 +182,10 @@ fn enqueue_lifecycle_notification_sqlite(
     Ok(true)
 }
 
-pub(crate) async fn enqueue_outbox_pg(
+pub(crate) async fn enqueue_outbox_pg_returning_id(
     pool: &PgPool,
     message: OutboxMessage<'_>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Option<i64>, sqlx::Error> {
     let reason_code = message
         .reason_code
         .map(str::trim)
@@ -219,14 +219,15 @@ pub(crate) async fn enqueue_outbox_pg(
                 existing_id,
                 "suppressed duplicate outbox message"
             );
-            return Ok(false);
+            return Ok(None);
         }
     }
 
-    sqlx::query(
+    let outbox_id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, reason_code, session_key)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id",
     )
     .bind(message.target)
     .bind(message.content)
@@ -234,10 +235,19 @@ pub(crate) async fn enqueue_outbox_pg(
     .bind(message.source)
     .bind(reason_code)
     .bind(session_key.as_deref())
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
 
-    Ok(true)
+    Ok(Some(outbox_id))
+}
+
+pub(crate) async fn enqueue_outbox_pg(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+) -> Result<bool, sqlx::Error> {
+    Ok(enqueue_outbox_pg_returning_id(pool, message)
+        .await?
+        .is_some())
 }
 
 // PG outbox rows are authoritative for the release runtime. Without a PG pool,

@@ -852,22 +852,56 @@ async fn enqueue_headless_delivery(
         .filter(|value| !value.is_empty())
         .unwrap_or("notify");
 
-    if crate::services::message_outbox::enqueue_outbox_best_effort(
-        shared.pg_pool.as_ref(),
-        None::<&crate::db::Db>,
-        crate::services::message_outbox::OutboxMessage {
-            target: &target,
-            content,
-            bot,
-            source: "headless_turn",
-            // Explicit reason_code keeps dedupe consistent across PG/SQLite.
-            reason_code: Some("headless.delivery"),
-            session_key,
-        },
-    )
-    .await
-    {
-        return Ok(());
+    let outbox_message = crate::services::message_outbox::OutboxMessage {
+        target: &target,
+        content,
+        bot,
+        source: "headless_turn",
+        // Explicit reason_code keeps dedupe consistent across PG/SQLite.
+        reason_code: Some("headless.delivery"),
+        session_key,
+    };
+    if let Some(pool) = shared.pg_pool.as_ref() {
+        match crate::services::message_outbox::enqueue_outbox_pg_returning_id(pool, outbox_message)
+            .await
+        {
+            Ok(Some(outbox_id)) => {
+                if let Some(session_key) =
+                    session_key.map(str::trim).filter(|value| !value.is_empty())
+                {
+                    let thread_channel_id = channel_id.get().to_string();
+                    if let Err(error) = sqlx::query(
+                        "UPDATE sessions
+                            SET active_turn_delivery_outbox_id = $1
+                          WHERE session_key = $2
+                            AND thread_channel_id = $3
+                            AND status IN ('turn_active', 'working')",
+                    )
+                    .bind(outbox_id)
+                    .bind(session_key)
+                    .bind(&thread_channel_id)
+                    .execute(pool)
+                    .await
+                    {
+                        tracing::warn!(
+                            "[outbox] failed to mark terminal delivery row {} for session {}: {}",
+                            outbox_id,
+                            session_key,
+                            error
+                        );
+                    }
+                }
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    "[outbox] postgres enqueue failed for terminal response on channel {}: {}",
+                    channel_id,
+                    error
+                );
+            }
+        }
     }
 
     let notify_http = if let Some(registry) = shared.health_registry() {

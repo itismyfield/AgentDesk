@@ -512,6 +512,38 @@ fn should_add_turn_pending_reaction(_dispatch_id: Option<&str>) -> bool {
     true
 }
 
+async fn clear_terminal_delivery_marker_for_new_turn(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    session_key: Option<&str>,
+) {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return;
+    };
+    let Some(session_key) = session_key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let thread_channel_id = channel_id.get().to_string();
+    if let Err(error) = sqlx::query(
+        "UPDATE sessions
+            SET active_turn_delivery_outbox_id = NULL
+          WHERE session_key = $1
+            AND thread_channel_id = $2
+            AND active_turn_delivery_outbox_id IS NOT NULL",
+    )
+    .bind(session_key)
+    .bind(&thread_channel_id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(
+            "[outbox] failed to clear terminal delivery marker before new turn for channel {}: {}",
+            channel_id,
+            error
+        );
+    }
+}
+
 fn native_fast_mode_override_for_turn(
     provider: &ProviderKind,
     channel_fast_mode_setting: Option<bool>,
@@ -834,6 +866,8 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     }
 
     let cancel_token = Arc::new(CancelToken::new());
+    clear_terminal_delivery_marker_for_new_turn(shared, channel_id, adk_session_key.as_deref())
+        .await;
     let started = super::super::mailbox_try_start_turn(
         shared,
         channel_id,
@@ -2468,6 +2502,8 @@ pub(in crate::services::discord) async fn handle_text_message(
     // because the async gap between check and insert allows interleaving.
     // If another message won the race, queue ourselves and clean up.
     let cancel_token = Arc::new(CancelToken::new());
+    clear_terminal_delivery_marker_for_new_turn(shared, channel_id, adk_session_key.as_deref())
+        .await;
     let started = super::super::mailbox_try_start_turn(
         shared,
         channel_id,
