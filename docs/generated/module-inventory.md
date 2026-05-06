@@ -322,7 +322,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 3249 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 841 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 5454 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 5546 | giant-file |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 242 |  |
 | `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 1433 | giant-file |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 |  |
