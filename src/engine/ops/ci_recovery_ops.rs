@@ -13,6 +13,10 @@ use sqlx::{PgPool, Row as SqlxRow};
 //   agentdesk.ciRecovery.getCardStatus(cardId) → { status: "…" } | null
 //     → SELECT status FROM kanban_cards WHERE id = ?
 //
+//   agentdesk.ciRecovery.getCardLifecycle(cardId)
+//     → { status, completed_at, github_issue_number, github_issue_url } | null
+//     → SELECT lifecycle fields FROM kanban_cards WHERE id = ?
+//
 //   agentdesk.ciRecovery.getReworkCardInfo(cardId)
 //     → { assigned_agent_id, title, github_issue_number } | null
 //     → SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?
@@ -46,6 +50,15 @@ pub(super) fn register_ci_recovery_ops<'js>(
         "__getCardStatusRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
             get_card_status_raw(pg_gcs.as_ref(), &card_id)
+        })?,
+    )?;
+
+    // getCardLifecycle
+    let pg_gcl = pg_pool.clone();
+    obj.set(
+        "__getCardLifecycleRaw",
+        Function::new(ctx.clone(), move |card_id: String| -> String {
+            get_card_lifecycle_raw(pg_gcl.as_ref(), &card_id)
         })?,
     )?;
 
@@ -85,6 +98,17 @@ pub(super) fn register_ci_recovery_ops<'js>(
                 if (result.error) return null;
                 if (!result.found) return null;
                 return { status: result.status };
+            };
+            agentdesk.ciRecovery.getCardLifecycle = function(cardId) {
+                var result = JSON.parse(agentdesk.ciRecovery.__getCardLifecycleRaw(cardId));
+                if (result.error) return null;
+                if (!result.found) return null;
+                return {
+                    status: result.status,
+                    completed_at: result.completed_at,
+                    github_issue_number: result.github_issue_number,
+                    github_issue_url: result.github_issue_url
+                };
             };
             agentdesk.ciRecovery.getReworkCardInfo = function(cardId) {
                 var result = JSON.parse(agentdesk.ciRecovery.__getReworkCardInfoRaw(cardId));
@@ -170,6 +194,59 @@ fn get_card_status_pg(pool: &PgPool, card_id: &str) -> String {
                     })?;
             Ok(match status {
                 Some(s) => json!({ "found": true, "status": s }).to_string(),
+                None => json!({ "found": false }).to_string(),
+            })
+        },
+        |error| json!({ "error": error }).to_string(),
+    ) {
+        Ok(result) => result,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
+    }
+}
+
+fn get_card_lifecycle_raw(pg_pool: Option<&PgPool>, card_id: &str) -> String {
+    if let Some(pool) = pg_pool {
+        return get_card_lifecycle_pg(pool, card_id);
+    }
+    json!({ "error": "sqlite backend is unavailable" }).to_string()
+}
+
+fn get_card_lifecycle_pg(pool: &PgPool, card_id: &str) -> String {
+    let card_id = card_id.to_string();
+    match crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let row = sqlx::query(
+                "SELECT status, completed_at, github_issue_number, github_issue_url
+                 FROM kanban_cards WHERE id = $1",
+            )
+            .bind(&card_id)
+            .fetch_optional(&bridge_pool)
+            .await
+            .map_err(|error| format!("load postgres kanban_cards lifecycle {card_id}: {error}"))?;
+            Ok(match row {
+                Some(row) => {
+                    let status: String = row
+                        .try_get("status")
+                        .map_err(|e| format!("decode status: {e}"))?;
+                    let completed_at: Option<chrono::DateTime<chrono::Utc>> = row
+                        .try_get("completed_at")
+                        .map_err(|e| format!("decode completed_at: {e}"))?;
+                    let issue: Option<i64> = row
+                        .try_get("github_issue_number")
+                        .map_err(|e| format!("decode github_issue_number: {e}"))?;
+                    let issue_url: Option<String> = row
+                        .try_get("github_issue_url")
+                        .map_err(|e| format!("decode github_issue_url: {e}"))?;
+                    json!({
+                        "found": true,
+                        "status": status,
+                        "completed_at": completed_at.map(|value| value.to_rfc3339()),
+                        "github_issue_number": issue,
+                        "github_issue_url": issue_url
+                    })
+                    .to_string()
+                }
                 None => json!({ "found": false }).to_string(),
             })
         },

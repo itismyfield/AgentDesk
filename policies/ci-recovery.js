@@ -24,6 +24,8 @@ var CI_DISPATCH_CARD_TITLE_MAX_CHARS = 120;
 var CI_DISPATCH_JOB_NAME_MAX_CHARS = 60;
 var CI_RUN_SUMMARY_MAX_CHARS = 240;
 var CI_LOOP_SUPPRESS_ESCALATION_THRESHOLD = 3;
+var FALLBACK_PENDING_HANDOFF_STATE = "pending-handoff";
+var FALLBACK_PENDING_HANDOFF_BLOCKED_REASON = "ci:pending-handoff";
 
 function truncateText(text, maxChars) {
   var normalized = String(text || "");
@@ -138,6 +140,66 @@ function loadPrTracking(cardId) {
 
 function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {
   return prTracking.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
+}
+
+function loadCardLifecycle(cardId) {
+  if (agentdesk.ciRecovery && typeof agentdesk.ciRecovery.getCardLifecycle === "function") {
+    return agentdesk.ciRecovery.getCardLifecycle(cardId);
+  }
+  if (agentdesk.ciRecovery && typeof agentdesk.ciRecovery.getCardStatus === "function") {
+    return agentdesk.ciRecovery.getCardStatus(cardId);
+  }
+  return null;
+}
+
+function isTerminalFallbackCard(cardId) {
+  var card = loadCardLifecycle(cardId);
+  if (!card) return false;
+  if (card.completed_at) return true;
+  if (!agentdesk.pipeline || typeof agentdesk.pipeline.resolveForCard !== "function" ||
+      typeof agentdesk.pipeline.isTerminal !== "function") {
+    return false;
+  }
+  var cfg = agentdesk.pipeline.resolveForCard(cardId);
+  return agentdesk.pipeline.isTerminal(card.status, cfg);
+}
+
+function fallbackPrUrl(repo, prNumber) {
+  if (!repo || !prNumber) return null;
+  return "https://github.com/" + repo + "/pull/" + prNumber;
+}
+
+function formatPendingHandoffReason(repo, pr, runId, classification) {
+  var reason = classification && classification.reason
+    ? classification.reason
+    : "failed checks";
+  var prRef = pr && pr.number ? ("PR #" + pr.number) : "fallback PR";
+  var prUrl = fallbackPrUrl(repo, pr ? pr.number : null);
+  return "Fallback " + prRef + " has failed checks for a closed/done source issue" +
+    (runId ? " (run " + runId + ")" : "") +
+    ": " + reason +
+    (prUrl ? ". PR: " + prUrl : "") +
+    ". Suggested next action: inspect the PR, fix/rerun checks, merge it, close it as superseded, or explicitly accept it as a pending handoff.";
+}
+
+function markPendingFallbackHandoff(cardId, repo, pr, branch, headSha, runId, classification) {
+  var reason = formatPendingHandoffReason(repo, pr, runId, classification);
+  upsertPrTracking(
+    cardId,
+    repo,
+    pr ? pr.worktree_path : null,
+    branch,
+    pr ? pr.number : null,
+    headSha || (pr ? pr.sha : null),
+    FALLBACK_PENDING_HANDOFF_STATE,
+    reason
+  );
+
+  var blockedReason = FALLBACK_PENDING_HANDOFF_BLOCKED_REASON +
+    (pr && pr.number ? ":PR#" + pr.number : "") +
+    " failed checks; inspect, fix/rerun, merge, close superseded, or accept pending handoff";
+  agentdesk.ciRecovery.setBlockedReason(cardId, blockedReason);
+  agentdesk.log.warn("[ci-recovery] Card " + cardId + " marked pending fallback handoff: " + reason);
 }
 
 function ciLoopBaseFingerprint(cardId, headSha, runId) {
@@ -585,6 +647,25 @@ function processWaitingCard(cardId, blockedReason) {
   var baseFingerprint = ciLoopBaseFingerprint(cardId, effectiveHeadSha, runId);
   var failureFingerprint = ciLoopFingerprint(cardId, effectiveHeadSha, runId, classification.type);
   agentdesk.log.info("[ci-recovery] Card " + cardId + " run " + runId + " classified as: " + classification.type + " (" + classification.reason + ")");
+
+  if (isTerminalFallbackCard(cardId)) {
+    markPendingFallbackHandoff(cardId, repo, pr, branch, effectiveHeadSha, runId, classification);
+    replaceCiLoopState(cardId, {
+      status: FALLBACK_PENDING_HANDOFF_STATE,
+      action: "fallback_pr_failed_checks",
+      fingerprint: failureFingerprint,
+      base_fingerprint: baseFingerprint,
+      classification: classification.type,
+      run_id: String(runId),
+      head_sha: effectiveHeadSha,
+      suppress_count: 0,
+      last_reason: classification.reason,
+      last_seen_at: loopGuardNowIso(),
+      escalation_reason: null,
+      escalated_at: null
+    });
+    return;
+  }
 
   if (classification.type === "retryable_transient") {
     var retryCount = parseInt(agentdesk.kv.get("ci:" + cardId + ":retry_count") || "0", 10);
