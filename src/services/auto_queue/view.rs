@@ -208,10 +208,10 @@ pub(super) async fn load_activate_card_state_pg(
     .map_err(|error| format!("load postgres card {card_id}: {error}"))?
     .ok_or_else(|| format!("postgres card {card_id} not found"))?;
 
-    let latest_dispatch_id: Option<String> = row
+    let mut latest_dispatch_id: Option<String> = row
         .try_get("latest_dispatch_id")
         .map_err(|error| format!("decode latest_dispatch_id for {card_id}: {error}"))?;
-    let latest_dispatch_status = if let Some(dispatch_id) = latest_dispatch_id.as_deref() {
+    let mut latest_dispatch_status = if let Some(dispatch_id) = latest_dispatch_id.as_deref() {
         sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
             .bind(dispatch_id)
             .fetch_optional(pool)
@@ -220,6 +220,33 @@ pub(super) async fn load_activate_card_state_pg(
     } else {
         None
     };
+    if !matches!(
+        latest_dispatch_status.as_deref(),
+        Some("pending") | Some("dispatched")
+    ) {
+        if let Some(row) = sqlx::query(
+            "SELECT td.id, td.status
+             FROM sessions s
+             JOIN task_dispatches td ON td.id = s.active_dispatch_id
+             WHERE td.kanban_card_id = $1
+               AND td.status IN ('pending', 'dispatched')
+               AND COALESCE(s.status, '') NOT IN ('disconnected', 'completed', 'failed', 'cancelled')
+             ORDER BY s.last_heartbeat DESC NULLS LAST, td.created_at DESC
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load postgres live session dispatch for {card_id}: {error}"))?
+        {
+            latest_dispatch_id = Some(row.try_get("id").map_err(|error| {
+                format!("decode live session dispatch id for {card_id}: {error}")
+            })?);
+            latest_dispatch_status = Some(row.try_get("status").map_err(|error| {
+                format!("decode live session dispatch status for {card_id}: {error}")
+            })?);
+        }
+    }
     let entry_status =
         sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_entries WHERE id = $1")
             .bind(entry_id)
