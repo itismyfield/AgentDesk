@@ -13,6 +13,7 @@ pub mod discord_config_audit;
 // #1693: `discord_delivery` moved to `dispatches::discord_delivery`. The
 // flat path is preserved as a re-export so existing import sites and
 // tests keep working without churn.
+#[allow(unused_imports)]
 pub(crate) use dispatches::discord_delivery;
 pub mod discord_dm_reply_store;
 pub mod disk_monitor;

@@ -61,6 +61,7 @@ src/
 │   │   │   ├── model.rs
 │   │   │   ├── notify.rs
 │   │   │   └── retry.rs
+│   │   ├── metadata.rs
 │   │   └── mod.rs
 │   ├── kanban_cards/
 │   │   ├── crud.rs
@@ -252,6 +253,8 @@ src/
 │   │   ├── mod.rs
 │   │   ├── query.rs
 │   │   └── turn.rs
+│   ├── analytics/
+│   │   └── api_usage.rs
 │   ├── auto_queue/
 │   │   ├── activate_bridge.rs
 │   │   ├── activate_command.rs
@@ -303,6 +306,9 @@ src/
 │   │   │   ├── session.rs
 │   │   │   ├── skill.rs
 │   │   │   └── text_commands.rs
+│   │   ├── health/
+│   │   │   ├── recovery.rs
+│   │   │   └── session_enrichment.rs
 │   │   ├── outbound/
 │   │   │   ├── decision.rs
 │   │   │   ├── delivery.rs
@@ -423,7 +429,11 @@ src/
 │   │   ├── tmux_session_files.rs
 │   │   └── tmux_watcher.rs
 │   ├── dispatches/
-│   │   ├── discord_delivery.rs
+│   │   ├── discord_delivery/
+│   │   │   ├── guard.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── orchestration.rs
+│   │   │   └── transport.rs
 │   │   ├── mod.rs
 │   │   ├── outbox_claiming.rs
 │   │   ├── outbox_queue.rs
@@ -499,7 +509,6 @@ src/
 │   ├── codex.rs
 │   ├── codex_tmux_wrapper.rs
 │   ├── discord_config_audit.rs
-│   ├── discord_delivery_metadata.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
 │   ├── dispatch_watchdog.rs

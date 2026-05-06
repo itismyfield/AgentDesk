@@ -4,7 +4,7 @@
 //! route-level callers keep this module path through re-exports only.
 
 #[allow(unused_imports)]
-pub(crate) use crate::services::discord_delivery::{
+pub(crate) use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind, DispatchMessagePostOutcome,
     DispatchNotifyDeliveryResult, DispatchTransport, HttpDispatchTransport, ReviewFollowupKind,
     discord_api_base_url, discord_api_url, edit_raw_message_once,
@@ -18,6 +18,6 @@ pub(crate) use crate::services::discord_delivery::{
 };
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 #[allow(unused_imports)]
-pub(super) use crate::services::discord_delivery::{
+pub(super) use crate::services::dispatches::discord_delivery::{
     add_thread_member_to_dispatch_thread, post_dispatch_message_to_channel,
 };

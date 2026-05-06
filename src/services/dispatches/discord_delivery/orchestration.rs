@@ -27,12 +27,12 @@ use std::sync::OnceLock;
 
 const SLOT_THREAD_MAX_SLOTS: i64 = 32;
 
-pub(crate) fn discord_api_base_url() -> String {
-    crate::services::discord_delivery::discord_api_base_url()
+fn discord_api_base_url() -> String {
+    super::discord_api_base_url()
 }
 
-pub(crate) fn discord_api_url(base_url: &str, path: &str) -> String {
-    crate::services::discord_delivery::discord_api_url(base_url, path)
+fn discord_api_url(base_url: &str, path: &str) -> String {
+    super::discord_api_url(base_url, path)
 }
 
 fn shared_discord_http_client() -> &'static reqwest::Client {
@@ -1170,7 +1170,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
             // Thread creation failed — fall back to sending directly to the channel
             let status = tr.status();
             let body = tr.text().await.unwrap_or_default();
-            if crate::services::discord_delivery::is_discord_length_error(status, &body) {
+            if super::is_discord_length_error(status, &body) {
                 return Err(format!(
                     "thread creation rejected for dispatch {dispatch_id} due to Discord length limits: {status} {body}"
                 ));
