@@ -1239,6 +1239,10 @@ pub struct StatusFilter {
     pub agent_id: Option<String>,
 }
 
+fn normalized_status_filter_value(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 #[derive(Debug, Clone)]
 pub struct BacklogCardRecord {
     pub card_id: String,
@@ -1316,14 +1320,33 @@ pub async fn find_latest_run_id_pg(
     pool: &PgPool,
     filter: &StatusFilter,
 ) -> Result<Option<String>, sqlx::Error> {
-    let repo = filter.repo.as_deref().filter(|value| !value.is_empty());
-    let agent_id = filter.agent_id.as_deref().filter(|value| !value.is_empty());
+    let repo = normalized_status_filter_value(filter.repo.as_deref());
+    let agent_id = normalized_status_filter_value(filter.agent_id.as_deref());
 
     sqlx::query_scalar::<_, String>(
         "SELECT id
-         FROM auto_queue_runs
-         WHERE ($1::TEXT IS NULL OR repo = $1 OR repo IS NULL OR repo = '')
-           AND ($2::TEXT IS NULL OR agent_id = $2 OR agent_id IS NULL OR agent_id = '')
+         FROM auto_queue_runs r
+         WHERE (
+             $1::TEXT IS NULL
+             OR r.repo = $1
+             OR EXISTS (
+                 SELECT 1
+                 FROM auto_queue_entries e
+                 JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+                 WHERE e.run_id = r.id
+                   AND kc.repo_id = $1
+             )
+         )
+           AND (
+             $2::TEXT IS NULL
+             OR r.agent_id = $2
+             OR EXISTS (
+                 SELECT 1
+                 FROM auto_queue_entries e
+                 WHERE e.run_id = r.id
+                   AND e.agent_id = $2
+             )
+         )
          ORDER BY created_at DESC
          LIMIT 1",
     )
@@ -1411,8 +1434,8 @@ pub async fn list_status_entries_pg(
     run_id: &str,
     filter: &StatusFilter,
 ) -> Result<Vec<StatusEntryRecord>, sqlx::Error> {
-    let agent_id = filter.agent_id.as_deref().filter(|value| !value.is_empty());
-    let repo = filter.repo.as_deref().filter(|value| !value.is_empty());
+    let agent_id = normalized_status_filter_value(filter.agent_id.as_deref());
+    let repo = normalized_status_filter_value(filter.repo.as_deref());
 
     let rows = sqlx::query(
         "SELECT e.id,
@@ -1464,8 +1487,8 @@ pub async fn list_run_history_pg(
     filter: &StatusFilter,
     limit: usize,
 ) -> Result<Vec<AutoQueueRunHistoryRecord>, sqlx::Error> {
-    let repo = filter.repo.as_deref().filter(|value| !value.is_empty());
-    let agent_id = filter.agent_id.as_deref().filter(|value| !value.is_empty());
+    let repo = normalized_status_filter_value(filter.repo.as_deref());
+    let agent_id = normalized_status_filter_value(filter.agent_id.as_deref());
     let limit = limit.clamp(1, 20) as i64;
 
     let rows = sqlx::query(

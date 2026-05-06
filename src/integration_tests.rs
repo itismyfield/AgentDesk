@@ -2689,6 +2689,99 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_queue_status_repo_filter_rejects_agent_id_value_pg() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('project-agentdesk', 'Project AgentDesk', '111', '222')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at, completed_at) \
+             VALUES \
+             ('run-agent-id-as-repo-old', 'project-agentdesk', 'project-agentdesk', 'completed', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '55 minutes'), \
+             ('run-agent-id-active', NULL, 'project-agentdesk', 'active', NOW(), NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = AppState::test_state_with_pg(test_db(), engine, pool.clone());
+        let (status, body) = crate::server::routes::auto_queue::status(
+            axum::extract::State(state),
+            axum::extract::Query(crate::server::routes::auto_queue::StatusQuery {
+                repo: Some("project-agentdesk".to_string()),
+                agent_id: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body.0["code"], "auto_queue");
+        assert!(body.0["error"].as_str().unwrap().contains("agent id"));
+        assert_eq!(body.0["context"]["agent_id"], "project-agentdesk");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_queue_status_repo_filter_finds_unscoped_run_by_entry_repo_pg() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+
+        seed_agent_pg(&pool).await;
+        seed_repo_pg(&pool, "owner/repo").await;
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
+             VALUES ('card-status-repo-filter', 'Status Repo Filter', 'ready', 'agent-1', 'owner/repo', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-status-repo-filter', NULL, NULL, 'active', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at) \
+             VALUES ('entry-status-repo-filter', 'run-status-repo-filter', 'card-status-repo-filter', 'agent-1', 'pending', 0, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = AppState::test_state_with_pg(test_db(), engine, pool.clone());
+        let (status, body) = crate::server::routes::auto_queue::status(
+            axum::extract::State(state),
+            axum::extract::Query(crate::server::routes::auto_queue::StatusQuery {
+                repo: Some("owner/repo".to_string()),
+                agent_id: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body.0["run"]["id"], "run-status-repo-filter");
+        assert_eq!(body.0["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(body.0["entries"][0]["id"], "entry-status-repo-filter");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     // #1239: migrated to PG fixtures because `activate_with_deps` is now
     // PG-only — the SQLite fallback was removed in favor of `activate_with_deps_pg`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
