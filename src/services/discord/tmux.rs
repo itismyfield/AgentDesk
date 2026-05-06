@@ -3433,6 +3433,96 @@ mod tests {
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
 
+    /// Regression: the synthetic inflight created by
+    /// `trigger_missing_inflight_reattach` must claim
+    /// `watcher_owns_live_relay = true` so that the freshly re-attached watcher
+    /// does NOT self-yield via `watcher_should_yield_to_inflight_state`. Before
+    /// the fix, the synthetic state defaulted to `false`, making the watcher
+    /// treat its own state as a competing active bridge turn and overwrite the
+    /// placeholder with `SUPPRESSED_INTERNAL_LABEL` once new tmux output
+    /// arrived (observed on adk-cdx thread 1501392749239468032 at 15:13 KST
+    /// 2026-05-06).
+    #[tokio::test]
+    async fn missing_inflight_reattach_marks_watcher_as_live_relay_owner() {
+        if !crate::services::claude::is_tmux_available() {
+            eprintln!("skipping synthetic-inflight ownership test: tmux is unavailable");
+            return;
+        }
+
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        clear_recent_watcher_reattach_offsets_for_tests();
+
+        let tmux_name = format!(
+            "AgentDesk-codex-test-self-yield-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let tmux_created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &tmux_name, "sleep 600"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !tmux_created {
+            unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+            panic!("failed to create tmux session for self-yield regression test");
+        }
+
+        let shared = super::super::make_shared_data_for_tests();
+        let http = Arc::new(poise::serenity_prelude::Http::new("Bot test-token"));
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(987_0964_002);
+        let (output_path, _) = super::super::turn_bridge::tmux_runtime_paths(&tmux_name);
+        if let Some(parent) = std::path::Path::new(&output_path).parent() {
+            std::fs::create_dir_all(parent).expect("runtime dir");
+        }
+        std::fs::write(&output_path, b"initial bytes").expect("seed output file");
+
+        let outcome =
+            trigger_missing_inflight_reattach(&http, &shared, &provider, channel, &tmux_name);
+        assert_eq!(
+            outcome,
+            MissingInflightReattachOutcome::Spawned {
+                replaced_existing: false
+            }
+        );
+
+        let state = super::super::inflight::load_inflight_state(&provider, channel.get())
+            .expect("synthetic inflight must be persisted");
+        assert!(
+            state.watcher_owns_live_relay,
+            "synthetic inflight must claim live-relay ownership for the re-attached watcher"
+        );
+        assert!(state.rebind_origin);
+        assert_eq!(state.tmux_session_name.as_deref(), Some(tmux_name.as_str()));
+
+        let initial_offset = state.last_offset;
+        let new_output_offset = initial_offset + 4096;
+        assert!(
+            !watcher_should_yield_to_inflight_state(
+                Some(&state),
+                &tmux_name,
+                initial_offset,
+                new_output_offset,
+            ),
+            "watcher must not yield to its own synthetic inflight when fresh tmux output arrives"
+        );
+
+        if let Some(watcher) = shared.tmux_watchers.get(&channel) {
+            watcher.cancel.store(true, Ordering::Relaxed);
+        }
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &tmux_name])
+            .status();
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+    }
+
     #[tokio::test]
     async fn missing_inflight_reattach_reuses_live_self_watcher() {
         if !crate::services::claude::is_tmux_available() {

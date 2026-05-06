@@ -32,7 +32,8 @@ route_srp_violations = [
 # extraction shifted callsites; #1450/#1472/#1467/#1476/#1477/#1480/#1560
 # refresh the remaining drift detected by CI with no logical regressions. The
 # upstream routine port refreshes line-only drift after the durable routine
-# modules land.
+# modules land. #1858 refreshes health.rs line drift after the
+# #1777/#1779/#1780/#1781 health-extraction landings.
 direct_discord_sends = [
   "src/services/discord/commands/model_picker.rs:60",
   "src/services/discord/commands/skill.rs:270",
