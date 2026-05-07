@@ -164,6 +164,8 @@ src/
 │   │   └── high_risk_recovery.rs
 │   └── agents_setup_e2e.rs
 ├── kanban/
+│   ├── audit.rs
+│   ├── github_sync.rs
 │   ├── hooks.rs
 │   ├── mod.rs
 │   ├── state_machine.rs
