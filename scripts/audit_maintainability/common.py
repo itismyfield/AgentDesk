@@ -6,6 +6,7 @@ Stdlib-only. No third-party dependencies.
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -78,10 +79,25 @@ def line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
-def is_allowlisted(allowlist: set[str], file: str, line: int | None = None) -> bool:
-    """Return true when a finding is covered by a path or path:line baseline."""
+def stable_finding_key(rule: str, file: str, context: str) -> str:
+    """Return a line-independent allowlist key for a finding context."""
+
+    normalized = " ".join(context.split())
+    digest = sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"{file}#{rule}:{digest}"
+
+
+def is_allowlisted(
+    allowlist: set[str],
+    file: str,
+    line: int | None = None,
+    stable_key: str | None = None,
+) -> bool:
+    """Return true when a finding is covered by a path, line, or stable key."""
 
     if file in allowlist:
+        return True
+    if stable_key is not None and stable_key in allowlist:
         return True
     return line is not None and f"{file}:{line}" in allowlist
 

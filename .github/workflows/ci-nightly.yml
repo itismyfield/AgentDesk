@@ -43,7 +43,11 @@ jobs:
         with:
           toolchain: "1.94.1"
 
+      - name: Disable sccache on macOS
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+
       - name: Setup sccache
+        if: runner.os != 'macOS'
         uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Cache cargo registry & build
@@ -321,8 +325,14 @@ jobs:
 
           exit $FAIL
 
-      - name: Generated docs and architecture drift check
-        run: python3 scripts/generate_inventory_docs.py --check
+      - name: Generated docs drift (warn)
+        shell: bash
+        run: |
+          if python3 scripts/generate_inventory_docs.py --check; then
+            echo "Inventory docs are up to date."
+          else
+            echo "::warning::Inventory docs drift detected. The weekly Regen inventory docs workflow opens a maintenance PR; this check is intentionally warning-only."
+          fi
 
   cli_smoke:
     name: CLI smoke

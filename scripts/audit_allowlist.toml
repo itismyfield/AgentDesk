@@ -26,47 +26,41 @@ route_srp_violations = [
 ]
 
 # Direct Discord sends: current baseline captured for #1436 outbound v3
-# extraction. Entries are path:line so new callsites in the same file still
-# fail the hard gate. Line numbers for tmux.rs / turn_bridge / mod.rs /
-# health.rs were refreshed in #1440 after the #1435 tmux watcher-lifecycle
-# extraction shifted callsites; #1450/#1472/#1467/#1476/#1477/#1480/#1560
-# refresh the remaining drift detected by CI with no logical regressions. The
-# upstream routine port refreshes line-only drift after the durable routine
-# modules land. #1858 refreshes health.rs line drift after the
-# #1777/#1779/#1780/#1781 health-extraction landings. #1879 refreshes the
-# remaining health.rs line-only drift after snapshot/mailbox extraction.
+# extraction. Entries use line-independent stable keys so mechanical refactors
+# do not fail CI when they only shift existing callsites. New callsites still
+# fail the hard gate because they produce different keys.
 direct_discord_sends = [
-  "src/services/discord/commands/model_picker.rs:60",
-  "src/services/discord/commands/skill.rs:270",
-  "src/services/discord/commands/skill.rs:336",
-  "src/services/discord/commands/text_commands.rs:1031",
-  "src/services/discord/commands/text_commands.rs:1309",
-  "src/services/discord/discord_io.rs:364",
-  "src/services/discord/gateway.rs:212",
-  "src/services/discord/gateway.rs:236",
-  "src/services/discord/gateway.rs:263",
-  "src/services/discord/health.rs:1645",
-  "src/services/discord/health.rs:1713",
-  "src/services/discord/meeting_orchestrator.rs:654",
-  "src/services/discord/meeting_orchestrator.rs:678",
-  "src/services/discord/monitoring_status.rs:50",
-  "src/services/discord/monitoring_status.rs:74",
-  "src/services/discord/placeholder_controller.rs:241",
-  "src/services/discord/placeholder_controller.rs:313",
-  "src/services/discord/placeholder_controller.rs:391",
-  "src/services/discord/router/intake_gate.rs:485",
-  "src/services/discord/turn_bridge/mod.rs:514",
-  "src/services/discord/turn_bridge/mod.rs:1312",
-  "src/services/discord/turn_bridge/mod.rs:1356",
-  "src/services/discord/turn_bridge/mod.rs:1762",
-  "src/services/discord/turn_bridge/mod.rs:2439",
-  "src/services/discord/turn_bridge/mod.rs:2487",
-  "src/services/discord/turn_bridge/mod.rs:2490",
-  "src/services/discord/turn_bridge/mod.rs:2571",
-  "src/services/discord/turn_bridge/mod.rs:2614",
-  "src/services/discord/turn_bridge/mod.rs:3041",
-  "src/services/discord/turn_bridge/mod.rs:3291",
-  "src/services/discord/turn_bridge/mod.rs:3587",
+  "src/services/discord/commands/model_picker.rs#direct_discord_sends:9cf1f42bcb8abe4f",
+  "src/services/discord/commands/skill.rs#direct_discord_sends:1e8d329a7b6eeefe",
+  "src/services/discord/commands/skill.rs#direct_discord_sends:192ce5dcdad6764f",
+  "src/services/discord/commands/text_commands.rs#direct_discord_sends:db5444d305a41f96",
+  "src/services/discord/commands/text_commands.rs#direct_discord_sends:e1dff75fe79e7d70",
+  "src/services/discord/discord_io.rs#direct_discord_sends:2f398342de1e7cd7",
+  "src/services/discord/gateway.rs#direct_discord_sends:fbf7eb28e7737abf",
+  "src/services/discord/gateway.rs#direct_discord_sends:0a20f86f0471df2b",
+  "src/services/discord/gateway.rs#direct_discord_sends:2e80b83349d17883",
+  "src/services/discord/health.rs#direct_discord_sends:fc0d3cc16af4bca7",
+  "src/services/discord/health.rs#direct_discord_sends:9a1e5bc39f554d40",
+  "src/services/discord/meeting_orchestrator.rs#direct_discord_sends:64c7fa00eace25a9",
+  "src/services/discord/meeting_orchestrator.rs#direct_discord_sends:5e0310b8b9e373ff",
+  "src/services/discord/monitoring_status.rs#direct_discord_sends:6911fe26869c481d",
+  "src/services/discord/monitoring_status.rs#direct_discord_sends:9ea6e87eaf2dcfcb",
+  "src/services/discord/placeholder_controller.rs#direct_discord_sends:1f16966d7b385d55",
+  "src/services/discord/placeholder_controller.rs#direct_discord_sends:b2a2a937b5534092",
+  "src/services/discord/placeholder_controller.rs#direct_discord_sends:6f0c077286559a63",
+  "src/services/discord/router/intake_gate.rs#direct_discord_sends:0a2beaabe9619b4f",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:f377b5c8a89499a2",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:9016a6940938ce84",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:2bf7e5b93d0fda6b",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:07b7e52940af8eab",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1cc530214eb6c5d6",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:cb8dfde9e6d19e3b",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:edafac97f164fd68",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:b4849c24f5cb7d09",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:590c5cd6bb3b93f8",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1c3d5094762f23e4",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:9de857dea13386a4",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:26d4f3ea346a4c7b",
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.
