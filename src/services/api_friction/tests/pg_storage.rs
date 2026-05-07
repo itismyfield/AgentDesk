@@ -67,6 +67,109 @@ async fn list_api_friction_patterns_counts_repeated_rows() {
 }
 
 #[tokio::test]
+async fn list_api_friction_patterns_preserves_issue_metadata_and_latest_event() {
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    sqlx::query(
+        "INSERT INTO api_friction_events (
+            id, fingerprint, endpoint, friction_type, docs_category, summary, workaround,
+            suggested_fix, task_summary, keywords_json, payload_json, channel_id, provider,
+            repo_id, memory_backend, memory_status, created_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            '[]'::jsonb, '{}'::jsonb, $10, $11, $12, $13, $14,
+            NOW() - INTERVAL '2 minutes'
+         )",
+    )
+    .bind("event-linked-1")
+    .bind("api-docs-kanban::docs-bypass")
+    .bind("/api/docs/kanban")
+    .bind("docs-bypass")
+    .bind("docs")
+    .bind("first")
+    .bind("sqlite3")
+    .bind("document a single endpoint")
+    .bind("older task")
+    .bind("1")
+    .bind("codex")
+    .bind("itismyfield/AgentDesk")
+    .bind("memento")
+    .bind("stored")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO api_friction_events (
+            id, fingerprint, endpoint, friction_type, docs_category, summary, workaround,
+            suggested_fix, task_summary, keywords_json, payload_json, channel_id, provider,
+            repo_id, memory_backend, memory_status, created_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            '[]'::jsonb, '{}'::jsonb, $10, $11, $12, $13, $14,
+            NOW() - INTERVAL '1 minute'
+         )",
+    )
+    .bind("event-linked-2")
+    .bind("api-docs-kanban::docs-bypass")
+    .bind("/api/docs/kanban")
+    .bind("docs-bypass")
+    .bind("docs")
+    .bind("second")
+    .bind("curl docs endpoint")
+    .bind("clarify docs category")
+    .bind("latest task")
+    .bind("1")
+    .bind("codex")
+    .bind("itismyfield/AgentDesk")
+    .bind("memento")
+    .bind("stored")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO api_friction_issues (
+            fingerprint, repo_id, endpoint, friction_type, title, body, issue_number,
+            issue_url, event_count, first_event_at, last_event_at, last_error, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '1 minute', $10, NOW(), NOW()
+         )",
+    )
+    .bind("api-docs-kanban::docs-bypass")
+    .bind("itismyfield/AgentDesk")
+    .bind("/api/docs/kanban")
+    .bind("docs-bypass")
+    .bind("api-friction: /api/docs/kanban")
+    .bind("body")
+    .bind(777_i32)
+    .bind("https://github.com/itismyfield/AgentDesk/issues/777")
+    .bind(2_i32)
+    .bind("already reported")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let patterns = load_pattern_candidates_pg(&pg_pool, 2, 5).await.unwrap();
+    assert_eq!(patterns.len(), 1);
+    let pattern = &patterns[0];
+    assert_eq!(pattern.github_issue_number, Some(777));
+    assert_eq!(
+        pattern.issue_url.as_deref(),
+        Some("https://github.com/itismyfield/AgentDesk/issues/777")
+    );
+    assert_eq!(pattern.last_error.as_deref(), Some("already reported"));
+    assert_eq!(pattern.summary, "second");
+    assert_eq!(pattern.workaround.as_deref(), Some("curl docs endpoint"));
+    assert_eq!(
+        pattern.suggested_fix.as_deref(),
+        Some("clarify docs category")
+    );
+    assert_eq!(pattern.task_summary.as_deref(), Some("latest task"));
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn record_api_friction_reports_uses_pg_only_when_sqlite_handle_present() {
     let _guard = crate::services::discord::runtime_store::lock_test_env();
     let temp = tempfile::tempdir().unwrap();

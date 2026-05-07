@@ -290,6 +290,7 @@ src/
 │   │   ├── markers.rs
 │   │   ├── memory_sync.rs
 │   │   ├── mod.rs
+│   │   ├── patterns.rs
 │   │   └── storage.rs
 │   ├── auto_queue/
 │   │   ├── activate_bridge.rs
