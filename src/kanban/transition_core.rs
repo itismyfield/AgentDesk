@@ -1,7 +1,8 @@
 //! Postgres transition orchestration for kanban cards.
 
+use super::hooks::fire_dynamic_hooks;
 use super::state_machine::{
-    fire_dynamic_hooks, github_sync_on_transition_pg, record_true_negative_if_pass_with_backends,
+    github_sync_on_transition_pg, record_true_negative_if_pass_with_backends,
     resolve_pipeline_with_pg,
 };
 use super::terminal_cleanup::cleanup_terminal_managed_worktrees_pg;

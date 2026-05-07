@@ -159,6 +159,7 @@ src/
 │   │   └── high_risk_recovery.rs
 │   └── agents_setup_e2e.rs
 ├── kanban/
+│   ├── hooks.rs
 │   ├── mod.rs
 │   ├── state_machine.rs
 │   ├── terminal_cleanup.rs
