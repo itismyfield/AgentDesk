@@ -264,10 +264,20 @@ pub fn terminate_process_handle(handle: SessionHandle) {
 pub struct StreamLineState {
     pub last_session_id: Option<String>,
     pub last_model: Option<String>,
+    /// #1918 — input/cache_read/cache_create record the **last** API call's
+    /// per-message usage so the status panel Context line reflects current
+    /// context occupancy (sum across multi-call turns inflated past the
+    /// window). `accum_output_tokens` stays cumulative because turn analytics
+    /// and persisted token totals expect the sum across all calls.
     pub accum_input_tokens: u64,
     pub accum_cache_create_tokens: u64,
     pub accum_cache_read_tokens: u64,
     pub accum_output_tokens: u64,
+    /// True once any per-message `usage` block has been observed in the
+    /// stream. Lets the result-event handler fall back to `result.usage`
+    /// only for providers (e.g. Qwen) that emit token counts solely on the
+    /// terminal result event.
+    pub saw_per_message_usage: bool,
     pub final_result: Option<String>,
     pub stdout_error: Option<(String, String)>,
     pub tool_use_names: HashMap<String, String>,

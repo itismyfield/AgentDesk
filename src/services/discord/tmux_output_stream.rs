@@ -159,12 +159,14 @@ pub(in crate::services::discord) fn process_watcher_lines(
                             state.last_model = Some(model.to_string());
                         }
                         if let Some(usage) = message.get("usage") {
-                            // #1918 — replace, do not accumulate. Each assistant
-                            // message's `usage` describes one API call's prompt;
-                            // the LAST one is the current context occupancy. The
-                            // status panel's Context line summed these values, so
-                            // accumulating across a multi-call (tool-use loop) turn
-                            // inflated the displayed usage past the window size.
+                            // #1918 — input/cache_read/cache_create REPLACE so the
+                            // status panel Context line reflects the LAST API call
+                            // (context occupancy of the most recent call). The
+                            // previous code summed per-call usage and inflated
+                            // multi-call (tool-use loop) turns past the window
+                            // size. output_tokens stays accumulated because turn
+                            // analytics expect the cumulative output total.
+                            state.saw_per_message_usage = true;
                             state.accum_input_tokens = usage
                                 .get("input_tokens")
                                 .and_then(|value| value.as_u64())
@@ -177,10 +179,12 @@ pub(in crate::services::discord) fn process_watcher_lines(
                                 .get("cache_creation_input_tokens")
                                 .and_then(|value| value.as_u64())
                                 .unwrap_or(state.accum_cache_create_tokens);
-                            state.accum_output_tokens = usage
-                                .get("output_tokens")
-                                .and_then(|value| value.as_u64())
-                                .unwrap_or(state.accum_output_tokens);
+                            state.accum_output_tokens = state.accum_output_tokens.saturating_add(
+                                usage
+                                    .get("output_tokens")
+                                    .and_then(|value| value.as_u64())
+                                    .unwrap_or(0),
+                            );
                         }
                         // Text content from assistant message
                         if let Some(content) = message.get("content") {
@@ -361,14 +365,36 @@ pub(in crate::services::discord) fn process_watcher_lines(
                             full_response.push_str(&result_str);
                         }
                     }
-                    // #1918 — context-window usage uses the LAST API call's
-                    // per-message `usage`, captured during the assistant-message
-                    // branch above. Older revisions copied result.usage here on
-                    // the assumption it reflected the final call, but Claude
-                    // CLI's result event in multi-call (tool-use loop) turns
-                    // reports turn-cumulative counts and inflated the displayed
-                    // context occupancy past the window size. Trust the
-                    // per-message stream instead.
+                    // #1918 — for providers that emit per-message `usage` (Claude),
+                    // the assistant-message branch above already captured the
+                    // LAST API call's prompt and cumulative output, which is what
+                    // the status panel and analytics need. Result.usage in
+                    // multi-call turns is turn-cumulative on those CLIs and
+                    // inflates the displayed context occupancy past the window
+                    // size. For providers that only normalize token counts onto
+                    // the terminal `result` event (e.g. Qwen's tmux wrapper),
+                    // fall back to result.usage so session context status and
+                    // turn analytics are not lost.
+                    if !state.saw_per_message_usage
+                        && let Some(usage) = val.get("usage")
+                    {
+                        state.accum_input_tokens = usage
+                            .get("input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        state.accum_cache_read_tokens = usage
+                            .get("cache_read_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        state.accum_cache_create_tokens = usage
+                            .get("cache_creation_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        state.accum_output_tokens = usage
+                            .get("output_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                    }
 
                     state.final_result = Some(String::new());
                     outcome.found_result = true;
