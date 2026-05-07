@@ -1187,6 +1187,15 @@ pub(crate) async fn run_stall_watchdog_pass(
         //      `global_active` and any leftover child/tmux are released.
         //   4. drop any parent → thread mapping that points at this channel
         //      (so the parent's THREAD-GUARD stops queueing)
+        // #1914: capture user_msg_id BEFORE deleting the inflight state file
+        // so we can scrub the ⏳ reaction the bridge added at turn start. The
+        // normal cleanup paths (`turn_bridge::mod.rs:3047-3048` and the four
+        // `tmux_watcher` finalize sites) all skip this code path because the
+        // turn never reached a watcher-side completion event.
+        let pending_hourglass_user_msg_id =
+            discord::inflight::load_inflight_state(provider, channel_id.get())
+                .filter(|state| state.user_msg_id != 0)
+                .map(|state| state.user_msg_id);
         discord::inflight::delete_inflight_state_file(provider, channel_id.get());
         let cleared = discord::mailbox_clear_channel(&shared, provider, channel_id).await;
         discord::stall_recovery::finalize_orphaned_clear(
@@ -1198,6 +1207,12 @@ pub(crate) async fn run_stall_watchdog_pass(
         shared
             .dispatch_thread_parents
             .retain(|_, thread_id| *thread_id != channel_id);
+        if let Some(user_msg_id) = pending_hourglass_user_msg_id
+            && let Ok(http) = super::resolve_bot_http(registry, provider.as_str()).await
+        {
+            discord::formatting::remove_reaction_raw(&http, channel_id, user_msg_id.into(), '⏳')
+                .await;
+        }
         cleaned += 1;
     }
     cleaned
