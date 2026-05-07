@@ -1,5 +1,6 @@
 pub mod claim;
 mod core;
+pub mod entries;
 pub mod phase_gates;
 pub mod queries;
 pub mod runs;
@@ -10,6 +11,7 @@ pub(crate) mod test_support;
 
 pub use claim::*;
 pub use core::*;
+pub use entries::*;
 pub use phase_gates::*;
 pub use queries::*;
 pub use runs::*;
