@@ -39,7 +39,7 @@ pub(super) fn tool_output_efficiency_guidance() -> &'static str {
 pub(super) fn api_friction_guidance(profile: DispatchProfile) -> Option<String> {
     (profile == DispatchProfile::Full).then_some(
         "\n\n[ADK API Usage]\n\
-         Before ADK API work, inspect `GET /api/docs` or `GET /api/docs/{category}`. If docs are missing/wrong, do not use sqlite fallback; report one `API_FRICTION: {...}` marker with endpoint, summary, workaround, and suggested_fix."
+         Before ADK API work, inspect `GET /api/docs` or `GET /api/docs/{category}`. If docs are missing/wrong, do not use sqlite fallback; report one `API_FRICTION: {...}` marker with endpoint, summary, workaround, and suggested_fix. The runtime stores valid markers under Memento `topic=api-friction` when Memento is configured."
             .to_string(),
     )
 }
