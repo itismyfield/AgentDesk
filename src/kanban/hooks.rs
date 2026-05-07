@@ -1,10 +1,13 @@
 //! Hook firing and side-effect draining for kanban transitions.
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use super::state_machine::{github_sync_on_transition, log_audit, record_true_negative_if_pass};
-use super::state_machine::{
-    github_sync_on_transition_pg, record_true_negative_if_pass_with_backends,
-};
+use super::audit::log_audit;
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use super::github_sync::github_sync_on_transition;
+use super::github_sync::github_sync_on_transition_pg;
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use super::state_machine::record_true_negative_if_pass;
+use super::state_machine::record_true_negative_if_pass_with_backends;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use super::terminal_cleanup::sync_terminal_transition_followups;
 use super::terminal_cleanup::sync_terminal_transition_followups_pg;
