@@ -191,7 +191,7 @@
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 161 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
 | `server` | `src/server/mod.rs` | 3726 | giant-file |
-| `server::cluster` | `src/server/cluster.rs` | 908 |  |
+| `server::cluster` | `src/server/cluster.rs` | 934 |  |
 | `server::cluster_session_routing` | `src/server/cluster_session_routing.rs` | 416 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
 | `server::dto` | `src/server/dto/mod.rs` | 7 |  |
@@ -493,7 +493,7 @@
 | `services::maintenance::jobs::memento_consolidation` | `src/services/maintenance/jobs/memento_consolidation.rs` | 406 |  |
 | `services::maintenance::jobs::target_sweep` | `src/services/maintenance/jobs/target_sweep.rs` | 248 |  |
 | `services::maintenance::jobs::worktree_orphan_sweep` | `src/services/maintenance/jobs/worktree_orphan_sweep.rs` | 279 |  |
-| `services::mcp_config` | `src/services/mcp_config.rs` | 1485 | giant-file |
+| `services::mcp_config` | `src/services/mcp_config.rs` | 1532 | giant-file |
 | `services::memory` | `src/services/memory/mod.rs` | 372 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 115 |  |
 | `services::memory::memento` | `src/services/memory/memento.rs` | 2556 | giant-file |
