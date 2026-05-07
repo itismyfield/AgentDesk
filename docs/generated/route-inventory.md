@@ -107,10 +107,10 @@
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:59` | `src/server/routes/domains/ops.rs:165` |
 | `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:42` | `src/server/routes/domains/ops.rs:164` |
 | `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:854` | `src/server/routes/domains/ops.rs:32` |
-| `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:1068` | `src/server/routes/domains/ops.rs:103` |
+| `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:1191` | `src/server/routes/domains/ops.rs:103` |
 | `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1513` | `src/server/routes/domains/admin.rs:64` |
-| `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:973` | `src/server/routes/domains/ops.rs:99` |
-| `GET` | `/api/internal/pending-dispatch-for-thread` | `dispatches::get_pending_dispatch_for_thread` | `src/server/routes/dispatches/thread_reuse.rs:1197` | `src/server/routes/domains/ops.rs:104` |
+| `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:1076` | `src/server/routes/domains/ops.rs:99` |
+| `GET` | `/api/internal/pending-dispatch-for-thread` | `dispatches::get_pending_dispatch_for_thread` | `src/server/routes/dispatches/thread_reuse.rs:1325` | `src/server/routes/domains/ops.rs:104` |
 | `GET` | `/api/kanban-cards` | `kanban::list_cards` | `src/server/routes/kanban.rs:269` | `src/server/routes/domains/kanban.rs:13` |
 | `POST` | `/api/kanban-cards` | `kanban::create_card` | `src/server/routes/kanban.rs:310` | `src/server/routes/domains/kanban.rs:13` |
 | `POST` | `/api/kanban-cards/assign-issue` | `kanban::assign_issue` | `src/server/routes/kanban.rs:1196` | `src/server/routes/domains/kanban.rs:18` |
