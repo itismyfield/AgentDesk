@@ -319,6 +319,22 @@ class DirectDiscordSendsCheck(unittest.TestCase):
             hits = list(direct_discord_sends.CHECK.runner(set()))
         self.assertEqual(_files(hits), {"src/services/agents.rs"})
 
+    def test_stable_allowlist_key_survives_line_drift(self) -> None:
+        body = """
+        async fn notify(http: Arc<Http>, ch: ChannelId) {
+            ch.send_message(&http, |m| m.content("x")).await.ok();
+        }
+        """
+        shifted = "\n\n" + body
+        with _FakeSrcTree({"src/services/agents.rs": body}):
+            hits = list(direct_discord_sends.CHECK.runner(set()))
+        self.assertEqual(len(hits), 1)
+        key = hits[0].extra["allowlist_key"]
+
+        with _FakeSrcTree({"src/services/agents.rs": shifted}):
+            shifted_hits = list(direct_discord_sends.CHECK.runner({key}))
+        self.assertEqual(shifted_hits, [])
+
 
 class ManualJsonMappingCheck(unittest.TestCase):
     def test_flags_serde_json_value_try_get(self) -> None:
@@ -648,6 +664,7 @@ class HarnessCli(unittest.TestCase):
                     direct_discord_sends = [
                       "src/services/notify.rs",
                       "src/services/notify.rs:42",
+                      "src/services/notify.rs#direct_discord_sends:abc123",
                     ]
                     """
                 ),
@@ -657,7 +674,11 @@ class HarnessCli(unittest.TestCase):
         self.assertEqual(data.get("giant_files"), {"src/big.rs"})
         self.assertEqual(
             data.get("direct_discord_sends"),
-            {"src/services/notify.rs", "src/services/notify.rs:42"},
+            {
+                "src/services/notify.rs",
+                "src/services/notify.rs:42",
+                "src/services/notify.rs#direct_discord_sends:abc123",
+            },
         )
         self.assertNotIn("src/services/notify.rs", data.get("giant_files", set()))
 

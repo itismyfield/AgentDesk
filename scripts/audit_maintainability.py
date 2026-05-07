@@ -96,7 +96,7 @@ def load_allowlist(path: Path) -> dict[str, set[str]]:
     current_key: str | None = None
     in_array = False
     for raw_line in text.splitlines():
-        line = raw_line.split("#", 1)[0].strip()
+        line = _strip_toml_comment(raw_line).strip()
         if not line:
             continue
         if "=" in line and "[" in line and not in_array:
@@ -129,6 +129,24 @@ def _extract_strings(fragment: str) -> Iterable[str]:
             return
         yield fragment[start + 1 : end]
         cursor = end + 1
+
+
+def _strip_toml_comment(line: str) -> str:
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_string:
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if ch == "#" and not in_string:
+            return line[:i]
+    return line
 
 
 def run_all(
