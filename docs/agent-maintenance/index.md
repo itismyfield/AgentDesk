@@ -19,7 +19,7 @@
   `src/services/api_friction.rs` service module (#1789).
 - [`auto-queue-db-extraction-plan.md`](auto-queue-db-extraction-plan.md) —
   subdomain map and ordered extraction issues for splitting the giant
-  `src/db/auto_queue/core.rs` persistence module (#1783).
+  `src/db/auto_queue/` persistence module family (#1783).
 - [`change-surfaces.md`](change-surfaces.md) — change-allowed surfaces, with
   canonical modules, giant-file flags, and `do_not_edit_without_migration_plan`
   list. Use this before adding logic to any new file.

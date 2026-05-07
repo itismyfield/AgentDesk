@@ -53,13 +53,15 @@ src/
 ├── db/
 │   ├── auto_queue/
 │   │   ├── claim.rs
-│   │   ├── core.rs
+│   │   ├── consultation.rs
+│   │   ├── entries.rs
 │   │   ├── mod.rs
 │   │   ├── phase_gates.rs
 │   │   ├── queries.rs
 │   │   ├── runs.rs
 │   │   ├── slots.rs
-│   │   └── test_support.rs
+│   │   ├── test_support.rs
+│   │   └── tests.rs
 │   ├── dispatches/
 │   │   ├── outbox/
 │   │   │   ├── claim.rs

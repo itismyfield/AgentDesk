@@ -1,6 +1,6 @@
 use sqlx::{PgPool, Row as SqlxRow};
 
-use super::core::{ENTRY_STATUS_DONE, ENTRY_STATUS_USER_CANCELLED};
+use super::entries::{ENTRY_STATUS_DONE, ENTRY_STATUS_USER_CANCELLED};
 use super::slots::release_run_slots_on_pg_tx;
 
 async fn queue_run_completion_notify_on_pg(
