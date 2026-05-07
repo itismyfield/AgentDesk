@@ -443,23 +443,6 @@ async fn clear_force_transition_terminalized_links_on_pg_tx(
     Ok(())
 }
 
-async fn count_live_dispatches_for_card_on_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    card_id: &str,
-) -> anyhow::Result<usize> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)
-         FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND status IN ('pending', 'dispatched')",
-    )
-    .bind(card_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| anyhow::anyhow!("count postgres live dispatches for {card_id}: {error}"))?;
-    Ok(count.max(0) as usize)
-}
-
 async fn cancel_active_dispatches_for_card_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     card_id: &str,
@@ -693,12 +676,11 @@ async fn execute_allowed_cleanup_on_pg_tx(
         }
         AllowedOnConnMutation::ForceTransitionTerminalCleanup => {
             counts.cancelled_dispatches =
-                count_live_dispatches_for_card_on_pg_tx(tx, card_id).await?;
-            crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
-                tx, card_id,
-            )
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+                crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
+                    tx, card_id,
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
         }
         AllowedOnConnMutation::TestOnlyRollbackGuard => {
             return Err(anyhow::anyhow!("cleanup failed"));
@@ -902,12 +884,11 @@ async fn transition_status_with_opts_pg_inner(
         let mut counts = PgTransitionCleanupCounts::default();
         if effective.is_terminal(new_status) {
             counts.cancelled_dispatches =
-                count_live_dispatches_for_card_on_pg_tx(&mut tx, card_id).await?;
-            crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
-                &mut tx, card_id,
-            )
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+                crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
+                    &mut tx, card_id,
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
         }
         counts
     };

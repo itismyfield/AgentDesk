@@ -491,7 +491,7 @@ async fn close_pg_card_for_issue(
         crate::engine::transition_executor_pg::execute_pg_transition_intent(&mut tx, intent)
             .await?;
     }
-    crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
+    let _ = crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
         &mut tx, &card.id,
     )
     .await?;
