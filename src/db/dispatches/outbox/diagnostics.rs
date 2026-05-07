@@ -6,14 +6,22 @@ pub(crate) async fn record_routing_diagnostics_pg(
     dispatch_id: &str,
     diagnostics: &serde_json::Value,
 ) {
+    let preferred_owner = diagnostics
+        .get("selected")
+        .and_then(|selected| selected.get("decision"))
+        .and_then(|decision| decision.get("instance_id"))
+        .and_then(|value| value.as_str());
+
     if let Err(error) = sqlx::query(
         "UPDATE dispatch_outbox
             SET routing_diagnostics = $2,
+                claim_owner = $3,
                 next_attempt_at = NOW() + INTERVAL '5 seconds'
           WHERE id = $1",
     )
     .bind(outbox_id)
     .bind(diagnostics)
+    .bind(preferred_owner)
     .execute(&mut **tx)
     .await
     {

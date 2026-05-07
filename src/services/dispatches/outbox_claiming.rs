@@ -43,14 +43,15 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
         }
     };
 
-    let candidates = match select_pending_dispatch_outbox_claim_candidates_pg(&mut tx).await {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            tracing::warn!("[dispatch-outbox] failed to select postgres outbox rows: {error}");
-            let _ = tx.rollback().await;
-            return Vec::new();
-        }
-    };
+    let candidates =
+        match select_pending_dispatch_outbox_claim_candidates_pg(&mut tx, claim_owner).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!("[dispatch-outbox] failed to select postgres outbox rows: {error}");
+                let _ = tx.rollback().await;
+                return Vec::new();
+            }
+        };
 
     let mut pending = Vec::new();
     for candidate in candidates {
