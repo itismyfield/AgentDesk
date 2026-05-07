@@ -1,102 +1,17 @@
 //! Postgres transition orchestration for kanban cards.
 
 use super::state_machine::{
-    cancel_active_dispatches_for_card_on_pg_tx, cleanup_force_transition_revert_fields_on_pg_tx,
-    cleanup_terminal_managed_worktrees_pg, clear_escalation_alert_state_on_pg_tx,
-    clear_force_transition_terminalized_links_on_pg_tx, fire_dynamic_hooks,
-    github_sync_on_transition_pg, record_true_negative_if_pass_with_backends,
-    resolve_pipeline_with_pg, skip_live_auto_queue_entries_for_card_on_pg_tx,
+    fire_dynamic_hooks, github_sync_on_transition_pg, record_true_negative_if_pass_with_backends,
+    resolve_pipeline_with_pg,
+};
+use super::transition_cleanup::{
+    AllowedOnConnMutation, PgTransitionCleanupCounts, cleanup_terminal_managed_worktrees_pg,
+    clear_escalation_alert_state_on_pg_tx, execute_allowed_cleanup_on_pg_tx,
 };
 use crate::db::Db;
 use crate::engine::PolicyEngine;
 use anyhow::Result;
 use sqlx::Row as SqlxRow;
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct PgTransitionCleanupCounts {
-    pub cancelled_dispatches: usize,
-    pub skipped_auto_queue_entries: usize,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AllowedOnConnMutation {
-    ForceTransitionRevertCleanup,
-    ForceTransitionTerminalCleanup,
-    TestOnlyRollbackGuard,
-    TestOnlyManualInterventionCleanup,
-}
-
-impl AllowedOnConnMutation {
-    fn audit_value(self) -> &'static str {
-        match self {
-            Self::ForceTransitionRevertCleanup => "force_transition_revert_cleanup",
-            Self::ForceTransitionTerminalCleanup => "force_transition_terminal_cleanup",
-            Self::TestOnlyRollbackGuard => "test_only_rollback_guard",
-            Self::TestOnlyManualInterventionCleanup => "test_only_manual_intervention_cleanup",
-        }
-    }
-
-    fn rationale(self) -> &'static str {
-        match self {
-            Self::ForceTransitionRevertCleanup => {
-                "same transaction required to clear review and dispatch residue while rewinding status"
-            }
-            Self::ForceTransitionTerminalCleanup => {
-                "same transaction required to cancel stale dispatches before terminal status commits"
-            }
-            Self::TestOnlyRollbackGuard => {
-                "test-only rollback probe for transition + cleanup atomicity"
-            }
-            Self::TestOnlyManualInterventionCleanup => {
-                "test-only cleanup for escalation-cooldown clearing assertions"
-            }
-        }
-    }
-}
-
-async fn execute_allowed_cleanup_on_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    card_id: &str,
-    new_status: &str,
-    on_pg_policy: AllowedOnConnMutation,
-) -> Result<PgTransitionCleanupCounts> {
-    let mut counts = PgTransitionCleanupCounts::default();
-
-    match on_pg_policy {
-        AllowedOnConnMutation::ForceTransitionRevertCleanup => {
-            let reason = format!("force-transition to {new_status}");
-            // Model 2: generic cancel keeps the dispatch pointer for
-            // provenance. Force-transition cleanup is the explicit terminal
-            // cleanup path, so it preserves the detailed cancel bookkeeping
-            // and then clears any skipped links that cancel's side-effect left.
-            let cancelled_counts =
-                cancel_active_dispatches_for_card_on_pg_tx(tx, card_id, Some(&reason)).await?;
-            counts.cancelled_dispatches = cancelled_counts.cancelled_dispatches;
-            counts.skipped_auto_queue_entries = cancelled_counts.skipped_auto_queue_entries;
-            counts.skipped_auto_queue_entries +=
-                skip_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
-            clear_force_transition_terminalized_links_on_pg_tx(tx, card_id).await?;
-            cleanup_force_transition_revert_fields_on_pg_tx(tx, card_id).await?;
-        }
-        AllowedOnConnMutation::ForceTransitionTerminalCleanup => {
-            counts.cancelled_dispatches =
-                crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
-                    tx, card_id,
-                )
-                .await
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
-        }
-        AllowedOnConnMutation::TestOnlyRollbackGuard => {
-            return Err(anyhow::anyhow!("cleanup failed"));
-        }
-        AllowedOnConnMutation::TestOnlyManualInterventionCleanup => {
-            clear_escalation_alert_state_on_pg_tx(tx, card_id).await?;
-        }
-    }
-
-    Ok(counts)
-}
 
 async fn transition_status_with_opts_pg_inner(
     db: Option<&Db>,

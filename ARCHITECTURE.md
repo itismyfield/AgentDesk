@@ -156,6 +156,7 @@ src/
 │   ├── mod.rs
 │   ├── state_machine.rs
 │   ├── test_support.rs
+│   ├── transition_cleanup.rs
 │   └── transition_core.rs
 ├── runtime_layout/
 │   ├── config_merge.rs
@@ -282,7 +283,8 @@ src/
 │   │   │   └── processing.rs
 │   │   ├── core.rs
 │   │   ├── markers.rs
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   └── storage.rs
 │   ├── auto_queue/
 │   │   ├── activate_bridge.rs
 │   │   ├── activate_command.rs

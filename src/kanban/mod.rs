@@ -4,9 +4,11 @@
 //! smaller owner modules.
 
 mod state_machine;
+mod transition_cleanup;
 mod transition_core;
 
 pub(crate) use state_machine::*;
+pub(crate) use transition_cleanup::*;
 pub(crate) use transition_core::*;
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
