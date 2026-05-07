@@ -159,32 +159,28 @@ pub(in crate::services::discord) fn process_watcher_lines(
                             state.last_model = Some(model.to_string());
                         }
                         if let Some(usage) = message.get("usage") {
-                            state.accum_input_tokens = state.accum_input_tokens.saturating_add(
-                                usage
-                                    .get("input_tokens")
-                                    .and_then(|value| value.as_u64())
-                                    .unwrap_or(0),
-                            );
-                            state.accum_cache_read_tokens =
-                                state.accum_cache_read_tokens.saturating_add(
-                                    usage
-                                        .get("cache_read_input_tokens")
-                                        .and_then(|value| value.as_u64())
-                                        .unwrap_or(0),
-                                );
-                            state.accum_cache_create_tokens =
-                                state.accum_cache_create_tokens.saturating_add(
-                                    usage
-                                        .get("cache_creation_input_tokens")
-                                        .and_then(|value| value.as_u64())
-                                        .unwrap_or(0),
-                                );
-                            state.accum_output_tokens = state.accum_output_tokens.saturating_add(
-                                usage
-                                    .get("output_tokens")
-                                    .and_then(|value| value.as_u64())
-                                    .unwrap_or(0),
-                            );
+                            // #1918 — replace, do not accumulate. Each assistant
+                            // message's `usage` describes one API call's prompt;
+                            // the LAST one is the current context occupancy. The
+                            // status panel's Context line summed these values, so
+                            // accumulating across a multi-call (tool-use loop) turn
+                            // inflated the displayed usage past the window size.
+                            state.accum_input_tokens = usage
+                                .get("input_tokens")
+                                .and_then(|value| value.as_u64())
+                                .unwrap_or(state.accum_input_tokens);
+                            state.accum_cache_read_tokens = usage
+                                .get("cache_read_input_tokens")
+                                .and_then(|value| value.as_u64())
+                                .unwrap_or(state.accum_cache_read_tokens);
+                            state.accum_cache_create_tokens = usage
+                                .get("cache_creation_input_tokens")
+                                .and_then(|value| value.as_u64())
+                                .unwrap_or(state.accum_cache_create_tokens);
+                            state.accum_output_tokens = usage
+                                .get("output_tokens")
+                                .and_then(|value| value.as_u64())
+                                .unwrap_or(state.accum_output_tokens);
                         }
                         // Text content from assistant message
                         if let Some(content) = message.get("content") {
@@ -365,24 +361,14 @@ pub(in crate::services::discord) fn process_watcher_lines(
                             full_response.push_str(&result_str);
                         }
                     }
-                    if let Some(usage) = val.get("usage") {
-                        state.accum_input_tokens = usage
-                            .get("input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        state.accum_cache_read_tokens = usage
-                            .get("cache_read_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        state.accum_cache_create_tokens = usage
-                            .get("cache_creation_input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        state.accum_output_tokens = usage
-                            .get("output_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                    }
+                    // #1918 — context-window usage uses the LAST API call's
+                    // per-message `usage`, captured during the assistant-message
+                    // branch above. Older revisions copied result.usage here on
+                    // the assumption it reflected the final call, but Claude
+                    // CLI's result event in multi-call (tool-use loop) turns
+                    // reports turn-cumulative counts and inflated the displayed
+                    // context occupancy past the window size. Trust the
+                    // per-message stream instead.
 
                     state.final_result = Some(String::new());
                     outcome.found_result = true;

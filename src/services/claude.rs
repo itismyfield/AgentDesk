@@ -753,10 +753,17 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     let mut last_session_id: Option<String> = None;
     let mut last_model: Option<String> = None;
-    let mut accum_input_tokens: u64 = 0;
-    let mut accum_cache_create_tokens: u64 = 0;
-    let mut accum_cache_read_tokens: u64 = 0;
-    let mut accum_output_tokens: u64 = 0;
+    // #1918 — track the LAST API call's usage rather than accumulating across
+    // a multi-call turn. The status panel context-usage line reports current
+    // context size, which equals the prompt size of the most recent API call,
+    // not the sum of every call's prompt within a tool-use loop. Each
+    // assistant message carries the per-call `usage`; we just keep the most
+    // recent one. Cumulative cost accounting is handled separately by the
+    // CLI's own `cost_usd` field.
+    let mut last_call_input_tokens: u64 = 0;
+    let mut last_call_cache_create_tokens: u64 = 0;
+    let mut last_call_cache_read_tokens: u64 = 0;
+    let mut last_call_output_tokens: u64 = 0;
     let mut final_result: Option<String> = None;
     let mut stdout_error: Option<(String, String)> = None; // (message, raw_line)
     let mut line_count = 0;
@@ -845,7 +852,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         last_model = Some(model.to_string());
                     }
                     if let Some(usage) = msg_obj.get("usage") {
-                        // Include cache tokens in input total for accurate context occupancy
+                        // #1918 — replace, do not accumulate. Each assistant message's
+                        // usage describes one API call's prompt; the LAST one is the
+                        // current context occupancy.
                         let inp = usage
                             .get("input_tokens")
                             .and_then(|v| v.as_u64())
@@ -858,11 +867,11 @@ IMPORTANT: Format your responses using Markdown for better readability:
                             .get("cache_creation_input_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
-                        accum_input_tokens += inp;
-                        accum_cache_read_tokens += cache_read;
-                        accum_cache_create_tokens += cache_creation;
+                        last_call_input_tokens = inp;
+                        last_call_cache_read_tokens = cache_read;
+                        last_call_cache_create_tokens = cache_creation;
                         if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                            accum_output_tokens += out;
+                            last_call_output_tokens = out;
                         }
                     }
                 }
@@ -878,31 +887,13 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32);
 
-                // Prefer result event's own usage field over accumulated message values.
-                // The result event usage reflects the LAST API call's context window,
-                // while accumulated values overcount for multi-call turns (tool use loops).
-                if let Some(usage) = json.get("usage") {
-                    let inp = usage
-                        .get("input_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let cache_read = usage
-                        .get("cache_read_input_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let cache_creation = usage
-                        .get("cache_creation_input_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let out = usage
-                        .get("output_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    accum_input_tokens = inp;
-                    accum_cache_read_tokens = cache_read;
-                    accum_cache_create_tokens = cache_creation;
-                    accum_output_tokens = out;
-                }
+                // #1918 — context-window usage uses the LAST API call's per-message
+                // `usage`, captured during the assistant-message branch above.
+                // Older revisions copied result.usage here on the assumption it
+                // reflected the final call, but Claude CLI's result event in
+                // multi-call (tool-use loop) turns reports turn-cumulative
+                // counts and inflated the displayed context occupancy past the
+                // window size. Trust the per-message stream instead.
 
                 if cost_usd.is_some() || total_cost_usd.is_some() || last_model.is_some() {
                     let _ = sender.send(StreamMessage::StatusUpdate {
@@ -911,23 +902,23 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         total_cost_usd,
                         duration_ms,
                         num_turns,
-                        input_tokens: if accum_input_tokens > 0 {
-                            Some(accum_input_tokens)
+                        input_tokens: if last_call_input_tokens > 0 {
+                            Some(last_call_input_tokens)
                         } else {
                             None
                         },
-                        cache_create_tokens: if accum_cache_create_tokens > 0 {
-                            Some(accum_cache_create_tokens)
+                        cache_create_tokens: if last_call_cache_create_tokens > 0 {
+                            Some(last_call_cache_create_tokens)
                         } else {
                             None
                         },
-                        cache_read_tokens: if accum_cache_read_tokens > 0 {
-                            Some(accum_cache_read_tokens)
+                        cache_read_tokens: if last_call_cache_read_tokens > 0 {
+                            Some(last_call_cache_read_tokens)
                         } else {
                             None
                         },
-                        output_tokens: if accum_output_tokens > 0 {
-                            Some(accum_output_tokens)
+                        output_tokens: if last_call_output_tokens > 0 {
+                            Some(last_call_output_tokens)
                         } else {
                             None
                         },
