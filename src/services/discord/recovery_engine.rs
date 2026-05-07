@@ -6,7 +6,7 @@ use super::settings::{
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 use crate::db::turns::TurnTokenUsage;
-use crate::services::agent_protocol::StreamMessage;
+use crate::services::agent_protocol::{StatusEvent, StreamMessage};
 use crate::services::git::GitCommand;
 #[cfg(unix)]
 use crate::services::platform::binary_resolver;
@@ -112,6 +112,50 @@ async fn relay_recovery_terminal_notice(
     )
     .await
     .is_ok()
+}
+
+async fn complete_recovery_visible_turn(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    background: bool,
+    source: &'static str,
+) {
+    let channel_id = ChannelId::new(state.channel_id);
+    let user_msg_id = MessageId::new(state.user_msg_id);
+    super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
+    super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
+
+    if !shared.status_panel_v2_enabled {
+        return;
+    }
+    let Some(status_msg_id) = state.status_message_id.map(MessageId::new) else {
+        return;
+    };
+
+    shared
+        .placeholder_live_events
+        .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
+    let started_at_unix = super::inflight::parse_started_at_unix(&state.started_at)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let panel_text =
+        shared
+            .placeholder_live_events
+            .render_status_panel(channel_id, provider, started_at_unix);
+
+    rate_limit_wait(shared, channel_id).await;
+    if let Err(error) =
+        super::http::edit_channel_message(http, channel_id, status_msg_id, &panel_text).await
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ recovery status-panel-v2 completion edit failed from {source} for msg {} in channel {}: {}",
+            status_msg_id.get(),
+            channel_id.get(),
+            error
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1155,8 +1199,15 @@ pub(super) async fn restore_inflight_turns(
                 // delivery commits; otherwise the channel shows completion
                 // without the final assistant message.
                 let user_msg_id = MessageId::new(state.user_msg_id);
-                super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
-                super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
+                complete_recovery_visible_turn(
+                    http,
+                    shared,
+                    provider,
+                    &state,
+                    false,
+                    "completed_during_downtime",
+                )
+                .await;
                 // Complete the dispatch if this was a work dispatch turn — the
                 // normal completion path was lost when dcserver restarted.
                 // #142: implementation/rework need explicit completion. Review
@@ -1716,8 +1767,15 @@ pub(super) async fn restore_inflight_turns(
                 );
                 continue;
             }
-            super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
-            super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
+            complete_recovery_visible_turn(
+                http,
+                shared,
+                provider,
+                &state,
+                false,
+                "captured_full_response",
+            )
+            .await;
 
             let recovered_dispatch_id = parse_dispatch_id(&state.user_text)
                 .or(lookup_pending_dispatch_for_thread(shared.api_port, state.channel_id).await);
@@ -1947,8 +2005,15 @@ pub(super) async fn restore_inflight_turns(
                 continue;
             }
             // Mark user message as completed only after Discord terminal delivery commits.
-            super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
-            super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
+            complete_recovery_visible_turn(
+                http,
+                shared,
+                provider,
+                &state,
+                false,
+                "output_completed",
+            )
+            .await;
 
             // Complete the dispatch if this was an implementation/rework turn.
             // Review dispatches require the verdict flow (review_verdict.rs)
