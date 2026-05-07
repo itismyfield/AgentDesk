@@ -1,5 +1,6 @@
 mod core;
 mod markers;
+mod memory_sync;
 mod storage;
 
 #[allow(unused_imports)]

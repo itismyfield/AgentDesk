@@ -2,14 +2,11 @@ use serde::Serialize;
 use sqlx::PgPool;
 
 use super::markers::ApiFrictionReport;
-use super::storage::{
-    DEFAULT_API_FRICTION_REPO, mark_event_memory_status_pg, store_api_friction_events_pg,
-};
+use super::memory_sync::sync_event_memory_pg;
+use super::storage::{DEFAULT_API_FRICTION_REPO, store_api_friction_events_pg};
 use crate::db::Db;
-use crate::services::discord::settings::{
-    MemoryBackendKind, ResolvedMemorySettings, resolve_memory_settings,
-};
-use crate::services::memory::{MementoBackend, TokenUsage};
+use crate::services::discord::settings::ResolvedMemorySettings;
+use crate::services::memory::TokenUsage;
 use crate::utils::api::clamp_api_limit;
 
 pub(super) const API_FRICTION_MIN_REPEAT_COUNT: usize = 2;
@@ -96,44 +93,15 @@ pub(crate) async fn record_api_friction_reports(
             .to_string()
     })?;
     let inserted_events = store_api_friction_events_pg(pg_pool, &context, reports).await?;
+    let stored_event_count = inserted_events.len();
+    let memory_result = sync_event_memory_pg(pg_pool, memory_settings, inserted_events).await;
 
-    let memory_backend = match resolve_memory_backend_for_friction(memory_settings) {
-        Some(settings) => Some(MementoBackend::new(settings)),
-        None => None,
-    };
-
-    let mut result = ApiFrictionRecordResult {
-        stored_event_count: inserted_events.len(),
-        ..ApiFrictionRecordResult::default()
-    };
-
-    for memory_draft in inserted_events {
-        let Some(backend) = memory_backend.as_ref() else {
-            mark_event_memory_status_pg(
-                pg_pool,
-                &memory_draft.event_id,
-                "skipped_backend",
-                Some("memento backend is not active for API friction".to_string()),
-            )
-            .await;
-            continue;
-        };
-
-        match backend.remember(memory_draft.request).await {
-            Ok(token_usage) => {
-                result.memory_stored_count += 1;
-                result.token_usage.saturating_add_assign(token_usage);
-                mark_event_memory_status_pg(pg_pool, &memory_draft.event_id, "stored", None).await;
-            }
-            Err(error) => {
-                result.memory_errors.push(error.clone());
-                mark_event_memory_status_pg(pg_pool, &memory_draft.event_id, "failed", Some(error))
-                    .await;
-            }
-        }
-    }
-
-    Ok(result)
+    Ok(ApiFrictionRecordResult {
+        stored_event_count,
+        memory_stored_count: memory_result.memory_stored_count,
+        memory_errors: memory_result.memory_errors,
+        token_usage: memory_result.token_usage,
+    })
 }
 
 pub(crate) async fn process_api_friction_patterns(
@@ -285,16 +253,6 @@ pub(crate) async fn process_api_friction_patterns(
     }
 
     Ok(summary)
-}
-
-fn resolve_memory_backend_for_friction(
-    memory_settings: &ResolvedMemorySettings,
-) -> Option<ResolvedMemorySettings> {
-    if memory_settings.backend == MemoryBackendKind::Memento {
-        return Some(memory_settings.clone());
-    }
-    let resolved = resolve_memory_settings(None, None);
-    (resolved.backend == MemoryBackendKind::Memento).then_some(resolved)
 }
 
 pub(super) async fn load_pattern_candidates_pg(

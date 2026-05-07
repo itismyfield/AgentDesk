@@ -1,11 +1,10 @@
 use sqlx::PgPool;
 
 use super::core::ApiFrictionRecordContext;
-use super::markers::{ApiFrictionReport, truncate_chars};
-use crate::services::memory::MementoRememberRequest;
+use super::markers::ApiFrictionReport;
+use super::memory_sync::{EventMemoryDraft, build_memento_request};
 
 pub(super) const DEFAULT_API_FRICTION_REPO: &str = "itismyfield/AgentDesk";
-const MAX_MEMORY_CONTENT_CHARS: usize = 900;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct SourceContext {
@@ -14,12 +13,6 @@ pub(super) struct SourceContext {
     pub(super) issue_number: Option<i64>,
     pub(super) task_summary: Option<String>,
     pub(super) agent_id: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct EventMemoryDraft {
-    pub(super) event_id: String,
-    pub(super) request: MementoRememberRequest,
 }
 
 #[derive(Clone, Debug)]
@@ -39,7 +32,7 @@ struct PreparedEventRow {
     github_issue_number_pg: Option<i32>,
     task_summary: Option<String>,
     agent_id: Option<String>,
-    request: MementoRememberRequest,
+    memory_draft: EventMemoryDraft,
 }
 
 pub(super) async fn store_api_friction_events_pg(
@@ -54,10 +47,7 @@ pub(super) async fn store_api_friction_events_pg(
 
     Ok(prepared_rows
         .into_iter()
-        .map(|row| EventMemoryDraft {
-            event_id: row.event_id,
-            request: row.request,
-        })
+        .map(|row| row.memory_draft)
         .collect())
 }
 
@@ -166,9 +156,18 @@ fn prepare_event_rows(
                 .repo_id
                 .clone()
                 .unwrap_or_else(|| DEFAULT_API_FRICTION_REPO.to_string());
+            let memory_draft = EventMemoryDraft {
+                event_id: event_id.clone(),
+                request: build_memento_request(
+                    source_context,
+                    report,
+                    &fingerprint,
+                    context.dispatch_id,
+                ),
+            };
 
             Ok(PreparedEventRow {
-                event_id: event_id.clone(),
+                event_id,
                 fingerprint: fingerprint.clone(),
                 endpoint: report.endpoint.clone(),
                 friction_type: report.friction_type.clone(),
@@ -185,12 +184,7 @@ fn prepare_event_rows(
                     .and_then(|value| i32::try_from(value).ok()),
                 task_summary: source_context.task_summary.clone(),
                 agent_id: source_context.agent_id.clone(),
-                request: build_memento_request(
-                    source_context,
-                    report,
-                    &fingerprint,
-                    context.dispatch_id,
-                ),
+                memory_draft,
             })
         })
         .collect()
@@ -251,69 +245,6 @@ async fn persist_event_rows_pg(
     Ok(())
 }
 
-fn build_memento_request(
-    source_context: &SourceContext,
-    report: &ApiFrictionReport,
-    fingerprint: &str,
-    dispatch_id: Option<&str>,
-) -> MementoRememberRequest {
-    let source = [
-        dispatch_id.map(|value| format!("dispatch:{value}")),
-        source_context
-            .card_id
-            .as_deref()
-            .map(|value| format!("card:{value}")),
-        source_context
-            .issue_number
-            .map(|value| format!("issue:{value}")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join("/");
-
-    let repo_workspace = source_context
-        .repo_id
-        .as_deref()
-        .and_then(|value| value.split('/').next_back())
-        .map(crate::services::memory::sanitize_memento_workspace_segment)
-        .unwrap_or_else(|| "agentdesk".to_string());
-
-    let content = truncate_chars(
-        &format!(
-            "API friction on {} ({})\nSummary: {}\nWorkaround: {}\nSuggested fix: {}\nTask: {}",
-            report.endpoint,
-            report.friction_type,
-            report.summary,
-            report.workaround.as_deref().unwrap_or("not provided"),
-            report.suggested_fix.as_deref().unwrap_or("not provided"),
-            source_context
-                .task_summary
-                .as_deref()
-                .unwrap_or("not provided"),
-        ),
-        MAX_MEMORY_CONTENT_CHARS,
-    );
-
-    MementoRememberRequest {
-        content,
-        topic: "api-friction".to_string(),
-        kind: "error".to_string(),
-        importance: None,
-        keywords: report.keywords.clone(),
-        source: (!source.is_empty()).then_some(source),
-        workspace: Some(repo_workspace),
-        agent_id: Some("default".to_string()),
-        case_id: Some(fingerprint.to_string()),
-        goal: Some(format!("Reduce API friction for {}", report.endpoint)),
-        outcome: Some("observed".to_string()),
-        phase: Some("runtime".to_string()),
-        resolution_status: Some("open".to_string()),
-        assertion_status: Some("reported".to_string()),
-        context_summary: Some(report.summary.clone()),
-    }
-}
-
 fn build_fingerprint(endpoint: &str, friction_type: &str) -> String {
     let endpoint = endpoint
         .chars()
@@ -344,22 +275,4 @@ fn build_fingerprint(endpoint: &str, friction_type: &str) -> String {
         .collect::<Vec<_>>()
         .join("-");
     format!("{endpoint}::{friction_type}")
-}
-
-pub(super) async fn mark_event_memory_status_pg(
-    pg_pool: &PgPool,
-    event_id: &str,
-    status: &str,
-    error: Option<String>,
-) {
-    let _ = sqlx::query(
-        "UPDATE api_friction_events
-             SET memory_status = $1, memory_error = $2
-             WHERE id = $3",
-    )
-    .bind(status)
-    .bind(error.as_deref())
-    .bind(event_id)
-    .execute(pg_pool)
-    .await;
 }
