@@ -150,7 +150,8 @@ src/
 ├── kanban/
 │   ├── mod.rs
 │   ├── state_machine.rs
-│   └── test_support.rs
+│   ├── test_support.rs
+│   └── transition_core.rs
 ├── runtime_layout/
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
@@ -267,13 +268,15 @@ src/
 │   │   ├── queue_metrics.rs
 │   │   └── session_metrics.rs
 │   ├── api_friction/
-│   │   └── tests/
-│   │       ├── helpers.rs
-│   │       ├── memory_sync.rs
-│   │       ├── mod.rs
-│   │       ├── parser.rs
-│   │       ├── pg_storage.rs
-│   │       └── processing.rs
+│   │   ├── tests/
+│   │   │   ├── helpers.rs
+│   │   │   ├── memory_sync.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── parser.rs
+│   │   │   ├── pg_storage.rs
+│   │   │   └── processing.rs
+│   │   ├── core.rs
+│   │   └── mod.rs
 │   ├── auto_queue/
 │   │   ├── activate_bridge.rs
 │   │   ├── activate_command.rs
@@ -526,7 +529,6 @@ src/
 │   │   └── mod.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
-│   ├── api_friction.rs
 │   ├── auto_queue.rs
 │   ├── claude.rs
 │   ├── codex.rs
