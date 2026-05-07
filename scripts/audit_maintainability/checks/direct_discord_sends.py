@@ -11,7 +11,15 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from ..common import Finding, is_allowlisted, line_of, read_text, rel_posix, strip_rust_comments
+from ..common import (
+    Finding,
+    is_allowlisted,
+    line_of,
+    read_text,
+    rel_posix,
+    stable_finding_key,
+    strip_rust_comments,
+)
 from . import CheckSpec
 
 ALLOWED_PARENTS = (
@@ -31,6 +39,21 @@ PATTERN = re.compile(
     r"(?:send_message|send_files|edit_message|create_message)\b",
 )
 
+FN_PATTERN = re.compile(r"\b(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*\(")
+
+
+def _enclosing_fn(text: str, offset: int) -> str:
+    matches = list(FN_PATTERN.finditer(text[:offset]))
+    if not matches:
+        return "<module>"
+    return matches[-1].group(1)
+
+
+def _snippet_context(text: str, offset: int, match_text: str) -> str:
+    start = max(0, offset - 160)
+    end = min(len(text), offset + 160)
+    return f"{_enclosing_fn(text, offset)}::{match_text}::{' '.join(text[start:end].split())}"
+
 
 def _run(allowlist: set[str]) -> Iterable[Finding]:
     from ..common import production_rust_files
@@ -44,7 +67,13 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
         stripped = strip_rust_comments(text)
         for match in PATTERN.finditer(stripped):
             line = line_of(stripped, match.start())
-            if is_allowlisted(allowlist, rel, line):
+            match_text = match.group(0).strip()
+            key = stable_finding_key(
+                "direct_discord_sends",
+                rel,
+                _snippet_context(stripped, match.start(), match_text),
+            )
+            if is_allowlisted(allowlist, rel, line, key):
                 continue
             findings.append(
                 Finding(
@@ -52,7 +81,8 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
                     severity="warn",
                     file=rel,
                     line=line,
-                    message=f"direct Discord send/edit call: `{match.group(0).strip()}`",
+                    message=f"direct Discord send/edit call: `{match_text}`",
+                    extra={"allowlist_key": key},
                 )
             )
     findings.sort(key=lambda f: (f.file, f.line or 0))
