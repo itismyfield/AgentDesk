@@ -179,7 +179,6 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
         hostname,
         pid,
         configured_role,
-        effective_role,
         labels,
         capabilities,
         config.cluster.heartbeat_interval_secs,
@@ -205,7 +204,6 @@ fn spawn_heartbeat_loop(
     hostname: String,
     pid: i32,
     configured_role: ClusterRole,
-    effective_role: ClusterRole,
     labels: serde_json::Value,
     capabilities: serde_json::Value,
     heartbeat_interval_secs: u64,
@@ -213,6 +211,7 @@ fn spawn_heartbeat_loop(
     mut leader_lease: Option<AdvisoryLockLease>,
 ) {
     let interval_secs = heartbeat_interval_secs.max(1);
+    let leader_eligible = matches!(configured_role, ClusterRole::Leader | ClusterRole::Auto);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.tick().await;
@@ -223,9 +222,36 @@ fn spawn_heartbeat_loop(
             {
                 tracing::warn!("[cluster] leader lease keepalive failed: {error}");
                 leader_active.store(false, Ordering::Release);
+                leader_lease = None;
+            }
+            // Live failover: if this node is eligible to lead and currently is
+            // not leader, retry the advisory lock. Picks up leadership when the
+            // previous leader's session is gone (Postgres releases the lock on
+            // session disconnect), without waiting for a dcserver restart.
+            if leader_eligible && leader_lease.is_none() && !leader_active.load(Ordering::Acquire) {
+                match AdvisoryLockLease::try_acquire(
+                    &pool,
+                    CLUSTER_LEADER_ADVISORY_LOCK_ID,
+                    "cluster-leader",
+                )
+                .await
+                {
+                    Ok(Some(new_lease)) => {
+                        tracing::info!(
+                            instance_id,
+                            "[cluster] acquired leader advisory lock via failover"
+                        );
+                        leader_lease = Some(new_lease);
+                        leader_active.store(true, Ordering::Release);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!("[cluster] leader lease retry failed: {error}");
+                    }
+                }
             }
             let current_effective_role = if leader_active.load(Ordering::Acquire) {
-                effective_role
+                ClusterRole::Leader
             } else {
                 ClusterRole::Worker
             };
