@@ -210,14 +210,14 @@
 ### `runtime_core`
 
 - canonical_modules: `src/config.rs`, `src/runtime_layout/mod.rs`,
-  `src/server/mod.rs`, `src/kanban.rs`, `src/receipt.rs`, and
+  `src/server/mod.rs`, `src/kanban/state_machine.rs`, `src/receipt.rs`, and
   `src/github/sync.rs`.
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/config.rs` (2601 lines).
   - `src/runtime_layout/mod.rs` (1425 lines).
   - `src/server/mod.rs` (3370 lines).
-  - `src/kanban.rs` (4041 lines).
+  - `src/kanban/state_machine.rs` (3550 lines).
   - `src/receipt.rs` (2133 lines).
   - `src/github/sync.rs` (1059 lines).
 - active_callsite_coverage: n/a.
@@ -225,12 +225,12 @@
   persistence, and GitHub sync must keep their existing owner-specific
   contracts; split work needs a dedicated extraction issue before new feature
   logic lands here.
-- allowed_changes: `bugfix` only; `src/kanban.rs` extraction is scoped by
+- allowed_changes: `bugfix` only; `src/kanban/` extraction is scoped by
   `docs/agent-maintenance/kanban-extraction-plan.md`; new feature logic must
   land in smaller owner-specific modules or a scoped extraction branch.
-- tests: owner-specific tests, with `src/kanban.rs` inline tests moving per
+- tests: owner-specific tests, with `src/kanban/state_machine.rs` inline tests moving per
   `docs/agent-maintenance/kanban-extraction-plan.md`.
-- related_issues: #1786, #1787, #1818-#1825 for `src/kanban.rs`; other runtime
+- related_issues: #1786, #1787, #1818-#1825 for `src/kanban/`; other runtime
   giant-file split issues TBD.
 
 ### `db_layer`

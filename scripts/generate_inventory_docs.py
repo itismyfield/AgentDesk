@@ -36,7 +36,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "high_risk_recovery.rs": "PG-only high-risk recovery tests for boot reconciliation and review refire paths.",
     "integration_tests/": "Scenario-specific integration test modules that supplement `src/integration_tests.rs`.",
     "integration_tests.rs": "End-to-end pipeline, dispatch, review, and recovery integration test harness.",
-    "kanban.rs": "High-level kanban orchestration and transition entrypoints.",
+    "kanban/": "High-level kanban orchestration, state machine facade, and shared test support.",
     "launch.rs": "Starts the Tokio runtime and hands off to server boot.",
     "logging.rs": "Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs.",
     "main.rs": "Binary entry point. Dispatches CLI commands or boots the server runtime.",

@@ -99,7 +99,9 @@ src/
 │   ├── dispatch_context.rs
 │   ├── dispatch_create.rs
 │   ├── dispatch_status.rs
-│   └── mod.rs
+│   ├── mod.rs
+│   ├── test_support.rs
+│   └── types.rs
 ├── engine/
 │   ├── ops/
 │   │   ├── agent_ops.rs
@@ -145,6 +147,10 @@ src/
 │   ├── tests/
 │   │   └── high_risk_recovery.rs
 │   └── agents_setup_e2e.rs
+├── kanban/
+│   ├── mod.rs
+│   ├── state_machine.rs
+│   └── test_support.rs
 ├── runtime_layout/
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
@@ -339,7 +345,6 @@ src/
 │   │   │   ├── common.rs
 │   │   │   ├── context_panel.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── prompt_panel.rs
 │   │   │   ├── recent_events.rs
 │   │   │   ├── session_panel.rs
 │   │   │   ├── status_events.rs
@@ -583,7 +588,6 @@ src/
 ├── error.rs
 ├── high_risk_recovery.rs
 ├── integration_tests.rs
-├── kanban.rs
 ├── launch.rs
 ├── logging.rs
 ├── main.rs
@@ -613,6 +617,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |
 | `src/integration_tests/` | Scenario-specific integration test modules that supplement `src/integration_tests.rs`. |
+| `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
 | `src/services/` | Core runtime services: provider runners, Discord bot, queueing, memory, and platform helpers. |
@@ -625,7 +630,6 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/error.rs` | Shared HTTP and policy error type with typed codes and JSON response helpers. |
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
 | `src/integration_tests.rs` | End-to-end pipeline, dispatch, review, and recovery integration test harness. |
-| `src/kanban.rs` | High-level kanban orchestration and transition entrypoints. |
 | `src/launch.rs` | Starts the Tokio runtime and hands off to server boot. |
 | `src/logging.rs` | Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs. |
 | `src/main.rs` | Binary entry point. Dispatches CLI commands or boots the server runtime. |
