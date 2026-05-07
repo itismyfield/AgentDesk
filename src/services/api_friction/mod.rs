@@ -1,11 +1,15 @@
 mod core;
+mod markers;
 
 #[allow(unused_imports)]
 pub(crate) use self::core::{
-    ApiFrictionExtraction, ApiFrictionPattern, ApiFrictionPatternFailure,
-    ApiFrictionProcessSummary, ApiFrictionRecordContext, ApiFrictionRecordResult,
-    ApiFrictionReport, ProcessedApiFrictionIssue, extract_api_friction_reports,
+    ApiFrictionPattern, ApiFrictionPatternFailure, ApiFrictionProcessSummary,
+    ApiFrictionRecordContext, ApiFrictionRecordResult, ProcessedApiFrictionIssue,
     process_api_friction_patterns, record_api_friction_reports,
+};
+#[allow(unused_imports)]
+pub(crate) use self::markers::{
+    ApiFrictionExtraction, ApiFrictionReport, extract_api_friction_reports,
 };
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
