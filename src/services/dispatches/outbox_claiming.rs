@@ -17,19 +17,24 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
     pool: &PgPool,
     claim_owner: &str,
 ) -> Vec<DispatchOutboxRow> {
-    let owner_node =
-        match crate::server::cluster::worker_node_snapshot_by_instance(pool, claim_owner, 60).await
-        {
-            Ok(node) => node,
-            Err(error) => {
-                tracing::warn!(
-                    claim_owner,
-                    error,
-                    "[dispatch-outbox] failed to load claim owner capabilities"
-                );
-                None
-            }
-        };
+    let lease_ttl_secs = 60u64;
+    let worker_nodes = match crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            tracing::warn!(
+                claim_owner,
+                error,
+                "[dispatch-outbox] failed to list worker nodes for routing"
+            );
+            Vec::new()
+        }
+    };
+    let owner_node = worker_nodes
+        .iter()
+        .find(|node| node.get("instance_id").and_then(|value| value.as_str()) == Some(claim_owner))
+        .cloned();
+    let cluster_default = cluster_default_required_capabilities();
+
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(error) => {
@@ -49,13 +54,47 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
 
     let mut pending = Vec::new();
     for candidate in candidates {
-        if let Some(required) =
-            non_empty_required_capabilities(candidate.required_capabilities.as_ref())
-        {
-            let decision =
+        let dispatch_required = candidate.required_capabilities.clone();
+        let routing_origin: &'static str =
+            if non_empty_required_capabilities(dispatch_required.as_ref()).is_some() {
+                "dispatch"
+            } else if cluster_default.is_some() {
+                "cluster_default"
+            } else {
+                "none"
+            };
+        let effective_required: Option<Value> = match routing_origin {
+            "dispatch" => dispatch_required.clone(),
+            "cluster_default" => cluster_default.clone(),
+            _ => None,
+        };
+
+        if let Some(required) = effective_required.as_ref() {
+            let owner_decision =
                 capability_decision_for_claim_owner(owner_node.as_ref(), claim_owner, required);
-            if !decision.eligible {
-                let diagnostics = routing_diagnostics(claim_owner, &decision, required);
+            let route_candidates =
+                crate::server::cluster::select_capability_route(&worker_nodes, required);
+            let selected = route_candidates
+                .first()
+                .and_then(|candidate| candidate.decision.instance_id.as_deref());
+            let preference_mismatch = selected.is_some() && selected != Some(claim_owner);
+
+            if !owner_decision.eligible || preference_mismatch {
+                let mut decision = owner_decision.clone();
+                if preference_mismatch && decision.eligible && decision.reasons.is_empty() {
+                    decision.reasons.push(format!(
+                        "claim owner is not preferred route owner; selected {}",
+                        selected.unwrap_or("unknown")
+                    ));
+                }
+                let diagnostics = routing_diagnostics(
+                    claim_owner,
+                    &decision,
+                    dispatch_required.as_ref(),
+                    effective_required.as_ref(),
+                    routing_origin,
+                    &route_candidates,
+                );
                 record_routing_diagnostics_pg(
                     &mut tx,
                     candidate.id,
@@ -94,6 +133,17 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
     pending
 }
 
+fn cluster_default_required_capabilities() -> Option<Value> {
+    let routing = crate::config::load_graceful().cluster.dispatch_routing;
+    if routing.default_preferred_labels.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({
+            "preferred": { "labels": routing.default_preferred_labels.clone() }
+        }))
+    }
+}
+
 fn non_empty_required_capabilities(required: Option<&Value>) -> Option<&Value> {
     match required {
         None | Some(Value::Null) => None,
@@ -119,12 +169,19 @@ fn capability_decision_for_claim_owner(
 fn routing_diagnostics(
     claim_owner: &str,
     decision: &CapabilityRouteDecision,
-    required_capabilities: &Value,
+    dispatch_required_capabilities: Option<&Value>,
+    effective_required_capabilities: Option<&Value>,
+    routing_origin: &str,
+    route_candidates: &[crate::server::cluster::CapabilityRouteCandidate],
 ) -> Value {
     serde_json::json!({
         "claim_owner": claim_owner,
         "decision": decision,
-        "required_capabilities": required_capabilities,
+        "selected": route_candidates.first(),
+        "candidates": route_candidates,
+        "required_capabilities": dispatch_required_capabilities,
+        "effective_required_capabilities": effective_required_capabilities,
+        "routing_origin": routing_origin,
         "checked_at": chrono::Utc::now(),
     })
 }
@@ -164,12 +221,27 @@ mod tests {
             reasons: vec!["missing required label mac-book".to_string()],
         };
         let required = json!({"labels": ["mac-book"]});
-        let diagnostics = routing_diagnostics("worker-a", &decision, &required);
+        let diagnostics = routing_diagnostics(
+            "worker-a",
+            &decision,
+            Some(&required),
+            Some(&required),
+            "dispatch",
+            &[],
+        );
 
         assert_eq!(diagnostics["claim_owner"], "worker-a");
         assert_eq!(diagnostics["decision"]["eligible"], false);
         assert_eq!(diagnostics["required_capabilities"], required);
+        assert_eq!(diagnostics["effective_required_capabilities"], required);
+        assert_eq!(diagnostics["routing_origin"], "dispatch");
         assert!(diagnostics["checked_at"].is_string());
+    }
+
+    #[test]
+    fn cluster_default_required_capabilities_returns_none_when_no_labels() {
+        let routing = crate::config::ClusterDispatchRoutingConfig::default();
+        assert!(routing.default_preferred_labels.is_empty());
     }
 
     #[test]
