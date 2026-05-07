@@ -99,6 +99,7 @@ src/
 │   ├── dispatch_context.rs
 │   ├── dispatch_create.rs
 │   ├── dispatch_status.rs
+│   ├── dispatch_summary.rs
 │   ├── mod.rs
 │   ├── test_support.rs
 │   └── types.rs
