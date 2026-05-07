@@ -12,8 +12,6 @@ pub(super) const STATUS_PANEL_SUBAGENT_LIMIT: usize = 6;
 pub(super) const SESSION_PANEL_LINE_MAX_CHARS: usize = 100;
 pub(super) const TASK_PANEL_LINE_MAX_CHARS: usize = 140;
 pub(super) const CONTEXT_PANEL_LINE_MAX_CHARS: usize = 120;
-pub(super) const PROMPT_PANEL_LINE_MAX_CHARS: usize = 120;
-pub(super) const PROMPT_PANEL_SKIPPED_REASON_MAX_CHARS: usize = 60;
 
 pub(super) fn sanitize_for_code_fence(raw: &str) -> String {
     raw.replace('`', "")
