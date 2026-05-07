@@ -30,6 +30,9 @@ DEPLOY_LOCK_TIMEOUT_SECS="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
 DEPLOY_MKDIR_LOCK_DIR=""
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
+CODESIGN_KEYCHAIN_PW_FILE="${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}"
+CODESIGN_KEYCHAIN_NAME="${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-agentdesk-codesign.keychain}"
+CODESIGN_KEYCHAIN_UNLOCKED=0
 RESOLVED_RELEASE_SIGNING_MODE=""
 DASHBOARD_SOURCE=""
 STAGED_BINARY=""
@@ -46,11 +49,35 @@ if [ "${AGENTDESK_DEPLOY_LOCK_HELD:-0}" != "1" ]; then
     echo "═══ ADK Deploy → Release ═══"
 fi
 
+_unlock_codesign_keychain_if_configured() {
+    [ "$CODESIGN_KEYCHAIN_UNLOCKED" = "1" ] && return 0
+    [ -n "$CODESIGN_KEYCHAIN_PW_FILE" ] || return 0
+    if [ ! -r "$CODESIGN_KEYCHAIN_PW_FILE" ]; then
+        echo "⚠ Codesign keychain pw file not readable: $CODESIGN_KEYCHAIN_PW_FILE — continuing without explicit unlock"
+        return 0
+    fi
+    command -v security >/dev/null 2>&1 || return 0
+    local pw
+    if ! pw=$(cat "$CODESIGN_KEYCHAIN_PW_FILE"); then
+        echo "⚠ Failed to read codesign keychain pw file"
+        return 0
+    fi
+    if security unlock-keychain -p "$pw" "$CODESIGN_KEYCHAIN_NAME" 2>/dev/null; then
+        echo "▸ Unlocked codesign keychain: $CODESIGN_KEYCHAIN_NAME"
+        CODESIGN_KEYCHAIN_UNLOCKED=1
+    else
+        echo "⚠ Failed to unlock codesign keychain $CODESIGN_KEYCHAIN_NAME — codesign may fail in non-GUI sessions"
+    fi
+    unset pw
+}
+
 sign_binary_with_fallback() {
     local target="$1"
     local identity="${CODESIGN_IDENTITY:--}"
     local signature_details=""
     local current_authority=""
+
+    _unlock_codesign_keychain_if_configured
 
     if [ -z "$identity" ]; then
         if [ "$ALLOW_ADHOC_RELEASE_SIGN" = "1" ]; then
@@ -485,6 +512,8 @@ export AGENTDESK_DEPLOY_TEST_MODE=$(printf '%q' "$DEPLOY_TEST_MODE")
 export AGENTDESK_SKIP_TURN_DRAIN=$(printf '%q' "${AGENTDESK_SKIP_TURN_DRAIN:-1}")
 export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
 export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-}")
+export AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}")
+export AGENTDESK_CODESIGN_KEYCHAIN_NAME=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-}")
 export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
 export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}")
