@@ -36,21 +36,21 @@ require_fixed_string "postgres pool is required for API friction processing; sql
 require_fixed_string "PG outbox rows are authoritative whenever a pool is configured." src/services/message_outbox.rs
 require_fixed_string "PG card_retrospectives rows are authoritative once a pool is attached." src/services/retrospectives.rs
 require_fixed_string "PG pending_dm_replies rows are authoritative in mixed mode." src/services/discord_dm_reply_store.rs
-require_fixed_string "pub async fn rebind_slot_for_group_agent_pg" src/db/auto_queue/core.rs
-require_fixed_string "async fn bind_slot_index_for_group_entries_pg" src/db/auto_queue/core.rs
-require_fixed_string "pub async fn release_slot_for_group_agent_pg" src/db/auto_queue/core.rs
+require_fixed_string "pub async fn rebind_slot_for_group_agent_pg" src/db/auto_queue/claim.rs
+require_fixed_string "async fn bind_slot_index_for_group_entries_pg" src/db/auto_queue/claim.rs
+require_fixed_string "pub async fn release_slot_for_group_agent_pg" src/db/auto_queue/slots.rs
 
-if sed -n '/pub fn rebind_slot_for_group_agent/,/pub async fn rebind_slot_for_group_agent_pg/p' src/db/auto_queue/core.rs \
+if sed -n '/pub fn rebind_slot_for_group_agent/,/pub async fn rebind_slot_for_group_agent_pg/p' src/db/auto_queue/claim.rs \
   | grep -Fq 'TODO(#839)'; then
   fail "rebind_slot_for_group_agent still carries TODO(#839) ambiguity"
 fi
 
-if sed -n '/fn bind_slot_index_for_group_entries/,/pub fn release_slot_for_group_agent/p' src/db/auto_queue/core.rs \
+if sed -n '/fn bind_slot_index_for_group_entries/,/pub fn release_slot_for_group_agent/p' src/db/auto_queue/claim.rs \
   | grep -Fq 'TODO(#839)'; then
   fail "bind_slot_index_for_group_entries still carries TODO(#839) ambiguity"
 fi
 
-if sed -n '/pub fn release_slot_for_group_agent/,/#[derive(Debug, Clone, Default)]/p' src/db/auto_queue/core.rs \
+if sed -n '/pub fn release_slot_for_group_agent/,/#[derive(Debug, Clone, Default)]/p' src/db/auto_queue/slots.rs \
   | grep -Fq 'TODO(#839)'; then
   fail "release_slot_for_group_agent still carries TODO(#839) ambiguity"
 fi
