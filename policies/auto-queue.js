@@ -865,7 +865,22 @@ function _phaseGateRequired(runId, phase) {
 function completeRunAndNotify(runId) {
   if (!runId) return;
   try {
-    agentdesk.autoQueue.resumeRun(runId, "phase_gate_complete_resume");
+    var completed = agentdesk.autoQueue.completeRun(
+      runId,
+      "phase_gate_complete",
+      { releaseSlots: true }
+    );
+    if (completed && completed.changed) return;
+    autoQueueLog("warn", "Phase-gate completion did not mark run " + runId + " completed; falling back to resume", {
+      run_id: runId
+    });
+  } catch (e) {
+    autoQueueLog("warn", "Failed to complete final phase-gate run " + runId + ": " + e, {
+      run_id: runId
+    });
+  }
+  try {
+    agentdesk.autoQueue.resumeRun(runId, "phase_gate_complete_resume_fallback");
   } catch (e) {
     autoQueueLog("warn", "Failed to resume final phase-gate run " + runId + ": " + e, {
       run_id: runId

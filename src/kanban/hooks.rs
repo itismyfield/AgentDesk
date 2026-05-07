@@ -494,3 +494,288 @@ fn fire_transition_hooks_pg(
         }
     }
 }
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+mod tests {
+    use super::*;
+    use crate::kanban::terminal_cleanup::TERMINAL_DISPATCH_CLEANUP_REASON;
+    use crate::kanban::test_support::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[test]
+    fn drain_hook_side_effects_materializes_tick_dispatch_intents() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("tick-dispatch.js"),
+            r#"
+            var policy = {
+                name: "tick-dispatch",
+                priority: 1,
+                onTick30s: function() {
+                    agentdesk.dispatch.create(
+                        "card-tick",
+                        "agent-1",
+                        "rework",
+                        "Tick Rework"
+                    );
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, dir.path());
+        seed_card(&db, "card-tick", "requested");
+
+        engine
+            .try_fire_hook_by_name("onTick30s", json!({}))
+            .unwrap();
+        drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-tick' AND dispatch_type = 'rework'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "tick hook dispatch intent should be persisted");
+    }
+
+    /// Regression test for #274: status transitions fire custom state hooks
+    /// through try_fire_hook_by_name(), and dispatch.create() in that path must
+    /// return with the dispatch row + notify outbox already materialized.
+
+    /// Regression guard for the known-hook path: try_fire_hook_by_name() must
+    /// return with dispatch.create() side-effects already visible, even without
+    /// an extra drain_hook_side_effects() call at the caller.
+    #[test]
+    fn try_fire_hook_drains_dispatch_intents_without_explicit_drain() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("tick-intent.js"),
+            r#"
+            var policy = {
+                name: "tick-intent",
+                priority: 1,
+                onTick1min: function() {
+                    agentdesk.dispatch.create(
+                        "card-intent-test",
+                        "agent-1",
+                        "implementation",
+                        "Intent Drain Test"
+                    );
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, dir.path());
+        seed_card(&db, "card-intent-test", "requested");
+
+        // Fire tick hook — do NOT call drain_hook_side_effects afterwards.
+        // The intent should still be drained by try_fire_hook's internal drain.
+        engine
+            .try_fire_hook_by_name("OnTick1min", json!({}))
+            .unwrap();
+
+        let conn = db.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-intent-test' AND dispatch_type = 'implementation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "#202: tick hook dispatch intent must be persisted by try_fire_hook's internal drain"
+        );
+    }
+
+    #[test]
+    fn fire_transition_hooks_terminal_cleanup_cancels_review_followups_with_reason() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-terminal-cleanup", "review");
+        seed_dispatch_with_type(
+            &db,
+            "dispatch-rd-cleanup",
+            "card-terminal-cleanup",
+            "review-decision",
+            "pending",
+        );
+        seed_dispatch_with_type(
+            &db,
+            "dispatch-rw-cleanup",
+            "card-terminal-cleanup",
+            "rework",
+            "dispatched",
+        );
+        seed_dispatch_with_type(
+            &db,
+            "dispatch-review-keep",
+            "card-terminal-cleanup",
+            "review",
+            "pending",
+        );
+
+        fire_transition_hooks(&db, &engine, "card-terminal-cleanup", "review", "done");
+
+        let conn = db.lock().unwrap();
+        let (rd_status, rd_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, json_extract(result, '$.reason') FROM task_dispatches WHERE id = 'dispatch-rd-cleanup'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let (rw_status, rw_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, json_extract(result, '$.reason') FROM task_dispatches WHERE id = 'dispatch-rw-cleanup'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let review_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-review-keep'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(rd_status, "cancelled");
+        assert_eq!(rd_reason.as_deref(), Some(TERMINAL_DISPATCH_CLEANUP_REASON));
+        assert_eq!(rw_status, "cancelled");
+        assert_eq!(rw_reason.as_deref(), Some(TERMINAL_DISPATCH_CLEANUP_REASON));
+        assert_eq!(
+            review_status, "pending",
+            "terminal cleanup must not cancel pending review dispatches"
+        );
+    }
+
+    // ── Pipeline / auto-queue regression tests (#110) ──────────────
+
+    /// #110: Pipeline stage should NOT advance on implementation dispatch completion alone.
+    /// The onDispatchCompleted in pipeline.js is now a no-op — advancement happens
+    /// only through review-automation processVerdict after review passes.
+    #[test]
+    fn pipeline_no_auto_advance_on_dispatch_complete() {
+        let db = test_db();
+        let engine = test_engine(&db);
+
+        seed_card_with_repo(&db, "card-pipe", "in_progress", "repo-1");
+        let (stage1, _stage2) = seed_pipeline_stages(&db, "repo-1");
+
+        // Assign pipeline stage (use integer id)
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET pipeline_stage_id = ?1 WHERE id = 'card-pipe'",
+                [stage1],
+            )
+            .unwrap();
+        }
+
+        // Create and complete an implementation dispatch
+        seed_dispatch(&db, "card-pipe", "pending");
+        let dispatch_id = "dispatch-card-pipe-pending";
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE task_dispatches SET status = 'completed', result = '{}' WHERE id = ?1",
+                [dispatch_id],
+            )
+            .unwrap();
+        }
+
+        // Fire OnDispatchCompleted — should NOT create a new dispatch for stage-2
+        let _ = engine
+            .try_fire_hook_by_name("OnDispatchCompleted", json!({ "dispatch_id": dispatch_id }));
+
+        // Verify: pipeline_stage_id should still be stage-1 (not advanced)
+        // pipeline_stage_id is TEXT, pipeline_stages.id is INTEGER AUTOINCREMENT
+        let stage_id: Option<String> = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT pipeline_stage_id FROM kanban_cards WHERE id = 'card-pipe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            stage_id.as_deref(),
+            Some(stage1.to_string().as_str()),
+            "pipeline_stage_id must NOT advance on dispatch completion alone"
+        );
+
+        // Verify: no new pending dispatch was created for stage-2
+        let new_dispatches: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-pipe' AND status = 'pending'",
+                [],
+                |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(
+            new_dispatches, 0,
+            "no new dispatch should be created by pipeline.js onDispatchCompleted"
+        );
+    }
+
+    /// #821 (5): `onDispatchCompleted` (kanban-rules.js) must skip cancelled
+    /// dispatches. A race can fire the hook after the user cancels a
+    /// dispatch; without the guard the policy would force-transition the
+    /// card to `review` and the terminal sweep would then push it to `done`,
+    /// overriding the user's explicit stop. #815 added the guard —
+    /// `if (dispatch.status === "cancelled") return;` — and this test locks
+    /// the behaviour.
+    #[test]
+    fn cancelled_dispatch_does_not_enter_review() {
+        let db = test_db();
+        let engine = test_engine(&db);
+
+        // Seed a card currently in `in_progress` with a cancelled
+        // implementation dispatch. Absent the #815 guard the policy would
+        // drive the card into `review` on hook fan-out.
+        seed_card(&db, "card-821-no-review", "in_progress");
+        let dispatch_id = "dispatch-821-no-review";
+        seed_dispatch_with_type(
+            &db,
+            dispatch_id,
+            "card-821-no-review",
+            "implementation",
+            "cancelled",
+        );
+
+        // Fire the hook the same way the real runtime would.
+        engine
+            .try_fire_hook_by_name("OnDispatchCompleted", json!({ "dispatch_id": dispatch_id }))
+            .expect("fire OnDispatchCompleted");
+
+        // The card must remain in its prior status — NOT `review`, NOT `done`.
+        let status: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-821-no-review'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            status, "in_progress",
+            "kanban-rules.onDispatchCompleted must skip cancelled dispatches"
+        );
+    }
+}

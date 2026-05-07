@@ -337,3 +337,36 @@ fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
 fn json_bool_field(value: &serde_json::Value, key: &str) -> bool {
     value.get(key).and_then(|field| field.as_bool()) == Some(true)
 }
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+mod tests {
+    use super::*;
+    use crate::kanban::test_support::*;
+
+    #[test]
+    fn sync_terminal_card_state_cancels_pending_implementation_dispatch() {
+        let db = test_db();
+        ensure_auto_queue_tables(&db);
+        seed_card(&db, "card-terminal-sync", "done");
+        seed_dispatch_with_type(
+            &db,
+            "dispatch-card-terminal-sync-pending",
+            "card-terminal-sync",
+            "implementation",
+            "pending",
+        );
+
+        sync_terminal_card_state(&db, "card-terminal-sync");
+
+        let status: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-card-terminal-sync-pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "cancelled");
+    }
+}

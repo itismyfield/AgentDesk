@@ -414,3 +414,161 @@ pub(super) async fn execute_allowed_cleanup_on_pg_tx(
 
     Ok(counts)
 }
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+mod tests {
+    use super::*;
+    use crate::kanban::test_support::*;
+
+    /// #800: `reset_full=true` reopens must scrub recorded worktree metadata
+    /// from `task_dispatches.context` / `task_dispatches.result` so a follow-up
+    /// `latest_completed_work_dispatch_target` call cannot silently re-inject
+    /// the stale path into the new dispatch context.
+    #[test]
+    fn cleanup_force_transition_revert_fields_strips_dispatch_worktree_metadata() {
+        let db = test_db();
+        seed_card(&db, "card-800-strip-wt", "in_progress");
+
+        let conn = db.lock().unwrap();
+        // Two dispatches on the same card, one completed implementation that
+        // recorded both context-side and result-side wt metadata, plus a
+        // pending dispatch with only context-side wt metadata. We assert that
+        // ALL wt-locating keys are removed but unrelated fields survive.
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'd-800-completed', 'card-800-strip-wt', 'agent-1', 'implementation', 'completed',
+                'Old impl', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            sqlite_test::params![
+                serde_json::json!({
+                    "worktree_path": "/tmp/agentdesk-800-stale",
+                    "worktree_branch": "wt/800-old",
+                    "preserve_me": "context_value"
+                })
+                .to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": "/tmp/agentdesk-800-stale",
+                    "completed_branch": "wt/800-old",
+                    "completed_commit": "deadbeefcafebabe",
+                    "preserve_me_too": "result_value"
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'd-800-pending', 'card-800-strip-wt', 'agent-1', 'implementation', 'pending',
+                'New impl', ?1, NULL, datetime('now'), datetime('now')
+             )",
+            sqlite_test::params![
+                serde_json::json!({
+                    "worktree_path": "/tmp/agentdesk-800-also-stale",
+                    "worktree_branch": "wt/800-also-old",
+                    "title_hint": "redispatch"
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        // A second card's dispatch must be untouched by the scoped cleanup.
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
+             VALUES ('card-800-other', 'Other', 'in_progress', 'agent-1', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'd-800-other-card', 'card-800-other', 'agent-1', 'implementation', 'completed',
+                'Other impl', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            sqlite_test::params![
+                serde_json::json!({
+                    "worktree_path": "/tmp/agentdesk-800-other-keep",
+                    "worktree_branch": "wt/800-other-keep"
+                })
+                .to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": "/tmp/agentdesk-800-other-keep",
+                    "completed_branch": "wt/800-other-keep"
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+
+        cleanup_force_transition_revert_fields_on_conn(&conn, "card-800-strip-wt").unwrap();
+
+        // Helper to read a dispatch JSON column back as a serde value.
+        let load_json = |dispatch_id: &str, column: &str| -> Option<serde_json::Value> {
+            let raw: Option<String> = conn
+                .query_row(
+                    &format!("SELECT {column} FROM task_dispatches WHERE id = ?1"),
+                    [dispatch_id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+            raw.and_then(|s| serde_json::from_str(&s).ok())
+        };
+
+        let completed_ctx = load_json("d-800-completed", "context").unwrap();
+        assert!(
+            completed_ctx.get("worktree_path").is_none(),
+            "context.worktree_path must be removed, got {completed_ctx:?}"
+        );
+        assert!(
+            completed_ctx.get("worktree_branch").is_none(),
+            "context.worktree_branch must be removed, got {completed_ctx:?}"
+        );
+        assert_eq!(
+            completed_ctx["preserve_me"].as_str(),
+            Some("context_value"),
+            "unrelated context fields must be preserved"
+        );
+
+        let completed_result = load_json("d-800-completed", "result").unwrap();
+        assert!(
+            completed_result.get("completed_worktree_path").is_none(),
+            "result.completed_worktree_path must be removed, got {completed_result:?}"
+        );
+        assert!(
+            completed_result.get("completed_branch").is_none(),
+            "result.completed_branch must be removed, got {completed_result:?}"
+        );
+        assert_eq!(
+            completed_result["completed_commit"].as_str(),
+            Some("deadbeefcafebabe"),
+            "completion evidence (completed_commit) must be preserved as audit history"
+        );
+        assert_eq!(
+            completed_result["preserve_me_too"].as_str(),
+            Some("result_value")
+        );
+
+        let pending_ctx = load_json("d-800-pending", "context").unwrap();
+        assert!(pending_ctx.get("worktree_path").is_none());
+        assert!(pending_ctx.get("worktree_branch").is_none());
+        assert_eq!(pending_ctx["title_hint"].as_str(), Some("redispatch"));
+
+        // Other card untouched — both wt-locating keys must still be present.
+        let other_ctx = load_json("d-800-other-card", "context").unwrap();
+        assert_eq!(
+            other_ctx["worktree_path"].as_str(),
+            Some("/tmp/agentdesk-800-other-keep"),
+            "cleanup must be card-scoped and not touch unrelated cards"
+        );
+        let other_result = load_json("d-800-other-card", "result").unwrap();
+        assert_eq!(
+            other_result["completed_worktree_path"].as_str(),
+            Some("/tmp/agentdesk-800-other-keep")
+        );
+    }
+}
