@@ -4,6 +4,7 @@
 //! smaller owner modules.
 
 mod state_machine;
+mod terminal_cleanup;
 mod transition_cleanup;
 mod transition_core;
 

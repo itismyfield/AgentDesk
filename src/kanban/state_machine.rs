@@ -12,6 +12,11 @@
 //! Custom pipelines can override the default via repo or agent-level overrides
 //! (3-level inheritance: default → repo → agent).
 
+use super::terminal_cleanup::sync_terminal_transition_followups_pg;
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use super::terminal_cleanup::{
+    TERMINAL_DISPATCH_CLEANUP_REASON, sync_terminal_card_state, sync_terminal_transition_followups,
+};
 use crate::db::Db;
 use crate::engine::PolicyEngine;
 use anyhow::Result;
@@ -203,69 +208,6 @@ async fn github_sync_target_for_card_pg(
     }
 
     issue_number.map(|number| (repo_id, number))
-}
-
-const TERMINAL_DISPATCH_CLEANUP_REASON: &str = "auto_cancelled_on_terminal_card";
-
-fn sync_terminal_card_state(db: &Db, card_id: &str) {
-    sync_terminal_card_state_with_scope(db, card_id, true);
-}
-
-fn sync_terminal_transition_followups(db: &Db, card_id: &str) {
-    sync_terminal_card_state_with_scope(db, card_id, false);
-}
-
-fn sync_terminal_card_state_with_scope(db: &Db, card_id: &str, cancel_implementation: bool) {
-    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
-    {
-        let _ = (db, card_id, cancel_implementation);
-        return;
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    {
-        let Ok(conn) = db.lock() else {
-            return;
-        };
-
-        let dispatch_types = if cancel_implementation {
-            "'implementation', 'review-decision', 'rework'"
-        } else {
-            "'review-decision', 'rework'"
-        };
-
-        let pending_followups: Vec<String> = conn
-            .prepare(&format!(
-                "SELECT id FROM task_dispatches \
-             WHERE kanban_card_id = ?1 AND dispatch_type IN ({dispatch_types}) \
-             AND status IN ('pending', 'dispatched')"
-            ))
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_map([card_id], |row| row.get::<_, String>(0))
-                    .ok()
-                    .map(|rows| rows.filter_map(|row| row.ok()).collect())
-            })
-            .unwrap_or_default();
-
-        let mut cancelled = 0usize;
-        for dispatch_id in pending_followups {
-            cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                &conn,
-                &dispatch_id,
-                Some(TERMINAL_DISPATCH_CLEANUP_REASON),
-            )
-            .unwrap_or(0);
-        }
-
-        if cancelled > 0 {
-            tracing::info!(
-                "[kanban] Cancelled {} pending terminal follow-up dispatch(es) for card {}",
-                cancelled,
-                card_id
-            );
-        }
-    }
 }
 
 /// Drain deferred side-effects produced while hooks were executing.
@@ -662,36 +604,9 @@ pub fn fire_transition_hooks_with_backends(
                         let mut tx = bridge_pool.begin().await.map_err(|error| {
                             format!("begin postgres terminal follow-up tx: {error}")
                         })?;
-                        crate::github::sync::sync_auto_queue_terminal_on_pg(
-                            &mut tx,
-                            &card_id_owned,
-                        )
-                        .await
-                        .map_err(|error| format!("{error}"))?;
-                        let dispatch_ids = sqlx::query_scalar::<_, String>(
-                        "SELECT id
-                         FROM task_dispatches
-                         WHERE kanban_card_id = $1
-                           AND dispatch_type IN ('review-decision', 'rework')
-                           AND status IN ('pending', 'dispatched')",
-                    )
-                    .bind(&card_id_owned)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .map_err(|error| {
-                        format!(
-                            "load postgres terminal follow-up dispatches {card_id_owned}: {error}"
-                        )
-                    })?;
-                        for dispatch_id in dispatch_ids {
-                            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
-                                &mut tx,
-                                &dispatch_id,
-                                Some(TERMINAL_DISPATCH_CLEANUP_REASON),
-                            )
+                        sync_terminal_transition_followups_pg(&mut tx, &card_id_owned)
                             .await
                             .map_err(|error| format!("{error}"))?;
-                        }
                         tx.commit().await.map_err(|error| {
                             format!("commit postgres terminal follow-up tx: {error}")
                         })?;

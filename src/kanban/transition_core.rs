@@ -4,9 +4,10 @@ use super::state_machine::{
     fire_dynamic_hooks, github_sync_on_transition_pg, record_true_negative_if_pass_with_backends,
     resolve_pipeline_with_pg,
 };
+use super::terminal_cleanup::cleanup_terminal_managed_worktrees_pg;
 use super::transition_cleanup::{
-    AllowedOnConnMutation, PgTransitionCleanupCounts, cleanup_terminal_managed_worktrees_pg,
-    clear_escalation_alert_state_on_pg_tx, execute_allowed_cleanup_on_pg_tx,
+    AllowedOnConnMutation, PgTransitionCleanupCounts, clear_escalation_alert_state_on_pg_tx,
+    execute_allowed_cleanup_on_pg_tx,
 };
 use crate::db::Db;
 use crate::engine::PolicyEngine;

@@ -56,6 +56,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── phase_gates.rs
 │   │   ├── queries.rs
+│   │   ├── slots.rs
 │   │   └── test_support.rs
 │   ├── dispatches/
 │   │   ├── outbox/
@@ -157,6 +158,7 @@ src/
 ├── kanban/
 │   ├── mod.rs
 │   ├── state_machine.rs
+│   ├── terminal_cleanup.rs
 │   ├── test_support.rs
 │   ├── transition_cleanup.rs
 │   └── transition_core.rs
