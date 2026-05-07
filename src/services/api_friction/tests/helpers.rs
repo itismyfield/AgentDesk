@@ -173,12 +173,53 @@ pub(super) fn install_mock_gh_issue_create(url: &str) -> MockGhIssueCreateEnv {
     }
 }
 
+#[cfg(unix)]
+pub(super) fn install_mock_gh_issue_create_failure(stderr: &str) -> MockGhIssueCreateEnv {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let gh_path = dir.path().join("gh");
+    let script = format!(
+        "#!/bin/sh\nset -eu\nif [ \"${{1-}}\" = \"issue\" ] && [ \"${{2-}}\" = \"create\" ]; then\ncat >&2 <<'EOF'\n{stderr}\nEOF\nexit 23\nfi\nexit 1\n"
+    );
+    fs::write(&gh_path, script).unwrap();
+    let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&gh_path, perms).unwrap();
+
+    let old_gh_path = std::env::var_os("AGENTDESK_GH_PATH");
+    unsafe { std::env::set_var("AGENTDESK_GH_PATH", &gh_path) };
+
+    MockGhIssueCreateEnv {
+        _dir: dir,
+        old_gh_path,
+    }
+}
+
 #[cfg(windows)]
 pub(super) fn install_mock_gh_issue_create(url: &str) -> MockGhIssueCreateEnv {
     let dir = tempfile::tempdir().unwrap();
     let gh_cmd_path = dir.path().join("gh.cmd");
     let wrapper = format!(
         "@echo off\r\nsetlocal\r\nif /I \"%~1\"==\"--version\" goto version\r\nif /I not \"%~1\"==\"issue\" exit /b 1\r\nif /I not \"%~2\"==\"create\" exit /b 1\r\necho {url}\r\nexit /b 0\r\n:version\r\necho gh mock 1.0\r\nexit /b 0\r\n"
+    );
+    fs::write(&gh_cmd_path, wrapper).unwrap();
+
+    let old_gh_path = std::env::var_os("AGENTDESK_GH_PATH");
+    unsafe { std::env::set_var("AGENTDESK_GH_PATH", &gh_cmd_path) };
+
+    MockGhIssueCreateEnv {
+        _dir: dir,
+        old_gh_path,
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn install_mock_gh_issue_create_failure(stderr: &str) -> MockGhIssueCreateEnv {
+    let dir = tempfile::tempdir().unwrap();
+    let gh_cmd_path = dir.path().join("gh.cmd");
+    let wrapper = format!(
+        "@echo off\r\nsetlocal\r\nif /I \"%~1\"==\"--version\" goto version\r\nif /I not \"%~1\"==\"issue\" exit /b 1\r\nif /I not \"%~2\"==\"create\" exit /b 1\r\necho {stderr} 1>&2\r\nexit /b 23\r\n:version\r\necho gh mock 1.0\r\nexit /b 0\r\n"
     );
     fs::write(&gh_cmd_path, wrapper).unwrap();
 
