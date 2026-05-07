@@ -51,6 +51,11 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── db/
+│   ├── auto_queue/
+│   │   ├── core.rs
+│   │   ├── mod.rs
+│   │   ├── queries.rs
+│   │   └── test_support.rs
 │   ├── dispatches/
 │   │   ├── outbox/
 │   │   │   ├── claim.rs
@@ -80,7 +85,6 @@ src/
 │   │   ├── storage_stats.rs
 │   │   └── tests.rs
 │   ├── agents.rs
-│   ├── auto_queue.rs
 │   ├── cancel_tombstones.rs
 │   ├── dispatched_sessions.rs
 │   ├── kanban.rs
@@ -99,6 +103,7 @@ src/
 │   ├── dispatch_context.rs
 │   ├── dispatch_create.rs
 │   ├── dispatch_status.rs
+│   ├── dispatch_summary.rs
 │   ├── mod.rs
 │   ├── test_support.rs
 │   └── types.rs
@@ -276,6 +281,7 @@ src/
 │   │   │   ├── pg_storage.rs
 │   │   │   └── processing.rs
 │   │   ├── core.rs
+│   │   ├── markers.rs
 │   │   └── mod.rs
 │   ├── auto_queue/
 │   │   ├── activate_bridge.rs

@@ -1,20 +1,21 @@
 # Auto-Queue DB Extraction Plan
 
-> Last refreshed: 2026-05-06 (against #1783 extraction-planning pass).
+> Last refreshed: 2026-05-07 (after #1797 facade shell).
 
 Source issue: #1783
 
-`src/db/auto_queue.rs` is currently 5,691 lines: about 3,100 lines of
-production helpers followed by about 2,590 lines of tests. The file is already
-listed as a giant `db_layer` surface in `docs/agent-maintenance/change-surfaces.md`,
-so this plan keeps the public `crate::db::auto_queue::*` API stable while
-moving implementation slices behind re-exports.
+`src/db/auto_queue/core.rs` now carries the former monolith behind the
+`src/db/auto_queue/mod.rs` facade: about 3,100 lines of production helpers
+followed by the remaining inline tests. The file is still listed as a giant
+`db_layer` surface in `docs/agent-maintenance/change-surfaces.md`, so this plan
+keeps the public `crate::db::auto_queue::*` API stable while moving
+implementation slices behind re-exports.
 
 ## Scope Notes
 
-- Do not start behavior extraction in #1783. This document is the deliverable.
-- Start with a facade conversion because Rust cannot have both
-  `src/db/auto_queue.rs` and `src/db/auto_queue/` as the same module.
+- Do not bundle behavior changes into extraction work.
+- #1797 created the facade shell; follow-up extraction issues should split
+  code from `src/db/auto_queue/core.rs` into sibling modules behind re-exports.
 - Preserve public function names during the split. Existing service, route,
   dispatch, supervisor, and GitHub-sync call sites should not need import
   changes unless a follow-up issue intentionally tightens them.
@@ -26,15 +27,15 @@ moving implementation slices behind re-exports.
 
 | Proposed module | Current source ranges | Approx. prod LOC | Responsibility | Main consumers |
 | --- | --- | ---: | --- | --- |
-| `auto_queue::mod` plus shared status/types | `src/db/auto_queue.rs:1`, `src/db/auto_queue.rs:20`, `src/db/auto_queue.rs:25`, `src/db/auto_queue.rs:39`, `src/db/auto_queue.rs:55` | 170 | Facade, re-exports, entry status constants, shared result/error DTOs, module wiring. | All `crate::db::auto_queue::*` callers. |
-| `auto_queue::queries` | `src/db/auto_queue.rs:1229`, `src/db/auto_queue.rs:1314`, `src/db/auto_queue.rs:3036` | 470 | Read-only filters, record structs, run/status/history/backlog/generate reads, card status counts, row mappers. | `src/services/auto_queue.rs`, `src/services/auto_queue/view_admin_routes.rs`. |
-| `auto_queue::phase_gates` | `src/db/auto_queue.rs:1686`, `src/db/auto_queue.rs:1709`, `src/db/auto_queue.rs:1823`, `src/db/auto_queue.rs:1970`, `src/db/auto_queue.rs:2099` | 360 | Batch phase eligibility, blocking gate reads, phase-gate state normalization, advisory lock, stale cleanup, save/clear persistence. | `src/services/auto_queue/activate_command.rs`, `src/engine/ops/auto_queue_ops.rs`, run finalization. |
-| `auto_queue::slots` | `src/db/auto_queue.rs:1623`, `src/db/auto_queue.rs:1637`, `src/db/auto_queue.rs:1656`, `src/db/auto_queue.rs:1672`, `src/db/auto_queue.rs:2463`, `src/db/auto_queue.rs:2489` | 240 | Slot pool sizing, slot row creation, inactive assignment cleanup, run-wide and targeted release, active dispatch checks. | `activate_command`, `planning`, `slot_routes`, engine auto-queue ops. |
-| `auto_queue::claim` | `src/db/auto_queue.rs:1178`, `src/db/auto_queue.rs:2125`, `src/db/auto_queue.rs:2148`, `src/db/auto_queue.rs:2187`, `src/db/auto_queue.rs:2236`, `src/db/auto_queue.rs:2267`, `src/db/auto_queue.rs:2539` | 520 | Group pending discovery, first pending selection, assigned group reuse, slot allocation/rebind CAS loops, group metadata sync. | `src/services/auto_queue/activate_command.rs`, `src/services/auto_queue/fsm.rs`, slot admin routes. |
-| `auto_queue::runs` | `src/db/auto_queue.rs:2713`, `src/db/auto_queue.rs:2730`, `src/db/auto_queue.rs:2794`, `src/db/auto_queue.rs:2810`, `src/db/auto_queue.rs:2848`, `src/db/auto_queue.rs:2864`, `src/db/auto_queue.rs:2895`, `src/db/auto_queue.rs:2948` | 330 | Run pause/resume/complete, ready-to-finalize policy, review-disabled completion hook, completion notification outbox target selection. | `src/engine/ops/auto_queue_ops.rs`, `src/github/sync.rs`, entry terminal sync. |
-| `auto_queue::entries` | `src/db/auto_queue.rs:93`, `src/db/auto_queue.rs:207`, `src/db/auto_queue.rs:314`, `src/db/auto_queue.rs:610`, `src/db/auto_queue.rs:833`, `src/db/auto_queue.rs:952`, `src/db/auto_queue.rs:987`, `src/db/auto_queue.rs:1047`, `src/db/auto_queue.rs:1074`, `src/db/auto_queue.rs:1111`, `src/db/auto_queue.rs:2584`, `src/db/auto_queue.rs:2639`, `src/db/auto_queue.rs:2653`, `src/db/auto_queue.rs:2686`, `src/db/auto_queue.rs:3010` | 1,120 | Entry lifecycle persistence, transition allowlist, optimistic update/retry, terminal dispatch sync, dispatch-failure retry accounting, reactivation, transition audit, dispatch history, latest Codex session lookup. | Dispatch status, supervisor, kanban transitions, GitHub sync, auto-queue FSM/activation/planning/admin. |
-| `auto_queue::consultation` | `src/db/auto_queue.rs:1724`, `src/db/auto_queue.rs:1738` | 120 | Consultation metadata merge and atomic card metadata plus entry-dispatched update. | `src/services/auto_queue/fsm.rs`, `src/engine/ops/auto_queue_ops.rs`. |
-| `auto_queue::test_support` | `src/db/auto_queue.rs:3130`, `src/db/auto_queue.rs:3860` | 220 test-only | Shared isolated PG database lifecycle, seed helpers, common row assertions, outbox/transition counters. | Per-module auto_queue DB tests. |
+| `auto_queue::mod` plus shared status/types | `src/db/auto_queue/core.rs:1`, `src/db/auto_queue/core.rs:20`, `src/db/auto_queue/core.rs:25`, `src/db/auto_queue/core.rs:39`, `src/db/auto_queue/core.rs:55` | 170 | Facade, re-exports, entry status constants, shared result/error DTOs, module wiring. | All `crate::db::auto_queue::*` callers. |
+| `auto_queue::queries` | `src/db/auto_queue/core.rs:1229`, `src/db/auto_queue/core.rs:1314`, `src/db/auto_queue/core.rs:3036` | 470 | Read-only filters, record structs, run/status/history/backlog/generate reads, card status counts, row mappers. | `src/services/auto_queue.rs`, `src/services/auto_queue/view_admin_routes.rs`. |
+| `auto_queue::phase_gates` | `src/db/auto_queue/core.rs:1686`, `src/db/auto_queue/core.rs:1709`, `src/db/auto_queue/core.rs:1823`, `src/db/auto_queue/core.rs:1970`, `src/db/auto_queue/core.rs:2099` | 360 | Batch phase eligibility, blocking gate reads, phase-gate state normalization, advisory lock, stale cleanup, save/clear persistence. | `src/services/auto_queue/activate_command.rs`, `src/engine/ops/auto_queue_ops.rs`, run finalization. |
+| `auto_queue::slots` | `src/db/auto_queue/core.rs:1623`, `src/db/auto_queue/core.rs:1637`, `src/db/auto_queue/core.rs:1656`, `src/db/auto_queue/core.rs:1672`, `src/db/auto_queue/core.rs:2463`, `src/db/auto_queue/core.rs:2489` | 240 | Slot pool sizing, slot row creation, inactive assignment cleanup, run-wide and targeted release, active dispatch checks. | `activate_command`, `planning`, `slot_routes`, engine auto-queue ops. |
+| `auto_queue::claim` | `src/db/auto_queue/core.rs:1178`, `src/db/auto_queue/core.rs:2125`, `src/db/auto_queue/core.rs:2148`, `src/db/auto_queue/core.rs:2187`, `src/db/auto_queue/core.rs:2236`, `src/db/auto_queue/core.rs:2267`, `src/db/auto_queue/core.rs:2539` | 520 | Group pending discovery, first pending selection, assigned group reuse, slot allocation/rebind CAS loops, group metadata sync. | `src/services/auto_queue/activate_command.rs`, `src/services/auto_queue/fsm.rs`, slot admin routes. |
+| `auto_queue::runs` | `src/db/auto_queue/core.rs:2713`, `src/db/auto_queue/core.rs:2730`, `src/db/auto_queue/core.rs:2794`, `src/db/auto_queue/core.rs:2810`, `src/db/auto_queue/core.rs:2848`, `src/db/auto_queue/core.rs:2864`, `src/db/auto_queue/core.rs:2895`, `src/db/auto_queue/core.rs:2948` | 330 | Run pause/resume/complete, ready-to-finalize policy, review-disabled completion hook, completion notification outbox target selection. | `src/engine/ops/auto_queue_ops.rs`, `src/github/sync.rs`, entry terminal sync. |
+| `auto_queue::entries` | `src/db/auto_queue/core.rs:93`, `src/db/auto_queue/core.rs:207`, `src/db/auto_queue/core.rs:314`, `src/db/auto_queue/core.rs:610`, `src/db/auto_queue/core.rs:833`, `src/db/auto_queue/core.rs:952`, `src/db/auto_queue/core.rs:987`, `src/db/auto_queue/core.rs:1047`, `src/db/auto_queue/core.rs:1074`, `src/db/auto_queue/core.rs:1111`, `src/db/auto_queue/core.rs:2584`, `src/db/auto_queue/core.rs:2639`, `src/db/auto_queue/core.rs:2653`, `src/db/auto_queue/core.rs:2686`, `src/db/auto_queue/core.rs:3010` | 1,120 | Entry lifecycle persistence, transition allowlist, optimistic update/retry, terminal dispatch sync, dispatch-failure retry accounting, reactivation, transition audit, dispatch history, latest Codex session lookup. | Dispatch status, supervisor, kanban transitions, GitHub sync, auto-queue FSM/activation/planning/admin. |
+| `auto_queue::consultation` | `src/db/auto_queue/core.rs:1724`, `src/db/auto_queue/core.rs:1738` | 120 | Consultation metadata merge and atomic card metadata plus entry-dispatched update. | `src/services/auto_queue/fsm.rs`, `src/engine/ops/auto_queue_ops.rs`. |
+| `auto_queue::test_support` | `src/db/auto_queue/test_support.rs` plus remaining inline helpers in `src/db/auto_queue/core.rs` | 220 test-only | Shared isolated PG database lifecycle first; later issues can move seed helpers, common row assertions, and outbox/transition counters with their owning tests. | Per-module auto_queue DB tests. |
 
 ## Recommended Extraction Order
 

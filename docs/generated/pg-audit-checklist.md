@@ -18,7 +18,7 @@ Status legend:
 | `src/services/api_friction.rs:607-640` | `hardened` | PG source-context query now reads `kc.github_issue_number` as `Option<i64>` so the BIGINT value survives without an intermediate `i32`. |
 | `src/server/routes/pipeline.rs:1099-1102` | `hardened` | `pg_stage_row_to_json` now decodes `stage_order`, `timeout_minutes`, and `max_retries` directly as `i64` / `Option<i64>`. |
 | `src/services/retrospectives.rs:551-599` | `hardened` | PG retrospective builder explicitly casts `github_issue_number` and `review_round` to `::BIGINT` before `i64` decode. |
-| `src/db/auto_queue.rs:1861-1885` | `hardened` | PG auto-queue status query already normalizes `github_issue_number`, `thread_group`, `batch_phase`, and `review_round` to `BIGINT`. |
+| `src/db/auto_queue/core.rs:1861-1885` | `hardened` | PG auto-queue status query already normalizes `github_issue_number`, `thread_group`, `batch_phase`, and `review_round` to `BIGINT`. |
 
 ## 2. JSONB decode sites and missing `::text` / silent JSON fallbacks
 
@@ -62,7 +62,7 @@ Initial pass did not surface a clear production PG site still decoding raw `TIME
 | `src/services/message_outbox.rs:141-190,236-277` | `hardened` | PG-only authority is now explicit in code comments: once `pg_pool` exists, lifecycle/outbox rows must land in PG because the release worker drains PG exclusively. SQLite is retained only for legacy no-PG runtime/tests. |
 | `src/services/retrospectives.rs:88-101,1137-1219` | `hardened` | PG-only authority is now explicit for `card_retrospectives` in mixed mode, and the PG test now asserts SQLite stays empty so the no-mirror choice is executable rather than implied. |
 | `src/services/discord_dm_reply_store.rs:85-123,156-173,261-276` | `hardened` | Pending DM reply ownership is now explicitly PG-first in mixed mode for register/read/consume paths; SQLite remains a legacy compatibility path only when PG is absent. |
-| `src/db/auto_queue.rs:1004-1045,1996-2236` | `hardened` | Slot rebind/release ownership is PG-only in the active implementation: the audit guard now requires the `*_pg` helpers and rejects old `TODO(#839)` ambiguity if legacy helper ranges return. |
+| `src/db/auto_queue/core.rs:1004-1045,1996-2236` | `hardened` | Slot rebind/release ownership is PG-only in the active implementation: the audit guard now requires the `*_pg` helpers and rejects old `TODO(#839)` ambiguity if legacy helper ranges return. |
 
 ## Later sub-PR guidance
 

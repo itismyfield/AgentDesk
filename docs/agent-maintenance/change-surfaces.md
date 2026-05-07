@@ -238,7 +238,7 @@
 - canonical_modules: `src/db/{mod,postgres,schema}.rs` and per-domain modules.
 - legacy_modules: SQLite path through `libsql_rusqlite` (see `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/db/auto_queue.rs` (5691 lines).
+  - `src/db/auto_queue/core.rs` (6702 lines).
   - `src/db/schema.rs` (3194 lines).
   - `src/db/kanban_cards.rs` (1903 lines; kanban card persistence and GitHub
     sync lookup surface).

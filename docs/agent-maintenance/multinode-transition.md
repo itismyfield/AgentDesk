@@ -278,7 +278,7 @@
   `resource_locks` record before launching local work, and must release or expire
   that record on worker death.
 - Current anchors: auto-queue slots already use PG compare-and-set style claims
-  at `src/db/auto_queue.rs:2170`; slot cleanup clears local runtime state through
+  at `src/db/auto_queue/core.rs:2170`; slot cleanup clears local runtime state through
   `src/services/auto_queue/runtime.rs:146`; #880 owns the missing resource-lock
   table and API.
 - Enablement condition: two workers contending for the same Unreal editor/test
