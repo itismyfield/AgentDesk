@@ -2,17 +2,17 @@ use sqlx::{PgPool, Row as SqlxRow};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
-use super::phase_gates::batch_phase_is_eligible;
 use super::slots::release_run_slots_on_pg_tx;
 
+#[cfg(test)]
+use super::claim::{SlotAllocation, allocate_slot_for_group_agent_pg};
 #[cfg(test)]
 use super::phase_gates::{
     PhaseGateStateWrite, clear_phase_gate_state_on_pg, save_phase_gate_state_on_pg,
 };
 #[cfg(test)]
 use super::slots::{
-    SlotAllocation, allocate_slot_for_group_agent_pg, release_run_slots_pg,
-    release_slot_for_group_agent_pg, slot_has_active_dispatch_pg,
+    release_run_slots_pg, release_slot_for_group_agent_pg, slot_has_active_dispatch_pg,
     slot_has_recent_terminal_auto_queue_dispatch_pg,
 };
 
@@ -1395,114 +1395,6 @@ pub async fn record_consultation_dispatch_on_pg(
         metadata_json,
         entry_status_changed: entry_result.changed,
     })
-}
-
-pub async fn group_has_pending_entries_pg(
-    pool: &PgPool,
-    run_id: &str,
-    thread_group: i64,
-    current_phase: Option<i64>,
-) -> Result<bool, sqlx::Error> {
-    let rows = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(batch_phase, 0)::BIGINT
-         FROM auto_queue_entries
-         WHERE run_id = $1
-           AND COALESCE(thread_group, 0) = $2
-           AND status = 'pending'
-         ORDER BY priority_rank ASC",
-    )
-    .bind(run_id)
-    .bind(thread_group)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .any(|batch_phase| batch_phase_is_eligible(batch_phase, current_phase)))
-}
-
-pub async fn first_pending_entry_for_group_pg(
-    pool: &PgPool,
-    run_id: &str,
-    thread_group: i64,
-    current_phase: Option<i64>,
-) -> Result<Option<(String, String, String, i64, i64)>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT e.id,
-                COALESCE(e.kanban_card_id, '') AS kanban_card_id,
-                e.agent_id,
-                COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase,
-                COALESCE(e.retry_count, 0)::BIGINT AS retry_count
-         FROM auto_queue_entries e
-         WHERE e.run_id = $1
-           AND COALESCE(e.thread_group, 0) = $2
-           AND e.status = 'pending'
-         ORDER BY e.priority_rank ASC",
-    )
-    .bind(run_id)
-    .bind(thread_group)
-    .fetch_all(pool)
-    .await?;
-
-    for row in rows {
-        let batch_phase = row.try_get::<i64, _>("batch_phase")?;
-        if batch_phase_is_eligible(batch_phase, current_phase) {
-            return Ok(Some((
-                row.try_get("id")?,
-                row.try_get("kanban_card_id")?,
-                row.try_get("agent_id")?,
-                batch_phase,
-                row.try_get("retry_count")?,
-            )));
-        }
-    }
-
-    Ok(None)
-}
-
-#[allow(dead_code)]
-pub async fn sync_run_group_metadata_pg(pool: &PgPool, run_id: &str) -> Result<(), String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| format!("begin postgres sync run group metadata {run_id}: {error}"))?;
-    sync_run_group_metadata_pg_tx(&mut tx, run_id).await?;
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit postgres sync run group metadata {run_id}: {error}"))?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub async fn sync_run_group_metadata_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    run_id: &str,
-) -> Result<(), String> {
-    let thread_group_count = sqlx::query_scalar::<_, i64>(
-        "SELECT GREATEST(
-                COALESCE(COUNT(DISTINCT COALESCE(thread_group, 0)), 0),
-                1
-            )::BIGINT
-         FROM auto_queue_entries
-         WHERE run_id = $1",
-    )
-    .bind(run_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| format!("count postgres thread groups for run {run_id}: {error}"))?;
-
-    sqlx::query(
-        "UPDATE auto_queue_runs
-         SET thread_group_count = $1,
-             max_concurrent_threads = $1
-         WHERE id = $2",
-    )
-    .bind(thread_group_count)
-    .bind(run_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| format!("update postgres run group metadata for {run_id}: {error}"))?;
-
-    Ok(())
 }
 
 async fn load_entry_status_row_pg(pool: &PgPool, entry_id: &str) -> Result<EntryStatusRow, String> {
