@@ -4,13 +4,11 @@ use std::sync::Mutex;
 use poise::serenity_prelude::ChannelId;
 use serde_json::Value;
 
-use crate::db::prompt_manifests::PromptManifest;
 use crate::services::agent_protocol::{StatusEvent, StatusTodoItem};
 use crate::services::provider::ProviderKind;
 
 mod common;
 mod context_panel;
-mod prompt_panel;
 mod recent_events;
 mod session_panel;
 mod status_events;
@@ -25,7 +23,6 @@ use common::{
     normalize_summary, sanitized_tool_name, tool_prefix, truncate_chars,
 };
 use context_panel::{ContextPanelSnapshot, render_context_panel_line};
-use prompt_panel::{PromptPanelSnapshot, render_prompt_panel_block};
 use recent_events::render_events;
 use session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use status_events::{is_schedule_wakeup_tool, parse_eta_secs};
@@ -234,34 +231,6 @@ impl PlaceholderLiveEvents {
         true
     }
 
-    pub(in crate::services::discord) fn set_prompt_manifest(
-        &self,
-        channel_id: ChannelId,
-        manifest: &PromptManifest,
-    ) -> bool {
-        let snapshot = PromptPanelSnapshot::from_manifest(manifest);
-        self.set_prompt_panel_snapshot(channel_id, Some(snapshot))
-    }
-
-    fn set_prompt_panel_snapshot(
-        &self,
-        channel_id: ChannelId,
-        snapshot: Option<PromptPanelSnapshot>,
-    ) -> bool {
-        let entry = self
-            .status_by_channel
-            .entry(channel_id)
-            .or_insert_with(|| Mutex::new(StatusPanelState::default()));
-        let mut guard = entry
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if guard.prompt == snapshot {
-            return false;
-        }
-        guard.prompt = snapshot;
-        true
-    }
-
     pub(in crate::services::discord) fn render_status_panel(
         &self,
         channel_id: ChannelId,
@@ -340,7 +309,6 @@ struct StatusPanelState {
     session: Option<SessionPanelSnapshot>,
     task: Option<TaskPanelSnapshot>,
     context: Option<ContextPanelSnapshot>,
-    prompt: Option<PromptPanelSnapshot>,
     todos: Vec<StatusTodoItem>,
     subagents: Vec<SubagentSlot>,
 }
@@ -473,10 +441,6 @@ fn render_status_panel(
         .and_then(render_context_panel_line)
     {
         sections.push(context_line);
-    }
-
-    if let Some(prompt) = snapshot.prompt.as_ref() {
-        sections.push(render_prompt_panel_block(prompt));
     }
 
     if !matches!(provider, ProviderKind::Codex) && !snapshot.todos.is_empty() {
