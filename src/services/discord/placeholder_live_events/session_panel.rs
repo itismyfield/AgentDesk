@@ -14,11 +14,11 @@ pub(super) enum SessionPanelKind {
 }
 
 impl SessionPanelKind {
-    const fn as_str(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
-            Self::Fresh => "fresh",
-            Self::Resumed => "resumed",
-            Self::Fallback => "fallback",
+            Self::Fresh => "🆕 새 세션 시작",
+            Self::Resumed => "기존 세션 복원",
+            Self::Fallback => "Lifecycle fallback",
         }
     }
 }
@@ -80,7 +80,7 @@ pub(super) fn render_session_panel_line(
     session: &SessionPanelSnapshot,
     provider: &ProviderKind,
 ) -> String {
-    let mut parts = vec![format!("Lifecycle {}", session.kind.as_str())];
+    let mut parts = vec![session.kind.label().to_string()];
     if let Some(provider_session_id) = session
         .provider_session_id
         .as_deref()

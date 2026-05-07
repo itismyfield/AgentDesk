@@ -259,7 +259,7 @@ fn status_panel_renders_session_resumed_line_from_lifecycle_details() {
     ));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.contains("Lifecycle resumed"));
+    assert!(rendered.contains("기존 세션 복원"));
     assert!(rendered.contains("provider session claude#8f21abcd…"));
     assert!(rendered.contains("tmux kept"));
 }
@@ -279,7 +279,7 @@ fn status_panel_renders_session_fresh_and_fallback_distinctly() {
     );
 
     let fresh = events.render_status_panel(fresh_channel_id, &ProviderKind::Codex, 1_700_000_000);
-    assert!(fresh.contains("Lifecycle fresh"));
+    assert!(fresh.contains("🆕 새 세션 시작"));
     assert!(fresh.contains("provider session codex#fresh-se…"));
     assert!(fresh.contains("tmux new"));
 
