@@ -18177,10 +18177,12 @@ async fn dispute_repeat_pg_does_not_reuse_poisoned_review_target() {
 async fn reopen_reactivates_done_card_without_deadlocking_review_tuning_fixup() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-reopen");
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+    seed_agent_pg(&pg_pool, "agent-reopen").await;
+    seed_repo_pg(&pg_pool, "test-repo").await;
     set_pmd_channel(&db, "pmd-chan-123");
-    ensure_auto_queue_tables(&db);
     let reopen_target = crate::pipeline::get()
         .dispatchable_states()
         .into_iter()
@@ -18188,47 +18190,54 @@ async fn reopen_reactivates_done_card_without_deadlocking_review_tuning_fixup() 
         .expect("default pipeline should expose at least one dispatchable state")
         .to_string();
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, assigned_agent_id, repo_id,
-                review_status, created_at, updated_at, completed_at
-            ) VALUES (
-                'card-reopen', 'Issue #270', 'done', 'medium', 'agent-reopen', 'test-repo',
-                'pass', datetime('now'), datetime('now'), datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-             VALUES ('run-reopen', 'test-repo', 'agent-reopen', 'active')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, completed_at
-            ) VALUES (
-                'entry-reopen', 'run-reopen', 'card-reopen', 'agent-reopen',
-                'done', datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO review_tuning_outcomes (
-                card_id, dispatch_id, review_round, verdict, decision, outcome
-            ) VALUES (
-                'card-reopen', 'review-pass', 1, 'pass', 'approved', 'true_negative'
-            )",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            review_status, created_at, updated_at, completed_at
+        ) VALUES (
+            'card-reopen', 'Issue #270', 'done', 'medium', 'agent-reopen', 'test-repo',
+            'pass', NOW(), NOW(), NOW()
+        )",
+    )
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('run-reopen', 'test-repo', 'agent-reopen', 'active')",
+    )
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, completed_at
+        ) VALUES (
+            'entry-reopen', 'run-reopen', 'card-reopen', 'agent-reopen',
+            'done', NOW()
+        )",
+    )
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO review_tuning_outcomes (
+            card_id, dispatch_id, review_round, verdict, decision, outcome
+        ) VALUES (
+            'card-reopen', 'review-pass', 1, 'pass', 'approved', 'true_negative'
+        )",
+    )
+    .execute(&pg_pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -18252,39 +18261,38 @@ async fn reopen_reactivates_done_card_without_deadlocking_review_tuning_fixup() 
     assert_eq!(json["reopened"], true);
     assert_eq!(json["to"], reopen_target);
 
-    let conn = db.lock().unwrap();
-    let (status, review_status, completed_at): (String, Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT status, review_status, completed_at
+    let (status, review_status, completed_at): (String, Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT status, review_status, completed_at::text
              FROM kanban_cards WHERE id = 'card-reopen'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
+        .fetch_one(&pg_pool)
+        .await
         .unwrap();
     assert_eq!(status, reopen_target);
     assert_eq!(review_status.as_deref(), Some("queued"));
     assert!(completed_at.is_none());
 
-    let entry_status: String = conn
-        .query_row(
-            "SELECT status FROM auto_queue_entries WHERE id = 'entry-reopen'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let entry_status: String =
+        sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'entry-reopen'")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
     assert_eq!(entry_status, "dispatched");
 
-    let outcome: String = conn
-        .query_row(
-            "SELECT outcome FROM review_tuning_outcomes
+    let outcome: String = sqlx::query_scalar(
+        "SELECT outcome FROM review_tuning_outcomes
              WHERE card_id = 'card-reopen'
              ORDER BY review_round DESC, id DESC
              LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    )
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
     assert_eq!(outcome, "false_negative");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
