@@ -3,9 +3,9 @@
 //! Keep `crate::kanban::*` stable while the implementation is split into
 //! smaller owner modules.
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod audit;
 mod github_sync;
+mod github_sync_target;
 mod hooks;
 mod review_tuning;
 mod state_machine;

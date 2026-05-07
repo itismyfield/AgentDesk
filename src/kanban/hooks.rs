@@ -2,6 +2,7 @@
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use super::audit::log_audit;
+use super::audit::log_transition_audit_pg;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use super::github_sync::github_sync_on_transition;
 use super::github_sync::github_sync_on_transition_pg;
@@ -369,27 +370,15 @@ fn fire_transition_hooks_pg(
     let effective = match crate::utils::async_bridge::block_on_pg_result(
         pg_pool,
         move |bridge_pool| async move {
-            sqlx::query(
-                "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result)
-                 VALUES ($1, $2, $3, 'hook', 'OK')",
+            log_transition_audit_pg(
+                &bridge_pool,
+                &card_id_owned,
+                &from_owned,
+                &to_owned,
+                "hook",
+                "OK",
             )
-            .bind(&card_id_owned)
-            .bind(&from_owned)
-            .bind(&to_owned)
-            .execute(&bridge_pool)
-            .await
-            .map_err(|error| {
-                format!("insert postgres kanban audit for {card_id_owned}: {error}")
-            })?;
-            sqlx::query(
-                "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
-                 VALUES ('kanban_card', $1, $2, 'hook')",
-            )
-            .bind(&card_id_owned)
-            .bind(format!("{from_owned}->{to_owned} (OK)"))
-            .execute(&bridge_pool)
-            .await
-            .map_err(|error| format!("insert postgres audit log for {card_id_owned}: {error}"))?;
+            .await?;
 
             crate::pipeline::ensure_loaded();
             let row = sqlx::query(
