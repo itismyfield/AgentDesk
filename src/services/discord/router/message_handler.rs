@@ -7425,7 +7425,7 @@ mod tests {
     fn session_strategy_lifecycle_event_records_fresh_and_resumed_details() {
         let fresh = session_strategy_lifecycle_event(None, "no_cached_provider_session");
         assert_eq!(fresh.meta().kind, "session_fresh");
-        assert!(fresh.notify_user());
+        assert!(!fresh.notify_user());
         let fresh_details = fresh.details_json();
         assert_eq!(fresh_details["reason"], "no_cached_provider_session");
         assert!(fresh_details["providerSessionId"].is_null());
