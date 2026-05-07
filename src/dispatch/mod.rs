@@ -8,6 +8,7 @@ use crate::db::Db;
 mod dispatch_channel;
 mod dispatch_context;
 mod dispatch_create;
+mod dispatch_query;
 mod dispatch_status;
 mod dispatch_summary;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -35,7 +36,6 @@ use dispatch_context::{
 };
 #[allow(unused_imports)]
 pub(crate) use dispatch_create::apply_dispatch_attached_intents_on_pg_tx;
-pub(crate) use dispatch_create::query_dispatch_row_pg;
 #[allow(unused_imports)]
 pub use dispatch_create::{
     create_dispatch, create_dispatch_core, create_dispatch_core_with_id,
@@ -46,6 +46,10 @@ pub use dispatch_create::{
 pub(crate) use dispatch_create::{
     create_dispatch_record_sqlite_test, create_dispatch_record_with_id_sqlite_test,
 };
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[allow(unused_imports)]
+pub use dispatch_query::query_dispatch_row;
+pub(crate) use dispatch_query::query_dispatch_row_pg;
 #[allow(unused_imports)]
 pub(crate) use dispatch_status::set_dispatch_status_without_queue_sync_with_backends;
 #[allow(unused_imports)]
@@ -61,8 +65,6 @@ pub(crate) use dispatch_status::{
     record_dispatch_status_event_on_conn, set_dispatch_status_on_conn,
     set_dispatch_status_without_queue_sync_on_conn,
 };
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use dispatch_summary::parse_dispatch_json_text;
 pub(crate) use dispatch_summary::{summarize_dispatch_from_text, summarize_dispatch_result};
 pub use types::DispatchCreateOptions;
 
@@ -631,56 +633,6 @@ pub fn cancel_active_dispatches_for_card_on_conn(
         };
     }
     Ok(cancelled)
-}
-
-/// Read a single dispatch row as JSON.
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub fn query_dispatch_row(
-    conn: &sqlite_test::Connection,
-    dispatch_id: &str,
-) -> Result<serde_json::Value> {
-    conn.query_row(
-        "SELECT id, kanban_card_id, from_agent_id, to_agent_id, dispatch_type, status, title, context, result, parent_dispatch_id, chain_depth, created_at, updated_at, completed_at, COALESCE(retry_count, 0)
-         FROM task_dispatches WHERE id = ?1",
-        [dispatch_id],
-        |row| {
-            let status: String = row.get(5)?;
-            let updated_at: String = row.get(12)?;
-            let dispatch_type = row.get::<_, Option<String>>(4)?;
-            let context_raw = row.get::<_, Option<String>>(7)?;
-            let result_raw = row.get::<_, Option<String>>(8)?;
-            let context = parse_dispatch_json_text(context_raw.as_deref());
-            let result = parse_dispatch_json_text(result_raw.as_deref());
-            let result_summary = summarize_dispatch_result(
-                dispatch_type.as_deref(),
-                Some(status.as_str()),
-                result.as_ref(),
-                context.as_ref(),
-            );
-            let completed_at: Option<String> = row
-                .get::<_, Option<String>>(13)?
-                .or_else(|| (status == "completed").then(|| updated_at.clone()));
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "kanban_card_id": row.get::<_, Option<String>>(1)?,
-                "from_agent_id": row.get::<_, Option<String>>(2)?,
-                "to_agent_id": row.get::<_, Option<String>>(3)?,
-                "dispatch_type": dispatch_type,
-                "status": status,
-                "title": row.get::<_, Option<String>>(6)?,
-                "context": context,
-                "result": result,
-                "result_summary": result_summary,
-                "parent_dispatch_id": row.get::<_, Option<String>>(9)?,
-                "chain_depth": row.get::<_, i64>(10)?,
-                "created_at": row.get::<_, String>(11)?,
-                "updated_at": updated_at,
-                "completed_at": completed_at,
-                "retry_count": row.get::<_, i64>(14)?,
-            }))
-        },
-    )
-    .map_err(|e| anyhow::anyhow!("Dispatch query error: {e}"))
 }
 
 pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {
@@ -4347,35 +4299,6 @@ mod tests {
                 .unwrap_or_default()
                 .contains("에러 핸들링 누락")
         }));
-    }
-
-    #[test]
-    fn query_dispatch_row_includes_normalized_result_summary() {
-        let db = test_db();
-        seed_card(&db, "card-summary-row", "review");
-
-        let conn = db.separate_conn().unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (
-                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at
-             ) VALUES (
-                'dispatch-summary-row', 'card-summary-row', 'agent-1', 'review-decision', 'completed',
-                'Review decision', ?1, datetime('now'), datetime('now')
-             )",
-            sqlite_test::params![json!({
-                "decision": "accept",
-                "comment": "Ship it"
-            })
-            .to_string()],
-        )
-        .unwrap();
-
-        let dispatch = query_dispatch_row(&conn, "dispatch-summary-row").unwrap();
-        assert_eq!(
-            dispatch["result_summary"].as_str(),
-            Some("Accepted review feedback: Ship it")
-        );
-        assert_eq!(dispatch["result"]["decision"], "accept");
     }
 
     // ── #821 invariants: cancel / terminal / done / reactivate ───────────

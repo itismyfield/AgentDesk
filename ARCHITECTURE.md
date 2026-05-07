@@ -54,6 +54,7 @@ src/
 │   ├── auto_queue/
 │   │   ├── core.rs
 │   │   ├── mod.rs
+│   │   ├── phase_gates.rs
 │   │   ├── queries.rs
 │   │   └── test_support.rs
 │   ├── dispatches/
@@ -102,6 +103,7 @@ src/
 │   ├── dispatch_channel.rs
 │   ├── dispatch_context.rs
 │   ├── dispatch_create.rs
+│   ├── dispatch_query.rs
 │   ├── dispatch_status.rs
 │   ├── dispatch_summary.rs
 │   ├── mod.rs

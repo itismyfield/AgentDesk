@@ -10,8 +10,8 @@ use crate::engine::PolicyEngine;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use super::dispatch_context::validate_dispatch_completion_evidence_on_conn;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use super::query_dispatch_row;
-use super::query_dispatch_row_pg;
+use super::dispatch_query::query_dispatch_row;
+use super::dispatch_query::query_dispatch_row_pg;
 
 /// #750: Sources whose completion path already writes ✅ to the Discord
 /// message via the command bot (turn_bridge / tmux watcher). For those, the
