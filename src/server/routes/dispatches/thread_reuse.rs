@@ -152,6 +152,36 @@ pub(crate) async fn get_thread_for_channel_pg(
     Ok(None)
 }
 
+pub(crate) async fn get_mapped_thread_for_channel_pg(
+    pool: &PgPool,
+    card_id: &str,
+    channel_id: u64,
+) -> Result<Option<String>, String> {
+    let row = sqlx::query(
+        "SELECT channel_thread_map::text AS channel_thread_map
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres thread map for {card_id}: {error}"))?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let map_json: Option<String> = row
+        .try_get("channel_thread_map")
+        .map_err(|error| format!("read postgres channel_thread_map for {card_id}: {error}"))?;
+
+    Ok(lookup_thread_for_channel_from_map_pg(
+        map_json.as_deref(),
+        card_id,
+        channel_id,
+    ))
+}
+
 /// Set the thread_id for a specific channel in channel_thread_map.
 /// Also updates active_thread_id for backward compatibility.
 pub(super) fn set_thread_for_channel<T>(
@@ -168,17 +198,37 @@ pub(crate) async fn set_thread_for_channel_pg(
     channel_id: u64,
     thread_id: &str,
 ) -> Result<(), String> {
+    set_thread_for_channel_pg_with_active(pool, card_id, channel_id, thread_id, true).await
+}
+
+pub(crate) async fn set_thread_for_channel_map_only_pg(
+    pool: &PgPool,
+    card_id: &str,
+    channel_id: u64,
+    thread_id: &str,
+) -> Result<(), String> {
+    set_thread_for_channel_pg_with_active(pool, card_id, channel_id, thread_id, false).await
+}
+
+async fn set_thread_for_channel_pg_with_active(
+    pool: &PgPool,
+    card_id: &str,
+    channel_id: u64,
+    thread_id: &str,
+    update_active_thread: bool,
+) -> Result<(), String> {
     sqlx::query(
         "UPDATE kanban_cards
          SET channel_thread_map = COALESCE(channel_thread_map, '{}'::jsonb)
                                   || jsonb_build_object($1::text, $2::text),
-             active_thread_id = $2,
+             active_thread_id = CASE WHEN $4::boolean THEN $2 ELSE active_thread_id END,
              updated_at = NOW()
          WHERE id = $3",
     )
     .bind(channel_id.to_string())
     .bind(thread_id)
     .bind(card_id)
+    .bind(update_active_thread)
     .execute(pool)
     .await
     .map_err(|error| format!("save postgres thread map for {card_id}: {error}"))?;
@@ -963,6 +1013,59 @@ mod tests {
         pool.close().await;
         pg_db.drop().await;
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mapped_thread_lookup_ignores_legacy_active_thread_pg() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let Some(pool) = pg_db.migrate().await else {
+            pg_db.drop().await;
+            return;
+        };
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                    id, title, status, active_thread_id, channel_thread_map
+                 )
+             VALUES ($1, 'Review Card', 'review', $2, '{}'::jsonb)",
+        )
+        .bind("card-review-thread-map")
+        .bind("1492434645395177545")
+        .execute(&pool)
+        .await
+        .expect("seed card with legacy active thread");
+
+        let legacy_lookup = get_thread_for_channel_pg(&pool, "card-review-thread-map", 222)
+            .await
+            .expect("legacy lookup should succeed");
+        assert_eq!(legacy_lookup.as_deref(), Some("1492434645395177545"));
+
+        let strict_lookup = get_mapped_thread_for_channel_pg(&pool, "card-review-thread-map", 222)
+            .await
+            .expect("mapped lookup should succeed");
+        assert_eq!(strict_lookup, None);
+
+        set_thread_for_channel_map_only_pg(&pool, "card-review-thread-map", 222, "456")
+            .await
+            .expect("save channel-only mapping");
+
+        let mapped_lookup = get_mapped_thread_for_channel_pg(&pool, "card-review-thread-map", 222)
+            .await
+            .expect("mapped lookup should succeed");
+        assert_eq!(mapped_lookup.as_deref(), Some("456"));
+
+        let active_thread_id: Option<String> =
+            sqlx::query_scalar("SELECT active_thread_id FROM kanban_cards WHERE id = $1")
+                .bind("card-review-thread-map")
+                .fetch_one(&pool)
+                .await
+                .expect("load active thread");
+        assert_eq!(active_thread_id.as_deref(), Some("1492434645395177545"));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 // ── Route handlers ────────────────────────────────────────────
@@ -981,14 +1084,16 @@ pub async fn link_dispatch_thread(
         );
     };
 
-    let card_id = match sqlx::query_scalar::<_, String>(
-        "SELECT kanban_card_id FROM task_dispatches WHERE id = $1",
+    let dispatch_row = match sqlx::query(
+        "SELECT kanban_card_id, dispatch_type, to_agent_id
+         FROM task_dispatches
+         WHERE id = $1",
     )
     .bind(&body.dispatch_id)
     .fetch_optional(pool)
     .await
     {
-        Ok(card_id) => card_id,
+        Ok(row) => row,
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -997,8 +1102,12 @@ pub async fn link_dispatch_thread(
         }
     };
 
-    match card_id {
-        Some(cid) => {
+    match dispatch_row {
+        Some(row) => {
+            let cid: String = row.try_get("kanban_card_id").unwrap_or_default();
+            let dispatch_type: Option<String> = row.try_get("dispatch_type").ok().flatten();
+            let to_agent_id: String = row.try_get("to_agent_id").unwrap_or_default();
+
             if let Err(error) = sqlx::query(
                 "UPDATE task_dispatches
                  SET thread_id = $1,
@@ -1018,7 +1127,21 @@ pub async fn link_dispatch_thread(
 
             let save_result = if let Some(ref ch_id) = body.channel_id {
                 if let Ok(ch_num) = ch_id.parse::<u64>() {
-                    set_thread_for_channel_pg(pool, &cid, ch_num, &body.thread_id).await
+                    let counter_channel =
+                        resolve_agent_counter_model_channel_pg(pool, &to_agent_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|value| parse_channel_id(&value));
+                    let is_counter_model_thread =
+                        super::use_counter_model_channel(dispatch_type.as_deref())
+                            && counter_channel == Some(ch_num);
+                    if is_counter_model_thread {
+                        set_thread_for_channel_map_only_pg(pool, &cid, ch_num, &body.thread_id)
+                            .await
+                    } else {
+                        set_thread_for_channel_pg(pool, &cid, ch_num, &body.thread_id).await
+                    }
                 } else {
                     sqlx::query(
                         "UPDATE kanban_cards
@@ -1146,7 +1269,12 @@ pub async fn get_card_thread(
             };
             // Look up channel-specific thread
             let thread_id = if let Some(ch_num) = target_channel.and_then(parse_channel_id) {
-                match get_thread_for_channel_pg(pool, &card_id, ch_num).await {
+                let lookup_result = if use_alt {
+                    get_mapped_thread_for_channel_pg(pool, &card_id, ch_num).await
+                } else {
+                    get_thread_for_channel_pg(pool, &card_id, ch_num).await
+                };
+                match lookup_result {
                     Ok(thread_id) => thread_id,
                     Err(error) => {
                         return (

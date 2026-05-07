@@ -2333,6 +2333,149 @@ async fn send_dispatch_to_discord_with_pg_creates_thread_and_persists_context() 
 }
 
 #[tokio::test]
+async fn review_delivery_creates_counter_model_slot_thread_without_legacy_active_fallback() {
+    let _env_lock = env_lock();
+    let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+    let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
+    let temp = tempfile::tempdir().unwrap();
+    write_announce_token(temp.path());
+    let _root = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+    let sqlite = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+
+    sqlx::query(
+        "INSERT INTO agents (
+                id, name, provider, discord_channel_id, discord_channel_alt,
+                discord_channel_cc, discord_channel_cdx
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind("agent-review-slot")
+    .bind("Review Slot Agent")
+    .bind("codex")
+    .bind("222")
+    .bind("111")
+    .bind("222")
+    .bind("111")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, latest_dispatch_id,
+                active_thread_id, github_issue_number, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+    )
+    .bind("card-review-slot")
+    .bind("Review slot card")
+    .bind("review")
+    .bind("agent-review-slot")
+    .bind("dispatch-review-slot")
+    .bind("1492434645395177545")
+    .bind(1922_i64)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+    )
+    .bind("dispatch-review-slot")
+    .bind("card-review-slot")
+    .bind("agent-review-slot")
+    .bind("review")
+    .bind("pending")
+    .bind("Review slot card")
+    .bind(r#"{"target_provider":"claude","slot_index":0}"#)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+             VALUES ($1, 0, '{}'::jsonb)",
+    )
+    .bind("agent-review-slot")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    send_dispatch_to_discord_with_pg(
+        Some(&sqlite),
+        Some(&pool),
+        "agent-review-slot",
+        "Review slot card",
+        "card-review-slot",
+        "dispatch-review-slot",
+    )
+    .await
+    .unwrap();
+
+    server_handle.abort();
+
+    let state = state.lock().unwrap();
+    assert!(
+        state
+            .calls
+            .contains(&"POST /channels/222/threads".to_string()),
+        "review delivery should create a counter-model channel thread, got {:?}",
+        state.calls
+    );
+    assert!(
+        state
+            .calls
+            .contains(&"POST /channels/456/messages".to_string()),
+        "review delivery should post into the created counter-model thread"
+    );
+    assert!(
+        !state
+            .calls
+            .iter()
+            .any(|call| call.contains("1492434645395177545")),
+        "review delivery must not probe or reuse the legacy active user thread: {:?}",
+        state.calls
+    );
+    drop(state);
+
+    let channel_thread_map: Option<String> =
+        sqlx::query_scalar("SELECT channel_thread_map::text FROM kanban_cards WHERE id = $1")
+            .bind("card-review-slot")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let channel_thread_map =
+        serde_json::from_str::<serde_json::Value>(&channel_thread_map.unwrap()).unwrap();
+    assert_eq!(channel_thread_map["222"], "456");
+
+    let active_thread_id: Option<String> =
+        sqlx::query_scalar("SELECT active_thread_id FROM kanban_cards WHERE id = $1")
+            .bind("card-review-slot")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(active_thread_id.as_deref(), Some("1492434645395177545"));
+
+    let slot_map: Option<String> = sqlx::query_scalar(
+        "SELECT thread_id_map::text
+             FROM auto_queue_slots
+             WHERE agent_id = $1 AND slot_index = 0",
+    )
+    .bind("agent-review-slot")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&slot_map.unwrap()).unwrap()["222"],
+        "456"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn review_decision_resolves_free_slot_and_skips_card_thread_candidate_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
@@ -2484,6 +2627,16 @@ async fn review_decision_resolves_free_slot_and_skips_card_thread_candidate_pg()
     assert_eq!(persisted_context["slot_index"], 1);
 
     sqlx::query(
+        "UPDATE task_dispatches
+         SET status = 'completed', updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind("dispatch-review-decision")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
         "INSERT INTO task_dispatches (
                 id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
                 created_at, updated_at
@@ -2499,7 +2652,20 @@ async fn review_decision_resolves_free_slot_and_skips_card_thread_candidate_pg()
     .execute(&pool)
     .await
     .unwrap();
-    for slot_index in 2..SLOT_THREAD_MAX_SLOTS {
+    for slot_index in 1..SLOT_THREAD_MAX_SLOTS {
+        let active_card_id = format!("card-active-{slot_index}");
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, created_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, NOW(), NOW())",
+        )
+        .bind(&active_card_id)
+        .bind(format!("Active slot {slot_index}"))
+        .bind("in_progress")
+        .bind("agent-1")
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query(
                 "INSERT INTO auto_queue_entries (
                     id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group
@@ -2507,7 +2673,7 @@ async fn review_decision_resolves_free_slot_and_skips_card_thread_candidate_pg()
             )
             .bind(format!("entry-active-{slot_index}"))
             .bind("run-1")
-            .bind("card-1")
+            .bind(&active_card_id)
             .bind("agent-1")
             .bind("dispatched")
             .bind(format!("dispatch-active-{slot_index}"))

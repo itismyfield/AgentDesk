@@ -1,7 +1,5 @@
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use super::add_thread_member_to_dispatch_thread;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-use super::post_dispatch_message_to_channel;
 use super::{
     DispatchNotifyDeliveryResult, DispatchTransport, ReviewFollowupKind,
     archive_duplicate_slot_threads, maybe_add_owner_to_dispatch_thread,
@@ -15,8 +13,8 @@ use crate::db::dispatches::{
 use crate::dispatch::dispatch_destination_provider_override;
 use crate::server::routes::dispatches::resolve_channel_alias;
 use crate::server::routes::dispatches::thread_reuse::{
-    clear_thread_for_channel_pg, get_thread_for_channel_pg, set_thread_for_channel_pg,
-    try_reuse_thread,
+    clear_thread_for_channel_pg, get_thread_for_channel_pg, set_thread_for_channel_map_only_pg,
+    set_thread_for_channel_pg, try_reuse_thread,
 };
 use crate::services::dispatches::outbox_route::{
     build_minimal_dispatch_message, format_dispatch_message, prefix_dispatch_message,
@@ -66,6 +64,10 @@ fn dispatch_type_requires_independent_slot_thread(dispatch_type: Option<&str>) -
         dispatch_type,
         Some("review" | "review-decision" | "phase-gate")
     )
+}
+
+fn dispatch_type_persists_counter_model_card_thread(dispatch_type: Option<&str>) -> bool {
+    matches!(dispatch_type, Some("review"))
 }
 
 #[cfg(test)]
@@ -1006,6 +1008,16 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                     if !independent_slot_thread {
                         set_thread_for_channel_pg(pool, card_id, channel_id_num, existing_tid)
                             .await?;
+                    } else if dispatch_type_persists_counter_model_card_thread(
+                        dispatch_type.as_deref(),
+                    ) {
+                        set_thread_for_channel_map_only_pg(
+                            pool,
+                            card_id,
+                            channel_id_num,
+                            existing_tid,
+                        )
+                        .await?;
                     }
                     if let Some(binding) = slot_binding.as_ref() {
                         upsert_slot_thread_id_pg(
@@ -1107,6 +1119,16 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                             if !independent_slot_thread {
                                 set_thread_for_channel_pg(pool, card_id, channel_id_num, thread_id)
                                     .await?;
+                            } else if dispatch_type_persists_counter_model_card_thread(
+                                dispatch_type.as_deref(),
+                            ) {
+                                set_thread_for_channel_map_only_pg(
+                                    pool,
+                                    card_id,
+                                    channel_id_num,
+                                    thread_id,
+                                )
+                                .await?;
                             }
                             if let Some(binding) = slot_binding.as_ref() {
                                 upsert_slot_thread_id_pg(
