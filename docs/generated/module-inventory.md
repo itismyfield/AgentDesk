@@ -5,7 +5,7 @@
 
 - Production Rust modules: `520`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `93`
+- Giant files: `92`
 
 ## Namespace Summary
 
@@ -116,13 +116,13 @@
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 877 |  |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 231 |  |
 | `db::turns` | `src/db/turns.rs` | 215 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 3305 | giant-file |
+| `dispatch` | `src/dispatch/mod.rs` | 66 |  |
 | `dispatch::dispatch_cancel` | `src/dispatch/dispatch_cancel.rs` | 577 |  |
-| `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 74 |  |
-| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 4029 | giant-file |
-| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2790 | giant-file |
+| `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 78 |  |
+| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 4033 | giant-file |
+| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2794 | giant-file |
 | `dispatch::dispatch_query` | `src/dispatch/dispatch_query.rs` | 174 |  |
-| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1921 | giant-file |
+| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1925 | giant-file |
 | `dispatch::dispatch_summary` | `src/dispatch/dispatch_summary.rs` | 326 |  |
 | `dispatch::test_support` | `src/dispatch/test_support.rs` | 258 |  |
 | `dispatch::types` | `src/dispatch/types.rs` | 5 |  |
