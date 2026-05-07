@@ -753,10 +753,16 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     let mut last_session_id: Option<String> = None;
     let mut last_model: Option<String> = None;
-    let mut accum_input_tokens: u64 = 0;
-    let mut accum_cache_create_tokens: u64 = 0;
-    let mut accum_cache_read_tokens: u64 = 0;
-    let mut accum_output_tokens: u64 = 0;
+    // #1918: context-window usage uses the LAST API call's input/cache totals,
+    // not the sum across a multi-call (tool-use loop) turn (which inflates
+    // past the window size). output_tokens stays cumulative because turn
+    // analytics expect the cumulative output. Cost accounting flows through
+    // the CLI's own `cost_usd` field, untouched here.
+    let mut last_call_input_tokens: u64 = 0;
+    let mut last_call_cache_create_tokens: u64 = 0;
+    let mut last_call_cache_read_tokens: u64 = 0;
+    let mut cumulative_output_tokens: u64 = 0;
+    let mut saw_per_message_usage = false;
     let mut final_result: Option<String> = None;
     let mut stdout_error: Option<(String, String)> = None; // (message, raw_line)
     let mut line_count = 0;
@@ -845,7 +851,10 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         last_model = Some(model.to_string());
                     }
                     if let Some(usage) = msg_obj.get("usage") {
-                        // Include cache tokens in input total for accurate context occupancy
+                        // #1918: input/cache_read/cache_create replace so the
+                        // status panel reflects the LAST API call's context
+                        // occupancy. output_tokens stays cumulative for analytics.
+                        saw_per_message_usage = true;
                         let inp = usage
                             .get("input_tokens")
                             .and_then(|v| v.as_u64())
@@ -858,11 +867,11 @@ IMPORTANT: Format your responses using Markdown for better readability:
                             .get("cache_creation_input_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
-                        accum_input_tokens += inp;
-                        accum_cache_read_tokens += cache_read;
-                        accum_cache_create_tokens += cache_creation;
+                        last_call_input_tokens = inp;
+                        last_call_cache_read_tokens = cache_read;
+                        last_call_cache_create_tokens = cache_creation;
                         if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                            accum_output_tokens += out;
+                            cumulative_output_tokens = cumulative_output_tokens.saturating_add(out);
                         }
                     }
                 }
@@ -878,30 +887,32 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32);
 
-                // Prefer result event's own usage field over accumulated message values.
-                // The result event usage reflects the LAST API call's context window,
-                // while accumulated values overcount for multi-call turns (tool use loops).
-                if let Some(usage) = json.get("usage") {
-                    let inp = usage
+                // #1918: for Claude CLI the assistant-message branch already
+                // captured the LAST API call's prompt and the cumulative
+                // output_tokens. result.usage in multi-call turns is itself
+                // turn-cumulative, so overwriting input/cache here would re-
+                // introduce the context-window inflation. Only fall back to
+                // result.usage when no per-message usage was observed (defensive
+                // — Claude CLI always emits per-message usage today, but the
+                // fallback keeps token analytics intact if a future variant
+                // skips it).
+                if !saw_per_message_usage && let Some(usage) = json.get("usage") {
+                    last_call_input_tokens = usage
                         .get("input_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    let cache_read = usage
+                    last_call_cache_read_tokens = usage
                         .get("cache_read_input_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    let cache_creation = usage
+                    last_call_cache_create_tokens = usage
                         .get("cache_creation_input_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    let out = usage
+                    cumulative_output_tokens = usage
                         .get("output_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    accum_input_tokens = inp;
-                    accum_cache_read_tokens = cache_read;
-                    accum_cache_create_tokens = cache_creation;
-                    accum_output_tokens = out;
                 }
 
                 if cost_usd.is_some() || total_cost_usd.is_some() || last_model.is_some() {
@@ -911,23 +922,23 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         total_cost_usd,
                         duration_ms,
                         num_turns,
-                        input_tokens: if accum_input_tokens > 0 {
-                            Some(accum_input_tokens)
+                        input_tokens: if last_call_input_tokens > 0 {
+                            Some(last_call_input_tokens)
                         } else {
                             None
                         },
-                        cache_create_tokens: if accum_cache_create_tokens > 0 {
-                            Some(accum_cache_create_tokens)
+                        cache_create_tokens: if last_call_cache_create_tokens > 0 {
+                            Some(last_call_cache_create_tokens)
                         } else {
                             None
                         },
-                        cache_read_tokens: if accum_cache_read_tokens > 0 {
-                            Some(accum_cache_read_tokens)
+                        cache_read_tokens: if last_call_cache_read_tokens > 0 {
+                            Some(last_call_cache_read_tokens)
                         } else {
                             None
                         },
-                        output_tokens: if accum_output_tokens > 0 {
-                            Some(accum_output_tokens)
+                        output_tokens: if cumulative_output_tokens > 0 {
+                            Some(cumulative_output_tokens)
                         } else {
                             None
                         },

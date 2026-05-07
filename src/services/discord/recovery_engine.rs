@@ -3823,9 +3823,39 @@ mod tests {
 
     #[test]
     fn extract_turn_analytics_from_output_reads_session_and_cache_tokens() {
+        // #1918: input/cache_read/cache_create reflect the LAST assistant
+        // message's per-call usage (current context occupancy) rather than the
+        // turn-cumulative `result.usage` block. output_tokens stays cumulative
+        // across assistant messages.
         let file = write_jsonl(&[
             r#"{"type":"system","subtype":"init","session_id":"session-init"}"#,
             r#"{"type":"assistant","message":{"model":"claude-sonnet","usage":{"input_tokens":10,"cache_creation_input_tokens":3,"cache_read_input_tokens":4,"output_tokens":2},"content":[{"type":"text","text":"partial"}]}}"#,
+            r#"{"type":"result","subtype":"success","session_id":"session-final","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40},"result":"done"}"#,
+        ]);
+
+        let (session_id, usage) =
+            extract_turn_analytics_from_output(file.path().to_str().unwrap(), 0);
+
+        assert_eq!(session_id.as_deref(), Some("session-final"));
+        assert_eq!(
+            usage,
+            Some(crate::db::turns::TurnTokenUsage {
+                input_tokens: 10,
+                cache_create_tokens: 3,
+                cache_read_tokens: 4,
+                output_tokens: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn extract_turn_analytics_from_output_falls_back_to_result_usage_when_no_per_message() {
+        // #1918: Qwen-style streams emit token counts only on the terminal
+        // result event. The fallback path must honour result.usage when no
+        // assistant message reported per-call usage.
+        let file = write_jsonl(&[
+            r#"{"type":"system","subtype":"init","session_id":"session-init"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}"#,
             r#"{"type":"result","subtype":"success","session_id":"session-final","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40},"result":"done"}"#,
         ]);
 
@@ -3840,6 +3870,31 @@ mod tests {
                 cache_create_tokens: 20,
                 cache_read_tokens: 30,
                 output_tokens: 40,
+            })
+        );
+    }
+
+    #[test]
+    fn extract_turn_analytics_keeps_last_call_input_and_cumulative_output() {
+        // #1918: across multi-call turns, input/cache_* should converge on
+        // the most recent assistant call's prompt (not summed) while
+        // output_tokens accumulates.
+        let file = write_jsonl(&[
+            r#"{"type":"system","subtype":"init","session_id":"session-init"}"#,
+            r#"{"type":"assistant","message":{"model":"claude-sonnet","usage":{"input_tokens":10,"cache_creation_input_tokens":3,"cache_read_input_tokens":4,"output_tokens":2},"content":[{"type":"text","text":"first"}]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-sonnet","usage":{"input_tokens":50,"cache_creation_input_tokens":7,"cache_read_input_tokens":80,"output_tokens":5},"content":[{"type":"text","text":"second"}]}}"#,
+            r#"{"type":"result","subtype":"success","session_id":"session-final","usage":{"input_tokens":60,"cache_creation_input_tokens":10,"cache_read_input_tokens":84,"output_tokens":7},"result":"done"}"#,
+        ]);
+
+        let (_session_id, usage) =
+            extract_turn_analytics_from_output(file.path().to_str().unwrap(), 0);
+        assert_eq!(
+            usage,
+            Some(crate::db::turns::TurnTokenUsage {
+                input_tokens: 50,
+                cache_create_tokens: 7,
+                cache_read_tokens: 80,
+                output_tokens: 7,
             })
         );
     }

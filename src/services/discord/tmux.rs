@@ -4023,6 +4023,50 @@ mod tests {
         assert_eq!(full_response, "Here is the answer.");
     }
 
+    #[test]
+    fn process_watcher_lines_uses_last_call_context_usage_and_cumulative_output() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet\",\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":4,\"output_tokens\":2},\"content\":[{\"type\":\"text\",\"text\":\"first\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet\",\"usage\":{\"input_tokens\":50,\"cache_creation_input_tokens\":7,\"cache_read_input_tokens\":80,\"output_tokens\":5},\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"session-final\",\"usage\":{\"input_tokens\":60,\"cache_creation_input_tokens\":10,\"cache_read_input_tokens\":84,\"output_tokens\":7},\"result\":\"done\"}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert_eq!(state.accum_input_tokens, 50);
+        assert_eq!(state.accum_cache_create_tokens, 7);
+        assert_eq!(state.accum_cache_read_tokens, 80);
+        assert_eq!(state.accum_output_tokens, 7);
+    }
+
+    #[test]
+    fn process_watcher_lines_missing_last_call_cache_fields_reset_to_zero() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet\",\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":80,\"output_tokens\":2},\"content\":[{\"type\":\"text\",\"text\":\"first\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet\",\"usage\":{\"input_tokens\":50,\"output_tokens\":5},\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"session-final\",\"usage\":{\"input_tokens\":60,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":80,\"output_tokens\":7},\"result\":\"done\"}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert_eq!(state.accum_input_tokens, 50);
+        assert_eq!(state.accum_cache_create_tokens, 0);
+        assert_eq!(state.accum_cache_read_tokens, 0);
+        assert_eq!(state.accum_output_tokens, 7);
+    }
+
     /// #1216: when the buffer holds two completed turns back-to-back (typical
     /// post-deploy/restart drain), `process_watcher_lines` must stop after the
     /// first `result` and leave the second turn untouched in the buffer for

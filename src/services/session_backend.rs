@@ -264,10 +264,20 @@ pub fn terminate_process_handle(handle: SessionHandle) {
 pub struct StreamLineState {
     pub last_session_id: Option<String>,
     pub last_model: Option<String>,
+    /// #1918: input/cache_read/cache_create record the **last** API call's
+    /// per-message usage so the status panel Context line reflects current
+    /// context occupancy (sum across multi-call turns inflated past the
+    /// window). `accum_output_tokens` stays cumulative because turn analytics
+    /// and persisted token totals expect the sum across all calls.
     pub accum_input_tokens: u64,
     pub accum_cache_create_tokens: u64,
     pub accum_cache_read_tokens: u64,
     pub accum_output_tokens: u64,
+    /// True once any per-message `usage` block has been observed in the
+    /// stream. Lets the result-event handler fall back to `result.usage`
+    /// only for providers (e.g. Qwen) that emit token counts solely on the
+    /// terminal result event.
+    pub saw_per_message_usage: bool,
     pub final_result: Option<String>,
     pub stdout_error: Option<(String, String)>,
     pub tool_use_names: HashMap<String, String>,
@@ -357,6 +367,13 @@ pub fn process_stream_line(
                 state.last_model = Some(model.to_string());
             }
             if let Some(usage) = message.get("usage") {
+                // #1918: input/cache_read/cache_create replace so persisted
+                // analytics reflect the LAST API call's prompt; the previous
+                // sum across multi-call (tool-use loop) turns inflated the
+                // recorded context tokens past the window. output_tokens stays
+                // accumulated for the cumulative output metric analytics
+                // expect.
+                state.saw_per_message_usage = true;
                 let input_tokens = usage
                     .get("input_tokens")
                     .and_then(|value| value.as_u64())
@@ -369,20 +386,29 @@ pub fn process_stream_line(
                     .get("cache_creation_input_tokens")
                     .and_then(|value| value.as_u64())
                     .unwrap_or(0);
-                state.accum_input_tokens += input_tokens;
-                state.accum_cache_read_tokens += cache_read;
-                state.accum_cache_create_tokens += cache_creation;
+                state.accum_input_tokens = input_tokens;
+                state.accum_cache_read_tokens = cache_read;
+                state.accum_cache_create_tokens = cache_creation;
                 if let Some(output_tokens) =
                     usage.get("output_tokens").and_then(|value| value.as_u64())
                 {
-                    state.accum_output_tokens += output_tokens;
+                    state.accum_output_tokens =
+                        state.accum_output_tokens.saturating_add(output_tokens);
                 }
             }
         }
     }
 
     if msg_type == "result" {
-        if let Some(usage) = json.get("usage") {
+        // #1918: Claude CLI's result.usage in multi-call turns is
+        // turn-cumulative, so overwriting input/cache here would re-introduce
+        // the context-token inflation the per-message branch above already
+        // resolved. Only adopt result.usage when no per-message usage was
+        // observed (Qwen tmux wrappers report token counts solely on the
+        // terminal result event).
+        if !state.saw_per_message_usage
+            && let Some(usage) = json.get("usage")
+        {
             let input_tokens = usage
                 .get("input_tokens")
                 .and_then(|value| value.as_u64())
@@ -872,6 +898,26 @@ mod tests {
         format!("{prefix}-{nanos}")
     }
 
+    fn drain_status_update(
+        receiver: &std::sync::mpsc::Receiver<StreamMessage>,
+    ) -> Option<(Option<u64>, Option<u64>, Option<u64>, Option<u64>)> {
+        receiver.try_iter().find_map(|message| match message {
+            StreamMessage::StatusUpdate {
+                input_tokens,
+                cache_create_tokens,
+                cache_read_tokens,
+                output_tokens,
+                ..
+            } => Some((
+                input_tokens,
+                cache_create_tokens,
+                cache_read_tokens,
+                output_tokens,
+            )),
+            _ => None,
+        })
+    }
+
     fn spawn_stdin_sink_handle() -> SessionHandle {
         #[cfg(unix)]
         let mut command = {
@@ -995,6 +1041,82 @@ mod tests {
             receiver.recv().unwrap(),
             StreamMessage::Done { result, session_id } if result == "done" && session_id.as_deref() == Some("sess-1")
         ));
+    }
+
+    #[test]
+    fn process_stream_line_status_update_uses_last_call_context_usage() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = StreamLineState::new();
+
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"claude-sonnet","usage":{"input_tokens":10,"cache_creation_input_tokens":3,"cache_read_input_tokens":4,"output_tokens":2},"content":[{"type":"text","text":"first"}]}}"#,
+            &sender,
+            &mut state,
+        ));
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"claude-sonnet","usage":{"input_tokens":50,"cache_creation_input_tokens":7,"cache_read_input_tokens":80,"output_tokens":5},"content":[{"type":"text","text":"second"}]}}"#,
+            &sender,
+            &mut state,
+        ));
+        assert!(process_stream_line(
+            r#"{"type":"result","subtype":"success","cost_usd":0.01,"session_id":"session-final","usage":{"input_tokens":60,"cache_creation_input_tokens":10,"cache_read_input_tokens":84,"output_tokens":7},"result":"done"}"#,
+            &sender,
+            &mut state,
+        ));
+
+        assert_eq!(
+            drain_status_update(&receiver),
+            Some((Some(50), Some(7), Some(80), Some(7)))
+        );
+    }
+
+    #[test]
+    fn process_stream_line_missing_last_call_cache_fields_reset_to_zero() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = StreamLineState::new();
+
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"claude-sonnet","usage":{"input_tokens":10,"cache_creation_input_tokens":3,"cache_read_input_tokens":80,"output_tokens":2},"content":[{"type":"text","text":"first"}]}}"#,
+            &sender,
+            &mut state,
+        ));
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"claude-sonnet","usage":{"input_tokens":50,"output_tokens":5},"content":[{"type":"text","text":"second"}]}}"#,
+            &sender,
+            &mut state,
+        ));
+        assert!(process_stream_line(
+            r#"{"type":"result","subtype":"success","cost_usd":0.01,"session_id":"session-final","usage":{"input_tokens":60,"cache_creation_input_tokens":3,"cache_read_input_tokens":80,"output_tokens":7},"result":"done"}"#,
+            &sender,
+            &mut state,
+        ));
+
+        assert_eq!(
+            drain_status_update(&receiver),
+            Some((Some(50), None, None, Some(7)))
+        );
+    }
+
+    #[test]
+    fn process_stream_line_status_update_falls_back_to_result_usage() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = StreamLineState::new();
+
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"qwen","content":[{"type":"text","text":"partial"}]}}"#,
+            &sender,
+            &mut state,
+        ));
+        assert!(process_stream_line(
+            r#"{"type":"result","subtype":"success","cost_usd":0.01,"session_id":"session-final","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40},"result":"done"}"#,
+            &sender,
+            &mut state,
+        ));
+
+        assert_eq!(
+            drain_status_update(&receiver),
+            Some((Some(100), Some(20), Some(30), Some(40)))
+        );
     }
 
     #[test]

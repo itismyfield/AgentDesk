@@ -1207,10 +1207,14 @@ fn persist_turn_analytics_row_prefers_output_jsonl_usage_from_turn_start_offset(
     assert_eq!(row.1.as_deref(), Some("[AgentDesk] #593 turns persistence"));
     assert_eq!(row.2, "1479671301387059200");
     assert_eq!(row.3.as_deref(), Some("session-final"));
-    assert_eq!(row.4, 100);
-    assert_eq!(row.5, 20);
-    assert_eq!(row.6, 30);
-    assert_eq!(row.7, 40);
+    // #1918: input/cache_read/cache_create reflect the LAST assistant
+    // message's per-call usage (10/3/4) rather than the turn-cumulative
+    // result.usage (100/20/30). output_tokens accumulates across assistant
+    // messages; only one such message here, so 0 + 2.
+    assert_eq!(row.4, 10);
+    assert_eq!(row.5, 3);
+    assert_eq!(row.6, 4);
+    assert_eq!(row.7, 2);
 }
 
 fn fetch_persisted_turn_usage(
