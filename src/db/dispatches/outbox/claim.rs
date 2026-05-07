@@ -6,6 +6,7 @@ const DISPATCH_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
 
 pub(crate) async fn select_pending_dispatch_outbox_claim_candidates_pg(
     tx: &mut Transaction<'_, Postgres>,
+    claim_owner: &str,
 ) -> Result<Vec<DispatchOutboxClaimCandidate>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT
@@ -22,6 +23,7 @@ pub(crate) async fn select_pending_dispatch_outbox_claim_candidates_pg(
          WHERE (
                 o.status = 'pending'
                 AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= NOW())
+                AND (o.claim_owner IS NULL OR o.claim_owner = $2)
              )
             OR (
                 o.status = 'processing'
@@ -35,6 +37,7 @@ pub(crate) async fn select_pending_dispatch_outbox_claim_candidates_pg(
          LIMIT 20",
     )
     .bind(DISPATCH_OUTBOX_CLAIM_STALE_SECS)
+    .bind(claim_owner)
     .fetch_all(&mut **tx)
     .await?;
 

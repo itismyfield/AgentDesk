@@ -32,7 +32,7 @@ if [ -n "$pending_rows" ]; then
 fi
 
 require_fixed_string "postgres pool is required for API friction capture; sqlite fallback is unavailable" src/services/api_friction/core.rs
-require_fixed_string "postgres pool is required for API friction processing; sqlite fallback is unavailable" src/services/api_friction/core.rs
+require_fixed_string "postgres pool is required for API friction processing; sqlite fallback is unavailable" src/services/api_friction/issues.rs
 require_fixed_string "PG outbox rows are authoritative whenever a pool is configured." src/services/message_outbox.rs
 require_fixed_string "PG card_retrospectives rows are authoritative once a pool is attached." src/services/retrospectives.rs
 require_fixed_string "PG pending_dm_replies rows are authoritative in mixed mode." src/services/discord_dm_reply_store.rs

@@ -218,6 +218,8 @@
   - `src/runtime_layout/mod.rs` (1425 lines).
   - `src/server/mod.rs` (3370 lines).
   - `src/kanban/state_machine.rs` (3550 lines).
+  - `src/kanban/transition_core.rs` (1107 lines; relocated from state_machine
+    via #1786 epic decompose, awaiting further split).
   - `src/receipt.rs` (2133 lines).
   - `src/github/sync.rs` (1059 lines).
 - active_callsite_coverage: n/a.
@@ -239,6 +241,8 @@
 - legacy_modules: SQLite path through `libsql_rusqlite` (see `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file):
   - `src/db/auto_queue/tests.rs` (3182 lines; migrated auto-queue test harness).
+  - `src/db/auto_queue/entries.rs` (1436 lines; awaiting follow-up split per
+    auto-queue decompose epic #1782).
   - `src/db/schema.rs` (3194 lines).
   - `src/db/kanban_cards/` (1932 total lines; kanban card persistence and
     GitHub sync lookup surface).
