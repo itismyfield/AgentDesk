@@ -1919,3 +1919,7 @@ fn check_entry_is_pass(entry: &serde_json::Value) -> bool {
     }
     false
 }
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[path = "dispatch_status_relocated_tests.rs"]
+mod relocated_tests;

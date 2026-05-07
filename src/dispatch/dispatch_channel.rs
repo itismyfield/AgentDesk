@@ -72,3 +72,7 @@ pub(crate) fn dispatch_destination_provider_override(
         .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[path = "dispatch_channel_relocated_tests.rs"]
+mod relocated_tests;
