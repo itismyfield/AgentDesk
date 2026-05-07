@@ -1198,7 +1198,7 @@ mod tests {
             "src/engine/transition_executor_pg.rs",
             "src/engine/intent.rs",
             "src/engine/ops/kanban_ops.rs",
-            "src/kanban.rs",
+            "src/kanban/state_machine.rs",
         ];
 
         fn is_test_context(path: &Path) -> bool {

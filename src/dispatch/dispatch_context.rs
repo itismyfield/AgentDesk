@@ -221,7 +221,7 @@ pub(crate) fn dispatch_type_uses_thread_routing(_dispatch_type: Option<&str>) ->
 /// `reset_full=true` branch of `POST /api/kanban-cards/:id/reopen`, which
 /// invokes `cleanup_force_transition_revert_fields_on_conn` to scrub the
 /// recorded worktree metadata from `task_dispatches` JSON columns. See
-/// `src/kanban.rs:strip_stale_worktree_metadata_from_dispatches_on_conn`.
+/// `src/kanban/state_machine.rs:strip_stale_worktree_metadata_from_dispatches_on_conn`.
 pub(crate) fn dispatch_session_strategy_from_context(
     context: Option<&serde_json::Value>,
     dispatch_type: Option<&str>,
