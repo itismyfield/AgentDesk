@@ -367,6 +367,13 @@ pub fn process_stream_line(
                 state.last_model = Some(model.to_string());
             }
             if let Some(usage) = message.get("usage") {
+                // #1918 — input/cache_read/cache_create REPLACE so persisted
+                // analytics reflect the LAST API call's prompt; the previous
+                // sum across multi-call (tool-use loop) turns inflated the
+                // recorded context tokens past the window. output_tokens stays
+                // accumulated for the cumulative output metric analytics
+                // expect.
+                state.saw_per_message_usage = true;
                 let input_tokens = usage
                     .get("input_tokens")
                     .and_then(|value| value.as_u64())
@@ -379,20 +386,29 @@ pub fn process_stream_line(
                     .get("cache_creation_input_tokens")
                     .and_then(|value| value.as_u64())
                     .unwrap_or(0);
-                state.accum_input_tokens += input_tokens;
-                state.accum_cache_read_tokens += cache_read;
-                state.accum_cache_create_tokens += cache_creation;
+                state.accum_input_tokens = input_tokens;
+                state.accum_cache_read_tokens = cache_read;
+                state.accum_cache_create_tokens = cache_creation;
                 if let Some(output_tokens) =
                     usage.get("output_tokens").and_then(|value| value.as_u64())
                 {
-                    state.accum_output_tokens += output_tokens;
+                    state.accum_output_tokens =
+                        state.accum_output_tokens.saturating_add(output_tokens);
                 }
             }
         }
     }
 
     if msg_type == "result" {
-        if let Some(usage) = json.get("usage") {
+        // #1918 — Claude CLI's result.usage in multi-call turns is
+        // turn-cumulative, so overwriting input/cache here would re-introduce
+        // the context-token inflation the per-message branch above already
+        // resolved. Only adopt result.usage when no per-message usage was
+        // observed (Qwen tmux wrappers report token counts solely on the
+        // terminal result event).
+        if !state.saw_per_message_usage
+            && let Some(usage) = json.get("usage")
+        {
             let input_tokens = usage
                 .get("input_tokens")
                 .and_then(|value| value.as_u64())
