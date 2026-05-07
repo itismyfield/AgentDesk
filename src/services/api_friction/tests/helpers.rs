@@ -1,6 +1,13 @@
 use sqlx::PgPool;
 use std::fs;
 
+#[derive(Clone)]
+pub(super) struct MockHttpResponse {
+    pub(super) status_line: &'static str,
+    pub(super) headers: Vec<(&'static str, &'static str)>,
+    pub(super) body: String,
+}
+
 pub(super) struct MockGhIssueCreateEnv {
     _dir: tempfile::TempDir,
     old_gh_path: Option<std::ffi::OsString>,
@@ -99,6 +106,48 @@ impl Drop for MockGhIssueCreateEnv {
             unsafe { std::env::remove_var("AGENTDESK_GH_PATH") };
         }
     }
+}
+
+pub(super) async fn spawn_response_sequence_server(
+    responses: Vec<MockHttpResponse>,
+) -> (
+    String,
+    tokio::sync::oneshot::Receiver<Vec<String>>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (requests_tx, requests_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for response in responses {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 32768];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
+
+            let mut raw_response = format!(
+                "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n",
+                response.status_line,
+                response.body.len()
+            );
+            for (header, value) in response.headers {
+                raw_response.push_str(&format!("{header}: {value}\r\n"));
+            }
+            raw_response.push_str("\r\n");
+            raw_response.push_str(&response.body);
+
+            let _ = stream.write_all(raw_response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
+        let _ = requests_tx.send(requests);
+    });
+
+    (format!("http://{}", addr), requests_rx, handle)
 }
 
 #[cfg(unix)]

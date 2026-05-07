@@ -10,8 +10,8 @@ use crate::services::memory::{MementoBackend, MementoRememberRequest, TokenUsage
 use crate::utils::api::clamp_api_limit;
 
 const DEFAULT_API_FRICTION_REPO: &str = "itismyfield/AgentDesk";
-const API_FRICTION_MIN_REPEAT_COUNT: usize = 2;
-const DEFAULT_PATTERN_LIMIT: usize = 20;
+pub(super) const API_FRICTION_MIN_REPEAT_COUNT: usize = 2;
+pub(super) const DEFAULT_PATTERN_LIMIT: usize = 20;
 const MAX_REPORT_FIELD_CHARS: usize = 240;
 const MAX_MEMORY_CONTENT_CHARS: usize = 900;
 const MAX_ISSUE_EVIDENCE_ITEMS: usize = 5;
@@ -121,12 +121,12 @@ pub(crate) struct ApiFrictionPatternFailure {
 }
 
 #[derive(Clone, Debug, Default)]
-struct SourceContext {
-    card_id: Option<String>,
-    repo_id: Option<String>,
-    issue_number: Option<i64>,
-    task_summary: Option<String>,
-    agent_id: Option<String>,
+pub(super) struct SourceContext {
+    pub(super) card_id: Option<String>,
+    pub(super) repo_id: Option<String>,
+    pub(super) issue_number: Option<i64>,
+    pub(super) task_summary: Option<String>,
+    pub(super) agent_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -541,7 +541,7 @@ fn resolve_memory_backend_for_friction(
     (resolved.backend == MemoryBackendKind::Memento).then_some(resolved)
 }
 
-async fn load_dispatch_source_context_pg(
+pub(super) async fn load_dispatch_source_context_pg(
     pg_pool: &PgPool,
     dispatch_id: &str,
 ) -> Result<Option<SourceContext>, String> {
@@ -847,7 +847,7 @@ async fn mark_event_memory_status(
     }
 }
 
-async fn load_pattern_candidates_pg(
+pub(super) async fn load_pattern_candidates_pg(
     pg_pool: &PgPool,
     min_events: usize,
     limit: usize,
@@ -1088,6 +1088,3 @@ async fn load_pattern_evidence_pg(
     })
     .map_err(|err| format!("query api_friction evidence: {err}"))
 }
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests;
