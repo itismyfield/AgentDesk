@@ -113,8 +113,8 @@
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 877 |  |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 231 |  |
 | `db::turns` | `src/db/turns.rs` | 215 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 4463 | giant-file |
-| `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 43 |  |
+| `dispatch` | `src/dispatch/mod.rs` | 4437 | giant-file |
+| `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 74 |  |
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 4029 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2790 | giant-file |
 | `dispatch::dispatch_query` | `src/dispatch/dispatch_query.rs` | 174 |  |
