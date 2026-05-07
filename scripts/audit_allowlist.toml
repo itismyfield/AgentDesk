@@ -33,7 +33,8 @@ route_srp_violations = [
 # refresh the remaining drift detected by CI with no logical regressions. The
 # upstream routine port refreshes line-only drift after the durable routine
 # modules land. #1858 refreshes health.rs line drift after the
-# #1777/#1779/#1780/#1781 health-extraction landings.
+# #1777/#1779/#1780/#1781 health-extraction landings. #1879 refreshes the
+# remaining health.rs line-only drift after snapshot/mailbox extraction.
 direct_discord_sends = [
   "src/services/discord/commands/model_picker.rs:60",
   "src/services/discord/commands/skill.rs:270",
@@ -44,8 +45,8 @@ direct_discord_sends = [
   "src/services/discord/gateway.rs:212",
   "src/services/discord/gateway.rs:236",
   "src/services/discord/gateway.rs:263",
-  "src/services/discord/health.rs:2309",
-  "src/services/discord/health.rs:2377",
+  "src/services/discord/health.rs:1645",
+  "src/services/discord/health.rs:1713",
   "src/services/discord/meeting_orchestrator.rs:654",
   "src/services/discord/meeting_orchestrator.rs:678",
   "src/services/discord/monitoring_status.rs:50",
