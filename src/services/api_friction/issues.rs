@@ -1,13 +1,12 @@
 use serde::Serialize;
 use sqlx::PgPool;
 
+use super::issue_body::build_issue_body_pg;
 use super::patterns::{
     API_FRICTION_MIN_REPEAT_COUNT, ApiFrictionPattern, DEFAULT_PATTERN_LIMIT,
     load_pattern_candidates_pg,
 };
 use crate::github::CreatedIssue;
-
-const MAX_ISSUE_EVIDENCE_ITEMS: usize = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct ProcessedApiFrictionIssue {
@@ -243,130 +242,4 @@ fn pattern_failure(pattern: &ApiFrictionPattern, error: String) -> ApiFrictionPa
         repo_id: pattern.repo_id.clone(),
         error,
     }
-}
-
-async fn build_issue_body_pg(
-    pg_pool: &PgPool,
-    pattern: &ApiFrictionPattern,
-) -> Result<String, String> {
-    let evidence = load_pattern_evidence_pg(pg_pool, &pattern.fingerprint).await?;
-    build_issue_body_from_evidence(pattern, evidence)
-}
-
-fn build_issue_body_from_evidence(
-    pattern: &ApiFrictionPattern,
-    evidence: Vec<PatternEvidence>,
-) -> Result<String, String> {
-    let mut lines = vec![
-        "## Summary".to_string(),
-        format!("- Endpoint/Surface: `{}`", pattern.endpoint),
-        format!("- Friction type: `{}`", pattern.friction_type),
-        format!("- Repeated count: {}", pattern.event_count),
-    ];
-    if let Some(docs_category) = pattern.docs_category.as_deref() {
-        lines.push(format!("- Docs category: `{docs_category}`"));
-    }
-    if let Some(task_summary) = pattern.task_summary.as_deref() {
-        lines.push(format!("- Latest task: {}", task_summary));
-    }
-
-    lines.extend([
-        String::new(),
-        "## Friction Pattern".to_string(),
-        format!("- Summary: {}", pattern.summary),
-        format!(
-            "- Workaround: {}",
-            pattern.workaround.as_deref().unwrap_or("not provided")
-        ),
-        format!(
-            "- Proposed improvement: {}",
-            pattern
-                .suggested_fix
-                .as_deref()
-                .unwrap_or("Provide a clearer single API path or docs entry")
-        ),
-        String::new(),
-        "## Evidence".to_string(),
-    ]);
-
-    if evidence.is_empty() {
-        lines.push("- No card-linked evidence was captured.".to_string());
-    } else {
-        for item in evidence {
-            let mut parts = Vec::new();
-            if let Some(repo_id) = item.repo_id.as_deref() {
-                if let Some(issue_number) = item.issue_number {
-                    parts.push(format!("{repo_id}#{issue_number}"));
-                } else {
-                    parts.push(repo_id.to_string());
-                }
-            } else if let Some(card_id) = item.card_id.as_deref() {
-                parts.push(format!("card {card_id}"));
-            }
-            if let Some(dispatch_id) = item.dispatch_id.as_deref() {
-                parts.push(format!("dispatch {dispatch_id}"));
-            }
-            if parts.is_empty() {
-                parts.push("runtime observation".to_string());
-            }
-            lines.push(format!("- {}: {}", parts.join(", "), item.summary));
-        }
-    }
-
-    lines.extend([
-        String::new(),
-        "## Suggested Next Step".to_string(),
-        "- Add or clarify the canonical `/api` endpoint/docs path so agents do not need trial-and-error or DB bypass.".to_string(),
-    ]);
-
-    Ok(lines.join("\n"))
-}
-
-#[derive(Clone, Debug)]
-struct PatternEvidence {
-    repo_id: Option<String>,
-    issue_number: Option<i64>,
-    card_id: Option<String>,
-    dispatch_id: Option<String>,
-    summary: String,
-}
-
-async fn load_pattern_evidence_pg(
-    pg_pool: &PgPool,
-    fingerprint: &str,
-) -> Result<Vec<PatternEvidence>, String> {
-    sqlx::query_as::<
-        _,
-        (
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-            String,
-        ),
-    >(
-        "SELECT repo_id, github_issue_number::BIGINT, card_id, dispatch_id, summary
-         FROM api_friction_events
-         WHERE fingerprint = $1
-         ORDER BY created_at DESC, id DESC
-         LIMIT $2",
-    )
-    .bind(fingerprint)
-    .bind(MAX_ISSUE_EVIDENCE_ITEMS as i64)
-    .fetch_all(pg_pool)
-    .await
-    .map(|rows| {
-        rows.into_iter()
-            .map(
-                |(repo_id, issue_number, card_id, dispatch_id, summary)| PatternEvidence {
-                    repo_id,
-                    issue_number,
-                    card_id,
-                    dispatch_id,
-                    summary,
-                },
-            )
-            .collect()
-    })
-    .map_err(|err| format!("query api_friction evidence: {err}"))
 }

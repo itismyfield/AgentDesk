@@ -1,4 +1,5 @@
 mod core;
+mod issue_body;
 mod issues;
 mod markers;
 mod memory_sync;
