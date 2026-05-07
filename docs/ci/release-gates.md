@@ -100,6 +100,13 @@ high_risk_recovery:
 
 - Recovery test의 `pg_recovery_test_config` 는 `pool_max = 1` 로 설정. 단일 connection 으로 startup reconcile 이 runtime pool 을 점유하지 않고 completion 되는지 검증 (`scenario_969_pg_boot_reconcile_uses_startup_pool_without_pool_timeout_logs`).
 
+### Legacy SQLite test feature
+
+- `legacy-sqlite-tests` feature 는 runtime fallback 이 아니라 SQLite fixture / migration compatibility 테스트를 남겨둔 기술부채 경로다.
+- 에이전트는 PR 전 확인 목적으로 `cargo test --features legacy-sqlite-tests` 전체 실행을 하지 않는다. 이 조합은 unrelated PG lifecycle 테스트까지 함께 끌어와 `lock_test_lifecycle()` / env mutex 대기에서 장시간 멈출 수 있다.
+- 필요한 경우에만 named filter 로 좁혀 실행한다: `cargo test --features legacy-sqlite-tests <test_name> -- --test-threads=1 --nocapture`.
+- 일반 품질 확인은 위 release gate 커맨드(Full / PostgreSQL / High-risk recovery)를 따른다. CI 전체를 로컬에서 재현하는 것은 필수 운영 규칙이 아니다.
+
 ## 5. Triage 분류 규약
 
 `scripts/main-ci-triage.sh` 는 `CI Main` 이 2회 연속 red일 때 test identifier 또는 `job::<name>` 단위로 ci-red 이슈를 생성/갱신한다. Release gate 별 분류 계약:

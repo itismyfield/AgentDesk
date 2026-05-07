@@ -12,9 +12,9 @@
 //! it is handed off to the platform shell. The guard is intentionally narrow:
 //! it detects the specific anti-patterns that produced the 2026-04-25 stall
 //! (recursive `grep -r/-R`, broad workspace-root scans, `find /Users` without
-//! a name filter) and offers a concrete `rg`-based alternative that respects
-//! `.gitignore` and excludes `target/`, `node_modules/`, and `.git/` by
-//! default.
+//! a name filter, broad legacy SQLite test sweeps) and offers a concrete
+//! `rg`-based or targeted test alternative that respects `.gitignore` and
+//! excludes `target/`, `node_modules/`, and `.git/` by default.
 //!
 //! The guard never executes the command itself; it returns a [`GuardDecision`]
 //! describing whether the caller should proceed and, when blocked, the reason
@@ -76,6 +76,16 @@ pub fn inspect_command(cmd: &str) -> GuardDecision {
     // we want to scan every subcommand (`a && b`, `a | b`, `a; b`).
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
 
+    // `legacy-sqlite-tests` is retained for migration coverage only. Broad
+    // full-suite runs can pull in PG lifecycle tests and block on global
+    // test mutexes for hours. Require a named test filter instead.
+    if let Some(reason) = detect_broad_legacy_sqlite_test(&tokens) {
+        return GuardDecision::Block {
+            reason,
+            suggestion: suggest_legacy_sqlite_test_replacement(),
+        };
+    }
+
     // Scan for `grep -r`, `grep -R`, `grep -rn`, `grep -rln`, etc. We only
     // flag when the recursive flag is present *and* there is no exclude
     // (`--exclude-dir`, `--include`) — agents that already filter are fine.
@@ -105,6 +115,107 @@ pub fn inspect_command(cmd: &str) -> GuardDecision {
     }
 
     GuardDecision::Allow
+}
+
+/// Detect broad `cargo test --features legacy-sqlite-tests` invocations.
+///
+/// This intentionally allows targeted commands such as
+/// `cargo test --features legacy-sqlite-tests shell_guard -- --test-threads=1`.
+fn detect_broad_legacy_sqlite_test(tokens: &[&str]) -> Option<String> {
+    let mut i = 0;
+    while i < tokens.len() {
+        if !is_cargo_command(tokens[i]) {
+            i += 1;
+            continue;
+        }
+
+        let segment_end = next_shell_boundary(tokens, i + 1).unwrap_or(tokens.len());
+        let segment = &tokens[i..segment_end];
+        let Some(test_idx) = cargo_test_subcommand_index(segment) else {
+            i = segment_end.max(i + 1);
+            continue;
+        };
+
+        if !segment_contains_legacy_sqlite_feature(segment) {
+            i = segment_end.max(i + 1);
+            continue;
+        }
+
+        if !cargo_test_has_named_filter(&segment[test_idx + 1..]) {
+            return Some(
+                "Detected broad `cargo test --features legacy-sqlite-tests` without a named \
+                 test filter. The legacy SQLite feature is migration/compat coverage only; \
+                 full-suite runs can mix unrelated PG lifecycle tests and wait on global test \
+                 mutexes for hours."
+                    .to_string(),
+            );
+        }
+
+        i = segment_end.max(i + 1);
+    }
+    None
+}
+
+fn is_cargo_command(tok: &str) -> bool {
+    let basename = tok.rsplit('/').next().unwrap_or(tok);
+    matches!(basename, "cargo" | "cargo.exe")
+}
+
+fn next_shell_boundary(tokens: &[&str], start: usize) -> Option<usize> {
+    tokens
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(idx, tok)| is_shell_boundary(tok).then_some(idx))
+}
+
+fn is_shell_boundary(tok: &str) -> bool {
+    matches!(tok, "|" | "||" | "&&" | ";") || tok.ends_with(';')
+}
+
+fn cargo_test_subcommand_index(segment: &[&str]) -> Option<usize> {
+    segment
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(idx, tok)| (*tok == "test").then_some(idx))
+}
+
+fn segment_contains_legacy_sqlite_feature(segment: &[&str]) -> bool {
+    segment.iter().enumerate().any(|(idx, tok)| {
+        tok.contains("legacy-sqlite-tests")
+            || ((*tok == "--features" || *tok == "-F")
+                && segment
+                    .get(idx + 1)
+                    .is_some_and(|next| next.contains("legacy-sqlite-tests")))
+    })
+}
+
+fn cargo_test_has_named_filter(args_after_test: &[&str]) -> bool {
+    let mut idx = 0;
+    while idx < args_after_test.len() {
+        let arg = args_after_test[idx];
+        if arg == "--" || is_shell_boundary(arg) {
+            return false;
+        }
+        if arg.starts_with('-') {
+            idx += 1 + cargo_test_option_value_count(arg);
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn cargo_test_option_value_count(arg: &str) -> usize {
+    if arg.contains('=') {
+        return 0;
+    }
+    match arg {
+        "-p" | "--package" | "--manifest-path" | "--target" | "--target-dir" | "--features"
+        | "-F" | "--jobs" | "-j" | "--bin" | "--example" | "--test" | "--bench" => 1,
+        _ => 0,
+    }
 }
 
 /// Detect recursive `grep -r/-R` invocations that lack any exclusion flag.
@@ -281,6 +392,13 @@ pub fn suggest_find_replacement(tokens: &[&str]) -> String {
     )
 }
 
+pub fn suggest_legacy_sqlite_test_replacement() -> String {
+    "Run a targeted legacy SQLite test only, e.g. `cargo test --features legacy-sqlite-tests \
+     <test_name> -- --test-threads=1 --nocapture`. For normal coverage, use the CI gate \
+     commands without `legacy-sqlite-tests`."
+        .to_string()
+}
+
 /// Outcome of [`wait_with_no_output_timeout`].
 pub struct WaitOutcome {
     pub stdout: Vec<u8>,
@@ -447,6 +565,48 @@ mod tests {
         assert!(inspect_command("rg pattern src/").is_allow());
         assert!(inspect_command("echo hello").is_allow());
         assert!(inspect_command("cargo check").is_allow());
+    }
+
+    #[test]
+    fn broad_legacy_sqlite_test_is_blocked() {
+        let d = inspect_command("cargo test --features legacy-sqlite-tests --quiet");
+        assert!(d.is_block(), "expected block, got {d:?}");
+        if let GuardDecision::Block { reason, suggestion } = &d {
+            assert!(reason.contains("legacy-sqlite-tests"));
+            assert!(reason.contains("named"));
+            assert!(suggestion.contains("<test_name>"));
+            assert!(suggestion.contains("--test-threads=1"));
+        }
+    }
+
+    #[test]
+    fn broad_legacy_sqlite_test_in_pipeline_is_blocked() {
+        let d = inspect_command(
+            "cargo check --all-targets && cargo test --features legacy-sqlite-tests --quiet | head",
+        );
+        assert!(d.is_block(), "expected block, got {d:?}");
+    }
+
+    #[test]
+    fn broad_legacy_sqlite_test_with_harness_args_only_is_blocked() {
+        let d = inspect_command("cargo test --features legacy-sqlite-tests -- --test-threads=1");
+        assert!(d.is_block(), "expected block, got {d:?}");
+    }
+
+    #[test]
+    fn targeted_legacy_sqlite_test_is_allowed() {
+        let d = inspect_command(
+            "cargo test --features legacy-sqlite-tests shell_guard -- --test-threads=1",
+        );
+        assert!(d.is_allow(), "expected allow, got {d:?}");
+    }
+
+    #[test]
+    fn targeted_legacy_sqlite_test_with_package_flags_is_allowed() {
+        let d = inspect_command(
+            "cargo test -p agentdesk --features legacy-sqlite-tests no_output_timeout -- --nocapture",
+        );
+        assert!(d.is_allow(), "expected allow, got {d:?}");
     }
 
     #[test]
