@@ -1,5 +1,6 @@
 mod core;
 mod markers;
+mod storage;
 
 #[allow(unused_imports)]
 pub(crate) use self::core::{
@@ -14,9 +15,10 @@ pub(crate) use self::markers::{
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use self::core::{
-    API_FRICTION_MIN_REPEAT_COUNT, DEFAULT_PATTERN_LIMIT, load_dispatch_source_context_pg,
-    load_pattern_candidates_pg,
+    API_FRICTION_MIN_REPEAT_COUNT, DEFAULT_PATTERN_LIMIT, load_pattern_candidates_pg,
 };
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use self::storage::load_dispatch_source_context_pg;
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests;
