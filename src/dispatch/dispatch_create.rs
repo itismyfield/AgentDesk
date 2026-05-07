@@ -397,7 +397,7 @@ fn normalize_required_capabilities(required: serde_json::Value) -> Option<serde_
     }
 }
 
-fn dispatch_required_capabilities_from_routing(
+pub(crate) fn dispatch_required_capabilities_from_routing(
     context: &serde_json::Value,
     dispatch_type: &str,
     routing: &crate::config::ClusterDispatchRoutingConfig,

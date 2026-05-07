@@ -246,6 +246,11 @@ pub(super) async fn create_activate_dispatch_pg(
 
     let context_str = serde_json::to_string(&context_with_strategy)
         .map_err(|error| format!("encode dispatch context for {card_id}: {error}"))?;
+    let required_capabilities = crate::dispatch::dispatch_required_capabilities_from_routing(
+        &context_with_strategy,
+        dispatch_type,
+        &crate::config::load_graceful().cluster.dispatch_routing,
+    );
     let mut tx = pool
         .begin()
         .await
@@ -284,10 +289,11 @@ pub(super) async fn create_activate_dispatch_pg(
             context,
             parent_dispatch_id,
             chain_depth,
+            required_capabilities,
             created_at,
             updated_at
         ) VALUES (
-            $1, $2, $3, $4, 'pending', $5, $6, $7, $8, NOW(), NOW()
+            $1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, NOW(), NOW()
         )",
     )
     .bind(&dispatch_id)
@@ -298,6 +304,7 @@ pub(super) async fn create_activate_dispatch_pg(
     .bind(&context_str)
     .bind(parent_dispatch_id.as_deref())
     .bind(chain_depth)
+    .bind(required_capabilities.as_ref())
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("insert postgres dispatch {dispatch_id} for {card_id}: {error}"))?;

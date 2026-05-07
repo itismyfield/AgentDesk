@@ -32,7 +32,9 @@ pub(crate) use dispatch_context::{
     resolve_card_worktree,
 };
 #[allow(unused_imports)]
-pub(crate) use dispatch_create::apply_dispatch_attached_intents_on_pg_tx;
+pub(crate) use dispatch_create::{
+    apply_dispatch_attached_intents_on_pg_tx, dispatch_required_capabilities_from_routing,
+};
 #[allow(unused_imports)]
 pub use dispatch_create::{
     create_dispatch, create_dispatch_core, create_dispatch_core_with_id,
