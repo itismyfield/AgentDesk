@@ -373,13 +373,23 @@ fn non_empty_dispatch_required_capabilities(
 }
 
 fn has_hard_required_capabilities(required: &serde_json::Value) -> bool {
-    let hard_required = required
-        .get("required")
-        .filter(|value| value.is_object())
-        .unwrap_or(required);
-    match hard_required {
+    if let Some(hard_required) = required.get("required") {
+        return capability_value_is_non_empty(hard_required);
+    }
+    match required {
+        serde_json::Value::Null => false,
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| key != "preferred" && capability_value_is_non_empty(value)),
+        _ => true,
+    }
+}
+
+fn capability_value_is_non_empty(value: &serde_json::Value) -> bool {
+    match value {
         serde_json::Value::Null => false,
         serde_json::Value::Object(map) => !map.is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
         _ => true,
     }
 }
@@ -2180,6 +2190,24 @@ mod capability_routing_tests {
             dispatch_required_capabilities_from_routing(&json!({}), "create-pr", &routing());
 
         assert_eq!(required, None);
+    }
+
+    #[test]
+    fn hard_required_detection_ignores_preferred_only_routes() {
+        assert!(!has_hard_required_capabilities(
+            &json!({"preferred": {"labels": ["linux"]}})
+        ));
+        assert!(!has_hard_required_capabilities(&json!({
+            "required": {},
+            "preferred": {"labels": ["linux"]}
+        })));
+        assert!(has_hard_required_capabilities(
+            &json!({"labels": ["mac-book"]})
+        ));
+        assert!(has_hard_required_capabilities(&json!({
+            "required": {"labels": ["mac-book"]},
+            "preferred": {"labels": ["mac-mini"]}
+        })));
     }
 }
 

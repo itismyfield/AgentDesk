@@ -367,13 +367,23 @@ fn eligible_reassignment_owner(
 }
 
 fn has_hard_required_capabilities(required: &Value) -> bool {
-    let hard_required = required
-        .get("required")
-        .filter(|value| value.is_object())
-        .unwrap_or(required);
-    match hard_required {
+    if let Some(hard_required) = required.get("required") {
+        return capability_value_is_non_empty(hard_required);
+    }
+    match required {
+        Value::Null => false,
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| key != "preferred" && capability_value_is_non_empty(value)),
+        _ => true,
+    }
+}
+
+fn capability_value_is_non_empty(value: &Value) -> bool {
+    match value {
         Value::Null => false,
         Value::Object(map) => !map.is_empty(),
+        Value::Array(items) => !items.is_empty(),
         _ => true,
     }
 }
@@ -753,6 +763,51 @@ mod tests {
 
         assert_eq!(worker_nodes[0]["active_dispatch_count"], 2);
         assert_eq!(worker_nodes[1]["active_dispatch_count"], 4);
+    }
+
+    #[test]
+    fn hard_required_detection_ignores_preferred_only_routes() {
+        assert!(!has_hard_required_capabilities(
+            &json!({"preferred": {"labels": ["linux"]}})
+        ));
+        assert!(!has_hard_required_capabilities(&json!({
+            "required": {},
+            "preferred": {"labels": ["linux"]}
+        })));
+        assert!(has_hard_required_capabilities(
+            &json!({"labels": ["mac-book"]})
+        ));
+        assert!(has_hard_required_capabilities(&json!({
+            "required": {"labels": ["mac-book"]},
+            "preferred": {"labels": ["mac-mini"]}
+        })));
+    }
+
+    #[test]
+    fn preferred_only_zero_score_reassignment_clears_owner() {
+        let nodes = vec![json!({
+            "instance_id": "mac-mini-release",
+            "status": "online",
+            "labels": ["mac-mini"],
+            "capabilities": {"providers": ["codex"]},
+            "last_heartbeat_at": "2026-05-08T00:00:00Z",
+        })];
+        let required = json!({"preferred": {"labels": ["linux"]}});
+        let route_decision = RoutingEngine::new(vec![Box::new(NoOpConstraint)]).route(
+            &nodes,
+            &required,
+            &RoutingDispatch::new("dispatch-a", None, Some(required.clone())),
+        );
+
+        assert_eq!(
+            route_decision.selected_instance_id(),
+            Some("mac-mini-release")
+        );
+        assert_eq!(route_decision.selected.as_ref().unwrap().score, 0);
+        assert_eq!(
+            eligible_reassignment_owner(&route_decision, &required),
+            None
+        );
     }
 
     #[tokio::test]

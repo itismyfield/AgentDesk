@@ -1,5 +1,6 @@
 use sqlx::{Postgres, Row as SqlxRow, Transaction};
 
+use super::diagnostics::wait_reason_from_routing_diagnostics;
 use super::model::{DispatchOutboxClaimCandidate, StaleDispatchOutboxClaimOwnerCandidate};
 
 const DISPATCH_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
@@ -133,11 +134,21 @@ pub(crate) async fn update_dispatch_outbox_claim_owner_pg(
     diagnostics: &serde_json::Value,
 ) -> Result<u64, sqlx::Error> {
     let constraint_results = diagnostics.get("constraint_results");
+    let wait_reason = if claim_owner.is_some() {
+        None
+    } else {
+        wait_reason_from_routing_diagnostics(diagnostics)
+    };
     let result = sqlx::query(
         "UPDATE dispatch_outbox
             SET claim_owner = $2,
                 routing_diagnostics = $3,
-                constraint_results = $4
+                constraint_results = $4,
+                wait_reason = $5,
+                wait_started_at = CASE
+                    WHEN $2::TEXT IS NOT NULL OR $5::TEXT IS NULL THEN NULL
+                    ELSE COALESCE(wait_started_at, NOW())
+                END
           WHERE id = $1
             AND status = 'pending'",
     )
@@ -145,6 +156,7 @@ pub(crate) async fn update_dispatch_outbox_claim_owner_pg(
     .bind(claim_owner)
     .bind(diagnostics)
     .bind(constraint_results)
+    .bind(wait_reason.as_deref())
     .execute(&mut **tx)
     .await?;
     Ok(result.rows_affected())
