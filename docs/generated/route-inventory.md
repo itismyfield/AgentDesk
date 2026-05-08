@@ -87,9 +87,9 @@
 | `POST` | `/api/dispatches/{id}/cancel` | `queue_api::cancel_dispatch` | `src/server/routes/queue_api.rs:103` | `src/server/routes/domains/ops.rs:275` |
 | `GET` | `/api/dispatches/{id}/events` | `dispatches::get_dispatch_delivery_events` | `src/server/routes/dispatches/crud.rs:90` | `src/server/routes/domains/ops.rs:99` |
 | `POST` | `/api/dm-reply/register` | `dm_reply::register_handler` | `src/server/routes/dm_reply.rs:22` | `src/server/routes/domains/integrations.rs:35` |
-| `GET` | `/api/docs` | `docs::api_docs` | `src/server/routes/docs.rs:4535` | `src/server/routes/domains/ops.rs:286` |
-| `GET` | `/api/docs/{group}/{category}` | `docs::api_docs_group_category` | `src/server/routes/docs.rs:5033` | `src/server/routes/domains/ops.rs:288` |
-| `GET` | `/api/docs/{segment}` | `docs::api_docs_group_or_category` | `src/server/routes/docs.rs:5010` | `src/server/routes/domains/ops.rs:287` |
+| `GET` | `/api/docs` | `docs::api_docs` | `src/server/routes/docs.rs:4568` | `src/server/routes/domains/ops.rs:286` |
+| `GET` | `/api/docs/{group}/{category}` | `docs::api_docs_group_category` | `src/server/routes/docs.rs:5066` | `src/server/routes/domains/ops.rs:288` |
+| `GET` | `/api/docs/{segment}` | `docs::api_docs_group_or_category` | `src/server/routes/docs.rs:5043` | `src/server/routes/domains/ops.rs:287` |
 | `POST` | `/api/doctor/stale-mailbox/repair` | `health_api::stale_mailbox_repair_handler` | `src/server/routes/health_api.rs:520` | `src/server/routes/domains/ops.rs:87` |
 | `GET` | `/api/doctor/startup/latest` | `health_api::startup_doctor_latest_handler` | `src/server/routes/health_api.rs:504` | `src/server/routes/domains/ops.rs:22` |
 | `GET` | `/api/github-closed-today` | `github_dashboard::closed_today` | `src/server/routes/github_dashboard.rs:140` | `src/server/routes/domains/integrations.rs:28` |
@@ -102,7 +102,7 @@
 | `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:527` | `src/server/routes/domains/integrations.rs:21` |
 | `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:484` | `src/server/routes/domains/access.rs:10` |
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:489` | `src/server/routes/domains/ops.rs:21` |
-| `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:4509` | `src/server/routes/domains/ops.rs:285` |
+| `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:4542` | `src/server/routes/domains/ops.rs:285` |
 | `GET` | `/api/home/kpi-trends` | `home_metrics::home_kpi_trends` | `src/server/routes/home_metrics.rs:54` | `src/server/routes/domains/admin.rs:81` |
 | `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:25` | `src/server/routes/domains/ops.rs:167` |
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:59` | `src/server/routes/domains/ops.rs:169` |
@@ -203,7 +203,7 @@
 | `GET` | `/api/queue/status` | `auto_queue::status` | `src/server/routes/auto_queue.rs:43` | `src/server/routes/domains/ops.rs:240` |
 | `GET` | `/api/rate-limits` | `analytics::rate_limits` | `src/server/routes/analytics.rs:432` | `src/server/routes/domains/admin.rs:78` |
 | `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:170` | `src/server/routes/domains/admin.rs:79` |
-| `POST` | `/api/reviews/decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:958` | `src/server/routes/domains/reviews.rs:23` |
+| `POST` | `/api/reviews/decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:1111` | `src/server/routes/domains/reviews.rs:23` |
 | `POST` | `/api/reviews/recovery` | `reviews::recover_review_target` | `src/server/routes/reviews.rs:562` | `src/server/routes/domains/reviews.rs:21` |
 | `POST` | `/api/reviews/tuning/aggregate` | `review_verdict::aggregate_review_tuning` | `src/server/routes/review_verdict/tuning_aggregate.rs:443` | `src/server/routes/domains/reviews.rs:27` |
 | `POST` | `/api/reviews/verdict` | `review_verdict::submit_verdict` | `src/server/routes/review_verdict/verdict_route.rs:212` | `src/server/routes/domains/reviews.rs:22` |
