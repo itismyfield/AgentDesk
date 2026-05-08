@@ -149,6 +149,7 @@ impl PlaceholderLiveEvents {
         dispatch_id: &str,
         card_id: Option<&str>,
         dispatch_type: Option<&str>,
+        owner_instance_id: Option<&str>,
     ) -> bool {
         let dispatch_id = clean_task_panel_value(dispatch_id);
         if dispatch_id.is_empty() {
@@ -165,6 +166,7 @@ impl PlaceholderLiveEvents {
                 dispatch_id,
                 card_id: clean_optional(card_id),
                 dispatch_type: clean_optional(dispatch_type),
+                owner_instance_id: clean_optional(owner_instance_id),
             }),
         )
     }
@@ -471,9 +473,11 @@ fn render_status_panel(
         sections.push(format!("Subagents\n{}", lines.join("\n")));
     }
 
+    let cluster_enabled = crate::config::load_graceful().cluster.enabled;
+    let recent_header = render_recent_section_header(snapshot.task.as_ref(), cluster_enabled);
     let recent_section = live_block
         .filter(|block| !block.trim().is_empty())
-        .map(|block| format!("Recent\n{block}"));
+        .map(|block| format!("{recent_header}\n{block}"));
 
     if let Some(recent) = recent_section.as_ref() {
         let mut with_recent = sections.clone();
@@ -485,6 +489,19 @@ fn render_status_panel(
     }
 
     truncate_chars(&sections.join("\n\n"), STATUS_PANEL_MAX_CHARS)
+}
+
+fn render_recent_section_header(task: Option<&TaskPanelSnapshot>, cluster_enabled: bool) -> String {
+    let owner = task
+        .and_then(|task| task.owner_instance_id.as_deref())
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty());
+    match owner {
+        Some(owner) if cluster_enabled => {
+            format!("🖥️ Recent ({})", escape_status_panel_markdown(owner))
+        }
+        _ => "🖥️ Recent".to_string(),
+    }
 }
 
 fn render_derived_status(status: &DerivedStatus) -> String {

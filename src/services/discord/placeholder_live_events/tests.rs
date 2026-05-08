@@ -322,10 +322,45 @@ fn status_panel_omits_context_line_when_token_data_is_absent() {
 }
 
 #[test]
+fn recent_header_uses_terminal_emoji_with_node_in_cluster_mode() {
+    let snapshot = TaskPanelSnapshot {
+        dispatch_id: "dsp_55".to_string(),
+        card_id: None,
+        dispatch_type: None,
+        owner_instance_id: Some("mac-book-release".to_string()),
+    };
+    assert_eq!(
+        render_recent_section_header(Some(&snapshot), true),
+        "🖥️ Recent (mac-book-release)"
+    );
+}
+
+#[test]
+fn recent_header_omits_node_when_cluster_disabled_or_unknown() {
+    let snapshot = TaskPanelSnapshot {
+        dispatch_id: "dsp_55".to_string(),
+        card_id: None,
+        dispatch_type: None,
+        owner_instance_id: Some("mac-book-release".to_string()),
+    };
+    assert_eq!(
+        render_recent_section_header(Some(&snapshot), false),
+        "🖥️ Recent"
+    );
+    assert_eq!(render_recent_section_header(None, true), "🖥️ Recent");
+}
+
+#[test]
 fn status_panel_renders_task_line_from_dispatch_metadata() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(185);
-    assert!(events.set_task_panel_info(channel_id, "dsp_123", Some("42"), Some("implementation"),));
+    assert!(events.set_task_panel_info(
+        channel_id,
+        "dsp_123",
+        Some("42"),
+        Some("implementation"),
+        None,
+    ));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
 
@@ -346,7 +381,7 @@ fn status_panel_omits_task_line_without_dispatch_id() {
 fn status_panel_renders_task_line_with_dispatch_fallback() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(187);
-    assert!(events.set_task_panel_info(channel_id, "dsp_404", None, None));
+    assert!(events.set_task_panel_info(channel_id, "dsp_404", None, None, None));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
