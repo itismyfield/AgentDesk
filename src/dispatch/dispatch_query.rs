@@ -76,7 +76,8 @@ pub(crate) async fn query_dispatch_row_pg(
             completed_at::text AS completed_at,
             COALESCE(retry_count, 0)::bigint AS retry_count,
             required_capabilities,
-            routing_diagnostics
+            routing_diagnostics,
+            constraint_results
          FROM task_dispatches
          WHERE id = $1",
     )
@@ -133,6 +134,7 @@ pub(crate) async fn query_dispatch_row_pg(
         "retry_count": row.try_get::<i64, _>("retry_count").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
         "required_capabilities": row.try_get::<Option<serde_json::Value>, _>("required_capabilities").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
         "routing_diagnostics": row.try_get::<Option<serde_json::Value>, _>("routing_diagnostics").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "constraint_results": row.try_get::<Option<serde_json::Value>, _>("constraint_results").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
     }))
 }
 

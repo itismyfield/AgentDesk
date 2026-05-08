@@ -361,6 +361,7 @@ cluster:
   dispatch_routing:
     default_preferred_labels: [mac-book]
     opt_out_dispatch_types: ["create-pr", "github-sync"]
+    constraints: [noop]
 
 # Optional file/MCP memory configuration. Omit the section entirely to use defaults.
 memory:

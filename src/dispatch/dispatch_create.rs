@@ -1828,6 +1828,7 @@ mod capability_routing_tests {
         crate::config::ClusterDispatchRoutingConfig {
             default_preferred_labels: vec!["mac-book".to_string()],
             opt_out_dispatch_types: vec!["create-pr".to_string(), "github-sync".to_string()],
+            ..Default::default()
         }
     }
 
