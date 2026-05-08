@@ -59,8 +59,14 @@ module.exports = function attachIdleKill(timeouts, helpers) {
       var now = Date.now();
       var processed = {};
 
-      function forceKillIdleSessions(sessions, minimumIdleMinutes, reasonLabel) {
+      function forceKillIdleSessions(sessions, minimumIdleMinutes, reasonLabel, maxKills) {
+        var killedCount = 0;
         for (var i = 0; i < sessions.length; i++) {
+          if (killedCount >= maxKills) {
+            agentdesk.log.info("[idle-kill] Reached max " + maxKills + " kills for this category. Breaking early.");
+            break;
+          }
+
           var s = sessions[i];
           if (!s.session_key || processed[s.session_key]) continue;
           processed[s.session_key] = true;
@@ -85,6 +91,8 @@ module.exports = function attachIdleKill(timeouts, helpers) {
             continue;
           }
 
+          killedCount++;
+
           if (!forceKillResp.tmux_killed) {
             agentdesk.log.warn("[idle-kill] force-kill API succeeded but tmux was already gone for " + s.session_key);
             continue;
@@ -99,7 +107,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         }
       }
 
-      forceKillIdleSessions(idleSessions, 60, "idle 60분 경과 (active_dispatch_id 없음)");
-      forceKillIdleSessions(safetySessions, 180, "idle 180분 경과 (safety TTL)");
+      forceKillIdleSessions(safetySessions, 180, "idle 180분 경과 (safety TTL)", 2);
+      forceKillIdleSessions(idleSessions, 60, "idle 60분 경과 (active_dispatch_id 없음)", 3);
     };
 };
