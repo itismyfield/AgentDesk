@@ -1382,7 +1382,7 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     dispatch_id: Option<&str>,
     error_msg: &str,
 ) {
-    fail_dispatch_with_policy(dispatch_id, error_msg, None, true).await;
+    fail_dispatch_with_policy(dispatch_id, error_msg, None, true, None).await;
 }
 
 pub(in crate::services::discord) async fn fail_dispatch_tmux_session_died(
@@ -1390,7 +1390,14 @@ pub(in crate::services::discord) async fn fail_dispatch_tmux_session_died(
     dispatch_id: Option<&str>,
     error_msg: &str,
 ) {
-    fail_dispatch_with_policy(dispatch_id, error_msg, Some("tmux_session_died"), true).await;
+    fail_dispatch_with_policy(
+        dispatch_id,
+        error_msg,
+        Some("tmux_session_died"),
+        true,
+        Some(&["pending", "dispatched"]),
+    )
+    .await;
 }
 
 pub(in crate::services::discord) async fn fail_dispatch_auth_expired(
@@ -1398,7 +1405,14 @@ pub(in crate::services::discord) async fn fail_dispatch_auth_expired(
     dispatch_id: Option<&str>,
     error_msg: &str,
 ) {
-    fail_dispatch_with_policy(dispatch_id, error_msg, Some("auth_token_expired"), false).await;
+    fail_dispatch_with_policy(
+        dispatch_id,
+        error_msg,
+        Some("auth_token_expired"),
+        false,
+        None,
+    )
+    .await;
 }
 
 async fn fail_dispatch_with_policy(
@@ -1406,6 +1420,7 @@ async fn fail_dispatch_with_policy(
     error_msg: &str,
     error_code: Option<&str>,
     reset_auto_queue_entries: bool,
+    allowed_from: Option<&[&str]>,
 ) {
     let Some(dispatch_id) = dispatch_id else {
         return;
@@ -1420,6 +1435,12 @@ async fn fail_dispatch_with_policy(
     let payload = crate::server::routes::dispatches::UpdateDispatchBody {
         status: Some("failed".to_string()),
         result: Some(dispatch_failure_result(error_msg, error_code)),
+        allowed_from: allowed_from.map(|statuses| {
+            statuses
+                .iter()
+                .map(|status| (*status).to_string())
+                .collect()
+        }),
     };
     for attempt in 1..=3 {
         match crate::services::discord::internal_api::update_dispatch(dispatch_id, payload.clone())
@@ -1714,6 +1735,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         let payload = crate::server::routes::dispatches::UpdateDispatchBody {
             status: Some("completed".to_string()),
             result: Some(update_result),
+            allowed_from: None,
         };
         for attempt in 1..=3u8 {
             match crate::services::discord::internal_api::update_dispatch(

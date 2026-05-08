@@ -2439,6 +2439,14 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "Structured dispatch result payload; response derives result_summary from result/context",
                 ),
             ),
+            (
+                "allowed_from",
+                body_param(
+                    "array<string>",
+                    false,
+                    "Optional status precondition for non-completed lifecycle updates; when the dispatch exists but its current status is outside this set, the request is a no-op and returns the current dispatch",
+                ),
+            ),
         ])
         .with_example(
             json!({"path": {"id": "dispatch-1"}, "body": {"status": "completed", "result": {"summary": "done"}}}),

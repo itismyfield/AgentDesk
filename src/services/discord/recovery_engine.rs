@@ -1358,6 +1358,7 @@ pub(super) async fn restore_inflight_turns(
                                         "completion_source": "recovery_completed_during_downtime"
                                     })
                                 })),
+                                allowed_from: None,
                             };
                         for attempt in 1..=3u8 {
                             match super::internal_api::update_dispatch(did, payload.clone()).await {
