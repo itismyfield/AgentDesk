@@ -92,7 +92,17 @@ async fn claim_task_dispatches_with_cluster_config(
                 status = 'pending'
              OR (
                     status = 'dispatched'
-                AND (claim_expires_at IS NULL OR claim_expires_at <= NOW())
+                AND claim_expires_at <= NOW()
+                )
+             OR (
+                    status = 'dispatched'
+                AND claim_expires_at IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM dispatch_semaphore_holdings active_holdings
+                     WHERE active_holdings.dispatch_id = task_dispatches.id
+                       AND active_holdings.expires_at > NOW()
+                )
                 )
            )
            AND ($1::TEXT IS NULL OR to_agent_id = $1)
@@ -509,19 +519,15 @@ mod tests {
             "pending",
         )
         .await;
-        sqlx::query(
-            "INSERT INTO dispatch_semaphore_holdings (
-                semaphore_name, scope, scope_key, slot_index, holder_instance_id,
-                dispatch_id, expires_at
-             )
-             VALUES (
-                'ue_editor', 'per-node', 'mac-mini-release', 0, 'mac-mini-release',
-                'disp-holder', NOW() + INTERVAL '10 minutes'
-             )",
+        seed_dispatch_semaphore_holding(
+            &pool,
+            "per-node",
+            "mac-mini-release",
+            "mac-mini-release",
+            "disp-holder",
+            600,
         )
-        .execute(&pool)
-        .await
-        .unwrap();
+        .await;
 
         let outcome = claim_task_dispatches_with_cluster_config(
             &pool,
@@ -557,6 +563,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claim_acquires_first_per_node_semaphore_on_preferred_node() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_two_worker_nodes(&pool).await;
+        seed_agent_and_card(&pool).await;
+        seed_dispatch_with_required_capabilities(
+            &pool,
+            "disp-first",
+            "First",
+            json!({
+                "required": {"semaphores": ["ue_editor"]},
+                "preferred": {"labels": ["mac-mini"]}
+            }),
+            "pending",
+        )
+        .await;
+
+        let outcome = claim_task_dispatches_with_cluster_config(
+            &pool,
+            &TaskDispatchClaimRequest {
+                claim_owner: "mac-mini-release".to_string(),
+                ttl_secs: Some(60),
+                limit: Some(10),
+                to_agent_id: None,
+                dispatch_type: None,
+                lease_ttl_secs: Some(60),
+            },
+            &cluster_config_with_semaphore(crate::config::ClusterSemaphoreScope::PerNode),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.claimed.len(), 1);
+        assert_eq!(outcome.claimed[0].id, "disp-first");
+        assert!(outcome.skipped.is_empty());
+        let holder: (String, String) = sqlx::query_as(
+            "SELECT holder_instance_id, scope_key
+             FROM dispatch_semaphore_holdings
+             WHERE dispatch_id = 'disp-first'
+               AND semaphore_name = 'ue_editor'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(holder.0, "mac-mini-release");
+        assert_eq!(holder.1, "mac-mini-release");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn claim_waits_when_all_per_node_semaphore_slots_are_exhausted() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_two_worker_nodes(&pool).await;
+        seed_agent_and_card(&pool).await;
+        seed_dispatch_with_required_capabilities(
+            &pool,
+            "disp-mini-holder",
+            "Mini Holder",
+            json!({"required": {"semaphores": ["ue_editor"]}}),
+            "dispatched",
+        )
+        .await;
+        seed_dispatch_with_required_capabilities(
+            &pool,
+            "disp-book-holder",
+            "Book Holder",
+            json!({"required": {"semaphores": ["ue_editor"]}}),
+            "dispatched",
+        )
+        .await;
+        seed_dispatch_with_required_capabilities(
+            &pool,
+            "disp-work",
+            "Work",
+            json!({"required": {"semaphores": ["ue_editor"]}}),
+            "pending",
+        )
+        .await;
+        seed_dispatch_semaphore_holding(
+            &pool,
+            "per-node",
+            "mac-mini-release",
+            "mac-mini-release",
+            "disp-mini-holder",
+            600,
+        )
+        .await;
+        seed_dispatch_semaphore_holding(
+            &pool,
+            "per-node",
+            "mac-book-release",
+            "mac-book-release",
+            "disp-book-holder",
+            600,
+        )
+        .await;
+
+        let outcome = claim_task_dispatches_with_cluster_config(
+            &pool,
+            &TaskDispatchClaimRequest {
+                claim_owner: "mac-book-release".to_string(),
+                ttl_secs: Some(60),
+                limit: Some(10),
+                to_agent_id: None,
+                dispatch_type: None,
+                lease_ttl_secs: Some(60),
+            },
+            &cluster_config_with_semaphore(crate::config::ClusterSemaphoreScope::PerNode),
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.claimed.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].id, "disp-work");
+        assert!(
+            outcome.skipped[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exhausted"))
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind("disp-work")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "pending");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
     async fn claim_waits_when_per_cluster_semaphore_is_exhausted() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
@@ -578,19 +720,15 @@ mod tests {
             "pending",
         )
         .await;
-        sqlx::query(
-            "INSERT INTO dispatch_semaphore_holdings (
-                semaphore_name, scope, scope_key, slot_index, holder_instance_id,
-                dispatch_id, expires_at
-             )
-             VALUES (
-                'ue_editor', 'per-cluster', 'cluster', 0, 'mac-mini-release',
-                'disp-holder', NOW() + INTERVAL '10 minutes'
-             )",
+        seed_dispatch_semaphore_holding(
+            &pool,
+            "per-cluster",
+            "cluster",
+            "mac-mini-release",
+            "disp-holder",
+            600,
         )
-        .execute(&pool)
-        .await
-        .unwrap();
+        .await;
 
         let outcome = claim_task_dispatches_with_cluster_config(
             &pool,
@@ -626,6 +764,153 @@ mod tests {
         pg_db.drop().await;
     }
 
+    #[tokio::test]
+    async fn claim_reclaims_expired_semaphore_holding_before_acquire() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_two_worker_nodes(&pool).await;
+        seed_agent_and_card(&pool).await;
+        seed_dispatch_with_required_capabilities(
+            &pool,
+            "disp-expired",
+            "Expired",
+            json!({"required": {"semaphores": ["ue_editor"]}}),
+            "failed",
+        )
+        .await;
+        seed_dispatch_with_required_capabilities(
+            &pool,
+            "disp-work",
+            "Work",
+            json!({
+                "required": {"semaphores": ["ue_editor"]},
+                "preferred": {"labels": ["mac-mini"]}
+            }),
+            "pending",
+        )
+        .await;
+        seed_dispatch_semaphore_holding(
+            &pool,
+            "per-node",
+            "mac-mini-release",
+            "mac-mini-release",
+            "disp-expired",
+            -60,
+        )
+        .await;
+
+        let outcome = claim_task_dispatches_with_cluster_config(
+            &pool,
+            &TaskDispatchClaimRequest {
+                claim_owner: "mac-mini-release".to_string(),
+                ttl_secs: Some(60),
+                limit: Some(10),
+                to_agent_id: None,
+                dispatch_type: None,
+                lease_ttl_secs: Some(60),
+            },
+            &cluster_config_with_semaphore(crate::config::ClusterSemaphoreScope::PerNode),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.claimed.len(), 1);
+        assert_eq!(outcome.claimed[0].id, "disp-work");
+        let expired_holdings: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT
+             FROM dispatch_semaphore_holdings
+             WHERE dispatch_id = 'disp-expired'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(expired_holdings, 0);
+        let work_holder: String = sqlx::query_scalar(
+            "SELECT holder_instance_id
+             FROM dispatch_semaphore_holdings
+             WHERE dispatch_id = 'disp-work'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(work_holder, "mac-mini-release");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn claim_does_not_reclaim_active_null_expiry_semaphore_holder() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_two_worker_nodes(&pool).await;
+        seed_agent_and_card(&pool).await;
+        seed_dispatch_with_required_capabilities(
+            &pool,
+            "disp-holder",
+            "Holder",
+            json!({"required": {"semaphores": ["ue_editor"]}}),
+            "dispatched",
+        )
+        .await;
+        sqlx::query("UPDATE task_dispatches SET claim_expires_at = NULL WHERE id = $1")
+            .bind("disp-holder")
+            .execute(&pool)
+            .await
+            .unwrap();
+        seed_dispatch_with_required_capabilities(
+            &pool,
+            "disp-work",
+            "Work",
+            json!({
+                "required": {"semaphores": ["ue_editor"]},
+                "preferred": {"labels": ["mac-mini"]}
+            }),
+            "pending",
+        )
+        .await;
+        seed_dispatch_semaphore_holding(
+            &pool,
+            "per-node",
+            "mac-mini-release",
+            "mac-mini-release",
+            "disp-holder",
+            600,
+        )
+        .await;
+
+        let outcome = claim_task_dispatches_with_cluster_config(
+            &pool,
+            &TaskDispatchClaimRequest {
+                claim_owner: "mac-book-release".to_string(),
+                ttl_secs: Some(60),
+                limit: Some(10),
+                to_agent_id: None,
+                dispatch_type: None,
+                lease_ttl_secs: Some(60),
+            },
+            &cluster_config_with_semaphore(crate::config::ClusterSemaphoreScope::PerNode),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.claimed.len(), 1);
+        assert_eq!(outcome.claimed[0].id, "disp-work");
+        let holder_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT
+             FROM dispatch_semaphore_holdings
+             WHERE dispatch_id = 'disp-holder'
+               AND holder_instance_id = 'mac-mini-release'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(holder_count, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     async fn seed_two_worker_nodes(pool: &PgPool) {
         sqlx::query(
             "INSERT INTO worker_nodes (
@@ -644,6 +929,34 @@ mod tests {
                     NOW() - INTERVAL '1 second', NOW(), NOW()
                 )",
         )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_dispatch_semaphore_holding(
+        pool: &PgPool,
+        scope: &str,
+        scope_key: &str,
+        holder_instance_id: &str,
+        dispatch_id: &str,
+        ttl_secs: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO dispatch_semaphore_holdings (
+                semaphore_name, scope, scope_key, slot_index, holder_instance_id,
+                dispatch_id, expires_at
+             )
+             VALUES (
+                'ue_editor', $1, $2, 0, $3, $4,
+                NOW() + ($5::BIGINT * INTERVAL '1 second')
+             )",
+        )
+        .bind(scope)
+        .bind(scope_key)
+        .bind(holder_instance_id)
+        .bind(dispatch_id)
+        .bind(ttl_secs)
         .execute(pool)
         .await
         .unwrap();
@@ -681,6 +994,19 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+        if status == "dispatched" {
+            sqlx::query(
+                "UPDATE task_dispatches
+                    SET claim_owner = 'mac-mini-release',
+                        claimed_at = NOW(),
+                        claim_expires_at = NOW() + INTERVAL '10 minutes'
+                  WHERE id = $1",
+            )
+            .bind(dispatch_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
     }
 
     fn cluster_config_with_semaphore(

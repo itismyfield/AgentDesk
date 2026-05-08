@@ -919,7 +919,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/cluster/task-dispatches/claim",
             "cluster",
-            "Atomically claim pending task_dispatches for a worker with PG row locking, capability-match diagnostics, and named semaphore routing constraints.",
+            "Atomically claim pending task_dispatches for a worker with PG row locking, capability-match diagnostics, and named semaphore routing constraints. Named semaphore acquire happens in this claim transaction after route owner selection; dispatch terminal statuses release holdings, and expired holdings are reclaimed before each claim.",
         )
         .with_example(
             json!({

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, Row, Transaction};
 
 use crate::config::ClusterSemaphoreConfig;
 
@@ -106,23 +106,16 @@ pub async fn semaphore_unavailable_reasons_on_pg_tx(
         };
         let scope = config.scope.as_str();
         let scope_key = config.scope.scope_key(instance_id);
-        let active: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::BIGINT
-             FROM dispatch_semaphore_holdings
-             WHERE semaphore_name = $1
-               AND scope = $2
-               AND scope_key = $3
-               AND expires_at > NOW()",
-        )
-        .bind(&name)
-        .bind(scope)
-        .bind(&scope_key)
-        .fetch_one(&mut **tx)
-        .await?;
+        let active = active_holding_diagnostics(tx, &name, scope, &scope_key).await?;
         let capacity = i64::from(config.effective_capacity());
-        if active >= capacity {
-            reasons.push(format!(
-                "semaphore '{name}' exhausted for {scope}:{scope_key} ({active}/{capacity} active)"
+        if active.count >= capacity {
+            reasons.push(exhausted_reason(
+                &name,
+                scope,
+                &scope_key,
+                active.count,
+                capacity,
+                &active.holders,
             ));
         }
     }
@@ -213,9 +206,14 @@ pub async fn try_acquire_dispatch_semaphores_on_pg_tx(
         .await?;
 
         if inserted.is_none() {
-            let active = active_holding_count(tx, &name, scope, &scope_key).await?;
-            reasons.push(format!(
-                "semaphore '{name}' exhausted for {scope}:{scope_key} ({active}/{capacity} active)"
+            let active = active_holding_diagnostics(tx, &name, scope, &scope_key).await?;
+            reasons.push(exhausted_reason(
+                &name,
+                scope,
+                &scope_key,
+                active.count,
+                i64::from(capacity),
+                &active.holders,
             ));
             break;
         }
@@ -229,25 +227,73 @@ pub async fn try_acquire_dispatch_semaphores_on_pg_tx(
     }
 }
 
-async fn active_holding_count(
+struct ActiveHoldingDiagnostics {
+    count: i64,
+    holders: Vec<String>,
+}
+
+async fn active_holding_diagnostics(
     tx: &mut Transaction<'_, Postgres>,
     name: &str,
     scope: &str,
     scope_key: &str,
-) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT COUNT(*)::BIGINT
-         FROM dispatch_semaphore_holdings
-         WHERE semaphore_name = $1
-           AND scope = $2
-           AND scope_key = $3
-           AND expires_at > NOW()",
+) -> Result<ActiveHoldingDiagnostics, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT COUNT(*) OVER ()::BIGINT AS active_count,
+                slot_index,
+                holder_instance_id,
+                dispatch_id,
+                expires_at::TEXT AS expires_at
+           FROM dispatch_semaphore_holdings
+          WHERE semaphore_name = $1
+            AND scope = $2
+            AND scope_key = $3
+            AND expires_at > NOW()
+          ORDER BY slot_index ASC
+          LIMIT 3",
     )
     .bind(name)
     .bind(scope)
     .bind(scope_key)
-    .fetch_one(&mut **tx)
-    .await
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let count = rows
+        .first()
+        .map(|row| row.get::<i64, _>("active_count"))
+        .unwrap_or(0);
+    let holders = rows
+        .into_iter()
+        .map(|row| {
+            let slot_index: i32 = row.get("slot_index");
+            let holder_instance_id: String = row.get("holder_instance_id");
+            let dispatch_id: String = row.get("dispatch_id");
+            let expires_at: String = row.get("expires_at");
+            format!(
+                "slot {slot_index} held by dispatch {dispatch_id} on {holder_instance_id} until {expires_at}"
+            )
+        })
+        .collect();
+
+    Ok(ActiveHoldingDiagnostics { count, holders })
+}
+
+fn exhausted_reason(
+    name: &str,
+    scope: &str,
+    scope_key: &str,
+    active: i64,
+    capacity: i64,
+    holders: &[String],
+) -> String {
+    if holders.is_empty() {
+        format!("semaphore '{name}' exhausted for {scope}:{scope_key} ({active}/{capacity} active)")
+    } else {
+        format!(
+            "semaphore '{name}' exhausted for {scope}:{scope_key} ({active}/{capacity} active; holders: {})",
+            holders.join(", ")
+        )
+    }
 }
 
 #[cfg(test)]
