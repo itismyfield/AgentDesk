@@ -704,13 +704,28 @@ impl ClusterConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ClusterDispatchRoutingConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_preferred_labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub opt_out_dispatch_types: Vec<String>,
+    #[serde(
+        default = "default_dispatch_routing_constraints",
+        skip_serializing_if = "is_default_dispatch_routing_constraints"
+    )]
+    pub constraints: Vec<String>,
+}
+
+impl Default for ClusterDispatchRoutingConfig {
+    fn default() -> Self {
+        Self {
+            default_preferred_labels: Vec::new(),
+            opt_out_dispatch_types: Vec::new(),
+            constraints: default_dispatch_routing_constraints(),
+        }
+    }
 }
 
 impl ClusterDispatchRoutingConfig {
@@ -723,6 +738,14 @@ impl ClusterDispatchRoutingConfig {
             .iter()
             .any(|value| value == dispatch_type)
     }
+}
+
+fn default_dispatch_routing_constraints() -> Vec<String> {
+    vec![crate::services::dispatches::routing_constraint::NOOP_CONSTRAINT_NAME.to_string()]
+}
+
+fn is_default_dispatch_routing_constraints(values: &[String]) -> bool {
+    values == default_dispatch_routing_constraints().as_slice()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

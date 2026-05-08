@@ -107,13 +107,30 @@ pub async fn routing_diagnostics(
     let lease_ttl_secs = state.config.cluster.lease_ttl_secs.max(1);
     match crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await {
         Ok(nodes) => {
+            let routing_engine =
+                crate::services::dispatches::routing_constraint::RoutingEngine::from_config(
+                    &state.config.cluster.dispatch_routing,
+                );
+            let routing_dispatch =
+                crate::services::dispatches::routing_constraint::RoutingDispatch::new(
+                    "diagnostics",
+                    None,
+                    Some(required.clone()),
+                );
+            let routing = routing_engine.route(&nodes, &required, &routing_dispatch);
+            let constraint_results = routing.constraint_results_json();
             let decisions = nodes
                 .iter()
                 .map(|node| crate::server::cluster::explain_capability_match(node, &required))
                 .collect::<Vec<_>>();
             (
                 StatusCode::OK,
-                Json(json!({ "required": required, "decisions": decisions })),
+                Json(json!({
+                    "required": required,
+                    "decisions": decisions,
+                    "routing": routing,
+                    "constraint_results": constraint_results,
+                })),
             )
         }
         Err(error) => (

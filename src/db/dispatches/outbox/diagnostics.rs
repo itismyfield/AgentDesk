@@ -11,17 +11,20 @@ pub(crate) async fn record_routing_diagnostics_pg(
         .and_then(|selected| selected.get("decision"))
         .and_then(|decision| decision.get("instance_id"))
         .and_then(|value| value.as_str());
+    let constraint_results = diagnostics.get("constraint_results");
 
     if let Err(error) = sqlx::query(
         "UPDATE dispatch_outbox
             SET routing_diagnostics = $2,
                 claim_owner = $3,
+                constraint_results = $4,
                 next_attempt_at = NOW() + INTERVAL '5 seconds'
           WHERE id = $1",
     )
     .bind(outbox_id)
     .bind(diagnostics)
     .bind(preferred_owner)
+    .bind(constraint_results)
     .execute(&mut **tx)
     .await
     {
@@ -35,11 +38,13 @@ pub(crate) async fn record_routing_diagnostics_pg(
     if let Err(error) = sqlx::query(
         "UPDATE task_dispatches
             SET routing_diagnostics = $2,
+                constraint_results = $3,
                 updated_at = NOW()
           WHERE id = $1",
     )
     .bind(dispatch_id)
     .bind(diagnostics)
+    .bind(constraint_results)
     .execute(&mut **tx)
     .await
     {

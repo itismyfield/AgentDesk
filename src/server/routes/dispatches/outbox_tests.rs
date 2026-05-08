@@ -172,16 +172,22 @@ async fn claim_pending_dispatch_outbox_batch_pg_filters_required_capabilities() 
 
     let rejected = claim_pending_dispatch_outbox_batch_pg(&pool, "mac-mini-release").await;
     assert!(rejected.is_empty());
-    let diagnostics: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT routing_diagnostics
+    let (diagnostics, constraint_results): (Option<serde_json::Value>, Option<serde_json::Value>) =
+        sqlx::query_as(
+            "SELECT routing_diagnostics, constraint_results
            FROM dispatch_outbox
           WHERE dispatch_id = 'dispatch-capability-filtered'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let diagnostics = diagnostics.expect("mismatch should record routing diagnostics");
     assert_eq!(diagnostics["decision"]["eligible"], false);
+    let constraint_results = constraint_results.expect("mismatch should record constraint results");
+    assert_eq!(
+        constraint_results[0]["constraints"][0]["outcome"]["outcome"],
+        "available"
+    );
 
     sqlx::query(
         "UPDATE dispatch_outbox

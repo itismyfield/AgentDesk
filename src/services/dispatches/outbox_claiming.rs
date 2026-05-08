@@ -12,6 +12,9 @@ use crate::db::dispatches::outbox::{
     select_pending_dispatch_outbox_claim_candidates_pg,
 };
 use crate::server::cluster::CapabilityRouteDecision;
+use crate::services::dispatches::routing_constraint::{
+    RoutingDispatch, RoutingEngine, RoutingEngineDecision,
+};
 
 pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
     pool: &PgPool,
@@ -33,7 +36,9 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
         .iter()
         .find(|node| node.get("instance_id").and_then(|value| value.as_str()) == Some(claim_owner))
         .cloned();
-    let cluster_default = cluster_default_required_capabilities();
+    let routing_config = crate::config::load_graceful().cluster.dispatch_routing;
+    let cluster_default = cluster_default_required_capabilities(&routing_config);
+    let routing_engine = RoutingEngine::from_config(&routing_config);
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -73,14 +78,25 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
         if let Some(required) = effective_required.as_ref() {
             let owner_decision =
                 capability_decision_for_claim_owner(owner_node.as_ref(), claim_owner, required);
-            let route_candidates =
-                crate::server::cluster::select_capability_route(&worker_nodes, required);
-            let selected = route_candidates
-                .first()
-                .and_then(|candidate| candidate.decision.instance_id.as_deref());
+            let dispatch = RoutingDispatch::new(
+                candidate.dispatch_id.clone(),
+                None,
+                effective_required.clone(),
+            );
+            let routing_decision = routing_engine.route(&worker_nodes, required, &dispatch);
+            let selected = routing_decision.selected_instance_id();
             let preference_mismatch = selected.is_some() && selected != Some(claim_owner);
+            let owner_constraint_blocked = routing_decision
+                .candidate_for_instance(claim_owner)
+                .is_some_and(|candidate| !candidate.is_available());
+            let no_available_route_due_to_constraints =
+                selected.is_none() && routing_decision.has_constraint_blocked_candidates();
 
-            if !owner_decision.eligible || preference_mismatch {
+            if !owner_decision.eligible
+                || preference_mismatch
+                || owner_constraint_blocked
+                || no_available_route_due_to_constraints
+            {
                 let mut decision = owner_decision.clone();
                 if preference_mismatch && decision.eligible && decision.reasons.is_empty() {
                     decision.reasons.push(format!(
@@ -88,13 +104,28 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
                         selected.unwrap_or("unknown")
                     ));
                 }
+                if owner_constraint_blocked {
+                    decision.eligible = false;
+                    if let Some(candidate) = routing_decision.candidate_for_instance(claim_owner) {
+                        decision.reasons.push(format!(
+                            "claim owner blocked by routing constraint: {:?}",
+                            candidate.final_outcome
+                        ));
+                    }
+                }
+                if no_available_route_due_to_constraints && decision.reasons.is_empty() {
+                    decision.eligible = false;
+                    decision
+                        .reasons
+                        .push("no route candidate is currently available".to_string());
+                }
                 let diagnostics = routing_diagnostics(
                     claim_owner,
                     &decision,
                     dispatch_required.as_ref(),
                     effective_required.as_ref(),
                     routing_origin,
-                    &route_candidates,
+                    &routing_decision,
                 );
                 record_routing_diagnostics_pg(
                     &mut tx,
@@ -134,8 +165,9 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
     pending
 }
 
-fn cluster_default_required_capabilities() -> Option<Value> {
-    let routing = crate::config::load_graceful().cluster.dispatch_routing;
+fn cluster_default_required_capabilities(
+    routing: &crate::config::ClusterDispatchRoutingConfig,
+) -> Option<Value> {
     if routing.default_preferred_labels.is_empty() {
         None
     } else {
@@ -173,13 +205,14 @@ fn routing_diagnostics(
     dispatch_required_capabilities: Option<&Value>,
     effective_required_capabilities: Option<&Value>,
     routing_origin: &str,
-    route_candidates: &[crate::server::cluster::CapabilityRouteCandidate],
+    routing_decision: &RoutingEngineDecision,
 ) -> Value {
     serde_json::json!({
         "claim_owner": claim_owner,
         "decision": decision,
-        "selected": route_candidates.first(),
-        "candidates": route_candidates,
+        "selected": &routing_decision.selected,
+        "candidates": &routing_decision.candidates,
+        "constraint_results": routing_decision.constraint_results_json(),
         "required_capabilities": dispatch_required_capabilities,
         "effective_required_capabilities": effective_required_capabilities,
         "routing_origin": routing_origin,
@@ -191,6 +224,7 @@ fn routing_diagnostics(
 mod tests {
     use super::*;
     use crate::db::dispatches::outbox::DispatchOutboxClaimCandidate;
+    use crate::services::dispatches::routing_constraint::{NoOpConstraint, RoutingEngine};
     use serde_json::json;
 
     #[test]
@@ -222,13 +256,29 @@ mod tests {
             reasons: vec!["missing required label mac-book".to_string()],
         };
         let required = json!({"labels": ["mac-book"]});
+        let route_nodes = vec![json!({
+            "instance_id": "worker-a",
+            "status": "online",
+            "labels": ["mac-book"],
+            "capabilities": {},
+            "last_heartbeat_at": "2026-05-08T00:00:00Z"
+        })];
+        let route_decision = RoutingEngine::new(vec![Box::new(NoOpConstraint)]).route(
+            &route_nodes,
+            &required,
+            &RoutingDispatch::new(
+                "dispatch-a",
+                Some("implementation".to_string()),
+                Some(required.clone()),
+            ),
+        );
         let diagnostics = routing_diagnostics(
             "worker-a",
             &decision,
             Some(&required),
             Some(&required),
             "dispatch",
-            &[],
+            &route_decision,
         );
 
         assert_eq!(diagnostics["claim_owner"], "worker-a");
@@ -236,6 +286,14 @@ mod tests {
         assert_eq!(diagnostics["required_capabilities"], required);
         assert_eq!(diagnostics["effective_required_capabilities"], required);
         assert_eq!(diagnostics["routing_origin"], "dispatch");
+        assert_eq!(
+            diagnostics["constraint_results"][0]["constraints"][0]["constraint"],
+            "noop"
+        );
+        assert_eq!(
+            diagnostics["constraint_results"][0]["constraints"][0]["outcome"]["outcome"],
+            "available"
+        );
         assert!(diagnostics["checked_at"].is_string());
     }
 
