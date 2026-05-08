@@ -349,6 +349,25 @@ async fn policy_tick_loop(
         // ── 1min tier: every 2nd tick (60s) ──
         if count % 2 == 0 {
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick1min", "1min").await;
+            if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
+                match crate::reconcile::reconcile_auto_queue_pending_delivery_orphans_pg(pool).await
+                {
+                    Ok(stats) if stats.touched() => {
+                        tracing::info!(
+                            candidates = stats.candidates,
+                            requeued_notify = stats.requeued_notify,
+                            skipped = stats.skipped,
+                            "[policy-tick] auto-queue pending delivery orphan reconcile repaired notify rows"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            "[policy-tick] auto-queue pending delivery orphan reconcile failed: {error}"
+                        );
+                    }
+                }
+            }
         }
 
         // ── 5min tier: every 10th tick (300s) ──

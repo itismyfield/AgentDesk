@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row as SqlxRow};
 use std::time::Duration;
 
 use crate::{db::Db, engine::PolicyEngine};
@@ -16,6 +16,30 @@ const STALE_INFLIGHT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const STALE_UPLOAD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const COMPLETED_QUEUE_REVIEW_DRIFT_GRACE: Duration = Duration::from_secs(5 * 60);
 const COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT: i64 = 50;
+const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE: Duration = Duration::from_secs(2 * 60);
+const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_STALE_CLAIM: Duration = Duration::from_secs(5 * 60);
+const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_BATCH_LIMIT: i64 = 50;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AutoQueuePendingDeliveryOrphanStats {
+    pub candidates: usize,
+    pub requeued_notify: usize,
+    pub skipped: usize,
+}
+
+impl AutoQueuePendingDeliveryOrphanStats {
+    pub(crate) fn touched(&self) -> bool {
+        self.requeued_notify > 0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AutoQueuePendingDeliveryOrphanCandidate {
+    dispatch_id: String,
+    entry_id: String,
+    run_id: String,
+    outbox_status: Option<String>,
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BootReconcileStats {
@@ -134,6 +158,60 @@ pub(crate) async fn reconcile_completed_queue_review_drift_pg(
     recover_completed_queue_review_drift_pg(pool, db, engine, drift_candidates).await
 }
 
+pub(crate) async fn reconcile_auto_queue_pending_delivery_orphans_pg(
+    pool: &PgPool,
+) -> Result<AutoQueuePendingDeliveryOrphanStats> {
+    let candidates = auto_queue_pending_delivery_orphan_candidates_pg(pool).await?;
+    let mut stats = AutoQueuePendingDeliveryOrphanStats {
+        candidates: candidates.len(),
+        ..AutoQueuePendingDeliveryOrphanStats::default()
+    };
+
+    for candidate in candidates {
+        match requeue_auto_queue_pending_delivery_orphan_notify_pg(pool, &candidate.dispatch_id)
+            .await
+        {
+            Ok(true) => {
+                stats.requeued_notify += 1;
+                tracing::info!(
+                    target: "reconcile",
+                    run_id = %candidate.run_id,
+                    entry_id = %candidate.entry_id,
+                    dispatch_id = %candidate.dispatch_id,
+                    outbox_status = candidate.outbox_status.as_deref().unwrap_or("missing"),
+                    "[auto-queue-reconcile] requeued orphan pending delivery notify"
+                );
+            }
+            Ok(false) => {
+                stats.skipped += 1;
+            }
+            Err(error) => {
+                stats.skipped += 1;
+                tracing::warn!(
+                    target: "reconcile",
+                    run_id = %candidate.run_id,
+                    entry_id = %candidate.entry_id,
+                    dispatch_id = %candidate.dispatch_id,
+                    %error,
+                    "[auto-queue-reconcile] failed to requeue orphan pending delivery notify"
+                );
+            }
+        }
+    }
+
+    if stats.touched() {
+        tracing::info!(
+            target: "reconcile",
+            candidates = stats.candidates,
+            requeued_notify = stats.requeued_notify,
+            skipped = stats.skipped,
+            "[auto-queue-reconcile] pending delivery orphan reconcile completed"
+        );
+    }
+
+    Ok(stats)
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 fn reconcile_boot_db_sqlite(db: &Db) -> Result<BootReconcileStats> {
     let conn = db
@@ -250,6 +328,256 @@ async fn reset_broken_auto_queue_entries_pg(pool: &PgPool) -> Result<usize> {
     .await
     .map(|result| result.rows_affected() as usize)
     .map_err(anyhow::Error::from)
+}
+
+async fn auto_queue_pending_delivery_orphan_candidates_pg(
+    pool: &PgPool,
+) -> Result<Vec<AutoQueuePendingDeliveryOrphanCandidate>> {
+    let rows = sqlx::query(
+        "WITH latest_notify AS (
+            SELECT DISTINCT ON (dispatch_id)
+                   id,
+                   dispatch_id,
+                   status,
+                   claimed_at,
+                   claim_owner
+              FROM dispatch_outbox
+             WHERE action = 'notify'
+             ORDER BY dispatch_id, id DESC
+         )
+         SELECT td.id AS dispatch_id,
+                e.id AS entry_id,
+                e.run_id AS run_id,
+                o.status AS outbox_status
+           FROM task_dispatches td
+           JOIN auto_queue_entries e
+             ON e.dispatch_id = td.id
+            AND e.status = 'dispatched'
+           JOIN auto_queue_runs r
+             ON r.id = e.run_id
+            AND r.status = 'active'
+           LEFT JOIN latest_notify o
+             ON o.dispatch_id = td.id
+          WHERE td.status = 'pending'
+            AND (COALESCE(NULLIF(td.context, ''), '{}')::jsonb)->>'auto_queue' = 'true'
+            AND COALESCE(e.dispatched_at, td.created_at, NOW())
+                <= NOW() - ($1::BIGINT * INTERVAL '1 second')
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM sessions s
+                 WHERE s.active_dispatch_id = td.id
+                   AND COALESCE(s.status, '') IN ('turn_active', 'working')
+            )
+            AND (
+                o.id IS NULL
+                OR o.status = 'failed'
+                OR (
+                    o.status = 'processing'
+                    AND (
+                        o.claimed_at IS NULL
+                        OR o.claimed_at <= NOW() - ($2::BIGINT * INTERVAL '1 second')
+                    )
+                )
+                OR (
+                    o.status = 'pending'
+                    AND o.claim_owner IS NOT NULL
+                    AND (
+                        o.claimed_at IS NULL
+                        OR o.claimed_at <= NOW() - ($2::BIGINT * INTERVAL '1 second')
+                    )
+                )
+            )
+          ORDER BY COALESCE(e.dispatched_at, td.created_at) ASC, td.id ASC
+          LIMIT $3",
+    )
+    .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE.as_secs() as i64)
+    .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_STALE_CLAIM.as_secs() as i64)
+    .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_BATCH_LIMIT)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(AutoQueuePendingDeliveryOrphanCandidate {
+                dispatch_id: row.try_get("dispatch_id")?,
+                entry_id: row.try_get("entry_id")?,
+                run_id: row.try_get("run_id")?,
+                outbox_status: row.try_get("outbox_status")?,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
+        .map_err(anyhow::Error::from)
+}
+
+async fn requeue_auto_queue_pending_delivery_orphan_notify_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<bool> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| anyhow!("begin orphan pending delivery requeue tx: {error}"))?;
+
+    let dispatch = sqlx::query(
+        "SELECT td.to_agent_id,
+                td.kanban_card_id,
+                td.title,
+                td.required_capabilities
+           FROM task_dispatches td
+           JOIN auto_queue_entries e
+             ON e.dispatch_id = td.id
+            AND e.status = 'dispatched'
+           JOIN auto_queue_runs r
+             ON r.id = e.run_id
+            AND r.status = 'active'
+          WHERE td.id = $1
+            AND td.status = 'pending'
+            AND (COALESCE(NULLIF(td.context, ''), '{}')::jsonb)->>'auto_queue' = 'true'
+            AND COALESCE(e.dispatched_at, td.created_at, NOW())
+                <= NOW() - ($2::BIGINT * INTERVAL '1 second')
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM sessions s
+                 WHERE s.active_dispatch_id = td.id
+                   AND COALESCE(s.status, '') IN ('turn_active', 'working')
+            )
+          FOR UPDATE OF td, e",
+    )
+    .bind(dispatch_id)
+    .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE.as_secs() as i64)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| anyhow!("lock orphan pending delivery dispatch {dispatch_id}: {error}"))?;
+
+    let Some(dispatch) = dispatch else {
+        tx.rollback()
+            .await
+            .map_err(|error| anyhow!("rollback skipped orphan requeue {dispatch_id}: {error}"))?;
+        return Ok(false);
+    };
+
+    let agent_id = dispatch
+        .try_get::<Option<String>, _>("to_agent_id")?
+        .ok_or_else(|| anyhow!("postgres dispatch {dispatch_id} missing to_agent_id"))?;
+    let card_id = dispatch
+        .try_get::<Option<String>, _>("kanban_card_id")?
+        .ok_or_else(|| anyhow!("postgres dispatch {dispatch_id} missing kanban_card_id"))?;
+    let title = dispatch
+        .try_get::<Option<String>, _>("title")?
+        .ok_or_else(|| anyhow!("postgres dispatch {dispatch_id} missing title"))?;
+    let required_capabilities: Option<serde_json::Value> =
+        dispatch.try_get("required_capabilities")?;
+
+    let outbox = sqlx::query(
+        "SELECT id,
+                (
+                    status = 'failed'
+                    OR (
+                        status = 'processing'
+                        AND (
+                            claimed_at IS NULL
+                            OR claimed_at <= NOW() - ($2::BIGINT * INTERVAL '1 second')
+                        )
+                    )
+                    OR (
+                        status = 'pending'
+                        AND claim_owner IS NOT NULL
+                        AND (
+                            claimed_at IS NULL
+                            OR claimed_at <= NOW() - ($2::BIGINT * INTERVAL '1 second')
+                        )
+                    )
+                ) AS needs_requeue
+           FROM dispatch_outbox
+          WHERE dispatch_id = $1
+            AND action = 'notify'
+          ORDER BY id DESC
+          LIMIT 1
+          FOR UPDATE",
+    )
+    .bind(dispatch_id)
+    .bind(AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_STALE_CLAIM.as_secs() as i64)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| anyhow!("lock notify outbox for orphan dispatch {dispatch_id}: {error}"))?;
+
+    let changed = if let Some(outbox) = outbox {
+        let needs_requeue: bool = outbox.try_get("needs_requeue")?;
+        if !needs_requeue {
+            false
+        } else {
+            let outbox_id: i64 = outbox.try_get("id")?;
+            sqlx::query(
+                "UPDATE dispatch_outbox
+                    SET agent_id = $2,
+                        card_id = $3,
+                        title = $4,
+                        required_capabilities = $5,
+                        status = 'pending',
+                        retry_count = 0,
+                        next_attempt_at = NULL,
+                        processed_at = NULL,
+                        error = NULL,
+                        delivery_status = NULL,
+                        delivery_result = NULL,
+                        claimed_at = NULL,
+                        claim_owner = NULL
+                  WHERE id = $1",
+            )
+            .bind(outbox_id)
+            .bind(&agent_id)
+            .bind(&card_id)
+            .bind(&title)
+            .bind(required_capabilities.as_ref())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                anyhow!("reset notify outbox for orphan dispatch {dispatch_id}: {error}")
+            })?
+            .rows_affected()
+                > 0
+        }
+    } else {
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (
+                dispatch_id,
+                action,
+                agent_id,
+                card_id,
+                title,
+                status,
+                retry_count,
+                required_capabilities
+             ) VALUES (
+                $1, 'notify', $2, $3, $4, 'pending', 0, $5
+             )
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(dispatch_id)
+        .bind(&agent_id)
+        .bind(&card_id)
+        .bind(&title)
+        .bind(required_capabilities.as_ref())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            anyhow!("insert notify outbox for orphan dispatch {dispatch_id}: {error}")
+        })?
+        .rows_affected()
+            > 0
+    };
+
+    if changed {
+        tx.commit().await.map_err(|error| {
+            anyhow!("commit orphan pending delivery requeue {dispatch_id}: {error}")
+        })?;
+    } else {
+        tx.rollback()
+            .await
+            .map_err(|error| anyhow!("rollback unchanged orphan requeue {dispatch_id}: {error}"))?;
+    }
+
+    Ok(changed)
 }
 
 async fn refire_missing_review_dispatches_pg(

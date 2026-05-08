@@ -308,6 +308,307 @@ async fn boot_reconcile_pg_resets_stale_runtime_rows() {
 }
 
 #[tokio::test]
+async fn runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_outbox() {
+    let pg_db = PgRecoveryTestDatabase::create().await;
+    let pool = pg_db.migrate().await;
+
+    seed_agent_pg(&pool).await;
+    for card_id in [
+        "card-pg-aq-orphan-failed",
+        "card-pg-aq-orphan-missing",
+        "card-pg-aq-orphan-live",
+    ] {
+        seed_card_pg(&pool, card_id, "in_progress").await;
+    }
+
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, agent_id, status)
+         VALUES ('run-pg-aq-orphan', 'agent-1', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed auto queue run");
+
+    for (dispatch_id, card_id, entry_id, slot_index) in [
+        (
+            "dispatch-pg-aq-orphan-failed",
+            "card-pg-aq-orphan-failed",
+            "entry-pg-aq-orphan-failed",
+            0_i32,
+        ),
+        (
+            "dispatch-pg-aq-orphan-missing",
+            "card-pg-aq-orphan-missing",
+            "entry-pg-aq-orphan-missing",
+            1_i32,
+        ),
+        (
+            "dispatch-pg-aq-orphan-live",
+            "card-pg-aq-orphan-live",
+            "entry-pg-aq-orphan-live",
+            2_i32,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id,
+                kanban_card_id,
+                to_agent_id,
+                dispatch_type,
+                status,
+                title,
+                context,
+                required_capabilities,
+                created_at,
+                updated_at
+             ) VALUES (
+                $1,
+                $2,
+                'agent-1',
+                'implementation',
+                'pending',
+                'Auto queue pending delivery',
+                $3,
+                $4::jsonb,
+                NOW() - INTERVAL '10 minutes',
+                NOW() - INTERVAL '10 minutes'
+             )",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .bind(
+            json!({
+                "auto_queue": true,
+                "entry_id": entry_id,
+                "slot_index": slot_index
+            })
+            .to_string(),
+        )
+        .bind(json!(["shell"]))
+        .execute(&pool)
+        .await
+        .expect("seed pending auto queue dispatch");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id,
+                run_id,
+                kanban_card_id,
+                agent_id,
+                status,
+                dispatch_id,
+                slot_index,
+                dispatched_at,
+                created_at
+             ) VALUES (
+                $1,
+                'run-pg-aq-orphan',
+                $2,
+                'agent-1',
+                'dispatched',
+                $3,
+                $4,
+                NOW() - INTERVAL '10 minutes',
+                NOW() - INTERVAL '10 minutes'
+             )",
+        )
+        .bind(entry_id)
+        .bind(card_id)
+        .bind(dispatch_id)
+        .bind(slot_index)
+        .execute(&pool)
+        .await
+        .expect("seed dispatched auto queue entry");
+    }
+
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (
+            dispatch_id,
+            action,
+            agent_id,
+            card_id,
+            title,
+            status,
+            retry_count,
+            next_attempt_at,
+            processed_at,
+            error,
+            delivery_status,
+            delivery_result,
+            claimed_at,
+            claim_owner,
+            required_capabilities
+         ) VALUES (
+            'dispatch-pg-aq-orphan-failed',
+            'notify',
+            'agent-1',
+            'card-pg-aq-orphan-failed',
+            'Stale failed notify',
+            'failed',
+            4,
+            NOW() + INTERVAL '1 hour',
+            NOW() - INTERVAL '9 minutes',
+            'delivery failed',
+            'failed',
+            $1::jsonb,
+            NOW() - INTERVAL '9 minutes',
+            'old-worker',
+            $2::jsonb
+         ),
+         (
+            'dispatch-pg-aq-orphan-live',
+            'notify',
+            'agent-1',
+            'card-pg-aq-orphan-live',
+            'Live failed notify',
+            'failed',
+            7,
+            NOW() + INTERVAL '1 hour',
+            NOW() - INTERVAL '9 minutes',
+            'delivery failed',
+            'failed',
+            $1::jsonb,
+            NOW() - INTERVAL '9 minutes',
+            'old-worker',
+            $2::jsonb
+         )",
+    )
+    .bind(json!({"ok": false}))
+    .bind(json!(["shell"]))
+    .execute(&pool)
+    .await
+    .expect("seed failed notify outbox rows");
+
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key,
+            agent_id,
+            provider,
+            status,
+            active_dispatch_id,
+            last_heartbeat,
+            created_at
+         ) VALUES (
+            'session-pg-aq-orphan-live',
+            'agent-1',
+            'codex',
+            'turn_active',
+            'dispatch-pg-aq-orphan-live',
+            NOW(),
+            NOW() - INTERVAL '9 minutes'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed live session linked to dispatch");
+
+    let stats = crate::reconcile::reconcile_auto_queue_pending_delivery_orphans_pg(&pool)
+        .await
+        .expect("runtime orphan reconcile succeeds");
+    assert_eq!(stats.candidates, 2);
+    assert_eq!(stats.requeued_notify, 2);
+    assert_eq!(stats.skipped, 0);
+
+    let repaired_failed: (String, i64, bool, bool, bool, bool, bool, bool, bool, bool) =
+        sqlx::query_as(
+            "SELECT status,
+                    retry_count,
+                    next_attempt_at IS NULL,
+                    processed_at IS NULL,
+                    error IS NULL,
+                    delivery_status IS NULL,
+                    delivery_result IS NULL,
+                    claimed_at IS NULL,
+                    claim_owner IS NULL,
+                    required_capabilities = '[\"shell\"]'::jsonb
+               FROM dispatch_outbox
+              WHERE dispatch_id = 'dispatch-pg-aq-orphan-failed'
+                AND action = 'notify'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load repaired failed notify row");
+    assert_eq!(
+        repaired_failed,
+        (
+            "pending".to_string(),
+            0,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+        )
+    );
+
+    let inserted_missing: (String, i64, bool) = sqlx::query_as(
+        "SELECT status,
+                retry_count,
+                required_capabilities = '[\"shell\"]'::jsonb
+           FROM dispatch_outbox
+          WHERE dispatch_id = 'dispatch-pg-aq-orphan-missing'
+            AND action = 'notify'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load inserted missing notify row");
+    assert_eq!(inserted_missing, ("pending".to_string(), 0, true));
+
+    let untouched_live: (String, i64, Option<String>) = sqlx::query_as(
+        "SELECT status, retry_count, claim_owner
+           FROM dispatch_outbox
+          WHERE dispatch_id = 'dispatch-pg-aq-orphan-live'
+            AND action = 'notify'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load live notify row");
+    assert_eq!(
+        untouched_live,
+        ("failed".to_string(), 7, Some("old-worker".to_string()))
+    );
+
+    let runtime_states: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT td.id, td.status, e.status
+           FROM task_dispatches td
+           JOIN auto_queue_entries e ON e.dispatch_id = td.id
+          WHERE td.id LIKE 'dispatch-pg-aq-orphan-%'
+          ORDER BY td.id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("load runtime states");
+    assert_eq!(
+        runtime_states,
+        vec![
+            (
+                "dispatch-pg-aq-orphan-failed".to_string(),
+                "pending".to_string(),
+                "dispatched".to_string()
+            ),
+            (
+                "dispatch-pg-aq-orphan-live".to_string(),
+                "pending".to_string(),
+                "dispatched".to_string()
+            ),
+            (
+                "dispatch-pg-aq-orphan-missing".to_string(),
+                "pending".to_string(),
+                "dispatched".to_string()
+            ),
+        ]
+    );
+
+    crate::db::postgres::close_test_pool(pool, "pg-only high_risk_recovery")
+        .await
+        .expect("close pg-only high_risk_recovery pool");
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn boot_reconcile_pg_refires_missing_review_dispatch() {
     let pg_db = PgRecoveryTestDatabase::create().await;
     let pool = pg_db.migrate().await;
