@@ -3,6 +3,7 @@ import * as api from "../../api";
 import type { KanbanReview } from "../../api";
 import CardIssueContent from "./CardIssueContent";
 import CardTimeline from "./CardTimeline";
+import DispatchDeliveryEventsPanel from "./DispatchDeliveryEventsPanel";
 import TurnTranscriptPanel from "./TurnTranscriptPanel";
 import { localeName } from "../../i18n";
 import {
@@ -181,6 +182,15 @@ export default function KanbanCardDetail({
     if (!agent) return agentId;
     return localeName(locale, agent);
   };
+
+  const cardDispatches = dispatches
+    .filter((d) => d.kanban_card_id === selectedCard.id)
+    .sort((a, b) => {
+      const ta = typeof a.created_at === "number" ? a.created_at : new Date(a.created_at).getTime();
+      const tb = typeof b.created_at === "number" ? b.created_at : new Date(b.created_at).getTime();
+      return tb - ta;
+    });
+  const deliveryEventsDispatchId = selectedCard.latest_dispatch_id ?? cardDispatches[0]?.id ?? null;
 
   const handleSaveCard = async () => {
     setSavingCard(true);
@@ -691,15 +701,14 @@ export default function KanbanCardDetail({
           <SurfaceMetricPill label={tr("완료", "Completed")} value={formatIso(selectedCard.completed_at, locale)} />
         </div>
 
+        <DispatchDeliveryEventsPanel
+          dispatchId={deliveryEventsDispatchId}
+          locale={locale}
+          tr={tr}
+        />
+
         {/* Dispatch history — all dispatches for this card */}
         {(() => {
-          const cardDispatches = dispatches
-            .filter((d) => d.kanban_card_id === selectedCard.id)
-            .sort((a, b) => {
-              const ta = typeof a.created_at === "number" ? a.created_at : new Date(a.created_at).getTime();
-              const tb = typeof b.created_at === "number" ? b.created_at : new Date(b.created_at).getTime();
-              return tb - ta;
-            });
           const hasAny = cardDispatches.length > 0 || selectedCard.latest_dispatch_status;
           if (!hasAny) return null;
 
