@@ -210,8 +210,11 @@
 ### `runtime_core`
 
 - canonical_modules: `src/config.rs`, `src/runtime_layout/mod.rs`,
-  `src/server/mod.rs`, `src/kanban/state_machine.rs`, `src/receipt.rs`, and
-  `src/github/sync.rs`.
+  `src/server/mod.rs`, `src/kanban/state_machine.rs`, `src/receipt.rs`,
+  `src/github/sync.rs`, `src/reconcile.rs` (periodic stale-inflight + orphan
+  sweep), `src/high_risk_recovery.rs` (PG recovery harness for delivery
+  outbox/notify), and `src/server/task_dispatch_claims.rs` (cluster-aware
+  task-dispatch claim coordination).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/config.rs` (2601 lines).
@@ -222,6 +225,13 @@
     via #1786 epic decompose, awaiting further split).
   - `src/receipt.rs` (2133 lines).
   - `src/github/sync.rs` (1059 lines).
+  - `src/reconcile.rs` (1867 lines; periodic reconcile loop covering stale
+    inflights, orphan uploads, dispatched-session drift, and queue-review
+    drift — split before adding non-bugfix behavior).
+  - `src/high_risk_recovery.rs` (1161 lines; PG recovery harness for the
+    delivery outbox/notify path — bugfix only).
+  - `src/server/task_dispatch_claims.rs` (1038 lines; cluster-aware
+    task-dispatch claim TTL/limit + semaphore coordination).
 - active_callsite_coverage: n/a.
 - invariants: config precedence, runtime path generation, kanban state, receipt
   persistence, and GitHub sync must keep their existing owner-specific
