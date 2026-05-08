@@ -59,6 +59,13 @@ fn context_reset_slot_thread_before_reuse(dispatch_context: Option<&serde_json::
         .unwrap_or(false)
 }
 
+fn context_entry_id(dispatch_context: Option<&serde_json::Value>) -> Option<&str> {
+    dispatch_context
+        .and_then(|ctx| ctx.get("entry_id"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn dispatch_type_requires_independent_slot_thread(dispatch_type: Option<&str>) -> bool {
     matches!(
         dispatch_type,
@@ -927,6 +934,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     .await?;
     let reset_slot_thread_before_reuse =
         context_reset_slot_thread_before_reuse(dispatch_context_json.as_ref());
+    let exclude_entry_id = context_entry_id(dispatch_context_json.as_ref());
     if reset_slot_thread_before_reuse
         && let Some(binding) = slot_binding.clone()
         && binding.thread_id.is_some()
@@ -936,6 +944,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
             &binding.agent_id,
             binding.slot_index,
             Some(dispatch_id),
+            exclude_entry_id,
         )
         .await?;
         slot_binding = read_slot_thread_binding_pg(
@@ -954,6 +963,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
             discord_api_base,
             dispatch_id,
             &binding,
+            exclude_entry_id,
         )
         .await?
         {
