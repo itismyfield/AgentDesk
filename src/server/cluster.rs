@@ -172,6 +172,26 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
     if let Err(error) = upsert_worker_mcp_endpoints(&pool, &instance_id, &capabilities).await {
         tracing::warn!("[cluster] worker MCP endpoint registration failed: {error}");
     }
+    match crate::services::dispatches::wait_queue::wake_waiting_dispatch_outbox_pg(
+        &pool,
+        &config.cluster,
+        "node_join",
+    )
+    .await
+    {
+        Ok(summary) if !summary.is_empty() => tracing::info!(
+            trigger = summary.trigger,
+            reassigned = summary.reassigned,
+            timed_out = summary.timed_out,
+            still_waiting = summary.still_waiting,
+            "[cluster] dispatch outbox wait queue wake-up after node registration"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            error,
+            "[cluster] dispatch outbox wait queue wake-up after node registration failed"
+        ),
+    }
 
     let stale_reassignment_pool = pool.clone();
     let stale_reassignment_config = config.cluster.clone();

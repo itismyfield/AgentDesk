@@ -674,6 +674,8 @@ pub struct ClusterConfig {
     pub capabilities: serde_json::Map<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub nodes: BTreeMap<String, ClusterNodeConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub blackout_windows: BTreeMap<String, Vec<ClusterBlackoutWindowConfig>>,
     #[serde(
         default,
         skip_serializing_if = "ClusterDispatchRoutingConfig::is_default"
@@ -695,6 +697,7 @@ impl Default for ClusterConfig {
             labels: Vec::new(),
             capabilities: serde_json::Map::new(),
             nodes: BTreeMap::new(),
+            blackout_windows: BTreeMap::new(),
             dispatch_routing: ClusterDispatchRoutingConfig::default(),
             semaphores: BTreeMap::new(),
         }
@@ -714,6 +717,15 @@ pub struct ClusterNodeConfig {
     pub max_concurrent_dispatches: Option<u32>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ClusterBlackoutWindowConfig {
+    pub start: String,
+    pub end: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ClusterDispatchRoutingConfig {
@@ -726,6 +738,13 @@ pub struct ClusterDispatchRoutingConfig {
         skip_serializing_if = "is_default_dispatch_routing_constraints"
     )]
     pub constraints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_timeout_secs: Option<u64>,
+    #[serde(
+        default = "default_dispatch_routing_wake_interval_secs",
+        skip_serializing_if = "is_default_dispatch_routing_wake_interval_secs"
+    )]
+    pub wake_interval_secs: u64,
 }
 
 impl Default for ClusterDispatchRoutingConfig {
@@ -734,6 +753,8 @@ impl Default for ClusterDispatchRoutingConfig {
             default_preferred_labels: Vec::new(),
             opt_out_dispatch_types: Vec::new(),
             constraints: default_dispatch_routing_constraints(),
+            wait_timeout_secs: None,
+            wake_interval_secs: default_dispatch_routing_wake_interval_secs(),
         }
     }
 }
@@ -756,6 +777,14 @@ fn default_dispatch_routing_constraints() -> Vec<String> {
 
 fn is_default_dispatch_routing_constraints(values: &[String]) -> bool {
     values == default_dispatch_routing_constraints().as_slice()
+}
+
+fn default_dispatch_routing_wake_interval_secs() -> u64 {
+    30
+}
+
+fn is_default_dispatch_routing_wake_interval_secs(value: &u64) -> bool {
+    *value == default_dispatch_routing_wake_interval_secs()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -856,6 +885,13 @@ enabled: true
 nodes:
   mac-mini-release:
     max_concurrent_dispatches: 4
+blackout_windows:
+  mac-mini-release:
+    - start: "23:00"
+      end: "23:30"
+      reason: maintenance
+dispatch_routing:
+  wait_timeout_secs: 600
 "#,
         )
         .expect("cluster node config parses");
@@ -864,6 +900,13 @@ nodes:
             config.nodes["mac-mini-release"].max_concurrent_dispatches,
             Some(4)
         );
+        assert_eq!(
+            config.blackout_windows["mac-mini-release"][0]
+                .reason
+                .as_deref(),
+            Some("maintenance")
+        );
+        assert_eq!(config.dispatch_routing.wait_timeout_secs, Some(600));
     }
 }
 

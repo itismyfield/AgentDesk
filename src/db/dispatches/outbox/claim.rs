@@ -22,6 +22,7 @@ pub(crate) async fn select_pending_dispatch_outbox_claim_candidates_pg(
          LEFT JOIN task_dispatches td ON td.id = o.dispatch_id
          WHERE (
                 o.status = 'pending'
+                AND o.wait_reason IS NULL
                 AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= NOW())
                 AND (o.claim_owner IS NULL OR o.claim_owner = $2)
              )
@@ -66,7 +67,9 @@ pub(crate) async fn mark_dispatch_outbox_claimed_pg(
         "UPDATE dispatch_outbox
             SET status = 'processing',
                 claimed_at = NOW(),
-                claim_owner = $2
+                claim_owner = $2,
+                wait_reason = NULL,
+                wait_started_at = NULL
           WHERE id = $1",
     )
     .bind(outbox_id)

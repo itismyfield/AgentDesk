@@ -21,6 +21,7 @@ pub(crate) mod outbox_claiming;
 pub(crate) mod outbox_queue;
 pub(crate) mod outbox_route;
 pub(crate) mod routing_constraint;
+pub(crate) mod wait_queue;
 
 const VALID_DISPATCH_STATUSES: &[&str] =
     &["pending", "dispatched", "completed", "cancelled", "failed"];

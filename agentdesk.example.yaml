@@ -11,6 +11,14 @@ cluster:
       max_concurrent_dispatches: 4
     mac-book-release:
       max_concurrent_dispatches: 4
+  blackout_windows:
+    mac-mini-release:
+      - start: "23:00"
+        end: "23:30"
+        reason: "maintenance"
+  dispatch_routing:
+    wait_timeout_secs: 600
+    wake_interval_secs: 30
 
 discord:
   guild_id: "YOUR_GUILD_ID"

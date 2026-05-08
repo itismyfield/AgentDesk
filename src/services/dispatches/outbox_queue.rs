@@ -581,8 +581,13 @@ pub(crate) async fn process_outbox_batch_with_real_notifier(
 ///
 /// This is the SINGLE place where dispatch-related Discord HTTP calls originate.
 /// All other code paths insert into the outbox table and return immediately.
-pub(crate) async fn dispatch_outbox_loop(pg_pool: Arc<PgPool>, claim_owner: String) {
-    use std::time::Duration;
+pub(crate) async fn dispatch_outbox_loop(
+    pg_pool: Arc<PgPool>,
+    claim_owner: String,
+    cluster_runtime: crate::server::cluster::ClusterRuntime,
+    cluster_config: crate::config::ClusterConfig,
+) {
+    use std::time::{Duration, Instant};
 
     // Wait for server to be ready
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -594,9 +599,38 @@ pub(crate) async fn dispatch_outbox_loop(pg_pool: Arc<PgPool>, claim_owner: Stri
     let notifier = RealOutboxNotifier::new(pg_pool);
     let mut poll_interval = Duration::from_millis(500);
     let max_interval = Duration::from_secs(5);
+    let wake_interval =
+        Duration::from_secs(cluster_config.dispatch_routing.wake_interval_secs.max(1));
+    let mut last_wake = Instant::now() - wake_interval;
 
     loop {
         tokio::time::sleep(poll_interval).await;
+
+        if cluster_runtime.is_leader() && last_wake.elapsed() >= wake_interval {
+            match crate::services::dispatches::wait_queue::wake_waiting_dispatch_outbox_pg(
+                notifier.pg_pool.as_ref(),
+                &cluster_config,
+                "periodic",
+            )
+            .await
+            {
+                Ok(summary) if !summary.is_empty() => {
+                    tracing::info!(
+                        trigger = summary.trigger,
+                        reassigned = summary.reassigned,
+                        timed_out = summary.timed_out,
+                        still_waiting = summary.still_waiting,
+                        "[dispatch-outbox] wait queue wake-up"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    error,
+                    "[dispatch-outbox] wait queue periodic wake-up failed"
+                ),
+            }
+            last_wake = Instant::now();
+        }
 
         let processed = process_outbox_batch_with_pg(
             None,

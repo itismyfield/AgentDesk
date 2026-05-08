@@ -1,12 +1,16 @@
+use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-use crate::config::{ClusterConfig, ClusterDispatchRoutingConfig, ClusterNodeConfig};
+use crate::config::{
+    ClusterBlackoutWindowConfig, ClusterConfig, ClusterDispatchRoutingConfig, ClusterNodeConfig,
+};
 use crate::server::cluster::CapabilityRouteCandidate;
 
 pub(crate) const NOOP_CONSTRAINT_NAME: &str = "noop";
 pub(crate) const NODE_CONCURRENCY_CAP_CONSTRAINT_NAME: &str = "node_concurrency_cap";
+pub(crate) const BLACKOUT_WINDOW_CONSTRAINT_NAME: &str = "blackout_window";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -281,6 +285,104 @@ impl RoutingConstraint for NodeConcurrencyCapConstraint {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct BlackoutWindowConstraint {
+    windows_by_node: BTreeMap<String, Vec<ClusterBlackoutWindowConfig>>,
+    now_utc: Option<chrono::NaiveTime>,
+}
+
+impl BlackoutWindowConstraint {
+    fn from_config(config: &ClusterConfig) -> Self {
+        Self {
+            windows_by_node: config.blackout_windows.clone(),
+            now_utc: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_now(
+        windows_by_node: BTreeMap<String, Vec<ClusterBlackoutWindowConfig>>,
+        now_utc: chrono::NaiveTime,
+    ) -> Self {
+        Self {
+            windows_by_node,
+            now_utc: Some(now_utc),
+        }
+    }
+
+    fn windows_for_node(&self, node: &Value) -> Option<(String, &[ClusterBlackoutWindowConfig])> {
+        let instance_id = node.get("instance_id").and_then(Value::as_str);
+        if let Some(instance_id) = instance_id
+            && let Some(windows) = self.windows_by_node.get(instance_id)
+        {
+            return Some((instance_id.to_string(), windows.as_slice()));
+        }
+
+        let hostname = node.get("hostname").and_then(Value::as_str);
+        if let Some(hostname) = hostname
+            && let Some(windows) = self.windows_by_node.get(hostname)
+        {
+            return Some((hostname.to_string(), windows.as_slice()));
+        }
+
+        None
+    }
+
+    fn current_utc_time(&self) -> chrono::NaiveTime {
+        self.now_utc
+            .unwrap_or_else(|| chrono::Utc::now().time().with_nanosecond(0).unwrap())
+    }
+
+    fn parse_time(raw: &str) -> Option<chrono::NaiveTime> {
+        chrono::NaiveTime::parse_from_str(raw.trim(), "%H:%M")
+            .or_else(|_| chrono::NaiveTime::parse_from_str(raw.trim(), "%H:%M:%S"))
+            .ok()
+    }
+
+    fn contains_time(
+        start: chrono::NaiveTime,
+        end: chrono::NaiveTime,
+        now: chrono::NaiveTime,
+    ) -> bool {
+        if start <= end {
+            now >= start && now < end
+        } else {
+            now >= start || now < end
+        }
+    }
+}
+
+impl RoutingConstraint for BlackoutWindowConstraint {
+    fn name(&self) -> &'static str {
+        BLACKOUT_WINDOW_CONSTRAINT_NAME
+    }
+
+    fn check(&self, node: &Value, _dispatch: &RoutingDispatch) -> ConstraintOutcome {
+        let Some((node_key, windows)) = self.windows_for_node(node) else {
+            return ConstraintOutcome::Available;
+        };
+        let now = self.current_utc_time();
+        for window in windows {
+            let Some(start) = Self::parse_time(&window.start) else {
+                continue;
+            };
+            let Some(end) = Self::parse_time(&window.end) else {
+                continue;
+            };
+            if Self::contains_time(start, end, now) {
+                let reason = window
+                    .reason
+                    .as_deref()
+                    .unwrap_or("configured blackout window");
+                return ConstraintOutcome::wait(format!(
+                    "node {node_key} is in blackout window {start}-{end} UTC: {reason}"
+                ));
+            }
+        }
+        ConstraintOutcome::Available
+    }
+}
+
 fn noop_constraint() -> Box<dyn RoutingConstraint> {
     Box::new(NoOpConstraint)
 }
@@ -288,14 +390,17 @@ fn noop_constraint() -> Box<dyn RoutingConstraint> {
 pub(crate) fn constraints_from_config(
     config: &ClusterDispatchRoutingConfig,
 ) -> Vec<Box<dyn RoutingConstraint>> {
-    constraints_from_names(&config.constraints, None)
+    constraints_from_names(&config.constraints, None, None)
 }
 
 pub(crate) fn constraints_from_cluster_config(
     config: &ClusterConfig,
 ) -> Vec<Box<dyn RoutingConstraint>> {
-    let mut constraints =
-        constraints_from_names(&config.dispatch_routing.constraints, Some(&config.nodes));
+    let mut constraints = constraints_from_names(
+        &config.dispatch_routing.constraints,
+        Some(&config.nodes),
+        Some(config),
+    );
     if node_concurrency_caps_configured(&config.nodes)
         && !constraints
             .iter()
@@ -305,12 +410,20 @@ pub(crate) fn constraints_from_cluster_config(
             Some(&config.nodes),
         )));
     }
+    if !config.blackout_windows.is_empty()
+        && !constraints
+            .iter()
+            .any(|constraint| constraint.name() == BLACKOUT_WINDOW_CONSTRAINT_NAME)
+    {
+        constraints.push(Box::new(BlackoutWindowConstraint::from_config(config)));
+    }
     constraints
 }
 
 fn constraints_from_names(
     names: &[String],
     node_configs: Option<&BTreeMap<String, ClusterNodeConfig>>,
+    cluster_config: Option<&ClusterConfig>,
 ) -> Vec<Box<dyn RoutingConstraint>> {
     names
         .iter()
@@ -320,6 +433,16 @@ fn constraints_from_names(
                 NodeConcurrencyCapConstraint::from_node_configs(node_configs),
             )
                 as Box<dyn RoutingConstraint>),
+            BLACKOUT_WINDOW_CONSTRAINT_NAME => cluster_config
+                .map(BlackoutWindowConstraint::from_config)
+                .map(|constraint| Box::new(constraint) as Box<dyn RoutingConstraint>)
+                .or_else(|| {
+                    tracing::warn!(
+                        constraint = name.as_str(),
+                        "[dispatch-routing] blackout_window requires full cluster config"
+                    );
+                    None
+                }),
             _ => {
                 tracing::warn!(
                     constraint = name.as_str(),
@@ -415,6 +538,24 @@ mod tests {
                     ClusterNodeConfig {
                         max_concurrent_dispatches: Some(*cap),
                     },
+                )
+            })
+            .collect()
+    }
+
+    fn blackout_windows(
+        entries: &[(&str, &str, &str)],
+    ) -> BTreeMap<String, Vec<ClusterBlackoutWindowConfig>> {
+        entries
+            .iter()
+            .map(|(node, start, end)| {
+                (
+                    (*node).to_string(),
+                    vec![ClusterBlackoutWindowConfig {
+                        start: (*start).to_string(),
+                        end: (*end).to_string(),
+                        reason: Some("maintenance".to_string()),
+                    }],
                 )
             })
             .collect()
@@ -569,5 +710,32 @@ mod tests {
             decision.candidates[0].constraints[0].outcome,
             ConstraintOutcome::Available
         );
+    }
+
+    #[test]
+    fn blackout_window_waits_during_configured_utc_window() {
+        let nodes = vec![
+            node_with_active("mac-mini-release", "mac-mini", 0),
+            node_with_active("mac-book-release", "mac-book", 0),
+        ];
+        let blackout = BlackoutWindowConstraint::with_now(
+            blackout_windows(&[("mac-mini-release", "23:00", "01:00")]),
+            chrono::NaiveTime::from_hms_opt(23, 30, 0).unwrap(),
+        );
+        let engine = RoutingEngine::new(vec![Box::new(blackout)]);
+        let decision = engine.route(
+            &nodes,
+            &json!({"preferred": {"labels": ["mac-mini", "mac-book"]}}),
+            &dispatch(),
+        );
+
+        assert_eq!(decision.selected_instance_id(), Some("mac-book-release"));
+        assert!(matches!(
+            decision
+                .candidate_for_instance("mac-mini-release")
+                .expect("mac-mini candidate")
+                .final_outcome,
+            ConstraintOutcome::Wait { .. }
+        ));
     }
 }

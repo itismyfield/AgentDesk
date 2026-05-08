@@ -495,10 +495,14 @@ impl SupervisedWorkerRegistry {
                     return Ok(None);
                 };
                 let claim_owner = self.cluster_runtime.instance_id().to_string();
+                let cluster_runtime = self.cluster_runtime.clone();
+                let cluster_config = self.config.cluster.clone();
                 self.register_tokio(spec, async move {
                     super::routes::dispatches::dispatch_outbox_loop(
                         dispatch_outbox_pg_pool,
                         claim_owner,
+                        cluster_runtime,
+                        cluster_config,
                     )
                     .await;
                 });

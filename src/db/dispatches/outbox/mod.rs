@@ -31,6 +31,7 @@ pub(crate) use delivery::{
 };
 pub(crate) use diagnostics::{
     record_routing_diagnostics_pg, record_task_dispatch_routing_diagnostics_pg,
+    wait_reason_from_routing_diagnostics,
 };
 pub(crate) use followup::{
     clear_all_dispatch_threads_pg, load_card_status_pg, load_completed_dispatch_info_pg,

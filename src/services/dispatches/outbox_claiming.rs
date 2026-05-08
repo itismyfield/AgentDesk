@@ -149,7 +149,7 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
                 .await;
                 continue;
             }
-        } else if node_concurrency_caps_configured(cluster_config) {
+        } else if routing_constraints_configured_for_unqualified_dispatch(cluster_config) {
             let required = json!({});
             let owner_decision =
                 capability_decision_for_claim_owner(owner_node.as_ref(), claim_owner, &required);
@@ -383,6 +383,20 @@ fn has_preferred_capabilities(required: &Value) -> bool {
         .get("preferred")
         .and_then(|value| value.as_object())
         .is_some_and(|map| !map.is_empty())
+}
+
+fn routing_constraints_configured_for_unqualified_dispatch(
+    cluster_config: &crate::config::ClusterConfig,
+) -> bool {
+    node_concurrency_caps_configured(cluster_config)
+        || !cluster_config.blackout_windows.is_empty()
+        || cluster_config
+            .dispatch_routing
+            .constraints
+            .iter()
+            .any(|name| {
+                name != crate::services::dispatches::routing_constraint::NOOP_CONSTRAINT_NAME
+            })
 }
 
 fn increment_active_dispatch_count(worker_nodes: &mut [Value], instance_id: &str) {
@@ -684,6 +698,27 @@ mod tests {
     fn cluster_default_required_capabilities_returns_none_when_no_labels() {
         let routing = crate::config::ClusterDispatchRoutingConfig::default();
         assert!(routing.default_preferred_labels.is_empty());
+    }
+
+    #[test]
+    fn blackout_windows_enable_constraint_routing_for_unqualified_dispatches() {
+        let mut config = crate::config::ClusterConfig::default();
+        assert!(!routing_constraints_configured_for_unqualified_dispatch(
+            &config
+        ));
+
+        config.blackout_windows.insert(
+            "worker-a".to_string(),
+            vec![crate::config::ClusterBlackoutWindowConfig {
+                start: "23:00".to_string(),
+                end: "23:30".to_string(),
+                reason: Some("maintenance".to_string()),
+            }],
+        );
+
+        assert!(routing_constraints_configured_for_unqualified_dispatch(
+            &config
+        ));
     }
 
     #[test]
