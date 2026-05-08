@@ -20,6 +20,7 @@ import {
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
 import { buildDiscordThreadLinks } from "./discord-routing";
+import { buildGitHubIssueUrl } from "./kanban-utils";
 
 interface Props {
   tr: (ko: string, en: string) => string;
@@ -234,6 +235,7 @@ function EntryRow({
   const isFailed = entry.status === "failed";
   const retryCount = entry.retry_count ?? 0;
   const showReviewRound = (entry.card_status === "review" || entry.card_status === "rework") && (entry.review_round ?? 0) > 0;
+  const githubIssueUrl = buildGitHubIssueUrl(entry.github_repo, entry.github_issue_number);
   const threadLinks = (entry.thread_links ?? []).filter(
     (link) => Boolean(link.url || link.thread_id),
   );
@@ -312,9 +314,9 @@ function EntryRow({
               </span>
             )}
             {entry.github_issue_number && (
-              entry.github_repo ? (
+              githubIssueUrl ? (
                 <a
-                  href={`https://github.com/${entry.github_repo}/issues/${entry.github_issue_number}`}
+                  href={githubIssueUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="mr-1 font-medium hover:underline"

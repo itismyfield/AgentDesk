@@ -26,6 +26,7 @@ import {
   PRIORITY_OPTIONS,
   STATUS_TRANSITIONS,
   TRANSITION_STYLE,
+  buildGitHubIssueUrl,
   formatIso,
   labelForStatus,
   parseCardMetadata,
@@ -174,6 +175,11 @@ export default function KanbanCardDetail({
     background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
     color: "var(--th-text-primary)",
   } as const;
+  const githubIssueUrl = buildGitHubIssueUrl(
+    selectedCard.github_repo,
+    selectedCard.github_issue_number,
+    selectedCard.github_issue_url,
+  );
 
   const getAgentLabel = (agentId: string | null | undefined) => {
     if (!agentId) return tr("미할당", "Unassigned");
@@ -401,8 +407,8 @@ export default function KanbanCardDetail({
           <SurfaceCard className="p-3" style={{ background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)" }}>
             <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("GitHub", "GitHub")}</div>
             <div style={{ color: "var(--th-text-primary)" }}>
-              {selectedCard.github_issue_url ? (
-                <a href={selectedCard.github_issue_url} target="_blank" rel="noreferrer" className="hover:underline" style={{ color: "#93c5fd" }}>
+              {githubIssueUrl ? (
+                <a href={githubIssueUrl} target="_blank" rel="noreferrer" className="hover:underline" style={{ color: "#93c5fd" }}>
                   #{selectedCard.github_issue_number ?? "-"}
                 </a>
               ) : (

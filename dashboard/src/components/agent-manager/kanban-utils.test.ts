@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { GitHubComment } from "../../api";
 import type { KanbanCard } from "../../types";
 import {
+  buildGitHubIssueUrl,
   coalesceGitHubCommentTimeline,
   getCardDwellBadge,
   getCardStateEnteredAt,
+  normalizeGitHubIssueUrl,
+  normalizeGitHubRepo,
   parseGitHubCommentTimeline,
 } from "./kanban-utils";
 
@@ -57,6 +60,28 @@ function makeCard(overrides: Partial<KanbanCard> = {}): KanbanCard {
     ...overrides,
   };
 }
+
+describe("GitHub link helpers", () => {
+  it("normalizes repo ids from issue URLs", () => {
+    expect(normalizeGitHubRepo("itismyfield/AgentDesk")).toBe("itismyfield/AgentDesk");
+    expect(normalizeGitHubRepo("https://github.com/itismyfield/AgentDesk/issues/1929")).toBe("itismyfield/AgentDesk");
+  });
+
+  it("repairs duplicated github prefixes in issue URLs", () => {
+    expect(
+      normalizeGitHubIssueUrl(
+        "https://github.com/https://github.com/itismyfield/AgentDesk/issues/1830/issues/1830",
+      ),
+    ).toBe("https://github.com/itismyfield/AgentDesk/issues/1830");
+  });
+
+  it("builds canonical issue links and rejects invalid repos", () => {
+    expect(buildGitHubIssueUrl("https://github.com/itismyfield/AgentDesk", 1929)).toBe(
+      "https://github.com/itismyfield/AgentDesk/issues/1929",
+    );
+    expect(buildGitHubIssueUrl("repo-without-owner", 1929)).toBeNull();
+  });
+});
 
 describe("parseGitHubCommentTimeline", () => {
   it("리뷰 진행 마커 코멘트를 review 이벤트로 파싱한다", () => {

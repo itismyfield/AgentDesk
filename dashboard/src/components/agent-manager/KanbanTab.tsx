@@ -40,6 +40,7 @@ import {
   STATUS_TRANSITIONS,
   TERMINAL_STATUSES,
   TRANSITION_STYLE,
+  buildGitHubIssueUrl,
   coerceEditor,
   createChecklistItem,
   formatIso,
@@ -716,6 +717,13 @@ export default function KanbanTab({
   const selectedCardChecklistSummary = selectedCard ? getChecklistSummary(selectedCard) : null;
   const selectedCardDelayBadge = selectedCard ? getCardDelayBadge(selectedCard, tr) : null;
   const selectedCardDwellBadge = selectedCard ? getCardDwellBadge(selectedCard, nowMs, tr) : null;
+  const selectedCardGitHubIssueUrl = selectedCard
+    ? buildGitHubIssueUrl(
+        selectedCard.github_repo,
+        selectedCard.github_issue_number,
+        selectedCard.github_issue_url,
+      )
+    : null;
   const selectedParentCard = selectedCard?.parent_card_id
     ? repoCardsById.get(selectedCard.parent_card_id) ?? null
     : null;
@@ -2370,8 +2378,8 @@ export default function KanbanTab({
                         <SurfaceCard className="space-y-1.5 p-3 md:col-span-2" style={{ ...SURFACE_PANEL_STYLE }}>
                           <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("GitHub", "GitHub")}</div>
                           <div style={{ color: "var(--th-text-primary)" }}>
-                            {selectedCard.github_issue_url ? (
-                              <a href={selectedCard.github_issue_url} target="_blank" rel="noreferrer" className="hover:underline" style={{ color: "#93c5fd" }}>
+                            {selectedCardGitHubIssueUrl ? (
+                              <a href={selectedCardGitHubIssueUrl} target="_blank" rel="noreferrer" className="hover:underline" style={{ color: "#93c5fd" }}>
                                 #{selectedCard.github_issue_number ?? "-"}
                               </a>
                             ) : (

@@ -8,6 +8,7 @@ import { getProviderMeta } from "../../app/providerTheme";
 import {
   STATUS_TRANSITIONS,
   TRANSITION_STYLE,
+  buildGitHubIssueUrl,
   isReviewCard,
   labelForStatus,
 } from "./kanban-utils";
@@ -266,6 +267,11 @@ function KanbanCardArticle({
 }: KanbanCardArticleProps) {
   const provider = getAgentProvider(card.assignee_agent_id);
   const providerMeta = provider ? getProviderMeta(provider) : null;
+  const githubIssueUrl = buildGitHubIssueUrl(
+    card.github_repo,
+    card.github_issue_number,
+    card.github_issue_url,
+  );
 
   return (
     <article
@@ -308,9 +314,9 @@ function KanbanCardArticle({
             {card.title}
           </h4>
         </div>
-        {card.github_issue_url && (
+        {githubIssueUrl && (
           <a
-            href={card.github_issue_url}
+            href={githubIssueUrl}
             target="_blank"
             rel="noreferrer"
             className="text-xs hover:underline"

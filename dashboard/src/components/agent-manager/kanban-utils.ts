@@ -134,6 +134,65 @@ export function getBoardColumnStatus(status: KanbanCardStatus): KanbanBoardColum
   return status;
 }
 
+function githubPathSegments(value: string | null | undefined): string[] | null {
+  const trimmed = (value ?? "").trim().replace(/\.git$/, "").replace(/^\/+|\/+$/g, "");
+  if (!trimmed) return null;
+
+  let path = trimmed;
+  if (trimmed.startsWith("git@github.com:")) {
+    path = trimmed.slice("git@github.com:".length);
+  } else if (trimmed.startsWith("ssh://git@github.com/")) {
+    path = trimmed.slice("ssh://git@github.com/".length);
+  } else if (trimmed.startsWith("https://github.com/") || trimmed.startsWith("http://github.com/")) {
+    const index = trimmed.lastIndexOf("github.com/");
+    path = trimmed.slice(index + "github.com/".length);
+  }
+
+  const segments = path
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  return segments.length > 0 ? segments : null;
+}
+
+function isValidGitHubSegment(segment: string): boolean {
+  return Boolean(segment) && !segment.includes(":") && !/\s/.test(segment) && segment !== "." && segment !== "..";
+}
+
+export function normalizeGitHubRepo(value: string | null | undefined): string | null {
+  const segments = githubPathSegments(value);
+  const owner = segments?.[0];
+  const repo = segments?.[1]?.replace(/\.git$/, "");
+  if (!owner || !repo || !isValidGitHubSegment(owner) || !isValidGitHubSegment(repo)) {
+    return null;
+  }
+  return `${owner}/${repo}`;
+}
+
+export function normalizeGitHubIssueUrl(value: string | null | undefined): string | null {
+  const repo = normalizeGitHubRepo(value);
+  const segments = githubPathSegments(value);
+  if (!repo || !segments) return null;
+  const issueIndex = segments.findIndex((segment) => segment === "issues");
+  const issueNumber = issueIndex >= 0 ? Number(segments[issueIndex + 1]) : NaN;
+  if (!Number.isInteger(issueNumber) || issueNumber <= 0) return null;
+  return `https://github.com/${repo}/issues/${issueNumber}`;
+}
+
+export function buildGitHubIssueUrl(
+  repo: string | null | undefined,
+  issueNumber: number | null | undefined,
+  issueUrl?: string | null,
+): string | null {
+  const normalizedIssueUrl = normalizeGitHubIssueUrl(issueUrl);
+  if (normalizedIssueUrl) return normalizedIssueUrl;
+  if (!Number.isInteger(issueNumber) || !issueNumber || issueNumber <= 0) return null;
+  const normalizedRepo = normalizeGitHubRepo(repo);
+  if (!normalizedRepo) return null;
+  return `https://github.com/${normalizedRepo}/issues/${issueNumber}`;
+}
+
 export function isBenignBlockedReason(reason: string | null | undefined): boolean {
   if (!reason) return false;
   return BENIGN_BLOCKED_REASON_PREFIXES.some((prefix) => reason.startsWith(prefix));

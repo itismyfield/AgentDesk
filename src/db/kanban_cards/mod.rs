@@ -274,8 +274,11 @@ pub(crate) fn kanban_card_row_to_record_pg(
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub fn card_row_to_json(row: &sqlite_test::Row) -> sqlite_test::Result<serde_json::Value> {
+    use crate::utils::github_links::{
+        normalize_optional_github_issue_url, normalize_optional_github_repo_id,
+    };
     use serde_json::json;
-    let repo_id = row.get::<_, Option<String>>(1)?;
+    let repo_id = normalize_optional_github_repo_id(row.get::<_, Option<String>>(1)?);
     let assigned_agent_id = row.get::<_, Option<String>>(5)?;
     let metadata_raw = row.get::<_, Option<String>>(10).unwrap_or(None);
     let metadata_parsed = metadata_raw
@@ -307,6 +310,13 @@ pub fn card_row_to_json(row: &sqlite_test::Row) -> sqlite_test::Result<serde_jso
     let depth = row.get::<_, i64>(31).unwrap_or(0);
     let review_entered_at = row.get::<_, Option<String>>(32).unwrap_or(None);
 
+    let github_issue_number = row.get::<_, Option<i64>>(7)?;
+    let github_issue_url = normalize_optional_github_issue_url(
+        row.get::<_, Option<String>>(6)?,
+        repo_id.as_deref(),
+        github_issue_number,
+    );
+
     Ok(json!({
         "id": row.get::<_, String>(0)?,
         "repo_id": repo_id,
@@ -314,8 +324,8 @@ pub fn card_row_to_json(row: &sqlite_test::Row) -> sqlite_test::Result<serde_jso
         "status": row.get::<_, String>(3)?,
         "priority": row.get::<_, String>(4)?,
         "assigned_agent_id": assigned_agent_id,
-        "github_issue_url": row.get::<_, Option<String>>(6)?,
-        "github_issue_number": row.get::<_, Option<i64>>(7)?,
+        "github_issue_url": github_issue_url,
+        "github_issue_number": github_issue_number,
         "latest_dispatch_id": row.get::<_, Option<String>>(8)?,
         "review_round": row.get::<_, i64>(9).unwrap_or(0),
         "metadata": metadata_parsed,

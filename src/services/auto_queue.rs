@@ -14,6 +14,7 @@ use crate::db::auto_queue::{
 };
 use crate::engine::PolicyEngine;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+use crate::utils::github_links::normalize_optional_github_repo_id;
 
 #[derive(Debug, Clone, Default)]
 pub struct AutoQueueLogContext<'a> {
@@ -806,6 +807,7 @@ impl AutoQueueStatusEntryView {
         dispatch_history: Vec<String>,
         thread_links: Vec<ThreadLinkView>,
     ) -> Self {
+        let github_repo = normalize_optional_github_repo_id(record.github_repo);
         Self {
             id: record.id,
             agent_id: record.agent_id,
@@ -824,7 +826,7 @@ impl AutoQueueStatusEntryView {
             completed_at: record.completed_at,
             card_title: record.card_title,
             github_issue_number: record.github_issue_number,
-            github_repo: record.github_repo,
+            github_repo,
             retry_count: record.retry_count,
             thread_group: record.thread_group,
             slot_index: record.slot_index,
@@ -1637,6 +1639,46 @@ mod tests {
             card_status: None,
             review_round: 0,
         }
+    }
+
+    #[test]
+    fn auto_queue_status_entry_normalizes_github_repo_url() {
+        let view = AutoQueueStatusEntryView::from_record(
+            StatusEntryRecord {
+                id: "entry-gh".to_string(),
+                agent_id: "agent-slot".to_string(),
+                card_id: "card-gh".to_string(),
+                dispatch_id: None,
+                dispatch_type: None,
+                dispatch_status: None,
+                dispatch_created_at: None,
+                dispatch_updated_at: None,
+                live_session_count: 0,
+                priority_rank: 0,
+                reason: None,
+                status: "pending".to_string(),
+                retry_count: 0,
+                created_at: 1_000,
+                dispatched_at: None,
+                completed_at: None,
+                card_title: None,
+                github_issue_number: Some(1830),
+                github_repo: Some(
+                    "https://github.com/itismyfield/AgentDesk/issues/1830".to_string(),
+                ),
+                thread_group: 0,
+                slot_index: None,
+                batch_phase: 0,
+                channel_thread_map: None,
+                active_thread_id: None,
+                card_status: None,
+                review_round: 0,
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(view.github_repo.as_deref(), Some("itismyfield/AgentDesk"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ import AgentAvatar from "../AgentAvatar";
 import {
   formatAgeLabel,
   formatIso,
+  buildGitHubIssueUrl,
   getCardStateEnteredAt,
   labelForStatus,
   parseCardMetadata,
@@ -176,6 +177,11 @@ function BacklogCardDrawer({
   const providerMeta = getProviderMeta(resolveCardAgent(card, agentMap)?.cli_provider);
   const metadata = parseCardMetadata(card.metadata_json);
   const ageLabel = formatAgeLabel(cardAgeMs(card), tr);
+  const githubIssueUrl = buildGitHubIssueUrl(
+    card.github_repo,
+    card.github_issue_number,
+    card.github_issue_url,
+  );
 
   const infoItems = [
     {
@@ -407,9 +413,9 @@ function BacklogCardDrawer({
                 ))}
               </div>
 
-              {card.github_issue_url ? (
+              {githubIssueUrl ? (
                 <a
-                  href={card.github_issue_url}
+                  href={githubIssueUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center rounded-full px-3 py-2 text-sm font-medium hover:underline"

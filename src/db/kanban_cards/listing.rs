@@ -2,6 +2,9 @@ use serde_json::json;
 use sqlx::{PgPool, QueryBuilder, Row as SqlxRow};
 
 use super::{CARD_SELECT_SQL_PG, KanbanCardRecord, ListCardsFilter, kanban_card_row_to_record_pg};
+use crate::utils::github_links::{
+    normalize_optional_github_issue_url, normalize_optional_github_repo_id,
+};
 
 pub async fn list_registered_repo_ids_pg(pool: &PgPool) -> Result<Vec<String>, String> {
     sqlx::query_scalar::<_, String>("SELECT id FROM github_repos")
@@ -239,9 +242,10 @@ pub async fn load_card_json_pg(
         return Ok(None);
     };
 
-    let repo_id: Option<String> = row
+    let repo_id_raw: Option<String> = row
         .try_get("repo_id")
         .map_err(|error| format!("decode repo_id for {card_id}: {error}"))?;
+    let repo_id = normalize_optional_github_repo_id(repo_id_raw);
     let assigned_agent_id: Option<String> = row
         .try_get("assigned_agent_id")
         .map_err(|error| format!("decode assigned_agent_id for {card_id}: {error}"))?;
@@ -269,6 +273,15 @@ pub async fn load_card_json_pg(
         latest_dispatch_result_raw.as_deref(),
         latest_dispatch_context_raw.as_deref(),
     );
+    let github_issue_number: Option<i64> = row
+        .try_get("github_issue_number")
+        .map_err(|error| format!("decode github_issue_number for {card_id}: {error}"))?;
+    let github_issue_url = normalize_optional_github_issue_url(
+        row.try_get::<Option<String>, _>("github_issue_url")
+            .map_err(|error| format!("decode github_issue_url for {card_id}: {error}"))?,
+        repo_id.as_deref(),
+        github_issue_number,
+    );
 
     Ok(Some(json!({
         "id": row.try_get::<String, _>("id").map_err(|error| format!("decode id for {card_id}: {error}"))?,
@@ -277,8 +290,8 @@ pub async fn load_card_json_pg(
         "status": row.try_get::<String, _>("status").map_err(|error| format!("decode status for {card_id}: {error}"))?,
         "priority": row.try_get::<String, _>("priority").map_err(|error| format!("decode priority for {card_id}: {error}"))?,
         "assigned_agent_id": assigned_agent_id,
-        "github_issue_url": row.try_get::<Option<String>, _>("github_issue_url").map_err(|error| format!("decode github_issue_url for {card_id}: {error}"))?,
-        "github_issue_number": row.try_get::<Option<i64>, _>("github_issue_number").map_err(|error| format!("decode github_issue_number for {card_id}: {error}"))?,
+        "github_issue_url": github_issue_url,
+        "github_issue_number": github_issue_number,
         "latest_dispatch_id": row.try_get::<Option<String>, _>("latest_dispatch_id").map_err(|error| format!("decode latest_dispatch_id for {card_id}: {error}"))?,
         "review_round": row.try_get::<i64, _>("review_round").map_err(|error| format!("decode review_round for {card_id}: {error}"))?,
         "metadata": metadata_parsed,

@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::db::kanban_cards::KanbanCardRecord;
+use crate::utils::github_links::{
+    normalize_optional_github_issue_url, normalize_optional_github_repo_id,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct ListCardsQuery {
@@ -177,19 +180,25 @@ impl From<KanbanCardRecord> for KanbanCardView {
             .as_ref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
             .unwrap_or(Value::Null);
+        let repo_id = normalize_optional_github_repo_id(record.repo_id);
+        let github_issue_url = normalize_optional_github_issue_url(
+            record.github_issue_url,
+            repo_id.as_deref(),
+            record.github_issue_number,
+        );
 
         Self {
             id: record.id,
-            github_repo: record.repo_id.clone(),
+            github_repo: repo_id.clone(),
             assignee_agent_id: record.assigned_agent_id.clone(),
             metadata_json: record.metadata_raw.clone(),
             metadata,
-            repo_id: record.repo_id,
+            repo_id,
             title: record.title,
             status: record.status,
             priority: record.priority,
             assigned_agent_id: record.assigned_agent_id,
-            github_issue_url: record.github_issue_url,
+            github_issue_url,
             github_issue_number: record.github_issue_number,
             latest_dispatch_id: record.latest_dispatch_id,
             review_round: record.review_round,

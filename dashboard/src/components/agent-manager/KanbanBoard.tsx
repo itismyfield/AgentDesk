@@ -17,6 +17,7 @@ import {
 import {
   QA_STATUSES,
   TERMINAL_STATUSES,
+  buildGitHubIssueUrl,
 } from "./kanban-utils";
 
 // ---------------------------------------------------------------------------
@@ -233,6 +234,11 @@ export default function KanbanBoard({
               <div className="mt-2 space-y-1.5">
                 {pageCards.map((card) => {
                   const cardNumber = card.github_issue_number ? `#${card.github_issue_number}` : `#${card.id.slice(0, 6)}`;
+                  const githubIssueUrl = buildGitHubIssueUrl(
+                    card.github_repo,
+                    card.github_issue_number,
+                    card.github_issue_url,
+                  );
                   return (
                     <button
                       key={card.id}
@@ -245,9 +251,9 @@ export default function KanbanBoard({
                         {cardNumber}
                       </span>
                       <span className="min-w-0 flex-1 truncate" style={{ color: "var(--th-text-primary)" }}>{card.title}</span>
-                      {card.github_issue_url && (
+                      {githubIssueUrl && (
                         <a
-                          href={card.github_issue_url}
+                          href={githubIssueUrl}
                           target="_blank"
                           rel="noreferrer"
                           className="shrink-0 text-xs hover:underline"

@@ -4,22 +4,29 @@ use super::{
     CardPipelineContext, GithubIssueRef, IssueCardUpsert, IssueCardUpsertResult, UpdateCardFields,
     normalize_optional_description, normalize_optional_text,
 };
+use crate::utils::github_links::{
+    normalize_optional_github_issue_url, normalize_optional_github_repo_id,
+};
 
 pub async fn upsert_card_from_issue_pg(
     pool: &PgPool,
     params: IssueCardUpsert,
 ) -> Result<IssueCardUpsertResult, String> {
-    let repo_id = params.repo_id.trim().to_string();
-    if repo_id.is_empty() {
+    let repo_id = normalize_optional_github_repo_id(Some(params.repo_id));
+    let Some(repo_id) = repo_id else {
         return Err("upsert issue card: repo_id is required".to_string());
-    }
+    };
 
     let title = params.title.trim().to_string();
     if title.is_empty() {
         return Err("upsert issue card: title is required".to_string());
     }
 
-    let issue_url = normalize_optional_text(params.issue_url);
+    let issue_url = normalize_optional_github_issue_url(
+        params.issue_url,
+        Some(&repo_id),
+        Some(params.issue_number),
+    );
     let description = normalize_optional_description(params.description);
     let priority = normalize_optional_text(params.priority);
     let assigned_agent_id = normalize_optional_text(params.assigned_agent_id);
@@ -131,6 +138,12 @@ pub async fn insert_card_pg(
     priority: &str,
     github_issue_url: Option<&str>,
 ) -> Result<(), String> {
+    let repo_id = normalize_optional_github_repo_id(repo_id.map(str::to_string));
+    let github_issue_url = normalize_optional_github_issue_url(
+        github_issue_url.map(str::to_string),
+        repo_id.as_deref(),
+        None,
+    );
     sqlx::query(
         "INSERT INTO kanban_cards (
             id,
@@ -144,11 +157,11 @@ pub async fn insert_card_pg(
          ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
     )
     .bind(id)
-    .bind(repo_id)
+    .bind(repo_id.as_deref())
     .bind(title)
     .bind(status)
     .bind(priority)
-    .bind(github_issue_url)
+    .bind(github_issue_url.as_deref())
     .execute(pool)
     .await
     .map_err(|error| format!("{error}"))?;
@@ -168,6 +181,12 @@ pub async fn update_card_fields_pg(
     card_id: &str,
     fields: &UpdateCardFields,
 ) -> Result<bool, String> {
+    let repo_id = normalize_optional_github_repo_id(fields.repo_id.clone());
+    let github_issue_url = normalize_optional_github_issue_url(
+        fields.github_issue_url.clone(),
+        repo_id.as_deref().or(fields.repo_id.as_deref()),
+        None,
+    );
     let result = sqlx::query(
         "UPDATE kanban_cards
          SET title = COALESCE($1, title),
@@ -185,8 +204,8 @@ pub async fn update_card_fields_pg(
     .bind(fields.title.as_deref())
     .bind(fields.priority.as_deref())
     .bind(fields.assigned_agent_id.as_deref())
-    .bind(fields.repo_id.as_deref())
-    .bind(fields.github_issue_url.as_deref())
+    .bind(repo_id.as_deref())
+    .bind(github_issue_url.as_deref())
     .bind(fields.description.as_deref())
     .bind(fields.metadata_json.as_deref())
     .bind(fields.review_status.as_deref())

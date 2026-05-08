@@ -2,6 +2,8 @@
 
 use sqlx::Row as SqlxRow;
 
+use crate::utils::github_links::{normalize_github_issue_url, normalize_github_repo_id};
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::db::Db;
 
@@ -22,16 +24,16 @@ pub(super) async fn github_sync_target_for_card_pg(
     .await
     .ok()??;
 
-    let repo_id: String = row.try_get("repo_id").ok()?;
+    let repo_id_raw: String = row.try_get("repo_id").ok()?;
+    let repo_id = normalize_github_repo_id(&repo_id_raw).unwrap_or(repo_id_raw);
     let issue_url: String = row.try_get("github_issue_url").ok()?;
     let issue_number: Option<i64> = row.try_get("github_issue_number").ok()?;
     if repo_id.is_empty() || issue_url.is_empty() {
         return None;
     }
 
-    let issue_repo = issue_url
-        .strip_prefix("https://github.com/")
-        .and_then(|value| value.find("/issues/").map(|index| &value[..index]))?;
+    let issue_url = normalize_github_issue_url(&issue_url)?;
+    let issue_repo = normalize_github_repo_id(&issue_url)?;
     if issue_repo != repo_id {
         tracing::warn!(
             "[kanban] skip GitHub sync for card {card_id}: issue URL repo {issue_repo} does not match card repo_id {repo_id}"
@@ -76,15 +78,17 @@ pub(super) fn github_sync_target_for_card(db: &Db, card_id: &str) -> Option<(Str
     let Some((repo_id, issue_url, issue_number)) = info else {
         return None;
     };
+    let repo_id = normalize_github_repo_id(&repo_id).unwrap_or(repo_id);
     if repo_id.is_empty() || issue_url.is_empty() {
         return None;
     }
 
-    let issue_repo = match issue_url
-        .strip_prefix("https://github.com/")
-        .and_then(|s| s.find("/issues/").map(|i| &s[..i]))
-    {
-        Some(r) => r,
+    let issue_url = match normalize_github_issue_url(&issue_url) {
+        Some(url) => url,
+        None => return None,
+    };
+    let issue_repo = match normalize_github_repo_id(&issue_url) {
+        Some(repo) => repo,
         None => return None,
     };
     if issue_repo != repo_id {
