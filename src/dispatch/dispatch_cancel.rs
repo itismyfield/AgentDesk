@@ -173,21 +173,12 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
         .await
         .map_err(|error| format!("commit postgres dispatch cancel {dispatch_id}: {error}"))?;
     if changed > 0 {
-        let cluster_config = crate::config::load_graceful().cluster;
-        if let Err(error) =
-            crate::services::dispatches::wait_queue::wake_waiting_dispatch_outbox_pg(
-                pool,
-                &cluster_config,
-                "constraint_release",
-            )
-            .await
-        {
-            tracing::warn!(
-                dispatch_id,
-                error,
-                "[dispatch] dispatch outbox wait queue wake-up after cancel failed"
-            );
-        }
+        crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
+            pool.clone(),
+            "constraint_release",
+            dispatch_id.to_string(),
+            "cancel_dispatch",
+        );
     }
 
     Ok(changed)

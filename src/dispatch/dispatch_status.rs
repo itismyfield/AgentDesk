@@ -729,21 +729,12 @@ async fn set_dispatch_status_on_pg_with_sync(
         .await
         .map_err(|error| anyhow::anyhow!("commit postgres dispatch status tx: {error}"))?;
     if changed > 0 && matches!(to_status, "completed" | "failed" | "cancelled") {
-        let cluster_config = crate::config::load_graceful().cluster;
-        if let Err(error) =
-            crate::services::dispatches::wait_queue::wake_waiting_dispatch_outbox_pg(
-                pool,
-                &cluster_config,
-                "constraint_release",
-            )
-            .await
-        {
-            tracing::warn!(
-                dispatch_id,
-                error,
-                "[dispatch] dispatch outbox wait queue wake-up after terminal status failed"
-            );
-        }
+        crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
+            pool.clone(),
+            "constraint_release",
+            dispatch_id.to_string(),
+            "dispatch_terminal_status",
+        );
     }
     Ok(changed)
 }

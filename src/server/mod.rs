@@ -156,6 +156,7 @@ pub(crate) async fn run(
     health_registry: Option<Arc<HealthRegistry>>,
     pg_pool: Option<PgPool>,
 ) -> Result<()> {
+    crate::services::dispatches::wait_queue::set_runtime_cluster_config(config.cluster.clone());
     let pg_pool = match pg_pool {
         Some(pool) => Some(pool),
         None => crate::db::postgres::connect_and_migrate(&config)

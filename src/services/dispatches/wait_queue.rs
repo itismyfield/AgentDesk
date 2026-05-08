@@ -8,12 +8,31 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
+use std::sync::{OnceLock, RwLock};
 
 use crate::config::{ClusterConfig, ClusterDispatchRoutingConfig};
 use crate::db::dispatches::outbox::wait_reason_from_routing_diagnostics;
 use crate::services::dispatches::routing_constraint::{RoutingDispatch, RoutingEngine};
 
 const DEFAULT_WAKE_LIMIT: i64 = 20;
+const WAKE_UP_HISTORY_LIMIT: usize = 50;
+const SELECT_WAIT_ROWS_FOR_WAKE_SQL: &str = r#"
+        SELECT
+            o.id,
+            o.dispatch_id,
+            COALESCE(o.required_capabilities, td.required_capabilities) AS required_capabilities,
+            o.wait_started_at,
+            o.wake_up_history
+         FROM dispatch_outbox o
+         LEFT JOIN task_dispatches td ON td.id = o.dispatch_id
+         WHERE o.status = 'pending'
+           AND o.wait_reason IS NOT NULL
+         ORDER BY o.created_at ASC, o.id ASC
+         FOR UPDATE OF o SKIP LOCKED
+         LIMIT $1
+"#;
+
+static RUNTIME_CLUSTER_CONFIG: OnceLock<RwLock<ClusterConfig>> = OnceLock::new();
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct DispatchOutboxWakeSummary {
@@ -27,6 +46,68 @@ impl DispatchOutboxWakeSummary {
     pub(crate) fn is_empty(&self) -> bool {
         self.reassigned == 0 && self.timed_out == 0 && self.still_waiting == 0
     }
+}
+
+pub(crate) fn set_runtime_cluster_config(cluster_config: ClusterConfig) {
+    let lock = RUNTIME_CLUSTER_CONFIG.get_or_init(|| RwLock::new(cluster_config.clone()));
+    match lock.write() {
+        Ok(mut guard) => *guard = cluster_config,
+        Err(poisoned) => *poisoned.into_inner() = cluster_config,
+    }
+}
+
+fn runtime_cluster_config_snapshot() -> ClusterConfig {
+    let Some(lock) = RUNTIME_CLUSTER_CONFIG.get() else {
+        return ClusterConfig::default();
+    };
+    match lock.read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+pub(crate) fn spawn_cached_constraint_release_wake(
+    pool: PgPool,
+    trigger: &'static str,
+    dispatch_id: String,
+    source: &'static str,
+) {
+    spawn_wait_queue_wake_pg(
+        pool,
+        runtime_cluster_config_snapshot(),
+        trigger,
+        source,
+        Some(dispatch_id),
+    );
+}
+
+pub(crate) fn spawn_wait_queue_wake_pg(
+    pool: PgPool,
+    cluster_config: ClusterConfig,
+    trigger: &'static str,
+    source: &'static str,
+    dispatch_id: Option<String>,
+) {
+    tokio::spawn(async move {
+        match wake_waiting_dispatch_outbox_pg(&pool, &cluster_config, trigger).await {
+            Ok(summary) if !summary.is_empty() => tracing::info!(
+                trigger = summary.trigger,
+                reassigned = summary.reassigned,
+                timed_out = summary.timed_out,
+                still_waiting = summary.still_waiting,
+                dispatch_id = dispatch_id.as_deref(),
+                source,
+                "[dispatch] dispatch outbox wait queue wake-up"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                error,
+                dispatch_id = dispatch_id.as_deref(),
+                source,
+                "[dispatch] dispatch outbox wait queue wake-up failed"
+            ),
+        }
+    });
 }
 
 pub(crate) async fn wake_waiting_dispatch_outbox_pg(
@@ -44,24 +125,11 @@ pub(crate) async fn wake_waiting_dispatch_outbox_pg(
         .begin()
         .await
         .map_err(|error| format!("begin dispatch outbox wake tx: {error}"))?;
-    let rows = sqlx::query(
-        "SELECT
-            o.id,
-            o.dispatch_id,
-            COALESCE(o.required_capabilities, td.required_capabilities) AS required_capabilities,
-            o.wait_started_at
-         FROM dispatch_outbox o
-         LEFT JOIN task_dispatches td ON td.id = o.dispatch_id
-         WHERE o.status = 'pending'
-           AND o.wait_reason IS NOT NULL
-         ORDER BY o.created_at ASC, o.id ASC
-         FOR UPDATE OF o SKIP LOCKED
-         LIMIT $1",
-    )
-    .bind(DEFAULT_WAKE_LIMIT)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|error| format!("select dispatch outbox wait rows: {error}"))?;
+    let rows = sqlx::query(SELECT_WAIT_ROWS_FOR_WAKE_SQL)
+        .bind(DEFAULT_WAKE_LIMIT)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| format!("select dispatch outbox wait rows: {error}"))?;
 
     let mut summary = DispatchOutboxWakeSummary {
         trigger: trigger.to_string(),
@@ -78,6 +146,10 @@ pub(crate) async fn wake_waiting_dispatch_outbox_pg(
             .try_get::<Option<DateTime<Utc>>, _>("wait_started_at")
             .ok()
             .flatten();
+        let existing_history = row
+            .try_get::<Option<Value>, _>("wake_up_history")
+            .ok()
+            .flatten();
         let (effective_required, routing_origin) =
             effective_required_capabilities(dispatch_required.clone(), cluster_default.clone());
         let route_required = effective_required.clone().unwrap_or_else(|| json!({}));
@@ -90,6 +162,7 @@ pub(crate) async fn wake_waiting_dispatch_outbox_pg(
             effective_required.as_ref(),
             routing_origin,
             &routing_decision,
+            now,
         );
         let wait_reason = wait_reason_from_routing_diagnostics(&diagnostics);
         let event = json!({
@@ -98,7 +171,8 @@ pub(crate) async fn wake_waiting_dispatch_outbox_pg(
             "selected": routing_decision.selected_instance_id(),
             "wait_reason": wait_reason,
         });
-        let event_array = json!([event]);
+        let wake_up_history =
+            append_bounded_wake_history(existing_history.as_ref(), event, WAKE_UP_HISTORY_LIMIT);
 
         if let Some(selected) = routing_decision.selected_instance_id() {
             sqlx::query(
@@ -109,14 +183,14 @@ pub(crate) async fn wake_waiting_dispatch_outbox_pg(
                         next_attempt_at = NULL,
                         routing_diagnostics = $3,
                         constraint_results = $4,
-                        wake_up_history = COALESCE(wake_up_history, '[]'::jsonb) || $5::jsonb
+                        wake_up_history = $5
                   WHERE id = $1",
             )
             .bind(outbox_id)
             .bind(selected)
             .bind(&diagnostics)
             .bind(diagnostics.get("constraint_results"))
-            .bind(&event_array)
+            .bind(&wake_up_history)
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("reassign dispatch outbox wait row {outbox_id}: {error}"))?;
@@ -139,14 +213,14 @@ pub(crate) async fn wake_waiting_dispatch_outbox_pg(
                         error = $2,
                         routing_diagnostics = $3,
                         constraint_results = $4,
-                        wake_up_history = COALESCE(wake_up_history, '[]'::jsonb) || $5::jsonb
+                        wake_up_history = $5
                   WHERE id = $1",
             )
             .bind(outbox_id)
             .bind(format!("wait timeout: {reason}"))
             .bind(&diagnostics)
             .bind(diagnostics.get("constraint_results"))
-            .bind(&event_array)
+            .bind(&wake_up_history)
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("timeout dispatch outbox wait row {outbox_id}: {error}"))?;
@@ -162,14 +236,14 @@ pub(crate) async fn wake_waiting_dispatch_outbox_pg(
                     next_attempt_at = NULL,
                     routing_diagnostics = $3,
                     constraint_results = $4,
-                    wake_up_history = COALESCE(wake_up_history, '[]'::jsonb) || $5::jsonb
+                    wake_up_history = $5
               WHERE id = $1",
         )
         .bind(outbox_id)
         .bind(wait_reason.as_deref())
         .bind(&diagnostics)
         .bind(diagnostics.get("constraint_results"))
-        .bind(&event_array)
+        .bind(&wake_up_history)
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("refresh dispatch outbox wait row {outbox_id}: {error}"))?;
@@ -220,6 +294,7 @@ fn wake_diagnostics(
     effective_required_capabilities: Option<&Value>,
     routing_origin: &str,
     routing_decision: &crate::services::dispatches::routing_constraint::RoutingEngineDecision,
+    checked_at: DateTime<Utc>,
 ) -> Value {
     json!({
         "dispatch_id": dispatch_id,
@@ -237,10 +312,27 @@ fn wake_diagnostics(
         "routing_origin": routing_origin,
         "wake_up": {
             "trigger": trigger,
-            "checked_at": Utc::now(),
+            "checked_at": checked_at,
         },
-        "checked_at": Utc::now(),
+        "checked_at": checked_at,
     })
+}
+
+fn append_bounded_wake_history(
+    existing_history: Option<&Value>,
+    event: Value,
+    limit: usize,
+) -> Value {
+    let mut entries = existing_history
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    entries.push(event);
+    if entries.len() > limit {
+        let drain_count = entries.len() - limit;
+        entries.drain(0..drain_count);
+    }
+    Value::Array(entries)
 }
 
 fn wait_timed_out(
@@ -278,6 +370,7 @@ fn increment_active_dispatch_count(worker_nodes: &mut [Value], instance_id: &str
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use sqlx::PgPool;
 
     #[test]
     fn wait_timeout_uses_wait_started_at() {
@@ -288,5 +381,207 @@ mod tests {
         assert!(!wait_timed_out(Some(started), Some(601), now));
         assert!(!wait_timed_out(None, Some(600), now));
         assert!(!wait_timed_out(Some(started), None, now));
+    }
+
+    #[test]
+    fn wake_history_keeps_only_recent_entries() {
+        let existing = json!(
+            (0..55)
+                .map(|index| json!({ "index": index }))
+                .collect::<Vec<_>>()
+        );
+        let history = append_bounded_wake_history(
+            Some(&existing),
+            json!({ "index": 55 }),
+            WAKE_UP_HISTORY_LIMIT,
+        );
+        let entries = history.as_array().expect("history remains an array");
+        assert_eq!(entries.len(), WAKE_UP_HISTORY_LIMIT);
+        assert_eq!(entries.first().unwrap()["index"], 6);
+        assert_eq!(entries.last().unwrap()["index"], 55);
+    }
+
+    #[test]
+    fn wake_query_preserves_fifo_ordering() {
+        assert!(
+            SELECT_WAIT_ROWS_FOR_WAKE_SQL.contains("ORDER BY o.created_at ASC, o.id ASC"),
+            "wait rows must be selected FIFO by insertion time and id"
+        );
+    }
+
+    struct TestPg {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        pool: PgPool,
+    }
+
+    impl TestPg {
+        async fn fresh(label: &str) -> Option<Self> {
+            let lock = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!("agentdesk_wait_queue_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            if let Err(error) =
+                crate::db::postgres::create_test_database(&admin_url, &database_name, label).await
+            {
+                eprintln!("skipping {label}: create database failed: {error}");
+                return None;
+            }
+            let pool = match crate::db::postgres::connect_test_pool_and_migrate(
+                &database_url,
+                label,
+            )
+            .await
+            {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!("skipping {label}: connect/migrate failed: {error}");
+                    let _ =
+                        crate::db::postgres::drop_test_database(&admin_url, &database_name, label)
+                            .await;
+                    return None;
+                }
+            };
+            Some(Self {
+                _lock: lock,
+                admin_url,
+                database_name,
+                pool,
+            })
+        }
+
+        async fn cleanup(self, label: &str) {
+            self.pool.close().await;
+            let _ = crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                label,
+            )
+            .await;
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
+    #[tokio::test]
+    async fn wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo() {
+        let label = "wait queue fifo pg";
+        let Some(pg) = TestPg::fresh(label).await else {
+            return;
+        };
+        let pool = &pg.pool;
+
+        sqlx::query(
+            "INSERT INTO worker_nodes (
+                instance_id, hostname, process_id, role, effective_role, status,
+                labels, capabilities, last_heartbeat_at, started_at, updated_at
+             ) VALUES (
+                'mac-mini-release', 'mac-mini', 100, 'auto', 'leader', 'online',
+                $1, $2, NOW(), NOW(), NOW()
+             )",
+        )
+        .bind(json!(["mac-mini"]))
+        .bind(json!({"providers": ["codex"]}))
+        .execute(pool)
+        .await
+        .unwrap();
+
+        for (dispatch_id, age) in [
+            ("dispatch-fifo-old", "2 minutes"),
+            ("dispatch-fifo-young", "1 minute"),
+        ] {
+            sqlx::query(
+                "INSERT INTO dispatch_outbox (
+                    dispatch_id, action, status, required_capabilities,
+                    wait_reason, wait_started_at, created_at
+                 ) VALUES (
+                    $1, 'notify', 'pending', $2,
+                    'node cap wait', NOW() - ($3::INTERVAL), NOW() - ($3::INTERVAL)
+                 )",
+            )
+            .bind(dispatch_id)
+            .bind(json!({
+                "providers": ["codex"],
+                "preferred": {"labels": ["mac-mini"]}
+            }))
+            .bind(age)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+
+        let mut config = ClusterConfig::default();
+        config.nodes.insert(
+            "mac-mini-release".to_string(),
+            crate::config::ClusterNodeConfig {
+                max_concurrent_dispatches: Some(1),
+            },
+        );
+
+        let summary = wake_waiting_dispatch_outbox_pg(pool, &config, "test_fifo")
+            .await
+            .unwrap();
+        assert_eq!(summary.reassigned, 1);
+        assert_eq!(summary.still_waiting, 1);
+
+        let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT dispatch_id, claim_owner, wait_reason
+               FROM dispatch_outbox
+              WHERE dispatch_id IN ('dispatch-fifo-old', 'dispatch-fifo-young')
+              ORDER BY created_at ASC, id ASC",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert_eq!(rows[0].0, "dispatch-fifo-old");
+        assert_eq!(rows[0].1.as_deref(), Some("mac-mini-release"));
+        assert!(rows[0].2.is_none());
+        assert_eq!(rows[1].0, "dispatch-fifo-young");
+        assert!(rows[1].1.is_none());
+        assert!(rows[1].2.is_some());
+
+        pg.cleanup(label).await;
     }
 }

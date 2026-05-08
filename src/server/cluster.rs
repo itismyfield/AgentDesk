@@ -172,25 +172,14 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
     if let Err(error) = upsert_worker_mcp_endpoints(&pool, &instance_id, &capabilities).await {
         tracing::warn!("[cluster] worker MCP endpoint registration failed: {error}");
     }
-    match crate::services::dispatches::wait_queue::wake_waiting_dispatch_outbox_pg(
-        &pool,
-        &config.cluster,
-        "node_join",
-    )
-    .await
-    {
-        Ok(summary) if !summary.is_empty() => tracing::info!(
-            trigger = summary.trigger,
-            reassigned = summary.reassigned,
-            timed_out = summary.timed_out,
-            still_waiting = summary.still_waiting,
-            "[cluster] dispatch outbox wait queue wake-up after node registration"
-        ),
-        Ok(_) => {}
-        Err(error) => tracing::warn!(
-            error,
-            "[cluster] dispatch outbox wait queue wake-up after node registration failed"
-        ),
+    if should_wake_wait_queue_after_node_join(&leader_active) {
+        crate::services::dispatches::wait_queue::spawn_wait_queue_wake_pg(
+            pool.clone(),
+            config.cluster.clone(),
+            "node_join",
+            "cluster_node_join",
+            None,
+        );
     }
 
     let stale_reassignment_pool = pool.clone();
@@ -223,6 +212,10 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
     };
     tracing::info!(cluster = %runtime.describe_for_log(), "[cluster] runtime bootstrapped");
     runtime
+}
+
+fn should_wake_wait_queue_after_node_join(leader_active: &AtomicBool) -> bool {
+    leader_active.load(Ordering::Acquire)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -834,9 +827,11 @@ fn parse_last_heartbeat(node: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
 mod tests {
     use super::{
         ClusterRole, explain_capability_match, resolve_instance_id, select_capability_route,
+        should_wake_wait_queue_after_node_join,
     };
     use crate::config::ClusterConfig;
     use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn cluster_role_parses_known_values_and_defaults_to_auto() {
@@ -852,6 +847,15 @@ mod tests {
             ..ClusterConfig::default()
         };
         assert_eq!(resolve_instance_id(&config), "mac-mini-release");
+    }
+
+    #[test]
+    fn node_join_wake_runs_only_on_leader() {
+        let leader = AtomicBool::new(true);
+        assert!(should_wake_wait_queue_after_node_join(&leader));
+
+        leader.store(false, Ordering::Release);
+        assert!(!should_wake_wait_queue_after_node_join(&leader));
     }
 
     #[test]
