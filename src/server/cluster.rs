@@ -199,6 +199,7 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
         labels,
         capabilities,
         config.cluster.heartbeat_interval_secs,
+        config.cluster.lease_ttl_secs,
         leader_active.clone(),
         leader_lease.take(),
     );
@@ -228,10 +229,12 @@ fn spawn_heartbeat_loop(
     labels: serde_json::Value,
     capabilities: serde_json::Value,
     heartbeat_interval_secs: u64,
+    lease_ttl_secs: u64,
     leader_active: Arc<AtomicBool>,
     mut leader_lease: Option<AdvisoryLockLease>,
 ) {
     let interval_secs = heartbeat_interval_secs.max(1);
+    let stale_threshold_secs = lease_ttl_secs.max(interval_secs * 3);
     let leader_eligible = matches!(configured_role, ClusterRole::Leader | ClusterRole::Auto);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -295,6 +298,17 @@ fn spawn_heartbeat_loop(
             {
                 tracing::warn!("[cluster] heartbeat MCP endpoint sync failed: {error}");
             }
+            // Stale-row GC: leader-only sweep that flips
+            // worker_nodes.status='offline' when a peer's last_heartbeat_at is
+            // beyond stale_threshold_secs. Without this, dead nodes keep
+            // status='online' and split-brain diagnostics remain unreliable.
+            if leader_active.load(Ordering::Acquire) {
+                if let Err(error) =
+                    mark_stale_worker_nodes_offline(&pool, stale_threshold_secs, &instance_id).await
+                {
+                    tracing::warn!("[cluster] stale worker_node GC failed: {error}");
+                }
+            }
         }
     });
 }
@@ -335,6 +349,34 @@ fn spawn_stale_claim_owner_reassignment_loop(
             }
         }
     });
+}
+
+async fn mark_stale_worker_nodes_offline(
+    pool: &PgPool,
+    stale_threshold_secs: u64,
+    self_instance_id: &str,
+) -> Result<u64, String> {
+    let result = sqlx::query(
+        "UPDATE worker_nodes
+            SET status = 'offline'
+          WHERE status = 'online'
+            AND instance_id <> $2
+            AND last_heartbeat_at < NOW() - ($1::BIGINT * INTERVAL '1 second')",
+    )
+    .bind(stale_threshold_secs.max(1) as i64)
+    .bind(self_instance_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("mark stale worker_nodes offline: {error}"))?;
+    let affected = result.rows_affected();
+    if affected > 0 {
+        tracing::info!(
+            stale_threshold_secs,
+            affected,
+            "[cluster] flipped stale worker_nodes to offline"
+        );
+    }
+    Ok(affected)
 }
 
 #[allow(clippy::too_many_arguments)]
