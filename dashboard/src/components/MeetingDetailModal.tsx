@@ -146,6 +146,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
             tone="neutral"
             className="shrink-0"
             style={{ minWidth: 44, minHeight: 44 }}
+            aria-label={t({ ko: "닫기", en: "Close" })}
           >
             ✕
           </SurfaceActionButton>
