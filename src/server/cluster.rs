@@ -667,11 +667,14 @@ fn capability_preference_score(node: &Value, preferred: Option<&Value>) -> i64 {
 
     let labels = string_set(node.get("labels"));
     if let Some(preferred_labels) = preferred.get("labels").and_then(|value| value.as_array()) {
+        let preferred_count = preferred_labels.len() as i64;
         score += preferred_labels
             .iter()
-            .filter_map(|value| value.as_str())
-            .filter(|label| labels.contains(label))
-            .count() as i64;
+            .enumerate()
+            .filter_map(|(index, value)| value.as_str().map(|label| (index, label)))
+            .filter(|(_, label)| labels.contains(label))
+            .map(|(index, _)| preferred_count.saturating_sub(index as i64))
+            .sum::<i64>();
     }
 
     let capabilities = node.get("capabilities").unwrap_or(&Value::Null);
@@ -905,6 +908,32 @@ mod tests {
             Some("mac-book-release")
         );
         assert_eq!(preferred_candidates[0].score, 1);
+    }
+
+    #[test]
+    fn preferred_label_order_beats_newer_heartbeat() {
+        let first_label = json!({
+            "instance_id": "mac-book-release",
+            "status": "online",
+            "labels": ["mac-book"],
+            "capabilities": {"providers": ["codex"]},
+            "last_heartbeat_at": "2026-05-03T00:00:01Z"
+        });
+        let second_label_newer = json!({
+            "instance_id": "mac-mini-release",
+            "status": "online",
+            "labels": ["mac-mini"],
+            "capabilities": {"providers": ["codex"]},
+            "last_heartbeat_at": "2026-05-03T00:00:02Z"
+        });
+        let route = json!({"preferred": {"labels": ["mac-book", "mac-mini"]}});
+
+        let candidates = select_capability_route(&[second_label_newer, first_label], &route);
+        assert_eq!(
+            candidates[0].decision.instance_id.as_deref(),
+            Some("mac-book-release")
+        );
+        assert!(candidates[0].score > candidates[1].score);
     }
 
     #[test]

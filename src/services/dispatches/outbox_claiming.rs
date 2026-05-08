@@ -153,7 +153,7 @@ fn non_empty_required_capabilities(required: Option<&Value>) -> Option<&Value> {
     }
 }
 
-fn capability_decision_for_claim_owner(
+pub(crate) fn capability_decision_for_claim_owner(
     owner_node: Option<&Value>,
     claim_owner: &str,
     required_capabilities: &Value,
