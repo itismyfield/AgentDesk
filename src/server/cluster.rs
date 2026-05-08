@@ -173,6 +173,14 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
         tracing::warn!("[cluster] worker MCP endpoint registration failed: {error}");
     }
 
+    let stale_reassignment_pool = pool.clone();
+    let stale_reassignment_config = config.cluster.clone();
+    spawn_stale_claim_owner_reassignment_loop(
+        stale_reassignment_pool,
+        stale_reassignment_config,
+        leader_active.clone(),
+    );
+
     spawn_heartbeat_loop(
         pool,
         instance_id.clone(),
@@ -273,6 +281,44 @@ fn spawn_heartbeat_loop(
                 upsert_worker_mcp_endpoints(&pool, &instance_id, &capabilities).await
             {
                 tracing::warn!("[cluster] heartbeat MCP endpoint sync failed: {error}");
+            }
+        }
+    });
+}
+
+fn spawn_stale_claim_owner_reassignment_loop(
+    pool: PgPool,
+    cluster_config: ClusterConfig,
+    leader_active: Arc<AtomicBool>,
+) {
+    let interval_secs = cluster_config.heartbeat_interval_secs.max(1);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if !leader_active.load(Ordering::Acquire) {
+                continue;
+            }
+            match crate::services::dispatches::outbox_claiming::reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(
+                &pool,
+                &cluster_config,
+            )
+            .await
+            {
+                Ok(0) => {}
+                Ok(count) => {
+                    tracing::info!(
+                        count,
+                        "[cluster] reassigned stale dispatch_outbox claim owners"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error,
+                        "[cluster] stale dispatch_outbox claim-owner reassignment failed"
+                    );
+                }
             }
         }
     });

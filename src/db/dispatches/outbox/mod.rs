@@ -23,12 +23,15 @@ pub(crate) use super::latest_completed_review_provider_on_conn;
 
 pub(crate) use claim::{
     mark_dispatch_outbox_claimed_pg, select_pending_dispatch_outbox_claim_candidates_pg,
+    select_stale_dispatch_outbox_claim_owner_candidates_pg, update_dispatch_outbox_claim_owner_pg,
 };
 pub(crate) use delivery::{
     dispatch_notify_delivery_suppressed_pg, mark_dispatch_dispatched_pg, mark_outbox_done_pg,
     mark_outbox_failed_pg,
 };
-pub(crate) use diagnostics::record_routing_diagnostics_pg;
+pub(crate) use diagnostics::{
+    record_routing_diagnostics_pg, record_task_dispatch_routing_diagnostics_pg,
+};
 pub(crate) use followup::{
     clear_all_dispatch_threads_pg, load_card_status_pg, load_completed_dispatch_info_pg,
 };

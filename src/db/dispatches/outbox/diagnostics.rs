@@ -55,3 +55,24 @@ pub(crate) async fn record_routing_diagnostics_pg(
         );
     }
 }
+
+pub(crate) async fn record_task_dispatch_routing_diagnostics_pg(
+    tx: &mut Transaction<'_, Postgres>,
+    dispatch_id: &str,
+    diagnostics: &serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    let constraint_results = diagnostics.get("constraint_results");
+    sqlx::query(
+        "UPDATE task_dispatches
+            SET routing_diagnostics = $2,
+                constraint_results = $3,
+                updated_at = NOW()
+          WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .bind(diagnostics)
+    .bind(constraint_results)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}

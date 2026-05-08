@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 /// Tuple shape returned by `claim_pending_dispatch_outbox_batch_pg`.
@@ -39,6 +40,16 @@ impl DispatchOutboxClaimCandidate {
             self.required_capabilities,
         )
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct StaleDispatchOutboxClaimOwnerCandidate {
+    pub(crate) id: i64,
+    pub(crate) dispatch_id: String,
+    pub(crate) action: String,
+    pub(crate) required_capabilities: Option<Value>,
+    pub(crate) stale_claim_owner: String,
+    pub(crate) stale_owner_last_heartbeat_at: Option<DateTime<Utc>>,
 }
 
 /// Snapshot of a completed dispatch row used to build followup summaries.

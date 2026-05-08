@@ -9,7 +9,9 @@ use sqlx::PgPool;
 
 use crate::db::dispatches::outbox::{
     DispatchOutboxRow, mark_dispatch_outbox_claimed_pg, record_routing_diagnostics_pg,
+    record_task_dispatch_routing_diagnostics_pg,
     select_pending_dispatch_outbox_claim_candidates_pg,
+    select_stale_dispatch_outbox_claim_owner_candidates_pg, update_dispatch_outbox_claim_owner_pg,
 };
 use crate::server::cluster::CapabilityRouteDecision;
 use crate::services::dispatches::routing_constraint::{
@@ -222,6 +224,100 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
     pending
 }
 
+pub(crate) async fn reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(
+    pool: &PgPool,
+    cluster_config: &crate::config::ClusterConfig,
+) -> Result<usize, String> {
+    let stale_threshold_secs = stale_claim_owner_threshold_secs(cluster_config);
+    let worker_nodes =
+        crate::server::cluster::list_worker_nodes(pool, stale_threshold_secs as u64).await?;
+    let routing_config = &cluster_config.dispatch_routing;
+    let cluster_default = cluster_default_required_capabilities(routing_config);
+    let routing_engine = RoutingEngine::from_cluster_config(cluster_config);
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin stale claim-owner reassignment tx: {error}"))?;
+    let candidates = select_stale_dispatch_outbox_claim_owner_candidates_pg(
+        &mut tx,
+        stale_threshold_secs,
+        STALE_CLAIM_OWNER_REASSIGN_LIMIT,
+    )
+    .await
+    .map_err(|error| format!("select stale dispatch outbox claim owners: {error}"))?;
+
+    let mut reassigned = 0usize;
+    for candidate in candidates {
+        let dispatch_required = candidate.required_capabilities.clone();
+        let routing_origin: &'static str =
+            if non_empty_required_capabilities(dispatch_required.as_ref()).is_some() {
+                "dispatch"
+            } else if cluster_default.is_some() {
+                "cluster_default"
+            } else {
+                "none"
+            };
+        let effective_required: Option<Value> = match routing_origin {
+            "dispatch" => dispatch_required.clone(),
+            "cluster_default" => cluster_default.clone(),
+            _ => None,
+        };
+
+        let (new_owner, routing_decision) = if let Some(required) = effective_required.as_ref() {
+            let dispatch =
+                RoutingDispatch::new(candidate.dispatch_id.clone(), None, Some(required.clone()));
+            let routing_decision = routing_engine.route(&worker_nodes, required, &dispatch);
+            let new_owner = eligible_reassignment_owner(&routing_decision, required);
+            (new_owner, Some(routing_decision))
+        } else {
+            (None, None)
+        };
+
+        let diagnostics = stale_claim_owner_reassignment_diagnostics(
+            &candidate.stale_claim_owner,
+            new_owner.as_deref(),
+            candidate.stale_owner_last_heartbeat_at,
+            dispatch_required.as_ref(),
+            effective_required.as_ref(),
+            routing_origin,
+            routing_decision.as_ref(),
+            &candidate.dispatch_id,
+            &candidate.action,
+            stale_threshold_secs,
+        );
+        let updated = update_dispatch_outbox_claim_owner_pg(
+            &mut tx,
+            candidate.id,
+            new_owner.as_deref(),
+            &diagnostics,
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "update stale claim owner for dispatch {}: {error}",
+                candidate.dispatch_id
+            )
+        })?;
+        if updated == 0 {
+            continue;
+        }
+        record_task_dispatch_routing_diagnostics_pg(&mut tx, &candidate.dispatch_id, &diagnostics)
+            .await
+            .map_err(|error| {
+                format!(
+                    "record stale claim owner diagnostics for dispatch {}: {error}",
+                    candidate.dispatch_id
+                )
+            })?;
+        reassigned += 1;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit stale claim-owner reassignment tx: {error}"))?;
+    Ok(reassigned)
+}
+
 fn cluster_default_required_capabilities(
     routing: &crate::config::ClusterDispatchRoutingConfig,
 ) -> Option<Value> {
@@ -247,6 +343,46 @@ fn node_concurrency_caps_configured(cluster_config: &crate::config::ClusterConfi
         .nodes
         .values()
         .any(|node| node.max_concurrent_dispatches.is_some())
+}
+
+const STALE_CLAIM_OWNER_REASSIGN_LIMIT: i64 = 200;
+
+fn stale_claim_owner_threshold_secs(cluster_config: &crate::config::ClusterConfig) -> i64 {
+    let heartbeat = cluster_config.heartbeat_interval_secs.max(1);
+    heartbeat.saturating_mul(3).clamp(1, i64::MAX as u64) as i64
+}
+
+fn eligible_reassignment_owner(
+    routing_decision: &RoutingEngineDecision,
+    required_capabilities: &Value,
+) -> Option<String> {
+    let selected = routing_decision.selected.as_ref()?;
+    if !has_hard_required_capabilities(required_capabilities)
+        && has_preferred_capabilities(required_capabilities)
+        && selected.score <= 0
+    {
+        return None;
+    }
+    selected.instance_id().map(str::to_string)
+}
+
+fn has_hard_required_capabilities(required: &Value) -> bool {
+    let hard_required = required
+        .get("required")
+        .filter(|value| value.is_object())
+        .unwrap_or(required);
+    match hard_required {
+        Value::Null => false,
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
+    }
+}
+
+fn has_preferred_capabilities(required: &Value) -> bool {
+    required
+        .get("preferred")
+        .and_then(|value| value.as_object())
+        .is_some_and(|map| !map.is_empty())
 }
 
 fn increment_active_dispatch_count(worker_nodes: &mut [Value], instance_id: &str) {
@@ -301,12 +437,178 @@ fn routing_diagnostics(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn stale_claim_owner_reassignment_diagnostics(
+    previous_owner: &str,
+    new_owner: Option<&str>,
+    previous_owner_last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+    dispatch_required_capabilities: Option<&Value>,
+    effective_required_capabilities: Option<&Value>,
+    routing_origin: &str,
+    routing_decision: Option<&RoutingEngineDecision>,
+    dispatch_id: &str,
+    action: &str,
+    stale_threshold_secs: i64,
+) -> Value {
+    let selected = routing_decision.and_then(|decision| decision.selected.as_ref());
+    let candidates = routing_decision
+        .map(|decision| json!(&decision.candidates))
+        .unwrap_or_else(|| json!([]));
+    let constraint_results = routing_decision
+        .map(RoutingEngineDecision::constraint_results_json)
+        .unwrap_or_else(|| json!([]));
+    serde_json::json!({
+        "event": "stale_claim_owner_reassigned",
+        "reason": "claim_owner heartbeat stale",
+        "dispatch_id": dispatch_id,
+        "action": action,
+        "previous_claim_owner": previous_owner,
+        "new_claim_owner": new_owner,
+        "selected": selected,
+        "candidates": candidates,
+        "constraint_results": constraint_results,
+        "required_capabilities": dispatch_required_capabilities,
+        "effective_required_capabilities": effective_required_capabilities,
+        "routing_origin": routing_origin,
+        "stale_threshold_secs": stale_threshold_secs,
+        "previous_owner_last_heartbeat_at": previous_owner_last_heartbeat_at,
+        "checked_at": chrono::Utc::now(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::dispatches::outbox::DispatchOutboxClaimCandidate;
     use crate::services::dispatches::routing_constraint::{NoOpConstraint, RoutingEngine};
     use serde_json::json;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    struct TestPostgresDb {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Option<Self> {
+            let lock = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!("agentdesk_outbox_claiming_{}", Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            if let Err(error) = crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "outbox claiming tests",
+            )
+            .await
+            {
+                eprintln!("skipping outbox claiming postgres test: {error}");
+                return None;
+            }
+
+            Some(Self {
+                _lock: lock,
+                admin_url,
+                database_name,
+                database_url,
+            })
+        }
+
+        async fn connect_and_migrate(&self) -> PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "outbox claiming tests",
+            )
+            .await
+            .expect("connect and migrate outbox claiming postgres test database")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "outbox claiming tests",
+            )
+            .await
+            .expect("drop outbox claiming postgres test database");
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgres://{user}:{password}@{host}:{port}"),
+            None => format!("postgres://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
+    async fn seed_worker_node(
+        pool: &PgPool,
+        instance_id: &str,
+        labels: serde_json::Value,
+        heartbeat_age_secs: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO worker_nodes (
+                instance_id, hostname, process_id, role, effective_role, status,
+                labels, capabilities, last_heartbeat_at, started_at, updated_at
+             ) VALUES (
+                $1, $1, 100, 'auto', 'worker', 'online',
+                $2, '{\"providers\":[\"codex\"]}'::jsonb,
+                NOW() - ($3::BIGINT * INTERVAL '1 second'), NOW(), NOW()
+             )",
+        )
+        .bind(instance_id)
+        .bind(labels)
+        .bind(heartbeat_age_secs)
+        .execute(pool)
+        .await
+        .expect("seed worker node");
+    }
 
     #[test]
     fn non_empty_required_capabilities_handles_null_and_empty_object() {
@@ -416,5 +718,109 @@ mod tests {
 
         assert_eq!(worker_nodes[0]["active_dispatch_count"], 2);
         assert_eq!(worker_nodes[1]["active_dispatch_count"], 4);
+    }
+
+    #[tokio::test]
+    async fn reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        seed_worker_node(&pool, "stale-node", json!(["mac-book"]), 45).await;
+        seed_worker_node(&pool, "mac-mini-release", json!(["mac-mini"]), 0).await;
+
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (
+                dispatch_id, action, status, claim_owner, required_capabilities
+             )
+             SELECT 'dispatch-stale-' || gs, 'notify', 'pending', 'stale-node', $1
+               FROM generate_series(1, 100) gs",
+        )
+        .bind(json!({"preferred": {"labels": ["mac-book", "mac-mini"]}}))
+        .execute(&pool)
+        .await
+        .expect("seed stale claim-owner outbox rows");
+
+        let mut config = crate::config::ClusterConfig::default();
+        config.heartbeat_interval_secs = 10;
+        let reassigned =
+            reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(&pool, &config)
+                .await
+                .expect("reassign stale claim owners");
+        assert_eq!(reassigned, 100);
+
+        let new_owner_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT
+               FROM dispatch_outbox
+              WHERE claim_owner = 'mac-mini-release'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(new_owner_count, 100);
+
+        let diagnostics: serde_json::Value = sqlx::query_scalar(
+            "SELECT routing_diagnostics
+               FROM dispatch_outbox
+              WHERE dispatch_id = 'dispatch-stale-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(diagnostics["event"], "stale_claim_owner_reassigned");
+        assert_eq!(diagnostics["previous_claim_owner"], "stale-node");
+        assert_eq!(diagnostics["new_claim_owner"], "mac-mini-release");
+        assert_eq!(
+            diagnostics["selected"]["decision"]["instance_id"],
+            "mac-mini-release"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        seed_worker_node(&pool, "stale-node", json!(["mac-book"]), 45).await;
+        seed_worker_node(&pool, "mac-mini-release", json!(["mac-mini"]), 0).await;
+
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (
+                dispatch_id, action, status, claim_owner, required_capabilities
+             ) VALUES (
+                'dispatch-no-candidate', 'notify', 'pending', 'stale-node', $1
+             )",
+        )
+        .bind(json!({"required": {"labels": ["linux"]}}))
+        .execute(&pool)
+        .await
+        .expect("seed no-candidate stale claim-owner outbox row");
+
+        let config = crate::config::ClusterConfig::default();
+        let reassigned =
+            reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(&pool, &config)
+                .await
+                .expect("clear stale claim owner");
+        assert_eq!(reassigned, 1);
+
+        let (claim_owner, diagnostics): (Option<String>, serde_json::Value) = sqlx::query_as(
+            "SELECT claim_owner, routing_diagnostics
+               FROM dispatch_outbox
+              WHERE dispatch_id = 'dispatch-no-candidate'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(claim_owner.is_none());
+        assert_eq!(diagnostics["previous_claim_owner"], "stale-node");
+        assert!(diagnostics["new_claim_owner"].is_null());
+        assert!(diagnostics["selected"].is_null());
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
