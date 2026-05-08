@@ -92,6 +92,7 @@ src/
 │   │   └── tests.rs
 │   ├── agents.rs
 │   ├── cancel_tombstones.rs
+│   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
 │   ├── kanban.rs
 │   ├── memento_feedback_stats.rs
@@ -611,7 +612,9 @@ src/
 ├── utils/
 │   ├── api.rs
 │   ├── async_bridge.rs
+│   ├── discord.rs
 │   ├── format.rs
+│   ├── github_links.rs
 │   ├── loopback_url.rs
 │   ├── mod.rs
 │   └── wip_detect.rs
