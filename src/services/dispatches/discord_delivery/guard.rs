@@ -17,10 +17,7 @@ pub(crate) async fn send_dispatch_with_delivery_guard<T: DispatchTransport>(
 ) -> Result<DispatchNotifyDeliveryResult, String> {
     let pg_pool = pg_pool.or_else(|| transport.pg_pool());
     if !claim_dispatch_delivery_guard(pg_pool, dispatch_id).await? {
-        return Ok(DispatchNotifyDeliveryResult::duplicate(
-            dispatch_id,
-            "dispatch delivery guard already recorded this semantic notify event",
-        ));
+        return duplicate_dispatch_delivery_result(pg_pool, dispatch_id).await;
     }
 
     let send_result = transport
@@ -50,6 +47,18 @@ async fn claim_dispatch_delivery_guard(
     dispatch_id: &str,
 ) -> Result<bool, String> {
     let pool = pg_pool.ok_or_else(|| "delivery guard requires postgres pool".to_string())?;
+    if dispatch_delivery_prior_delivery_pg(pool, dispatch_id)
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    recover_expired_dispatch_delivery_reservation_pg(pool, dispatch_id).await?;
+    if has_active_dispatch_delivery_reservation_pg(pool, dispatch_id).await? {
+        return Ok(false);
+    }
+
     let notified: Option<i32> = sqlx::query_scalar("SELECT 1 FROM kv_meta WHERE key = $1 LIMIT 1")
         .bind(notified_key(dispatch_id))
         .fetch_optional(pool)
@@ -59,6 +68,7 @@ async fn claim_dispatch_delivery_guard(
         return Ok(false);
     }
 
+    delete_expired_dispatch_reserving_marker_pg(pool, dispatch_id).await?;
     let result = sqlx::query(
         "INSERT INTO kv_meta (key, value, expires_at)
          VALUES ($1, $2, NOW() + INTERVAL '5 minutes')
@@ -71,17 +81,163 @@ async fn claim_dispatch_delivery_guard(
     .map_err(|error| format!("claim postgres delivery guard for {dispatch_id}: {error}"))?;
     let claimed = result.rows_affected() > 0;
     if claimed {
-        if let Err(error) =
-            insert_reserved_dispatch_delivery_event_pg(pool, dispatch_id, None, None).await
-        {
-            tracing::warn!(
-                dispatch_id,
-                error = %error,
-                "[dispatch] shadow dispatch_delivery_events reservation write failed"
-            );
+        match insert_reserved_dispatch_delivery_event_pg(pool, dispatch_id, None, None).await {
+            Ok(true) => {}
+            Ok(false) => {
+                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                    .bind(reserving_key(dispatch_id))
+                    .execute(pool)
+                    .await
+                    .ok();
+                return Ok(false);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    dispatch_id,
+                    error = %error,
+                    "[dispatch] shadow dispatch_delivery_events reservation write failed"
+                );
+            }
         }
     }
     Ok(claimed)
+}
+
+async fn duplicate_dispatch_delivery_result(
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+) -> Result<DispatchNotifyDeliveryResult, String> {
+    let mut result = DispatchNotifyDeliveryResult::duplicate(
+        dispatch_id,
+        "dispatch delivery guard already recorded this semantic notify event",
+    );
+    let Some(pool) = pg_pool else {
+        return Ok(result);
+    };
+    if let Some(prior) = dispatch_delivery_prior_delivery_pg(pool, dispatch_id).await? {
+        result.target_channel_id = prior.target_channel_id;
+        result.message_id = prior.message_id;
+        result.fallback_kind = prior.fallback_kind;
+    }
+    Ok(result)
+}
+
+struct PriorDispatchDelivery {
+    target_channel_id: Option<String>,
+    message_id: Option<String>,
+    fallback_kind: Option<String>,
+}
+
+async fn dispatch_delivery_prior_delivery_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<Option<PriorDispatchDelivery>, String> {
+    sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+        "SELECT target_channel_id, message_id, fallback_kind
+           FROM dispatch_delivery_events
+          WHERE dispatch_id = $1
+            AND correlation_id = $2
+            AND semantic_event_id = $3
+            AND operation = 'send'
+            AND target_kind = 'channel'
+            AND status IN ('sent', 'fallback', 'skipped', 'duplicate')
+          ORDER BY attempt DESC, updated_at DESC, id DESC
+          LIMIT 1",
+    )
+    .bind(dispatch_id)
+    .bind(format!("dispatch:{dispatch_id}"))
+    .bind(format!("dispatch:{dispatch_id}:notify"))
+    .fetch_optional(pool)
+    .await
+    .map(|row| {
+        row.map(
+            |(target_channel_id, message_id, fallback_kind)| PriorDispatchDelivery {
+                target_channel_id,
+                message_id,
+                fallback_kind,
+            },
+        )
+    })
+    .map_err(|error| format!("load prior dispatch delivery event for {dispatch_id}: {error}"))
+}
+
+async fn recover_expired_dispatch_delivery_reservation_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE dispatch_delivery_events
+            SET status = 'failed',
+                error = COALESCE(error, 'delivery reservation expired before finalize'),
+                result_json = CASE
+                    WHEN result_json = '{}'::jsonb THEN jsonb_build_object(
+                        'status', 'failed',
+                        'dispatch_id', dispatch_id,
+                        'action', 'notify',
+                        'detail', 'delivery reservation expired before finalize'
+                    )
+                    ELSE result_json
+                END,
+                reserved_until = NULL,
+                updated_at = NOW()
+          WHERE dispatch_id = $1
+            AND correlation_id = $2
+            AND semantic_event_id = $3
+            AND operation = 'send'
+            AND target_kind = 'channel'
+            AND status = 'reserved'
+            AND reserved_until <= NOW()",
+    )
+    .bind(dispatch_id)
+    .bind(format!("dispatch:{dispatch_id}"))
+    .bind(format!("dispatch:{dispatch_id}:notify"))
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|error| {
+        format!("recover expired dispatch delivery reservation for {dispatch_id}: {error}")
+    })
+}
+
+async fn has_active_dispatch_delivery_reservation_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<bool, String> {
+    sqlx::query_scalar::<_, i32>(
+        "SELECT 1
+           FROM dispatch_delivery_events
+          WHERE dispatch_id = $1
+            AND correlation_id = $2
+            AND semantic_event_id = $3
+            AND operation = 'send'
+            AND target_kind = 'channel'
+            AND status = 'reserved'
+            AND (reserved_until IS NULL OR reserved_until > NOW())
+          LIMIT 1",
+    )
+    .bind(dispatch_id)
+    .bind(format!("dispatch:{dispatch_id}"))
+    .bind(format!("dispatch:{dispatch_id}:notify"))
+    .fetch_optional(pool)
+    .await
+    .map(|row| row.is_some())
+    .map_err(|error| {
+        format!("check active dispatch delivery reservation for {dispatch_id}: {error}")
+    })
+}
+
+async fn delete_expired_dispatch_reserving_marker_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "DELETE FROM kv_meta WHERE key = $1 AND expires_at IS NOT NULL AND expires_at <= NOW()",
+    )
+    .bind(reserving_key(dispatch_id))
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("delete expired postgres delivery guard for {dispatch_id}: {error}"))
 }
 
 async fn finalize_dispatch_delivery_guard(
@@ -209,113 +365,22 @@ fn dispatch_delivery_result_json(result: &DispatchNotifyDeliveryResult) -> Value
 
 #[cfg(test)]
 mod tests {
+    use super::super::ReviewFollowupKind;
     use super::*;
     use serde_json::Value;
+    use std::sync::{Arc, Mutex};
 
-    struct TestPostgresDb {
-        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
-        admin_url: String,
-        database_name: String,
-        database_url: String,
-    }
-
-    impl TestPostgresDb {
-        async fn create() -> Self {
-            let lock = crate::db::postgres::lock_test_lifecycle();
-            let admin_url = postgres_admin_database_url();
-            let database_name = format!(
-                "agentdesk_dispatch_delivery_guard_{}",
-                uuid::Uuid::new_v4().simple()
-            );
-            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
-            crate::db::postgres::create_test_database(
-                &admin_url,
-                &database_name,
-                "dispatch delivery guard tests",
-            )
-            .await
-            .unwrap();
-
-            Self {
-                _lock: lock,
-                admin_url,
-                database_name,
-                database_url,
-            }
-        }
-
-        async fn connect_and_migrate(&self) -> sqlx::PgPool {
-            crate::db::postgres::connect_test_pool_and_migrate(
-                &self.database_url,
-                "dispatch delivery guard tests",
-            )
-            .await
-            .unwrap()
-        }
-
-        async fn drop(self) {
-            crate::db::postgres::drop_test_database(
-                &self.admin_url,
-                &self.database_name,
-                "dispatch delivery guard tests",
-            )
-            .await
-            .unwrap();
-        }
-    }
-
-    fn postgres_base_database_url() -> String {
-        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
-            let trimmed = base.trim();
-            if !trimmed.is_empty() {
-                return trimmed.trim_end_matches('/').to_string();
-            }
-        }
-
-        let user = std::env::var("PGUSER")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                std::env::var("USER")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .unwrap_or_else(|| "postgres".to_string());
-        let password = std::env::var("PGPASSWORD")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let host = std::env::var("PGHOST")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "localhost".to_string());
-        let port = std::env::var("PGPORT")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "5432".to_string());
-
-        match password {
-            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
-            None => format!("postgresql://{user}@{host}:{port}"),
-        }
-    }
-
-    fn postgres_admin_database_url() -> String {
-        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "postgres".to_string());
-        format!("{}/{}", postgres_base_database_url(), admin_db)
+    async fn create_test_pg_db() -> crate::dispatch::test_support::DispatchPostgresTestDb {
+        crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_dispatch_delivery_guard",
+            "dispatch delivery guard tests",
+        )
+        .await
     }
 
     async fn seed_dispatch(pool: &PgPool, dispatch_id: &str) {
-        sqlx::query(
-            "INSERT INTO task_dispatches (id, status, title)
-             VALUES ($1, 'pending', 'Delivery guard test')",
-        )
-        .bind(dispatch_id)
-        .execute(pool)
-        .await
-        .unwrap();
+        crate::dispatch::test_support::seed_pg_dispatch(pool, dispatch_id, "Delivery guard test")
+            .await;
     }
 
     async fn kv_meta_count(pool: &PgPool, key: &str) -> i64 {
@@ -336,6 +401,73 @@ mod tests {
         .fetch_one(pool)
         .await
         .unwrap()
+    }
+
+    #[derive(Clone)]
+    struct RecordingDispatchTransport {
+        calls: Arc<Mutex<usize>>,
+        target_channel_id: String,
+        message_id: String,
+        assert_reserving_during_send: Option<PgPool>,
+    }
+
+    impl RecordingDispatchTransport {
+        fn new(target_channel_id: &str, message_id: &str) -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(0)),
+                target_channel_id: target_channel_id.to_string(),
+                message_id: message_id.to_string(),
+                assert_reserving_during_send: None,
+            }
+        }
+
+        fn with_reservation_assertion(mut self, pool: PgPool) -> Self {
+            self.assert_reserving_during_send = Some(pool);
+            self
+        }
+
+        fn calls(&self) -> usize {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    impl DispatchTransport for RecordingDispatchTransport {
+        async fn send_dispatch(
+            &self,
+            _db: Option<crate::db::Db>,
+            _agent_id: String,
+            _title: String,
+            _card_id: String,
+            dispatch_id: String,
+        ) -> Result<DispatchNotifyDeliveryResult, String> {
+            *self.calls.lock().unwrap() += 1;
+            if let Some(pool) = self.assert_reserving_during_send.as_ref() {
+                assert_eq!(
+                    kv_meta_count(pool, &reserving_key(&dispatch_id)).await,
+                    1,
+                    "kv_meta reservation must be renewed before transport sends"
+                );
+            }
+            let mut result =
+                DispatchNotifyDeliveryResult::success(&dispatch_id, "notify", "mock sent");
+            result.correlation_id = Some(format!("dispatch:{dispatch_id}"));
+            result.semantic_event_id = Some(format!("dispatch:{dispatch_id}:notify"));
+            result.target_channel_id = Some(self.target_channel_id.clone());
+            result.message_id = Some(self.message_id.clone());
+            Ok(result)
+        }
+
+        async fn send_review_followup(
+            &self,
+            _db: Option<crate::db::Db>,
+            _review_dispatch_id: String,
+            _card_id: String,
+            _channel_id_num: u64,
+            _message: String,
+            _kind: ReviewFollowupKind,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -399,7 +531,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_delivery_guard_shadow_writes_one_reserved_event() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_test_pg_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let dispatch_id = "dispatch-shadow-reserved";
         seed_dispatch(&pool, dispatch_id).await;
@@ -441,7 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_delivery_guard_shadow_updates_sent_event_and_kv_meta() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_test_pg_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let dispatch_id = "dispatch-shadow-sent";
         seed_dispatch(&pool, dispatch_id).await;
@@ -517,7 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_delivery_guard_shadow_updates_failed_event_without_notified_marker() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_test_pg_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let dispatch_id = "dispatch-shadow-failed";
         seed_dispatch(&pool, dispatch_id).await;
@@ -553,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_delivery_retry_shadow_writes_next_attempt_without_changing_kv_meta() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_test_pg_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let dispatch_id = "dispatch-shadow-retry";
         seed_dispatch(&pool, dispatch_id).await;
@@ -620,6 +752,190 @@ mod tests {
                 ),
             ]
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn expired_reserved_delivery_recovers_with_new_attempt_and_single_transport_send() {
+        let pg_db = create_test_pg_db().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let dispatch_id = "dispatch-expired-reserved-recovery";
+        seed_dispatch(&pool, dispatch_id).await;
+
+        sqlx::query(
+            "INSERT INTO dispatch_delivery_events (
+                dispatch_id, correlation_id, semantic_event_id, operation, target_kind,
+                status, attempt, result_json, reserved_until
+             ) VALUES (
+                $1, $2, $3, 'send', 'channel', 'reserved', 1, '{}'::jsonb,
+                NOW() - INTERVAL '1 minute'
+             )",
+        )
+        .bind(dispatch_id)
+        .bind(format!("dispatch:{dispatch_id}"))
+        .bind(format!("dispatch:{dispatch_id}:notify"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value, expires_at)
+             VALUES ($1, $2, NOW() - INTERVAL '1 minute')",
+        )
+        .bind(reserving_key(dispatch_id))
+        .bind(dispatch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let transport =
+            RecordingDispatchTransport::new("1500000000000000010", "1500000000000000011")
+                .with_reservation_assertion(pool.clone());
+        let result = send_dispatch_with_delivery_guard(
+            None,
+            Some(&pool),
+            "agent-1",
+            "Expired reservation",
+            "card-expired-reserved",
+            dispatch_id,
+            &transport,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, "success");
+        assert_eq!(transport.calls(), 1);
+        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
+        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
+
+        let rows: Vec<(String, i32, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT status, attempt, error, message_id
+               FROM dispatch_delivery_events
+              WHERE dispatch_id = $1
+              ORDER BY attempt",
+        )
+        .bind(dispatch_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "failed".to_string(),
+                    1,
+                    Some("delivery reservation expired before finalize".to_string()),
+                    None
+                ),
+                (
+                    "sent".to_string(),
+                    2,
+                    None,
+                    Some("1500000000000000011".to_string())
+                ),
+            ]
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_delivery_replay_returns_prior_message_metadata_without_resend() {
+        let pg_db = create_test_pg_db().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let dispatch_id = "dispatch-duplicate-replay";
+        seed_dispatch(&pool, dispatch_id).await;
+
+        let transport =
+            RecordingDispatchTransport::new("1500000000000000020", "1500000000000000021");
+        let first = send_dispatch_with_delivery_guard(
+            None,
+            Some(&pool),
+            "agent-1",
+            "Duplicate replay",
+            "card-duplicate-replay",
+            dispatch_id,
+            &transport,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status, "success");
+
+        let second = send_dispatch_with_delivery_guard(
+            None,
+            Some(&pool),
+            "agent-1",
+            "Duplicate replay",
+            "card-duplicate-replay",
+            dispatch_id,
+            &transport,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(transport.calls(), 1);
+        assert_eq!(second.status, "duplicate");
+        assert_eq!(
+            second.correlation_id.as_deref(),
+            Some("dispatch:dispatch-duplicate-replay")
+        );
+        assert_eq!(
+            second.semantic_event_id.as_deref(),
+            Some("dispatch:dispatch-duplicate-replay:notify")
+        );
+        assert_eq!(
+            second.target_channel_id.as_deref(),
+            Some("1500000000000000020")
+        );
+        assert_eq!(second.message_id.as_deref(), Some("1500000000000000021"));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn active_dispatch_delivery_unique_key_allows_one_concurrent_reserved_row() {
+        let pg_db = create_test_pg_db().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(2).await;
+        let dispatch_id = "dispatch-active-unique";
+        seed_dispatch(&pool, dispatch_id).await;
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            let dispatch_id = dispatch_id.to_string();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                insert_reserved_dispatch_delivery_event_pg(&pool, &dispatch_id, None, None)
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let mut inserted = 0;
+        for task in tasks {
+            if task.await.unwrap() {
+                inserted += 1;
+            }
+        }
+        assert_eq!(inserted, 1);
+        assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
+
+        let (status, attempt): (String, i32) = sqlx::query_as(
+            "SELECT status, attempt
+               FROM dispatch_delivery_events
+              WHERE dispatch_id = $1",
+        )
+        .bind(dispatch_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "reserved");
+        assert_eq!(attempt, 1);
 
         pool.close().await;
         pg_db.drop().await;

@@ -1,7 +1,143 @@
-use crate::db::Db;
-use crate::engine::PolicyEngine;
 use crate::services::git::GitCommand;
+use std::str::FromStr;
 use std::sync::MutexGuard;
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use crate::db::Db;
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use crate::engine::PolicyEngine;
+
+pub(crate) struct DispatchPostgresTestDb {
+    _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+    admin_url: String,
+    database_name: String,
+    database_url: String,
+    label: String,
+}
+
+impl DispatchPostgresTestDb {
+    pub(crate) async fn create(prefix: &str, label: &str) -> Self {
+        let lock = crate::db::postgres::lock_test_lifecycle();
+        let admin_url = postgres_admin_database_url();
+        let database_name = format!("{}_{}", prefix, uuid::Uuid::new_v4().simple());
+        let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+        crate::db::postgres::create_test_database(&admin_url, &database_name, label)
+            .await
+            .unwrap_or_else(|err| panic!("create {label} postgres test db: {err}"));
+
+        Self {
+            _lock: lock,
+            admin_url,
+            database_name,
+            database_url,
+            label: label.to_string(),
+        }
+    }
+
+    pub(crate) async fn connect_and_migrate(&self) -> sqlx::PgPool {
+        crate::db::postgres::connect_test_pool_and_migrate(&self.database_url, &self.label)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("connect + migrate {} postgres test db: {err}", self.label)
+            })
+    }
+
+    pub(crate) async fn connect_and_migrate_with_max_connections(
+        &self,
+        max_connections: u32,
+    ) -> sqlx::PgPool {
+        let options = sqlx::postgres::PgConnectOptions::from_str(&self.database_url)
+            .unwrap_or_else(|err| panic!("parse {} postgres test url: {err}", self.label));
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(max_connections.max(1))
+            .acquire_timeout(Duration::from_secs(15))
+            .connect_with(options)
+            .await
+            .unwrap_or_else(|err| panic!("connect {} postgres test db: {err}", self.label));
+        crate::db::postgres::migrate(&pool)
+            .await
+            .unwrap_or_else(|err| panic!("migrate {} postgres test db: {err}", self.label));
+        pool
+    }
+
+    pub(crate) async fn drop(self) {
+        crate::db::postgres::drop_test_database(&self.admin_url, &self.database_name, &self.label)
+            .await
+            .unwrap_or_else(|err| panic!("drop {} postgres test db: {err}", self.label));
+    }
+}
+
+pub(crate) fn postgres_base_database_url() -> String {
+    if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+        let trimmed = base.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_end_matches('/').to_string();
+        }
+    }
+
+    let user = std::env::var("PGUSER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("USER")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "postgres".to_string());
+    let password = std::env::var("PGPASSWORD")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let host = std::env::var("PGHOST")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = std::env::var("PGPORT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "5432".to_string());
+
+    match password {
+        Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+        None => format!("postgresql://{user}@{host}:{port}"),
+    }
+}
+
+pub(crate) fn postgres_admin_database_url() -> String {
+    let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "postgres".to_string());
+    format!("{}/{}", postgres_base_database_url(), admin_db)
+}
+
+pub(crate) async fn seed_pg_dispatch(pool: &sqlx::PgPool, dispatch_id: &str, title: &str) {
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, status, title, created_at, updated_at)
+         VALUES ($1, 'pending', $2, NOW(), NOW())",
+    )
+    .bind(dispatch_id)
+    .bind(title)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|err| panic!("seed postgres dispatch {dispatch_id}: {err}"));
+}
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+fn lock_dispatch_test_env() -> MutexGuard<'static, ()> {
+    crate::services::discord::runtime_store::lock_test_env()
+}
+
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+fn lock_dispatch_test_env() -> MutexGuard<'static, ()> {
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("dispatch test env lock poisoned")
+}
 
 pub(crate) struct DispatchEnvOverride {
     _lock: MutexGuard<'static, ()>,
@@ -11,7 +147,7 @@ pub(crate) struct DispatchEnvOverride {
 
 impl DispatchEnvOverride {
     pub(crate) fn new(repo_dir: Option<&str>, config_path: Option<&str>) -> Self {
-        let lock = crate::services::discord::runtime_store::lock_test_env();
+        let lock = lock_dispatch_test_env();
         let previous_repo_dir = std::env::var("AGENTDESK_REPO_DIR").ok();
         let previous_config = std::env::var("AGENTDESK_CONFIG").ok();
 
@@ -55,7 +191,7 @@ pub(crate) struct RepoDirOverride {
 
 impl RepoDirOverride {
     pub(crate) fn new(path: &str) -> Self {
-        let lock = crate::services::discord::runtime_store::lock_test_env();
+        let lock = lock_dispatch_test_env();
         let previous = std::env::var("AGENTDESK_REPO_DIR").ok();
         unsafe { std::env::set_var("AGENTDESK_REPO_DIR", path) };
         Self {
@@ -75,6 +211,7 @@ impl Drop for RepoDirOverride {
     }
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn test_db() -> Db {
     let conn = sqlite_test::Connection::open_in_memory().unwrap();
     conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
@@ -92,6 +229,7 @@ pub(crate) fn test_db() -> Db {
     db
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn test_engine(db: &Db) -> PolicyEngine {
     let config = crate::config::Config::default();
     PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
@@ -148,6 +286,7 @@ pub(crate) fn git_commit(repo_dir: &str, message: &str) -> String {
     crate::services::platform::git_head_commit(repo_dir).unwrap()
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn seed_card(db: &Db, card_id: &str, status: &str) {
     let conn = db.separate_conn().unwrap();
     conn.execute(
@@ -157,6 +296,7 @@ pub(crate) fn seed_card(db: &Db, card_id: &str, status: &str) {
     .unwrap();
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn set_card_issue_number(db: &Db, card_id: &str, issue_number: i64) {
     let conn = db.separate_conn().unwrap();
     conn.execute(
@@ -166,6 +306,7 @@ pub(crate) fn set_card_issue_number(db: &Db, card_id: &str, issue_number: i64) {
     .unwrap();
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn set_card_repo_id(db: &Db, card_id: &str, repo_id: &str) {
     let conn = db.separate_conn().unwrap();
     conn.execute(
@@ -175,6 +316,7 @@ pub(crate) fn set_card_repo_id(db: &Db, card_id: &str, repo_id: &str) {
     .unwrap();
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn set_card_description(db: &Db, card_id: &str, description: &str) {
     let conn = db.separate_conn().unwrap();
     conn.execute(
@@ -197,6 +339,7 @@ pub(crate) fn write_repo_mapping_config(entries: &[(&str, &str)]) -> tempfile::T
     dir
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn count_notify_outbox(conn: &sqlite_test::Connection, dispatch_id: &str) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
@@ -206,6 +349,7 @@ pub(crate) fn count_notify_outbox(conn: &sqlite_test::Connection, dispatch_id: &
     .unwrap()
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn count_status_reaction_outbox(
     conn: &sqlite_test::Connection,
     dispatch_id: &str,
@@ -218,6 +362,7 @@ pub(crate) fn count_status_reaction_outbox(
     .unwrap()
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn load_dispatch_events(
     conn: &sqlite_test::Connection,
     dispatch_id: &str,
@@ -238,6 +383,7 @@ pub(crate) fn load_dispatch_events(
     .collect()
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn seed_assistant_response_for_dispatch(db: &Db, dispatch_id: &str, message: &str) {
     crate::db::session_transcripts::persist_turn(
         db,

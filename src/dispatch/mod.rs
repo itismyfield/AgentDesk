@@ -5,7 +5,7 @@ mod dispatch_create;
 mod dispatch_query;
 mod dispatch_status;
 mod dispatch_summary;
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[cfg(test)]
 pub(crate) mod test_support;
 mod types;
 

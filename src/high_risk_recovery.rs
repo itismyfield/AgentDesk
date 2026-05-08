@@ -1,9 +1,15 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
 use crate::config::Config;
 use crate::engine::PolicyEngine;
+use crate::services::dispatches::discord_delivery::{
+    DispatchNotifyDeliveryResult, DispatchTransport, ReviewFollowupKind,
+    send_dispatch_with_delivery_guard,
+};
+use crate::services::dispatches::outbox_queue::{OutboxNotifier, process_outbox_batch_with_pg};
 
 struct PgRecoveryTestDatabase {
     _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
@@ -159,6 +165,92 @@ async fn seed_card_pg(pool: &sqlx::PgPool, card_id: &str, status: &str) {
     .expect("seed postgres card");
 }
 
+#[derive(Clone, Default)]
+struct RestartGuardTransport {
+    posts: Arc<Mutex<Vec<String>>>,
+}
+
+impl RestartGuardTransport {
+    fn post_count(&self) -> usize {
+        self.posts.lock().unwrap().len()
+    }
+}
+
+impl DispatchTransport for RestartGuardTransport {
+    async fn send_dispatch(
+        &self,
+        _db: Option<crate::db::Db>,
+        _agent_id: String,
+        _title: String,
+        _card_id: String,
+        dispatch_id: String,
+    ) -> Result<DispatchNotifyDeliveryResult, String> {
+        self.posts.lock().unwrap().push(dispatch_id.clone());
+        let mut result =
+            DispatchNotifyDeliveryResult::success(&dispatch_id, "notify", "restart mock sent");
+        result.correlation_id = Some(format!("dispatch:{dispatch_id}"));
+        result.semantic_event_id = Some(format!("dispatch:{dispatch_id}:notify"));
+        result.target_channel_id = Some("111".to_string());
+        result.message_id = Some("restart-new-message".to_string());
+        Ok(result)
+    }
+
+    async fn send_review_followup(
+        &self,
+        _db: Option<crate::db::Db>,
+        _review_dispatch_id: String,
+        _card_id: String,
+        _channel_id_num: u64,
+        _message: String,
+        _kind: ReviewFollowupKind,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+struct RestartGuardNotifier {
+    pool: sqlx::PgPool,
+    transport: RestartGuardTransport,
+}
+
+impl OutboxNotifier for RestartGuardNotifier {
+    async fn notify_dispatch(
+        &self,
+        _db: Option<crate::db::Db>,
+        agent_id: String,
+        title: String,
+        card_id: String,
+        dispatch_id: String,
+    ) -> Result<DispatchNotifyDeliveryResult, String> {
+        send_dispatch_with_delivery_guard(
+            None,
+            Some(&self.pool),
+            &agent_id,
+            &title,
+            &card_id,
+            &dispatch_id,
+            &self.transport,
+        )
+        .await
+    }
+
+    async fn handle_followup(
+        &self,
+        _db: Option<crate::db::Db>,
+        _dispatch_id: String,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn sync_status_reaction(
+        &self,
+        _db: Option<crate::db::Db>,
+        _dispatch_id: String,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn boot_reconcile_pg_resets_stale_runtime_rows() {
     let pg_db = PgRecoveryTestDatabase::create().await;
@@ -299,6 +391,128 @@ async fn boot_reconcile_pg_resets_stale_runtime_rows() {
             .expect("load valid entry status");
     assert_eq!(broken_status, "pending");
     assert_eq!(valid_status, "dispatched");
+
+    drop(engine);
+    crate::db::postgres::close_test_pool(pool, "pg-only high_risk_recovery")
+        .await
+        .expect("close pg-only high_risk_recovery pool");
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery() {
+    let pg_db = PgRecoveryTestDatabase::create().await;
+    let pool = pg_db.migrate().await;
+    let engine = test_engine_with_pg(pool.clone());
+
+    seed_agent_pg(&pool).await;
+    seed_card_pg(&pool, "card-pg-restart-delivery", "in_progress").await;
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            'dispatch-pg-restart-delivery',
+            'card-pg-restart-delivery',
+            'agent-1',
+            'implementation',
+            'pending',
+            'Restart delivery',
+            NOW(),
+            NOW()
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed restart dispatch");
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (
+            dispatch_id, action, agent_id, card_id, title, status, claimed_at, claim_owner
+         ) VALUES (
+            'dispatch-pg-restart-delivery',
+            'notify',
+            'agent-1',
+            'card-pg-restart-delivery',
+            'Restart delivery',
+            'processing',
+            NOW() - INTERVAL '1 minute',
+            'old-dcserver'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed processing notify outbox");
+    sqlx::query(
+        "INSERT INTO dispatch_delivery_events (
+            dispatch_id,
+            correlation_id,
+            semantic_event_id,
+            operation,
+            target_kind,
+            target_channel_id,
+            status,
+            attempt,
+            message_id,
+            messages_json,
+            result_json
+         ) VALUES (
+            'dispatch-pg-restart-delivery',
+            'dispatch:dispatch-pg-restart-delivery',
+            'dispatch:dispatch-pg-restart-delivery:notify',
+            'send',
+            'channel',
+            '111',
+            'sent',
+            1,
+            'restart-prior-message',
+            '[{\"channel_id\":\"111\",\"message_id\":\"restart-prior-message\"}]'::jsonb,
+            '{\"status\":\"success\",\"message_id\":\"restart-prior-message\"}'::jsonb
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed prior typed sent delivery");
+
+    let stats = crate::reconcile::reconcile_boot_runtime(None, &engine, Some(&pool))
+        .await
+        .expect("pg boot reconcile succeeds");
+    assert_eq!(stats.stale_processing_outbox_reset, 1);
+
+    let transport = RestartGuardTransport::default();
+    let notifier = RestartGuardNotifier {
+        pool: pool.clone(),
+        transport: transport.clone(),
+    };
+    let processed =
+        process_outbox_batch_with_pg(None, Some(&pool), &notifier, Some("restart-test")).await;
+    assert_eq!(processed, 1);
+    assert_eq!(
+        transport.post_count(),
+        0,
+        "typed prior delivery must suppress restart replay posts"
+    );
+
+    let (outbox_status, delivery_status, delivery_result): (
+        String,
+        Option<String>,
+        Option<serde_json::Value>,
+    ) = sqlx::query_as(
+        "SELECT status, delivery_status, delivery_result
+           FROM dispatch_outbox
+          WHERE dispatch_id = 'dispatch-pg-restart-delivery'
+            AND action = 'notify'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load restart outbox result");
+    assert_eq!(outbox_status, "done");
+    assert_eq!(delivery_status.as_deref(), Some("duplicate"));
+    assert_eq!(
+        delivery_result
+            .as_ref()
+            .and_then(|value| value.get("message_id"))
+            .and_then(|value| value.as_str()),
+        Some("restart-prior-message")
+    );
 
     drop(engine);
     crate::db::postgres::close_test_pool(pool, "pg-only high_risk_recovery")
