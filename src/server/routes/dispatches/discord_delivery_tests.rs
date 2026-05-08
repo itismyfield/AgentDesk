@@ -2333,6 +2333,178 @@ async fn send_dispatch_to_discord_with_pg_creates_thread_and_persists_context() 
 }
 
 #[tokio::test]
+async fn reset_slot_thread_before_reuse_excludes_current_auto_queue_entry_pg() {
+    let _env_lock = env_lock();
+    let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+    let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
+    let temp = tempfile::tempdir().unwrap();
+    write_announce_token(temp.path());
+    let _root = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+    let sqlite = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id)
+             VALUES ($1, $2, $3)",
+    )
+    .bind("agent-1")
+    .bind("Agent 1")
+    .bind("123")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, latest_dispatch_id, github_issue_number,
+                created_at, updated_at
+             ) VALUES
+                ($1, $2, $3, $4, $5, $6, NOW(), NOW()),
+                ($7, $8, $9, $4, NULL, $10, NOW(), NOW())",
+    )
+    .bind("card-current")
+    .bind("Reset current")
+    .bind("requested")
+    .bind("agent-1")
+    .bind("dispatch-current")
+    .bind(1933_i64)
+    .bind("card-other")
+    .bind("Other active")
+    .bind("in_progress")
+    .bind(1934_i64)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+    )
+    .bind("dispatch-current")
+    .bind("card-current")
+    .bind("agent-1")
+    .bind("implementation")
+    .bind("pending")
+    .bind("Reset current")
+    .bind(
+        r#"{"auto_queue":true,"entry_id":"entry-current","slot_index":0,"reset_slot_thread_before_reuse":true}"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+             VALUES ($1, 0, $2::jsonb)",
+    )
+    .bind("agent-1")
+    .bind(r#"{"123":"thread-history"}"#)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES ($1, $2, $3)",
+    )
+    .bind("run-1")
+    .bind("agent-1")
+    .bind("active")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group
+             ) VALUES ($1, $2, $3, $4, $5, NULL, 0, 0)",
+    )
+    .bind("entry-current")
+    .bind("run-1")
+    .bind("card-current")
+    .bind("agent-1")
+    .bind("dispatched")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    send_dispatch_to_discord_with_pg(
+        Some(&sqlite),
+        Some(&pool),
+        "agent-1",
+        "Reset current",
+        "card-current",
+        "dispatch-current",
+    )
+    .await
+    .unwrap();
+
+    server_handle.abort();
+
+    let state = state.lock().unwrap();
+    assert!(
+        !state
+            .calls
+            .contains(&"GET /channels/thread-history".to_string()),
+        "reset-before-reuse should clear the stale slot binding before reuse probes"
+    );
+    assert!(
+        state
+            .calls
+            .contains(&"POST /channels/123/threads".to_string()),
+        "delivery should create a fresh slot thread after excluding its own entry"
+    );
+    assert!(
+        state
+            .calls
+            .contains(&"POST /channels/456/messages".to_string()),
+        "delivery should post into the fresh slot thread"
+    );
+    drop(state);
+
+    let slot_map: Option<String> = sqlx::query_scalar(
+        "SELECT thread_id_map::text
+             FROM auto_queue_slots
+             WHERE agent_id = $1 AND slot_index = 0",
+    )
+    .bind("agent-1")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&slot_map.unwrap()).unwrap()["123"],
+        "456"
+    );
+
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group
+             ) VALUES ($1, $2, $3, $4, $5, NULL, 0, 0)",
+    )
+    .bind("entry-other")
+    .bind("run-1")
+    .bind("card-other")
+    .bind("agent-1")
+    .bind("dispatched")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let err = crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding_pg(
+        &pool,
+        "agent-1",
+        0,
+        Some("dispatch-current"),
+        Some("entry-current"),
+    )
+    .await
+    .expect_err("different active entry on the same slot must still block reset");
+    assert!(err.contains("has active dispatch"));
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn review_delivery_creates_counter_model_slot_thread_without_legacy_active_fallback() {
     let _env_lock = env_lock();
     let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;

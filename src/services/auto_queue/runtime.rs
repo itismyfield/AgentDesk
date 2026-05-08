@@ -183,19 +183,23 @@ pub async fn slot_has_active_dispatch_excluding_pg(
     agent_id: &str,
     slot_index: i64,
     exclude_dispatch_id: Option<&str>,
+    exclude_entry_id: Option<&str>,
 ) -> Result<bool, String> {
     let exclude_id = exclude_dispatch_id.unwrap_or("");
+    let exclude_entry_id = exclude_entry_id.unwrap_or("");
     let auto_queue_active: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)
          FROM auto_queue_entries
          WHERE agent_id = $1
            AND slot_index = $2
            AND status = 'dispatched'
-           AND COALESCE(dispatch_id, '') != $3",
+           AND COALESCE(dispatch_id, '') != $3
+           AND id != $4",
     )
     .bind(agent_id)
     .bind(slot_index)
     .bind(exclude_id)
+    .bind(exclude_entry_id)
     .fetch_one(pool)
     .await
     .map_err(|error| {
@@ -260,7 +264,7 @@ pub async fn reset_slot_thread_bindings_pg(
     agent_id: &str,
     slot_index: i64,
 ) -> Result<(usize, usize, usize), String> {
-    reset_slot_thread_bindings_excluding_pg(pool, agent_id, slot_index, None).await
+    reset_slot_thread_bindings_excluding_pg(pool, agent_id, slot_index, None, None).await
 }
 
 pub async fn reset_slot_thread_bindings_excluding_pg(
@@ -268,9 +272,16 @@ pub async fn reset_slot_thread_bindings_excluding_pg(
     agent_id: &str,
     slot_index: i64,
     exclude_dispatch_id: Option<&str>,
+    exclude_entry_id: Option<&str>,
 ) -> Result<(usize, usize, usize), String> {
-    if slot_has_active_dispatch_excluding_pg(pool, agent_id, slot_index, exclude_dispatch_id)
-        .await?
+    if slot_has_active_dispatch_excluding_pg(
+        pool,
+        agent_id,
+        slot_index,
+        exclude_dispatch_id,
+        exclude_entry_id,
+    )
+    .await?
     {
         return Err(format!(
             "slot {slot_index} for agent {agent_id} has active dispatch"

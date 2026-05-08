@@ -441,6 +441,7 @@ pub(crate) async fn reset_stale_slot_thread_if_needed(
     discord_api_base: &str,
     dispatch_id: &str,
     slot_binding: &crate::db::dispatches::SlotThreadBinding,
+    exclude_entry_id: Option<&str>,
 ) -> Result<bool, String> {
     let Some(thread_id) = slot_binding.thread_id.as_deref() else {
         return Ok(false);
@@ -499,6 +500,7 @@ pub(crate) async fn reset_stale_slot_thread_if_needed(
         &slot_binding.agent_id,
         slot_binding.slot_index,
         Some(dispatch_id),
+        exclude_entry_id,
     )
     .await?;
     Ok(true)
