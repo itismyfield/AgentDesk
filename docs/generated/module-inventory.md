@@ -5,7 +5,7 @@
 
 - Production Rust modules: `530`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `94`
+- Giant files: `95`
 
 ## Namespace Summary
 
@@ -83,7 +83,7 @@
 | `db::auto_queue::slots` | `src/db/auto_queue/slots.rs` | 197 |  |
 | `db::auto_queue::test_support` | `src/db/auto_queue/test_support.rs` | 150 |  |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
-| `db::dispatch_semaphores` | `src/db/dispatch_semaphores.rs` | 285 |  |
+| `db::dispatch_semaphores` | `src/db/dispatch_semaphores.rs` | 331 |  |
 | `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1532 | giant-file |
 | `db::dispatches` | `src/db/dispatches/mod.rs` | 991 |  |
 | `db::dispatches::delivery_events` | `src/db/dispatches/delivery_events.rs` | 479 |  |
@@ -103,7 +103,7 @@
 | `db::kanban_cards::metadata` | `src/db/kanban_cards/metadata.rs` | 235 |  |
 | `db::kanban_cards::transitions` | `src/db/kanban_cards/transitions.rs` | 595 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 265 |  |
-| `db::postgres` | `src/db/postgres.rs` | 1647 | giant-file |
+| `db::postgres` | `src/db/postgres.rs` | 1667 | giant-file |
 | `db::prompt_manifests` | `src/db/prompt_manifests/mod.rs` | 26 |  |
 | `db::prompt_manifests::builder` | `src/db/prompt_manifests/builder.rs` | 86 |  |
 | `db::prompt_manifests::model` | `src/db/prompt_manifests/model.rs` | 181 |  |
@@ -126,7 +126,7 @@
 | `dispatch::dispatch_query` | `src/dispatch/dispatch_query.rs` | 174 |  |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1934 | giant-file |
 | `dispatch::dispatch_summary` | `src/dispatch/dispatch_summary.rs` | 326 |  |
-| `dispatch::test_support` | `src/dispatch/test_support.rs` | 404 |  |
+| `dispatch::test_support` | `src/dispatch/test_support.rs` | 401 |  |
 | `dispatch::types` | `src/dispatch/types.rs` | 5 |  |
 | `engine` | `src/engine/mod.rs` | 2590 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
@@ -161,7 +161,7 @@
 | `github::dod` | `src/github/dod.rs` | 395 |  |
 | `github::sync` | `src/github/sync.rs` | 1059 | giant-file |
 | `github::triage` | `src/github/triage.rs` | 159 |  |
-| `high_risk_recovery` | `src/high_risk_recovery.rs` | 1133 | giant-file |
+| `high_risk_recovery` | `src/high_risk_recovery.rs` | 1161 | giant-file |
 | `integration_tests::agents_setup_e2e` | `src/integration_tests/agents_setup_e2e.rs` | 651 |  |
 | `integration_tests::discord_flow` | `src/integration_tests/discord_flow/mod.rs` | 46 |  |
 | `integration_tests::discord_flow::harness` | `src/integration_tests/discord_flow/harness.rs` | 265 |  |
@@ -184,7 +184,7 @@
 | `manual_intervention` | `src/manual_intervention.rs` | 65 |  |
 | `pipeline` | `src/pipeline.rs` | 2125 | giant-file |
 | `receipt` | `src/receipt.rs` | 2133 | giant-file |
-| `reconcile` | `src/reconcile.rs` | 1861 | giant-file |
+| `reconcile` | `src/reconcile.rs` | 1867 | giant-file |
 | `runtime` | `src/runtime.rs` | 115 |  |
 | `runtime_layout` | `src/runtime_layout/mod.rs` | 1425 | giant-file |
 | `runtime_layout::config_merge` | `src/runtime_layout/config_merge.rs` | 596 |  |
@@ -269,7 +269,7 @@
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 303 |  |
 | `server::routes::v1` | `src/server/routes/v1.rs` | 1857 | giant-file |
 | `server::state` | `src/server/state.rs` | 235 |  |
-| `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 712 |  |
+| `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 1038 | giant-file |
 | `server::test_phase_runs` | `src/server/test_phase_runs.rs` | 426 |  |
 | `server::worker_registry` | `src/server/worker_registry.rs` | 733 |  |
 | `server::ws` | `src/server/ws.rs` | 236 |  |
