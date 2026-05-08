@@ -4,7 +4,7 @@ Source issue: #1791
 
 Epic: #1790
 
-Last refreshed: 2026-05-06
+Last refreshed: 2026-05-08
 
 ## Background
 
@@ -206,6 +206,15 @@ The typed table can become authoritative only after all of these are true:
 Once those criteria pass, switch runtime reads and dedupe claims to
 `dispatch_delivery_events`, keep shadow `kv_meta` writes for one release, then
 remove the legacy guard in follow-up issue #1864.
+
+## Cutover Decision Log
+
+| Date       | Decision | Report                                                                                                      | Notes                                                                                                                                                                                         |
+| ---------- | -------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-05-08 | NO-GO    | [dispatch-delivery-events-cutover-2026-05-08.md](../reports/dispatch-delivery-events-cutover-2026-05-08.md) | Release snapshot had 188 typed events, 1099 cumulative reconciliation mismatches, and no seven-day post-prerequisite soak. Keep the legacy reservation/finalization path; do not start #1864. |
+
+Rollback procedure for a future typed-authority cutover:
+[dispatch-delivery-cutover-rollback.md](../runbooks/dispatch-delivery-cutover-rollback.md).
 
 ## Implementation Checklist
 
