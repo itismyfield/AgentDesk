@@ -31,6 +31,25 @@ make that state queryable without changing first-step delivery behavior.
 - Provide a clear cutover path from `kv_meta` to typed idempotency once shadow
   writes prove stable.
 
+## Current rollout state
+
+The legacy `kv_meta` markers remain the authoritative reservation and
+finalization guard until the cutover go/no-go issue #1952 passes. However,
+`dispatch_delivery_events` is no longer write-only shadow data. The current
+guard reads typed rows to:
+
+- detect a prior successful, fallback, skipped, or duplicate delivery before
+  claiming a new send;
+- return prior delivery metadata during duplicate replay;
+- block concurrent sends when a non-expired typed reservation is active; and
+- recover expired typed reservations by marking them `failed` before a retry.
+
+That means operators should use the typed table for delivery diagnosis during
+rollout while still treating `kv_meta` as the source of truth for whether the
+legacy guard has reserved or finalized a notification. Full typed-table
+authority remains incomplete until #1952 approves cutover; legacy guard removal
+stays deferred to follow-up issue #1864.
+
 ## Non-Goals
 
 - No behavior change in the design step.
