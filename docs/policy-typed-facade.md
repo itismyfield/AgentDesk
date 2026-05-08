@@ -24,7 +24,11 @@ Current typed facade entrypoints:
 | `agentdesk.review` | `getVerdict(card_id)` | Returns canonical review verdict state from `card_review_state` with fallback to the latest completed review dispatch result. |
 | `agentdesk.review` | `entryContext(card_id)` | Returns review-entry planning data: current round, completed implementation/rework count, and the next round decision without exposing `task_dispatches` SQL. |
 | `agentdesk.review` | `recordEntry(card_id, opts)` | Updates `kanban_cards.review_round` and `updated_at` for the review-entry flow with an optional terminal-state guard. |
+| `agentdesk.reviewState` | `sync(card_id, state, opts)` | Synchronizes the canonical review verdict state in `card_review_state`. |
+| `agentdesk.kanban` | `setStatus(card_id, new_status, force?)` | Updates the card status without raw `kanban_cards.status` UPDATEs. |
+| `agentdesk.kanban` | `setReviewStatus(card_id, status, opts)` | Updates the review status without raw `kanban_cards.review_status` UPDATEs. |
 | `agentdesk.queue` | `status()` | Returns typed queue and outbox counts without exposing raw queue tables to JS. |
+| `agentdesk.autoQueue` | `updateEntryStatus(entry_id, status, source, opts)` | Updates `auto_queue_entries` status cleanly, logging the transition. |
 | `agentdesk.dispatch` | `create(...)` | Existing typed command, retained as-is. |
 | `agentdesk.kv` | `get/set/delete(...)` | Existing typed KV facade, preferred over `kv_meta` SQL. |
 
