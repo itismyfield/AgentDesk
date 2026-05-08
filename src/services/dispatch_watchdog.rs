@@ -78,7 +78,7 @@ async fn scan_once(pool: &PgPool) -> Result<(), sqlx::Error> {
            AND completed_at IS NULL
            AND last_stuck_alert_at IS NULL
            AND updated_at < NOW() - make_interval(mins =>
-               CASE WHEN dispatch_type = 'implementation' THEN $1 ELSE $2 END)",
+               (CASE WHEN dispatch_type = 'implementation' THEN $1 ELSE $2 END)::int)",
     )
     .bind(STUCK_THRESHOLD_IMPLEMENTATION)
     .bind(STUCK_THRESHOLD_OTHER)
