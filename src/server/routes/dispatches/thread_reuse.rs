@@ -619,6 +619,34 @@ pub(crate) async fn try_reuse_thread(
     )>,
     super::discord_delivery::DispatchMessagePostError,
 > {
+    // #1968: Refuse to reuse a thread that already has a *different* active
+    // dispatch. Two dispatches assigned to the same Discord thread results in
+    // the second never receiving turn_started — its session_key/started_at
+    // stay null forever. Force the caller to create a fresh thread instead.
+    if let Some(pool) = pg_pool {
+        let active_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM task_dispatches
+             WHERE thread_id = $1
+               AND id <> $2
+               AND status IN ('pending','dispatched')",
+        )
+        .bind(thread_id)
+        .bind(dispatch_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        if active_count > 0 {
+            tracing::info!(
+                "[dispatch] Thread {thread_id} has {active_count} active dispatch(es); refusing reuse for {dispatch_id} and forcing fresh thread"
+            );
+            // Clear so subsequent retries don't keep probing this busy thread.
+            clear_thread_for_channel_pg(pool, card_id, expected_parent)
+                .await
+                .ok();
+            return Ok(None);
+        }
+    }
+
     // 1. Fetch thread info to verify it exists and belongs to the right parent channel
     let thread_info_url = format!(
         "{}/channels/{}",
