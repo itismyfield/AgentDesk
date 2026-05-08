@@ -22,15 +22,12 @@ var pipeline = {
     if (!isDispatchable) return;
 
     // Check if repo has pipeline stages triggered on this dispatchable state
-    var cards = agentdesk.db.query(
-      "SELECT repo_id FROM kanban_cards WHERE id = ?",
-      [payload.card_id]
-    );
-    if (cards.length === 0) return;
+    var card = agentdesk.cards.get(payload.card_id);
+    if (!card) return;
 
     var stages = agentdesk.db.query(
       "SELECT id, stage_name, agent_override_id FROM pipeline_stages WHERE repo_id = ? AND trigger_after = ? ORDER BY stage_order ASC LIMIT 1",
-      [cards[0].repo_id, payload.to]
+      [card.repo_id, payload.to]
     );
     if (stages.length > 0) {
       agentdesk.db.execute(
