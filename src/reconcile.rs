@@ -223,6 +223,8 @@ pub(crate) async fn reconcile_boot_db_pg(pool: &PgPool) -> Result<BootReconcileS
     let stale_processing_outbox_reset = sqlx::query(
         "UPDATE dispatch_outbox
             SET status = 'pending',
+                claimed_at = NULL,
+                claim_owner = NULL,
                 next_attempt_at = NOW()
           WHERE status = 'processing'",
     )
@@ -636,7 +638,11 @@ fn reconcile_boot_db_sqlite(db: &Db) -> Result<BootReconcileStats> {
         .map_err(|error| anyhow!("open sqlite boot reconcile connection: {error}"))?;
     let stale_processing_outbox_reset = conn
         .execute(
-            "UPDATE dispatch_outbox SET status = 'pending' WHERE status = 'processing'",
+            "UPDATE dispatch_outbox
+                SET status = 'pending',
+                    claimed_at = NULL,
+                    claim_owner = NULL
+              WHERE status = 'processing'",
             [],
         )
         .unwrap_or(0);

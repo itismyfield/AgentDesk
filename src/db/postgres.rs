@@ -763,7 +763,7 @@ where
 }
 
 #[cfg(test)]
-async fn connect_test_pool_with_max_connections(
+pub(crate) async fn connect_test_pool_with_max_connections(
     database_url: &str,
     label: &str,
     max_connections: u32,
@@ -893,11 +893,31 @@ pub(crate) async fn drop_test_database(
         .execute(&admin_pool),
     )
     .await?;
-    run_test_postgres_sqlx_op(
-        &format!("{label} drop postgres test db {database_name}"),
-        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{database_name}\"")).execute(&admin_pool),
-    )
-    .await?;
+    let drop_sql = format!("DROP DATABASE IF EXISTS \"{database_name}\" WITH (FORCE)");
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        match run_test_postgres_sqlx_op(
+            &format!("{label} drop postgres test db {database_name}"),
+            sqlx::query(&drop_sql).execute(&admin_pool),
+        )
+        .await
+        {
+            Ok(_) => {
+                last_error = None;
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 3 {
+                    tokio::time::sleep(Duration::from_millis(100 * attempt)).await;
+                }
+            }
+        }
+    }
+    if let Some(error) = last_error {
+        close_test_pool(admin_pool, &format!("{label} admin")).await?;
+        return Err(error);
+    }
     close_test_pool(admin_pool, &format!("{label} admin")).await?;
     Ok(())
 }

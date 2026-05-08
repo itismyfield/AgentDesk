@@ -1,9 +1,7 @@
 use crate::services::git::GitCommand;
-use std::str::FromStr;
 use std::sync::MutexGuard;
 #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::db::Db;
@@ -49,14 +47,13 @@ impl DispatchPostgresTestDb {
         &self,
         max_connections: u32,
     ) -> sqlx::PgPool {
-        let options = sqlx::postgres::PgConnectOptions::from_str(&self.database_url)
-            .unwrap_or_else(|err| panic!("parse {} postgres test url: {err}", self.label));
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(max_connections.max(1))
-            .acquire_timeout(Duration::from_secs(15))
-            .connect_with(options)
-            .await
-            .unwrap_or_else(|err| panic!("connect {} postgres test db: {err}", self.label));
+        let pool = crate::db::postgres::connect_test_pool_with_max_connections(
+            &self.database_url,
+            &self.label,
+            max_connections,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("connect {} postgres test db: {err}", self.label));
         crate::db::postgres::migrate(&pool)
             .await
             .unwrap_or_else(|err| panic!("migrate {} postgres test db: {err}", self.label));

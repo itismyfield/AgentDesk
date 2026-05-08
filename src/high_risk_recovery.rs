@@ -406,6 +406,20 @@ async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery() {
     let engine = test_engine_with_pg(pool.clone());
 
     seed_agent_pg(&pool).await;
+    sqlx::query(
+        "INSERT INTO worker_nodes (
+            instance_id, hostname, process_id, role, effective_role, status,
+            labels, capabilities, last_heartbeat_at, started_at, updated_at
+         ) VALUES (
+            'restart-test', 'restart-host', 100, 'worker', 'worker', 'online',
+            $1, $2, NOW(), NOW(), NOW()
+         )",
+    )
+    .bind(serde_json::json!(["mac-book", "restart-test"]))
+    .bind(serde_json::json!({"providers": ["codex", "claude"]}))
+    .execute(&pool)
+    .await
+    .expect("seed restart worker node");
     seed_card_pg(&pool, "card-pg-restart-delivery", "in_progress").await;
     sqlx::query(
         "INSERT INTO task_dispatches (
@@ -476,6 +490,20 @@ async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery() {
         .await
         .expect("pg boot reconcile succeeds");
     assert_eq!(stats.stale_processing_outbox_reset, 1);
+    let (recovered_status, recovered_claim_owner): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, claim_owner
+           FROM dispatch_outbox
+          WHERE dispatch_id = 'dispatch-pg-restart-delivery'
+            AND action = 'notify'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load recovered restart outbox");
+    assert_eq!(recovered_status, "pending");
+    assert!(
+        recovered_claim_owner.is_none(),
+        "boot recovery must clear stale claim_owner so the restarted worker can claim"
+    );
 
     let transport = RestartGuardTransport::default();
     let notifier = RestartGuardNotifier {
