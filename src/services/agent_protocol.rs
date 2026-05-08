@@ -99,7 +99,12 @@ pub enum StreamMessage {
         #[allow(dead_code)]
         exit_code: Option<i32>,
     },
-    /// Statusline info extracted from result/assistant events
+    /// Statusline info extracted from result/assistant events.
+    ///
+    /// Token fields are snapshots of the latest provider usage known for the
+    /// turn. For context-window occupancy, consumers must count cache-create
+    /// and cache-read input tokens with raw input tokens, and must not add
+    /// output tokens.
     StatusUpdate {
         model: Option<String>,
         cost_usd: Option<f64>,
