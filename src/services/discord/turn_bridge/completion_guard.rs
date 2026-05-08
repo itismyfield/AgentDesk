@@ -133,6 +133,23 @@ pub(in crate::services::discord) fn extract_review_decision(
     found
 }
 
+pub(in crate::services::discord::turn_bridge) fn extract_review_decision_commit_sha(
+    full_response: &str,
+) -> Option<String> {
+    let keyed_commit = regex::Regex::new(
+        r#"(?im)\b(?:completed_commit|commit_sha|current_commit|head_sha|commit)\b\s*[:=]\s*`?([0-9a-f]{7,64})`?"#,
+    )
+    .ok()?;
+    keyed_commit
+        .captures_iter(full_response)
+        .filter_map(|captures| {
+            captures
+                .get(1)
+                .map(|value| value.as_str().to_ascii_lowercase())
+        })
+        .last()
+}
+
 async fn submit_review_decision_fallback(
     _api_port: u16,
     card_id: &str,
@@ -141,12 +158,16 @@ async fn submit_review_decision_fallback(
     full_response: &str,
 ) -> Result<(), String> {
     let comment = truncate_str(full_response.trim(), 4000).to_string();
+    let commit_sha = (decision == "accept")
+        .then(|| extract_review_decision_commit_sha(full_response))
+        .flatten();
     crate::services::discord::internal_api::submit_review_decision(
         crate::server::routes::review_verdict::ReviewDecisionBody {
             card_id: card_id.to_string(),
             dispatch_id: Some(dispatch_id.to_string()),
             decision: decision.to_string(),
             comment: Some(comment),
+            commit_sha,
         },
     )
     .await

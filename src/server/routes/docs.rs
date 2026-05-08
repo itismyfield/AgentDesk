@@ -4361,7 +4361,40 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/reviews/decision",
             "reviews",
-            "Submit review-decision action // TODO: example",
+            "Submit review-decision action. For accept, optional commit_sha takes precedence over worktree inference for skip_rework detection.",
+        )
+        .with_params([
+            ("card_id", body_param("string", true, "Kanban card ID")),
+            (
+                "decision",
+                body_param("string", true, "accept | dispute | dismiss"),
+            ),
+            ("comment", body_param("string", false, "Optional decision comment")),
+            (
+                "commit_sha",
+                body_param(
+                    "string",
+                    false,
+                    "Current implementation commit SHA. On accept, explicit commit_sha is compared to the last review reviewed_commit before falling back to worktree inference.",
+                ),
+            ),
+            (
+                "dispatch_id",
+                body_param(
+                    "string",
+                    false,
+                    "Pending review-decision dispatch ID for stale/replay protection",
+                ),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"card_id": "card-1977", "decision": "accept", "commit_sha": "dbadcb1234567890"}}),
+            json!({"ok": true, "card_id": "card-1977", "decision": "accept", "rework_dispatch_created": false, "direct_review_created": true, "review_auto_approved": false, "skip_rework": true}),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"card_id": "card-1977", "decision": "accept", "commit_sha": "not-a-sha"}}),
+            json!({"error": "commit_sha must be a 7-64 character hex git commit SHA", "field": "commit_sha"}),
         ),
         ep(
             "POST",

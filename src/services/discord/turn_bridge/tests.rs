@@ -1,6 +1,6 @@
 use super::completion_guard::{
     build_verdict_payload, extract_explicit_review_verdict, extract_explicit_work_outcome,
-    extract_review_decision,
+    extract_review_decision, extract_review_decision_commit_sha,
 };
 use super::context_window::{
     apply_context_token_update, persisted_context_tokens, resolve_done_response,
@@ -2389,6 +2389,22 @@ fn review_decision_explicit_marker_takes_priority() {
     assert_eq!(
         extract_review_decision("DECISION: accept\n이 dismiss는 무시해도 됩니다."),
         Some("accept")
+    );
+}
+
+#[test]
+fn review_decision_commit_sha_parser_prefers_keyed_commit() {
+    assert_eq!(
+        extract_review_decision_commit_sha(
+            "DECISION: accept\nreviewed_commit: aaaaaaa\ncompleted_commit: dbadcb1234567890"
+        )
+        .as_deref(),
+        Some("dbadcb1234567890")
+    );
+    assert_eq!(
+        extract_review_decision_commit_sha("DECISION: accept\ncommit_sha=`ABCDEF1234567`")
+            .as_deref(),
+        Some("abcdef1234567")
     );
 }
 

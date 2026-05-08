@@ -6943,6 +6943,7 @@ mod tests {
                 card_id: "card-195".to_string(),
                 decision: "accept".to_string(),
                 comment: None,
+                commit_sha: None,
                 dispatch_id: Some("rd-195".to_string()),
             }),
         )
@@ -7068,6 +7069,7 @@ mod tests {
                 card_id: "card-339-skip".to_string(),
                 decision: "accept".to_string(),
                 comment: None,
+                commit_sha: None,
                 dispatch_id: Some("rd-339-skip".to_string()),
             }),
         )
@@ -7147,6 +7149,7 @@ mod tests {
                 card_id: "card-339-no-agent".to_string(),
                 decision: "accept".to_string(),
                 comment: None,
+                commit_sha: None,
                 dispatch_id: Some("rd-339-no-agent".to_string()),
             }),
         )
