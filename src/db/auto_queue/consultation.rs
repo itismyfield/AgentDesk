@@ -100,14 +100,6 @@ pub async fn record_consultation_dispatch_on_pg(
         },
     )
     .await?;
-    if !entry_result.changed {
-        tx.rollback().await.map_err(|error| {
-            format!("rollback stale postgres consultation dispatch entry {entry_id}: {error}")
-        })?;
-        return Err(format!(
-            "stale postgres consultation dispatch entry {entry_id}: status update was not applied"
-        ));
-    }
 
     tx.commit()
         .await

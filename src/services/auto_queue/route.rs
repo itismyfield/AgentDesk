@@ -77,7 +77,7 @@ use dispatch_command::*;
 use dispatch_query::*;
 use fsm::{
     ActivatePreflightOutcome, apply_restore_state_changes_pg, attempt_restore_dispatch,
-    clamp_retry_limit, create_activate_dispatch_prefer_pg, finalize_restore_run_pg,
+    clamp_retry_limit, create_activate_dispatch_for_entry_prefer_pg, finalize_restore_run_pg,
     load_kv_meta_value_pg, record_consultation_dispatch_prefer_pg,
     select_consultation_counterpart_prefer_pg, update_entry_status_prefer_pg,
 };

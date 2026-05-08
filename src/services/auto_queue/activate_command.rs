@@ -732,41 +732,6 @@ pub(crate) async fn activate_with_deps_pg(
             cleared_slots.insert(slot_key);
         }
 
-        match crate::db::auto_queue::update_entry_status_on_pg(
-            pool,
-            &entry_id,
-            crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-            "activate_dispatch_reserve_pg",
-            &crate::db::auto_queue::EntryStatusUpdateOptions {
-                dispatch_id: None,
-                slot_index,
-            },
-        )
-        .await
-        {
-            Ok(result) if !result.changed => {
-                crate::auto_queue_log!(
-                    info,
-                    "activate_dispatch_reserve_already_claimed_pg",
-                    entry_log_ctx.clone().maybe_slot_index(slot_index),
-                    "[auto-queue] entry {entry_id} was already reserved by another activate worker; skipping duplicate PG dispatch creation"
-                );
-                continue;
-            }
-            Ok(_) => {}
-            Err(error) => {
-                crate::auto_queue_log!(
-                    warn,
-                    "activate_dispatch_reserve_failed_pg",
-                    entry_log_ctx.clone().maybe_slot_index(slot_index),
-                    "[auto-queue] failed to reserve PG entry {} before create_dispatch: {}",
-                    entry_id,
-                    error
-                );
-                continue;
-            }
-        }
-
         let retry_resume_session_id = if retry_count > 0 {
             match crate::db::auto_queue::latest_entry_phase_codex_session_id_pg(
                 pool,
@@ -813,13 +778,18 @@ pub(crate) async fn activate_with_deps_pg(
             reset_slot_thread_before_reuse,
             dispatch_extra_fields,
         );
-        let dispatch_id = match create_activate_dispatch_pg(
+        let dispatch_id = match create_activate_dispatch_for_entry_pg(
             pool,
             &card_id,
             &agent_id,
             "implementation",
             &initial_state.title,
             &dispatch_context,
+            ActivateDispatchEntryAttachment::new(
+                &entry_id,
+                slot_index,
+                "activate_dispatch_created_pg",
+            ),
         )
         .await
         {

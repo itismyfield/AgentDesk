@@ -105,26 +105,6 @@ pub(super) fn attempt_restore_dispatch(
     } else {
         return Ok(result);
     };
-    match update_entry_status_prefer_pg(
-        deps,
-        &entry.entry_id,
-        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-        "restore_run_dispatch_reserve",
-        &crate::db::auto_queue::EntryStatusUpdateOptions {
-            dispatch_id: None,
-            slot_index,
-        },
-    ) {
-        Ok(update) if !update.changed => return Ok(result),
-        Ok(_) => {}
-        Err(error) => {
-            return Err(format!(
-                "{}: eager restore reservation failed: {error}",
-                entry.entry_id
-            ));
-        }
-    }
-
     let dispatch_context = build_auto_queue_dispatch_context(
         &entry.entry_id,
         entry.thread_group,
@@ -132,13 +112,16 @@ pub(super) fn attempt_restore_dispatch(
         reset_slot_thread_before_reuse,
         [("restored_run", json!(true)), ("run_id", json!(run_id))],
     );
-    let dispatch_result = create_activate_dispatch_prefer_pg(
+    let dispatch_result = create_activate_dispatch_for_entry_prefer_pg(
         deps,
         &entry.card_id,
         &entry.agent_id,
         "implementation",
         &candidate.title,
         &dispatch_context,
+        &entry.entry_id,
+        slot_index,
+        "restore_run_create_dispatch",
     );
     let created_dispatch = dispatch_result.is_ok();
 
@@ -790,6 +773,56 @@ pub(super) fn create_activate_dispatch_prefer_pg(
     }
 
     let _ = (deps, card_id, to_agent_id, dispatch_type, title, context);
+    Err("postgres backend required for auto-queue dispatch creation".to_string())
+}
+
+pub(super) fn create_activate_dispatch_for_entry_prefer_pg(
+    deps: &AutoQueueActivateDeps,
+    card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+    entry_id: &str,
+    slot_index: Option<i64>,
+    trigger_source: &str,
+) -> Result<String, String> {
+    if let Some(pool) = deps.pg_pool.as_ref() {
+        let card_id = card_id.to_string();
+        let to_agent_id = to_agent_id.to_string();
+        let dispatch_type = dispatch_type.to_string();
+        let title = title.to_string();
+        let context = context.clone();
+        let attachment = ActivateDispatchEntryAttachment::new(entry_id, slot_index, trigger_source);
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                create_activate_dispatch_for_entry_pg(
+                    &bridge_pool,
+                    &card_id,
+                    &to_agent_id,
+                    &dispatch_type,
+                    &title,
+                    &context,
+                    attachment,
+                )
+                .await
+            },
+            |error| error,
+        );
+    }
+
+    let _ = (
+        deps,
+        card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        entry_id,
+        slot_index,
+        trigger_source,
+    );
     Err("postgres backend required for auto-queue dispatch creation".to_string())
 }
 

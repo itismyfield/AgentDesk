@@ -242,34 +242,6 @@ pub(super) fn handle_activate_preflight_metadata(
 
     match parsed.get("preflight_status").and_then(|v| v.as_str()) {
         Some("consult_required") => {
-            match update_entry_status_prefer_pg(
-                deps,
-                entry_id,
-                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-                "activate_preflight_consultation_reserve",
-                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-            ) {
-                Ok(result) if !result.changed => {
-                    crate::auto_queue_log!(
-                        info,
-                        "activate_preflight_consultation_reserve_already_claimed",
-                        log_ctx.clone(),
-                        "[auto-queue] consultation entry {entry_id} was already reserved before preflight dispatch creation"
-                    );
-                    return ActivatePreflightOutcome::Deferred;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    crate::auto_queue_log!(
-                        warn,
-                        "activate_preflight_consultation_reserve_failed",
-                        log_ctx.clone(),
-                        "[auto-queue] failed to reserve consultation entry {entry_id} before dispatch creation: {error}"
-                    );
-                    return ActivatePreflightOutcome::Deferred;
-                }
-            }
-
             let consult_agent_id = match select_consultation_counterpart_prefer_pg(deps, agent_id) {
                 Ok(consult_agent_id) => consult_agent_id,
                 Err(error) => {
@@ -293,13 +265,16 @@ pub(super) fn handle_activate_preflight_metadata(
                     ("batch_phase", json!(batch_phase)),
                 ],
             );
-            let dispatch_id = match create_activate_dispatch_prefer_pg(
+            let dispatch_id = match create_activate_dispatch_for_entry_prefer_pg(
                 deps,
                 card_id,
                 &consult_agent_id,
                 "consultation",
                 &format!("[Consultation] {title}"),
                 &dispatch_context,
+                entry_id,
+                None,
+                "activate_preflight_consultation_dispatch",
             ) {
                 Ok(dispatch_id) => dispatch_id,
                 Err(error) => {

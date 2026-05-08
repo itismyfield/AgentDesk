@@ -1,5 +1,22 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+pub(super) struct ActivateDispatchEntryAttachment {
+    pub entry_id: String,
+    pub slot_index: Option<i64>,
+    pub trigger_source: String,
+}
+
+impl ActivateDispatchEntryAttachment {
+    pub(super) fn new(entry_id: &str, slot_index: Option<i64>, trigger_source: &str) -> Self {
+        Self {
+            entry_id: entry_id.to_string(),
+            slot_index,
+            trigger_source: trigger_source.to_string(),
+        }
+    }
+}
+
 pub(super) async fn create_activate_dispatch_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
@@ -7,6 +24,48 @@ pub(super) async fn create_activate_dispatch_pg(
     dispatch_type: &str,
     title: &str,
     context: &serde_json::Value,
+) -> Result<String, String> {
+    create_activate_dispatch_pg_inner(
+        pool,
+        card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn create_activate_dispatch_for_entry_pg(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+    entry_attachment: ActivateDispatchEntryAttachment,
+) -> Result<String, String> {
+    create_activate_dispatch_pg_inner(
+        pool,
+        card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        Some(entry_attachment),
+    )
+    .await
+}
+
+async fn create_activate_dispatch_pg_inner(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+    entry_attachment: Option<ActivateDispatchEntryAttachment>,
 ) -> Result<String, String> {
     // #1564 RC10: refuse to create policy-driven follow-up dispatches while
     // the owning auto-queue run is paused. force_transition uses a separate
@@ -256,6 +315,63 @@ pub(super) async fn create_activate_dispatch_pg(
         .await
         .map_err(|error| format!("open postgres activate dispatch transaction: {error}"))?;
 
+    if let Some(attachment) = entry_attachment.as_ref() {
+        let row = sqlx::query(
+            "SELECT status, dispatch_id
+             FROM auto_queue_entries
+             WHERE id = $1
+               AND kanban_card_id = $2
+             FOR UPDATE",
+        )
+        .bind(&attachment.entry_id)
+        .bind(card_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "lock postgres auto-queue entry {} for dispatch attach: {error}",
+                attachment.entry_id
+            )
+        })?
+        .ok_or_else(|| {
+            format!(
+                "auto-queue entry {} for card {card_id} not found during dispatch attach",
+                attachment.entry_id
+            )
+        })?;
+        let entry_status: String = row.try_get("status").map_err(|error| {
+            format!(
+                "decode postgres auto-queue entry {} status during dispatch attach: {error}",
+                attachment.entry_id
+            )
+        })?;
+        let entry_dispatch_id: Option<String> = row.try_get("dispatch_id").map_err(|error| {
+            format!(
+                "decode postgres auto-queue entry {} dispatch_id during dispatch attach: {error}",
+                attachment.entry_id
+            )
+        })?;
+        match entry_status.as_str() {
+            crate::db::auto_queue::ENTRY_STATUS_PENDING => {}
+            crate::db::auto_queue::ENTRY_STATUS_DISPATCHED => {
+                tx.rollback().await.ok();
+                return entry_dispatch_id.ok_or_else(|| {
+                    format!(
+                        "auto-queue entry {} is dispatched without dispatch_id",
+                        attachment.entry_id
+                    )
+                });
+            }
+            other => {
+                tx.rollback().await.ok();
+                return Err(format!(
+                    "auto-queue entry {} is no longer pending for dispatch attach (status: {other})",
+                    attachment.entry_id
+                ));
+            }
+        }
+    }
+
     if dispatch_type != "review-decision"
         && let Some(existing_id) = sqlx::query_scalar::<_, String>(
             "SELECT id
@@ -274,7 +390,27 @@ pub(super) async fn create_activate_dispatch_pg(
             format!("recheck active postgres dispatch for {card_id} during create: {error}")
         })?
     {
-        tx.rollback().await.ok();
+        if let Some(attachment) = entry_attachment.as_ref() {
+            crate::db::auto_queue::update_entry_status_on_pg_tx(
+                &mut tx,
+                &attachment.entry_id,
+                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                &attachment.trigger_source,
+                &crate::db::auto_queue::EntryStatusUpdateOptions {
+                    dispatch_id: Some(existing_id.clone()),
+                    slot_index: attachment.slot_index,
+                },
+            )
+            .await?;
+            tx.commit().await.map_err(|error| {
+                format!(
+                    "commit postgres existing dispatch attach {existing_id} for entry {}: {error}",
+                    attachment.entry_id
+                )
+            })?;
+        } else {
+            tx.rollback().await.ok();
+        }
         return Ok(existing_id);
     }
 
@@ -351,6 +487,27 @@ pub(super) async fn create_activate_dispatch_pg(
             &mut tx, intent,
         )
         .await?;
+    }
+
+    if let Some(attachment) = entry_attachment.as_ref() {
+        let entry_result = crate::db::auto_queue::update_entry_status_on_pg_tx(
+            &mut tx,
+            &attachment.entry_id,
+            crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+            &attachment.trigger_source,
+            &crate::db::auto_queue::EntryStatusUpdateOptions {
+                dispatch_id: Some(dispatch_id.clone()),
+                slot_index: attachment.slot_index,
+            },
+        )
+        .await?;
+        if !entry_result.changed {
+            tx.rollback().await.ok();
+            return Err(format!(
+                "stale postgres auto-queue entry {} during dispatch attach: status update was not applied",
+                attachment.entry_id
+            ));
+        }
     }
 
     tx.commit()

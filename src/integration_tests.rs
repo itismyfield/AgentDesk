@@ -3053,6 +3053,110 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_queue_activate_attaches_dispatch_id_before_dispatched_pg() {
+        let (_repo, _repo_guard) = setup_test_repo();
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION test_reject_dispatched_without_dispatch_id()
+             RETURNS TRIGGER AS $$
+             BEGIN
+                 IF NEW.status = 'dispatched' AND NEW.dispatch_id IS NULL THEN
+                     RAISE EXCEPTION 'auto_queue_entries cannot expose dispatched without dispatch_id';
+                 END IF;
+                 RETURN NEW;
+             END;
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_dispatched_without_dispatch_id
+             BEFORE UPDATE ON auto_queue_entries
+             FOR EACH ROW EXECUTE FUNCTION test_reject_dispatched_without_dispatch_id()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES ('agent-atomic', 'Atomic Agent', '111', '222')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at)
+             VALUES ('card-aq-atomic', 'AQ Atomic', 'ready', 'agent-atomic', 'repo-atomic', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at)
+             VALUES ('run-aq-atomic', 'repo-atomic', 'agent-atomic', 'active', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at)
+             VALUES ('entry-aq-atomic', 'run-aq-atomic', 'card-aq-atomic', 'agent-atomic', 'pending', 0, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
+            test_db(),
+            engine.clone(),
+        );
+        let (status, body) = crate::server::routes::auto_queue::activate_with_deps_pg(
+            &deps,
+            crate::server::routes::auto_queue::ActivateBody {
+                run_id: Some("run-aq-atomic".to_string()),
+                repo: None,
+                agent_id: None,
+                thread_group: None,
+                unified_thread: None,
+                active_only: Some(true),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "activate response body: {}",
+            body.0
+        );
+        let (entry_status, entry_dispatch_id): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-atomic'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(entry_status, "dispatched");
+        let entry_dispatch_id =
+            entry_dispatch_id.expect("dispatched entry must carry dispatch_id atomically");
+        let dispatch_status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind(&entry_dispatch_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(dispatch_status, "pending");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_queue_activate_create_dispatch_failure_counts_retries_pg() {
         let pg_db = IntegrationPgDatabase::create().await;
         let pool = pg_db.migrate().await;
