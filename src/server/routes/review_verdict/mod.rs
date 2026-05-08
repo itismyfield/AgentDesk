@@ -10,7 +10,8 @@ pub(crate) use decision_route::ReviewDecisionBody;
 pub use decision_route::submit_review_decision;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use decision_route::{
-    clear_test_worktree_commit_override, set_test_worktree_commit_override,
+    clear_test_worktree_commit_override, evaluate_accept_skip_rework,
+    set_test_worktree_commit_override,
 };
 pub use tuning_aggregate::aggregate_review_tuning;
 pub(crate) use tuning_aggregate::spawn_aggregate_if_needed_with_pg;

@@ -36,6 +36,8 @@ pub struct CreateDispatchBody {
 pub struct UpdateDispatchBody {
     pub status: Option<String>,
     pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_from: Option<Vec<String>>,
 }
 
 // ── Handlers ───────────────────────────────────────────────────
@@ -262,8 +264,26 @@ pub async fn update_dispatch(
             ))),
         );
     }
+    if let Some(allowed_from) = body.allowed_from.as_ref()
+        && let Some(invalid) = allowed_from
+            .iter()
+            .find(|status| !VALID_DISPATCH_STATUSES.contains(&status.as_str()))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(DispatchRouteResponse::error(format!(
+                "invalid allowed_from status '{}' — allowed values: {}",
+                invalid,
+                VALID_DISPATCH_STATUSES.join(", ")
+            ))),
+        );
+    }
 
     if let Some(status) = body.status {
+        let allowed_from_refs = body
+            .allowed_from
+            .as_ref()
+            .map(|statuses| statuses.iter().map(String::as_str).collect::<Vec<_>>());
         let changed = crate::dispatch::set_dispatch_status_with_backends(
             None,
             Some(pool),
@@ -271,11 +291,19 @@ pub async fn update_dispatch(
             &status,
             body.result.as_ref(),
             "api_update_dispatch",
-            None,
+            allowed_from_refs.as_deref(),
             false,
         );
         match changed {
             Ok(0) => {
+                if allowed_from_refs.is_some()
+                    && let Ok(dispatch) = crate::dispatch::query_dispatch_row_pg(pool, &id).await
+                {
+                    return (
+                        StatusCode::OK,
+                        Json(DispatchRouteResponse::dispatch(dispatch)),
+                    );
+                }
                 return (
                     StatusCode::NOT_FOUND,
                     Json(DispatchRouteResponse::error("dispatch not found")),

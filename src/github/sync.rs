@@ -510,10 +510,10 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     // (#815 handoff). `skipped` pending entries are finalized inline by
     // `update_entry_status_on_pg_tx` — see explicit sweep at the end for why
     // we still fall back to `maybe_finalize_run_if_ready_pg` for those runs.
-    let dispatched_rows = sqlx::query(
-        "SELECT id, run_id
+    let terminal_rows = sqlx::query(
+        "SELECT id, run_id, status
          FROM auto_queue_entries
-         WHERE kanban_card_id = $1 AND status = 'dispatched'",
+         WHERE kanban_card_id = $1 AND status IN ('dispatched', 'failed')",
     )
     .bind(card_id)
     .fetch_all(&mut **tx)
@@ -522,31 +522,45 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
 
     let mut done_run_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
-    for row in dispatched_rows {
+    for row in terminal_rows {
         let entry_id: String = row
             .try_get("id")
-            .map_err(|error| format!("read dispatched auto-queue entry id: {error}"))?;
+            .map_err(|error| format!("read terminal auto-queue entry id: {error}"))?;
+        let entry_status: String = row
+            .try_get("status")
+            .map_err(|error| format!("read terminal auto-queue entry status: {error}"))?;
         if let Ok(Some(run_id)) = row.try_get::<Option<String>, _>("run_id") {
             done_run_ids.insert(run_id);
         }
-        sqlx::query(
-            "UPDATE auto_queue_entries
-             SET status = 'done',
-                 completed_at = NOW()
-             WHERE id = $1 AND status = 'dispatched'",
-        )
-        .bind(&entry_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| format!("mark auto-queue entry {entry_id} done: {error}"))?;
-        record_auto_queue_transition_on_pg(
-            tx,
-            &entry_id,
-            crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-            crate::db::auto_queue::ENTRY_STATUS_DONE,
-            "card_terminal",
-        )
-        .await?;
+        if entry_status == crate::db::auto_queue::ENTRY_STATUS_FAILED {
+            crate::db::auto_queue::update_entry_status_on_pg_tx(
+                tx,
+                &entry_id,
+                crate::db::auto_queue::ENTRY_STATUS_DONE,
+                "card_terminal",
+                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+            )
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET status = 'done',
+                     completed_at = NOW()
+                 WHERE id = $1 AND status = 'dispatched'",
+            )
+            .bind(&entry_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("mark auto-queue entry {entry_id} done: {error}"))?;
+            record_auto_queue_transition_on_pg(
+                tx,
+                &entry_id,
+                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                crate::db::auto_queue::ENTRY_STATUS_DONE,
+                "card_terminal",
+            )
+            .await?;
+        }
     }
 
     let pending_rows = sqlx::query(

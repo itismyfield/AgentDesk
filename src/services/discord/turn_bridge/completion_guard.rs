@@ -133,6 +133,23 @@ pub(in crate::services::discord) fn extract_review_decision(
     found
 }
 
+pub(in crate::services::discord::turn_bridge) fn extract_review_decision_commit_sha(
+    full_response: &str,
+) -> Option<String> {
+    let keyed_commit = regex::Regex::new(
+        r#"(?im)\b(?:completed_commit|commit_sha|current_commit|head_sha|commit)\b\s*[:=]\s*`?([0-9a-f]{7,64})`?"#,
+    )
+    .ok()?;
+    keyed_commit
+        .captures_iter(full_response)
+        .filter_map(|captures| {
+            captures
+                .get(1)
+                .map(|value| value.as_str().to_ascii_lowercase())
+        })
+        .last()
+}
+
 async fn submit_review_decision_fallback(
     _api_port: u16,
     card_id: &str,
@@ -141,12 +158,16 @@ async fn submit_review_decision_fallback(
     full_response: &str,
 ) -> Result<(), String> {
     let comment = truncate_str(full_response.trim(), 4000).to_string();
+    let commit_sha = (decision == "accept")
+        .then(|| extract_review_decision_commit_sha(full_response))
+        .flatten();
     crate::services::discord::internal_api::submit_review_decision(
         crate::server::routes::review_verdict::ReviewDecisionBody {
             card_id: card_id.to_string(),
             dispatch_id: Some(dispatch_id.to_string()),
             decision: decision.to_string(),
             comment: Some(comment),
+            commit_sha,
         },
     )
     .await
@@ -332,7 +353,7 @@ fn reset_linked_auto_queue_entries_on_db(
              dispatched_at = NULL,
              completed_at = NULL
          WHERE dispatch_id = ?1
-           AND status IN ('pending', 'dispatched')",
+           AND status IN ('pending', 'dispatched', 'failed')",
         [dispatch_id],
     )
     .map_err(|error| format!("reset sqlite auto_queue_entries for {dispatch_id}: {error}"))
@@ -574,7 +595,7 @@ fn runtime_pg_reset_linked_auto_queue_entries(dispatch_id: &str) -> bool {
                      dispatched_at = NULL,
                      completed_at = NULL
                  WHERE dispatch_id = $1
-                   AND status IN ('pending', 'dispatched')",
+                   AND status IN ('pending', 'dispatched', 'failed')",
             )
             .bind(&dispatch_id)
             .execute(&pool)
@@ -1361,7 +1382,22 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     dispatch_id: Option<&str>,
     error_msg: &str,
 ) {
-    fail_dispatch_with_policy(dispatch_id, error_msg, None, true).await;
+    fail_dispatch_with_policy(dispatch_id, error_msg, None, true, None).await;
+}
+
+pub(in crate::services::discord) async fn fail_dispatch_tmux_session_died(
+    _api_port: u16,
+    dispatch_id: Option<&str>,
+    error_msg: &str,
+) {
+    fail_dispatch_with_policy(
+        dispatch_id,
+        error_msg,
+        Some("tmux_session_died"),
+        true,
+        Some(&["pending", "dispatched"]),
+    )
+    .await;
 }
 
 pub(in crate::services::discord) async fn fail_dispatch_auth_expired(
@@ -1369,7 +1405,14 @@ pub(in crate::services::discord) async fn fail_dispatch_auth_expired(
     dispatch_id: Option<&str>,
     error_msg: &str,
 ) {
-    fail_dispatch_with_policy(dispatch_id, error_msg, Some("auth_token_expired"), false).await;
+    fail_dispatch_with_policy(
+        dispatch_id,
+        error_msg,
+        Some("auth_token_expired"),
+        false,
+        None,
+    )
+    .await;
 }
 
 async fn fail_dispatch_with_policy(
@@ -1377,6 +1420,7 @@ async fn fail_dispatch_with_policy(
     error_msg: &str,
     error_code: Option<&str>,
     reset_auto_queue_entries: bool,
+    allowed_from: Option<&[&str]>,
 ) {
     let Some(dispatch_id) = dispatch_id else {
         return;
@@ -1391,6 +1435,12 @@ async fn fail_dispatch_with_policy(
     let payload = crate::server::routes::dispatches::UpdateDispatchBody {
         status: Some("failed".to_string()),
         result: Some(dispatch_failure_result(error_msg, error_code)),
+        allowed_from: allowed_from.map(|statuses| {
+            statuses
+                .iter()
+                .map(|status| (*status).to_string())
+                .collect()
+        }),
     };
     for attempt in 1..=3 {
         match crate::services::discord::internal_api::update_dispatch(dispatch_id, payload.clone())
@@ -1685,6 +1735,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         let payload = crate::server::routes::dispatches::UpdateDispatchBody {
             status: Some("completed".to_string()),
             result: Some(update_result),
+            allowed_from: None,
         };
         for attempt in 1..=3u8 {
             match crate::services::discord::internal_api::update_dispatch(
@@ -2210,7 +2261,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_linked_auto_queue_entries_on_conn_resets_pending_and_dispatched_rows() {
+    fn reset_linked_auto_queue_entries_on_conn_resets_retryable_rows() {
         let db = crate::db::test_db();
         let conn = db.lock().expect("db lock");
         conn.execute_batch(
@@ -2237,14 +2288,15 @@ mod tests {
              ) VALUES
                 ('entry-pending', 'run-1', 'card-1', 'agent-1', 'pending', 'dispatch-1', 7, 0, 0, datetime('now'), datetime('now')),
                 ('entry-dispatched', 'run-1', 'card-2', 'agent-1', 'dispatched', 'dispatch-1', 8, 0, 0, datetime('now'), NULL),
-                ('entry-done', 'run-1', 'card-3', 'agent-1', 'done', 'dispatch-1', 9, 0, 0, datetime('now'), datetime('now'))",
+                ('entry-failed', 'run-1', 'card-3', 'agent-1', 'failed', 'dispatch-1', 9, 0, 0, datetime('now'), datetime('now')),
+                ('entry-done', 'run-1', 'card-4', 'agent-1', 'done', 'dispatch-1', 10, 0, 0, datetime('now'), datetime('now'))",
             [],
         )
         .expect("seed entries");
         drop(conn);
 
         let changed = reset_linked_auto_queue_entries_on_db(&db, "dispatch-1").expect("reset");
-        assert_eq!(changed, 2);
+        assert_eq!(changed, 3);
 
         let pending: (
             String,
@@ -2308,6 +2360,37 @@ mod tests {
         assert!(dispatched.3.is_none());
         assert!(dispatched.4.is_none());
 
+        let failed: (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = db
+            .read_conn()
+            .expect("read conn")
+            .query_row(
+                "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-failed'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("failed row");
+        assert_eq!(failed.0, "pending");
+        assert!(failed.1.is_none());
+        assert!(failed.2.is_none());
+        assert!(failed.3.is_none());
+        assert!(failed.4.is_none());
+
         let done: (
             String,
             Option<String>,
@@ -2335,7 +2418,7 @@ mod tests {
             .expect("done row");
         assert_eq!(done.0, "done");
         assert_eq!(done.1.as_deref(), Some("dispatch-1"));
-        assert_eq!(done.2, Some(9));
+        assert_eq!(done.2, Some(10));
         assert!(done.3.is_some());
         assert!(done.4.is_some());
     }

@@ -20,6 +20,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
         _ => return,
     };
 
+    let mut protected_dispatch_orphans = Vec::new();
     let orphans: Vec<String> = {
         let data = shared.core.lock().await;
         let mut result = Vec::new();
@@ -78,12 +79,22 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
                     parsed_channel_name.as_deref(),
                 ) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] ♻ orphan cleanup: preserving dispatch session {} — {}",
-                        session_name,
-                        protection.log_reason()
-                    );
-                    continue;
+                    if protection.active_dispatch_id().is_some() {
+                        tracing::warn!(
+                            "  [{ts}] orphan cleanup: active dispatch owns dead session {} — {}",
+                            session_name,
+                            protection.log_reason()
+                        );
+                        protected_dispatch_orphans
+                            .push((session_name.to_string(), protection.clone()));
+                    } else {
+                        tracing::info!(
+                            "  [{ts}] ♻ orphan cleanup: preserving dispatch session {} — {}",
+                            session_name,
+                            protection.log_reason()
+                        );
+                        continue;
+                    }
                 }
 
                 result.push(session_name.to_string());
@@ -92,6 +103,24 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
 
         result
     };
+
+    for (session_name, protection) in &protected_dispatch_orphans {
+        if super::tmux_lifecycle::fail_active_dispatch_for_dead_tmux_session(
+            shared.api_port,
+            protection,
+            session_name,
+            "orphan_cleanup",
+        )
+        .await
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] orphan cleanup: failed active dispatch for dead session {} — {}",
+                session_name,
+                protection.log_reason()
+            );
+        }
+    }
 
     if orphans.is_empty() {
         return;
@@ -199,12 +228,27 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
             channel_name.as_deref(),
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ♻ reaper: preserving dispatch session {} — {}",
+            if super::tmux_lifecycle::fail_active_dispatch_for_dead_tmux_session(
+                api_port,
+                &protection,
                 session_name,
-                protection.log_reason()
-            );
-            continue;
+                "tmux_reaper",
+            )
+            .await
+            {
+                tracing::warn!(
+                    "  [{ts}] reaper: failed active dispatch for dead session {} — {}",
+                    session_name,
+                    protection.log_reason()
+                );
+            } else {
+                tracing::info!(
+                    "  [{ts}] ♻ reaper: preserving dispatch session {} — {}",
+                    session_name,
+                    protection.log_reason()
+                );
+                continue;
+            }
         }
 
         // Dead session with no watcher — report idle to DB and kill

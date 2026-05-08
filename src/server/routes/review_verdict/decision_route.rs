@@ -668,6 +668,28 @@ async fn latest_completed_review_context_pg_first(
         };
     }
 
+    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+    if let Some(db) = state.legacy_db() {
+        return db.separate_conn().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT context
+                 FROM task_dispatches
+                 WHERE kanban_card_id = ?1
+                   AND dispatch_type = 'review'
+                   AND status = 'completed'
+                 ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC, rowid DESC
+                 LIMIT 1",
+                [card_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+            .and_then(|ctx| serde_json::from_str::<serde_json::Value>(&ctx).ok())
+        });
+    }
+
     None
 }
 
@@ -692,7 +714,134 @@ async fn card_issue_number_pg_first(state: &AppState, card_id: &str) -> Option<i
         };
     }
 
+    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+    if let Some(db) = state.legacy_db() {
+        return db.separate_conn().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+        });
+    }
+
     None
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SkipReworkDiagnostics {
+    pub(crate) skip_rework: bool,
+    pub(crate) last_reviewed_commit: Option<String>,
+    pub(crate) current_commit: Option<String>,
+    pub(crate) current_commit_source: Option<&'static str>,
+    pub(crate) issue_number: Option<i64>,
+    pub(crate) reason: &'static str,
+}
+
+impl SkipReworkDiagnostics {
+    fn to_json(&self) -> serde_json::Value {
+        json!({
+            "skip_rework": self.skip_rework,
+            "last_reviewed_commit": self.last_reviewed_commit.as_deref(),
+            "current_commit": self.current_commit.as_deref(),
+            "current_commit_source": self.current_commit_source,
+            "issue_number": self.issue_number,
+            "reason": self.reason,
+        })
+    }
+}
+
+fn normalize_optional_commit_sha(commit_sha: Option<&str>) -> Result<Option<String>, String> {
+    let Some(commit_sha) = commit_sha else {
+        return Ok(None);
+    };
+    let trimmed = commit_sha.trim();
+    if trimmed.is_empty() {
+        return Err("commit_sha must not be empty when provided".to_string());
+    }
+    if !(7..=64).contains(&trimmed.len()) || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("commit_sha must be a 7-64 character hex git commit SHA".to_string());
+    }
+    Ok(Some(trimmed.to_ascii_lowercase()))
+}
+
+fn commit_sha_differs(current: &str, previous: &str) -> bool {
+    !current.eq_ignore_ascii_case(previous)
+}
+
+pub(crate) async fn evaluate_accept_skip_rework(
+    state: &AppState,
+    card_id: &str,
+    submitted_commit: Option<&str>,
+) -> SkipReworkDiagnostics {
+    let last_review_context = latest_completed_review_context_pg_first(state, card_id).await;
+
+    let last_reviewed_commit: Option<String> = last_review_context.as_ref().and_then(|v| {
+        v.get("reviewed_commit")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
+    });
+
+    let issue_number = card_issue_number_pg_first(state, card_id).await;
+
+    let (current_commit, current_commit_source) = if let Some(submitted_commit) = submitted_commit {
+        (Some(submitted_commit.to_string()), Some("request"))
+    } else if last_reviewed_commit.is_some() {
+        if let Some(issue_num) = issue_number {
+            (
+                current_issue_worktree_commit(
+                    state.engine.pg_pool(),
+                    card_id,
+                    issue_num,
+                    last_review_context.as_ref(),
+                )
+                .await,
+                Some("worktree"),
+            )
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    let (skip_rework, reason) = match (&last_reviewed_commit, &current_commit) {
+        (Some(previous), Some(current)) if commit_sha_differs(current, previous) => {
+            (true, "current_commit_differs_from_reviewed_commit")
+        }
+        (Some(_), Some(_)) => (false, "current_commit_matches_reviewed_commit"),
+        (None, _) => (false, "missing_last_reviewed_commit"),
+        (_, None) if submitted_commit.is_none() && issue_number.is_none() => {
+            (false, "missing_issue_number_for_worktree_inference")
+        }
+        (_, None) => (false, "missing_current_commit"),
+    };
+
+    let diagnostics = SkipReworkDiagnostics {
+        skip_rework,
+        last_reviewed_commit,
+        current_commit,
+        current_commit_source,
+        issue_number,
+        reason,
+    };
+
+    tracing::info!(
+        card_id = %card_id,
+        skip_rework = diagnostics.skip_rework,
+        last_reviewed_commit = diagnostics.last_reviewed_commit.as_deref().unwrap_or(""),
+        current_commit = diagnostics.current_commit.as_deref().unwrap_or(""),
+        current_commit_source = diagnostics.current_commit_source.unwrap_or(""),
+        issue_number = ?diagnostics.issue_number,
+        reason = diagnostics.reason,
+        "[review-decision] #1977 evaluated accept skip_rework"
+    );
+
+    diagnostics
 }
 
 async fn stale_review_dispatch_ids_pg_first(state: &AppState, card_id: &str) -> Vec<String> {
@@ -942,6 +1091,10 @@ pub struct ReviewDecisionBody {
     pub card_id: String,
     pub decision: String, // "accept", "dispute", "dismiss"
     pub comment: Option<String>,
+    /// Optional current implementation commit. When accept is submitted after
+    /// the agent has already committed fixes during review-decision, this takes
+    /// precedence over worktree inference for #246 skip_rework detection.
+    pub commit_sha: Option<String>,
     /// #109: dispatch-scoped targeting — when provided, the server validates
     /// that this dispatch_id matches the pending review-decision dispatch for
     /// the card. Prevents replayed/stale decisions from consuming the wrong
@@ -966,6 +1119,16 @@ pub async fn submit_review_decision(
             Json(json!({"error": format!("decision must be one of: {}", valid.join(", "))})),
         );
     }
+
+    let submitted_commit = match normalize_optional_commit_sha(body.commit_sha.as_deref()) {
+        Ok(commit) => commit,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": error, "field": "commit_sha"})),
+            );
+        }
+    };
 
     if !card_exists_pg_first(&state, &body.card_id).await {
         return (
@@ -1055,46 +1218,10 @@ pub async fn submit_review_decision(
             // review-decision turn. If the worktree HEAD differs from the
             // reviewed_commit of the last review, skip rework and go straight
             // to review (the agent already addressed the feedback).
-            let skip_rework = {
-                let last_review_context =
-                    latest_completed_review_context_pg_first(&state, &body.card_id).await;
-
-                let last_reviewed_commit: Option<String> =
-                    last_review_context.as_ref().and_then(|v| {
-                        v.get("reviewed_commit")
-                            .and_then(|c| c.as_str())
-                            .map(|s| s.to_string())
-                    });
-
-                let issue_number = card_issue_number_pg_first(&state, &body.card_id).await;
-
-                if let (Some(prev_commit), Some(issue_num)) = (&last_reviewed_commit, issue_number)
-                {
-                    let current_commit = current_issue_worktree_commit(
-                        state.engine.pg_pool(),
-                        &body.card_id,
-                        issue_num,
-                        last_review_context.as_ref(),
-                    )
+            let skip_rework_diagnostics =
+                evaluate_accept_skip_rework(&state, &body.card_id, submitted_commit.as_deref())
                     .await;
-                    if let Some(ref cur) = current_commit {
-                        let differs = cur != prev_commit;
-                        if differs {
-                            tracing::info!(
-                                "[review-decision] #246 New commit detected for card {}: prev={} cur={} — skipping rework",
-                                body.card_id,
-                                &prev_commit[..8.min(prev_commit.len())],
-                                &cur[..8.min(cur.len())]
-                            );
-                        }
-                        differs
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            };
+            let skip_rework = skip_rework_diagnostics.skip_rework;
 
             let mut accept_failures = Vec::new();
             let mut direct_review_auto_approved = false;
@@ -1381,6 +1508,7 @@ pub async fn submit_review_decision(
                         "card_id": body.card_id,
                         "pending_dispatch_id": pending_rd_id,
                         "skip_rework": skip_rework,
+                        "skip_rework_diagnostics": skip_rework_diagnostics.to_json(),
                         "card_status_before": card_status_now,
                         "card_status_after": card_status_after,
                         "rework_target": rework_target,
@@ -1548,6 +1676,8 @@ pub async fn submit_review_decision(
                     "rework_dispatch_created": rework_dispatch_created,
                     "direct_review_created": direct_review_created,
                     "review_auto_approved": terminal_auto_approved,
+                    "skip_rework": skip_rework,
+                    "skip_rework_diagnostics": skip_rework_diagnostics.to_json(),
                     "message": message,
                 })),
             );

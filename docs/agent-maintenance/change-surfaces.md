@@ -213,8 +213,9 @@
   `src/server/mod.rs`, `src/kanban/state_machine.rs`, `src/receipt.rs`,
   `src/github/sync.rs`, `src/reconcile.rs` (periodic stale-inflight + orphan
   sweep), `src/high_risk_recovery.rs` (PG recovery harness for delivery
-  outbox/notify), and `src/server/task_dispatch_claims.rs` (cluster-aware
-  task-dispatch claim coordination).
+  outbox/notify), `src/server/task_dispatch_claims.rs` (cluster-aware
+  task-dispatch claim coordination), and `src/server/cluster.rs`
+  (cluster role/leader-failover coordination).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/config.rs` (2601 lines).
@@ -232,6 +233,8 @@
     delivery outbox/notify path — bugfix only).
   - `src/server/task_dispatch_claims.rs` (1038 lines; cluster-aware
     task-dispatch claim TTL/limit + semaphore coordination).
+  - `src/server/cluster.rs` (1046 lines; cluster role detection, leader
+    advisory-lock coordination, and failover wiring — bugfix only).
 - active_callsite_coverage: n/a.
 - invariants: config precedence, runtime path generation, kanban state, receipt
   persistence, and GitHub sync must keep their existing owner-specific
@@ -321,7 +324,8 @@ The remaining giant-file modules under `src/services/` not covered above:
   Discord notification plumbing. Split before broadening behavior outside the
   current routine API/runtime contract.
 - `src/services/discord/mod.rs` (5519),
-  `src/services/discord_config_audit.rs` (1310), and
+  `src/services/discord_config_audit.rs` (1310),
+  `src/services/discord/tmux_lifecycle.rs` (1129), and
   `src/services/qwen_tmux_wrapper.rs` (1194).
 - `src/services/turn_orchestrator.rs` (2070).
 - `src/services/session_backend.rs` (1053).

@@ -3079,15 +3079,36 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &tmux_session_name,
             channel_name.as_deref(),
         );
-    let cleanup_plan = dead_session_cleanup_plan(dispatch_protection.is_some());
+    let dispatch_failed_for_dead_session = if let Some(protection) = dispatch_protection.as_ref() {
+        crate::services::discord::tmux_lifecycle::fail_active_dispatch_for_dead_tmux_session(
+            api_port,
+            protection,
+            &tmux_session_name,
+            "tmux_watcher",
+        )
+        .await
+    } else {
+        false
+    };
+    let cleanup_plan = dead_session_cleanup_plan(
+        dispatch_protection.is_some() && !dispatch_failed_for_dead_session,
+    );
 
     if let Some(protection) = dispatch_protection {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ♻ tmux watcher: preserving dispatch session {} — {}",
-            tmux_session_name,
-            protection.log_reason()
-        );
+        if dispatch_failed_for_dead_session {
+            tracing::warn!(
+                "  [{ts}] tmux watcher: failed active dispatch for dead session {} — {}",
+                tmux_session_name,
+                protection.log_reason()
+            );
+        } else {
+            tracing::info!(
+                "  [{ts}] ♻ tmux watcher: preserving dispatch session {} — {}",
+                tmux_session_name,
+                protection.log_reason()
+            );
+        }
     }
 
     if !cleanup_plan.preserve_tmux_session {

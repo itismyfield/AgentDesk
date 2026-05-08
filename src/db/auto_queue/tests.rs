@@ -1061,6 +1061,74 @@ mod dispatch_terminal_sync_pg_tests {
     }
 
     #[tokio::test]
+    async fn completed_retry_reconciles_failed_entry_for_same_card_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES ('card-retry-done', 'Card Retry Done', 'done', 'agent-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed card");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, context, completed_at)
+             VALUES
+                ('dispatch-retry-old', 'card-retry-done', 'agent-1',
+                 'implementation', 'cancelled', '{}', NOW()),
+                ('dispatch-retry-new', 'card-retry-done', 'agent-1',
+                 'implementation', 'completed', '{}', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed dispatches");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index,
+                 retry_count, thread_group, batch_phase, completed_at)
+             VALUES ('entry-retry-done', 'run-1', 'card-retry-done', 'agent-1',
+                     'failed', 'dispatch-retry-old', 0, 1, 0, 0, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed failed entry");
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        let result = finalize_completed_dispatch_terminal_entry_on_pg_tx(
+            &mut tx,
+            "dispatch-retry-new",
+            "watcher_streaming_final",
+            true,
+        )
+        .await
+        .expect("finalize completed retry dispatch entry");
+        tx.commit().await.expect("commit tx");
+
+        assert_eq!(result.changed_entries, 1);
+        assert_eq!(result.affected_run_ids, vec!["run-1".to_string()]);
+        let (status, dispatch_id, completed_at) =
+            entry_row_status_dispatch_completed(&pool, "entry-retry-done").await;
+        assert_eq!(status, ENTRY_STATUS_DONE);
+        assert_eq!(dispatch_id.as_deref(), Some("dispatch-retry-old"));
+        assert!(completed_at.is_some());
+        assert_eq!(count_transitions(&pool, "entry-retry-done").await, 1);
+        let retry_history_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT
+             FROM auto_queue_entry_dispatch_history
+             WHERE entry_id = 'entry-retry-done'
+               AND dispatch_id = 'dispatch-retry-new'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("retry dispatch history count");
+        assert_eq!(retry_history_count, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
     async fn completed_dispatch_terminal_finalizer_completes_review_disabled_run_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;

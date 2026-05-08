@@ -37,9 +37,9 @@ use std::collections::VecDeque;
 // Re-exports for pub(super) items used by sibling modules in the discord package
 pub(crate) use completion_guard::build_work_dispatch_completion_result;
 pub(super) use completion_guard::{
-    fail_dispatch_auth_expired, fail_dispatch_with_retry, guard_review_dispatch_completion,
-    queue_dispatch_followup_with_handles, runtime_db_fallback_complete_with_result,
-    streaming_final_complete_dispatch_with_result,
+    fail_dispatch_auth_expired, fail_dispatch_tmux_session_died, fail_dispatch_with_retry,
+    guard_review_dispatch_completion, queue_dispatch_followup_with_handles,
+    runtime_db_fallback_complete_with_result, streaming_final_complete_dispatch_with_result,
 };
 pub(super) use recovery_text::{
     auto_retry_with_history, build_session_retry_context_from_history, store_session_retry_context,
@@ -147,7 +147,7 @@ pub(crate) use tmux_runtime::tmux_runtime_paths;
 
 // Items used by spawn_turn_bridge from submodules
 use completion_guard::complete_work_dispatch_on_turn_end;
-use context_window::{persisted_context_tokens, resolve_done_response};
+use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
 use memory_lifecycle::{
     optional_metric_token_fields, plan_turn_end_memory, spawn_memory_capture_task,
     spawn_memory_reflect_task, take_memento_reflect_request,
@@ -2175,19 +2175,25 @@ pub(super) fn spawn_turn_bridge(
                             let has_context_token_data = input_tokens.is_some()
                                 || cache_create_tokens.is_some()
                                 || cache_read_tokens.is_some();
-                            // Use latest values (not cumulative) — provider adapters emit
-                            // cumulative totals for the current turn/session snapshot.
-                            if let Some(it) = input_tokens {
-                                accumulated_input_tokens = it;
-                            }
-                            if let Some(tokens) = cache_create_tokens {
-                                accumulated_cache_create_tokens = tokens;
-                            }
-                            if let Some(tokens) = cache_read_tokens {
-                                accumulated_cache_read_tokens = tokens;
+                            // Token fields are provider-normalized snapshots,
+                            // not deltas. Claude reports uncached input,
+                            // cache writes, and cache reads separately, while
+                            // other providers may omit unavailable cache
+                            // fields. Keep the largest context-occupancy
+                            // snapshot seen in this turn so late partial
+                            // status events cannot make the live panel shrink.
+                            if has_context_token_data {
+                                apply_context_token_update(
+                                    &mut accumulated_input_tokens,
+                                    &mut accumulated_cache_create_tokens,
+                                    &mut accumulated_cache_read_tokens,
+                                    input_tokens,
+                                    cache_create_tokens,
+                                    cache_read_tokens,
+                                );
                             }
                             if let Some(ot) = output_tokens {
-                                accumulated_output_tokens = ot;
+                                accumulated_output_tokens = accumulated_output_tokens.max(ot);
                             }
                             if shared_owned.status_panel_v2_enabled && has_context_token_data {
                                 status_panel_dirty |= shared_owned
@@ -2834,11 +2840,9 @@ pub(super) fn spawn_turn_bridge(
             &provider,
             adk_session_info.as_deref(),
             persisted_context_tokens(
-                total_model_input_tokens(
-                    accumulated_input_tokens,
-                    accumulated_cache_create_tokens,
-                    accumulated_cache_read_tokens,
-                ),
+                accumulated_input_tokens,
+                accumulated_cache_create_tokens,
+                accumulated_cache_read_tokens,
                 accumulated_output_tokens,
             ),
             adk_cwd.as_deref(),

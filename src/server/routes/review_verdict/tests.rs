@@ -627,6 +627,7 @@ async fn dismiss_clears_review_status_and_cancels_pending_dispatches() {
             card_id: "card-d".to_string(),
             decision: "dismiss".to_string(),
             comment: None,
+            commit_sha: None,
             dispatch_id: None,
         }),
     )
@@ -1070,6 +1071,7 @@ async fn accept_on_done_card_fails_closed_without_stranding() {
             card_id: "card-done".to_string(),
             decision: "accept".to_string(),
             comment: None,
+            commit_sha: None,
             dispatch_id: None,
         }),
     )
@@ -1155,6 +1157,7 @@ async fn accept_skip_rework_auto_approves_when_direct_review_has_no_alternate_re
             card_id: "card-skip-fallback".to_string(),
             decision: "accept".to_string(),
             comment: None,
+            commit_sha: Some("bbb2222".to_string()),
             dispatch_id: Some("rd-skip-fallback".to_string()),
         }),
     )
@@ -1173,7 +1176,8 @@ async fn accept_skip_rework_auto_approves_when_direct_review_has_no_alternate_re
     assert_eq!(
         body.0["rework_dispatch_created"],
         serde_json::Value::Bool(false),
-        "single-provider auto-approve must not create a rework dispatch"
+        "single-provider auto-approve must not create a rework dispatch: {}",
+        body.0
     );
     assert_eq!(
         body.0["review_auto_approved"],
@@ -1262,6 +1266,7 @@ async fn accept_rework_failure_keeps_review_decision_pending() {
             card_id: "card-no-agent".to_string(),
             decision: "accept".to_string(),
             comment: None,
+            commit_sha: None,
             dispatch_id: Some("rd-no-agent".to_string()),
         }),
     )
@@ -1336,6 +1341,7 @@ async fn dismiss_then_late_accept_does_not_reopen() {
             card_id: "card-dismissed".to_string(),
             decision: "accept".to_string(),
             comment: Some("late accept after dismiss".to_string()),
+            commit_sha: None,
             dispatch_id: None,
         }),
     )
@@ -1389,6 +1395,7 @@ async fn duplicate_accept_returns_conflict() {
             card_id: "card-dup".to_string(),
             decision: "accept".to_string(),
             comment: None,
+            commit_sha: None,
             dispatch_id: None,
         }),
     )
@@ -1431,6 +1438,7 @@ async fn duplicate_accept_returns_conflict() {
             card_id: "card-dup".to_string(),
             decision: "accept".to_string(),
             comment: None,
+            commit_sha: None,
             dispatch_id: None,
         }),
     )
@@ -1469,6 +1477,7 @@ async fn accept_then_dispute_returns_conflict() {
             card_id: "card-ad".to_string(),
             decision: "accept".to_string(),
             comment: None,
+            commit_sha: None,
             dispatch_id: None,
         }),
     )
@@ -1482,6 +1491,7 @@ async fn accept_then_dispute_returns_conflict() {
             card_id: "card-ad".to_string(),
             decision: "dispute".to_string(),
             comment: None,
+            commit_sha: None,
             dispatch_id: None,
         }),
     )
@@ -1704,6 +1714,7 @@ async fn accept_updates_canonical_review_state() {
             card_id: "card-rs".to_string(),
             decision: "accept".to_string(),
             comment: None,
+            commit_sha: None,
             dispatch_id: None,
         }),
     )
@@ -1777,6 +1788,7 @@ async fn accept_clears_suggestion_pending_review_status() {
             card_id: "card-266".to_string(),
             decision: "accept".to_string(),
             comment: None,
+            commit_sha: None,
             dispatch_id: None,
         }),
     )
@@ -1860,12 +1872,50 @@ fn latest_completed_review_lookup_prefers_completed_at() {
     );
 }
 
+/// #1977: review-decision accept may know the commit explicitly from the
+/// agent's final response. That commit must be used before worktree inference.
+#[tokio::test]
+async fn accept_skip_rework_diagnostics_prefers_explicit_commit() {
+    let _worktree_override = WorktreeCommitOverrideGuard::set("aaa1111");
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, github_issue_number, created_at, updated_at) \
+             VALUES ('card-1977-diag', 'Commit diagnostics', 'review', 1977, datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, title, context, completed_at, created_at, updated_at) \
+             VALUES ('review-1977-diag', 'card-1977-diag', 'review', 'completed', '[Review R1]', \
+             '{\"reviewed_commit\":\"aaa1111\"}', datetime('now'), datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+
+    let diagnostics = evaluate_accept_skip_rework(&state, "card-1977-diag", Some("bbb2222")).await;
+
+    assert!(diagnostics.skip_rework);
+    assert_eq!(diagnostics.current_commit.as_deref(), Some("bbb2222"));
+    assert_eq!(diagnostics.current_commit_source, Some("request"));
+    assert_eq!(
+        diagnostics.reason,
+        "current_commit_differs_from_reviewed_commit"
+    );
+}
+
 /// #266: When the agent already committed new work during the review-decision
 /// turn (skip_rework / direct_review_created path), OnReviewEnter sets
 /// review_status='reviewing'. The accept cleanup must NOT clear it.
 #[tokio::test]
 async fn accept_direct_review_pg_preserves_reviewing_status() {
-    let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
+    // #1977: an explicit review-decision commit must win over worktree
+    // inference. If inference won here, it would match the reviewed commit and
+    // incorrectly create a rework dispatch.
+    let _worktree_override = WorktreeCommitOverrideGuard::set("aaa1111");
     let pg_db = ReviewVerdictPgDatabase::create().await;
     let pool = pg_db.migrate().await;
     let db = test_db();
@@ -1914,6 +1964,7 @@ async fn accept_direct_review_pg_preserves_reviewing_status() {
             card_id: "card-266dr".to_string(),
             decision: "accept".to_string(),
             comment: None,
+            commit_sha: Some("bbb2222".to_string()),
             dispatch_id: None,
         }),
     )
@@ -1930,6 +1981,22 @@ async fn accept_direct_review_pg_preserves_reviewing_status() {
         resp.get("rework_dispatch_created"),
         Some(&serde_json::Value::Bool(false)),
         "skip_rework accept must not create a rework dispatch"
+    );
+    assert_eq!(
+        resp.get("skip_rework"),
+        Some(&serde_json::Value::Bool(true)),
+        "explicit commit_sha should trigger skip_rework when it differs from reviewed_commit"
+    );
+    assert_eq!(
+        resp.pointer("/skip_rework_diagnostics/current_commit_source")
+            .and_then(|value| value.as_str()),
+        Some("request"),
+        "commit_sha in the request must take precedence over inferred worktree HEAD"
+    );
+    assert_eq!(
+        resp.pointer("/skip_rework_diagnostics/current_commit")
+            .and_then(|value| value.as_str()),
+        Some("bbb2222")
     );
 
     let review_status: Option<String> =

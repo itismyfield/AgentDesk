@@ -1,9 +1,10 @@
 use super::completion_guard::{
     build_verdict_payload, extract_explicit_review_verdict, extract_explicit_work_outcome,
-    extract_review_decision,
+    extract_review_decision, extract_review_decision_commit_sha,
 };
 use super::context_window::{
-    persisted_context_tokens, resolve_done_response, total_context_tokens,
+    apply_context_token_update, persisted_context_tokens, resolve_done_response,
+    total_context_tokens,
 };
 use super::memory_lifecycle::{
     PROVIDER_SESSION_ASSISTANT_TURN_CAP, TurnEndMemoryPlan, optional_metric_token_fields,
@@ -278,15 +279,51 @@ fn final_turn_without_remaining_queue_resumes_watcher() {
 }
 
 #[test]
-fn persisted_context_tokens_uses_input_only() {
-    // input_tokens represents full context window occupancy; output is excluded
-    assert_eq!(persisted_context_tokens(610_000, 90_000), Some(610_000));
-    assert_eq!(persisted_context_tokens(0, 0), None);
+fn persisted_context_tokens_counts_cache_and_excludes_output() {
+    assert_eq!(persisted_context_tokens(100, 20, 30, 40), Some(150));
+    assert_eq!(
+        persisted_context_tokens(610_000, 0, 0, 90_000),
+        Some(610_000)
+    );
+    assert_eq!(persisted_context_tokens(0, 0, 0, 90_000), None);
 }
 
 #[test]
 fn total_context_tokens_saturates_on_overflow() {
-    assert_eq!(total_context_tokens(u64::MAX, 1), u64::MAX);
+    assert_eq!(total_context_tokens(u64::MAX, 1, 1, 1), u64::MAX);
+}
+
+#[test]
+fn context_token_update_keeps_largest_context_snapshot() {
+    let mut input_tokens = 100;
+    let mut cache_create_tokens = 20;
+    let mut cache_read_tokens = 30;
+
+    assert!(!apply_context_token_update(
+        &mut input_tokens,
+        &mut cache_create_tokens,
+        &mut cache_read_tokens,
+        Some(80),
+        Some(20),
+        Some(30),
+    ));
+    assert_eq!(
+        (input_tokens, cache_create_tokens, cache_read_tokens),
+        (100, 20, 30)
+    );
+
+    assert!(apply_context_token_update(
+        &mut input_tokens,
+        &mut cache_create_tokens,
+        &mut cache_read_tokens,
+        Some(90),
+        Some(20),
+        Some(50),
+    ));
+    assert_eq!(
+        (input_tokens, cache_create_tokens, cache_read_tokens),
+        (90, 20, 50)
+    );
 }
 
 #[test]
@@ -2352,6 +2389,22 @@ fn review_decision_explicit_marker_takes_priority() {
     assert_eq!(
         extract_review_decision("DECISION: accept\n이 dismiss는 무시해도 됩니다."),
         Some("accept")
+    );
+}
+
+#[test]
+fn review_decision_commit_sha_parser_prefers_keyed_commit() {
+    assert_eq!(
+        extract_review_decision_commit_sha(
+            "DECISION: accept\nreviewed_commit: aaaaaaa\ncompleted_commit: dbadcb1234567890"
+        )
+        .as_deref(),
+        Some("dbadcb1234567890")
+    );
+    assert_eq!(
+        extract_review_decision_commit_sha("DECISION: accept\ncommit_sha=`ABCDEF1234567`")
+            .as_deref(),
+        Some("abcdef1234567")
     );
 }
 
