@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod auto_queue;
 pub mod cancel_tombstones;
+pub mod dispatch_semaphores;
 pub mod dispatched_sessions;
 pub mod dispatches;
 pub mod kanban;

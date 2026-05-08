@@ -919,7 +919,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/cluster/task-dispatches/claim",
             "cluster",
-            "Atomically claim pending task_dispatches for a worker with PG row locking and capability-match diagnostics.",
+            "Atomically claim pending task_dispatches for a worker with PG row locking, capability-match diagnostics, and named semaphore routing constraints.",
         )
         .with_example(
             json!({
@@ -932,11 +932,16 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "claimed": [{
                     "id": "dispatch-123",
                     "claim_owner": "mac-book-release",
-                    "required_capabilities": {"labels": ["mac-book"]}
+                    "required_capabilities": {
+                        "required": {
+                            "labels": ["mac-book"],
+                            "semaphores": ["ue_editor"]
+                        }
+                    }
                 }],
                 "skipped": [{
                     "id": "dispatch-456",
-                    "reasons": ["missing label 'mac-mini'"]
+                    "reasons": ["semaphore 'ue_editor' exhausted for per-node:mac-mini-release (1/1 active)"]
                 }]
             }),
         )

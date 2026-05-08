@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +13,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub mcp_servers: std::collections::BTreeMap<String, McpServerConfig>,
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_mcp_allowlist: Vec<String>,
     #[serde(default)]
@@ -676,6 +677,8 @@ pub struct ClusterConfig {
         skip_serializing_if = "ClusterDispatchRoutingConfig::is_default"
     )]
     pub dispatch_routing: ClusterDispatchRoutingConfig,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub semaphores: BTreeMap<String, ClusterSemaphoreConfig>,
 }
 
 impl Default for ClusterConfig {
@@ -690,6 +693,7 @@ impl Default for ClusterConfig {
             labels: Vec::new(),
             capabilities: serde_json::Map::new(),
             dispatch_routing: ClusterDispatchRoutingConfig::default(),
+            semaphores: BTreeMap::new(),
         }
     }
 }
@@ -718,6 +722,97 @@ impl ClusterDispatchRoutingConfig {
         self.opt_out_dispatch_types
             .iter()
             .any(|value| value == dispatch_type)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ClusterSemaphoreConfig {
+    #[serde(default = "default_cluster_semaphore_capacity")]
+    pub capacity: u32,
+    #[serde(default)]
+    pub scope: ClusterSemaphoreScope,
+}
+
+impl Default for ClusterSemaphoreConfig {
+    fn default() -> Self {
+        Self {
+            capacity: default_cluster_semaphore_capacity(),
+            scope: ClusterSemaphoreScope::default(),
+        }
+    }
+}
+
+impl ClusterSemaphoreConfig {
+    pub fn effective_capacity(&self) -> i32 {
+        self.capacity.clamp(1, 1024) as i32
+    }
+}
+
+fn default_cluster_semaphore_capacity() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClusterSemaphoreScope {
+    #[serde(alias = "per_node")]
+    PerNode,
+    #[serde(alias = "per_cluster")]
+    PerCluster,
+}
+
+impl Default for ClusterSemaphoreScope {
+    fn default() -> Self {
+        Self::PerNode
+    }
+}
+
+impl ClusterSemaphoreScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PerNode => "per-node",
+            Self::PerCluster => "per-cluster",
+        }
+    }
+
+    pub fn scope_key(self, instance_id: &str) -> String {
+        match self {
+            Self::PerNode => instance_id.to_string(),
+            Self::PerCluster => "cluster".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod cluster_semaphore_config_tests {
+    use super::{ClusterConfig, ClusterSemaphoreScope};
+
+    #[test]
+    fn cluster_semaphores_parse_kebab_scope_and_default_capacity() {
+        let config: ClusterConfig = serde_yaml::from_str(
+            r#"
+enabled: true
+semaphores:
+  ue_editor:
+    capacity: 1
+    scope: per-node
+  gpu:
+    scope: per-cluster
+"#,
+        )
+        .expect("cluster semaphore config parses");
+
+        assert_eq!(
+            config.semaphores["ue_editor"].scope,
+            ClusterSemaphoreScope::PerNode
+        );
+        assert_eq!(config.semaphores["ue_editor"].effective_capacity(), 1);
+        assert_eq!(
+            config.semaphores["gpu"].scope,
+            ClusterSemaphoreScope::PerCluster
+        );
+        assert_eq!(config.semaphores["gpu"].effective_capacity(), 1);
     }
 }
 

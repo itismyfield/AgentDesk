@@ -269,6 +269,10 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
     )
     .await?;
 
+    crate::db::dispatch_semaphores::release_dispatch_semaphores_on_pg_tx(tx, dispatch_id)
+        .await
+        .map_err(|error| format!("release postgres dispatch semaphores {dispatch_id}: {error}"))?;
+
     sqlx::query(
         "UPDATE sessions
          SET status = CASE

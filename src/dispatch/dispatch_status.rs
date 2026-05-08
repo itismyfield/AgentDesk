@@ -685,6 +685,15 @@ async fn set_dispatch_status_on_pg_with_sync(
         }
 
         if matches!(to_status, "completed" | "failed" | "cancelled") {
+            crate::db::dispatch_semaphores::release_dispatch_semaphores_on_pg_tx(
+                &mut tx,
+                dispatch_id,
+            )
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("release postgres dispatch semaphores for {dispatch_id}: {error}")
+            })?;
+
             let session_info = format!("Dispatch {to_status}");
             let cleared = sqlx::query(
                 "UPDATE sessions
