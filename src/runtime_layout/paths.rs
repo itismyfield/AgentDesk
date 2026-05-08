@@ -118,7 +118,7 @@ pub fn resolve_memory_path(root: &Path, raw: &str) -> PathBuf {
     }
 }
 
-pub(super) fn expand_user_path(raw: &str) -> Option<PathBuf> {
+pub fn expand_user_path(raw: &str) -> Option<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;

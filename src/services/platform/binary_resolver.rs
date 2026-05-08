@@ -14,6 +14,8 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::runtime_layout::expand_user_path;
+
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 8 * 1024;
@@ -114,7 +116,8 @@ fn resolve_provider_binary_legacy(provider: &str) -> BinaryResolution {
 
     match std::env::var_os(&override_var).filter(|value| !os_value_is_empty(value)) {
         Some(raw_override) => {
-            let expanded = expand_user_path(&raw_override);
+            let expanded = expand_user_path(&raw_override.to_string_lossy())
+                .unwrap_or_else(|| PathBuf::from(&raw_override));
             match resolve_candidate_path(&expanded, &cwd) {
                 Ok(path) => {
                     attempts.push(format!(
@@ -718,19 +721,6 @@ fn os_value_is_empty(value: &OsStr) -> bool {
     value.to_string_lossy().trim().is_empty()
 }
 
-fn expand_user_path(raw: &OsStr) -> PathBuf {
-    let raw = raw.to_string_lossy();
-    if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw.as_ref()));
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(raw.as_ref())
-}
-
 fn push_env_dir(
     env_name: &str,
     suffix: Option<&str>,
@@ -740,7 +730,8 @@ fn push_env_dir(
     let Some(value) = std::env::var_os(env_name).filter(|value| !os_value_is_empty(value)) else {
         return;
     };
-    let mut path = expand_user_path(&value);
+    let mut path =
+        expand_user_path(&value.to_string_lossy()).unwrap_or_else(|| PathBuf::from(&value));
     if let Some(suffix) = suffix {
         path = path.join(suffix);
     }
@@ -833,7 +824,7 @@ fn registry_channel_resolution(
     channel: &crate::services::provider_cli::ProviderCliChannel,
 ) -> Option<BinaryResolution> {
     let cwd = current_dir_fallback();
-    let expanded = expand_user_path(OsStr::new(&channel.path));
+    let expanded = expand_user_path(&channel.path).unwrap_or_else(|| PathBuf::from(&channel.path));
     let resolved_path = resolve_candidate_path(&expanded, &cwd).ok()?;
     let resolution = finalize_resolution(
         requested_binary.to_string(),

@@ -27,8 +27,8 @@ use skill_sync::ensure_managed_skill_dir;
 pub(crate) use config_merge::preview_role_map_merge;
 #[allow(unused_imports)]
 pub use paths::{
-    config_dir, config_file_path, credential_dir, credential_token_path, legacy_config_file_path,
-    legacy_credential_dir, managed_agents_root, managed_memories_root,
+    config_dir, config_file_path, credential_dir, credential_token_path, expand_user_path,
+    legacy_config_file_path, legacy_credential_dir, managed_agents_root, managed_memories_root,
     managed_skills_manifest_path, managed_skills_root, memories_archive_root, memory_backend_path,
     org_schema_path, resolve_memory_path, role_map_path, shared_agent_knowledge_dir,
     shared_prompt_path,
