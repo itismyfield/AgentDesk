@@ -274,7 +274,7 @@
 | `server::worker_registry` | `src/server/worker_registry.rs` | 737 |  |
 | `server::ws` | `src/server/ws.rs` | 236 |  |
 | `services` | `src/services/mod.rs` | 68 |  |
-| `services::agent_protocol` | `src/services/agent_protocol.rs` | 272 |  |
+| `services::agent_protocol` | `src/services/agent_protocol.rs` | 277 |  |
 | `services::agent_quality` | `src/services/agent_quality/mod.rs` | 24 |  |
 | `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 616 |  |
 | `services::agents` | `src/services/agents/mod.rs` | 2 |  |
@@ -447,9 +447,9 @@
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 597 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
 | `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 3207 | giant-file |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 4539 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 4543 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2342 | giant-file |
-| `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 36 |  |
+| `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 88 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 193 |  |
 | `services::discord::turn_bridge::output_lifecycle` | `src/services/discord/turn_bridge/output_lifecycle.rs` | 75 |  |
 | `services::discord::turn_bridge::recall_feedback` | `src/services/discord/turn_bridge/recall_feedback.rs` | 799 |  |
