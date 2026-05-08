@@ -166,8 +166,12 @@ src/
 │   │   └── high_risk_recovery.rs
 │   └── agents_setup_e2e.rs
 ├── kanban/
+│   ├── audit.rs
+│   ├── github_sync.rs
+│   ├── github_sync_target.rs
 │   ├── hooks.rs
 │   ├── mod.rs
+│   ├── review_tuning.rs
 │   ├── state_machine.rs
 │   ├── terminal_cleanup.rs
 │   ├── test_support.rs
@@ -297,6 +301,8 @@ src/
 │   │   │   ├── pg_storage.rs
 │   │   │   └── processing.rs
 │   │   ├── core.rs
+│   │   ├── issue_body.rs
+│   │   ├── issues.rs
 │   │   ├── markers.rs
 │   │   ├── memory_sync.rs
 │   │   ├── mod.rs
