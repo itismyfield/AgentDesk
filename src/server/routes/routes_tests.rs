@@ -23617,7 +23617,7 @@ async fn auto_queue_status_exposes_explicit_thread_links_from_configured_channel
     }
 
     let mut config = crate::config::Config::default();
-    config.discord.guild_id = Some("guild-123".to_string());
+    config.discord.guild_id = Some("1490141479707086938".to_string());
     let app = test_api_router_with_config(db.clone(), engine, config, None);
 
     let response = app
@@ -23645,14 +23645,14 @@ async fn auto_queue_status_exposes_explicit_thread_links_from_configured_channel
     assert_eq!(thread_links[0]["thread_id"], "222000000000000001");
     assert_eq!(
         thread_links[0]["url"],
-        "https://discord.com/channels/guild-123/222000000000000001"
+        "https://discord.com/channels/1490141479707086938/222000000000000001"
     );
     assert_eq!(thread_links[1]["label"], "review");
     assert_eq!(thread_links[1]["channel_id"], "222");
     assert_eq!(thread_links[1]["thread_id"], "222000000000000002");
     assert_eq!(
         thread_links[1]["url"],
-        "https://discord.com/channels/guild-123/222000000000000002"
+        "https://discord.com/channels/1490141479707086938/222000000000000002"
     );
 }
 
@@ -23861,7 +23861,7 @@ async fn auto_queue_status_pg_exposes_explicit_thread_links_from_configured_chan
     .unwrap();
 
     let mut config = crate::config::Config::default();
-    config.discord.guild_id = Some("guild-123".to_string());
+    config.discord.guild_id = Some("1490141479707086938".to_string());
     let app = test_api_router_with_pg(db, engine, config, None, pg_pool.clone());
 
     let response = app
@@ -23890,14 +23890,14 @@ async fn auto_queue_status_pg_exposes_explicit_thread_links_from_configured_chan
     assert_eq!(thread_links[0]["thread_id"], "222000000000000001");
     assert_eq!(
         thread_links[0]["url"],
-        "https://discord.com/channels/guild-123/222000000000000001"
+        "https://discord.com/channels/1490141479707086938/222000000000000001"
     );
     assert_eq!(thread_links[1]["label"], "review");
     assert_eq!(thread_links[1]["channel_id"], "222");
     assert_eq!(thread_links[1]["thread_id"], "222000000000000002");
     assert_eq!(
         thread_links[1]["url"],
-        "https://discord.com/channels/guild-123/222000000000000002"
+        "https://discord.com/channels/1490141479707086938/222000000000000002"
     );
 
     pg_pool.close().await;
@@ -23947,8 +23947,8 @@ async fn auto_queue_status_pg_repairs_thread_links_from_dispatch_history() {
     .bind("medium")
     .bind("agent-thread-repair-pg")
     .bind(1470_i64)
-    .bind("thread-review-cancelled")
-    .bind(json!({"111": "thread-review-cancelled"}).to_string())
+    .bind("1501968633650483273")
+    .bind(json!({"111": "1501968633650483273"}).to_string())
     .execute(&pg_pool)
     .await
     .unwrap();
@@ -23964,10 +23964,10 @@ async fn auto_queue_status_pg_repairs_thread_links_from_dispatch_history() {
     .bind("card-thread-repair-pg")
     .bind("agent-thread-repair-pg")
     .bind("Work dispatch")
-    .bind("thread-work-completed")
+    .bind("1501968633650483272")
     .bind("dispatch-thread-repair-review")
     .bind("Cancelled review dispatch")
-    .bind("thread-review-cancelled")
+    .bind("1501968633650483273")
     .execute(&pg_pool)
     .await
     .unwrap();
@@ -24000,7 +24000,7 @@ async fn auto_queue_status_pg_repairs_thread_links_from_dispatch_history() {
     .unwrap();
 
     let mut config = crate::config::Config::default();
-    config.discord.guild_id = Some("guild-123".to_string());
+    config.discord.guild_id = Some("1490141479707086938".to_string());
     let app = test_api_router_with_pg(db, engine, config, None, pg_pool.clone());
     let response = app
         .oneshot(
@@ -24028,8 +24028,8 @@ async fn auto_queue_status_pg_repairs_thread_links_from_dispatch_history() {
             "role": "work",
             "label": "work",
             "channel_id": "222",
-            "thread_id": "thread-work-completed",
-            "url": "https://discord.com/channels/guild-123/thread-work-completed"
+            "thread_id": "1501968633650483272",
+            "url": "https://discord.com/channels/1490141479707086938/1501968633650483272"
         })],
         "status should recover the completed work thread and suppress the cancelled review thread"
     );

@@ -24,19 +24,61 @@ export function isDiscordSnowflake(value: string | null | undefined): value is s
   return Boolean(value && /^\d{15,}$/.test(value));
 }
 
+function normalizeDiscordSnowflake(value: string | null | undefined): string | null {
+  const normalized = value?.trim();
+  return isDiscordSnowflake(normalized) ? normalized : null;
+}
+
+function parseDiscordChannelUrl(
+  value: string | null | undefined,
+  pattern: RegExp,
+): { guildId: string; channelId: string } | null {
+  const match = value?.trim().match(pattern);
+  if (!match) return null;
+  const guildId = normalizeDiscordSnowflake(match[1]);
+  const channelId = normalizeDiscordSnowflake(match[2]);
+  return guildId && channelId ? { guildId, channelId } : null;
+}
+
+function formatDiscordWebUrl(guildId: string, channelId: string): string {
+  return `https://discord.com/channels/${guildId}/${channelId}`;
+}
+
+function formatDiscordDeepLink(guildId: string, channelId: string): string {
+  return `discord://discord.com/channels/${guildId}/${channelId}`;
+}
+
+function normalizeDiscordWebUrl(value: string | null | undefined): string | null {
+  const parsed = parseDiscordChannelUrl(
+    value,
+    /^https:\/\/discord\.com\/channels\/([^/]+)\/([^/]+)$/,
+  );
+  return parsed ? formatDiscordWebUrl(parsed.guildId, parsed.channelId) : null;
+}
+
+function normalizeDiscordDeepLink(value: string | null | undefined): string | null {
+  const parsed = parseDiscordChannelUrl(
+    value,
+    /^discord:\/\/discord\.com\/channels\/([^/]+)\/([^/]+)$/,
+  );
+  return parsed ? formatDiscordDeepLink(parsed.guildId, parsed.channelId) : null;
+}
+
 export function buildDiscordChannelLinks(
   channelId: string | null | undefined,
   guildId: string | null | undefined,
 ): Pick<DiscordTargetSummary, "webUrl" | "deepLink"> {
-  if (!channelId || !guildId) {
+  const normalizedChannelId = normalizeDiscordSnowflake(channelId);
+  const normalizedGuildId = normalizeDiscordSnowflake(guildId);
+  if (!normalizedChannelId || !normalizedGuildId) {
     return {
       webUrl: null,
       deepLink: null,
     };
   }
   return {
-    webUrl: `https://discord.com/channels/${guildId}/${channelId}`,
-    deepLink: `discord://discord.com/channels/${guildId}/${channelId}`,
+    webUrl: formatDiscordWebUrl(normalizedGuildId, normalizedChannelId),
+    deepLink: formatDiscordDeepLink(normalizedGuildId, normalizedChannelId),
   };
 }
 
@@ -50,10 +92,13 @@ export function buildDiscordThreadLinks(
     };
   }
 
-  const match = link.url.match(/^https:\/\/discord\.com\/channels\/([^/]+)\/([^/]+)$/);
+  const parsed = parseDiscordChannelUrl(
+    link.url,
+    /^https:\/\/discord\.com\/channels\/([^/]+)\/([^/]+)$/,
+  );
   return {
-    webUrl: link.url,
-    deepLink: match ? `discord://discord.com/channels/${match[1]}/${match[2]}` : null,
+    webUrl: parsed ? formatDiscordWebUrl(parsed.guildId, parsed.channelId) : null,
+    deepLink: parsed ? formatDiscordDeepLink(parsed.guildId, parsed.channelId) : null,
   };
 }
 
@@ -165,9 +210,12 @@ export function describeDispatchedSession(
   // already populated a rebuilt URL — defeating the contract. Prefer
   // canonical fields first, fall back to the rebuilt summary only when the
   // backend didn't supply a value.
-  const canonicalWebUrl = session.deeplink_url ?? session.channel_web_url ?? null;
-  const canonicalDeepLink =
-    session.thread_deeplink_url ?? session.channel_deeplink_url ?? null;
+  const canonicalWebUrl = normalizeDiscordWebUrl(
+    session.deeplink_url ?? session.channel_web_url ?? null,
+  );
+  const canonicalDeepLink = normalizeDiscordDeepLink(
+    session.thread_deeplink_url ?? session.channel_deeplink_url ?? null,
+  );
   if (canonicalWebUrl) {
     summary.webUrl = canonicalWebUrl;
   }

@@ -311,8 +311,8 @@ pub fn build_channel_deeplinks(
     channel_id: Option<&str>,
     guild_id: Option<&str>,
 ) -> (Option<String>, Option<String>) {
-    let channel = channel_id.map(str::trim).filter(|s| !s.is_empty());
-    let guild = guild_id.map(str::trim).filter(|s| !s.is_empty());
+    let channel = crate::utils::discord::normalize_discord_snowflake(channel_id);
+    let guild = crate::utils::discord::normalize_discord_snowflake(guild_id);
     match (channel, guild) {
         (Some(c), Some(g)) => (
             Some(format!("https://discord.com/channels/{g}/{c}")),
@@ -370,6 +370,16 @@ mod tests {
         let (web_none, deep_none) = build_channel_deeplinks(Some("1485506232256168011"), None);
         assert!(web_none.is_none());
         assert!(deep_none.is_none());
+
+        let (web_bad_guild, deep_bad_guild) =
+            build_channel_deeplinks(Some("1485506232256168011"), Some("123"));
+        assert!(web_bad_guild.is_none());
+        assert!(deep_bad_guild.is_none());
+
+        let (web_bad_channel, deep_bad_channel) =
+            build_channel_deeplinks(Some("thread-work-completed"), Some("1490141479707086938"));
+        assert!(web_bad_channel.is_none());
+        assert!(deep_bad_channel.is_none());
     }
 
     #[test]

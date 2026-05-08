@@ -1340,17 +1340,18 @@ fn thread_link_view(
     guild_id: Option<&str>,
 ) -> ThreadLinkView {
     let thread_id = thread_id.trim().to_string();
-    let guild_id = guild_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
+    let valid_guild_id = crate::utils::discord::normalize_discord_snowflake(guild_id);
+    let valid_thread_id = crate::utils::discord::normalize_discord_snowflake(Some(&thread_id));
 
     ThreadLinkView {
         role: role.to_string(),
         label,
         channel_id: channel_id.map(|value| value.to_string()),
-        url: guild_id
-            .map(|guild_id| format!("https://discord.com/channels/{guild_id}/{thread_id}")),
+        url: valid_guild_id
+            .zip(valid_thread_id)
+            .map(|(guild_id, thread_id)| {
+                format!("https://discord.com/channels/{guild_id}/{thread_id}")
+            }),
         thread_id,
     }
 }
@@ -1491,5 +1492,39 @@ mod tests {
             violation["recovery"]["reset_slot_thread_endpoint"],
             "/api/queue/slots/agent-slot/1/reset-thread"
         );
+    }
+
+    #[test]
+    fn thread_link_view_only_builds_url_for_discord_snowflakes() {
+        let valid = thread_link_view(
+            "work",
+            "work".to_string(),
+            Some(1485506232256168011),
+            "1501968633650483271",
+            Some("1490141479707086938"),
+        );
+        assert_eq!(
+            valid.url.as_deref(),
+            Some("https://discord.com/channels/1490141479707086938/1501968633650483271")
+        );
+
+        let bad_guild = thread_link_view(
+            "work",
+            "work".to_string(),
+            Some(1485506232256168011),
+            "1501968633650483271",
+            Some("123"),
+        );
+        assert!(bad_guild.url.is_none());
+
+        let bad_thread = thread_link_view(
+            "work",
+            "work".to_string(),
+            Some(1485506232256168011),
+            "thread-work-completed",
+            Some("1490141479707086938"),
+        );
+        assert!(bad_thread.url.is_none());
+        assert_eq!(bad_thread.thread_id, "thread-work-completed");
     }
 }

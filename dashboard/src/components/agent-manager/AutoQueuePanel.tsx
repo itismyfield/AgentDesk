@@ -353,10 +353,14 @@ function EntryRow({
               {threadLinks.map((link) => {
                 const label = formatThreadLinkLabel(link, tr);
                 const key = `${entry.id}:${link.role}:${link.thread_id}`;
+                const resolvedLink = link.url ? buildDiscordThreadLinks(link) : null;
+                const href = resolvedLink
+                  ? (resolvedLink.deepLink ?? resolvedLink.webUrl)
+                  : null;
                 const content = (
                   <>
                     <span>{label}</span>
-                    {link.url ? (
+                    {href ? (
                       <span aria-hidden="true">↗</span>
                     ) : (
                       <span className="font-mono opacity-70">
@@ -366,12 +370,11 @@ function EntryRow({
                   </>
                 );
 
-                if (link.url) {
-                  const { deepLink } = buildDiscordThreadLinks(link);
+                if (href) {
                   return (
                     <a
                       key={key}
-                      href={deepLink ?? link.url}
+                      href={href}
                       target="_blank"
                       rel="noreferrer"
                       onClick={(event) => event.stopPropagation()}
