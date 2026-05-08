@@ -56,6 +56,11 @@ pub struct StatusEntryRecord {
     pub agent_id: String,
     pub card_id: String,
     pub dispatch_id: Option<String>,
+    pub dispatch_type: Option<String>,
+    pub dispatch_status: Option<String>,
+    pub dispatch_created_at: Option<i64>,
+    pub dispatch_updated_at: Option<i64>,
+    pub live_session_count: i64,
     pub priority_rank: i64,
     pub reason: Option<String>,
     pub status: String,
@@ -81,6 +86,7 @@ pub struct AutoQueueRunHistoryRecord {
     pub repo: Option<String>,
     pub agent_id: Option<String>,
     pub status: String,
+    pub timeout_minutes: i64,
     pub created_at: i64,
     pub completed_at: Option<i64>,
     pub entry_count: i64,
@@ -169,6 +175,15 @@ pub async fn get_status_entry_pg(
                 e.agent_id,
                 COALESCE(e.kanban_card_id, '') AS kanban_card_id,
                 e.dispatch_id,
+                td.dispatch_type AS dispatch_type,
+                td.status AS dispatch_status,
+                CASE WHEN td.created_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM td.created_at)::BIGINT * 1000
+                END AS dispatch_created_at,
+                CASE WHEN td.updated_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM td.updated_at)::BIGINT * 1000
+                END AS dispatch_updated_at,
+                COALESCE(live_sessions.live_session_count, 0)::BIGINT AS live_session_count,
                 e.priority_rank::BIGINT AS priority_rank,
                 e.reason,
                 e.status,
@@ -193,6 +208,13 @@ pub async fn get_status_entry_pg(
          FROM auto_queue_entries e
          LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
          LEFT JOIN card_review_state crs ON e.kanban_card_id = crs.card_id
+         LEFT JOIN task_dispatches td ON td.id = e.dispatch_id
+         LEFT JOIN LATERAL (
+             SELECT COUNT(*)::BIGINT AS live_session_count
+             FROM sessions s
+             WHERE s.active_dispatch_id = e.dispatch_id
+               AND COALESCE(s.status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')
+         ) live_sessions ON TRUE
          WHERE e.id = $1",
     )
     .bind(entry_id)
@@ -216,6 +238,15 @@ pub async fn list_status_entries_pg(
                 e.agent_id,
                 COALESCE(e.kanban_card_id, '') AS kanban_card_id,
                 e.dispatch_id,
+                td.dispatch_type AS dispatch_type,
+                td.status AS dispatch_status,
+                CASE WHEN td.created_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM td.created_at)::BIGINT * 1000
+                END AS dispatch_created_at,
+                CASE WHEN td.updated_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM td.updated_at)::BIGINT * 1000
+                END AS dispatch_updated_at,
+                COALESCE(live_sessions.live_session_count, 0)::BIGINT AS live_session_count,
                 e.priority_rank::BIGINT AS priority_rank,
                 e.reason,
                 e.status,
@@ -240,6 +271,13 @@ pub async fn list_status_entries_pg(
          FROM auto_queue_entries e
          LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
          LEFT JOIN card_review_state crs ON e.kanban_card_id = crs.card_id
+         LEFT JOIN task_dispatches td ON td.id = e.dispatch_id
+         LEFT JOIN LATERAL (
+             SELECT COUNT(*)::BIGINT AS live_session_count
+             FROM sessions s
+             WHERE s.active_dispatch_id = e.dispatch_id
+               AND COALESCE(s.status, '') NOT IN ('disconnected', 'aborted', 'completed', 'failed', 'cancelled')
+         ) live_sessions ON TRUE
          WHERE e.run_id = $1
            AND ($2::TEXT IS NULL OR e.agent_id = $2)
            AND ($3::TEXT IS NULL OR kc.repo_id = $3)
@@ -270,6 +308,7 @@ pub async fn list_run_history_pg(
                 r.repo,
                 r.agent_id,
                 r.status,
+                COALESCE(r.timeout_minutes, 120)::BIGINT AS timeout_minutes,
                 EXTRACT(EPOCH FROM r.created_at)::BIGINT * 1000 AS created_at,
                 CASE WHEN r.completed_at IS NOT NULL
                     THEN EXTRACT(EPOCH FROM r.completed_at)::BIGINT * 1000
@@ -284,7 +323,7 @@ pub async fn list_run_history_pg(
          LEFT JOIN kanban_cards kc ON kc.id = e.kanban_card_id
          WHERE ($1::TEXT IS NULL OR COALESCE(kc.repo_id, r.repo, '') = $1)
            AND ($2::TEXT IS NULL OR COALESCE(e.agent_id, r.agent_id, '') = $2)
-         GROUP BY r.id, r.repo, r.agent_id, r.status, r.created_at, r.completed_at
+         GROUP BY r.id, r.repo, r.agent_id, r.status, r.timeout_minutes, r.created_at, r.completed_at
          ORDER BY r.created_at DESC
          LIMIT $3",
     )
@@ -445,6 +484,11 @@ fn status_entry_record_from_pg_row(
         agent_id: row.try_get("agent_id")?,
         card_id: row.try_get("kanban_card_id")?,
         dispatch_id: row.try_get("dispatch_id")?,
+        dispatch_type: row.try_get("dispatch_type")?,
+        dispatch_status: row.try_get("dispatch_status")?,
+        dispatch_created_at: row.try_get("dispatch_created_at")?,
+        dispatch_updated_at: row.try_get("dispatch_updated_at")?,
+        live_session_count: row.try_get("live_session_count")?,
         priority_rank: row.try_get("priority_rank")?,
         reason: row.try_get("reason")?,
         status: row.try_get("status")?,
@@ -473,6 +517,7 @@ fn auto_queue_run_history_record_from_pg_row(
         repo: row.try_get("repo")?,
         agent_id: row.try_get("agent_id")?,
         status: row.try_get("status")?,
+        timeout_minutes: row.try_get("timeout_minutes")?,
         created_at: row.try_get("created_at")?,
         completed_at: row.try_get("completed_at")?,
         entry_count: row.try_get("entry_count")?,

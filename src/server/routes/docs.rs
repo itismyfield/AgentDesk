@@ -3550,7 +3550,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/queue/status",
             "auto-queue",
-            "Get latest auto-queue run state. When auto_queue_slot_single_active_entry is violated, diagnostics.slot_invariant_violations identifies run_id, agent_id, slot_index, conflicting entry_ids, related dispatch_ids, and recovery endpoints. Recommended recovery: choose the entry that should retain the active slot, complete/cancel/skip stale entries, then use /api/queue/slots/{agent_id}/{slot_index}/reset-thread or /api/queue/slots/{agent_id}/{slot_index}/rebind if the slot binding points at the wrong thread group.",
+            "Get latest auto-queue run state. diagnostics.entry_dispatch_delivery_mismatches surfaces split-brain delivery where an entry is dispatched but the linked dispatch/session is not live; it includes run_id, entry_id, dispatch_id, card_id, github_issue_number, thread_group, slot_index, dispatch_status, entry_status, age_ms, and recovery endpoints. diagnostics.run_timeout_overruns reports active runs beyond timeout_minutes. When auto_queue_slot_single_active_entry is violated, diagnostics.slot_invariant_violations identifies run_id, agent_id, slot_index, conflicting entry_ids, related dispatch_ids, and recovery endpoints. Recommended recovery: reset stale entries to pending, release slot bindings with /api/queue/slots/{agent_id}/{slot_index}/reset-thread or /api/queue/slots/{agent_id}/{slot_index}/rebind, then dispatch again.",
         )
         .with_params([
             (
@@ -3611,6 +3611,9 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "repo": "test-repo",
                     "agent_id": "agent-1",
                     "status": "completed",
+                    "timeout_minutes": 120,
+                    "timeout_exceeded": false,
+                    "timeout_overrun_ms": 0,
                     "created_at": 1712600000000_i64,
                     "completed_at": 1712600300000_i64,
                     "duration_ms": 300000_i64,
@@ -5229,6 +5232,15 @@ mod tests {
                 .description
                 .contains("diagnostics.slot_invariant_violations"),
             "status docs must describe slot invariant recovery diagnostics"
+        );
+        assert!(
+            status
+                .description
+                .contains("diagnostics.entry_dispatch_delivery_mismatches")
+                && status
+                    .description
+                    .contains("diagnostics.run_timeout_overruns"),
+            "status docs must describe delivery split-brain and timeout diagnostics"
         );
         assert!(
             status.description.contains("entry_ids")

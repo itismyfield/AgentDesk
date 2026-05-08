@@ -63,17 +63,29 @@ pub async fn history(
             } else {
                 0.0
             };
+            let duration_ms = record
+                .completed_at
+                .unwrap_or(now_ms)
+                .saturating_sub(record.created_at);
+            let timeout_ms = record.timeout_minutes.max(0).saturating_mul(60_000);
+            let timeout_exceeded = timeout_ms > 0 && duration_ms > timeout_ms;
+            let timeout_overrun_ms = if timeout_exceeded {
+                duration_ms.saturating_sub(timeout_ms)
+            } else {
+                0
+            };
+
             AutoQueueHistoryRun {
                 id: record.id,
                 repo: record.repo,
                 agent_id: record.agent_id,
                 status: record.status,
+                timeout_minutes: record.timeout_minutes,
+                timeout_exceeded,
+                timeout_overrun_ms,
                 created_at: record.created_at,
                 completed_at: record.completed_at,
-                duration_ms: record
-                    .completed_at
-                    .unwrap_or(now_ms)
-                    .saturating_sub(record.created_at),
+                duration_ms,
                 entry_count,
                 done_count: record.done_count,
                 skipped_count: record.skipped_count,

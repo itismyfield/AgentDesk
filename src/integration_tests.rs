@@ -2782,6 +2782,110 @@ mod tests {
         pg_db.drop().await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_queue_status_reports_pending_dispatch_split_brain_pg() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+
+        seed_agent_pg(&pool).await;
+        seed_repo_pg(&pool, "owner/repo").await;
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, repo_id, github_issue_number,
+                created_at, updated_at
+             ) VALUES (
+                'card-split-brain', 'Split Brain', 'in_progress', 'agent-1',
+                'owner/repo', 1935, NOW() - INTERVAL '7 hours', NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                created_at, updated_at
+             ) VALUES (
+                'dispatch-split-brain', 'card-split-brain', 'agent-1',
+                'implementation', 'pending', 'Split Brain Dispatch',
+                NOW() - INTERVAL '6 hours', NOW() - INTERVAL '6 hours'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, timeout_minutes, created_at
+             ) VALUES (
+                'run-split-brain', 'owner/repo', 'agent-1', 'active', 120,
+                NOW() - INTERVAL '6 hours'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id,
+                slot_index, thread_group, priority_rank, dispatched_at, created_at
+             ) VALUES (
+                'entry-split-brain', 'run-split-brain', 'card-split-brain',
+                'agent-1', 'dispatched', 'dispatch-split-brain', 0, 1, 0,
+                NOW() - INTERVAL '6 hours', NOW() - INTERVAL '6 hours'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = AppState::test_state_with_pg(test_db(), engine, pool.clone());
+        let (status, body) = crate::server::routes::auto_queue::status(
+            axum::extract::State(state),
+            axum::extract::Query(crate::server::routes::auto_queue::StatusQuery {
+                repo: Some("owner/repo".to_string()),
+                agent_id: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let diagnostics = body
+            .0
+            .get("diagnostics")
+            .expect("split-brain status must include diagnostics");
+        let mismatch = &diagnostics["entry_dispatch_delivery_mismatches"][0];
+        assert_eq!(mismatch["diagnostic"], "entry_dispatch_delivery_mismatch");
+        assert_eq!(mismatch["run_id"], "run-split-brain");
+        assert_eq!(mismatch["entry_id"], "entry-split-brain");
+        assert_eq!(mismatch["dispatch_id"], "dispatch-split-brain");
+        assert_eq!(mismatch["card_id"], "card-split-brain");
+        assert_eq!(mismatch["github_issue_number"], 1935);
+        assert_eq!(mismatch["thread_group"], 1);
+        assert_eq!(mismatch["slot_index"], 0);
+        assert_eq!(mismatch["dispatch_status"], "pending");
+        assert_eq!(mismatch["entry_status"], "dispatched");
+        assert_eq!(mismatch["live_session_count"], 0);
+        assert_eq!(
+            mismatch["recovery"]["reset_entry_pending_endpoint"],
+            "/api/queue/entries/entry-split-brain"
+        );
+        assert_eq!(
+            mismatch["recovery"]["reset_slot_thread_endpoint"],
+            "/api/queue/slots/agent-1/0/reset-thread"
+        );
+        assert_eq!(
+            diagnostics["run_timeout_overruns"][0]["diagnostic"],
+            "run_timeout_overrun"
+        );
+        assert_eq!(body.0["run"]["timeout_exceeded"], true);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     // #1239: migrated to PG fixtures because `activate_with_deps` is now
     // PG-only — the SQLite fallback was removed in favor of `activate_with_deps_pg`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

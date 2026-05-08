@@ -183,11 +183,17 @@ pub struct AutoQueueStatusResponse {
 pub struct AutoQueueStatusDiagnostics {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slot_invariant_violations: Vec<AutoQueueSlotInvariantViolation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entry_dispatch_delivery_mismatches: Vec<AutoQueueDeliveryMismatchDiagnostic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_timeout_overruns: Vec<AutoQueueRunTimeoutOverrunDiagnostic>,
 }
 
 impl AutoQueueStatusDiagnostics {
     fn is_empty(&self) -> bool {
         self.slot_invariant_violations.is_empty()
+            && self.entry_dispatch_delivery_mismatches.is_empty()
+            && self.run_timeout_overruns.is_empty()
     }
 }
 
@@ -219,6 +225,57 @@ pub struct AutoQueueSlotInvariantRecovery {
     pub skip_entry_endpoint_template: String,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct AutoQueueDeliveryMismatchDiagnostic {
+    pub diagnostic: String,
+    pub run_id: String,
+    pub entry_id: String,
+    pub dispatch_id: Option<String>,
+    pub card_id: String,
+    pub github_issue_number: Option<i64>,
+    pub thread_group: i64,
+    pub slot_index: Option<i64>,
+    pub entry_status: String,
+    pub dispatch_status: Option<String>,
+    pub dispatch_type: Option<String>,
+    pub live_session_count: i64,
+    pub age_ms: i64,
+    pub dispatch_age_ms: Option<i64>,
+    pub recovery: AutoQueueDeliveryMismatchRecovery,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct AutoQueueDeliveryMismatchRecovery {
+    pub summary: String,
+    pub requeue_notify: bool,
+    pub reset_entry_pending: bool,
+    pub release_slot: bool,
+    pub reset_entry_pending_endpoint: String,
+    pub dispatch_next_endpoint: String,
+    pub cancel_dispatch_endpoint: Option<String>,
+    pub reset_slot_thread_endpoint: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct AutoQueueRunTimeoutOverrunDiagnostic {
+    pub diagnostic: String,
+    pub run_id: String,
+    pub status: String,
+    pub timeout_minutes: i64,
+    pub created_at: i64,
+    pub age_ms: i64,
+    pub timeout_ms: i64,
+    pub overdue_ms: i64,
+    pub recovery: AutoQueueRunTimeoutRecovery,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct AutoQueueRunTimeoutRecovery {
+    pub summary: String,
+    pub status_endpoint: String,
+    pub update_run_endpoint: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AutoQueueRunView {
     pub id: String,
@@ -227,6 +284,10 @@ pub struct AutoQueueRunView {
     pub review_mode: String,
     pub status: String,
     pub timeout_minutes: i64,
+    pub age_ms: i64,
+    pub timeout_ms: i64,
+    pub timeout_exceeded: bool,
+    pub timeout_overrun_ms: i64,
     pub ai_model: Option<String>,
     pub ai_rationale: Option<String>,
     pub created_at: i64,
@@ -255,6 +316,16 @@ pub struct AutoQueueStatusEntryView {
     pub card_id: String,
     #[serde(skip)]
     pub dispatch_id: Option<String>,
+    #[serde(skip)]
+    pub dispatch_type: Option<String>,
+    #[serde(skip)]
+    pub dispatch_status: Option<String>,
+    #[serde(skip)]
+    pub dispatch_created_at: Option<i64>,
+    #[serde(skip)]
+    pub dispatch_updated_at: Option<i64>,
+    #[serde(skip)]
+    pub live_session_count: i64,
     pub priority_rank: i64,
     pub reason: Option<String>,
     pub status: String,
@@ -505,9 +576,10 @@ impl AutoQueueService {
         pool: &PgPool,
         run_id: &str,
     ) -> ServiceResult<Option<AutoQueueRunView>> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
         auto_queue::get_run_pg(pool, run_id)
             .await
-            .map(|record| record.map(AutoQueueRunView::from))
+            .map(|record| record.map(|record| AutoQueueRunView::from_record(record, now_ms)))
             .map_err(|error| {
                 ServiceError::internal(format!("load run: {error}"))
                     .with_code(ErrorCode::Database)
@@ -688,8 +760,17 @@ impl From<GenerateCandidateRecord> for GenerateCandidate {
     }
 }
 
-impl From<AutoQueueRunRecord> for AutoQueueRunView {
-    fn from(record: AutoQueueRunRecord) -> Self {
+impl AutoQueueRunView {
+    fn from_record(record: AutoQueueRunRecord, now_ms: i64) -> Self {
+        let age_ms = run_age_ms(&record, now_ms);
+        let timeout_ms = timeout_ms(record.timeout_minutes);
+        let timeout_exceeded = timeout_ms > 0 && age_ms > timeout_ms;
+        let timeout_overrun_ms = if timeout_exceeded {
+            age_ms.saturating_sub(timeout_ms)
+        } else {
+            0
+        };
+
         Self {
             id: record.id,
             repo: record.repo,
@@ -697,6 +778,10 @@ impl From<AutoQueueRunRecord> for AutoQueueRunView {
             review_mode: record.review_mode,
             status: record.status,
             timeout_minutes: record.timeout_minutes,
+            age_ms,
+            timeout_ms,
+            timeout_exceeded,
+            timeout_overrun_ms,
             ai_model: record.ai_model,
             ai_rationale: record.ai_rationale,
             created_at: record.created_at,
@@ -706,6 +791,12 @@ impl From<AutoQueueRunRecord> for AutoQueueRunView {
             max_concurrent_threads: record.max_concurrent_threads,
             thread_group_count: record.thread_group_count,
         }
+    }
+}
+
+impl From<AutoQueueRunRecord> for AutoQueueRunView {
+    fn from(record: AutoQueueRunRecord) -> Self {
+        Self::from_record(record, chrono::Utc::now().timestamp_millis())
     }
 }
 
@@ -720,6 +811,11 @@ impl AutoQueueStatusEntryView {
             agent_id: record.agent_id,
             card_id: record.card_id,
             dispatch_id: record.dispatch_id,
+            dispatch_type: record.dispatch_type,
+            dispatch_status: record.dispatch_status,
+            dispatch_created_at: record.dispatch_created_at,
+            dispatch_updated_at: record.dispatch_updated_at,
+            live_session_count: record.live_session_count,
             priority_rank: record.priority_rank,
             reason: record.reason,
             status: record.status,
@@ -755,7 +851,12 @@ async fn build_status_response_pg(
     }
 
     let phase_gates = query_phase_gates_pg(pool, &run.id).await?;
-    Ok(assemble_status_response(run, entries, phase_gates))
+    Ok(assemble_status_response(
+        run,
+        entries,
+        phase_gates,
+        chrono::Utc::now().timestamp_millis(),
+    ))
 }
 
 async fn query_phase_gates_pg(pool: &PgPool, run_id: &str) -> ServiceResult<Vec<PhaseGateView>> {
@@ -966,12 +1067,130 @@ fn slot_invariant_recovery(agent_id: &str, slot_index: i64) -> AutoQueueSlotInva
     }
 }
 
+fn build_status_diagnostics(
+    run: &AutoQueueRunRecord,
+    entries: &[AutoQueueStatusEntryView],
+    now_ms: i64,
+) -> AutoQueueStatusDiagnostics {
+    AutoQueueStatusDiagnostics {
+        slot_invariant_violations: check_auto_queue_slot_single_active_entry(&run.id, entries),
+        entry_dispatch_delivery_mismatches: collect_entry_dispatch_delivery_mismatches(
+            &run.id, entries, now_ms,
+        ),
+        run_timeout_overruns: collect_run_timeout_overruns(run, now_ms),
+    }
+}
+
+fn collect_entry_dispatch_delivery_mismatches(
+    run_id: &str,
+    entries: &[AutoQueueStatusEntryView],
+    now_ms: i64,
+) -> Vec<AutoQueueDeliveryMismatchDiagnostic> {
+    entries
+        .iter()
+        .filter(|entry| entry.status == "dispatched")
+        .filter(|entry| {
+            entry.dispatch_status.as_deref() != Some("dispatched") || entry.live_session_count <= 0
+        })
+        .map(|entry| {
+            let age_start_ms = entry.dispatched_at.unwrap_or(entry.created_at);
+            AutoQueueDeliveryMismatchDiagnostic {
+                diagnostic: "entry_dispatch_delivery_mismatch".to_string(),
+                run_id: run_id.to_string(),
+                entry_id: entry.id.clone(),
+                dispatch_id: entry.dispatch_id.clone(),
+                card_id: entry.card_id.clone(),
+                github_issue_number: entry.github_issue_number,
+                thread_group: entry.thread_group,
+                slot_index: entry.slot_index,
+                entry_status: entry.status.clone(),
+                dispatch_status: entry.dispatch_status.clone(),
+                dispatch_type: entry.dispatch_type.clone(),
+                live_session_count: entry.live_session_count,
+                age_ms: elapsed_ms(age_start_ms, now_ms),
+                dispatch_age_ms: entry
+                    .dispatch_created_at
+                    .map(|created_at| elapsed_ms(created_at, now_ms)),
+                recovery: delivery_mismatch_recovery(entry),
+            }
+        })
+        .collect()
+}
+
+fn delivery_mismatch_recovery(
+    entry: &AutoQueueStatusEntryView,
+) -> AutoQueueDeliveryMismatchRecovery {
+    let release_slot = entry.slot_index.is_some();
+    AutoQueueDeliveryMismatchRecovery {
+        summary: "The auto-queue entry is marked dispatched, but delivery state is not backed by a live dispatch session. Reset the entry to pending, clear the slot if one is held, then dispatch the run again.".to_string(),
+        requeue_notify: true,
+        reset_entry_pending: true,
+        release_slot,
+        reset_entry_pending_endpoint: format!("/api/queue/entries/{}", entry.id),
+        dispatch_next_endpoint: "/api/queue/dispatch-next".to_string(),
+        cancel_dispatch_endpoint: entry
+            .dispatch_id
+            .as_ref()
+            .map(|dispatch_id| format!("/api/dispatches/{dispatch_id}/cancel")),
+        reset_slot_thread_endpoint: entry
+            .slot_index
+            .map(|slot_index| format!("/api/queue/slots/{}/{slot_index}/reset-thread", entry.agent_id)),
+    }
+}
+
+fn collect_run_timeout_overruns(
+    run: &AutoQueueRunRecord,
+    now_ms: i64,
+) -> Vec<AutoQueueRunTimeoutOverrunDiagnostic> {
+    if run.status != "active" {
+        return Vec::new();
+    }
+    let age_ms = run_age_ms(run, now_ms);
+    let timeout_ms = timeout_ms(run.timeout_minutes);
+    if timeout_ms <= 0 || age_ms <= timeout_ms {
+        return Vec::new();
+    }
+
+    vec![AutoQueueRunTimeoutOverrunDiagnostic {
+        diagnostic: "run_timeout_overrun".to_string(),
+        run_id: run.id.clone(),
+        status: run.status.clone(),
+        timeout_minutes: run.timeout_minutes,
+        created_at: run.created_at,
+        age_ms,
+        timeout_ms,
+        overdue_ms: age_ms.saturating_sub(timeout_ms),
+        recovery: AutoQueueRunTimeoutRecovery {
+            summary: "The active auto-queue run has exceeded timeout_minutes; inspect delivery diagnostics before deciding whether to reset entries, release slots, or complete/cancel the run.".to_string(),
+            status_endpoint: run
+                .agent_id
+                .as_ref()
+                .map(|agent_id| format!("/api/queue/status?agent_id={agent_id}"))
+                .unwrap_or_else(|| "/api/queue/status".to_string()),
+            update_run_endpoint: format!("/api/queue/runs/{}", run.id),
+        },
+    }]
+}
+
+fn run_age_ms(run: &AutoQueueRunRecord, now_ms: i64) -> i64 {
+    elapsed_ms(run.created_at, run.completed_at.unwrap_or(now_ms))
+}
+
+fn timeout_ms(timeout_minutes: i64) -> i64 {
+    timeout_minutes.max(0).saturating_mul(60_000)
+}
+
+fn elapsed_ms(start_ms: i64, end_ms: i64) -> i64 {
+    end_ms.saturating_sub(start_ms).max(0)
+}
+
 fn assemble_status_response(
     run: AutoQueueRunRecord,
     entries: Vec<AutoQueueStatusEntryView>,
     phase_gates: Vec<PhaseGateView>,
+    now_ms: i64,
 ) -> AutoQueueStatusResponse {
-    let slot_invariant_violations = check_auto_queue_slot_single_active_entry(&run.id, &entries);
+    let diagnostics = build_status_diagnostics(&run, &entries, now_ms);
     let mut agents = BTreeMap::<String, AutoQueueStatusCounts>::new();
     let mut thread_groups = BTreeMap::<String, AutoQueueThreadGroupView>::new();
     for entry in &entries {
@@ -1014,14 +1233,12 @@ fn assemble_status_response(
     }
 
     AutoQueueStatusResponse {
-        run: Some(AutoQueueRunView::from(run)),
+        run: Some(AutoQueueRunView::from_record(run, now_ms)),
         entries,
         agents,
         thread_groups,
         phase_gates,
-        diagnostics: AutoQueueStatusDiagnostics {
-            slot_invariant_violations,
-        },
+        diagnostics,
     }
 }
 
@@ -1397,6 +1614,11 @@ mod tests {
             agent_id: "agent-slot".to_string(),
             card_id: card_id.to_string(),
             dispatch_id: dispatch_id.map(str::to_string),
+            dispatch_type: dispatch_id.map(|_| "implementation".to_string()),
+            dispatch_status: dispatch_id.map(|_| "dispatched".to_string()),
+            dispatch_created_at: dispatch_id.map(|_| 1_000),
+            dispatch_updated_at: dispatch_id.map(|_| 1_000),
+            live_session_count: if dispatch_id.is_some() { 1 } else { 0 },
             priority_rank: 0,
             reason: None,
             status: status.to_string(),
@@ -1430,6 +1652,7 @@ mod tests {
                 vec!["dispatch-clean"],
             )],
             Vec::new(),
+            2_000,
         );
         let value = serde_json::to_value(response).unwrap();
 
@@ -1466,6 +1689,7 @@ mod tests {
                 ),
             ],
             Vec::new(),
+            2_000,
         );
         let value = serde_json::to_value(response).unwrap();
         let violation = &value["diagnostics"]["slot_invariant_violations"][0];
@@ -1526,5 +1750,61 @@ mod tests {
         );
         assert!(bad_thread.url.is_none());
         assert_eq!(bad_thread.thread_id, "thread-work-completed");
+    }
+
+    #[test]
+    fn auto_queue_status_reports_delivery_split_brain_and_timeout() {
+        let mut run = run_record("run-split-brain");
+        run.created_at = 0;
+        run.timeout_minutes = 1;
+        let mut entry = status_entry(
+            "entry-split",
+            "card-split",
+            "dispatched",
+            Some(2),
+            Some("dispatch-pending"),
+            vec!["dispatch-pending"],
+        );
+        entry.dispatched_at = Some(30_000);
+        entry.dispatch_status = Some("pending".to_string());
+        entry.dispatch_created_at = Some(20_000);
+        entry.live_session_count = 0;
+        entry.github_issue_number = Some(1935);
+
+        let response = assemble_status_response(run, vec![entry], Vec::new(), 125_000);
+        let value = serde_json::to_value(response).unwrap();
+
+        let mismatch = &value["diagnostics"]["entry_dispatch_delivery_mismatches"][0];
+        assert_eq!(mismatch["diagnostic"], "entry_dispatch_delivery_mismatch");
+        assert_eq!(mismatch["run_id"], "run-split-brain");
+        assert_eq!(mismatch["entry_id"], "entry-split");
+        assert_eq!(mismatch["dispatch_id"], "dispatch-pending");
+        assert_eq!(mismatch["card_id"], "card-split");
+        assert_eq!(mismatch["github_issue_number"], 1935);
+        assert_eq!(mismatch["thread_group"], 0);
+        assert_eq!(mismatch["slot_index"], 2);
+        assert_eq!(mismatch["dispatch_status"], "pending");
+        assert_eq!(mismatch["entry_status"], "dispatched");
+        assert_eq!(mismatch["live_session_count"], 0);
+        assert_eq!(mismatch["age_ms"], 95_000);
+        assert_eq!(mismatch["dispatch_age_ms"], 105_000);
+        assert_eq!(
+            mismatch["recovery"]["reset_entry_pending_endpoint"],
+            "/api/queue/entries/entry-split"
+        );
+        assert_eq!(
+            mismatch["recovery"]["reset_slot_thread_endpoint"],
+            "/api/queue/slots/agent-slot/2/reset-thread"
+        );
+
+        let timeout = &value["diagnostics"]["run_timeout_overruns"][0];
+        assert_eq!(timeout["diagnostic"], "run_timeout_overrun");
+        assert_eq!(timeout["run_id"], "run-split-brain");
+        assert_eq!(timeout["timeout_minutes"], 1);
+        assert_eq!(timeout["age_ms"], 125_000);
+        assert_eq!(timeout["timeout_ms"], 60_000);
+        assert_eq!(timeout["overdue_ms"], 65_000);
+        assert_eq!(value["run"]["timeout_exceeded"], true);
+        assert_eq!(value["run"]["timeout_overrun_ms"], 65_000);
     }
 }
