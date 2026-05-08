@@ -4,7 +4,7 @@
 //! The DB outbox repository only selects locked claim candidates, marks
 //! claimed rows, and persists the diagnostics payload this module builds.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use crate::db::dispatches::outbox::{
@@ -20,25 +20,36 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
     pool: &PgPool,
     claim_owner: &str,
 ) -> Vec<DispatchOutboxRow> {
-    let lease_ttl_secs = 60u64;
-    let worker_nodes = match crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await {
-        Ok(nodes) => nodes,
-        Err(error) => {
-            tracing::warn!(
-                claim_owner,
-                error,
-                "[dispatch-outbox] failed to list worker nodes for routing"
-            );
-            Vec::new()
-        }
-    };
+    let cluster_config = crate::config::load_graceful().cluster;
+    claim_pending_dispatch_outbox_batch_with_cluster_config_pg(pool, claim_owner, &cluster_config)
+        .await
+}
+
+pub(crate) async fn claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
+    pool: &PgPool,
+    claim_owner: &str,
+    cluster_config: &crate::config::ClusterConfig,
+) -> Vec<DispatchOutboxRow> {
+    let lease_ttl_secs = cluster_config.lease_ttl_secs.max(1);
+    let mut worker_nodes =
+        match crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                tracing::warn!(
+                    claim_owner,
+                    error,
+                    "[dispatch-outbox] failed to list worker nodes for routing"
+                );
+                Vec::new()
+            }
+        };
     let owner_node = worker_nodes
         .iter()
         .find(|node| node.get("instance_id").and_then(|value| value.as_str()) == Some(claim_owner))
         .cloned();
-    let routing_config = crate::config::load_graceful().cluster.dispatch_routing;
-    let cluster_default = cluster_default_required_capabilities(&routing_config);
-    let routing_engine = RoutingEngine::from_config(&routing_config);
+    let routing_config = &cluster_config.dispatch_routing;
+    let cluster_default = cluster_default_required_capabilities(routing_config);
+    let routing_engine = RoutingEngine::from_cluster_config(cluster_config);
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -75,14 +86,14 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
             _ => None,
         };
 
+        let dispatch = RoutingDispatch::new(
+            candidate.dispatch_id.clone(),
+            None,
+            effective_required.clone(),
+        );
         if let Some(required) = effective_required.as_ref() {
             let owner_decision =
                 capability_decision_for_claim_owner(owner_node.as_ref(), claim_owner, required);
-            let dispatch = RoutingDispatch::new(
-                candidate.dispatch_id.clone(),
-                None,
-                effective_required.clone(),
-            );
             let routing_decision = routing_engine.route(&worker_nodes, required, &dispatch);
             let selected = routing_decision.selected_instance_id();
             let preference_mismatch = selected.is_some() && selected != Some(claim_owner);
@@ -136,6 +147,51 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
                 .await;
                 continue;
             }
+        } else if node_concurrency_caps_configured(cluster_config) {
+            let required = json!({});
+            let owner_decision =
+                capability_decision_for_claim_owner(owner_node.as_ref(), claim_owner, &required);
+            let routing_decision = routing_engine.route(&worker_nodes, &required, &dispatch);
+            let owner_constraint_blocked = routing_decision
+                .candidate_for_instance(claim_owner)
+                .is_some_and(|candidate| !candidate.is_available());
+            let no_available_route_due_to_constraints =
+                routing_decision.selected_instance_id().is_none()
+                    && routing_decision.has_constraint_blocked_candidates();
+
+            if owner_constraint_blocked || no_available_route_due_to_constraints {
+                let mut decision = owner_decision.clone();
+                decision.eligible = false;
+                if owner_constraint_blocked {
+                    if let Some(candidate) = routing_decision.candidate_for_instance(claim_owner) {
+                        decision.reasons.push(format!(
+                            "claim owner blocked by routing constraint: {:?}",
+                            candidate.final_outcome
+                        ));
+                    }
+                }
+                if no_available_route_due_to_constraints && decision.reasons.is_empty() {
+                    decision
+                        .reasons
+                        .push("no route candidate is currently available".to_string());
+                }
+                let diagnostics = routing_diagnostics(
+                    claim_owner,
+                    &decision,
+                    dispatch_required.as_ref(),
+                    None,
+                    routing_origin,
+                    &routing_decision,
+                );
+                record_routing_diagnostics_pg(
+                    &mut tx,
+                    candidate.id,
+                    &candidate.dispatch_id,
+                    &diagnostics,
+                )
+                .await;
+                continue;
+            }
         }
 
         if let Err(error) =
@@ -151,6 +207,7 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
         }
 
         pending.push(candidate.into_outbox_row());
+        increment_active_dispatch_count(&mut worker_nodes, claim_owner);
         if pending.len() >= 5 {
             break;
         }
@@ -182,6 +239,30 @@ fn non_empty_required_capabilities(required: Option<&Value>) -> Option<&Value> {
         None | Some(Value::Null) => None,
         Some(Value::Object(map)) if map.is_empty() => None,
         Some(required) => Some(required),
+    }
+}
+
+fn node_concurrency_caps_configured(cluster_config: &crate::config::ClusterConfig) -> bool {
+    cluster_config
+        .nodes
+        .values()
+        .any(|node| node.max_concurrent_dispatches.is_some())
+}
+
+fn increment_active_dispatch_count(worker_nodes: &mut [Value], instance_id: &str) {
+    let Some(node) = worker_nodes
+        .iter_mut()
+        .find(|node| node.get("instance_id").and_then(Value::as_str) == Some(instance_id))
+    else {
+        return;
+    };
+    let active = node
+        .get("active_dispatch_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(1);
+    if let Some(object) = node.as_object_mut() {
+        object.insert("active_dispatch_count".to_string(), json!(active));
     }
 }
 
@@ -322,5 +403,18 @@ mod tests {
         assert_eq!(row.2, "notify");
         assert_eq!(row.6, 2);
         assert_eq!(row.7, Some(json!({"providers": ["codex"]})));
+    }
+
+    #[test]
+    fn increment_active_dispatch_count_updates_matching_node_only() {
+        let mut worker_nodes = vec![
+            json!({"instance_id": "node-a", "active_dispatch_count": 1}),
+            json!({"instance_id": "node-b", "active_dispatch_count": 4}),
+        ];
+
+        increment_active_dispatch_count(&mut worker_nodes, "node-a");
+
+        assert_eq!(worker_nodes[0]["active_dispatch_count"], 2);
+        assert_eq!(worker_nodes[1]["active_dispatch_count"], 4);
     }
 }

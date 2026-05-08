@@ -450,10 +450,18 @@ pub(crate) async fn list_worker_nodes(
             END AS computed_status,
             labels,
             capabilities,
+            COALESCE(active_dispatches.active_dispatch_count, 0)::BIGINT AS active_dispatch_count,
             last_heartbeat_at,
             started_at,
             updated_at
         FROM worker_nodes
+        LEFT JOIN (
+            SELECT claim_owner, COUNT(*)::BIGINT AS active_dispatch_count
+              FROM dispatch_outbox
+             WHERE status IN ('claimed', 'processing')
+               AND claim_owner IS NOT NULL
+             GROUP BY claim_owner
+        ) active_dispatches ON active_dispatches.claim_owner = worker_nodes.instance_id
         ORDER BY last_heartbeat_at DESC, instance_id ASC
         "#,
     )
@@ -485,6 +493,11 @@ pub(crate) async fn list_worker_nodes(
                     .flatten()
                     .unwrap_or_else(|| serde_json::json!([])),
                 "capabilities": capabilities,
+                "active_dispatch_count": row
+                    .try_get::<Option<i64>, _>("active_dispatch_count")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0),
                 "api_base_url": api_base_url,
                 "session_api_routable": session_api_routable,
                 "last_heartbeat_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_heartbeat_at").ok().flatten(),

@@ -206,6 +206,188 @@ async fn claim_pending_dispatch_outbox_batch_pg_filters_required_capabilities() 
     pg_db.drop().await;
 }
 
+#[tokio::test]
+async fn claim_pending_dispatch_outbox_batch_pg_falls_back_when_preferred_node_cap_is_full() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    seed_two_worker_nodes_for_routing(&pool).await;
+    seed_processing_outbox_rows(&pool, "mac-mini-release", 2).await;
+
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (
+            dispatch_id, action, status, required_capabilities
+         ) VALUES ($1, 'status_reaction', 'pending', $2)",
+    )
+    .bind("dispatch-node-cap-fallback")
+    .bind(serde_json::json!({
+        "providers": ["codex"],
+        "preferred": {"labels": ["mac-mini", "mac-book"]}
+    }))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let config = cluster_config_with_node_caps(&[("mac-mini-release", 2), ("mac-book-release", 4)]);
+    let rejected = crate::services::dispatches::outbox_claiming::claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
+        &pool,
+        "mac-mini-release",
+        &config,
+    )
+    .await;
+    assert!(rejected.is_empty());
+
+    let (next_owner, diagnostics): (Option<String>, Option<serde_json::Value>) = sqlx::query_as(
+        "SELECT claim_owner, routing_diagnostics
+           FROM dispatch_outbox
+          WHERE dispatch_id = 'dispatch-node-cap-fallback'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(next_owner.as_deref(), Some("mac-book-release"));
+    let diagnostics = diagnostics.expect("node-cap skip records diagnostics");
+    assert_eq!(
+        diagnostics["selected"]["decision"]["instance_id"],
+        "mac-book-release"
+    );
+    assert!(
+        diagnostics["constraint_results"][0]["final_outcome"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("active dispatches 2/2 at capacity")
+    );
+
+    sqlx::query(
+        "UPDATE dispatch_outbox
+            SET next_attempt_at = NULL
+          WHERE dispatch_id = 'dispatch-node-cap-fallback'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let claimed = crate::services::dispatches::outbox_claiming::claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
+        &pool,
+        "mac-book-release",
+        &config,
+    )
+    .await;
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].1, "dispatch-node-cap-fallback");
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn claim_pending_dispatch_outbox_batch_pg_waits_when_all_node_caps_are_full() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    seed_two_worker_nodes_for_routing(&pool).await;
+    seed_processing_outbox_rows(&pool, "mac-mini-release", 2).await;
+    seed_processing_outbox_rows(&pool, "mac-book-release", 4).await;
+
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (
+            dispatch_id, action, status, required_capabilities
+         ) VALUES ($1, 'status_reaction', 'pending', $2)",
+    )
+    .bind("dispatch-node-cap-wait")
+    .bind(serde_json::json!({
+        "providers": ["codex"],
+        "preferred": {"labels": ["mac-mini", "mac-book"]}
+    }))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let config = cluster_config_with_node_caps(&[("mac-mini-release", 2), ("mac-book-release", 4)]);
+    let claimed = crate::services::dispatches::outbox_claiming::claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
+        &pool,
+        "mac-mini-release",
+        &config,
+    )
+    .await;
+    assert!(claimed.is_empty());
+
+    let (status, claim_owner, diagnostics): (String, Option<String>, Option<serde_json::Value>) =
+        sqlx::query_as(
+            "SELECT status, claim_owner, routing_diagnostics
+           FROM dispatch_outbox
+          WHERE dispatch_id = 'dispatch-node-cap-wait'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "pending");
+    assert!(claim_owner.is_none());
+    let diagnostics = diagnostics.expect("all-full node-cap wait records diagnostics");
+    assert!(diagnostics["selected"].is_null());
+    assert_eq!(
+        diagnostics["constraint_results"][0]["final_outcome"]["outcome"],
+        "wait"
+    );
+    assert_eq!(
+        diagnostics["constraint_results"][1]["final_outcome"]["outcome"],
+        "wait"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+async fn seed_two_worker_nodes_for_routing(pool: &PgPool) {
+    sqlx::query(
+        "INSERT INTO worker_nodes (
+            instance_id, hostname, process_id, role, effective_role, status,
+            labels, capabilities, last_heartbeat_at, started_at, updated_at
+         ) VALUES
+            (
+                'mac-mini-release', 'mac-mini', 100, 'auto', 'leader', 'online',
+                $1, $2, NOW(), NOW(), NOW()
+            ),
+            (
+                'mac-book-release', 'mac-book', 101, 'worker', 'worker', 'online',
+                $3, $4, NOW() - INTERVAL '1 second', NOW(), NOW()
+            )",
+    )
+    .bind(serde_json::json!(["mac-mini"]))
+    .bind(serde_json::json!({"providers": ["codex"]}))
+    .bind(serde_json::json!(["mac-book"]))
+    .bind(serde_json::json!({"providers": ["codex"]}))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_processing_outbox_rows(pool: &PgPool, claim_owner: &str, count: usize) {
+    for index in 0..count {
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (
+                dispatch_id, action, status, claim_owner, claimed_at
+             ) VALUES ($1, 'notify', 'processing', $2, NOW())",
+        )
+        .bind(format!("active-{claim_owner}-{index}"))
+        .bind(claim_owner)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+fn cluster_config_with_node_caps(caps: &[(&str, u32)]) -> crate::config::ClusterConfig {
+    let mut config = crate::config::ClusterConfig::default();
+    for (node, cap) in caps {
+        config.nodes.insert(
+            (*node).to_string(),
+            crate::config::ClusterNodeConfig {
+                max_concurrent_dispatches: Some(*cap),
+            },
+        );
+    }
+    config
+}
+
 fn postgres_base_database_url() -> String {
     if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
         let trimmed = base.trim();

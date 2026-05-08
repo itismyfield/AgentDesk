@@ -108,8 +108,8 @@ pub async fn routing_diagnostics(
     match crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await {
         Ok(nodes) => {
             let routing_engine =
-                crate::services::dispatches::routing_constraint::RoutingEngine::from_config(
-                    &state.config.cluster.dispatch_routing,
+                crate::services::dispatches::routing_constraint::RoutingEngine::from_cluster_config(
+                    &state.config.cluster,
                 );
             let routing_dispatch =
                 crate::services::dispatches::routing_constraint::RoutingDispatch::new(

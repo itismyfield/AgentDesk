@@ -672,6 +672,8 @@ pub struct ClusterConfig {
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub capabilities: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub nodes: BTreeMap<String, ClusterNodeConfig>,
     #[serde(
         default,
         skip_serializing_if = "ClusterDispatchRoutingConfig::is_default"
@@ -692,6 +694,7 @@ impl Default for ClusterConfig {
             api_base_url: None,
             labels: Vec::new(),
             capabilities: serde_json::Map::new(),
+            nodes: BTreeMap::new(),
             dispatch_routing: ClusterDispatchRoutingConfig::default(),
             semaphores: BTreeMap::new(),
         }
@@ -702,6 +705,13 @@ impl ClusterConfig {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ClusterNodeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_dispatches: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -836,6 +846,24 @@ semaphores:
             ClusterSemaphoreScope::PerCluster
         );
         assert_eq!(config.semaphores["gpu"].effective_capacity(), 1);
+    }
+
+    #[test]
+    fn cluster_nodes_parse_max_concurrent_dispatches() {
+        let config: ClusterConfig = serde_yaml::from_str(
+            r#"
+enabled: true
+nodes:
+  mac-mini-release:
+    max_concurrent_dispatches: 4
+"#,
+        )
+        .expect("cluster node config parses");
+
+        assert_eq!(
+            config.nodes["mac-mini-release"].max_concurrent_dispatches,
+            Some(4)
+        );
     }
 }
 

@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
-use crate::config::ClusterDispatchRoutingConfig;
+use crate::config::{ClusterConfig, ClusterDispatchRoutingConfig, ClusterNodeConfig};
 use crate::server::cluster::CapabilityRouteCandidate;
 
 pub(crate) const NOOP_CONSTRAINT_NAME: &str = "noop";
+pub(crate) const NODE_CONCURRENCY_CAP_CONSTRAINT_NAME: &str = "node_concurrency_cap";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -143,6 +145,10 @@ impl RoutingEngine {
         Self::new(constraints_from_config(config))
     }
 
+    pub(crate) fn from_cluster_config(config: &ClusterConfig) -> Self {
+        Self::new(constraints_from_cluster_config(config))
+    }
+
     pub(crate) fn new(constraints: Vec<Box<dyn RoutingConstraint>>) -> Self {
         Self { constraints }
     }
@@ -211,38 +217,124 @@ impl RoutingConstraint for NoOpConstraint {
     }
 }
 
-type ConstraintFactory = fn() -> Box<dyn RoutingConstraint>;
+#[derive(Debug, Default)]
+pub(crate) struct NodeConcurrencyCapConstraint {
+    caps_by_node: BTreeMap<String, u32>,
+}
+
+impl NodeConcurrencyCapConstraint {
+    fn from_node_configs(node_configs: Option<&BTreeMap<String, ClusterNodeConfig>>) -> Self {
+        let caps_by_node = node_configs
+            .into_iter()
+            .flat_map(|configs| configs.iter())
+            .filter_map(|(node, config)| {
+                config
+                    .max_concurrent_dispatches
+                    .map(|cap| (node.clone(), cap))
+            })
+            .collect();
+        Self { caps_by_node }
+    }
+
+    fn cap_for_node(&self, node: &Value) -> Option<(String, u32)> {
+        let instance_id = node.get("instance_id").and_then(Value::as_str);
+        if let Some(instance_id) = instance_id
+            && let Some(cap) = self.caps_by_node.get(instance_id)
+        {
+            return Some((instance_id.to_string(), *cap));
+        }
+
+        let hostname = node.get("hostname").and_then(Value::as_str);
+        if let Some(hostname) = hostname
+            && let Some(cap) = self.caps_by_node.get(hostname)
+        {
+            return Some((hostname.to_string(), *cap));
+        }
+
+        None
+    }
+
+    fn active_dispatch_count(node: &Value) -> u32 {
+        node.get("active_dispatch_count")
+            .and_then(Value::as_u64)
+            .and_then(|count| u32::try_from(count).ok())
+            .unwrap_or(0)
+    }
+}
+
+impl RoutingConstraint for NodeConcurrencyCapConstraint {
+    fn name(&self) -> &'static str {
+        NODE_CONCURRENCY_CAP_CONSTRAINT_NAME
+    }
+
+    fn check(&self, node: &Value, _dispatch: &RoutingDispatch) -> ConstraintOutcome {
+        let Some((node_key, cap)) = self.cap_for_node(node) else {
+            return ConstraintOutcome::Available;
+        };
+        let active = Self::active_dispatch_count(node);
+        if active >= cap {
+            return ConstraintOutcome::wait(format!(
+                "node {node_key} active dispatches {active}/{cap} at capacity"
+            ));
+        }
+        ConstraintOutcome::Available
+    }
+}
 
 fn noop_constraint() -> Box<dyn RoutingConstraint> {
     Box::new(NoOpConstraint)
 }
 
-const ROUTING_CONSTRAINT_FACTORIES: &[(&str, ConstraintFactory)] =
-    &[(NOOP_CONSTRAINT_NAME, noop_constraint)];
-
 pub(crate) fn constraints_from_config(
     config: &ClusterDispatchRoutingConfig,
 ) -> Vec<Box<dyn RoutingConstraint>> {
-    constraints_from_names(&config.constraints)
+    constraints_from_names(&config.constraints, None)
 }
 
-fn constraints_from_names(names: &[String]) -> Vec<Box<dyn RoutingConstraint>> {
+pub(crate) fn constraints_from_cluster_config(
+    config: &ClusterConfig,
+) -> Vec<Box<dyn RoutingConstraint>> {
+    let mut constraints =
+        constraints_from_names(&config.dispatch_routing.constraints, Some(&config.nodes));
+    if node_concurrency_caps_configured(&config.nodes)
+        && !constraints
+            .iter()
+            .any(|constraint| constraint.name() == NODE_CONCURRENCY_CAP_CONSTRAINT_NAME)
+    {
+        constraints.push(Box::new(NodeConcurrencyCapConstraint::from_node_configs(
+            Some(&config.nodes),
+        )));
+    }
+    constraints
+}
+
+fn constraints_from_names(
+    names: &[String],
+    node_configs: Option<&BTreeMap<String, ClusterNodeConfig>>,
+) -> Vec<Box<dyn RoutingConstraint>> {
     names
         .iter()
-        .filter_map(|name| {
-            ROUTING_CONSTRAINT_FACTORIES
-                .iter()
-                .find(|(registered, _)| registered == &name.as_str())
-                .map(|(_, factory)| factory())
-                .or_else(|| {
-                    tracing::warn!(
-                        constraint = name.as_str(),
-                        "[dispatch-routing] unknown routing constraint configured"
-                    );
-                    None
-                })
+        .filter_map(|name| match name.as_str() {
+            NOOP_CONSTRAINT_NAME => Some(noop_constraint()),
+            NODE_CONCURRENCY_CAP_CONSTRAINT_NAME => Some(Box::new(
+                NodeConcurrencyCapConstraint::from_node_configs(node_configs),
+            )
+                as Box<dyn RoutingConstraint>),
+            _ => {
+                tracing::warn!(
+                    constraint = name.as_str(),
+                    "[dispatch-routing] unknown routing constraint configured"
+                );
+                None
+            }
         })
         .collect()
+}
+
+fn node_concurrency_caps_configured(nodes: &BTreeMap<String, ClusterNodeConfig>) -> bool {
+    nodes
+        .values()
+        .any(|config| config.max_concurrent_dispatches.is_some())
 }
 
 fn aggregate_outcome(results: &[ConstraintCheckResult]) -> ConstraintOutcome {
@@ -283,6 +375,7 @@ fn node_for_candidate<'a>(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     struct FixedConstraint {
         name: &'static str,
@@ -311,6 +404,32 @@ mod tests {
 
     fn dispatch() -> RoutingDispatch {
         RoutingDispatch::new("dispatch-1", Some("implementation".to_string()), None)
+    }
+
+    fn node_caps(entries: &[(&str, u32)]) -> BTreeMap<String, ClusterNodeConfig> {
+        entries
+            .iter()
+            .map(|(node, cap)| {
+                (
+                    (*node).to_string(),
+                    ClusterNodeConfig {
+                        max_concurrent_dispatches: Some(*cap),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn node_with_active(instance_id: &str, label: &str, active_dispatch_count: u32) -> Value {
+        json!({
+            "instance_id": instance_id,
+            "hostname": label,
+            "status": "online",
+            "labels": [label],
+            "capabilities": {"providers": ["codex"]},
+            "active_dispatch_count": active_dispatch_count,
+            "last_heartbeat_at": "2026-05-08T00:00:00Z"
+        })
     }
 
     #[test]
@@ -380,6 +499,75 @@ mod tests {
         assert_eq!(
             decision.constraint_results_json()[0]["constraints"][0]["outcome"]["outcome"],
             "reject"
+        );
+    }
+
+    #[test]
+    fn node_concurrency_cap_selects_fallback_when_preferred_node_is_full() {
+        let nodes = vec![
+            node_with_active("mac-mini-release", "mac-mini", 2),
+            node_with_active("mac-book-release", "mac-book", 0),
+        ];
+        let caps = node_caps(&[("mac-mini-release", 2), ("mac-book-release", 4)]);
+        let engine = RoutingEngine::new(vec![Box::new(
+            NodeConcurrencyCapConstraint::from_node_configs(Some(&caps)),
+        )]);
+        let decision = engine.route(
+            &nodes,
+            &json!({
+                "providers": ["codex"],
+                "preferred": {"labels": ["mac-mini", "mac-book"]}
+            }),
+            &dispatch(),
+        );
+
+        assert_eq!(decision.selected_instance_id(), Some("mac-book-release"));
+        let mini = decision
+            .candidate_for_instance("mac-mini-release")
+            .expect("mac-mini candidate");
+        assert_eq!(
+            mini.final_outcome,
+            ConstraintOutcome::wait(
+                "node_concurrency_cap: node mac-mini-release active dispatches 2/2 at capacity"
+            )
+        );
+    }
+
+    #[test]
+    fn node_concurrency_cap_waits_when_all_candidates_are_full() {
+        let nodes = vec![
+            node_with_active("mac-mini-release", "mac-mini", 2),
+            node_with_active("mac-book-release", "mac-book", 4),
+        ];
+        let caps = node_caps(&[("mac-mini-release", 2), ("mac-book-release", 4)]);
+        let engine = RoutingEngine::new(vec![Box::new(
+            NodeConcurrencyCapConstraint::from_node_configs(Some(&caps)),
+        )]);
+        let decision = engine.route(&nodes, &json!({"providers": ["codex"]}), &dispatch());
+
+        assert_eq!(decision.selected_instance_id(), None);
+        assert!(decision.has_constraint_blocked_candidates());
+        assert!(decision.candidates.iter().all(|candidate| {
+            matches!(candidate.final_outcome, ConstraintOutcome::Wait { .. })
+        }));
+    }
+
+    #[test]
+    fn node_concurrency_cap_is_unlimited_when_cap_is_unset() {
+        let nodes = vec![node_with_active("mac-mini-release", "mac-mini", 99)];
+        let engine = RoutingEngine::new(vec![Box::new(
+            NodeConcurrencyCapConstraint::from_node_configs(None),
+        )]);
+        let decision = engine.route(
+            &nodes,
+            &json!({"providers": ["codex"], "preferred": {"labels": ["mac-mini"]}}),
+            &dispatch(),
+        );
+
+        assert_eq!(decision.selected_instance_id(), Some("mac-mini-release"));
+        assert_eq!(
+            decision.candidates[0].constraints[0].outcome,
+            ConstraintOutcome::Available
         );
     }
 }

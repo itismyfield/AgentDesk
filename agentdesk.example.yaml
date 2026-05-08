@@ -2,6 +2,16 @@ server:
   port: 8791
   host: "0.0.0.0"
 
+cluster:
+  enabled: false
+  # Optional per-worker concurrency caps for dispatch routing.
+  # Keys match worker `instance_id` first, then hostname.
+  nodes:
+    mac-mini-release:
+      max_concurrent_dispatches: 4
+    mac-book-release:
+      max_concurrent_dispatches: 4
+
 discord:
   guild_id: "YOUR_GUILD_ID"
   owner_id: "YOUR_DISCORD_USER_ID"
