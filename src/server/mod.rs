@@ -3594,9 +3594,33 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
 
     let mut poll_interval = Duration::from_millis(500);
     let max_interval = Duration::from_secs(5);
+    // Periodic stale-row GC: prunes failed rows older than 7d and sent rows
+    // older than 30d. Without this, every config-rejected send (`unknown
+    // source role`, `channel not in role-map`) accumulates indefinitely; the
+    // 2026-05-09 incident found 7163+149+188 stale failed rows from sources
+    // that are now allowed but whose historical rejections were never cleaned
+    // up.
+    let mut next_gc_at = std::time::Instant::now() + Duration::from_secs(60);
 
     loop {
         tokio::time::sleep(poll_interval).await;
+
+        if std::time::Instant::now() >= next_gc_at {
+            match gc_stale_message_outbox_rows(pg_pool.as_ref()).await {
+                Ok((failed, sent)) if failed + sent > 0 => {
+                    tracing::info!(
+                        failed_pruned = failed,
+                        sent_pruned = sent,
+                        "[outbox] gc swept stale message_outbox rows"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!("[outbox] gc failed: {error}");
+                }
+            }
+            next_gc_at = std::time::Instant::now() + Duration::from_secs(3600);
+        }
         if drain_message_outbox_batch_once(pg_pool.as_ref(), Some(&claim_owner), {
             let health_registry = health_registry.clone();
             let pg_pool = pg_pool.clone();
@@ -3638,6 +3662,28 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
         // Work found: reset to fast polling
         poll_interval = Duration::from_millis(500);
     }
+}
+
+/// Delete `message_outbox` rows whose status is terminal and beyond retention.
+/// Returns `(failed_pruned, sent_pruned)` for logging.
+async fn gc_stale_message_outbox_rows(pool: &PgPool) -> Result<(u64, u64), sqlx::Error> {
+    let failed = sqlx::query(
+        "DELETE FROM message_outbox
+          WHERE status = 'failed'
+            AND created_at < NOW() - INTERVAL '7 days'",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let sent = sqlx::query(
+        "DELETE FROM message_outbox
+          WHERE status = 'sent'
+            AND created_at < NOW() - INTERVAL '30 days'",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok((failed, sent))
 }
 
 async fn dm_reply_retry_loop(pg_pool: Arc<PgPool>) {
