@@ -42,12 +42,43 @@ use crate::services::memory::{
 #[cfg(test)]
 use crate::services::observability::turn_lifecycle::TurnEvent;
 use crate::services::provider::{CancelToken, cancel_requested};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, LazyLock, Mutex};
 
 const WATCHDOG_DEADLOCK_PREALERT_MS: i64 = 5 * 60 * 1000;
 const WATCHDOG_DEADLOCK_PREALERT_BOT: &str = "announce";
 const WATCHDOG_TIMEOUT_REASON: &str = "watchdog timeout";
 const WATCHDOG_TIMEOUT_CANCEL_SOURCE: &str = "watchdog_timeout";
+static PLACEHOLDER_POST_FAILURE_RETRIES: LazyLock<Mutex<HashSet<(u64, u64)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn claim_placeholder_post_failure_retry(channel_id: ChannelId, user_msg_id: MessageId) -> bool {
+    PLACEHOLDER_POST_FAILURE_RETRIES
+        .lock()
+        .expect("placeholder post retry guard poisoned")
+        .insert((channel_id.get(), user_msg_id.get()))
+}
+
+fn clear_placeholder_post_failure_retry(channel_id: ChannelId, user_msg_id: MessageId) {
+    PLACEHOLDER_POST_FAILURE_RETRIES
+        .lock()
+        .expect("placeholder post retry guard poisoned")
+        .remove(&(channel_id.get(), user_msg_id.get()));
+}
+
+async fn enqueue_placeholder_post_failure_retry(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: Intervention,
+) -> bool {
+    if !claim_placeholder_post_failure_retry(channel_id, intervention.message_id) {
+        return false;
+    }
+    mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
+        .await
+        .enqueued
+}
 
 fn watchdog_deadlock_prealert_bot_name() -> &'static str {
     WATCHDOG_DEADLOCK_PREALERT_BOT
@@ -3273,6 +3304,20 @@ pub(in crate::services::discord) async fn handle_text_message(
             Ok(msg_id) => msg_id,
             Err(error) => {
                 let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
+                let retry_enqueued = enqueue_placeholder_post_failure_retry(
+                    shared,
+                    &bot_owner_provider,
+                    channel_id,
+                    build_race_requeued_intervention(
+                        request_owner,
+                        user_msg_id,
+                        user_text,
+                        reply_context.clone(),
+                        has_reply_boundary,
+                        merge_consecutive,
+                    ),
+                )
+                .await;
                 let kicked = release_mailbox_after_placeholder_post_failure(
                     shared,
                     &bot_owner_provider,
@@ -3281,15 +3326,17 @@ pub(in crate::services::discord) async fn handle_text_message(
                 .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
-                    "  [{ts}] ⚠ INTAKE: placeholder POST failed after mailbox slot acquired (channel {}, error={}); released mailbox slot, kickoff_scheduled={}",
+                    "  [{ts}] ⚠ INTAKE: placeholder POST failed after mailbox slot acquired (channel {}, error={}); released mailbox slot, retry_enqueued={}, kickoff_scheduled={}",
                     channel_id,
                     error,
+                    retry_enqueued,
                     kicked
                 );
                 return Err::<(), Error>(error.into());
             }
         }
     };
+    clear_placeholder_post_failure_retry(channel_id, user_msg_id);
 
     shared
         .global_active
@@ -7067,6 +7114,92 @@ mod tests {
             backlog_after, backlog_before,
             "deferred_hook_backlog must not grow when the queue is empty (avoid spurious wake-ups)"
         );
+    }
+
+    /// Regression for the live #adk-cc failure mode: the active turn acquired
+    /// the mailbox slot, then Discord rejected the placeholder POST before the
+    /// provider turn started. Requeue the original message once before
+    /// releasing the slot so the deferred drain can retry the turn instead of
+    /// silently dropping it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn placeholder_post_failure_requeues_active_message_once_before_release() {
+        use crate::services::provider::CancelToken;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        let shared = super::super::super::make_shared_data_for_tests();
+        let provider = super::super::super::ProviderKind::Codex;
+        let channel_id = ChannelId::new(333_456_789);
+        let owner = UserId::new(77);
+        let active_msg_id = MessageId::new(3_000);
+        clear_placeholder_post_failure_retry(channel_id, active_msg_id);
+
+        let cancel_token = Arc::new(CancelToken::new());
+        let started = super::super::super::mailbox_try_start_turn(
+            shared.as_ref(),
+            channel_id,
+            cancel_token.clone(),
+            owner,
+            active_msg_id,
+        )
+        .await;
+        assert!(started, "fresh mailbox should accept the active turn");
+        shared.global_active.fetch_add(1, Ordering::Relaxed);
+
+        let first_retry_enqueued = enqueue_placeholder_post_failure_retry(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            build_race_requeued_intervention(
+                owner,
+                active_msg_id,
+                "original user request",
+                None,
+                false,
+                true,
+            ),
+        )
+        .await;
+        assert!(
+            first_retry_enqueued,
+            "first placeholder failure should requeue the active user message"
+        );
+
+        let duplicate_retry_enqueued = enqueue_placeholder_post_failure_retry(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            build_race_requeued_intervention(
+                owner,
+                active_msg_id,
+                "original user request",
+                None,
+                false,
+                true,
+            ),
+        )
+        .await;
+        assert!(
+            !duplicate_retry_enqueued,
+            "retry guard must prevent an infinite placeholder-failure loop"
+        );
+
+        let backlog_before = shared.deferred_hook_backlog.load(Ordering::Relaxed);
+        let kicked =
+            release_mailbox_after_placeholder_post_failure(&shared, &provider, channel_id).await;
+        assert!(kicked, "requeued active message should schedule kickoff");
+        assert_eq!(
+            shared.deferred_hook_backlog.load(Ordering::Relaxed),
+            backlog_before + 1,
+            "deferred drain should be scheduled for the requeued active message"
+        );
+
+        let snapshot = shared.mailbox(channel_id).snapshot().await;
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(snapshot.intervention_queue[0].message_id, active_msg_id);
+        assert_eq!(snapshot.intervention_queue[0].text, "original user request");
+
+        clear_placeholder_post_failure_retry(channel_id, active_msg_id);
     }
 
     /// codex review round-9 P2 (#1332): when a dispatch-role-routed message
