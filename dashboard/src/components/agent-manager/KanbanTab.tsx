@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../../api";
 import type { DispatchDeliveryEvent, GitHubIssue, GitHubRepoOption, KanbanRepoSource } from "../../api";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
@@ -65,10 +65,15 @@ import {
   formatDispatchSummary,
 } from "./card-detail-activity";
 import {
+  createDeliveryEventsLoadState,
   compactStringParts,
   deliveryEventMessagesCount,
+  finishDeliveryEventsLoadError,
+  finishDeliveryEventsLoadSuccess,
   getDeliveryEventStatusStyle,
+  startDeliveryEventsLoad,
   summarizeDeliveryError,
+  type DeliveryEventsLoadState,
 } from "./dispatch-delivery-events";
 
 interface KanbanTabProps {
@@ -231,17 +236,30 @@ export default function KanbanTab({
   const [cancelBusy, setCancelBusy] = useState(false);
   const [auditLog, setAuditLog] = useState<api.CardAuditLogEntry[]>([]);
   const [ghComments, setGhComments] = useState<api.GitHubComment[]>([]);
-  const [deliveryEvents, setDeliveryEvents] = useState<DispatchDeliveryEvent[]>([]);
-  const [deliveryEventsLoading, setDeliveryEventsLoading] = useState(false);
-  const [deliveryEventsError, setDeliveryEventsError] = useState<string | null>(null);
+  const [deliveryEventsState, setDeliveryEventsState] = useState<DeliveryEventsLoadState<DispatchDeliveryEvent>>(
+    () => createDeliveryEventsLoadState(),
+  );
   const [deliveryEventsPanelVisible, setDeliveryEventsPanelVisible] = useState(true);
   const [timelineFilter, setTimelineFilter] = useState<"review" | "pm" | "work" | "general" | null>(null);
   const [activityRefreshTick, setActivityRefreshTick] = useState(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [liveTurnsByAgentId, setLiveTurnsByAgentId] = useState<Record<string, api.AgentTurnState>>({});
   const ghCommentsCache = useRef<Map<string, { comments: api.GitHubComment[]; body: string; ts: number }>>(new Map());
+  const deliveryEventsStateRef = useRef(deliveryEventsState);
   const deliveryEventsPanelRef = useRef<HTMLDivElement | null>(null);
   const detailRequestSeq = useRef(0);
+  const commitDeliveryEventsState = useCallback((
+    updater: (prev: DeliveryEventsLoadState<DispatchDeliveryEvent>) => DeliveryEventsLoadState<DispatchDeliveryEvent>,
+  ) => {
+    setDeliveryEventsState((prev) => {
+      const next = updater(prev);
+      deliveryEventsStateRef.current = next;
+      return next;
+    });
+  }, []);
+  const deliveryEvents = deliveryEventsState.events;
+  const deliveryEventsLoading = deliveryEventsState.loading;
+  const deliveryEventsError = deliveryEventsState.error;
 
   const agentMap = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const cardsById = useMemo(() => new Map(cards.map((card) => [card.id, card])), [cards]);
@@ -820,32 +838,36 @@ export default function KanbanTab({
 
   useEffect(() => {
     if (!selectedDeliveryDispatchId) {
-      setDeliveryEvents([]);
-      setDeliveryEventsError(null);
-      setDeliveryEventsLoading(false);
+      commitDeliveryEventsState(() => createDeliveryEventsLoadState());
       return;
     }
     if (!deliveryEventsPanelVisible) return;
 
     let stale = false;
     let pollTimer: number | null = null;
-    setDeliveryEventsLoading(true);
-    setDeliveryEventsError(null);
-    setDeliveryEvents([]);
+    const resetEvents = deliveryEventsStateRef.current.loadedDispatchId !== selectedDeliveryDispatchId;
 
     const loadDeliveryEvents = async (showLoading: boolean) => {
-      if (showLoading) setDeliveryEventsLoading(true);
+      if (showLoading) {
+        commitDeliveryEventsState((prev) => (
+          startDeliveryEventsLoad(prev, selectedDeliveryDispatchId, resetEvents)
+        ));
+      }
       try {
         const response = await api.getDispatchDeliveryEvents(selectedDeliveryDispatchId);
         if (stale) return;
-        setDeliveryEvents(response.events);
-        setDeliveryEventsError(null);
+        commitDeliveryEventsState((prev) => (
+          finishDeliveryEventsLoadSuccess(prev, selectedDeliveryDispatchId, response.events)
+        ));
       } catch (error) {
         if (stale) return;
-        setDeliveryEvents([]);
-        setDeliveryEventsError((error as Error).message || "Failed to load delivery events");
-      } finally {
-        if (!stale && showLoading) setDeliveryEventsLoading(false);
+        commitDeliveryEventsState((prev) => (
+          finishDeliveryEventsLoadError(
+            prev,
+            (error as Error).message || "Failed to load delivery events",
+            showLoading && resetEvents,
+          )
+        ));
       }
     };
 
@@ -856,7 +878,7 @@ export default function KanbanTab({
       stale = true;
       if (pollTimer !== null) window.clearInterval(pollTimer);
     };
-  }, [activityRefreshTick, deliveryEventsPanelVisible, selectedDeliveryDispatchId]);
+  }, [activityRefreshTick, commitDeliveryEventsState, deliveryEventsPanelVisible, selectedDeliveryDispatchId]);
 
   const filteredCards = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -3166,7 +3188,7 @@ export default function KanbanTab({
                             <SurfaceMetricPill
                               tone={deliveryEventsError ? "warn" : "info"}
                               label={tr("이벤트", "Events")}
-                              value={deliveryEventsLoading ? tr("로딩", "Loading") : deliveryEvents.length}
+                              value={deliveryEventsLoading && deliveryEvents.length === 0 ? tr("로딩", "Loading") : deliveryEvents.length}
                               className="min-w-[96px]"
                             />
                           )}
@@ -3187,15 +3209,7 @@ export default function KanbanTab({
                               </SurfaceNotice>
                             )}
 
-                            {deliveryEventsError ? null : deliveryEventsLoading ? (
-                              <SurfaceEmptyState className="px-3 py-4 text-center text-xs">
-                                {tr("delivery 이벤트를 불러오는 중입니다.", "Loading delivery events.")}
-                              </SurfaceEmptyState>
-                            ) : deliveryEvents.length === 0 ? (
-                              <SurfaceEmptyState className="px-3 py-4 text-center text-xs">
-                                {tr("No delivery events recorded", "No delivery events recorded")}
-                              </SurfaceEmptyState>
-                            ) : (
+                            {deliveryEvents.length > 0 ? (
                               <div className="-mx-2 overflow-x-auto px-2">
                                 <table className="min-w-[720px] w-full table-fixed text-left text-xs">
                                   <thead style={{ color: "var(--th-text-muted)" }}>
@@ -3255,6 +3269,14 @@ export default function KanbanTab({
                                   </tbody>
                                 </table>
                               </div>
+                            ) : deliveryEventsLoading ? (
+                              <SurfaceEmptyState className="px-3 py-4 text-center text-xs">
+                                {tr("delivery 이벤트를 불러오는 중입니다.", "Loading delivery events.")}
+                              </SurfaceEmptyState>
+                            ) : deliveryEventsError ? null : (
+                              <SurfaceEmptyState className="px-3 py-4 text-center text-xs">
+                                {tr("No delivery events recorded", "No delivery events recorded")}
+                              </SurfaceEmptyState>
                             )}
                           </div>
                         </SurfaceSubsection>

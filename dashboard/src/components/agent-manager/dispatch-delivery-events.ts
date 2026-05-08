@@ -24,3 +24,61 @@ export function summarizeDeliveryError(error: string | null | undefined): string
   const compact = error.trim().replace(/\s+/g, " ");
   return compact.length > 96 ? `${compact.slice(0, 93)}...` : compact;
 }
+
+export interface DeliveryEventsLoadState<TEvent> {
+  events: TEvent[];
+  loading: boolean;
+  error: string | null;
+  loadedDispatchId: string | null;
+}
+
+export function createDeliveryEventsLoadState<TEvent>(): DeliveryEventsLoadState<TEvent> {
+  return {
+    events: [],
+    loading: false,
+    error: null,
+    loadedDispatchId: null,
+  };
+}
+
+export function startDeliveryEventsLoad<TEvent>(
+  state: DeliveryEventsLoadState<TEvent>,
+  dispatchId: string,
+  reset: boolean,
+): DeliveryEventsLoadState<TEvent> {
+  const hasCurrentRows = state.loadedDispatchId === dispatchId && state.events.length > 0;
+  return {
+    events: reset ? [] : state.events,
+    loading: reset || !hasCurrentRows,
+    error: null,
+    loadedDispatchId: reset ? null : state.loadedDispatchId,
+  };
+}
+
+export function finishDeliveryEventsLoadSuccess<TEvent>(
+  state: DeliveryEventsLoadState<TEvent>,
+  dispatchId: string,
+  events: TEvent[],
+): DeliveryEventsLoadState<TEvent> {
+  return {
+    ...state,
+    events,
+    loading: false,
+    error: null,
+    loadedDispatchId: dispatchId,
+  };
+}
+
+export function finishDeliveryEventsLoadError<TEvent>(
+  state: DeliveryEventsLoadState<TEvent>,
+  message: string,
+  clearEvents: boolean,
+): DeliveryEventsLoadState<TEvent> {
+  return {
+    ...state,
+    events: clearEvents ? [] : state.events,
+    loading: false,
+    error: message,
+    loadedDispatchId: clearEvents ? null : state.loadedDispatchId,
+  };
+}
