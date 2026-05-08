@@ -110,6 +110,14 @@ impl OutboxNotifier for RealOutboxNotifier {
 const RETRY_BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
 /// Maximum number of retries before marking as permanent failure.
 const MAX_RETRY_COUNT: i64 = 4;
+/// #1967: slot-busy errors are transient resource conflicts, not failures.
+/// They should retry every 60s without consuming retry budget so a slot
+/// release that lands mid-backoff isn't ignored for up to 1 hour.
+const SLOT_BUSY_RETRY_SECS: i64 = 60;
+
+fn is_transient_slot_busy_error(err: &str) -> bool {
+    err.contains("has active dispatch")
+}
 
 /// Invariant: `dispatch_outbox_retry_count_in_bounds`.
 ///
@@ -352,6 +360,20 @@ async fn process_outbox_batch_sqlite<N: OutboxNotifier>(db: &crate::db::Db, noti
                 }
             }
             Err(err) => {
+                if is_transient_slot_busy_error(&err) {
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "UPDATE dispatch_outbox
+                                SET status = 'pending',
+                                    error = ?1,
+                                    next_attempt_at = datetime('now', '+' || ?2 || ' seconds')
+                              WHERE id = ?3",
+                            sqlite_test::params![err, SLOT_BUSY_RETRY_SECS, id],
+                        )
+                        .ok();
+                    }
+                    continue;
+                }
                 let new_count = retry_count + 1;
                 if new_count > MAX_RETRY_COUNT {
                     let delivery_result = DispatchNotifyDeliveryResult::permanent_failure(
@@ -501,6 +523,14 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                 }
             }
             Err(err) => {
+                if is_transient_slot_busy_error(&err) {
+                    tracing::info!(
+                        "[dispatch-outbox] Slot busy for entry {id} (dispatch={dispatch_id}, action={action}); retrying in {SLOT_BUSY_RETRY_SECS}s without consuming retry budget"
+                    );
+                    schedule_outbox_retry_pg(pool, id, &err, retry_count, SLOT_BUSY_RETRY_SECS)
+                        .await;
+                    continue;
+                }
                 let new_count = retry_count + 1;
                 if new_count > MAX_RETRY_COUNT {
                     // Permanent failure — exhausted all 4 retries (1m → 5m → 15m → 1h)
