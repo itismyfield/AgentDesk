@@ -1364,6 +1364,14 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     fail_dispatch_with_policy(dispatch_id, error_msg, None, true).await;
 }
 
+pub(in crate::services::discord) async fn fail_dispatch_tmux_session_died(
+    _api_port: u16,
+    dispatch_id: Option<&str>,
+    error_msg: &str,
+) {
+    fail_dispatch_with_policy(dispatch_id, error_msg, Some("tmux_session_died"), true).await;
+}
+
 pub(in crate::services::discord) async fn fail_dispatch_auth_expired(
     _api_port: u16,
     dispatch_id: Option<&str>,

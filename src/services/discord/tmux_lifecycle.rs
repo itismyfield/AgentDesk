@@ -5,6 +5,7 @@ pub(super) enum DispatchTmuxProtection {
     SessionRow {
         dispatch_id: String,
         session_status: String,
+        dispatch_status: String,
     },
     ThreadDispatch {
         dispatch_id: String,
@@ -18,8 +19,9 @@ impl DispatchTmuxProtection {
             Self::SessionRow {
                 dispatch_id,
                 session_status,
+                dispatch_status,
             } => format!(
-                "session row keeps active_dispatch_id={dispatch_id} (status={session_status})"
+                "session row keeps active_dispatch_id={dispatch_id} (session_status={session_status}, dispatch_status={dispatch_status})"
             ),
             Self::ThreadDispatch {
                 dispatch_id,
@@ -29,6 +31,35 @@ impl DispatchTmuxProtection {
             }
         }
     }
+
+    pub(super) fn active_dispatch_id(&self) -> Option<&str> {
+        let (dispatch_id, dispatch_status) = match self {
+            Self::SessionRow {
+                dispatch_id,
+                dispatch_status,
+                ..
+            }
+            | Self::ThreadDispatch {
+                dispatch_id,
+                dispatch_status,
+            } => (dispatch_id, dispatch_status),
+        };
+        matches!(dispatch_status.as_str(), "pending" | "dispatched").then_some(dispatch_id.as_str())
+    }
+}
+
+pub(super) async fn fail_active_dispatch_for_dead_tmux_session(
+    api_port: u16,
+    protection: &DispatchTmuxProtection,
+    tmux_session_name: &str,
+    source: &str,
+) -> bool {
+    let Some(dispatch_id) = protection.active_dispatch_id() else {
+        return false;
+    };
+    let reason = format!("tmux session died ({source}): session={tmux_session_name}");
+    super::turn_bridge::fail_dispatch_tmux_session_died(api_port, Some(dispatch_id), &reason).await;
+    true
 }
 
 pub(super) fn resolve_dispatch_tmux_protection(
@@ -64,8 +95,11 @@ pub(super) fn resolve_dispatch_tmux_protection(
         return crate::utils::async_bridge::block_on_pg_result(
             pg_pool,
             move |pool| async move {
-                if let Some((dispatch_id, session_status)) = sqlx::query_as::<_, (String, String)>(
-                    "SELECT s.active_dispatch_id, s.status
+                if let Some((dispatch_id, session_status, dispatch_status)) = sqlx::query_as::<
+                    _,
+                    (String, String, String),
+                >(
+                    "SELECT s.active_dispatch_id, s.status, td.status
                      FROM sessions s
                      JOIN task_dispatches td
                        ON td.id = s.active_dispatch_id
@@ -103,6 +137,7 @@ pub(super) fn resolve_dispatch_tmux_protection(
                     return Ok(Some(DispatchTmuxProtection::SessionRow {
                         dispatch_id,
                         session_status,
+                        dispatch_status,
                     }));
                 }
 
@@ -155,7 +190,7 @@ pub(super) fn resolve_dispatch_tmux_protection(
     let db = db?;
     let conn = db.read_conn().ok()?;
     if let Ok(protection) = conn.query_row(
-        "SELECT s.active_dispatch_id, s.status
+        "SELECT s.active_dispatch_id, s.status, td.status
          FROM sessions s
          JOIN task_dispatches td
            ON td.id = s.active_dispatch_id
@@ -191,6 +226,7 @@ pub(super) fn resolve_dispatch_tmux_protection(
             Ok(DispatchTmuxProtection::SessionRow {
                 dispatch_id: row.get::<_, String>(0)?,
                 session_status: row.get::<_, String>(1)?,
+                dispatch_status: row.get::<_, String>(2)?,
             })
         },
     ) {
@@ -313,6 +349,7 @@ mod tests {
             Some(DispatchTmuxProtection::SessionRow {
                 dispatch_id: "dispatch-495".to_string(),
                 session_status: "idle".to_string(),
+                dispatch_status: "dispatched".to_string(),
             })
         );
     }
@@ -413,6 +450,7 @@ mod tests {
             Some(DispatchTmuxProtection::SessionRow {
                 dispatch_id: "dispatch-stale".to_string(),
                 session_status: "idle".to_string(),
+                dispatch_status: "completed".to_string(),
             })
         );
     }
@@ -657,6 +695,7 @@ mod tests {
             Some(DispatchTmuxProtection::SessionRow {
                 dispatch_id: "dispatch-same-token".to_string(),
                 session_status: "idle".to_string(),
+                dispatch_status: "dispatched".to_string(),
             })
         );
     }
@@ -702,7 +741,25 @@ mod tests {
             Some(DispatchTmuxProtection::SessionRow {
                 dispatch_id: "dispatch-db-wrapper".to_string(),
                 session_status: "idle".to_string(),
+                dispatch_status: "dispatched".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn active_dispatch_id_only_returns_retryable_statuses() {
+        let active = DispatchTmuxProtection::SessionRow {
+            dispatch_id: "dispatch-active".to_string(),
+            session_status: "idle".to_string(),
+            dispatch_status: "dispatched".to_string(),
+        };
+        let completed = DispatchTmuxProtection::SessionRow {
+            dispatch_id: "dispatch-completed".to_string(),
+            session_status: "idle".to_string(),
+            dispatch_status: "completed".to_string(),
+        };
+
+        assert_eq!(active.active_dispatch_id(), Some("dispatch-active"));
+        assert_eq!(completed.active_dispatch_id(), None);
     }
 }
