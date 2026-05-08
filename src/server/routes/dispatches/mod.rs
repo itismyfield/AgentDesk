@@ -8,7 +8,7 @@ pub(crate) mod thread_reuse;
 // ── Re-exports: CRUD routes ──────────────────────────────────
 pub use crud::{
     UpdateDispatchBody, create_dispatch, get_dispatch, get_dispatch_delivery_events,
-    list_dispatches, update_dispatch,
+    get_dispatch_delivery_reconcile_stats, list_dispatches, update_dispatch,
 };
 
 // ── Re-exports: Outbox ───────────────────────────────────────

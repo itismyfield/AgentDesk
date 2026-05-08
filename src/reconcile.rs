@@ -1,7 +1,15 @@
 use anyhow::{Result, anyhow};
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use crate::{db::Db, engine::PolicyEngine};
 
@@ -19,6 +27,146 @@ const COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT: i64 = 50;
 const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_GRACE: Duration = Duration::from_secs(2 * 60);
 const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_STALE_CLAIM: Duration = Duration::from_secs(5 * 60);
 const AUTO_QUEUE_PENDING_DELIVERY_ORPHAN_BATCH_LIMIT: i64 = 50;
+const DISPATCH_DELIVERY_EVENT_RECONCILE_BATCH_LIMIT: i64 = 500;
+
+const DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED: &str = "missing_typed";
+const DISPATCH_DELIVERY_MISMATCH_NOTIFIED_STATUS: &str = "notified_status_mismatch";
+const DISPATCH_DELIVERY_MISMATCH_MISSING_KV_META: &str = "missing_kv_meta";
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct DispatchDeliveryEventReconcileStats {
+    pub kv_reserving_checked: usize,
+    pub kv_notified_checked: usize,
+    pub typed_events_checked: usize,
+    pub mismatch_count: usize,
+    pub missing_typed: usize,
+    pub notified_status_mismatch: usize,
+    pub missing_kv_meta: usize,
+}
+
+impl DispatchDeliveryEventReconcileStats {
+    pub(crate) fn touched(&self) -> bool {
+        self.mismatch_count > 0
+    }
+
+    fn record_mismatch(&mut self, kind: &str) {
+        self.mismatch_count += 1;
+        match kind {
+            DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED => self.missing_typed += 1,
+            DISPATCH_DELIVERY_MISMATCH_NOTIFIED_STATUS => self.notified_status_mismatch += 1,
+            DISPATCH_DELIVERY_MISMATCH_MISSING_KV_META => self.missing_kv_meta += 1,
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DispatchDeliveryEventMismatch {
+    pub dispatch_id: String,
+    pub kind: String,
+    pub expected_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_status: Option<String>,
+}
+
+impl DispatchDeliveryEventMismatch {
+    fn missing_typed(dispatch_id: String, expected_status: &'static str) -> Self {
+        Self {
+            dispatch_id,
+            kind: DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED.to_string(),
+            expected_status: expected_status.to_string(),
+            actual_status: None,
+        }
+    }
+
+    fn notified_status(dispatch_id: String, actual_status: Option<String>) -> Self {
+        Self {
+            dispatch_id,
+            kind: DISPATCH_DELIVERY_MISMATCH_NOTIFIED_STATUS.to_string(),
+            expected_status: "sent".to_string(),
+            actual_status,
+        }
+    }
+
+    fn missing_kv_meta(dispatch_id: String, expected_status: &'static str) -> Self {
+        Self {
+            dispatch_id,
+            kind: DISPATCH_DELIVERY_MISMATCH_MISSING_KV_META.to_string(),
+            expected_status: expected_status.to_string(),
+            actual_status: Some(expected_status.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DispatchDeliveryEventReconcileReport {
+    pub stats: DispatchDeliveryEventReconcileStats,
+    pub mismatches: Vec<DispatchDeliveryEventMismatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct DispatchDeliveryEventMismatchMetric {
+    pub name: &'static str,
+    pub kind: String,
+    pub value: u64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct DeliveryKvGuardRow {
+    dispatch_id: String,
+    reserving_count: i64,
+    notified_count: i64,
+    typed_status: Option<String>,
+    typed_reserved_until: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct DeliveryTypedGuardRow {
+    dispatch_id: String,
+    typed_status: String,
+    reserved_until: Option<DateTime<Utc>>,
+    has_reserving: bool,
+    has_notified: bool,
+}
+
+static DISPATCH_DELIVERY_MISMATCH_COUNTERS: OnceLock<dashmap::DashMap<String, Arc<AtomicU64>>> =
+    OnceLock::new();
+
+fn dispatch_delivery_mismatch_counter(kind: &str) -> Arc<AtomicU64> {
+    DISPATCH_DELIVERY_MISMATCH_COUNTERS
+        .get_or_init(dashmap::DashMap::new)
+        .entry(kind.to_string())
+        .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+        .clone()
+}
+
+fn record_dispatch_delivery_mismatch_metric(kind: &str) {
+    dispatch_delivery_mismatch_counter(kind).fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn dispatch_delivery_event_mismatch_metrics_snapshot()
+-> Vec<DispatchDeliveryEventMismatchMetric> {
+    let Some(counters) = DISPATCH_DELIVERY_MISMATCH_COUNTERS.get() else {
+        return Vec::new();
+    };
+    let mut rows: Vec<DispatchDeliveryEventMismatchMetric> = counters
+        .iter()
+        .map(|entry| DispatchDeliveryEventMismatchMetric {
+            name: "agentdesk_dispatch_delivery_event_mismatch_total",
+            kind: entry.key().clone(),
+            value: entry.value().load(Ordering::Relaxed),
+        })
+        .collect();
+    rows.sort_by(|a, b| a.kind.cmp(&b.kind));
+    rows
+}
+
+#[cfg(test)]
+pub(crate) fn reset_dispatch_delivery_event_mismatch_metrics_for_tests() {
+    if let Some(counters) = DISPATCH_DELIVERY_MISMATCH_COUNTERS.get() {
+        counters.clear();
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AutoQueuePendingDeliveryOrphanStats {
@@ -47,6 +195,7 @@ pub(crate) struct BootReconcileStats {
     pub stale_dispatch_reservations_cleared: usize,
     pub missing_notify_outbox_backfilled: usize,
     pub broken_auto_queue_entries_reset: usize,
+    pub dispatch_delivery_event_mismatches: usize,
     pub stale_channel_thread_map_entries_cleared: usize,
     pub missing_review_dispatches_refired: usize,
     pub completed_queue_review_drift_recovered: usize,
@@ -58,6 +207,7 @@ impl BootReconcileStats {
             || self.stale_dispatch_reservations_cleared > 0
             || self.missing_notify_outbox_backfilled > 0
             || self.broken_auto_queue_entries_reset > 0
+            || self.dispatch_delivery_event_mismatches > 0
             || self.stale_channel_thread_map_entries_cleared > 0
             || self.missing_review_dispatches_refired > 0
             || self.completed_queue_review_drift_recovered > 0
@@ -81,6 +231,18 @@ pub(crate) async fn reconcile_boot_db_pg(pool: &PgPool) -> Result<BootReconcileS
     .map(|r| r.rows_affected() as usize)
     .unwrap_or(0);
 
+    let dispatch_delivery_event_mismatches = reconcile_dispatch_delivery_events_pg(pool)
+        .await
+        .map(|stats| stats.mismatch_count)
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                target: "reconcile",
+                %error,
+                "[dispatch-delivery-reconcile] boot mismatch reconcile failed"
+            );
+            0
+        });
+
     let stale_dispatch_reservations_cleared =
         sqlx::query("DELETE FROM kv_meta WHERE key LIKE 'dispatch_reserving:%'")
             .execute(pool)
@@ -96,6 +258,7 @@ pub(crate) async fn reconcile_boot_db_pg(pool: &PgPool) -> Result<BootReconcileS
         stale_dispatch_reservations_cleared,
         missing_notify_outbox_backfilled,
         broken_auto_queue_entries_reset,
+        dispatch_delivery_event_mismatches,
         stale_channel_thread_map_entries_cleared: 0,
         missing_review_dispatches_refired: 0,
         completed_queue_review_drift_recovered: 0,
@@ -135,11 +298,12 @@ pub(crate) async fn reconcile_boot_runtime(
 
     if stats.touched() {
         tracing::info!(
-            "[boot-reconcile] reset_processing={} cleared_reservations={} missing_notify={} broken_auto_queue={} cleared_thread_map={} refired_review={} recovered_review_drift={}",
+            "[boot-reconcile] reset_processing={} cleared_reservations={} missing_notify={} broken_auto_queue={} dispatch_delivery_mismatches={} cleared_thread_map={} refired_review={} recovered_review_drift={}",
             stats.stale_processing_outbox_reset,
             stats.stale_dispatch_reservations_cleared,
             stats.missing_notify_outbox_backfilled,
             stats.broken_auto_queue_entries_reset,
+            stats.dispatch_delivery_event_mismatches,
             stats.stale_channel_thread_map_entries_cleared,
             stats.missing_review_dispatches_refired,
             stats.completed_queue_review_drift_recovered
@@ -156,6 +320,259 @@ pub(crate) async fn reconcile_completed_queue_review_drift_pg(
 ) -> Result<usize> {
     let drift_candidates = completed_queue_review_drift_candidates_pg(pool).await?;
     recover_completed_queue_review_drift_pg(pool, db, engine, drift_candidates).await
+}
+
+pub(crate) async fn reconcile_dispatch_delivery_events_pg(
+    pool: &PgPool,
+) -> Result<DispatchDeliveryEventReconcileStats> {
+    let report = dispatch_delivery_event_reconcile_report_pg(pool).await?;
+    for mismatch in &report.mismatches {
+        record_dispatch_delivery_mismatch_metric(&mismatch.kind);
+        tracing::warn!(
+            target: "reconcile",
+            dispatch_id = %mismatch.dispatch_id,
+            kind = %mismatch.kind,
+            expected_status = %mismatch.expected_status,
+            actual_status = mismatch.actual_status.as_deref().unwrap_or("missing"),
+            "[dispatch-delivery-reconcile] delivery guard mismatch"
+        );
+    }
+
+    if report.stats.touched() {
+        tracing::warn!(
+            target: "reconcile",
+            kv_reserving_checked = report.stats.kv_reserving_checked,
+            kv_notified_checked = report.stats.kv_notified_checked,
+            typed_events_checked = report.stats.typed_events_checked,
+            mismatch_count = report.stats.mismatch_count,
+            missing_typed = report.stats.missing_typed,
+            notified_status_mismatch = report.stats.notified_status_mismatch,
+            missing_kv_meta = report.stats.missing_kv_meta,
+            "[dispatch-delivery-reconcile] mismatch scan completed"
+        );
+    }
+
+    Ok(report.stats)
+}
+
+pub(crate) async fn dispatch_delivery_event_reconcile_report_pg(
+    pool: &PgPool,
+) -> Result<DispatchDeliveryEventReconcileReport> {
+    let mut stats = DispatchDeliveryEventReconcileStats::default();
+    let mut mismatches = Vec::new();
+
+    let mut cursor = String::new();
+    loop {
+        let rows = fetch_delivery_kv_guard_batch_pg(
+            pool,
+            &cursor,
+            DISPATCH_DELIVERY_EVENT_RECONCILE_BATCH_LIMIT,
+        )
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in &rows {
+            stats.kv_reserving_checked += row.reserving_count.max(0) as usize;
+            stats.kv_notified_checked += row.notified_count.max(0) as usize;
+            classify_delivery_kv_guard_mismatches(&mut stats, &mut mismatches, row);
+        }
+        cursor = rows
+            .last()
+            .map(|row| row.dispatch_id.clone())
+            .unwrap_or_default();
+    }
+
+    cursor.clear();
+    loop {
+        let rows = fetch_delivery_typed_guard_batch_pg(
+            pool,
+            &cursor,
+            DISPATCH_DELIVERY_EVENT_RECONCILE_BATCH_LIMIT,
+        )
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in &rows {
+            stats.typed_events_checked += 1;
+            classify_delivery_typed_guard_mismatches(&mut stats, &mut mismatches, row);
+        }
+        cursor = rows
+            .last()
+            .map(|row| row.dispatch_id.clone())
+            .unwrap_or_default();
+    }
+
+    Ok(DispatchDeliveryEventReconcileReport { stats, mismatches })
+}
+
+fn classify_delivery_kv_guard_mismatches(
+    stats: &mut DispatchDeliveryEventReconcileStats,
+    mismatches: &mut Vec<DispatchDeliveryEventMismatch>,
+    row: &DeliveryKvGuardRow,
+) {
+    let has_notified = row.notified_count > 0;
+    let typed_status = row.typed_status.as_deref();
+    if typed_status.is_none() {
+        let expected = if has_notified { "sent" } else { "reserved" };
+        let mismatch =
+            DispatchDeliveryEventMismatch::missing_typed(row.dispatch_id.clone(), expected);
+        stats.record_mismatch(&mismatch.kind);
+        mismatches.push(mismatch);
+        return;
+    }
+
+    if has_notified && typed_status != Some("sent") {
+        if typed_status == Some("reserved")
+            && row
+                .typed_reserved_until
+                .as_ref()
+                .is_some_and(|reserved_until| *reserved_until > Utc::now())
+        {
+            return;
+        }
+        let mismatch = DispatchDeliveryEventMismatch::notified_status(
+            row.dispatch_id.clone(),
+            row.typed_status.clone(),
+        );
+        stats.record_mismatch(&mismatch.kind);
+        mismatches.push(mismatch);
+        return;
+    }
+}
+
+fn classify_delivery_typed_guard_mismatches(
+    stats: &mut DispatchDeliveryEventReconcileStats,
+    mismatches: &mut Vec<DispatchDeliveryEventMismatch>,
+    row: &DeliveryTypedGuardRow,
+) {
+    if row.has_reserving || row.has_notified {
+        return;
+    }
+    match row.typed_status.as_str() {
+        "reserved" => {
+            if row
+                .reserved_until
+                .as_ref()
+                .is_some_and(|reserved_until| *reserved_until > Utc::now())
+            {
+                return;
+            }
+            let mismatch =
+                DispatchDeliveryEventMismatch::missing_kv_meta(row.dispatch_id.clone(), "reserved");
+            stats.record_mismatch(&mismatch.kind);
+            mismatches.push(mismatch);
+        }
+        "sent" => {
+            let mismatch =
+                DispatchDeliveryEventMismatch::missing_kv_meta(row.dispatch_id.clone(), "sent");
+            stats.record_mismatch(&mismatch.kind);
+            mismatches.push(mismatch);
+        }
+        _ => {}
+    }
+}
+
+async fn fetch_delivery_kv_guard_batch_pg(
+    pool: &PgPool,
+    cursor: &str,
+    limit: i64,
+) -> Result<Vec<DeliveryKvGuardRow>> {
+    sqlx::query_as::<_, DeliveryKvGuardRow>(
+        "WITH kv_guards AS (
+            SELECT SUBSTRING(key FROM LENGTH('dispatch_reserving:') + 1) AS dispatch_id,
+                   'reserving' AS guard_kind
+              FROM kv_meta
+             WHERE key LIKE 'dispatch\\_reserving:%' ESCAPE '\\'
+               AND SUBSTRING(key FROM LENGTH('dispatch_reserving:') + 1) > $1
+            UNION ALL
+            SELECT SUBSTRING(key FROM LENGTH('dispatch_notified:') + 1) AS dispatch_id,
+                   'notified' AS guard_kind
+              FROM kv_meta
+             WHERE key LIKE 'dispatch\\_notified:%' ESCAPE '\\'
+               AND SUBSTRING(key FROM LENGTH('dispatch_notified:') + 1) > $1
+        ),
+        grouped AS (
+            SELECT dispatch_id,
+                   SUM(CASE WHEN guard_kind = 'reserving' THEN 1 ELSE 0 END)::BIGINT AS reserving_count,
+                   SUM(CASE WHEN guard_kind = 'notified' THEN 1 ELSE 0 END)::BIGINT AS notified_count
+              FROM kv_guards
+             GROUP BY dispatch_id
+             ORDER BY dispatch_id
+             LIMIT $2
+        )
+        SELECT grouped.dispatch_id,
+               grouped.reserving_count,
+               grouped.notified_count,
+               latest.status AS typed_status,
+               latest.reserved_until AS typed_reserved_until
+          FROM grouped
+          LEFT JOIN LATERAL (
+              SELECT status, reserved_until
+                FROM dispatch_delivery_events
+               WHERE dispatch_id = grouped.dispatch_id
+                 AND operation = 'send'
+                 AND target_kind = 'channel'
+               ORDER BY updated_at DESC, id DESC
+               LIMIT 1
+          ) latest ON TRUE
+         ORDER BY grouped.dispatch_id",
+    )
+    .bind(cursor)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow!("query dispatch delivery kv guard reconcile batch: {error}"))
+}
+
+async fn fetch_delivery_typed_guard_batch_pg(
+    pool: &PgPool,
+    cursor: &str,
+    limit: i64,
+) -> Result<Vec<DeliveryTypedGuardRow>> {
+    sqlx::query_as::<_, DeliveryTypedGuardRow>(
+        "WITH candidate_ids AS (
+            SELECT DISTINCT dispatch_id
+              FROM dispatch_delivery_events
+             WHERE dispatch_id > $1
+               AND operation = 'send'
+               AND target_kind = 'channel'
+             ORDER BY dispatch_id
+             LIMIT $2
+        ),
+        latest AS (
+            SELECT DISTINCT ON (events.dispatch_id)
+                   events.dispatch_id,
+                   events.status,
+                   events.reserved_until
+              FROM dispatch_delivery_events events
+              JOIN candidate_ids ON candidate_ids.dispatch_id = events.dispatch_id
+             WHERE events.operation = 'send'
+               AND events.target_kind = 'channel'
+             ORDER BY events.dispatch_id, events.updated_at DESC, events.id DESC
+        )
+        SELECT latest.dispatch_id,
+               latest.status AS typed_status,
+               latest.reserved_until,
+               EXISTS (
+                   SELECT 1
+                     FROM kv_meta
+                    WHERE key = 'dispatch_reserving:' || latest.dispatch_id
+               ) AS has_reserving,
+               EXISTS (
+                   SELECT 1
+                     FROM kv_meta
+                    WHERE key = 'dispatch_notified:' || latest.dispatch_id
+               ) AS has_notified
+          FROM latest
+         ORDER BY latest.dispatch_id",
+    )
+    .bind(cursor)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow!("query dispatch delivery typed reconcile batch: {error}"))
 }
 
 pub(crate) async fn reconcile_auto_queue_pending_delivery_orphans_pg(
@@ -270,6 +687,7 @@ fn reconcile_boot_db_sqlite(db: &Db) -> Result<BootReconcileStats> {
         stale_dispatch_reservations_cleared,
         missing_notify_outbox_backfilled,
         broken_auto_queue_entries_reset,
+        dispatch_delivery_event_mismatches: 0,
         stale_channel_thread_map_entries_cleared: 0,
         missing_review_dispatches_refired: 0,
         completed_queue_review_drift_recovered: 0,
@@ -1011,6 +1429,345 @@ pub(crate) async fn reconcile_zombie_resources() -> ZombieReconcileStats {
     }
 
     stats
+}
+
+#[cfg(test)]
+mod dispatch_delivery_reconcile_tests {
+    use super::*;
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+
+    #[derive(Clone)]
+    struct TestLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct TestPostgresDb {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn try_create() -> Option<Self> {
+            let lock = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!(
+                "agentdesk_delivery_reconcile_{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            if let Err(error) = crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "dispatch delivery reconcile tests",
+            )
+            .await
+            {
+                eprintln!("skipping postgres-backed dispatch delivery reconcile test: {error}");
+                drop(lock);
+                return None;
+            }
+
+            Some(Self {
+                _lock: lock,
+                admin_url,
+                database_name,
+                database_url,
+            })
+        }
+
+        async fn connect_and_migrate(&self) -> PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "dispatch delivery reconcile tests",
+            )
+            .await
+            .unwrap()
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "dispatch delivery reconcile tests",
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
+    async fn seed_dispatch(pool: &PgPool, dispatch_id: &str) {
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, status, title)
+             VALUES ($1, 'pending', 'Delivery reconcile test')",
+        )
+        .bind(dispatch_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_delivery_event(pool: &PgPool, dispatch_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO dispatch_delivery_events (
+                dispatch_id,
+                correlation_id,
+                semantic_event_id,
+                operation,
+                target_kind,
+                status,
+                attempt,
+                result_json,
+                reserved_until,
+                created_at,
+                updated_at
+             ) VALUES (
+                $1,
+                'dispatch:' || $1,
+                'dispatch:' || $1 || ':notify',
+                'send',
+                'channel',
+                $2,
+                1,
+                '{}'::jsonb,
+                CASE WHEN $2 = 'reserved' THEN NOW() - INTERVAL '1 minute' ELSE NULL END,
+                NOW() - INTERVAL '1 minute',
+                NOW() - INTERVAL '1 minute'
+             )",
+        )
+        .bind(dispatch_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_kv(pool: &PgPool, key: &str, dispatch_id: &str) {
+        sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
+            .bind(key)
+            .bind(dispatch_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn dispatch_delivery_reconcile_classifies_rows_without_postgres() {
+        let mut stats = DispatchDeliveryEventReconcileStats::default();
+        let mut mismatches = Vec::new();
+
+        classify_delivery_kv_guard_mismatches(
+            &mut stats,
+            &mut mismatches,
+            &DeliveryKvGuardRow {
+                dispatch_id: "dispatch-missing-typed".to_string(),
+                reserving_count: 1,
+                notified_count: 0,
+                typed_status: None,
+                typed_reserved_until: None,
+            },
+        );
+        classify_delivery_kv_guard_mismatches(
+            &mut stats,
+            &mut mismatches,
+            &DeliveryKvGuardRow {
+                dispatch_id: "dispatch-notified-status".to_string(),
+                reserving_count: 0,
+                notified_count: 1,
+                typed_status: Some("failed".to_string()),
+                typed_reserved_until: None,
+            },
+        );
+        classify_delivery_typed_guard_mismatches(
+            &mut stats,
+            &mut mismatches,
+            &DeliveryTypedGuardRow {
+                dispatch_id: "dispatch-typed-only".to_string(),
+                typed_status: "sent".to_string(),
+                reserved_until: None,
+                has_reserving: false,
+                has_notified: false,
+            },
+        );
+
+        assert_eq!(stats.mismatch_count, 3);
+        assert_eq!(stats.missing_typed, 1);
+        assert_eq!(stats.notified_status_mismatch, 1);
+        assert_eq!(stats.missing_kv_meta, 1);
+        assert_eq!(
+            mismatches
+                .iter()
+                .map(|mismatch| mismatch.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED,
+                DISPATCH_DELIVERY_MISMATCH_NOTIFIED_STATUS,
+                DISPATCH_DELIVERY_MISMATCH_MISSING_KV_META,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_delivery_reconcile_classifies_three_mismatch_kinds_pg() {
+        let Some(pg_db) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_dispatch(&pool, "dispatch-missing-typed").await;
+        insert_kv(
+            &pool,
+            "dispatch_reserving:dispatch-missing-typed",
+            "dispatch-missing-typed",
+        )
+        .await;
+
+        seed_dispatch(&pool, "dispatch-notified-status").await;
+        insert_kv(
+            &pool,
+            "dispatch_notified:dispatch-notified-status",
+            "dispatch-notified-status",
+        )
+        .await;
+        insert_delivery_event(&pool, "dispatch-notified-status", "failed").await;
+
+        seed_dispatch(&pool, "dispatch-typed-only").await;
+        insert_delivery_event(&pool, "dispatch-typed-only", "sent").await;
+
+        seed_dispatch(&pool, "dispatch-failed-typed-only").await;
+        insert_delivery_event(&pool, "dispatch-failed-typed-only", "failed").await;
+
+        let report = dispatch_delivery_event_reconcile_report_pg(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(report.stats.mismatch_count, 3);
+        assert_eq!(report.stats.missing_typed, 1);
+        assert_eq!(report.stats.notified_status_mismatch, 1);
+        assert_eq!(report.stats.missing_kv_meta, 1);
+        assert!(report.mismatches.iter().any(|mismatch| {
+            mismatch.dispatch_id == "dispatch-missing-typed"
+                && mismatch.kind == DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED
+                && mismatch.expected_status == "reserved"
+        }));
+        assert!(report.mismatches.iter().any(|mismatch| {
+            mismatch.dispatch_id == "dispatch-notified-status"
+                && mismatch.kind == DISPATCH_DELIVERY_MISMATCH_NOTIFIED_STATUS
+                && mismatch.actual_status.as_deref() == Some("failed")
+        }));
+        assert!(report.mismatches.iter().any(|mismatch| {
+            mismatch.dispatch_id == "dispatch-typed-only"
+                && mismatch.kind == DISPATCH_DELIVERY_MISMATCH_MISSING_KV_META
+                && mismatch.expected_status == "sent"
+        }));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_delivery_reconcile_logs_dispatch_id_and_increments_metric_pg() {
+        reset_dispatch_delivery_event_mismatch_metrics_for_tests();
+        let Some(pg_db) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_dispatch(&pool, "dispatch-log-missing-typed").await;
+        insert_kv(
+            &pool,
+            "dispatch_reserving:dispatch-log-missing-typed",
+            "dispatch-log-missing-typed",
+        )
+        .await;
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || TestLogWriter {
+                buffer: writer_buffer.clone(),
+            })
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let stats = reconcile_dispatch_delivery_events_pg(&pool).await.unwrap();
+        drop(_guard);
+        let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        let metrics = dispatch_delivery_event_mismatch_metrics_snapshot();
+
+        assert_eq!(stats.mismatch_count, 1);
+        assert!(
+            logs.contains("dispatch-log-missing-typed")
+                && logs.contains(DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED),
+            "mismatch log must include dispatch_id and kind; logs={logs}"
+        );
+        assert!(metrics.iter().any(|metric| {
+            metric.kind == DISPATCH_DELIVERY_MISMATCH_MISSING_TYPED && metric.value == 1
+        }));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

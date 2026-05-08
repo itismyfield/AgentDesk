@@ -249,6 +249,7 @@ pub(crate) const TOP_40_PAIRED_PATHS: &[(&str, &str)] = &[
     ("POST", "/api/dispatches"),
     ("GET", "/api/dispatches/{id}"),
     ("GET", "/api/dispatches/{id}/events"),
+    ("GET", "/api/dispatches/delivery-events/reconcile-stats"),
     ("PATCH", "/api/dispatches/{id}"),
     ("POST", "/api/queue/generate"),
     ("POST", "/api/queue/dispatch-next"),
@@ -2370,6 +2371,43 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"error": "dispatch not found"}),
         )
         .with_curl("curl http://localhost:8787/api/dispatches/dispatch-1/events"),
+        ep(
+            "GET",
+            "/api/dispatches/delivery-events/reconcile-stats",
+            "dispatches",
+            "Read typed dispatch_delivery_events versus kv_meta delivery guard reconciliation stats. Compares dispatch_reserving and dispatch_notified guard keys with latest typed reserved/sent rows, returns mismatch samples, and exposes the cumulative agentdesk_dispatch_delivery_event_mismatch_total metric by kind.",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "stats": {
+                    "kv_reserving_checked": 1,
+                    "kv_notified_checked": 2,
+                    "typed_events_checked": 3,
+                    "mismatch_count": 1,
+                    "missing_typed": 0,
+                    "notified_status_mismatch": 1,
+                    "missing_kv_meta": 0
+                },
+                "mismatches": [{
+                    "dispatch_id": "dispatch-1",
+                    "kind": "notified_status_mismatch",
+                    "expected_status": "sent",
+                    "actual_status": "reserved"
+                }],
+                "metrics": [{
+                    "name": "agentdesk_dispatch_delivery_event_mismatch_total",
+                    "kind": "notified_status_mismatch",
+                    "value": 1
+                }]
+            }),
+        )
+        .with_error_example(
+            503,
+            json!({}),
+            json!({"error": "postgres pool unavailable"}),
+        )
+        .with_curl("curl http://localhost:8787/api/dispatches/delivery-events/reconcile-stats"),
         ep(
             "PATCH",
             "/api/dispatches/{id}",

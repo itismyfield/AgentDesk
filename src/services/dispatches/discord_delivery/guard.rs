@@ -60,8 +60,8 @@ async fn claim_dispatch_delivery_guard(
     }
 
     let result = sqlx::query(
-        "INSERT INTO kv_meta (key, value)
-         VALUES ($1, $2)
+        "INSERT INTO kv_meta (key, value, expires_at)
+         VALUES ($1, $2, NOW() + INTERVAL '5 minutes')
          ON CONFLICT (key) DO NOTHING",
     )
     .bind(reserving_key(dispatch_id))
@@ -502,6 +502,14 @@ mod tests {
         assert!(error.is_none());
         assert_eq!(result_json["status"], "success");
         assert!(reserved_until.is_none());
+
+        let reconcile = crate::reconcile::dispatch_delivery_event_reconcile_report_pg(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            reconcile.stats.mismatch_count, 0,
+            "dual-write delivery guard happy path must reconcile cleanly"
+        );
 
         pool.close().await;
         pg_db.drop().await;

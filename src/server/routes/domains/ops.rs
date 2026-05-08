@@ -89,6 +89,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(health_api::stale_mailbox_repair_handler),
             )
             .route(
+                "/dispatches/delivery-events/reconcile-stats",
+                get(dispatches::get_dispatch_delivery_reconcile_stats),
+            )
+            .route(
                 "/dispatches/{id}",
                 get(dispatches::get_dispatch).patch(dispatches::update_dispatch),
             )

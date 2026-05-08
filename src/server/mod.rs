@@ -407,6 +407,24 @@ async fn policy_tick_loop(
                         );
                     }
                 }
+
+                match crate::reconcile::reconcile_dispatch_delivery_events_pg(pool).await {
+                    Ok(stats) if stats.touched() => {
+                        tracing::warn!(
+                            mismatch_count = stats.mismatch_count,
+                            missing_typed = stats.missing_typed,
+                            notified_status_mismatch = stats.notified_status_mismatch,
+                            missing_kv_meta = stats.missing_kv_meta,
+                            "[policy-tick] dispatch delivery event reconcile found mismatches"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            "[policy-tick] dispatch delivery event reconcile failed: {error}"
+                        );
+                    }
+                }
             }
 
             // Also fire legacy OnTick for backward compat
