@@ -963,26 +963,50 @@ async fn sync_dispatch_terminal_entries_on_pg_tx_result(
     // cross-row updates when both pointers happen to align) AND when the
     // entry's previously-tracked dispatch is in a terminal non-completed
     // state — i.e. genuine self-recovery, not normal lifecycle.
+    //
+    // #1970: retryable transport failures can briefly push the entry to
+    // `failed` before a later retry dispatch succeeds for the same card. Treat
+    // the completed retry as authoritative and reconcile that stale failed
+    // entry to `done` by card id.
     let rows = sqlx::query(
-        "SELECT e.id, e.run_id, e.dispatch_id, e.slot_index
+        "WITH target_dispatch AS (
+             SELECT kanban_card_id
+             FROM task_dispatches
+             WHERE id = $1
+         )
+         SELECT e.id, e.run_id, e.dispatch_id, e.slot_index, e.status
          FROM auto_queue_entries e
-         WHERE e.status = 'dispatched'
-           AND (
-                 e.dispatch_id = $1
-              OR (
-                   e.kanban_card_id = (
-                     SELECT kanban_card_id
-                     FROM task_dispatches
-                     WHERE id = $1
-                   )
-                   AND COALESCE(
-                     (SELECT status FROM task_dispatches WHERE id = e.dispatch_id),
-                     ''
-                   ) IN ('cancelled', 'failed', 'superseded')
-                 )
-           )",
+         JOIN target_dispatch d ON d.kanban_card_id = e.kanban_card_id
+         WHERE (
+                e.status = 'dispatched'
+            AND (
+                  e.dispatch_id = $1
+               OR COALESCE(
+                    (SELECT status FROM task_dispatches WHERE id = e.dispatch_id),
+                    ''
+                  ) IN ('cancelled', 'failed', 'superseded')
+            )
+         )
+         OR (
+                $2 = 'done'
+            AND e.status = 'failed'
+            AND (
+                  e.dispatch_id = $1
+               OR COALESCE(
+                    (SELECT status FROM task_dispatches WHERE id = e.dispatch_id),
+                    ''
+                  ) IN ('cancelled', 'failed', 'superseded')
+               OR EXISTS (
+                    SELECT 1
+                    FROM auto_queue_entry_dispatch_history h
+                    WHERE h.entry_id = e.id
+                      AND h.dispatch_id = $1
+               )
+            )
+         )",
     )
     .bind(dispatch_id)
+    .bind(new_status)
     .fetch_all(&mut **tx)
     .await
     .map_err(|error| {
@@ -998,36 +1022,51 @@ async fn sync_dispatch_terminal_entries_on_pg_tx_result(
         let run_id: String = row.try_get("run_id").map_err(|error| {
             format!("decode postgres auto-queue entry run_id for {dispatch_id}: {error}")
         })?;
-        let linked_dispatch_id: String = row.try_get("dispatch_id").map_err(|error| {
+        let linked_dispatch_id: Option<String> = row.try_get("dispatch_id").map_err(|error| {
             format!("decode postgres auto-queue entry dispatch_id for {dispatch_id}: {error}")
         })?;
         let slot_index: Option<i64> = row.try_get("slot_index").map_err(|error| {
             format!("decode postgres auto-queue entry slot_index for {dispatch_id}: {error}")
         })?;
+        let entry_status: String = row.try_get("status").map_err(|error| {
+            format!("decode postgres auto-queue entry status for {dispatch_id}: {error}")
+        })?;
+        let update_trigger_source =
+            if entry_status == ENTRY_STATUS_FAILED && new_status == ENTRY_STATUS_DONE {
+                "dispatch_terminal_reconcile"
+            } else {
+                trigger_source
+            };
         let result = update_entry_status_on_pg_tx(
             tx,
             &entry_id,
             new_status,
-            trigger_source,
+            update_trigger_source,
             &EntryStatusUpdateOptions::default(),
         )
         .await?;
         if result.changed {
+            if entry_status == ENTRY_STATUS_FAILED && new_status == ENTRY_STATUS_DONE {
+                record_entry_dispatch_history_on_pg(tx, &entry_id, dispatch_id, trigger_source)
+                    .await?;
+            }
             if preserve_dispatch_link {
-                sqlx::query(
-                    "UPDATE auto_queue_entries
-                     SET dispatch_id = $1,
-                         slot_index = $2
-                     WHERE id = $3",
-                )
-                .bind(&linked_dispatch_id)
-                .bind(slot_index)
-                .bind(&entry_id)
-                .execute(&mut **tx)
-                .await
-                .map_err(|error| {
-                    format!("restore postgres auto-queue entry lineage for {entry_id}: {error}")
-                })?;
+                if let Some(linked_dispatch_id) = linked_dispatch_id {
+                    sqlx::query(
+                        "UPDATE auto_queue_entries
+                         SET dispatch_id = $1,
+                             slot_index = $2
+                         WHERE id = $3",
+                    )
+                    .bind(&linked_dispatch_id)
+                    .bind(slot_index)
+                    .bind(&entry_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(|error| {
+                        format!("restore postgres auto-queue entry lineage for {entry_id}: {error}")
+                    })?;
+                }
             }
             affected_run_ids.insert(run_id);
             changed += 1;
@@ -1356,7 +1395,10 @@ fn is_allowed_entry_transition(from_status: &str, to_status: &str, trigger_sourc
     }
     if from_status == ENTRY_STATUS_FAILED
         && to_status == ENTRY_STATUS_DONE
-        && trigger_source == "manual_terminal_reconcile"
+        && matches!(
+            trigger_source,
+            "manual_terminal_reconcile" | "dispatch_terminal_reconcile" | "card_terminal"
+        )
     {
         return true;
     }

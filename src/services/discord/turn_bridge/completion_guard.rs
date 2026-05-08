@@ -332,7 +332,7 @@ fn reset_linked_auto_queue_entries_on_db(
              dispatched_at = NULL,
              completed_at = NULL
          WHERE dispatch_id = ?1
-           AND status IN ('pending', 'dispatched')",
+           AND status IN ('pending', 'dispatched', 'failed')",
         [dispatch_id],
     )
     .map_err(|error| format!("reset sqlite auto_queue_entries for {dispatch_id}: {error}"))
@@ -574,7 +574,7 @@ fn runtime_pg_reset_linked_auto_queue_entries(dispatch_id: &str) -> bool {
                      dispatched_at = NULL,
                      completed_at = NULL
                  WHERE dispatch_id = $1
-                   AND status IN ('pending', 'dispatched')",
+                   AND status IN ('pending', 'dispatched', 'failed')",
             )
             .bind(&dispatch_id)
             .execute(&pool)
@@ -2218,7 +2218,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_linked_auto_queue_entries_on_conn_resets_pending_and_dispatched_rows() {
+    fn reset_linked_auto_queue_entries_on_conn_resets_retryable_rows() {
         let db = crate::db::test_db();
         let conn = db.lock().expect("db lock");
         conn.execute_batch(
@@ -2245,14 +2245,15 @@ mod tests {
              ) VALUES
                 ('entry-pending', 'run-1', 'card-1', 'agent-1', 'pending', 'dispatch-1', 7, 0, 0, datetime('now'), datetime('now')),
                 ('entry-dispatched', 'run-1', 'card-2', 'agent-1', 'dispatched', 'dispatch-1', 8, 0, 0, datetime('now'), NULL),
-                ('entry-done', 'run-1', 'card-3', 'agent-1', 'done', 'dispatch-1', 9, 0, 0, datetime('now'), datetime('now'))",
+                ('entry-failed', 'run-1', 'card-3', 'agent-1', 'failed', 'dispatch-1', 9, 0, 0, datetime('now'), datetime('now')),
+                ('entry-done', 'run-1', 'card-4', 'agent-1', 'done', 'dispatch-1', 10, 0, 0, datetime('now'), datetime('now'))",
             [],
         )
         .expect("seed entries");
         drop(conn);
 
         let changed = reset_linked_auto_queue_entries_on_db(&db, "dispatch-1").expect("reset");
-        assert_eq!(changed, 2);
+        assert_eq!(changed, 3);
 
         let pending: (
             String,
@@ -2316,6 +2317,37 @@ mod tests {
         assert!(dispatched.3.is_none());
         assert!(dispatched.4.is_none());
 
+        let failed: (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = db
+            .read_conn()
+            .expect("read conn")
+            .query_row(
+                "SELECT status, dispatch_id, slot_index, dispatched_at, completed_at
+                 FROM auto_queue_entries
+                 WHERE id = 'entry-failed'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("failed row");
+        assert_eq!(failed.0, "pending");
+        assert!(failed.1.is_none());
+        assert!(failed.2.is_none());
+        assert!(failed.3.is_none());
+        assert!(failed.4.is_none());
+
         let done: (
             String,
             Option<String>,
@@ -2343,7 +2375,7 @@ mod tests {
             .expect("done row");
         assert_eq!(done.0, "done");
         assert_eq!(done.1.as_deref(), Some("dispatch-1"));
-        assert_eq!(done.2, Some(9));
+        assert_eq!(done.2, Some(10));
         assert!(done.3.is_some());
         assert!(done.4.is_some());
     }
