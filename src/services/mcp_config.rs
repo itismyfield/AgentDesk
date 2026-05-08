@@ -317,12 +317,22 @@ fn claude_mcp_config_arg_from_servers(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            let mut headers = Map::new();
-            headers.insert(
-                "Authorization".to_string(),
-                Value::String(format!("Bearer ${{{token_env_var}}}")),
-            );
-            entry.insert("headers".to_string(), Value::Object(headers));
+            // Claude Code SDK does not expand ${VAR} in --mcp-config HTTP
+            // headers, so resolve the env var here and emit the literal token.
+            // If the env var is unset, omit the header so the SDK can still
+            // attempt connection (useful for OAuth-protected servers).
+            if let Some(token_value) = std::env::var(token_env_var)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+            {
+                let mut headers = Map::new();
+                headers.insert(
+                    "Authorization".to_string(),
+                    Value::String(format!("Bearer {token_value}")),
+                );
+                entry.insert("headers".to_string(), Value::Object(headers));
+            }
         }
         mcp_servers.insert(server.name.clone(), Value::Object(entry));
     }
@@ -956,6 +966,10 @@ mod tests {
 
     #[test]
     fn claude_mcp_config_arg_from_config_renders_http_servers() {
+        let env_var = "MEMENTO_ACCESS_KEY_CLAUDE_MCP_TEST";
+        let previous = std::env::var_os(env_var);
+        unsafe { std::env::set_var(env_var, "literal-token-value") };
+
         let mut config = Config::default();
         config.mcp_servers.insert(
             "memento".to_string(),
@@ -963,7 +977,7 @@ mod tests {
                 url: "http://localhost:57332/mcp".to_string(),
                 auth: Some(crate::config::McpServerAuthConfig {
                     auth_type: McpServerAuthType::Bearer,
-                    token_env_var: Some("MEMENTO_ACCESS_KEY".to_string()),
+                    token_env_var: Some(env_var.to_string()),
                 }),
             },
         );
@@ -981,8 +995,41 @@ mod tests {
         );
         assert_eq!(
             value["mcpServers"]["memento"]["headers"]["Authorization"],
-            Value::String("Bearer ${MEMENTO_ACCESS_KEY}".to_string())
+            Value::String("Bearer literal-token-value".to_string())
         );
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var(env_var, value) },
+            None => unsafe { std::env::remove_var(env_var) },
+        }
+    }
+
+    #[test]
+    fn claude_mcp_config_arg_omits_auth_header_when_env_var_unset() {
+        let env_var = "MEMENTO_ACCESS_KEY_CLAUDE_MCP_TEST_UNSET";
+        let previous = std::env::var_os(env_var);
+        unsafe { std::env::remove_var(env_var) };
+
+        let mut config = Config::default();
+        config.mcp_servers.insert(
+            "memento".to_string(),
+            McpServerConfig {
+                url: "http://localhost:57332/mcp".to_string(),
+                auth: Some(crate::config::McpServerAuthConfig {
+                    auth_type: McpServerAuthType::Bearer,
+                    token_env_var: Some(env_var.to_string()),
+                }),
+            },
+        );
+
+        let rendered = claude_mcp_config_arg_from_config(&config, None).expect("config");
+        let value: Value = serde_json::from_str(&rendered).unwrap();
+
+        assert!(value["mcpServers"]["memento"].get("headers").is_none());
+
+        if let Some(value) = previous {
+            unsafe { std::env::set_var(env_var, value) };
+        }
     }
 
     #[test]
