@@ -515,6 +515,19 @@ async fn render_visible_queued_ack(
                 channel_id,
                 error
             );
+            // #1984 (codex C — observation): record the failure without
+            // changing user-visible behaviour. The user message is already
+            // enqueued in the mailbox at this point — only the visible
+            // "queued" card rendering is missing — so the recovery label
+            // reflects that the message itself is not lost.
+            crate::services::observability::emit_intake_placeholder_post_failed(
+                data.provider.as_str(),
+                channel_id.get(),
+                Some(user_msg_id.get()),
+                "queue_ack_visible",
+                "queued_card_skipped",
+                &error.to_string(),
+            );
             return false;
         }
     };

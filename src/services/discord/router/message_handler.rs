@@ -2859,6 +2859,17 @@ pub(in crate::services::discord) async fn handle_text_message(
                         channel_id,
                         error
                     );
+                    // #1984 (codex C — observation): the user message is
+                    // already in the mailbox queue; the dispatch path will
+                    // POST a fresh card via the missing-mapping fallback.
+                    crate::services::observability::emit_intake_placeholder_post_failed(
+                        provider.as_str(),
+                        channel_id.get(),
+                        Some(user_msg_id.get()),
+                        "race_after_enqueue",
+                        "fresh_card_via_dispatch",
+                        &error.to_string(),
+                    );
                     return Ok(());
                 }
             }
@@ -3285,6 +3296,22 @@ pub(in crate::services::discord) async fn handle_text_message(
                     channel_id,
                     error,
                     kicked
+                );
+                // #1984 (codex C — observation): the mailbox slot is
+                // released; whether a follow-up kickoff was scheduled
+                // determines if the user message can still progress.
+                let recovery = if kicked {
+                    "mailbox_released_kickoff_rescheduled"
+                } else {
+                    "mailbox_released_kickoff_skipped"
+                };
+                crate::services::observability::emit_intake_placeholder_post_failed(
+                    provider.as_str(),
+                    channel_id.get(),
+                    Some(user_msg_id.get()),
+                    "intake_after_mailbox_slot",
+                    recovery,
+                    &error.to_string(),
                 );
                 return Err::<(), Error>(error.into());
             }
