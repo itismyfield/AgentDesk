@@ -473,8 +473,14 @@ fn render_status_panel(
         sections.push(format!("Subagents\n{}", lines.join("\n")));
     }
 
-    let cluster_enabled = crate::config::load_graceful().cluster.enabled;
-    let recent_header = render_recent_section_header(snapshot.task.as_ref(), cluster_enabled);
+    let cluster_config = &crate::config::load_graceful().cluster;
+    let cluster_enabled = cluster_config.enabled;
+    let local_instance_id = cluster_config.instance_id.clone();
+    let recent_header = render_recent_section_header(
+        snapshot.task.as_ref(),
+        cluster_enabled,
+        local_instance_id.as_deref(),
+    );
     let recent_section = live_block
         .filter(|block| !block.trim().is_empty())
         .map(|block| format!("{recent_header}\n{block}"));
@@ -491,16 +497,26 @@ fn render_status_panel(
     truncate_chars(&sections.join("\n\n"), STATUS_PANEL_MAX_CHARS)
 }
 
-fn render_recent_section_header(task: Option<&TaskPanelSnapshot>, cluster_enabled: bool) -> String {
-    let owner = task
+fn render_recent_section_header(
+    task: Option<&TaskPanelSnapshot>,
+    cluster_enabled: bool,
+    local_instance_id: Option<&str>,
+) -> String {
+    if !cluster_enabled {
+        return "🖥️ Recent".to_string();
+    }
+    let dispatch_owner = task
         .and_then(|task| task.owner_instance_id.as_deref())
         .map(str::trim)
         .filter(|owner| !owner.is_empty());
+    let owner = dispatch_owner.or_else(|| {
+        local_instance_id
+            .map(str::trim)
+            .filter(|owner| !owner.is_empty())
+    });
     match owner {
-        Some(owner) if cluster_enabled => {
-            format!("🖥️ Recent ({})", escape_status_panel_markdown(owner))
-        }
-        _ => "🖥️ Recent".to_string(),
+        Some(owner) => format!("🖥️ Recent ({})", escape_status_panel_markdown(owner)),
+        None => "🖥️ Recent".to_string(),
     }
 }
 

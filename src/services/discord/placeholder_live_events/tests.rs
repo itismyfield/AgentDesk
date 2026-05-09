@@ -322,7 +322,7 @@ fn status_panel_omits_context_line_when_token_data_is_absent() {
 }
 
 #[test]
-fn recent_header_uses_terminal_emoji_with_node_in_cluster_mode() {
+fn recent_header_prefers_dispatch_owner_over_local_node() {
     let snapshot = TaskPanelSnapshot {
         dispatch_id: "dsp_55".to_string(),
         card_id: None,
@@ -330,8 +330,30 @@ fn recent_header_uses_terminal_emoji_with_node_in_cluster_mode() {
         owner_instance_id: Some("mac-book-release".to_string()),
     };
     assert_eq!(
-        render_recent_section_header(Some(&snapshot), true),
+        render_recent_section_header(Some(&snapshot), true, Some("mac-mini-release")),
         "🖥️ Recent (mac-book-release)"
+    );
+}
+
+#[test]
+fn recent_header_falls_back_to_local_node_when_no_dispatch_owner() {
+    assert_eq!(
+        render_recent_section_header(None, true, Some("mac-mini-release")),
+        "🖥️ Recent (mac-mini-release)"
+    );
+    let snapshot_without_owner = TaskPanelSnapshot {
+        dispatch_id: "dsp_99".to_string(),
+        card_id: None,
+        dispatch_type: None,
+        owner_instance_id: None,
+    };
+    assert_eq!(
+        render_recent_section_header(
+            Some(&snapshot_without_owner),
+            true,
+            Some("mac-mini-release")
+        ),
+        "🖥️ Recent (mac-mini-release)"
     );
 }
 
@@ -344,10 +366,10 @@ fn recent_header_omits_node_when_cluster_disabled_or_unknown() {
         owner_instance_id: Some("mac-book-release".to_string()),
     };
     assert_eq!(
-        render_recent_section_header(Some(&snapshot), false),
+        render_recent_section_header(Some(&snapshot), false, Some("mac-mini-release")),
         "🖥️ Recent"
     );
-    assert_eq!(render_recent_section_header(None, true), "🖥️ Recent");
+    assert_eq!(render_recent_section_header(None, true, None), "🖥️ Recent");
 }
 
 #[test]
