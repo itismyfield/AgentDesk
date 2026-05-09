@@ -825,6 +825,43 @@ pub fn emit_dispatch_result(
     );
 }
 
+/// #1984 (codex C — observation): record a structured event whenever a
+/// Discord placeholder POST fails inside one of the intake/queue/race code
+/// paths. Each call site sets a stable `phase` label so the resulting PG
+/// rows can be aggregated into a daily failure count, and a `recovery`
+/// label so we can confirm whether the user message stayed in queue, the
+/// mailbox slot was released, or it dropped on the floor.
+///
+/// This is the measurement instrumentation the retro asked for before
+/// considering whether to re-apply the rolled-back 7f8184b9 retry guard.
+/// The event payload is intentionally minimal — we want raw counts, not a
+/// full incident timeline.
+pub fn emit_intake_placeholder_post_failed(
+    provider: &str,
+    channel_id: u64,
+    user_msg_id: Option<u64>,
+    phase: &str,
+    recovery: &str,
+    error: &str,
+) {
+    emit_event(
+        "intake_placeholder_post_failed",
+        Some(provider),
+        Some(channel_id),
+        None,
+        None,
+        None,
+        normalize_string(phase).as_deref(),
+        CounterDelta::default(),
+        json!({
+            "phase": normalize_string(phase),
+            "recovery": normalize_string(recovery),
+            "user_msg_id": user_msg_id,
+            "error": normalize_string(error),
+        }),
+    );
+}
+
 pub fn emit_agent_quality_event(event: AgentQualityEvent) {
     let Some(event_type) = normalize_quality_event_type(&event.event_type) else {
         tracing::warn!(
