@@ -186,6 +186,18 @@ pub(crate) async fn enqueue_outbox_pg_returning_id(
     pool: &PgPool,
     message: OutboxMessage<'_>,
 ) -> Result<Option<i64>, sqlx::Error> {
+    enqueue_outbox_pg_returning_id_with_ttl(pool, message, LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS).await
+}
+
+/// Variant of [`enqueue_outbox_pg_returning_id`] that lets the caller pick the
+/// dedupe TTL (in seconds). Use when the default 5-minute window is too short
+/// for the firing cadence (e.g. periodic GitHub sync alerts that fire every
+/// 20 minutes and should not spam the channel every cycle).
+pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+) -> Result<Option<i64>, sqlx::Error> {
     let reason_code = message
         .reason_code
         .map(str::trim)
@@ -207,7 +219,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_id(
         .bind(message.target)
         .bind(reason_code)
         .bind(session_key)
-        .bind(LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS)
+        .bind(dedupe_ttl_secs)
         .fetch_optional(pool)
         .await?;
 
@@ -217,6 +229,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_id(
                 reason_code,
                 session_key,
                 existing_id,
+                dedupe_ttl_secs,
                 "suppressed duplicate outbox message"
             );
             return Ok(None);
@@ -239,6 +252,19 @@ pub(crate) async fn enqueue_outbox_pg_returning_id(
     .await?;
 
     Ok(Some(outbox_id))
+}
+
+/// Variant of [`enqueue_outbox_pg`] that lets the caller pick the dedupe TTL.
+pub(crate) async fn enqueue_outbox_pg_with_ttl(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+) -> Result<bool, sqlx::Error> {
+    Ok(
+        enqueue_outbox_pg_returning_id_with_ttl(pool, message, dedupe_ttl_secs)
+            .await?
+            .is_some(),
+    )
 }
 
 pub(crate) async fn enqueue_outbox_pg(
