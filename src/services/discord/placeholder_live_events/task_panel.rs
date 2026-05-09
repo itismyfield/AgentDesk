@@ -7,6 +7,7 @@ pub(super) struct TaskPanelSnapshot {
     pub(super) dispatch_id: String,
     pub(super) card_id: Option<String>,
     pub(super) dispatch_type: Option<String>,
+    pub(super) owner_instance_id: Option<String>,
 }
 
 pub(super) fn clean_task_panel_value(raw: &str) -> String {

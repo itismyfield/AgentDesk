@@ -341,6 +341,7 @@ async fn refresh_session_panel_line_from_lifecycle(
 struct TaskPanelDispatchMetadata {
     card_id: Option<String>,
     dispatch_type: Option<String>,
+    claim_owner: Option<String>,
 }
 
 async fn load_task_panel_dispatch_metadata(
@@ -351,9 +352,12 @@ async fn load_task_panel_dispatch_metadata(
         return Ok(None);
     };
     let row = sqlx::query(
-        "SELECT kanban_card_id, dispatch_type
-         FROM task_dispatches
-         WHERE id = $1",
+        "SELECT td.kanban_card_id, td.dispatch_type, dox.claim_owner
+         FROM task_dispatches td
+         LEFT JOIN dispatch_outbox dox ON dox.dispatch_id = td.id
+         WHERE td.id = $1
+         ORDER BY dox.created_at DESC NULLS LAST
+         LIMIT 1",
     )
     .bind(dispatch_id)
     .fetch_optional(pg_pool)
@@ -367,6 +371,9 @@ async fn load_task_panel_dispatch_metadata(
                 .map_err(|error| format!("decode task panel card_id for {dispatch_id}: {error}"))?,
             dispatch_type: row.try_get("dispatch_type").map_err(|error| {
                 format!("decode task panel dispatch_type for {dispatch_id}: {error}")
+            })?,
+            claim_owner: row.try_get("claim_owner").map_err(|error| {
+                format!("decode task panel claim_owner for {dispatch_id}: {error}")
             })?,
         })
     })
@@ -402,6 +409,9 @@ async fn refresh_task_panel_line_from_dispatch(
         metadata
             .as_ref()
             .and_then(|value| value.dispatch_type.as_deref()),
+        metadata
+            .as_ref()
+            .and_then(|value| value.claim_owner.as_deref()),
     )
 }
 
