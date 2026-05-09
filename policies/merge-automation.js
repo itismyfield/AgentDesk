@@ -1045,6 +1045,91 @@ function createOrLocateTrackedPr(candidate, options) {
   return findOpenPrByTrackedBranch(candidate.repo_id, candidate.branch);
 }
 
+// #1946 (a): close the GitHub issue after a successful direct-first merge.
+// `gh issue close` is idempotent (closing a CLOSED issue is a no-op) but we
+// pre-check state to avoid noise in the audit comment trail. Comment first,
+// then close — `gh issue close --comment` would attach the comment to a
+// closed issue and the timestamp ordering becomes confusing for retros.
+function closeGithubIssueAfterDirectMerge(candidate, mergeResult) {
+  if (!candidate || !candidate.card) return;
+  var issueNumber = candidate.card.github_issue_number;
+  if (!issueNumber) {
+    agentdesk.log.info(
+      "[merge] direct-merge close-issue skipped: no github_issue_number on card " + candidate.card.id
+    );
+    return;
+  }
+  if (!candidate.repo_id) {
+    agentdesk.log.info(
+      "[merge] direct-merge close-issue skipped: no repo_id for card " + candidate.card.id
+    );
+    return;
+  }
+
+  var issueArg = String(issueNumber);
+
+  // 멱등성 가드: 이미 CLOSED 상태면 comment + close 둘 다 skip.
+  var stateResult = agentdesk.exec("gh", [
+    "issue", "view", issueArg,
+    "--repo", candidate.repo_id,
+    "--json", "state",
+    "--jq", ".state"
+  ]);
+  if (stateResult && stateResult.indexOf("ERROR") === 0) {
+    agentdesk.log.warn(
+      "[merge] direct-merge close-issue: state lookup failed for #" + issueArg +
+      " in " + candidate.repo_id + ": " + stateResult
+    );
+    return;
+  }
+  if (stateResult && stateResult.trim().toUpperCase() === "CLOSED") {
+    agentdesk.log.info(
+      "[merge] direct-merge close-issue: #" + issueArg + " in " + candidate.repo_id +
+      " already closed; skipping"
+    );
+    return;
+  }
+
+  var shortSha = candidate.head_sha ? String(candidate.head_sha).substring(0, 12) : "?";
+  var mainBranch = (mergeResult && mergeResult.main_branch) || "main";
+  var commentBody =
+    "Closed by automated direct-first merge of `" + candidate.branch + "` " +
+    "(commit " + shortSha + ") into `" + mainBranch + "`.\n\n" +
+    "Auto-close mechanism: see retro #1946.";
+
+  var commentResult = agentdesk.exec("gh", [
+    "issue", "comment", issueArg,
+    "--repo", candidate.repo_id,
+    "--body", commentBody
+  ]);
+  if (commentResult && commentResult.indexOf("ERROR") === 0) {
+    agentdesk.log.warn(
+      "[merge] direct-merge close-issue: comment failed for #" + issueArg +
+      " in " + candidate.repo_id + ": " + commentResult
+    );
+    // close 는 계속 시도 — 코멘트는 보조 audit 이고 핵심은 issue 가 닫히는 것.
+  }
+
+  var closeArgs = [
+    "issue", "close", issueArg,
+    "--repo", candidate.repo_id,
+    "--reason", "completed"
+  ];
+  var closeResult = agentdesk.exec("gh", closeArgs);
+  if (closeResult && closeResult.indexOf("ERROR") === 0) {
+    agentdesk.log.warn(
+      "[merge] direct-merge close-issue: close failed for #" + issueArg +
+      " in " + candidate.repo_id + ": " + closeResult
+    );
+    return;
+  }
+
+  agentdesk.log.info(
+    "[merge] direct-merge close-issue: closed #" + issueArg + " in " + candidate.repo_id +
+    " after merging " + candidate.branch
+  );
+}
+
 function tryDirectMergeOrTrackPr(cardId, tracking) {
   var candidate = resolveTerminalMergeCandidate(cardId, tracking);
   if (!candidate) {
@@ -1134,6 +1219,13 @@ function tryDirectMergeOrTrackPr(cardId, tracking) {
     );
     clearTrackedMergeStrategyMode(cardId);
     agentdesk.log.info("[merge] Card " + cardId + " direct-merged " + candidate.branch + " into " + mergeResult.main_branch);
+
+    // #1946 (a): direct-first 머지 성공 후 GH 이슈를 자동 close 한다. retro 의
+    // root cause 는 PR 없이 main 에 commit 이 land 한 다음 GH 이슈는 OPEN 으로
+    // 남았던 16건 누락. 이 분기에서 close + comment 까지 같은 정책 사이클에
+    // 처리해서 그 누락이 다시 발생하지 않게 한다. 실패하더라도 머지 자체는
+    // 이미 성공했으므로 sync 루프를 막지 않는다.
+    closeGithubIssueAfterDirectMerge(candidate, mergeResult);
     return;
   }
 
@@ -2400,7 +2492,8 @@ if (typeof module !== "undefined" && module.exports) {
     __test: {
       loadRequiredPhaseKeysForCard: loadRequiredPhaseKeysForCard,
       verifyRequiredPhaseEvidence: verifyRequiredPhaseEvidence,
-      verifyTrackedPrMergeReadiness: verifyTrackedPrMergeReadiness
+      verifyTrackedPrMergeReadiness: verifyTrackedPrMergeReadiness,
+      closeGithubIssueAfterDirectMerge: closeGithubIssueAfterDirectMerge
     }
   };
 }
