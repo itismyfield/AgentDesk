@@ -24,6 +24,7 @@ jobs:
     outputs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
       high_risk_recovery: ${{ steps.filter.outputs.high_risk_recovery }}
+      pg_db: ${{ steps.filter.outputs.pg_db }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
     steps:
       - uses: actions/checkout@v4
@@ -59,9 +60,38 @@ jobs:
               - 'src/services/auto_queue.rs'
               - 'src/services/auto_queue/**'
               - 'src/services/discord/**'
+              - '!src/services/discord/placeholder_live_events/**'
               - 'src/services/message_outbox.rs'
               - 'src/services/platform/tmux.rs'
               - 'src/services/tmux_common.rs'
+            pg_db:
+              - '.github/workflows/**'
+              - 'migrations/**'
+              - 'src/db/**'
+              - 'src/dispatch/**'
+              - 'src/engine/**'
+              - 'src/integration_tests.rs'
+              - 'src/integration_tests/**'
+              - 'src/kanban/**'
+              - 'src/reconcile.rs'
+              - 'src/server/routes/auto_queue.rs'
+              - 'src/server/routes/dispatched_sessions.rs'
+              - 'src/server/routes/dispatches/**'
+              - 'src/services/auto_queue.rs'
+              - 'src/services/auto_queue/**'
+              - 'src/services/dispatches/**'
+              - 'src/services/message_outbox.rs'
+              - 'src/services/api_friction/**'
+              - 'src/services/retrospectives.rs'
+              - 'src/services/discord_dm_reply_store.rs'
+              - 'src/server/cluster.rs'
+              - 'src/server/task_dispatch_claims.rs'
+              - 'src/services/dispatch_watchdog.rs'
+              - 'src/services/observability/**'
+              - 'src/config.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'sqlx-data.json'
             rust_or_policy:
               - 'src/**'
               - 'tests/**'
@@ -189,7 +219,7 @@ jobs:
   test_fast:
     name: PostgreSQL tests (ubuntu-postgres)
     needs: changes
-    if: needs.changes.outputs.rust_or_policy == 'true'
+    if: needs.changes.outputs.pg_db == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
