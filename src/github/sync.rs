@@ -224,6 +224,22 @@ pub async fn sync_github_issues_for_repo_pg(
                     issue.number,
                     card.id
                 );
+                // #1946 (codex C — observability promotion): the OPEN/terminal
+                // mismatch was previously only counted in the result and
+                // emitted as a tracing warning, so production retros for the
+                // direct-first publication gap had to be reconstructed from
+                // commit logs after the fact. Promote it to a deduped alert
+                // on the operator channel so each new mismatch surfaces
+                // within one GitHub-sync cycle (~20 min) of going terminal.
+                if let Err(error) =
+                    enqueue_terminal_open_alert_pg(pool, repo, issue.number, &card, &card.status)
+                        .await
+                {
+                    tracing::warn!(
+                        "[github-sync] {repo}#{}: terminal-open alert enqueue failed: {error}",
+                        issue.number
+                    );
+                }
             }
         }
 
@@ -762,6 +778,155 @@ pub fn sync_all_repos(
 pub struct SyncResult {
     pub closed_count: usize,
     pub inconsistency_count: usize,
+}
+
+/// Reason code attached to terminal-card / OPEN-issue mismatch alerts so the
+/// outbox can dedupe per `(repo, issue, card)` window.
+const TERMINAL_OPEN_REASON_CODE: &str = "github_sync.terminal_open_issue";
+
+/// Dedupe TTL for terminal-open mismatch alerts. The GitHub sync interval is
+/// runtime-configurable (default ~5 min, often raised to ~20 min in
+/// production); a 24h dedupe window keeps the alert from spamming the
+/// channel every cycle while still giving a daily reminder until the
+/// mismatch is resolved.
+const TERMINAL_OPEN_ALERT_DEDUPE_TTL_SECS: i64 = 24 * 60 * 60;
+
+/// Render the alert content for a terminal-card / OPEN-issue mismatch.
+///
+/// Public for unit-testing the formatter without spinning up a Postgres pool.
+pub(crate) fn format_terminal_open_alert(
+    repo: &str,
+    issue_number: i64,
+    card_id: &str,
+    card_status: &str,
+) -> String {
+    format!(
+        "[github-sync] terminal/OPEN mismatch: {repo}#{issue_number} card={card_id} status={card_status} \
+         — kanban marks this card terminal but the GitHub issue is still OPEN. \
+         Likely caused by direct-first / cherry-merge publication without a \
+         closing PR (see retro #1946). Verify the commit landed on main and \
+         close the issue manually if appropriate."
+    )
+}
+
+/// Resolve the operator alert channel for github-sync mismatches. Falls back
+/// to the same channel as agent-quality regression alerts so all
+/// observability alerts share one operator inbox unless overridden.
+fn resolve_terminal_open_alert_channel() -> String {
+    std::env::var("ADK_GITHUB_SYNC_ALERT_CHANNEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(crate::services::agent_quality::regression_alerts::resolve_alert_channel)
+}
+
+async fn enqueue_terminal_open_alert_pg(
+    pool: &PgPool,
+    repo: &str,
+    issue_number: i64,
+    card: &PgCardRecord,
+    card_status: &str,
+) -> Result<bool, String> {
+    let target_channel = resolve_terminal_open_alert_channel();
+    if target_channel.is_empty() {
+        return Ok(false);
+    }
+    let target = format!("channel:{target_channel}");
+    let session_key = format!(
+        "github_sync.terminal_open:{repo}:{issue_number}:{}",
+        card.id
+    );
+    let content = format_terminal_open_alert(repo, issue_number, &card.id, card_status);
+
+    crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
+        pool,
+        crate::services::message_outbox::OutboxMessage {
+            target: target.as_str(),
+            content: content.as_str(),
+            bot: "notify",
+            source: "github_sync",
+            reason_code: Some(TERMINAL_OPEN_REASON_CODE),
+            session_key: Some(session_key.as_str()),
+        },
+        TERMINAL_OPEN_ALERT_DEDUPE_TTL_SECS,
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "enqueue github-sync terminal-open alert for {repo}#{issue_number}/{}: {error}",
+            card.id
+        )
+    })
+}
+
+#[cfg(test)]
+mod terminal_open_alert_tests {
+    use super::*;
+
+    /// #1946: the alert message must surface enough context for an operator
+    /// to find the offending card and issue at a glance, plus point them at
+    /// the retro for the longer-form root-cause writeup.
+    #[test]
+    fn format_terminal_open_alert_contains_actionable_context() {
+        let msg = format_terminal_open_alert("itismyfield/AgentDesk", 1812, "card-1812", "done");
+        assert!(msg.contains("itismyfield/AgentDesk"), "msg: {msg}");
+        assert!(msg.contains("#1812"), "msg: {msg}");
+        assert!(msg.contains("card-1812"), "msg: {msg}");
+        assert!(msg.contains("done"), "msg: {msg}");
+        assert!(msg.contains("#1946"), "msg should reference retro: {msg}");
+    }
+
+    /// PG dedupe: re-running the alert enqueue for the same
+    /// `(repo, issue, card)` triple within the dedupe TTL must not produce a
+    /// second outbox row. Verifies the 24h dedupe window is wired through
+    /// `enqueue_outbox_pg_with_ttl`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enqueue_terminal_open_alert_pg_dedupes_within_ttl() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let card = PgCardRecord {
+            id: "card-1946-pg".into(),
+            status: "done".into(),
+            review_status: None,
+            latest_dispatch_id: None,
+            assigned_agent_id: None,
+        };
+
+        let first = enqueue_terminal_open_alert_pg(&pool, "owner/repo", 1812, &card, "done")
+            .await
+            .expect("first enqueue ok");
+        assert!(first, "first alert should be enqueued");
+
+        let second = enqueue_terminal_open_alert_pg(&pool, "owner/repo", 1812, &card, "done")
+            .await
+            .expect("second enqueue ok");
+        assert!(!second, "duplicate alert within TTL should be suppressed");
+
+        let count: i64 = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM message_outbox WHERE reason_code = $1",
+        )
+        .bind(TERMINAL_OPEN_REASON_CODE)
+        .fetch_one(&pool)
+        .await
+        .expect("count outbox rows");
+        assert_eq!(count, 1, "exactly one outbox row should be persisted");
+
+        // Different (repo, issue, card) triple must NOT be dedupe-suppressed.
+        let other_card = PgCardRecord {
+            id: "card-1813-pg".into(),
+            status: "done".into(),
+            review_status: None,
+            latest_dispatch_id: None,
+            assigned_agent_id: None,
+        };
+        let third = enqueue_terminal_open_alert_pg(&pool, "owner/repo", 1813, &other_card, "done")
+            .await
+            .expect("third enqueue ok");
+        assert!(third, "different card should produce a new alert");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
