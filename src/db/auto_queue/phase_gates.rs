@@ -1,3 +1,4 @@
+use serde_json::Value;
 use sqlx::{PgPool, Row as SqlxRow};
 
 pub async fn current_batch_phase_pg(
@@ -399,6 +400,675 @@ pub async fn clear_phase_gate_state_on_pg(
     Ok(deleted > 0)
 }
 
+/// Outcome of `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx`. Used by
+/// callers (and tests) to decide whether a follow-up resume/complete is owed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PhaseGateReconciliation {
+    /// Dispatch carries no `phase_gate` context, so nothing to do.
+    NoContext,
+    /// Phase-gate state row was already in `failed` — leaving it alone.
+    AlreadyFailed,
+    /// Phase-gate row was missing for this dispatch (stale or pre-policy
+    /// dispatch) — nothing to reconcile.
+    StaleRow,
+    /// Verdict mismatch or required sibling failure detected. The phase-gate
+    /// row was flipped to `failed` and the run was paused (when active).
+    /// Caller may emit observability/alerting on top.
+    MarkedFailed {
+        run_id: String,
+        phase: i64,
+        failed_dispatch_id: String,
+        failed_reason: String,
+    },
+    /// Pass verdict received but at least one sibling dispatch is still
+    /// pending/dispatched. Phase-gate stays open.
+    AwaitingSiblings {
+        run_id: String,
+        phase: i64,
+        pending_count: i64,
+    },
+    /// All sibling phase-gate dispatches passed. The phase-gate rows for
+    /// this `(run_id, phase)` were cleared, and the helper also:
+    ///   - resumed the run if it was paused on this gate (`run_resumed`);
+    ///   - mirrored the JS hook's `completeRunAndNotify` for final-phase
+    ///     gates by calling `maybe_finalize_run_if_ready_pg` in-transaction
+    ///     (`run_finalized` reflects whether that flipped the run to
+    ///     `completed` and queued the completion notification).
+    ///
+    /// Non-final activation of the next phase's first dispatch is intentionally
+    /// not performed here — that is owned by the JS hook's `activateRun` host
+    /// call and by the existing `onTick1min` recovery path; the resumed run
+    /// status is enough for the next tick to pick it up.
+    Cleared {
+        run_id: String,
+        phase: i64,
+        next_phase: Option<i64>,
+        final_phase: bool,
+        run_resumed: bool,
+        run_finalized: bool,
+    },
+}
+
+/// #1980: durable reconciliation for phase-gate sidecar dispatches.
+///
+/// `policies/auto-queue.js::onDispatchCompleted` is the canonical path that
+/// reads the phase-gate row, compares verdicts, and either clears the row
+/// (resuming the run) or marks it `failed` (pausing the run). That hook only
+/// fires from `complete_dispatch_pg_inner`; direct status transitions through
+/// `set_dispatch_status_with_backends` (used by the dispatch CRUD route and
+/// some recovery paths) bypass it, leaving phase-gate rows stuck in
+/// `pending`/`failed` forever and blocking every subsequent phase via
+/// `activate_preflight`.
+///
+/// This helper applies the same rules in the durable Postgres path so the
+/// reconciliation happens whether the JS hook fires or not. It is idempotent:
+/// running it twice for the same dispatch is a no-op (rows already in their
+/// final state are detected and left alone).
+///
+/// `dispatch_context_json` and `dispatch_result_json` are the raw JSONB text
+/// columns — the function tolerates `None`/empty/malformed inputs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    dispatch_status: &str,
+    dispatch_context_json: Option<&str>,
+    dispatch_result_json: Option<&str>,
+) -> Result<PhaseGateReconciliation, String> {
+    let Some(gate) = parse_phase_gate_context(dispatch_context_json) else {
+        return Ok(PhaseGateReconciliation::NoContext);
+    };
+
+    lock_phase_gate_state_on_pg_tx(tx, &gate.run_id, gate.phase).await?;
+
+    let Some(gate_row) =
+        load_phase_gate_row_for_dispatch_on_pg_tx(tx, &gate.run_id, gate.phase, dispatch_id)
+            .await?
+    else {
+        return Ok(PhaseGateReconciliation::StaleRow);
+    };
+
+    if gate_row.status == "failed" {
+        return Ok(PhaseGateReconciliation::AlreadyFailed);
+    }
+
+    let pass_verdict = if gate.pass_verdict.is_empty() {
+        "phase_gate_passed".to_string()
+    } else {
+        gate.pass_verdict.clone()
+    };
+
+    // Parse JSON once so we can reuse it for both explicit verdict extraction
+    // and checks-only inference.
+    let result_value: Option<Value> = dispatch_result_json
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| serde_json::from_str(raw).ok());
+    let context_value: Option<Value> = dispatch_context_json
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| serde_json::from_str(raw).ok());
+    let mut verdict = result_value.as_ref().and_then(extract_explicit_verdict);
+    if verdict.is_none()
+        && let Some(result) = result_value.as_ref()
+    {
+        // #1980 + #699: legacy / checks-only results do not include an
+        // explicit verdict. Mirror the JS hook's inference so the durable
+        // Rust path does not spuriously fail those gates.
+        verdict = infer_phase_gate_pass_verdict(context_value.as_ref(), result);
+    }
+
+    // Treat any non-`completed` terminal status (`failed`/`cancelled`) as a
+    // gate failure regardless of verdict — the dispatch never produced a
+    // verdict so we cannot pretend it passed.
+    if dispatch_status != "completed" || verdict.as_deref() != Some(pass_verdict.as_str()) {
+        let failed_reason = compose_failed_reason(
+            dispatch_status,
+            dispatch_result_json,
+            verdict.as_deref(),
+            &pass_verdict,
+        );
+        mark_phase_gate_row_failed_on_pg_tx(
+            tx,
+            &gate.run_id,
+            gate.phase,
+            dispatch_id,
+            verdict.as_deref(),
+            &failed_reason,
+        )
+        .await?;
+        // Don't preempt the JS hook's pause/notify for `pending`-row cases
+        // where the policy may want richer side effects; instead flip the
+        // run to paused only when it is currently active so we don't lose
+        // the gate-blocked invariant during the gap.
+        pause_run_if_active_on_pg_tx(tx, &gate.run_id).await?;
+        return Ok(PhaseGateReconciliation::MarkedFailed {
+            run_id: gate.run_id,
+            phase: gate.phase,
+            failed_dispatch_id: dispatch_id.to_string(),
+            failed_reason,
+        });
+    }
+
+    let sibling_summary =
+        load_sibling_phase_gate_dispatches_on_pg_tx(tx, &gate.run_id, gate.phase).await?;
+
+    if sibling_summary.pending > 0 {
+        return Ok(PhaseGateReconciliation::AwaitingSiblings {
+            run_id: gate.run_id,
+            phase: gate.phase,
+            pending_count: sibling_summary.pending,
+        });
+    }
+
+    if let Some(failed_sibling) = sibling_summary.failed_sibling {
+        // Aggregate verdict failure: mark this gate failed referencing the
+        // first failing sibling so the policy/operator sees the same
+        // diagnostic the JS path would produce.
+        mark_phase_gate_row_failed_on_pg_tx(
+            tx,
+            &gate.run_id,
+            gate.phase,
+            &failed_sibling.dispatch_id,
+            failed_sibling.verdict.as_deref(),
+            &failed_sibling.reason,
+        )
+        .await?;
+        pause_run_if_active_on_pg_tx(tx, &gate.run_id).await?;
+        return Ok(PhaseGateReconciliation::MarkedFailed {
+            run_id: gate.run_id,
+            phase: gate.phase,
+            failed_dispatch_id: failed_sibling.dispatch_id,
+            failed_reason: failed_sibling.reason,
+        });
+    }
+
+    // All siblings passed (or none). Clear the gate row, resume the run if
+    // it was paused on this gate, and mirror the JS hook's pass side effects
+    // for bypass callers:
+    //
+    //   - For `final_phase` gates the JS hook calls `completeRunAndNotify`,
+    //     which marks the run completed and queues the Discord completion
+    //     ping. The Rust equivalent is `maybe_finalize_run_if_ready_pg` —
+    //     it is idempotent, in-transaction, and a no-op when the run still
+    //     has pending entries or another blocking gate. We always call it
+    //     here so a CRUD/recovery completion of a final-phase gate cannot
+    //     leave the run sitting in `active` with no pending work.
+    //
+    //   - Non-final gate activation (kicking off the next phase's first
+    //     dispatch) is owned by the JS hook's `activateRun` host call and
+    //     by the existing `onTick1min` recovery path. We do not duplicate
+    //     that here; resuming the run's status to `active` is enough for
+    //     the next tick (or any operator-driven activate) to pick it up.
+    sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = $1 AND phase = $2")
+        .bind(&gate.run_id)
+        .bind(gate.phase)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "clear phase-gate rows for run {} phase {} after pass: {}",
+                gate.run_id, gate.phase, error
+            )
+        })?;
+
+    let run_resumed = resume_run_if_paused_on_pg_tx(tx, &gate.run_id).await?;
+    let run_finalized = super::runs::maybe_finalize_run_if_ready_pg(tx, &gate.run_id).await?;
+
+    Ok(PhaseGateReconciliation::Cleared {
+        run_id: gate.run_id,
+        phase: gate.phase,
+        next_phase: gate.next_phase,
+        final_phase: gate.final_phase,
+        run_resumed,
+        run_finalized,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedPhaseGateContext {
+    pub run_id: String,
+    pub phase: i64,
+    pub pass_verdict: String,
+    pub next_phase: Option<i64>,
+    pub final_phase: bool,
+}
+
+fn parse_phase_gate_context(context_json: Option<&str>) -> Option<ParsedPhaseGateContext> {
+    let raw = context_json?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(raw).ok()?;
+    let gate = value.get("phase_gate")?;
+    let run_id = gate.get("run_id")?.as_str()?.trim().to_string();
+    if run_id.is_empty() {
+        return None;
+    }
+    let phase = gate
+        .get("batch_phase")
+        .and_then(numeric_i64)
+        .or_else(|| gate.get("phase").and_then(numeric_i64))?;
+    if phase < 0 {
+        return None;
+    }
+    let pass_verdict = gate
+        .get("pass_verdict")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_default();
+    let next_phase = gate.get("next_phase").and_then(numeric_i64);
+    let final_phase = gate
+        .get("final_phase")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Some(ParsedPhaseGateContext {
+        run_id,
+        phase,
+        pass_verdict,
+        next_phase,
+        final_phase,
+    })
+}
+
+fn numeric_i64(value: &Value) -> Option<i64> {
+    if let Some(n) = value.as_i64() {
+        return Some(n);
+    }
+    if let Some(f) = value.as_f64()
+        && f.is_finite()
+        && f.fract() == 0.0
+    {
+        return Some(f as i64);
+    }
+    if let Some(text) = value.as_str() {
+        return text.trim().parse::<i64>().ok();
+    }
+    None
+}
+
+fn extract_explicit_verdict(result: &Value) -> Option<String> {
+    for key in ["verdict", "decision"] {
+        if let Some(text) = result.get(key).and_then(Value::as_str) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Mirror of the JS `_inferPhaseGatePassVerdict` helper in
+/// `policies/auto-queue.js`. When a phase-gate dispatch result is missing an
+/// explicit `verdict` / `decision`, but reports check entries that all pass,
+/// fall back to the gate's `pass_verdict` (default `phase_gate_passed`). This
+/// keeps legacy / checks-only results from being reconciled as failures by
+/// the durable Rust path.
+///
+/// Refuses to infer if any check fails, if any declared check is missing, if
+/// no checks are reported, or if `result.verdict` / `result.decision` is
+/// already set to anything truthy (mirroring JS's `||` operator semantics —
+/// numbers, booleans, objects all count as explicit just like in JS).
+fn infer_phase_gate_pass_verdict(context: Option<&Value>, result: &Value) -> Option<String> {
+    if has_js_truthy_explicit_verdict(result) {
+        return None;
+    }
+    let phase_gate = context?.get("phase_gate")?;
+    if !phase_gate.is_object() {
+        return None;
+    }
+    let checks = result.get("checks")?.as_object()?;
+    if checks.is_empty() {
+        return None;
+    }
+
+    if let Some(declared) = phase_gate.get("checks").and_then(Value::as_array) {
+        for required in declared {
+            let Some(name) = required.as_str() else {
+                continue;
+            };
+            let Some(entry) = checks.get(name) else {
+                return None;
+            };
+            if !js_check_entry_is_pass(entry) {
+                return None;
+            }
+        }
+    }
+
+    for entry in checks.values() {
+        if !js_check_entry_is_pass(entry) {
+            return None;
+        }
+    }
+
+    let pass_verdict = phase_gate
+        .get("pass_verdict")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| "phase_gate_passed".to_string());
+    Some(pass_verdict)
+}
+
+/// JS-style truthiness check for `result.verdict || result.decision`.
+/// Mirrors the `||` short-circuit in `policies/auto-queue.js:47` so any
+/// non-falsy value (boolean true, non-zero number, non-empty string, any
+/// object/array) blocks inference.
+fn has_js_truthy_explicit_verdict(result: &Value) -> bool {
+    for key in ["verdict", "decision"] {
+        if let Some(value) = result.get(key)
+            && is_js_truthy(value)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_js_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::String(s) => !s.is_empty(),
+        Value::Number(n) => n.as_f64().map(|f| f != 0.0 && !f.is_nan()).unwrap_or(false),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
+/// Mirrors `entryIsPass` from `policies/auto-queue.js`. Notably, JS does NOT
+/// trim whitespace before comparing — only lowercases via `String(...)`. We
+/// match that exactly so a status like `" pass "` is rejected here and in JS.
+fn js_check_entry_is_pass(entry: &Value) -> bool {
+    let raw = match entry {
+        Value::String(text) => Some(text.as_str()),
+        Value::Object(map) => map
+            .get("status")
+            .or_else(|| map.get("result"))
+            .and_then(Value::as_str),
+        _ => None,
+    };
+    raw.map(|status| {
+        let lower = status.to_ascii_lowercase();
+        lower == "pass" || lower == "passed"
+    })
+    .unwrap_or(false)
+}
+
+fn compose_failed_reason(
+    dispatch_status: &str,
+    dispatch_result_json: Option<&str>,
+    verdict: Option<&str>,
+    pass_verdict: &str,
+) -> String {
+    if dispatch_status != "completed" {
+        return format!("dispatch reached terminal status {dispatch_status} without verdict");
+    }
+    if let Some(raw) = dispatch_result_json
+        && let Ok(value) = serde_json::from_str::<Value>(raw)
+    {
+        for key in ["summary", "reason"] {
+            if let Some(text) = value.get(key).and_then(Value::as_str) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+    }
+    format!(
+        "expected verdict {pass_verdict}, got {}",
+        verdict.unwrap_or("none")
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PhaseGateRow {
+    status: String,
+}
+
+async fn load_phase_gate_row_for_dispatch_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    phase: i64,
+    dispatch_id: &str,
+) -> Result<Option<PhaseGateRow>, String> {
+    let row = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM auto_queue_phase_gates
+         WHERE run_id = $1 AND phase = $2 AND dispatch_id = $3
+         LIMIT 1",
+    )
+    .bind(run_id)
+    .bind(phase)
+    .bind(dispatch_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "load phase-gate row for run {run_id} phase {phase} dispatch {dispatch_id}: {error}"
+        )
+    })?;
+    Ok(row.map(|status| PhaseGateRow { status }))
+}
+
+#[derive(Debug, Default)]
+struct SiblingSummary {
+    pending: i64,
+    failed_sibling: Option<FailedSibling>,
+}
+
+#[derive(Debug)]
+struct FailedSibling {
+    dispatch_id: String,
+    verdict: Option<String>,
+    reason: String,
+}
+
+async fn load_sibling_phase_gate_dispatches_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    phase: i64,
+) -> Result<SiblingSummary, String> {
+    // `task_dispatches.context` and `.result` are TEXT today, but cast to TEXT
+    // explicitly so the JSON parsing path stays correct if the schema is ever
+    // promoted to JSONB. We also decode them as `Option<String>` and surface
+    // decode errors instead of `.ok()`-swallowing them.
+    let rows = sqlx::query(
+        "SELECT pg.dispatch_id,
+                td.status            AS dispatch_status,
+                td.context::TEXT     AS dispatch_context,
+                td.result::TEXT      AS dispatch_result
+         FROM auto_queue_phase_gates pg
+         JOIN task_dispatches td ON td.id = pg.dispatch_id
+         WHERE pg.run_id = $1
+           AND pg.phase = $2
+           AND pg.dispatch_id IS NOT NULL",
+    )
+    .bind(run_id)
+    .bind(phase)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| format!("load sibling phase-gate dispatches for {run_id}/{phase}: {error}"))?;
+
+    let mut summary = SiblingSummary::default();
+    for row in rows {
+        let dispatch_id: String = row
+            .try_get("dispatch_id")
+            .map_err(|error| format!("decode sibling dispatch_id: {error}"))?;
+        let status: String = row
+            .try_get("dispatch_status")
+            .map_err(|error| format!("decode sibling status: {error}"))?;
+        let context_text: Option<String> = row.try_get("dispatch_context").map_err(|error| {
+            format!("decode sibling dispatch_context for {dispatch_id}: {error}")
+        })?;
+        let result_text: Option<String> = row.try_get("dispatch_result").map_err(|error| {
+            format!("decode sibling dispatch_result for {dispatch_id}: {error}")
+        })?;
+        let context_value: Option<Value> = context_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| {
+                serde_json::from_str(raw).map_err(|error| {
+                    format!("parse sibling dispatch_context JSON for {dispatch_id}: {error}")
+                })
+            })
+            .transpose()?;
+        let result_value: Option<Value> = result_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| {
+                serde_json::from_str(raw).map_err(|error| {
+                    format!("parse sibling dispatch_result JSON for {dispatch_id}: {error}")
+                })
+            })
+            .transpose()?;
+        match status.as_str() {
+            "pending" | "dispatched" => {
+                summary.pending += 1;
+                continue;
+            }
+            "completed" => {}
+            _ => {
+                let verdict = result_value
+                    .as_ref()
+                    .and_then(|v| {
+                        v.get("verdict")
+                            .or_else(|| v.get("decision"))
+                            .and_then(Value::as_str)
+                    })
+                    .map(str::to_string);
+                let reason = result_value
+                    .as_ref()
+                    .and_then(|v| {
+                        v.get("summary")
+                            .or_else(|| v.get("reason"))
+                            .and_then(Value::as_str)
+                    })
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        format!("sibling dispatch {dispatch_id} reached terminal status {status}")
+                    });
+                summary.failed_sibling = Some(FailedSibling {
+                    dispatch_id,
+                    verdict,
+                    reason,
+                });
+                return Ok(summary);
+            }
+        }
+
+        let expected_verdict = context_value
+            .as_ref()
+            .and_then(|v| v.get("phase_gate"))
+            .and_then(|gate| gate.get("pass_verdict"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| "phase_gate_passed".to_string());
+        let mut actual_verdict = result_value.as_ref().and_then(extract_explicit_verdict);
+        if actual_verdict.is_none()
+            && let Some(result) = result_value.as_ref()
+        {
+            // Mirror the JS hook's #699-round-2 inference for legacy sibling
+            // rows that completed before the server fix shipped.
+            actual_verdict = infer_phase_gate_pass_verdict(context_value.as_ref(), result);
+        }
+        if actual_verdict.as_deref() != Some(expected_verdict.as_str()) {
+            let reason = result_value
+                .as_ref()
+                .and_then(|v| {
+                    v.get("summary")
+                        .or_else(|| v.get("reason"))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    format!(
+                        "expected verdict {expected_verdict}, got {}",
+                        actual_verdict.as_deref().unwrap_or("none")
+                    )
+                });
+            summary.failed_sibling = Some(FailedSibling {
+                dispatch_id,
+                verdict: actual_verdict,
+                reason,
+            });
+            return Ok(summary);
+        }
+    }
+    Ok(summary)
+}
+
+async fn mark_phase_gate_row_failed_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    phase: i64,
+    failed_dispatch_id: &str,
+    failed_verdict: Option<&str>,
+    failed_reason: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE auto_queue_phase_gates
+         SET status = 'failed',
+             verdict = COALESCE($3, verdict),
+             failure_reason = $4,
+             updated_at = NOW()
+         WHERE run_id = $1 AND phase = $2",
+    )
+    .bind(run_id)
+    .bind(phase)
+    .bind(failed_verdict)
+    .bind(failed_reason)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "mark phase-gate {run_id}/{phase} failed via dispatch {failed_dispatch_id}: {error}"
+        )
+    })?;
+    Ok(())
+}
+
+async fn pause_run_if_active_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<bool, String> {
+    let rows = sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'paused',
+             completed_at = NULL
+         WHERE id = $1
+           AND status = 'active'",
+    )
+    .bind(run_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("pause auto-queue run {run_id} during phase-gate failure: {error}"))?
+    .rows_affected();
+    Ok(rows > 0)
+}
+
+async fn resume_run_if_paused_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<bool, String> {
+    let rows = sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'active',
+             completed_at = NULL
+         WHERE id = $1
+           AND status = 'paused'",
+    )
+    .bind(run_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("resume auto-queue run {run_id} after phase-gate clear: {error}"))?
+    .rows_affected();
+    Ok(rows > 0)
+}
+
 #[cfg(test)]
 mod current_batch_phase_pg_tests {
     use super::current_batch_phase_pg;
@@ -628,6 +1298,829 @@ mod current_batch_phase_pg_tests {
             Some(1),
             "phase should advance when phase-0 cards reached terminal status"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
+#[cfg(test)]
+mod reconcile_phase_gate_pg_tests {
+    use super::{
+        PhaseGateReconciliation, PhaseGateStateWrite, infer_phase_gate_pass_verdict,
+        parse_phase_gate_context, reconcile_phase_gate_for_terminal_dispatch_on_pg_tx,
+        save_phase_gate_state_on_pg,
+    };
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    async fn fixture(pool: &PgPool) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-pg-test', 'Agent', 'claude', '999')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed agent");
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-pg-test', 'repo', 'agent-pg-test', 'active')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed run");
+    }
+
+    async fn insert_dispatch(
+        pool: &PgPool,
+        id: &str,
+        status: &str,
+        context: serde_json::Value,
+        result: Option<serde_json::Value>,
+    ) {
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, to_agent_id, dispatch_type, status, title, context, result)
+             VALUES ($1, 'agent-pg-test', 'phase-gate', $2, 'gate dispatch',
+                     CAST($3 AS jsonb), CAST($4 AS jsonb))",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(context.to_string())
+        .bind(result.map(|v| v.to_string()))
+        .execute(pool)
+        .await
+        .expect("seed gate dispatch");
+    }
+
+    async fn run_reconcile(
+        pool: &PgPool,
+        dispatch_id: &str,
+        status: &str,
+        context: serde_json::Value,
+        result: Option<serde_json::Value>,
+    ) -> PhaseGateReconciliation {
+        let context_text = context.to_string();
+        let result_text = result.as_ref().map(|v| v.to_string());
+        let mut tx = pool.begin().await.expect("begin tx");
+        let outcome = reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+            &mut tx,
+            dispatch_id,
+            status,
+            Some(context_text.as_str()),
+            result_text.as_deref(),
+        )
+        .await
+        .expect("reconcile");
+        tx.commit().await.expect("commit");
+        outcome
+    }
+
+    async fn run_status(pool: &PgPool, run_id: &str) -> String {
+        sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("run row")
+    }
+
+    async fn gate_count(pool: &PgPool, run_id: &str, phase: i64) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM auto_queue_phase_gates
+             WHERE run_id = $1 AND phase = $2",
+        )
+        .bind(run_id)
+        .bind(phase)
+        .fetch_one(pool)
+        .await
+        .expect("gate count")
+    }
+
+    async fn gate_status(pool: &PgPool, run_id: &str, phase: i64) -> String {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM auto_queue_phase_gates
+             WHERE run_id = $1 AND phase = $2 LIMIT 1",
+        )
+        .bind(run_id)
+        .bind(phase)
+        .fetch_one(pool)
+        .await
+        .expect("gate status")
+    }
+
+    fn gate_context() -> serde_json::Value {
+        json!({
+            "phase_gate": {
+                "run_id": "run-pg-test",
+                "batch_phase": 0,
+                "pass_verdict": "phase_gate_passed",
+                "next_phase": 1,
+                "final_phase": false,
+            }
+        })
+    }
+
+    #[test]
+    fn parse_phase_gate_context_handles_string_batch_phase() {
+        let ctx = parse_phase_gate_context(Some(
+            r#"{"phase_gate":{"run_id":"r","batch_phase":"0","pass_verdict":"p"}}"#,
+        ))
+        .expect("ctx");
+        assert_eq!(ctx.run_id, "r");
+        assert_eq!(ctx.phase, 0);
+        assert_eq!(ctx.pass_verdict, "p");
+    }
+
+    #[test]
+    fn parse_phase_gate_context_returns_none_without_run_id() {
+        assert!(
+            parse_phase_gate_context(Some(
+                r#"{"phase_gate":{"batch_phase":0,"pass_verdict":"p"}}"#
+            ))
+            .is_none()
+        );
+        assert!(parse_phase_gate_context(Some("{}")).is_none());
+        assert!(parse_phase_gate_context(None).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_phase_gate_context_is_noop() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        let outcome =
+            run_reconcile(&pool, "dsp-noop", "completed", json!({}), Some(json!({}))).await;
+        assert!(matches!(outcome, PhaseGateReconciliation::NoContext));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_phase_gate_row_returns_stale_row() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-stale",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        assert!(matches!(outcome, PhaseGateReconciliation::StaleRow));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Helper: seed a `pending` auto-queue entry so the run still has work
+    /// remaining after a gate clear. This prevents `maybe_finalize_run_if_ready_pg`
+    /// from automatically finalizing the run, exposing the resume-only
+    /// behavior we want to assert.
+    async fn seed_pending_entry(pool: &PgPool, run_id: &str, entry_id: &str, batch_phase: i64) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, repo_id, title, status)
+             VALUES ($1, NULL, 'card', 'pending')",
+        )
+        .bind(format!("{entry_id}-card"))
+        .execute(pool)
+        .await
+        .expect("seed kanban card");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, batch_phase, priority_rank)
+             VALUES ($1, $2, $3, 'agent-pg-test', 'pending', $4, 0)",
+        )
+        .bind(entry_id)
+        .bind(run_id)
+        .bind(format!("{entry_id}-card"))
+        .bind(batch_phase)
+        .execute(pool)
+        .await
+        .expect("seed pending entry");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pass_verdict_with_no_siblings_clears_gate_and_resumes_paused_run() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+        // Seed a pending entry on the next phase so finalization does not
+        // run the moment we clear the gate — we want to assert resume here.
+        seed_pending_entry(&pool, "run-pg-test", "entry-next-phase", 1).await;
+
+        insert_dispatch(
+            &pool,
+            "dsp-pass",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-pass".into()],
+                next_phase: Some(1),
+                final_phase: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+        sqlx::query("UPDATE auto_queue_runs SET status='paused' WHERE id='run-pg-test'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-pass",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        match outcome {
+            PhaseGateReconciliation::Cleared {
+                run_resumed,
+                next_phase,
+                run_finalized,
+                ..
+            } => {
+                assert!(run_resumed, "paused run should resume after pass");
+                assert_eq!(next_phase, Some(1));
+                assert!(
+                    !run_finalized,
+                    "run with pending entries must not finalize on gate clear"
+                );
+            }
+            other => panic!("expected Cleared, got {other:?}"),
+        }
+        assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
+        assert_eq!(run_status(&pool, "run-pg-test").await, "active");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #1980 (codex v2 HIGH): a final-phase gate clear must finalize the run
+    /// in-transaction so CRUD/recovery completion does not leave the run
+    /// active without a completion notification. Mirrors the JS hook's
+    /// `completeRunAndNotify` for the bypass path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn final_phase_pass_finalizes_run_and_queues_completion_notify() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        // No pending entries — drained run, ready to finalize.
+        let final_context = json!({
+            "phase_gate": {
+                "run_id": "run-pg-test",
+                "batch_phase": 0,
+                "pass_verdict": "phase_gate_passed",
+                "final_phase": true,
+            }
+        });
+        insert_dispatch(
+            &pool,
+            "dsp-final",
+            "completed",
+            final_context.clone(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-final".into()],
+                next_phase: None,
+                final_phase: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-final",
+            "completed",
+            final_context,
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        match outcome {
+            PhaseGateReconciliation::Cleared {
+                run_finalized,
+                final_phase,
+                ..
+            } => {
+                assert!(final_phase, "context flagged final_phase");
+                assert!(
+                    run_finalized,
+                    "final-phase pass with drained run must finalize"
+                );
+            }
+            other => panic!("expected Cleared, got {other:?}"),
+        }
+        assert_eq!(run_status(&pool, "run-pg-test").await, "completed");
+        // Completion notification should be queued in the outbox.
+        let notify_count: i64 = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM message_outbox WHERE bot = 'notify'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count notify rows");
+        assert!(
+            notify_count >= 1,
+            "expected completion notification queued, got {notify_count}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verdict_mismatch_marks_gate_failed_and_pauses_run() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        insert_dispatch(
+            &pool,
+            "dsp-bad",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"please_revise","summary":"reviewer wants edits"})),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-bad".into()],
+                next_phase: Some(1),
+                final_phase: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-bad",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"please_revise","summary":"reviewer wants edits"})),
+        )
+        .await;
+        match outcome {
+            PhaseGateReconciliation::MarkedFailed { failed_reason, .. } => {
+                assert_eq!(failed_reason, "reviewer wants edits");
+            }
+            other => panic!("expected MarkedFailed, got {other:?}"),
+        }
+        assert_eq!(gate_status(&pool, "run-pg-test", 0).await, "failed");
+        assert_eq!(run_status(&pool, "run-pg-test").await, "paused");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn already_failed_gate_is_left_alone() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        insert_dispatch(
+            &pool,
+            "dsp-already",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "failed".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-already".into()],
+                next_phase: Some(1),
+                final_phase: false,
+                failure_reason: Some("earlier failure".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+        sqlx::query("UPDATE auto_queue_runs SET status='paused' WHERE id='run-pg-test'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-already",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        assert!(matches!(outcome, PhaseGateReconciliation::AlreadyFailed));
+        assert_eq!(gate_status(&pool, "run-pg-test", 0).await, "failed");
+        assert_eq!(run_status(&pool, "run-pg-test").await, "paused");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn awaiting_siblings_keeps_gate_open() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        insert_dispatch(
+            &pool,
+            "dsp-pass-1",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        insert_dispatch(&pool, "dsp-pending-2", "dispatched", gate_context(), None).await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-pass-1".into(), "dsp-pending-2".into()],
+                next_phase: Some(1),
+                final_phase: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-pass-1",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        match outcome {
+            PhaseGateReconciliation::AwaitingSiblings { pending_count, .. } => {
+                assert_eq!(pending_count, 1);
+            }
+            other => panic!("expected AwaitingSiblings, got {other:?}"),
+        }
+        assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 2);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_status_marks_gate_failed_even_when_verdict_absent() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        insert_dispatch(&pool, "dsp-cancelled", "cancelled", gate_context(), None).await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-cancelled".into()],
+                next_phase: Some(1),
+                final_phase: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+
+        let outcome =
+            run_reconcile(&pool, "dsp-cancelled", "cancelled", gate_context(), None).await;
+        match outcome {
+            PhaseGateReconciliation::MarkedFailed { failed_reason, .. } => {
+                assert!(failed_reason.contains("cancelled"));
+            }
+            other => panic!("expected MarkedFailed, got {other:?}"),
+        }
+        assert_eq!(gate_status(&pool, "run-pg-test", 0).await, "failed");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #1980 + #699: legacy / checks-only results have all required checks
+    /// passing but no explicit `verdict` / `decision`. The Rust reconciler
+    /// must mirror the JS hook's inference and treat these as a pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checks_only_pass_without_explicit_verdict_is_inferred() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        let context = json!({
+            "phase_gate": {
+                "run_id": "run-pg-test",
+                "batch_phase": 0,
+                "pass_verdict": "phase_gate_passed",
+                "next_phase": 1,
+                "final_phase": false,
+                "checks": ["lint", "tests"],
+            }
+        });
+        let result = json!({
+            "checks": {
+                "lint": { "status": "pass" },
+                "tests": "passed",
+            }
+        });
+
+        insert_dispatch(
+            &pool,
+            "dsp-checks-only",
+            "completed",
+            context.clone(),
+            Some(result.clone()),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-checks-only".into()],
+                next_phase: Some(1),
+                final_phase: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+
+        let outcome =
+            run_reconcile(&pool, "dsp-checks-only", "completed", context, Some(result)).await;
+        assert!(
+            matches!(outcome, PhaseGateReconciliation::Cleared { .. }),
+            "checks-only pass should infer phase_gate_passed and clear: got {outcome:?}"
+        );
+        assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #1980 + codex v2 MED #5 parity: any truthy explicit `verdict`/`decision`
+    /// (including non-string values like numbers or booleans) must block
+    /// inference, matching JS's `||` operator semantics. The result here has
+    /// `verdict: 1` plus all-passing checks — JS would refuse to infer, so
+    /// Rust must too.
+    #[test]
+    fn truthy_non_string_explicit_verdict_blocks_inference() {
+        let context = json!({"phase_gate": {"pass_verdict": "phase_gate_passed"}});
+        let result = json!({
+            "verdict": 1,
+            "checks": { "tests": "pass" },
+        });
+        assert!(
+            infer_phase_gate_pass_verdict(Some(&context), &result).is_none(),
+            "truthy non-string verdict must block inference"
+        );
+    }
+
+    /// JS's `entryIsPass` does NOT trim whitespace before comparing. Mirror
+    /// that so a status of `" pass "` is rejected (it would also be rejected
+    /// in JS).
+    #[test]
+    fn whitespace_padded_check_status_is_not_inferred_as_pass() {
+        let context =
+            json!({"phase_gate": {"pass_verdict": "phase_gate_passed", "checks": ["tests"]}});
+        let result = json!({"checks": {"tests": " pass "}});
+        assert!(
+            infer_phase_gate_pass_verdict(Some(&context), &result).is_none(),
+            "whitespace-padded status must not be inferred (JS parity)"
+        );
+    }
+
+    /// #1980: failing check entry must NOT be inferred as pass; the gate
+    /// stays open as a fail (mirroring the JS guard).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checks_with_any_fail_is_not_inferred_as_pass() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        let context = json!({
+            "phase_gate": {
+                "run_id": "run-pg-test",
+                "batch_phase": 0,
+                "pass_verdict": "phase_gate_passed",
+                "next_phase": 1,
+                "final_phase": false,
+                "checks": ["lint", "tests"],
+            }
+        });
+        let result = json!({
+            "checks": {
+                "lint": { "status": "pass" },
+                "tests": { "status": "fail" },
+            }
+        });
+
+        insert_dispatch(
+            &pool,
+            "dsp-mixed-checks",
+            "completed",
+            context.clone(),
+            Some(result.clone()),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-mixed-checks".into()],
+                next_phase: Some(1),
+                final_phase: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-mixed-checks",
+            "completed",
+            context,
+            Some(result),
+        )
+        .await;
+        assert!(
+            matches!(outcome, PhaseGateReconciliation::MarkedFailed { .. }),
+            "mixed-pass/fail checks must not be inferred as pass: got {outcome:?}"
+        );
+        assert_eq!(gate_status(&pool, "run-pg-test", 0).await, "failed");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #1980: when this dispatch passes and ALL its sibling phase-gate
+    /// dispatches have already completed with a passing verdict, the gate
+    /// should be cleared. This exercises the multi-sibling all-pass branch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn all_siblings_completed_and_passing_clears_gate() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        for id in ["dsp-pass-a", "dsp-pass-b"] {
+            insert_dispatch(
+                &pool,
+                id,
+                "completed",
+                gate_context(),
+                Some(json!({"verdict":"phase_gate_passed"})),
+            )
+            .await;
+        }
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-pass-a".into(), "dsp-pass-b".into()],
+                next_phase: Some(1),
+                final_phase: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-pass-b",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        assert!(
+            matches!(outcome, PhaseGateReconciliation::Cleared { .. }),
+            "all siblings passing should clear gate: got {outcome:?}"
+        );
+        assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #1980 fix #2: callers may write `status='completed'` without a `result`
+    /// (CRUD route). Reconciliation must fall back to the persisted dispatch
+    /// row's result so a previously-recorded passing verdict is honored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn status_only_completion_uses_persisted_result_for_pass() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        // Seed dispatch row with persisted passing verdict already stored.
+        insert_dispatch(
+            &pool,
+            "dsp-status-only",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-status-only".into()],
+                next_phase: Some(1),
+                final_phase: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+
+        // Caller passes None for the result_json — simulating a status-only
+        // CRUD update. Reconciliation should still see the persisted result.
+        let context_text = gate_context().to_string();
+        let mut tx = pool.begin().await.expect("begin tx");
+        // Mirror what `set_dispatch_status_on_pg_with_sync` does: read the
+        // persisted result text from the row and pass it as the fallback.
+        let persisted: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT result::TEXT FROM task_dispatches WHERE id = $1",
+        )
+        .bind("dsp-status-only")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("load persisted result");
+        let outcome = reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+            &mut tx,
+            "dsp-status-only",
+            "completed",
+            Some(context_text.as_str()),
+            persisted.as_deref(),
+        )
+        .await
+        .expect("reconcile");
+        tx.commit().await.expect("commit");
+        assert!(
+            matches!(outcome, PhaseGateReconciliation::Cleared { .. }),
+            "status-only completion with persisted pass result should clear: got {outcome:?}"
+        );
+        assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
 
         pool.close().await;
         pg_db.drop().await;

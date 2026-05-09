@@ -415,6 +415,69 @@ async fn validate_dispatch_completion_evidence_on_pg(
     ))
 }
 
+fn log_phase_gate_reconciliation(
+    dispatch_id: &str,
+    outcome: &crate::db::auto_queue::PhaseGateReconciliation,
+) {
+    use crate::db::auto_queue::PhaseGateReconciliation;
+    match outcome {
+        PhaseGateReconciliation::NoContext | PhaseGateReconciliation::StaleRow => {}
+        PhaseGateReconciliation::AlreadyFailed => {
+            tracing::debug!(
+                dispatch_id,
+                "[phase_gate] terminal dispatch already in failed gate state — leaving as-is"
+            );
+        }
+        PhaseGateReconciliation::AwaitingSiblings {
+            run_id,
+            phase,
+            pending_count,
+        } => {
+            tracing::info!(
+                dispatch_id,
+                run_id = %run_id,
+                phase,
+                pending_count,
+                "[phase_gate] dispatch passed; awaiting sibling gate dispatches"
+            );
+        }
+        PhaseGateReconciliation::MarkedFailed {
+            run_id,
+            phase,
+            failed_dispatch_id,
+            failed_reason,
+        } => {
+            tracing::warn!(
+                dispatch_id,
+                run_id = %run_id,
+                phase,
+                failed_dispatch_id = %failed_dispatch_id,
+                failed_reason = %failed_reason,
+                "[phase_gate] durable reconciliation marked phase gate failed"
+            );
+        }
+        PhaseGateReconciliation::Cleared {
+            run_id,
+            phase,
+            next_phase,
+            final_phase,
+            run_resumed,
+            run_finalized,
+        } => {
+            tracing::info!(
+                dispatch_id,
+                run_id = %run_id,
+                phase,
+                next_phase = ?next_phase,
+                final_phase,
+                run_resumed,
+                run_finalized,
+                "[phase_gate] durable reconciliation cleared phase gate"
+            );
+        }
+    }
+}
+
 async fn set_dispatch_status_on_pg_with_sync(
     pool: &PgPool,
     dispatch_id: &str,
@@ -424,6 +487,7 @@ async fn set_dispatch_status_on_pg_with_sync(
     allowed_from: Option<&[&str]>,
     touch_completed_at: bool,
     sync_auto_queue_terminal_entries: bool,
+    assume_external_phase_gate_lifecycle: bool,
 ) -> Result<usize> {
     let mut tx = pool
         .begin()
@@ -431,7 +495,9 @@ async fn set_dispatch_status_on_pg_with_sync(
         .map_err(|error| anyhow::anyhow!("begin postgres dispatch status tx: {error}"))?;
 
     let current = sqlx::query(
-        "SELECT status, kanban_card_id, to_agent_id, dispatch_type
+        "SELECT status, kanban_card_id, to_agent_id, dispatch_type,
+                context::TEXT AS context_text,
+                result::TEXT  AS persisted_result_text
          FROM task_dispatches
          WHERE id = $1",
     )
@@ -684,6 +750,50 @@ async fn set_dispatch_status_on_pg_with_sync(
             }
         }
 
+        if matches!(to_status, "completed" | "failed" | "cancelled")
+            && !assume_external_phase_gate_lifecycle
+        {
+            // #1980: phase-gate reconciliation in the durable Postgres path so
+            // sidecar gate dispatches are cleared/marked-failed even when the
+            // JS `onDispatchCompleted` hook does not fire (CRUD route, recovery
+            // helpers, etc. flow through this path). The
+            // `assume_external_phase_gate_lifecycle` flag is set by callers
+            // (notably `complete_dispatch_inner_with_backends`) that will fire
+            // the JS policy hook themselves — those callers own the gate-row
+            // lifecycle plus the run finalize/activate side effects, and we
+            // must not pre-empt them by deleting the row here.
+            let context_text = current
+                .try_get::<Option<String>, _>("context_text")
+                .map_err(|error| {
+                    anyhow::anyhow!("decode postgres dispatch context for {dispatch_id}: {error}")
+                })?;
+            // Caller-supplied result wins; fall back to whatever was persisted
+            // on the dispatch row so status-only completion writes (CRUD route,
+            // legacy callers) reuse the verdict that produced the original
+            // result instead of looking like an empty-result failure.
+            let persisted_result_text = current
+                .try_get::<Option<String>, _>("persisted_result_text")
+                .map_err(|error| {
+                    anyhow::anyhow!("decode postgres dispatch result for {dispatch_id}: {error}")
+                })?;
+            let result_text = result_json.clone().or(persisted_result_text);
+            let outcome =
+                crate::db::auto_queue::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+                    &mut tx,
+                    dispatch_id,
+                    to_status,
+                    context_text.as_deref(),
+                    result_text.as_deref(),
+                )
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "reconcile phase-gate for terminal dispatch {dispatch_id}: {error}"
+                    )
+                })?;
+            log_phase_gate_reconciliation(dispatch_id, &outcome);
+        }
+
         if matches!(to_status, "completed" | "failed" | "cancelled") {
             crate::db::dispatch_semaphores::release_dispatch_semaphores_on_pg_tx(
                 &mut tx,
@@ -756,6 +866,36 @@ async fn set_dispatch_status_on_pg(
         transition_source,
         allowed_from,
         touch_completed_at,
+        true,
+        false,
+    )
+    .await
+}
+
+/// Variant for callers that will themselves invoke the `OnDispatchCompleted`
+/// JS policy hook (currently `complete_dispatch_inner_with_backends`). The JS
+/// hook owns the phase-gate row lifecycle plus the run finalize/activate side
+/// effects after a passing gate, so the durable Rust path must NOT clear the
+/// gate row beneath it. CRUD/recovery callers that bypass the hook should keep
+/// using `set_dispatch_status_on_pg`.
+async fn set_dispatch_status_on_pg_with_external_phase_gate(
+    pool: &PgPool,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+) -> Result<usize> {
+    set_dispatch_status_on_pg_with_sync(
+        pool,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+        true,
         true,
     )
     .await
@@ -1418,6 +1558,11 @@ fn set_dispatch_status_with_backends_and_sync(
             allowed_from_refs.as_deref(),
             touch_completed_at,
             sync_auto_queue_terminal_entries,
+            // The legacy `set_dispatch_status_with_backends*` family is used by
+            // a wide variety of bypass callers (CRUD route, transition_executor,
+            // supervisor, dispatch_cancel). None of them fire the JS hook, so
+            // we always own the gate-row reconciliation here.
+            false,
         )
         .await
     })
@@ -1617,7 +1762,12 @@ fn complete_dispatch_inner_with_backends(
             maybe_inject_phase_gate_verdict_pg(&pool, &dispatch_id_owned, &input_result).await;
         let effective_result = result_owned.unwrap_or(input_result);
 
-        let changed = set_dispatch_status_on_pg(
+        // #1980: complete_dispatch fires the OnDispatchCompleted JS hook
+        // immediately after this returns; that hook owns the phase-gate row
+        // lifecycle plus run finalize/activate. Use the external-phase-gate
+        // variant so the durable reconciler does not clear the gate row
+        // out from under the hook.
+        let changed = set_dispatch_status_on_pg_with_external_phase_gate(
             &pool,
             &dispatch_id_owned,
             "completed",
