@@ -256,6 +256,11 @@
   - `src/db/auto_queue/tests.rs` (3182 lines; migrated auto-queue test harness).
   - `src/db/auto_queue/entries.rs` (1436 lines; awaiting follow-up split per
     auto-queue decompose epic #1782).
+  - `src/db/auto_queue/phase_gates.rs` (~2128 lines after #1980 durable
+    reconciliation; ~1300 LoC of PG-backed tests for `current_batch_phase_pg`
+    + `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx`. Split the test
+    module out into a sibling `phase_gates_tests.rs` before adding new
+    feature logic).
   - `src/db/schema.rs` (3194 lines).
   - `src/db/kanban_cards/` (1932 total lines; kanban card persistence and
     GitHub sync lookup surface).
