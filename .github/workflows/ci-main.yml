@@ -52,6 +52,7 @@ jobs:
               - 'src/services/auto_queue.rs'
               - 'src/services/auto_queue/**'
               - 'src/services/discord/**'
+              - '!src/services/discord/placeholder_live_events/**'
               - 'src/services/message_outbox.rs'
               - 'src/services/platform/tmux.rs'
               - 'src/services/tmux_common.rs'
