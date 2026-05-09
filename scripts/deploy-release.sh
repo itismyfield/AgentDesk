@@ -37,13 +37,47 @@ RESOLVED_RELEASE_SIGNING_MODE=""
 DASHBOARD_SOURCE=""
 STAGED_BINARY=""
 POLICIES_STAGED=""
+DEPLOY_ALL_NODES="${AGENTDESK_DEPLOY_ALL_NODES:-0}"
+DEPLOY_PEERS_OVERRIDE=()
+DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
+DEPLOY_PEER_INVOCATION="${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}"
 
-for arg in "$@"; do
-    case "$arg" in
-        --skip-review) ;; # accepted-and-ignored for backward compatibility
-        --skip-health) ;; # accepted-and-ignored for backward compatibility
+# Parse flags non-destructively into shell vars + env so that the lock-acquire
+# re-exec (lockf/flock pass-through) and the detached-helper tmux script both
+# see the same configuration without us having to reconstruct $@.
+PARSED_ARGS=()
+_idx=0
+_args=("$@")
+while [ "$_idx" -lt "${#_args[@]}" ]; do
+    case "${_args[$_idx]}" in
+        --skip-review|--skip-health)
+            PARSED_ARGS+=("${_args[$_idx]}") ;;
+        --all-nodes|--cluster)
+            DEPLOY_ALL_NODES=1
+            export AGENTDESK_DEPLOY_ALL_NODES=1
+            ;;
+        --peer)
+            _idx=$((_idx + 1))
+            [ "$_idx" -lt "${#_args[@]}" ] || { echo "✗ --peer requires a value"; exit 2; }
+            DEPLOY_PEERS_OVERRIDE+=("${_args[$_idx]}")
+            if [ -n "${AGENTDESK_DEPLOY_PEERS:-}" ]; then
+                AGENTDESK_DEPLOY_PEERS="${AGENTDESK_DEPLOY_PEERS},${_args[$_idx]}"
+            else
+                AGENTDESK_DEPLOY_PEERS="${_args[$_idx]}"
+            fi
+            export AGENTDESK_DEPLOY_PEERS
+            ;;
+        *)
+            PARSED_ARGS+=("${_args[$_idx]}") ;;
     esac
+    _idx=$((_idx + 1))
 done
+unset _idx _args
+if [ "${#PARSED_ARGS[@]}" -gt 0 ]; then
+    set -- "${PARSED_ARGS[@]}"
+else
+    set --
+fi
 
 if [ "${AGENTDESK_DEPLOY_LOCK_HELD:-0}" != "1" ]; then
     echo "═══ ADK Deploy → Release ═══"
@@ -447,6 +481,83 @@ _self_hosted_release_session() {
     return 0
 }
 
+_resolve_deploy_peers() {
+    if [ "${#DEPLOY_PEERS_OVERRIDE[@]}" -gt 0 ]; then
+        printf '%s\n' "${DEPLOY_PEERS_OVERRIDE[@]}"
+        return 0
+    fi
+    if [ -n "${AGENTDESK_DEPLOY_PEERS:-}" ]; then
+        printf '%s\n' "$AGENTDESK_DEPLOY_PEERS" \
+            | tr ',' '\n' \
+            | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+            | grep -vE '^$'
+        return 0
+    fi
+    if [ -f "$DEPLOY_PEERS_FILE" ]; then
+        sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//' "$DEPLOY_PEERS_FILE" \
+            | grep -vE '^$'
+        return 0
+    fi
+    printf ''
+}
+
+_deploy_to_one_peer() {
+    local peer="$1"
+    local repo_remote="${AGENTDESK_PEER_REPO_DIR:-\$HOME/.adk/release/workspaces/agentdesk}"
+
+    echo "▸ [peer:$peer] Pre-syncing repo (fast-forward only)..."
+    if ! ssh "$peer" "bash -lc 'set -e
+cd \"$repo_remote\"
+git fetch --quiet origin main
+git checkout --quiet main
+git merge --quiet --ff-only origin/main'"; then
+        echo "✗ [peer:$peer] Pre-sync failed (diverged or fetch error). Resolve on the peer and retry."
+        return 1
+    fi
+
+    echo "▸ [peer:$peer] Running deploy-release.sh..."
+    if ! ssh "$peer" "bash -lc 'cd \"$repo_remote\" && AGENTDESK_DEPLOY_PEER_INVOCATION=1 bash scripts/deploy-release.sh'"; then
+        echo "✗ [peer:$peer] deploy-release.sh failed"
+        return 1
+    fi
+
+    echo "✓ [peer:$peer] deploy completed"
+    return 0
+}
+
+_deploy_to_all_peers() {
+    [ "$DEPLOY_PEER_INVOCATION" != "1" ] || {
+        # Avoid recursive cluster deploy when this run is itself an SSH-driven peer leg.
+        return 0
+    }
+
+    local peers
+    peers=$(_resolve_deploy_peers)
+    if [ -z "$peers" ]; then
+        echo "▸ --all-nodes set but no peers resolved; skipping cluster deploy."
+        echo "  configure peers via:"
+        echo "    - $DEPLOY_PEERS_FILE  (one SSH alias per line, '#' comments allowed)"
+        echo "    - AGENTDESK_DEPLOY_PEERS=mac-book,other-node  (comma-separated env)"
+        echo "    - --peer <ssh-alias>  (repeatable flag)"
+        return 0
+    fi
+
+    echo "═══ Cluster Deploy → Peers ═══"
+    local failures=0
+    while IFS= read -r peer; do
+        [ -n "$peer" ] || continue
+        if ! _deploy_to_one_peer "$peer"; then
+            failures=$((failures + 1))
+        fi
+    done <<<"$peers"
+
+    if [ "$failures" -gt 0 ]; then
+        echo "✗ Cluster deploy: $failures peer(s) failed"
+        exit 1
+    fi
+    echo "═══ Cluster Deploy Complete (all peers healthy) ═══"
+}
+
 _acquire_release_deploy_lock() {
     if [ "${AGENTDESK_DEPLOY_LOCK_HELD:-0}" = "1" ]; then
         echo "▸ [gate] Release deploy lock acquired"
@@ -519,6 +630,10 @@ export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FR
 export AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_LOCK_FILE=$(printf '%q' "$DEPLOY_LOCK_FILE")
 export AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS=$(printf '%q' "$DEPLOY_LOCK_TIMEOUT_SECS")
+export AGENTDESK_DEPLOY_ALL_NODES=$(printf '%q' "${AGENTDESK_DEPLOY_ALL_NODES:-0}")
+export AGENTDESK_DEPLOY_PEERS=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS:-}")
+export AGENTDESK_DEPLOY_PEERS_FILE=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS_FILE:-}")
+export AGENTDESK_DEPLOY_PEER_INVOCATION=$(printf '%q' "${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}")
 unset AGENTDESK_DEPLOY_LOCK_HELD
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/deploy-release.sh")${quoted_args}
@@ -909,3 +1024,7 @@ fi
 _write_release_source_manifest
 
 echo "═══ Deploy Complete ═══"
+
+if [ "$DEPLOY_ALL_NODES" = "1" ]; then
+    _deploy_to_all_peers
+fi
