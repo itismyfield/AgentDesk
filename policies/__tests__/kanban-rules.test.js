@@ -19,7 +19,7 @@ function assertMetadataObjectParam(execution) {
 }
 
 test("kanban-rules preflight uses typed facade agentdesk.cards.get", () => {
-  const { module } = loadPolicy("policies/kanban-rules.js", {
+  const { module, state } = loadPolicy("policies/kanban-rules.js", {
     dbQuery: createSqlRouter([
       {
         match: "SELECT id FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'implementation' AND status = 'completed'",
@@ -37,6 +37,22 @@ test("kanban-rules preflight uses typed facade agentdesk.cards.get", () => {
 
   const result = toPlain(module.__test.runPreflight("card-facade"));
   assert.equal(result.status, "assumption_ok");
+  assert.equal(state.queries.length, 1);
+  assert.match(state.queries[0].sql, /FROM task_dispatches/);
+  assert.doesNotMatch(state.queries[0].sql, /FROM kanban_cards/);
+});
+
+test("kanban-rules preflight missing facade card returns invalid without fallback side effects", () => {
+  const { module, state } = loadPolicy("policies/kanban-rules.js", {
+    dbQuery: createSqlRouter([]),
+    exec: createExecRouter([]),
+    cards: {}
+  });
+
+  const result = toPlain(module.__test.runPreflight("missing-card"));
+  assert.deepEqual(result, { status: "invalid", summary: "Card not found" });
+  assert.deepEqual(state.queries, []);
+  assert.deepEqual(state.execCalls, []);
 });
 
 test("kanban-rules preflight returns already_applied when the linked GitHub issue is closed", () => {
