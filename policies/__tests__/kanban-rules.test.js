@@ -18,26 +18,43 @@ function assertMetadataObjectParam(execution) {
   return written;
 }
 
-test("kanban-rules preflight returns already_applied when the linked GitHub issue is closed", () => {
+test("kanban-rules preflight uses typed facade agentdesk.cards.get", () => {
   const { module } = loadPolicy("policies/kanban-rules.js", {
     dbQuery: createSqlRouter([
       {
-        match: "FROM kanban_cards kc WHERE kc.id = ?",
-        result: [
-          {
-            id: "card-1",
-            title: "Closed issue card",
-            github_issue_number: 925,
-            github_issue_url: "https://github.com/itismyfield/AgentDesk/issues/925",
-            status: "requested",
-            description: "This issue body is comfortably longer than thirty characters.",
-            assigned_agent_id: "agent-1",
-            metadata: "{}",
-            blocked_reason: null
-          }
-        ]
+        match: "SELECT id FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'implementation' AND status = 'completed'",
+        result: []
       }
     ]),
+    cards: {
+      "card-facade": {
+        id: "card-facade",
+        description: "A description that is long enough to pass the length check.",
+        metadata: "{}",
+      }
+    }
+  });
+
+  const result = toPlain(module.__test.runPreflight("card-facade"));
+  assert.equal(result.status, "assumption_ok");
+});
+
+test("kanban-rules preflight returns already_applied when the linked GitHub issue is closed", () => {
+  const { module } = loadPolicy("policies/kanban-rules.js", {
+    dbQuery: createSqlRouter([]),
+    cards: {
+      "card-1": {
+        id: "card-1",
+        title: "Closed issue card",
+        github_issue_number: 925,
+        github_issue_url: "https://github.com/itismyfield/AgentDesk/issues/925",
+        status: "requested",
+        description: "This issue body is comfortably longer than thirty characters.",
+        assigned_agent_id: "agent-1",
+        metadata: "{}",
+        blocked_reason: null
+      }
+    },
     exec: createExecRouter([
       {
         match: (cmd, args) =>
@@ -245,24 +262,21 @@ test("kanban-rules writes noop work-resolution metadata as a JSON object param",
 
 test("kanban-rules preflight already_applied transitions the card to done and skips pending queue entries", () => {
   const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      "card-2": {
+        id: "card-2",
+        title: "Already implemented",
+        github_issue_number: null,
+        github_issue_url: null,
+        status: "requested",
+        description: "This body is long enough to pass the description length gate.",
+        assigned_agent_id: "agent-1",
+        metadata: null,
+        blocked_reason: null
+      }
+    },
     dbQuery: createSqlRouter([
       { match: "SELECT metadata FROM kanban_cards WHERE id = ?", result: [] },
-      {
-        match: "FROM kanban_cards kc WHERE kc.id = ?",
-        result: [
-          {
-            id: "card-2",
-            title: "Already implemented",
-            github_issue_number: null,
-            github_issue_url: null,
-            status: "requested",
-            description: "This body is long enough to pass the description length gate.",
-            assigned_agent_id: "agent-1",
-            metadata: null,
-            blocked_reason: null
-          }
-        ]
-      },
       {
         match: "SELECT id FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'implementation' AND status = 'completed'",
         result: [{ id: "dispatch-1" }]

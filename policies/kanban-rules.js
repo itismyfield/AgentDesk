@@ -276,14 +276,8 @@ function _findAutoQueueEntriesByDispatch(dispatchId, liveOnly) {
 }
 
 function _runPreflight(cardId) {
-  var card = agentdesk.db.query(
-    "SELECT kc.id, kc.title, kc.github_issue_number, kc.github_issue_url, kc.status, kc.description, " +
-    "kc.assigned_agent_id, kc.metadata, kc.blocked_reason " +
-    "FROM kanban_cards kc WHERE kc.id = ?",
-    [cardId]
-  );
-  if (card.length === 0) return { status: "invalid", summary: "Card not found" };
-  var c = card[0];
+  var c = agentdesk.cards.get(cardId);
+  if (!c) return { status: "invalid", summary: "Card not found" };
 
   // Check 1: GitHub issue closed? (uses gh CLI since no bridge exists)
   if (c.github_issue_number && c.github_issue_url) {
