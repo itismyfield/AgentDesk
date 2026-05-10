@@ -555,6 +555,27 @@ pub(crate) fn resolve_self_instance_id_without_config() -> String {
     )
 }
 
+/// Wait until `cluster::bootstrap` has populated `SELF_INSTANCE_ID`, then
+/// return its value. Used by callers (Phase 5.1 intake_worker spawn) that
+/// race with cluster bootstrap and would otherwise pick up the
+/// hostname+PID fallback. Times out after `max_wait` and falls back to
+/// `resolve_self_instance_id_without_config()` so the caller never blocks
+/// forever in degraded boots.
+pub(crate) async fn wait_for_self_instance_id(max_wait: std::time::Duration) -> String {
+    let start = std::time::Instant::now();
+    while SELF_INSTANCE_ID.get().is_none() {
+        if start.elapsed() >= max_wait {
+            tracing::warn!(
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "[cluster] wait_for_self_instance_id timed out — falling back to hostname/PID"
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    resolve_self_instance_id_without_config()
+}
+
 fn resolve_instance_id(config: &ClusterConfig) -> String {
     if let Some(value) = config
         .instance_id
