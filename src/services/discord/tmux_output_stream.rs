@@ -111,8 +111,12 @@ pub(in crate::services::discord) fn build_watcher_placeholder_status_block(
     prev_tool_status: Option<&str>,
     current_tool_line: Option<&str>,
     full_response: &str,
+    status_panel_msg_id: Option<serenity::MessageId>,
 ) -> String {
-    if shared.status_panel_v2_enabled {
+    if watcher_placeholder_uses_status_panel_only(
+        shared.status_panel_v2_enabled,
+        status_panel_msg_id,
+    ) {
         return crate::services::discord::formatting::build_processing_status_block(indicator);
     }
     let status_block = crate::services::discord::formatting::build_placeholder_status_block(
@@ -121,12 +125,30 @@ pub(in crate::services::discord) fn build_watcher_placeholder_status_block(
         current_tool_line,
         full_response,
     );
-    if shared.placeholder_live_events_enabled
-        && let Some(block) = shared.placeholder_live_events.render_block(channel_id)
+    if watcher_placeholder_inlines_live_events(
+        shared.placeholder_live_events_enabled,
+        shared.status_panel_v2_enabled,
+        status_panel_msg_id,
+    ) && let Some(block) = shared.placeholder_live_events.render_block(channel_id)
     {
         return format!("{status_block}\n{block}");
     }
     status_block
+}
+
+fn watcher_placeholder_uses_status_panel_only(
+    status_panel_v2_enabled: bool,
+    status_panel_msg_id: Option<serenity::MessageId>,
+) -> bool {
+    status_panel_v2_enabled && status_panel_msg_id.is_some()
+}
+
+fn watcher_placeholder_inlines_live_events(
+    placeholder_live_events_enabled: bool,
+    status_panel_v2_enabled: bool,
+    status_panel_msg_id: Option<serenity::MessageId>,
+) -> bool {
+    placeholder_live_events_enabled || (status_panel_v2_enabled && status_panel_msg_id.is_none())
 }
 
 /// Process buffered lines for the tmux watcher.
@@ -488,4 +510,29 @@ pub(in crate::services::discord) fn process_watcher_lines(
     }
 
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watcher_status_panel_fallback_inlines_events_without_status_message() {
+        assert!(
+            watcher_placeholder_inlines_live_events(false, true, /*status_panel_msg_id*/ None),
+            "status-panel-v2 watcher fallback must keep recent tool/subagent monitoring visible"
+        );
+    }
+
+    #[test]
+    fn watcher_status_panel_bound_placeholder_keeps_events_on_status_panel() {
+        assert!(
+            watcher_placeholder_uses_status_panel_only(true, Some(MessageId::new(99))),
+            "bound status-panel-v2 watcher should avoid duplicating recent events in placeholder"
+        );
+        assert!(
+            !watcher_placeholder_inlines_live_events(false, true, Some(MessageId::new(99))),
+            "recent events stay on the dedicated status panel when that message is available"
+        );
+    }
 }
