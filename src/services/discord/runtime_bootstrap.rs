@@ -979,6 +979,19 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         known_slash_commands: tokio::sync::OnceCell::new(),
     });
 
+    // Phase 5.2 of intake-node-routing (issue #2009): populate
+    // `cached_bot_token` BEFORE the gateway lease check so the
+    // standby-side response path (`turn_bridge` tmux watcher,
+    // placeholder edits) can build a REST `Arc<Http>` via
+    // `shared.serenity_http_or_token_fallback()` even when
+    // `cached_serenity_ctx` stays empty (no gateway runtime).
+    //
+    // On the leader the OnceCell is also set later inside the poise
+    // setup callback — that second `set` is a no-op (`OnceCell::set`
+    // returns Err on already-set), preserving the leader's existing
+    // semantics.
+    let _ = shared.cached_bot_token.set(token.to_string());
+
     // Phase 5.1 of intake-node-routing (issue #2007): spawn the
     // intake_worker poll loop NOW so cluster-standby nodes (whose
     // gateway lease check below early-returns) still drain their

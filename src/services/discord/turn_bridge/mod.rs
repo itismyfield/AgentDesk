@@ -945,8 +945,11 @@ async fn enqueue_headless_delivery(
         None
     };
 
+    // Phase 5.2 of intake-node-routing (issue #2009): use gateway-or-token
+    // fallback so the standby worker path can still deliver headless
+    // messages even when `cached_serenity_ctx` is None.
     let http = notify_http
-        .or_else(|| shared.cached_serenity_ctx.get().map(|ctx| ctx.http.clone()))
+        .or_else(|| shared.serenity_http_or_token_fallback())
         .ok_or_else(|| {
             format!(
                 "headless delivery unavailable for channel {}: no outbox storage or discord http",
@@ -2281,8 +2284,17 @@ pub(super) fn spawn_turn_bridge(
                             if watcher_claimed {
                                 #[cfg(unix)]
                                 {
-                                    if let Some(ctx) = shared_owned.cached_serenity_ctx.get() {
-                                        let http_bg = ctx.http.clone();
+                                    // Phase 5.2 of intake-node-routing
+                                    // (issue #2009): use the gateway-or-token
+                                    // fallback so cluster-standby nodes
+                                    // (no `cached_serenity_ctx`) still spawn
+                                    // the tmux watcher with a REST `Arc<Http>`
+                                    // built from `cached_bot_token`. Previously
+                                    // the gate here checked `cached_serenity_ctx.get()`
+                                    // directly and warned-and-bailed on standby,
+                                    // which meant the worker turn ran in tmux
+                                    // but never relayed back to Discord.
+                                    if let Some(http_bg) = shared_owned.serenity_http_or_token_fallback() {
                                         let shared_bg = shared_owned.clone();
                                         inflight_state.watcher_owns_live_relay = true;
                                         let restored_turn =
@@ -2320,7 +2332,7 @@ pub(super) fn spawn_turn_bridge(
                                     } else {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
                                         tracing::warn!(
-                                            "  [{ts}] ⚠ cached serenity context missing; tmux watcher not started for channel {}",
+                                            "  [{ts}] ⚠ no Http source (neither cached_serenity_ctx nor cached_bot_token); tmux watcher not started for channel {}",
                                             channel_id
                                         );
                                         if let Some((_, handle)) =

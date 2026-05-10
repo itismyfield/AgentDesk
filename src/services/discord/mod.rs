@@ -1314,6 +1314,34 @@ impl SharedData {
         self.pg_pool.is_some()
     }
 
+    /// Phase 5.2 of intake-node-routing (issue #2009): return an `Arc<Http>`
+    /// that the response path (tmux watcher, placeholder updates, message
+    /// edits) can use to call Discord. On the leader the gateway-attached
+    /// runtime caches `cached_serenity_ctx`, and `ctx.http` is preferred so
+    /// the Http instance shares the same application_id and connection
+    /// pool the gateway already owns. On cluster-standby nodes the
+    /// OnceCell is empty (no gateway runtime ever ran), so we fall back to
+    /// a freshly constructed `serenity::http::Http` built from the bot
+    /// token cached in `cached_bot_token`. Returns `None` only when both
+    /// caches are empty — that means the runtime never reached the
+    /// "token known" milestone in `run_bot()`, which today only happens
+    /// before `bot_settings` finishes loading.
+    ///
+    /// Callers should treat `None` as a hard failure: they cannot post
+    /// to Discord without an Http instance. The current call sites
+    /// either propagate the failure (skip the work + warn) or have
+    /// their own panic-on-None invariant tied to `cached_bot_token`
+    /// being populated at `run_bot()` startup.
+    pub(super) fn serenity_http_or_token_fallback(&self) -> Option<Arc<serenity::http::Http>> {
+        if let Some(ctx) = self.cached_serenity_ctx.get() {
+            return Some(ctx.http.clone());
+        }
+        if let Some(token) = self.cached_bot_token.get() {
+            return Some(Arc::new(serenity::http::Http::new(token)));
+        }
+        None
+    }
+
     fn mailbox(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
         self.mailboxes.handle(channel_id)
     }
@@ -2341,13 +2369,17 @@ async fn apply_queue_exit_feedback(
     let visible_cards_to_clear =
         queue_exit_drain_queued_placeholders(shared, channel_id, &queue_exit_events).await;
 
-    let Some(ctx) = shared.cached_serenity_ctx.get() else {
+    // Phase 5.2 of intake-node-routing (issue #2009): use gateway-or-token
+    // fallback so cluster-standby workers can still rewrite queue-exit
+    // placeholder cards via REST. Falling back to the deferred-cleanup
+    // path is still correct for genuinely-no-token startup races.
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
         shared
             .add_pending_queue_exit_placeholder_clears(channel_id, &visible_cards_to_clear)
             .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
-            "  [{ts}] ⚠ QUEUE-FEEDBACK: skipped {} queue exit reaction(s) in channel {} (cached ctx missing); queued {} visible card(s) for ready-time cleanup",
+            "  [{ts}] ⚠ QUEUE-FEEDBACK: skipped {} queue exit reaction(s) in channel {} (no Http source); queued {} visible card(s) for ready-time cleanup",
             queue_exit_events.len(),
             channel_id,
             visible_cards_to_clear.len(),
@@ -2365,10 +2397,10 @@ async fn apply_queue_exit_feedback(
     for card in &visible_cards_to_clear {
         let body = queue_exit_card_body(card.kind);
         let edit_result =
-            http::edit_channel_message(&ctx.http, channel_id, card.placeholder_msg_id, &body).await;
+            http::edit_channel_message(&http, channel_id, card.placeholder_msg_id, &body).await;
         if edit_result.is_err() {
             let _ = channel_id
-                .delete_message(&ctx.http, card.placeholder_msg_id)
+                .delete_message(&http, card.placeholder_msg_id)
                 .await;
         }
     }
@@ -2379,11 +2411,11 @@ async fn apply_queue_exit_feedback(
         // and standalone heads carry 📬; remove both unconditionally so cancel /
         // expiry / supersede leaves only the exit-state reaction visible.
         for message_id in &event.intervention.source_message_ids {
-            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, '📬').await;
-            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, '➕').await;
+            formatting::remove_reaction_raw(&http, channel_id, *message_id, '📬').await;
+            formatting::remove_reaction_raw(&http, channel_id, *message_id, '➕').await;
         }
         formatting::add_reaction_raw(
-            &ctx.http,
+            &http,
             channel_id,
             event.intervention.message_id,
             queue_exit_feedback_emoji(event.kind),
@@ -2415,12 +2447,13 @@ impl runtime_bootstrap::StalePlaceholderDeleter for QueueExitPendingPlaceholderD
 pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_clears(
     shared: &SharedData,
 ) {
-    let Some(ctx) = shared.cached_serenity_ctx.get() else {
+    // Phase 5.2 of intake-node-routing (issue #2009): use gateway-or-token
+    // fallback so the deferred drain that fires on `bot_connected` /
+    // `runtime_bootstrap` can still run on standby workers.
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
         return;
     };
-    let deleter = QueueExitPendingPlaceholderDeleter {
-        http: ctx.http.clone(),
-    };
+    let deleter = QueueExitPendingPlaceholderDeleter { http };
     drain_pending_queue_exit_placeholder_clears_with(shared, &deleter).await;
 }
 
@@ -2532,7 +2565,11 @@ fn maybe_schedule_catch_up_retry_after_queue_drain(
         return false;
     }
 
-    let Some(ctx) = shared.cached_serenity_ctx.get() else {
+    // Phase 5.2 of intake-node-routing (issue #2009): catch-up retry runs
+    // on whatever node hosts the channel; on standby workers it falls back
+    // to a token-built REST `Arc<Http>` so retries still fire even
+    // without a gateway runtime.
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
         return false;
     };
 
@@ -2542,7 +2579,6 @@ fn maybe_schedule_catch_up_retry_after_queue_drain(
         return false;
     };
 
-    let http = ctx.http.clone();
     let shared = Arc::clone(shared);
     let provider = provider.clone();
     tokio::spawn(async move {
