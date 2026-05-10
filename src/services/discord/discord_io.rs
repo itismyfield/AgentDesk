@@ -4,7 +4,7 @@ use crate::services::discord::outbound::{
     HttpOutboundClient, OutboundDeduper, deliver_outbound,
 };
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Check if a user is authorized (owner or allowed user)
 /// Returns true if authorized, false if rejected.
@@ -327,16 +327,13 @@ pub(super) async fn rate_limit_wait(shared: &Arc<SharedData>, channel_id: Channe
 
 /// Add a reaction to a message
 pub(super) async fn add_reaction(
-    ctx: &serenity::Context,
+    http: &Arc<serenity::http::Http>,
     channel_id: ChannelId,
     message_id: MessageId,
     emoji: char,
 ) {
     let reaction = serenity::ReactionType::Unicode(emoji.to_string());
-    if let Err(e) = channel_id
-        .create_reaction(&ctx.http, message_id, reaction)
-        .await
-    {
+    if let Err(e) = channel_id.create_reaction(http, message_id, reaction).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
             "  [{ts}] ⚠ Failed to add reaction '{emoji}' to msg {message_id} in channel {channel_id}: {e}"

@@ -1,5 +1,6 @@
 use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
+use std::sync::Arc;
 
 /// Dispatch info returned by the card-thread internal API.
 #[derive(Debug, Clone, Default)]
@@ -77,10 +78,10 @@ pub(super) async fn lookup_dispatch_info(api_port: u16, dispatch_id: &str) -> Op
 /// Verify a thread is accessible and not locked via Discord API.
 /// Returns true if the thread exists and is not locked.
 pub(super) async fn verify_thread_accessible(
-    ctx: &poise::serenity_prelude::Context,
+    http: &Arc<serenity::http::Http>,
     thread_id: ChannelId,
 ) -> bool {
-    match ctx.http.get_channel(thread_id).await {
+    match http.get_channel(thread_id).await {
         Ok(channel) => {
             if let Some(guild_channel) = channel.guild() {
                 // Check if thread is locked
@@ -92,7 +93,7 @@ pub(super) async fn verify_thread_accessible(
                     if metadata.archived {
                         let edit =
                             poise::serenity_prelude::builder::EditThread::new().archived(false);
-                        if let Err(e) = thread_id.edit_thread(&ctx.http, edit).await {
+                        if let Err(e) = thread_id.edit_thread(http, edit).await {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
                                 "  [{ts}] ⚠️ Failed to unarchive thread {thread_id}: {e}"

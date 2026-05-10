@@ -536,7 +536,9 @@ impl TurnGateway for DiscordGateway {
             }
 
             let deps = router::IntakeDeps {
-                ctx: &live_turn.ctx,
+                http: &live_turn.ctx.http,
+                cache: Some(&live_turn.ctx.cache),
+                ctx_for_chained_dispatch: Some(&live_turn.ctx),
                 shared: &self.shared,
                 token: &live_turn.token,
             };

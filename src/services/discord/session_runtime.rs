@@ -660,7 +660,8 @@ pub(super) async fn auto_restore_session_force(
     dm_hint: Option<bool>,
 ) {
     // Resolve channel/category before taking the lock for mutation
-    let (live_ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
+    let (live_ch_name, cat_name) =
+        resolve_channel_category(&serenity_ctx.http, Some(&serenity_ctx.cache), channel_id).await;
     let existing_channel_name = {
         let data = shared.core.lock().await;
         data.sessions
@@ -859,12 +860,13 @@ pub(super) async fn bootstrap_thread_session(
     shared: &Arc<SharedData>,
     thread_channel_id: ChannelId,
     parent_path: &str,
-    serenity_ctx: &serenity::prelude::Context,
+    http: &Arc<serenity::http::Http>,
+    cache: Option<&Arc<serenity::cache::Cache>>,
 ) -> bool {
-    let (thread_title, cat_name) = resolve_channel_category(serenity_ctx, thread_channel_id).await;
+    let (thread_title, cat_name) = resolve_channel_category(http, cache, thread_channel_id).await;
     let provider_kind = shared.settings.read().await.provider.clone();
     // Build a short, stable channel_name: "{parent_channel}-t{thread_id}"
-    let parent_info = resolve_thread_parent(&serenity_ctx.http, thread_channel_id).await;
+    let parent_info = resolve_thread_parent(http, thread_channel_id).await;
     let ch_name = if let Some((parent_id, parent_name)) = parent_info {
         let parent = parent_name.unwrap_or_else(|| format!("{parent_id}"));
         Some(synthetic_thread_channel_name(&parent, thread_channel_id))
@@ -954,11 +956,17 @@ fn sync_inflight_worktree_context(
 }
 
 /// Resolve the channel name and parent category name for a Discord channel.
+///
+/// `cache` is an optional optimization: when present (leader-side), category
+/// names are looked up via the in-memory guild cache and avoid an extra REST
+/// hop. Worker-side callers without a live shard pass `None` and pay the
+/// REST fallback at line ~978 instead. Correctness is identical either way.
 pub(super) async fn resolve_channel_category(
-    ctx: &serenity::prelude::Context,
+    http: &Arc<serenity::http::Http>,
+    cache: Option<&Arc<serenity::cache::Cache>>,
     channel_id: serenity::model::id::ChannelId,
 ) -> (Option<String>, Option<String>) {
-    let Ok(channel) = channel_id.to_channel(&ctx.http).await else {
+    let Ok(channel) = channel_id.to_channel(http).await else {
         return (None, None);
     };
     let serenity::model::channel::Channel::Guild(gc) = channel else {
@@ -966,16 +974,18 @@ pub(super) async fn resolve_channel_category(
     };
     let ch_name = Some(gc.name.clone());
     let cat_name = if let Some(parent_id) = gc.parent_id {
-        let cached_cat_name = ctx.cache.guild(gc.guild_id).and_then(|guild| {
-            guild
-                .channels
-                .get(&parent_id)
-                .map(|parent_ch| parent_ch.name.clone())
+        let cached_cat_name = cache.and_then(|c| {
+            c.guild(gc.guild_id).and_then(|guild| {
+                guild
+                    .channels
+                    .get(&parent_id)
+                    .map(|parent_ch| parent_ch.name.clone())
+            })
         });
 
         if let Some(cat_name) = cached_cat_name {
             Some(cat_name)
-        } else if let Ok(parent_ch) = parent_id.to_channel(&ctx.http).await {
+        } else if let Ok(parent_ch) = parent_id.to_channel(http).await {
             match parent_ch {
                 serenity::model::channel::Channel::Guild(cat) => Some(cat.name.clone()),
                 _ => {
@@ -1017,7 +1027,7 @@ pub(in crate::services::discord) async fn validate_live_channel_routing_with_dm_
             Ok(serenity::model::channel::Channel::Private(_))
         ),
     };
-    let (channel_name, _) = resolve_channel_category(ctx, channel_id).await;
+    let (channel_name, _) = resolve_channel_category(&ctx.http, Some(&ctx.cache), channel_id).await;
     let (allowlist_channel_id, provider_channel_name) = if let Some((parent_id, parent_name)) =
         resolve_thread_parent(&ctx.http, channel_id).await
     {
