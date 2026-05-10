@@ -807,51 +807,15 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     }
 
     let token_hash = settings::discord_token_hash(token);
-    let gateway_lease = match pg_pool.as_ref() {
-        Some(pool) => match try_acquire_discord_gateway_lease(pool, &token_hash, &provider).await {
-            Ok(Some(lease)) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 🔐 GATEWAY-LEASE: {} acquired singleton lease",
-                    provider.display_name()
-                );
-                Some(lease)
-            }
-            Ok(None) => {
-                run_startup_diagnostic_after_reconcile_barrier(
-                    startup_reconcile_remaining,
-                    startup_doctor_started,
-                    health_registry,
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — singleton lease held elsewhere",
-                    provider.display_name()
-                );
-                shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
-                return;
-            }
-            Err(error) => {
-                run_startup_diagnostic_after_reconcile_barrier(
-                    startup_reconcile_remaining,
-                    startup_doctor_started,
-                    health_registry,
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — failed to acquire singleton lease: {}",
-                    provider.display_name(),
-                    error
-                );
-                shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
-                return;
-            }
-        },
-        None => None,
-    };
 
+    // Phase 5.1 of intake-node-routing (issue #2007): build SharedData and
+    // spawn the intake_worker poll loop BEFORE the gateway lease check.
+    // Standby nodes (lease held elsewhere) still need a live worker to
+    // claim `intake_outbox` rows targeted at this `instance_id` — that is
+    // the entire point of routing intake to a worker node. Previously the
+    // worker spawn lived inside the poise setup callback, which only
+    // executes on the lease-holding leader, so standby workers never
+    // started.
     super::internal_api::init(api_port, pg_pool.clone());
 
     // Initialize debug logging from environment variable
@@ -949,7 +913,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
         global_active,
         global_finalizing,
-        shutdown_remaining,
+        shutdown_remaining: shutdown_remaining.clone(),
         shutdown_counted: std::sync::atomic::AtomicBool::new(false),
         intake_dedup: dashmap::DashMap::new(),
         dispatch_thread_parents: dashmap::DashMap::new(),
@@ -1014,6 +978,116 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         health_registry: Arc::downgrade(&health_registry),
         known_slash_commands: tokio::sync::OnceCell::new(),
     });
+
+    // Phase 5.1 of intake-node-routing (issue #2007): spawn the
+    // intake_worker poll loop NOW so cluster-standby nodes (whose
+    // gateway lease check below early-returns) still drain their
+    // share of `intake_outbox`. The loop is gated by
+    // `ADK_INTAKE_ROUTING_MODE`: when `disabled` (default), the leader
+    // hook never inserts rows and the worker simply polls an empty
+    // queue with the idle backoff — no production impact.
+    //
+    // The worker uses `serenity::http::Http::new(token)` (REST-only,
+    // no IDENTIFY) so it never contends for the gateway lease. It
+    // only touches `shared.{core, settings, pg_pool, dispatch_thread_parents}`,
+    // none of which depend on a live gateway shard.
+    //
+    // Cancellation rides on `shared.shutting_down`. On the leader, the
+    // gateway-lease loss handler and SIGTERM handler flip that flag.
+    // On standby today no signal handler is wired; the worker exits
+    // when launchd kills the process during deploy. A follow-up could
+    // add SIGTERM handling on the standby path for graceful drain.
+    if let Some(pool_for_intake_worker) = shared.pg_pool.clone() {
+        let intake_worker_http = std::sync::Arc::new(serenity::http::Http::new(token));
+        let intake_worker_shared = shared.clone();
+        let intake_worker_token = token.to_string();
+        let intake_worker_provider = provider.as_str().to_string();
+        let intake_worker_cancel = shared.shutting_down.clone();
+        // The intake_worker spawn runs concurrently with `cluster::bootstrap`
+        // which is the writer of `SELF_INSTANCE_ID`. Resolving
+        // `target_instance_id` eagerly here would race and pick up the
+        // hostname+PID fallback (e.g. `itismyfieldui-Macmini-46662`)
+        // instead of the configured cluster id (e.g. `mac-mini-release`).
+        // The leader hook (`intake_router_hook::try_route_intake`) resolves
+        // the same function later, by which time bootstrap has populated
+        // the OnceLock — the two ids must match or every claim misses.
+        // Bridge the race by awaiting the OnceLock inside the spawned task
+        // before the worker logs "poll loop started".
+        tokio::spawn(async move {
+            let resolved_target_id = crate::server::cluster::wait_for_self_instance_id(
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+            // claim_owner appends provider so multi-bot deployments
+            // surface which token's worker holds a row in
+            // observability dashboards.
+            let resolved_claim_owner = format!("{}:{}", resolved_target_id, intake_worker_provider);
+            crate::services::cluster::intake_worker::run_intake_worker_loop(
+                pool_for_intake_worker,
+                intake_worker_http,
+                intake_worker_shared,
+                intake_worker_token,
+                resolved_target_id,
+                intake_worker_provider,
+                resolved_claim_owner,
+                crate::services::cluster::intake_worker::IntakeWorkerConfig::default(),
+                intake_worker_cancel,
+            )
+            .await;
+        });
+    } else {
+        tracing::info!(
+            "[intake_worker] postgres pool unavailable — intake-node-routing worker not started"
+        );
+    }
+
+    // Now that the worker is alive, do the gateway lease check.
+    // Standby nodes (lease held elsewhere) early-return below; the
+    // detached worker task keeps polling using `Arc<SharedData>`.
+    let gateway_lease = match shared.pg_pool.as_ref() {
+        Some(pool) => match try_acquire_discord_gateway_lease(pool, &token_hash, &provider).await {
+            Ok(Some(lease)) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔐 GATEWAY-LEASE: {} acquired singleton lease",
+                    provider.display_name()
+                );
+                Some(lease)
+            }
+            Ok(None) => {
+                run_startup_diagnostic_after_reconcile_barrier(
+                    startup_reconcile_remaining,
+                    startup_doctor_started,
+                    health_registry,
+                )
+                .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — singleton lease held elsewhere (intake_worker remains live)",
+                    provider.display_name()
+                );
+                shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
+                return;
+            }
+            Err(error) => {
+                run_startup_diagnostic_after_reconcile_barrier(
+                    startup_reconcile_remaining,
+                    startup_doctor_started,
+                    health_registry,
+                )
+                .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — failed to acquire singleton lease: {} (intake_worker remains live)",
+                    provider.display_name(),
+                    error
+                );
+                shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
+                return;
+            }
+        },
+        None => None,
+    };
 
     {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1194,52 +1268,11 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     }
                 });
 
-                // Phase 5 of intake-node-routing
-                // (docs/design/intake-node-routing.md): start the worker
-                // poll loop that claims `intake_outbox` rows targeted at
-                // this instance. The loop is gated by
-                // `ADK_INTAKE_ROUTING_MODE`: when `disabled` (default),
-                // the leader hook never inserts rows and the worker
-                // simply polls an empty queue with the idle backoff —
-                // no production impact. When `observe`/`enforce` is
-                // flipped on, the worker drains the queue without
-                // additional bootstrap. Cancellation rides on
-                // `SharedData.shutting_down` so the loop exits cleanly
-                // during deferred restart drain.
-                if let Some(pool_for_intake_worker) = shared_for_tmux.pg_pool.clone() {
-                    let intake_worker_http = ctx.http.clone();
-                    let intake_worker_shared = shared_for_tmux.clone();
-                    let intake_worker_token = token_for_ready.clone();
-                    let intake_worker_target_id =
-                        crate::server::cluster::resolve_self_instance_id_without_config();
-                    let intake_worker_provider = provider_for_setup.as_str().to_string();
-                    // claim_owner appends provider so multi-bot deployments
-                    // surface which token's worker holds a row in
-                    // observability dashboards.
-                    let intake_worker_claim_owner = format!(
-                        "{}:{}",
-                        intake_worker_target_id, intake_worker_provider,
-                    );
-                    let intake_worker_cancel = shared_for_tmux.shutting_down.clone();
-                    tokio::spawn(async move {
-                        crate::services::cluster::intake_worker::run_intake_worker_loop(
-                            pool_for_intake_worker,
-                            intake_worker_http,
-                            intake_worker_shared,
-                            intake_worker_token,
-                            intake_worker_target_id,
-                            intake_worker_provider,
-                            intake_worker_claim_owner,
-                            crate::services::cluster::intake_worker::IntakeWorkerConfig::default(),
-                            intake_worker_cancel,
-                        )
-                        .await;
-                    });
-                } else {
-                    tracing::info!(
-                        "[intake_worker] postgres pool unavailable — intake-node-routing worker not started"
-                    );
-                }
+                // (Phase 5.1 of intake-node-routing — issue #2007: the
+                // intake_worker poll loop is now spawned in `run_bot()`
+                // before the gateway lease check, so cluster-standby
+                // nodes also drain their share of `intake_outbox`. No
+                // worker bootstrap belongs here anymore.)
 
                 // Background: hot-reload skills on file changes (30s polling)
                 // Scans home-level AND all active project-level skill directories.
