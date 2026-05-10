@@ -271,6 +271,11 @@
   - `src/db/agents.rs` (1125 lines).
   - `src/db/prompt_manifests.rs` (1219 lines, post-#1699 retention policy +
     write-time byte cap pushed it past the giant-file threshold).
+  - `src/db/intake_outbox.rs` (~1240 lines after intake-node-routing Phase 2;
+    schema migration tests + claim/transition/sweep helpers + their
+    PG-backed integration coverage. Phase 5 transition-12 helper +
+    provider-JOIN claim push it further. Split the helper_tests module out
+    into a sibling `intake_outbox_tests.rs` before adding new feature logic).
 - active_callsite_coverage: PG-only cleanup tracked per #1237/#1238/#1239 —
   see `known-legacy.md`.
 - invariants: production reads/writes go through `pg_pool_ref()`; `legacy_db()`
