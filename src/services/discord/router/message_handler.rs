@@ -1792,15 +1792,26 @@ async fn send_restore_notification(
     }
 }
 
+/// Bundle of Discord-runtime dependencies that `handle_text_message`
+/// reads from outside its per-message parameters. Phase 2-pre.1 of
+/// intake-node-routing (docs/design/intake-node-routing.md): pass-through
+/// shape only — no behaviour change. A future Phase 2-pre.2 swaps `ctx`
+/// for `Arc<serenity::Http>` so the same body runs on a worker node
+/// that has no live gateway shard.
+#[derive(Clone, Copy)]
+pub(in crate::services::discord) struct IntakeDeps<'a> {
+    pub ctx: &'a serenity::Context,
+    pub shared: &'a Arc<SharedData>,
+    pub token: &'a str,
+}
+
 pub(in crate::services::discord) async fn handle_text_message(
-    ctx: &serenity::Context,
+    deps: &IntakeDeps<'_>,
     channel_id: ChannelId,
     user_msg_id: MessageId,
     request_owner: UserId,
     request_owner_name: &str,
     user_text: &str,
-    shared: &Arc<SharedData>,
-    token: &str,
     reply_to_user_message: bool,
     defer_watcher_resume: bool,
     wait_for_completion: bool,
@@ -1810,6 +1821,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     dm_hint: Option<bool>,
     turn_kind: TurnKind,
 ) -> Result<(), Error> {
+    let IntakeDeps { ctx, shared, token } = *deps;
     let original_channel_id = channel_id;
     let mut session_reset_reason = None;
     let mut reset_session_id_to_clear = None;

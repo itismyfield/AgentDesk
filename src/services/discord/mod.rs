@@ -3396,15 +3396,14 @@ pub(super) async fn kickoff_idle_queues(
                 .await;
         }
 
+        let deps = router::IntakeDeps { ctx, shared, token };
         if let Err(e) = router::handle_text_message(
-            ctx,
+            &deps,
             channel_id,
             intervention.message_id,
             intervention.author_id,
             &owner_name,
             &intervention.text,
-            shared,
-            token,
             true,     // reply_to_user_message
             has_more, // defer_watcher_resume
             false,    // wait_for_completion — don't block, let channels run concurrently

@@ -535,15 +535,18 @@ impl TurnGateway for DiscordGateway {
                     .await;
             }
 
+            let deps = router::IntakeDeps {
+                ctx: &live_turn.ctx,
+                shared: &self.shared,
+                token: &live_turn.token,
+            };
             handle_text_message(
-                &live_turn.ctx,
+                &deps,
                 channel_id,
                 intervention.message_id,
                 live_turn.request_owner,
                 request_owner_name,
                 &intervention.text,
-                &self.shared,
-                &live_turn.token,
                 true,
                 has_more_queued_turns,
                 true,

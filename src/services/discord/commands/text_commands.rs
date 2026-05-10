@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
 
-use super::super::router::{TurnKind, handle_text_message};
+use super::super::router::{IntakeDeps, TurnKind, handle_text_message};
 use super::super::*;
 use super::build_provider_skill_prompt;
 use crate::services::provider::CancelToken;
@@ -1312,15 +1312,18 @@ Any other message is sent to {p}.
                 )
                 .await?;
 
-            handle_text_message(
+            let deps = IntakeDeps {
                 ctx,
+                shared: &data.shared,
+                token: &data.token,
+            };
+            handle_text_message(
+                &deps,
                 channel_id,
                 confirm.id,
                 msg.author.id,
                 &msg.author.name,
                 &skill_prompt,
-                &data.shared,
-                &data.token,
                 false,
                 false,
                 false,

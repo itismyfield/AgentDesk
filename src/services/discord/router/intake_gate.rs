@@ -1597,15 +1597,18 @@ pub(in crate::services::discord) async fn handle_event(
                 notify_bot_id,
             );
 
-            super::message_handler::handle_text_message(
+            let deps = super::message_handler::IntakeDeps {
                 ctx,
+                shared: &data.shared,
+                token: &data.token,
+            };
+            super::message_handler::handle_text_message(
+                &deps,
                 channel_id,
                 new_message.id,
                 user_id,
                 user_name,
                 text,
-                &data.shared,
-                &data.token,
                 false,
                 false,
                 false,
