@@ -26,12 +26,17 @@ mod placeholder_cleanup;
 mod placeholder_controller;
 mod placeholder_live_events;
 mod placeholder_sweeper;
+// Phase 5.3 of intake-node-routing (issue #2011): standalone JSONL → Discord
+// relay loop spawned by the bridge on cluster-standby nodes (where the tmux
+// watcher's relay path does not fire). Leader keeps using tmux_watcher.
 mod prompt_builder;
 mod queue_io;
 mod queued_placeholders_store;
 mod relay_health;
 mod relay_recovery;
 pub(crate) mod response_sanitizer;
+#[cfg(unix)]
+mod standby_relay;
 // #1074: landing zone for the future recovery-engine module split
 // (restart / runtime / manual_rebind). See `docs/recovery-paths.md`.
 // Named `recovery_paths` to avoid shadowing the existing
