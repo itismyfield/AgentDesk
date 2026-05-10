@@ -2323,13 +2323,20 @@ pub(super) fn spawn_turn_bridge(
                                             "  [{ts}] ⏭ standby relay: skipping tmux watcher spawn for channel {}; spawning JSONL→Discord standby_relay",
                                             channel_id
                                         );
-                                        if let Some((_, handle)) =
-                                            shared_owned
-                                                .tmux_watchers
-                                                .remove(&watcher_owner_channel_id)
-                                        {
-                                            handle.cancel.store(true, Ordering::Relaxed);
-                                        }
+                                        // Drop the registered watcher slot so a
+                                        // subsequent turn does not falsely reuse
+                                        // a "live" watcher that we never spawned.
+                                        // Do NOT call `cancel.store(true)` on the
+                                        // returned handle: the inner cancel Arc
+                                        // is shared with the local `cancel` and
+                                        // would pre-cancel the standby_relay we
+                                        // are about to spawn (Codex P1 review on
+                                        // PR #2012). The cancel Arc is otherwise
+                                        // unused on this branch since no watcher
+                                        // task ever reads it.
+                                        let _ = shared_owned
+                                            .tmux_watchers
+                                            .remove(&watcher_owner_channel_id);
                                         if let Some(http_for_standby) =
                                             shared_owned.serenity_http_or_token_fallback()
                                         {
@@ -2342,7 +2349,12 @@ pub(super) fn spawn_turn_bridge(
                                                     ))
                                                 };
                                             let output_path_for_standby = output_path.clone();
-                                            let cancel_for_standby = cancel.clone();
+                                            // Use a fresh cancel Arc, independent
+                                            // from the watcher's `cancel` (which
+                                            // is shared via `handle.cancel`).
+                                            let cancel_for_standby = Arc::new(
+                                                std::sync::atomic::AtomicBool::new(false),
+                                            );
                                             let shared_for_standby = shared_owned.clone();
                                             let provider_for_standby = provider.clone();
                                             tokio::spawn(super::standby_relay::run_standby_relay(
