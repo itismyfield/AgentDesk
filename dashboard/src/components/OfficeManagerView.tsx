@@ -476,6 +476,9 @@ export default function OfficeManagerView({
                       {OFFICE_ICONS.map((icon) => (
                         <button
                           key={icon}
+                          type="button"
+                          aria-label={tr(`아이콘 ${icon}`, `Icon ${icon}`)}
+                          aria-pressed={draft.icon === icon}
                           onClick={() => setDraft((prev) => ({ ...prev, icon }))}
                           className="flex h-10 w-10 items-center justify-center rounded-xl text-lg transition-colors"
                           style={{
