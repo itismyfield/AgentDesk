@@ -8,5 +8,6 @@
 //! `preferred_intake_node_labels` and the live `worker_nodes` snapshot.
 //! Phase 3 will add the worker-side polling loop in a sibling submodule.
 
+pub(crate) mod intake_router_hook;
 pub(crate) mod intake_routing;
 pub(crate) mod intake_worker;
