@@ -74,6 +74,11 @@ pub(crate) use meeting_orchestrator as meeting;
 pub(in crate::services::discord) use recovery_engine as recovery;
 pub(crate) use restart_mode::InflightRestartMode;
 pub(crate) use router::HeadlessTurnStartError;
+// Phase 2-pre.3 of intake-node-routing: worker entry point. Phase 3 will
+// add the worker polling loop that imports these names; until then they
+// are intentionally exposed but unused at the crate boundary.
+#[allow(unused_imports)]
+pub(crate) use router::{IntakeRequest, TurnKind, execute_intake_turn_core};
 pub(crate) use turn_bridge::TmuxCleanupPolicy;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use turn_bridge::build_work_dispatch_completion_result;
@@ -1110,8 +1115,13 @@ impl UserRecord {
     }
 }
 
-/// Shared state for the Discord bot — split into independently-lockable groups
-pub(super) struct SharedData {
+/// Shared state for the Discord bot — split into independently-lockable groups.
+///
+/// Phase 2-pre.3 of intake-node-routing: widened from `pub(super)` to
+/// `pub(crate)` so the public worker entry point `execute_intake_turn_core`
+/// can accept `&Arc<SharedData>` from a non-`services::discord` caller
+/// (Phase 3 worker polling loop).
+pub(crate) struct SharedData {
     /// Core state (sessions + request lifecycle) — requires atomic access
     pub(super) core: Mutex<CoreState>,
     /// Per-channel request lifecycle actor registry.
