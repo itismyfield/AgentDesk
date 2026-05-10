@@ -4,7 +4,7 @@
 /// needs (e.g. "🟢 main CI 통과!" relayed from a `Bash run_in_background`
 /// completion). See #796.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) enum TurnKind {
+pub(crate) enum TurnKind {
     /// Triggered by a human user message. Race-handler may delete the
     /// placeholder when this turn loses to another active turn — the user
     /// still sees their own message and can be told "queued for later".

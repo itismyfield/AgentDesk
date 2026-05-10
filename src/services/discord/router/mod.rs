@@ -7,11 +7,12 @@ mod response_format;
 mod thread_binding;
 mod turn_start;
 
-pub(super) use authorization::TurnKind;
+pub(crate) use authorization::TurnKind;
 pub(super) use intake_gate::{handle_event, should_process_turn_message};
 pub(super) use message_handler::{
     IntakeDeps, handle_text_message, start_headless_turn, start_reserved_headless_turn,
 };
+pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core};
 pub(super) use turn_start::reserve_headless_turn;
 pub(crate) use turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
