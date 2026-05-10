@@ -91,8 +91,13 @@ pub(in crate::services::discord) async fn cmd_start(
     };
 
     // Resolve channel/category names before taking the lock
-    let (ch_name, cat_name) =
-        resolve_channel_category(ctx.serenity_context(), ctx.channel_id()).await;
+    let serenity_ctx = ctx.serenity_context();
+    let (ch_name, cat_name) = resolve_channel_category(
+        &serenity_ctx.http,
+        Some(&serenity_ctx.cache),
+        ctx.channel_id(),
+    )
+    .await;
 
     // Check for worktree conflict (another channel using same git repo path)
     let worktree_info = {

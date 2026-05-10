@@ -278,7 +278,9 @@ pub(in crate::services::discord) async fn cmd_cc(
         auto_restore_session(&ctx.data().shared, channel_id, serenity_ctx).await;
         let data = ctx.data();
         let deps = IntakeDeps {
-            ctx: serenity_ctx,
+            http: &serenity_ctx.http,
+            cache: Some(&serenity_ctx.cache),
+            ctx_for_chained_dispatch: Some(serenity_ctx),
             shared: &data.shared,
             token: &data.token,
         };
@@ -345,8 +347,11 @@ pub(in crate::services::discord) async fn cmd_cc(
 
     // Hand off to the text message handler (it creates its own placeholder)
     let data = ctx.data();
+    let serenity_ctx = ctx.serenity_context();
     let deps = IntakeDeps {
-        ctx: ctx.serenity_context(),
+        http: &serenity_ctx.http,
+        cache: Some(&serenity_ctx.cache),
+        ctx_for_chained_dispatch: Some(serenity_ctx),
         shared: &data.shared,
         token: &data.token,
     };
