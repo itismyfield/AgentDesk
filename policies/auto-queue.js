@@ -447,7 +447,7 @@ var autoQueue = {
       "AND NOT EXISTS (" +
       "  SELECT 1 FROM auto_queue_entries e " +
       "  WHERE e.run_id = r.id AND e.status = 'user_cancelled'" +
-      ")",
+      ") LIMIT 50",
       []
     );
     for (var fr = 0; fr < finishedRuns.length; fr++) {
