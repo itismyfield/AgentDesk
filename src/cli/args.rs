@@ -189,6 +189,11 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: MonitoringAction,
     },
+    /// intake_outbox operator tools (Phase 5 of intake-node-routing)
+    IntakeOutbox {
+        #[command(subcommand)]
+        action: IntakeOutboxAction,
+    },
     /// Discord utility commands without HTTP server dependency
     Discord {
         #[command(subcommand)]
@@ -463,6 +468,29 @@ pub(crate) enum DispatchAction {
     Redispatch {
         /// Kanban card ID
         card_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum IntakeOutboxAction {
+    /// Show recent intake_outbox rows (newest first).
+    Status {
+        /// Filter to a single Discord channel id.
+        #[arg(long = "channel")]
+        channel_id: Option<String>,
+        /// Maximum rows to display.
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
+    /// Force-fail a stuck row and re-enqueue a fresh attempt.
+    /// Implements transition 12 from the design doc.
+    ForceFail {
+        /// id of the stuck row.
+        #[arg(long)]
+        id: i64,
+        /// Operator's reason text recorded in `last_error`.
+        #[arg(long, default_value = "operator force-fail via CLI")]
+        reason: String,
     },
 }
 

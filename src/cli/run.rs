@@ -2,7 +2,8 @@ use anyhow::Result;
 
 use super::args::{
     AgentHandoffChannelKindArg, AutoQueueAction, CardAction, Commands, ConfigAction,
-    DispatchAction, DoctorProfileArg, MigrateAction, MonitoringAction, ReportProvider,
+    DispatchAction, DoctorProfileArg, IntakeOutboxAction, MigrateAction, MonitoringAction,
+    ReportProvider,
 };
 
 fn agent_handoff_channel_kind(
@@ -207,6 +208,14 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 description,
             } => super::monitoring::start(channel, &key, &description),
             MonitoringAction::Stop { channel, key } => super::monitoring::stop(channel, &key),
+        }),
+        Commands::IntakeOutbox { action } => exit_for_cli(match action {
+            IntakeOutboxAction::Status { channel_id, limit } => super::direct::run_async(
+                super::direct::cmd_intake_outbox_status(channel_id.as_deref(), limit),
+            ),
+            IntakeOutboxAction::ForceFail { id, reason } => {
+                super::direct::run_async(super::direct::cmd_intake_outbox_force_fail(id, &reason))
+            }
         }),
         Commands::Discord { action } => exit_for_cli(match action {
             super::args::DiscordAction::Read {

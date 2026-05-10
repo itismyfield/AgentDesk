@@ -497,6 +497,62 @@ pub(crate) async fn cmd_force_kill(session_key: &str, retry: bool) -> Result<(),
     .await
 }
 
+/// Phase 5 of intake-node-routing: operator-facing "list recent rows"
+/// command. Hits the intake_outbox table directly via the PG pool —
+/// no HTTP server required so operators can run it during deploys.
+pub(crate) async fn cmd_intake_outbox_status(
+    channel_id: Option<&str>,
+    limit: i64,
+) -> Result<(), String> {
+    let state = build_app_state(false).await?;
+    let pool = state
+        .pg_pool_ref()
+        .ok_or_else(|| "postgres pool unavailable for intake_outbox status".to_string())?;
+    let rows = crate::db::intake_outbox::list_recent_rows(pool, channel_id, limit)
+        .await
+        .map_err(|e| format!("list intake_outbox rows: {e}"))?;
+
+    if rows.is_empty() {
+        println!("(no intake_outbox rows)");
+        return Ok(());
+    }
+
+    println!(
+        "{:<8} {:<12} {:<22} {:<14} {:<14} attempt parent agent",
+        "id", "status", "channel_id", "user_msg_id", "target",
+    );
+    for row in rows {
+        println!(
+            "{:<8} {:<12} {:<22} {:<14} {:<14} {:<7} {:<6} {}",
+            row.id,
+            row.status,
+            row.channel_id,
+            row.user_msg_id,
+            row.target_instance_id,
+            row.attempt_no,
+            row.parent_outbox_id
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            row.agent_id,
+        );
+    }
+    Ok(())
+}
+
+/// Phase 5 of intake-node-routing: operator transition-12 trigger.
+/// Calls `force_fail_and_retry_as_new` against the given stuck row id.
+pub(crate) async fn cmd_intake_outbox_force_fail(id: i64, reason: &str) -> Result<(), String> {
+    let state = build_app_state(false).await?;
+    let pool = state
+        .pg_pool_ref()
+        .ok_or_else(|| "postgres pool unavailable for intake_outbox force-fail".to_string())?;
+    let new_id = crate::db::intake_outbox::force_fail_and_retry_as_new(pool, id, reason)
+        .await
+        .map_err(|e| format!("force_fail_and_retry_as_new(id={id}): {e}"))?;
+    println!("force-failed intake_outbox row id={id}; new attempt inserted as id={new_id}");
+    Ok(())
+}
+
 pub(crate) async fn cmd_github_sync(repo: Option<&str>) -> Result<(), String> {
     let state = build_app_state(false).await?;
     let repos = if let Some(repo) = repo.map(str::trim).filter(|repo| !repo.is_empty()) {

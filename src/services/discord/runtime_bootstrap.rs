@@ -1194,6 +1194,53 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     }
                 });
 
+                // Phase 5 of intake-node-routing
+                // (docs/design/intake-node-routing.md): start the worker
+                // poll loop that claims `intake_outbox` rows targeted at
+                // this instance. The loop is gated by
+                // `ADK_INTAKE_ROUTING_MODE`: when `disabled` (default),
+                // the leader hook never inserts rows and the worker
+                // simply polls an empty queue with the idle backoff —
+                // no production impact. When `observe`/`enforce` is
+                // flipped on, the worker drains the queue without
+                // additional bootstrap. Cancellation rides on
+                // `SharedData.shutting_down` so the loop exits cleanly
+                // during deferred restart drain.
+                if let Some(pool_for_intake_worker) = shared_for_tmux.pg_pool.clone() {
+                    let intake_worker_http = ctx.http.clone();
+                    let intake_worker_shared = shared_for_tmux.clone();
+                    let intake_worker_token = token_for_ready.clone();
+                    let intake_worker_target_id =
+                        crate::server::cluster::resolve_self_instance_id_without_config();
+                    let intake_worker_provider = provider_for_setup.as_str().to_string();
+                    // claim_owner appends provider so multi-bot deployments
+                    // surface which token's worker holds a row in
+                    // observability dashboards.
+                    let intake_worker_claim_owner = format!(
+                        "{}:{}",
+                        intake_worker_target_id, intake_worker_provider,
+                    );
+                    let intake_worker_cancel = shared_for_tmux.shutting_down.clone();
+                    tokio::spawn(async move {
+                        crate::services::cluster::intake_worker::run_intake_worker_loop(
+                            pool_for_intake_worker,
+                            intake_worker_http,
+                            intake_worker_shared,
+                            intake_worker_token,
+                            intake_worker_target_id,
+                            intake_worker_provider,
+                            intake_worker_claim_owner,
+                            crate::services::cluster::intake_worker::IntakeWorkerConfig::default(),
+                            intake_worker_cancel,
+                        )
+                        .await;
+                    });
+                } else {
+                    tracing::info!(
+                        "[intake_worker] postgres pool unavailable — intake-node-routing worker not started"
+                    );
+                }
+
                 // Background: hot-reload skills on file changes (30s polling)
                 // Scans home-level AND all active project-level skill directories.
                 let shared_for_skills = shared_for_tmux.clone();
