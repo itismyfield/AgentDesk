@@ -79,9 +79,10 @@ pub(crate) async fn run_intake_worker_tick(
     shared: &Arc<SharedData>,
     token: &str,
     target_instance_id: &str,
+    provider: &str,
     claim_owner: &str,
 ) -> Result<TickOutcome, sqlx::Error> {
-    let claimed = claim_pending_for_target(pool, target_instance_id, claim_owner).await?;
+    let claimed = claim_pending_for_target(pool, target_instance_id, provider, claim_owner).await?;
     let Some(row) = claimed else {
         return Ok(TickOutcome::QueueEmpty);
     };
@@ -184,22 +185,31 @@ pub(crate) async fn run_intake_worker_tick(
 /// - During an active tick (DB roundtrip OR
 ///   `execute_intake_turn_core`), the cancel flag is NOT polled —
 ///   the running turn drains to completion before the loop exits.
-///   Phase 4 wants this behaviour: a half-spawned Discord turn would
-///   leak placeholders if interrupted mid-flight. Operators with a
-///   stuck turn should use Phase 5's force-fail CLI rather than
-///   relying on cancel-mid-tick.
+///   Operators with a stuck turn should use Phase 5's force-fail CLI
+///   rather than relying on cancel-mid-tick.
+///
+/// What flips the cancel flag (codex Phase 5 P1 #3): the bootstrap
+/// passes `SharedData.shutting_down`, which the SIGTERM/SIGINT path
+/// flips early in `setup_signal_handlers`. The marker-based DEFERRED
+/// restart flow only sets `restart_pending`, so the worker keeps
+/// polling during a deferred drain — by design, since the leader
+/// also queues new turns into the mailbox during drain. The worker
+/// stops when the actual restart happens and the new process flips
+/// `shutting_down` on the OLD process via the kill path.
 pub(crate) async fn run_intake_worker_loop(
     pool: PgPool,
     http: Arc<serenity::http::Http>,
     shared: Arc<SharedData>,
     token: String,
     target_instance_id: String,
+    provider: String,
     claim_owner: String,
     config: IntakeWorkerConfig,
     cancel: Arc<AtomicBool>,
 ) {
     tracing::info!(
         target_instance_id,
+        provider,
         claim_owner,
         idle_ms = config.idle_poll_interval.as_millis() as u64,
         busy_ms = config.busy_poll_interval.as_millis() as u64,
@@ -217,6 +227,7 @@ pub(crate) async fn run_intake_worker_loop(
             &shared,
             &token,
             &target_instance_id,
+            &provider,
             &claim_owner,
         )
         .await;
