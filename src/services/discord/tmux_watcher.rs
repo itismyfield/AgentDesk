@@ -992,6 +992,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             tool_state.prev_tool_status.as_deref(),
                             tool_state.current_tool_line.as_deref(),
                             &full_response,
+                            status_panel_msg_id,
                         );
                         let Some(msg_id) = placeholder_msg_id else {
                             break;
@@ -1076,6 +1077,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         tool_state.prev_tool_status.as_deref(),
                         tool_state.current_tool_line.as_deref(),
                         &full_response,
+                        status_panel_msg_id,
                     );
                     let current_portion = full_response.get(response_sent_offset..).unwrap_or("");
                     let display_text =
