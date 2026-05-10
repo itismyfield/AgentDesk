@@ -5,6 +5,7 @@ pub mod analytics;
 pub mod api_friction;
 pub mod auto_queue;
 pub mod claude;
+pub mod cluster;
 pub mod codex;
 #[cfg(unix)]
 pub mod codex_tmux_wrapper;

@@ -1604,6 +1604,102 @@ pub(in crate::services::discord) async fn handle_event(
                 notify_bot_id,
             );
 
+            // Phase 4 of intake-node-routing: try to forward to a worker
+            // node first. Only acts when a PG pool exists AND the global
+            // mode env var is `observe` or `enforce`; otherwise this is
+            // a no-op and the leader runs the intake locally as before.
+            let route_decision = if let Some(pool) = data.shared.pg_pool.as_ref().as_ref() {
+                let mode =
+                    crate::services::cluster::intake_router_hook::IntakeRoutingMode::from_env();
+                let leader_instance_id =
+                    crate::server::cluster::resolve_self_instance_id_without_config();
+                let channel_id_str = channel_id.get().to_string();
+                let user_msg_id_str = new_message.id.get().to_string();
+                let request_owner_id_str = user_id.get().to_string();
+                let turn_kind_str = match turn_kind {
+                    super::message_handler::TurnKind::Foreground => "foreground",
+                    super::message_handler::TurnKind::BackgroundTrigger => "background_trigger",
+                };
+                let hook_ctx = crate::services::cluster::intake_router_hook::IntakeRouterContext {
+                    mode,
+                    leader_instance_id: &leader_instance_id,
+                    channel_id: &channel_id_str,
+                    user_msg_id: &user_msg_id_str,
+                    request_owner_id: &request_owner_id_str,
+                    request_owner_name: Some(user_name),
+                    user_text: text,
+                    reply_context: reply_context.as_deref(),
+                    has_reply_boundary,
+                    dm_hint: Some(is_dm),
+                    turn_kind: turn_kind_str,
+                    merge_consecutive,
+                    reply_to_user_message: false,
+                    defer_watcher_resume: false,
+                    wait_for_completion: false,
+                };
+                Some(
+                    crate::services::cluster::intake_router_hook::try_route_intake(pool, &hook_ctx)
+                        .await,
+                )
+            } else {
+                None
+            };
+
+            // Branch on the decision:
+            // - `Forwarded` → worker has it, skip local.
+            // - `SkippedDuplicate` → Discord redelivery, skip local
+            //   (running locally would double-emit).
+            // - `ObservedWouldForward` → log the would-be target,
+            //   fall through to local (dark-launch).
+            // - `RanLocal { reason }` → log the reason for Phase 5
+            //   observability, then fall through to local.
+            match &route_decision {
+                Some(
+                    crate::services::cluster::intake_router_hook::IntakeRouterDecision::Forwarded {
+                        target_instance_id,
+                        outbox_id,
+                    },
+                ) => {
+                    tracing::info!(
+                        target_instance_id = %target_instance_id,
+                        outbox_id = outbox_id,
+                        channel_id = %channel_id,
+                        user_msg_id = %new_message.id,
+                        "[intake_router] ENFORCE: forwarded intake to worker — skipping local execution"
+                    );
+                    return Ok(());
+                }
+                Some(crate::services::cluster::intake_router_hook::IntakeRouterDecision::SkippedDuplicate) => {
+                    tracing::info!(
+                        channel_id = %channel_id,
+                        user_msg_id = %new_message.id,
+                        "[intake_router] SKIPPED_DUPLICATE: Discord redelivered known message — skipping local execution"
+                    );
+                    return Ok(());
+                }
+                Some(
+                    crate::services::cluster::intake_router_hook::IntakeRouterDecision::ObservedWouldForward {
+                        target_instance_id,
+                    },
+                ) => {
+                    tracing::info!(
+                        target_instance_id = %target_instance_id,
+                        channel_id = %channel_id,
+                        user_msg_id = %new_message.id,
+                        "[intake_router] OBSERVE: would forward — running locally"
+                    );
+                }
+                Some(crate::services::cluster::intake_router_hook::IntakeRouterDecision::RanLocal { reason }) => {
+                    tracing::debug!(
+                        ?reason,
+                        channel_id = %channel_id,
+                        user_msg_id = %new_message.id,
+                        "[intake_router] ran locally"
+                    );
+                }
+                None => {} // hook not active (no PG pool)
+            }
+
             let deps = super::message_handler::IntakeDeps {
                 http: &ctx.http,
                 cache: Some(&ctx.cache),

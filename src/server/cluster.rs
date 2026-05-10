@@ -65,6 +65,9 @@ pub(crate) struct CapabilityRouteCandidate {
 
 impl ClusterRuntime {
     pub(crate) fn single_node() -> Self {
+        // Cache the synthetic id so the intake-routing leader hook
+        // sees a stable answer in single-node mode too.
+        let _ = SELF_INSTANCE_ID.set("single-node".to_string());
         Self {
             enabled: false,
             instance_id: "single-node".to_string(),
@@ -118,6 +121,12 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
     };
 
     let instance_id = resolve_instance_id(&config.cluster);
+    // Phase 4 of intake-node-routing: cache the resolved instance_id
+    // so the intake-routing leader hook (`services::cluster::intake_router_hook`)
+    // sees the same id we register with `worker_nodes`. The OnceLock
+    // ignores subsequent sets; if bootstrap is called twice in tests,
+    // the first wins.
+    let _ = SELF_INSTANCE_ID.set(instance_id.clone());
     let hostname = crate::services::platform::hostname_short();
     let configured_role = ClusterRole::parse(&config.cluster.role);
     let mut leader_lease = match configured_role {
@@ -510,6 +519,40 @@ async fn upsert_worker_mcp_endpoints(
     .await
     .map_err(|error| format!("prune worker_mcp_endpoints: {error}"))?;
     Ok(())
+}
+
+/// Process-global cache of the resolved self `instance_id`. Set once
+/// during `bootstrap()` from `ClusterRuntime.instance_id()` so callers
+/// (e.g. the intake-routing leader hook in `services::cluster::intake_router_hook`)
+/// see the SAME id the cluster bootstrap registered with `worker_nodes`,
+/// even when the id was supplied via `ClusterConfig.instance_id` rather
+/// than env or hostname.
+pub(crate) static SELF_INSTANCE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Resolve the self instance_id, preferring the value the cluster
+/// bootstrap registered (config-driven if present), falling back to
+/// the env-var/hostname pair only when the OnceLock has not yet been
+/// initialised (e.g. unit tests, early startup before bootstrap).
+///
+/// Phase 4 codex blocker fix #1: a config-driven id must be reachable
+/// from the intake hook so `pick_intake_target` can correctly
+/// classify the leader as self. Otherwise the hook can route a
+/// message to leader's own `instance_id` and the gate then skips
+/// local execution, leaving the row unconsumed.
+pub(crate) fn resolve_self_instance_id_without_config() -> String {
+    if let Some(value) = SELF_INSTANCE_ID.get() {
+        return value.clone();
+    }
+    if let Ok(value) = std::env::var("AGENTDESK_INSTANCE_ID")
+        && !value.trim().is_empty()
+    {
+        return value.trim().to_string();
+    }
+    format!(
+        "{}-{}",
+        crate::services::platform::hostname_short(),
+        std::process::id()
+    )
 }
 
 fn resolve_instance_id(config: &ClusterConfig) -> String {
