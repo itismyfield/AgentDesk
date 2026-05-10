@@ -1498,7 +1498,10 @@ fn process_sse_event(
 fn allocate_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|e| format!("Failed to allocate a free port: {e}"))?;
-    Ok(listener.local_addr().unwrap().port())
+    let addr = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to resolve local address: {e}"))?;
+    Ok(addr.port())
     // listener drops here, freeing the port with a brief race window
 }
 
