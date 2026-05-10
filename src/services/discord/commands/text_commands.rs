@@ -178,7 +178,7 @@ pub(in crate::services::discord) async fn handle_text_command(
                     .take(8)
                     .map(char::from)
                     .collect();
-                let ch_name = resolve_channel_category(ctx, channel_id)
+                let ch_name = resolve_channel_category(&ctx.http, Some(&ctx.cache), channel_id)
                     .await
                     .0
                     .unwrap_or_else(|| format!("ch-{}", channel_id));
@@ -210,7 +210,8 @@ pub(in crate::services::discord) async fn handle_text_command(
                 effective_path
             );
 
-            let (ch_name, cat_name) = resolve_channel_category(ctx, channel_id).await;
+            let (ch_name, cat_name) =
+                resolve_channel_category(&ctx.http, Some(&ctx.cache), channel_id).await;
             {
                 let mut d = data.shared.core.lock().await;
                 let session = d
@@ -1313,7 +1314,9 @@ Any other message is sent to {p}.
                 .await?;
 
             let deps = IntakeDeps {
-                ctx,
+                http: &ctx.http,
+                cache: Some(&ctx.cache),
+                ctx_for_chained_dispatch: Some(ctx),
                 shared: &data.shared,
                 token: &data.token,
             };

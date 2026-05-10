@@ -3396,7 +3396,13 @@ pub(super) async fn kickoff_idle_queues(
                 .await;
         }
 
-        let deps = router::IntakeDeps { ctx, shared, token };
+        let deps = router::IntakeDeps {
+            http: &ctx.http,
+            cache: Some(&ctx.cache),
+            ctx_for_chained_dispatch: Some(ctx),
+            shared,
+            token,
+        };
         if let Err(e) = router::handle_text_message(
             &deps,
             channel_id,

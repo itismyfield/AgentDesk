@@ -1141,7 +1141,14 @@ pub(in crate::services::discord) async fn handle_event(
                             .and_then(|s| s.current_path.clone())
                     };
                     if let Some(path) = parent_path {
-                        bootstrap_thread_session(&data.shared, channel_id, &path, ctx).await;
+                        bootstrap_thread_session(
+                            &data.shared,
+                            channel_id,
+                            &path,
+                            &ctx.http,
+                            Some(&ctx.cache),
+                        )
+                        .await;
                     }
                 }
             }
@@ -1272,7 +1279,7 @@ pub(in crate::services::discord) async fn handle_event(
                             )
                             .await;
                             add_reaction(
-                                ctx,
+                                &ctx.http,
                                 channel_id,
                                 new_message.id,
                                 queue_pending_reaction_for(outcome),
@@ -1320,7 +1327,7 @@ pub(in crate::services::discord) async fn handle_event(
                         channel_id
                     );
                     add_reaction(
-                        ctx,
+                        &ctx.http,
                         channel_id,
                         new_message.id,
                         queue_pending_reaction_for(outcome),
@@ -1372,7 +1379,7 @@ pub(in crate::services::discord) async fn handle_event(
 
                 // React 📬 (standalone queue head) or ➕ (merged into previous head).
                 add_reaction(
-                    ctx,
+                    &ctx.http,
                     channel_id,
                     new_message.id,
                     queue_pending_reaction_for(outcome),
@@ -1452,7 +1459,7 @@ pub(in crate::services::discord) async fn handle_event(
 
                 // React 📬 (standalone) or ➕ (merged into previous queue head).
                 add_reaction(
-                    ctx,
+                    &ctx.http,
                     channel_id,
                     new_message.id,
                     queue_pending_reaction_for(outcome),
@@ -1521,7 +1528,7 @@ pub(in crate::services::discord) async fn handle_event(
                         channel_id
                     );
                     add_reaction(
-                        ctx,
+                        &ctx.http,
                         channel_id,
                         new_message.id,
                         queue_pending_reaction_for(outcome),
@@ -1598,7 +1605,9 @@ pub(in crate::services::discord) async fn handle_event(
             );
 
             let deps = super::message_handler::IntakeDeps {
-                ctx,
+                http: &ctx.http,
+                cache: Some(&ctx.cache),
+                ctx_for_chained_dispatch: Some(ctx),
                 shared: &data.shared,
                 token: &data.token,
             };
