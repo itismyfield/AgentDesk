@@ -94,6 +94,22 @@ struct ActiveVoiceRoute {
     updated_at: Instant,
 }
 
+enum VoiceTurnTargetResolution {
+    Target {
+        channel_id: ChannelId,
+        transcript: String,
+    },
+    NeedsAgent,
+    Ignored,
+}
+
+fn voice_lobby_accepts_source_channel(config: &VoiceConfig, channel_id: ChannelId) -> bool {
+    match config.lobby_channel_id_u64() {
+        Some(lobby_channel_id) => lobby_channel_id == channel_id.get(),
+        None => true,
+    }
+}
+
 struct DeferredBargeInDrain {
     acknowledgement: Option<String>,
     prompt: String,
@@ -919,9 +935,22 @@ impl VoiceBargeInRuntime {
         _shared: &Arc<SharedData>,
         source_channel_id: ChannelId,
         transcript: &str,
-    ) -> Option<(ChannelId, String)> {
+    ) -> VoiceTurnTargetResolution {
         if super::settings::resolve_role_binding(source_channel_id, None).is_some() {
-            return Some((source_channel_id, transcript.trim().to_string()));
+            return VoiceTurnTargetResolution::Target {
+                channel_id: source_channel_id,
+                transcript: transcript.trim().to_string(),
+            };
+        }
+
+        let config = crate::config::load_graceful();
+        if !voice_lobby_accepts_source_channel(&config.voice, source_channel_id) {
+            tracing::debug!(
+                source_channel_id = source_channel_id.get(),
+                lobby_channel_id = config.voice.lobby_channel_id.as_deref(),
+                "voice source channel is not role-bound or configured as voice lobby"
+            );
+            return VoiceTurnTargetResolution::Ignored;
         }
 
         let active_context = self
@@ -932,13 +961,12 @@ impl VoiceBargeInRuntime {
                 channel_id: entry.channel_id.get(),
                 updated_at: entry.updated_at,
             });
-        let config = crate::config::load_graceful();
         let now = Instant::now();
         match resolve_voice_lobby_route(&config, transcript, active_context.as_ref(), now) {
             Ok(VoiceLobbyRouteDecision::Routed(route)) => {
                 let remaining = route.remaining_transcript.trim();
                 if remaining.is_empty() {
-                    return None;
+                    return VoiceTurnTargetResolution::NeedsAgent;
                 }
                 let target_channel_id = ChannelId::new(route.channel_id);
                 self.bind_routed_voice_context(source_channel_id, target_channel_id);
@@ -950,7 +978,10 @@ impl VoiceBargeInRuntime {
                         updated_at: now,
                     },
                 );
-                Some((target_channel_id, remaining.to_string()))
+                VoiceTurnTargetResolution::Target {
+                    channel_id: target_channel_id,
+                    transcript: remaining.to_string(),
+                }
             }
             Ok(VoiceLobbyRouteDecision::ContinueActive {
                 agent_id,
@@ -967,16 +998,19 @@ impl VoiceBargeInRuntime {
                         updated_at: now,
                     },
                 );
-                Some((target_channel_id, transcript))
+                VoiceTurnTargetResolution::Target {
+                    channel_id: target_channel_id,
+                    transcript,
+                }
             }
-            Ok(VoiceLobbyRouteDecision::NeedAgent) => None,
+            Ok(VoiceLobbyRouteDecision::NeedAgent) => VoiceTurnTargetResolution::NeedsAgent,
             Err(error) => {
                 tracing::warn!(
                     error = %error,
                     source_channel_id = source_channel_id.get(),
                     "voice lobby routing rejected alias collision"
                 );
-                None
+                VoiceTurnTargetResolution::NeedsAgent
             }
         }
     }
@@ -1060,12 +1094,21 @@ impl VoiceBargeInRuntime {
             return outcome;
         }
 
-        let Some((target_channel_id, transcript)) = self
+        let (target_channel_id, transcript) = match self
             .resolve_voice_turn_target(shared, channel_id, transcript)
             .await
-        else {
-            self.ask_for_agent(shared, channel_id).await;
-            return VoiceBargeInTranscriptOutcome::AgentRoutingRequired;
+        {
+            VoiceTurnTargetResolution::Target {
+                channel_id,
+                transcript,
+            } => (channel_id, transcript),
+            VoiceTurnTargetResolution::NeedsAgent => {
+                self.ask_for_agent(shared, channel_id).await;
+                return VoiceBargeInTranscriptOutcome::AgentRoutingRequired;
+            }
+            VoiceTurnTargetResolution::Ignored => {
+                return VoiceBargeInTranscriptOutcome::NoActiveTurn;
+            }
         };
 
         self.start_voice_turn(shared, target_channel_id, utterance, &transcript)

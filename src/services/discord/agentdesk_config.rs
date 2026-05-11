@@ -116,7 +116,8 @@ pub(crate) fn ensure_agent_setup_config(
         }
     }
 
-    config.agents.push(AgentDef {
+    let mut next_agents = config.agents.clone();
+    next_agents.push(AgentDef {
         id: input.agent_id.clone(),
         name: input.agent_id.clone(),
         name_ko: None,
@@ -126,6 +127,12 @@ pub(crate) fn ensure_agent_setup_config(
         department: None,
         avatar_emoji: None,
     });
+
+    if let Err(error) = crate::voice::commands::validate_agent_alias_collisions(&next_agents) {
+        return AgentSetupConfigMutation::Conflict(format!("validate voice aliases: {error}"));
+    }
+
+    config.agents = next_agents;
 
     AgentSetupConfigMutation::Created
 }

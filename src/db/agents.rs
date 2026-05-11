@@ -289,6 +289,9 @@ pub async fn resolve_agent_dispatch_channel_pg(
 /// Only updates fields that come from config; leaves status/xp/skills untouched.
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub fn sync_agents_from_config(db: &Db, agents: &[AgentDef]) -> Result<usize> {
+    crate::voice::commands::validate_agent_alias_collisions(agents)
+        .map_err(|error| anyhow::anyhow!("validate voice aliases: {error}"))?;
+
     let conn = db
         .lock()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;

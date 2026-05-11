@@ -1801,7 +1801,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 }
 
                 if voice_config_for_setup.enabled
-                    && !voice_config_for_setup.auto_join_channel_ids.is_empty()
+                    && !voice_config_for_setup
+                        .auto_join_channel_ids_with_lobby()
+                        .is_empty()
                 {
                     let ctx_for_voice = ctx.clone();
                     let receiver_for_voice = voice_receiver_for_setup.clone();

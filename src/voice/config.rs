@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::voice::barge_in::BargeInSensitivity;
 
@@ -14,6 +15,7 @@ pub(crate) const DEFAULT_STT_LANGUAGE: &str = "ko";
 pub(crate) const DEFAULT_BARGE_IN_ACKNOWLEDGEMENT: &str =
     "그동안 말씀하신 거 같이 정리해서 작업할게요.";
 pub(crate) const DEFAULT_BARGE_IN_TTL_SECS: u64 = 15 * 60;
+pub(crate) const DEFAULT_ACTIVE_AGENT_TTL_SECS: u64 = 180;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -28,6 +30,8 @@ pub(crate) struct VoiceConfig {
     pub barge_in: VoiceBargeInConfig,
     pub wake_words: Vec<String>,
     pub allowed_user_ids: Vec<String>,
+    pub lobby_channel_id: Option<String>,
+    pub active_agent_ttl_seconds: u64,
     pub auto_join_channel_ids: Vec<String>,
 }
 
@@ -44,6 +48,8 @@ impl Default for VoiceConfig {
             barge_in: VoiceBargeInConfig::default(),
             wake_words: vec!["agentdesk".to_string()],
             allowed_user_ids: Vec::new(),
+            lobby_channel_id: None,
+            active_agent_ttl_seconds: DEFAULT_ACTIVE_AGENT_TTL_SECS,
             auto_join_channel_ids: Vec::new(),
         }
     }
@@ -63,6 +69,47 @@ impl VoiceConfig {
                     .iter()
                     .any(|wake_word| !wake_word.trim().is_empty())
             })
+    }
+
+    pub(crate) fn lobby_channel_id_u64(&self) -> Option<u64> {
+        self.lobby_channel_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|value| value.parse::<u64>().ok())
+    }
+
+    pub(crate) fn is_lobby_channel(&self, channel_id: u64) -> bool {
+        self.lobby_channel_id_u64() == Some(channel_id)
+    }
+
+    pub(crate) fn active_agent_context_ttl(&self) -> Duration {
+        Duration::from_secs(match self.active_agent_ttl_seconds {
+            0 => DEFAULT_ACTIVE_AGENT_TTL_SECS,
+            value => value,
+        })
+    }
+
+    pub(crate) fn auto_join_channel_ids_with_lobby(&self) -> Vec<String> {
+        let mut channel_ids = Vec::new();
+        if let Some(lobby_channel_id) = self
+            .lobby_channel_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            channel_ids.push(lobby_channel_id.to_string());
+        }
+
+        for channel_id in &self.auto_join_channel_ids {
+            let channel_id = channel_id.trim();
+            if channel_id.is_empty() || channel_ids.iter().any(|existing| existing == channel_id) {
+                continue;
+            }
+            channel_ids.push(channel_id.to_string());
+        }
+
+        channel_ids
     }
 }
 
@@ -228,6 +275,11 @@ mod tests {
         assert!(!config.enabled);
         assert!(!config.verbose_progress);
         assert!(config.allowed_user_ids.is_empty());
+        assert_eq!(config.lobby_channel_id_u64(), None);
+        assert_eq!(
+            config.active_agent_context_ttl(),
+            Duration::from_secs(DEFAULT_ACTIVE_AGENT_TTL_SECS)
+        );
         assert!(config.auto_join_channel_ids.is_empty());
         assert_eq!(config.wake_words, vec!["agentdesk"]);
         assert_eq!(config.stt.ffmpeg_command, DEFAULT_STT_FFMPEG_COMMAND);
@@ -266,6 +318,8 @@ wake_words:
   - desk
 allowed_user_ids:
   - "343742347365974026"
+lobby_channel_id: "1509999999999999999"
+active_agent_ttl_seconds: 240
 auto_join_channel_ids:
   - "1500000000000000000"
 "#,
@@ -294,7 +348,17 @@ auto_join_channel_ids:
         assert_eq!(config.barge_in, VoiceBargeInConfig::default());
         assert_eq!(config.wake_words, vec!["desk"]);
         assert_eq!(config.allowed_user_ids, vec!["343742347365974026"]);
+        assert_eq!(
+            config.lobby_channel_id,
+            Some("1509999999999999999".to_string())
+        );
+        assert!(config.is_lobby_channel(1_509_999_999_999_999_999));
+        assert_eq!(config.active_agent_context_ttl(), Duration::from_secs(240));
         assert_eq!(config.auto_join_channel_ids, vec!["1500000000000000000"]);
+        assert_eq!(
+            config.auto_join_channel_ids_with_lobby(),
+            vec!["1509999999999999999", "1500000000000000000"]
+        );
     }
 
     #[test]

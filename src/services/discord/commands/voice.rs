@@ -359,7 +359,7 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
         return;
     }
 
-    for raw_channel_id in config.auto_join_channel_ids {
+    for raw_channel_id in config.auto_join_channel_ids_with_lobby() {
         let Ok(channel_id) = raw_channel_id.trim().parse::<u64>().map(ChannelId::new) else {
             tracing::warn!(
                 channel_id = raw_channel_id,

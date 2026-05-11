@@ -9,9 +9,11 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::config::{AgentDef, Config};
 use crate::voice::barge_in::{BargeInSensitivity, parse_sensitivity_command};
+use crate::voice::config::DEFAULT_ACTIVE_AGENT_TTL_SECS;
 use crate::voice::progress;
 
-pub(crate) const VOICE_ACTIVE_AGENT_CONTEXT_TTL: Duration = Duration::from_secs(180);
+pub(crate) const VOICE_ACTIVE_AGENT_CONTEXT_TTL: Duration =
+    Duration::from_secs(DEFAULT_ACTIVE_AGENT_TTL_SECS);
 pub(crate) const DEFAULT_WAKE_WORD: &str = "agentdesk";
 
 static LANGUAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -233,30 +235,43 @@ pub(crate) fn resolve_voice_lobby_route(
     validate_agent_alias_collisions(&config.agents)?;
 
     let transcript = transcript.trim();
-    let Some((first_token, rest)) = split_first_spoken_token(transcript) else {
+    if transcript.is_empty() {
         return Ok(VoiceLobbyRouteDecision::NeedAgent);
-    };
-    let normalized_token = normalize_voice_alias_key(trim_agent_address_suffix(first_token));
-    if !normalized_token.is_empty() {
-        for agent in &config.agents {
-            if agent_voice_aliases(agent)
-                .iter()
-                .any(|alias| normalize_voice_alias_key(alias) == normalized_token)
-                && let Some((provider, channel_id)) = first_explicit_agent_channel(agent)
-            {
-                return Ok(VoiceLobbyRouteDecision::Routed(VoiceAgentRoute {
-                    agent_id: agent.id.clone(),
-                    channel_id,
-                    provider,
-                    matched_alias: first_token.to_string(),
-                    remaining_transcript: rest.trim().to_string(),
-                }));
+    }
+
+    let mut best_route: Option<(usize, VoiceAgentRoute)> = None;
+    for agent in &config.agents {
+        let Some((provider, channel_id)) = first_explicit_agent_channel(agent) else {
+            continue;
+        };
+        for alias in agent_voice_aliases(agent) {
+            if let Some(alias_match) = match_spoken_alias_prefix(transcript, &alias) {
+                let score = normalize_voice_alias_key(&alias_match.matched_alias).len();
+                if best_route
+                    .as_ref()
+                    .is_some_and(|(best_score, _)| *best_score >= score)
+                {
+                    continue;
+                }
+                best_route = Some((
+                    score,
+                    VoiceAgentRoute {
+                        agent_id: agent.id.clone(),
+                        channel_id,
+                        provider: provider.clone(),
+                        matched_alias: alias_match.matched_alias,
+                        remaining_transcript: alias_match.remaining_transcript,
+                    },
+                ));
             }
         }
     }
+    if let Some((_, route)) = best_route {
+        return Ok(VoiceLobbyRouteDecision::Routed(route));
+    }
 
     if let Some(active_context) = active_context
-        && now.duration_since(active_context.updated_at) <= VOICE_ACTIVE_AGENT_CONTEXT_TTL
+        && now.duration_since(active_context.updated_at) <= config.voice.active_agent_context_ttl()
     {
         return Ok(VoiceLobbyRouteDecision::ContinueActive {
             agent_id: active_context.agent_id.clone(),
@@ -399,24 +414,75 @@ fn first_explicit_agent_channel(agent: &AgentDef) -> Option<(String, u64)> {
     None
 }
 
-fn split_first_spoken_token(transcript: &str) -> Option<(&str, &str)> {
-    let transcript = transcript.trim();
-    if transcript.is_empty() {
-        return None;
-    }
-    Some(
-        transcript
-            .split_once(char::is_whitespace)
-            .unwrap_or((transcript, "")),
-    )
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpokenAliasPrefixMatch {
+    matched_alias: String,
+    remaining_transcript: String,
 }
 
-fn trim_agent_address_suffix(token: &str) -> &str {
-    token
+fn match_spoken_alias_prefix(transcript: &str, alias: &str) -> Option<SpokenAliasPrefixMatch> {
+    let alias_key = normalize_voice_alias_key(alias);
+    if alias_key.is_empty() {
+        return None;
+    }
+
+    let accepted_keys = accepted_address_alias_keys(&alias_key);
+    let normalized_transcript = transcript.nfc().collect::<String>();
+    let transcript = normalized_transcript.trim_start();
+    let mut last_prefix_key = String::new();
+    for end in transcript
+        .char_indices()
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .chain(std::iter::once(transcript.len()))
+    {
+        let prefix = &transcript[..end];
+        let prefix_key = normalize_voice_alias_key(prefix);
+        if prefix_key.is_empty() || prefix_key == last_prefix_key {
+            continue;
+        }
+        last_prefix_key = prefix_key.clone();
+
+        if accepted_keys.iter().any(|key| key == &prefix_key) {
+            let remaining = &transcript[end..];
+            if remaining
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_alphanumeric())
+            {
+                continue;
+            }
+            return Some(SpokenAliasPrefixMatch {
+                matched_alias: clean_spoken_alias(prefix),
+                remaining_transcript: trim_spoken_address_separator(remaining).to_string(),
+            });
+        }
+
+        if !accepted_keys.iter().any(|key| key.starts_with(&prefix_key)) {
+            break;
+        }
+    }
+
+    None
+}
+
+fn accepted_address_alias_keys(alias_key: &str) -> [String; 4] {
+    [
+        alias_key.to_string(),
+        format!("{alias_key}에게"),
+        format!("{alias_key}야"),
+        format!("{alias_key}아"),
+    ]
+}
+
+fn clean_spoken_alias(value: &str) -> String {
+    value
+        .trim()
         .trim_matches(|ch: char| !ch.is_alphanumeric())
-        .trim_end_matches("에게")
-        .trim_end_matches('야')
-        .trim_end_matches('아')
+        .to_string()
+}
+
+fn trim_spoken_address_separator(value: &str) -> &str {
+    value.trim_start_matches(|ch: char| ch.is_whitespace() || !ch.is_alphanumeric())
 }
 
 #[cfg(test)]
@@ -504,6 +570,45 @@ mod tests {
     }
 
     #[test]
+    fn lobby_alias_matching_normalizes_spoken_prefix_cases() {
+        let mut td = agent("ch-td", "TD", Some("테크 디렉터"), "123");
+        td.keywords = vec!["Tech Director".to_string(), "빌드담당".to_string()];
+        let config = Config {
+            agents: vec![td],
+            ..Config::default()
+        };
+
+        let cases = [
+            ("td 상태 알려줘", "상태 알려줘"),
+            ("TD야 상태 알려줘", "상태 알려줘"),
+            ("T D, 상태 알려줘", "상태 알려줘"),
+            ("테크 디렉터, 빌드 어때?", "빌드 어때?"),
+            ("테크 디렉터 빌드 어때?", "빌드 어때?"),
+            ("tech-director 작업 시작", "작업 시작"),
+            ("ch td alias 진행해", "진행해"),
+            ("빌드담당에게 테스트는 통과해?", "테스트는 통과해?"),
+        ];
+
+        for (input, remaining) in cases {
+            let routed = resolve_voice_lobby_route(&config, input, None, Instant::now())
+                .unwrap_or_else(|_| panic!("route should not collide for input={input}"));
+            match routed {
+                VoiceLobbyRouteDecision::Routed(route) => {
+                    assert_eq!(route.agent_id, "ch-td", "input={input}");
+                    assert_eq!(route.channel_id, 123, "input={input}");
+                    assert_eq!(route.remaining_transcript, remaining, "input={input}");
+                }
+                other => panic!("expected routed for input={input}, got {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            resolve_voice_lobby_route(&config, "tdx 상태 알려줘", None, Instant::now()).unwrap(),
+            VoiceLobbyRouteDecision::NeedAgent
+        );
+    }
+
+    #[test]
     fn duplicate_aliases_across_agents_are_rejected() {
         let mut a = agent("agent-a", "Alpha", Some("알파"), "100");
         a.keywords.push("공통 별칭".to_string());
@@ -553,6 +658,31 @@ mod tests {
                 channel_id: 123,
                 transcript: "계속 진행해".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn lobby_active_context_expires_after_configured_ttl() {
+        let mut config = Config {
+            agents: vec![agent(
+                "project-agentdesk",
+                "AgentDesk",
+                Some("에이디케이"),
+                "123",
+            )],
+            ..Config::default()
+        };
+        config.voice.active_agent_ttl_seconds = 60;
+        let now = Instant::now();
+        let active = VoiceActiveAgentContext {
+            agent_id: "project-agentdesk".to_string(),
+            channel_id: 123,
+            updated_at: now - Duration::from_secs(61),
+        };
+
+        assert_eq!(
+            resolve_voice_lobby_route(&config, "계속 진행해", Some(&active), now).unwrap(),
+            VoiceLobbyRouteDecision::NeedAgent
         );
     }
 }

@@ -102,7 +102,12 @@ voice:
   # Discord user IDs allowed to invoke voice commands.
   allowed_user_ids:
     - "YOUR_DISCORD_USER_ID"
+  # Single hands-free lobby voice channel. Agent aliases route utterances from here.
+  lobby_channel_id: "YOUR_VOICE_LOBBY_CHANNEL_ID"
+  # Alias-free follow-up window for the last routed lobby agent.
+  active_agent_ttl_seconds: 180
   # Voice channel IDs that should be joined automatically on startup.
+  # The lobby channel is auto-joined automatically when configured.
   auto_join_channel_ids: []
 
 shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
