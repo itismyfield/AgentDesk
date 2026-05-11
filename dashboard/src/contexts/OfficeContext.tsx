@@ -223,13 +223,8 @@ export function OfficeProvider({
           refreshAllAgents();
           refreshOffices();
           break;
-        case "departments_changed":
-          refreshDepartments();
-          refreshAllDepartments();
-          break;
-        case "offices_changed":
-          refreshOffices();
-          break;
+        // #2050 P1 finding 1 — departments_changed / offices_changed had no
+        // server emit path; removed from WSEventType.
         case "dispatched_session_new": {
           const s = event.payload as DispatchedSession;
           setSessions((prev) => [s, ...prev.filter((p) => p.id !== s.id)]);

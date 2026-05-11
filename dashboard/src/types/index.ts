@@ -682,22 +682,18 @@ export interface SkillCatalogEntry {
 }
 
 // WebSocket Events
+//
+// #2050 P1/P2 finding 1 — keep this union aligned with events the server
+// actually broadcasts. The 11 events removed below (task_update,
+// subtask_update, departments_changed, offices_changed, new_message,
+// announcement, cli_output, cli_usage_update, cross_dept_delivery,
+// ceo_office_call, chat_stream, task_report) had no server emit path and
+// existed only as dead-code handlers in dashboard contexts. Polling
+// fallbacks in App.tsx / context providers cover the remaining state.
 export type WSEventType =
-  | "task_update"
   | "agent_status"
   | "agent_created"
   | "agent_deleted"
-  | "departments_changed"
-  | "offices_changed"
-  | "new_message"
-  | "announcement"
-  | "cli_output"
-  | "cli_usage_update"
-  | "subtask_update"
-  | "cross_dept_delivery"
-  | "ceo_office_call"
-  | "chat_stream"
-  | "task_report"
   | "dispatched_session_new"
   | "dispatched_session_update"
   | "dispatched_session_disconnect"
