@@ -270,7 +270,7 @@
 | `server::routes::stats` | `src/server/routes/stats.rs` | 587 |  |
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 303 |  |
 | `server::routes::v1` | `src/server/routes/v1.rs` | 1857 | giant-file |
-| `server::routes::voice_config` | `src/server/routes/voice_config.rs` | 446 |  |
+| `server::routes::voice_config` | `src/server/routes/voice_config.rs` | 461 |  |
 | `server::state` | `src/server/state.rs` | 235 |  |
 | `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 1038 | giant-file |
 | `server::test_phase_runs` | `src/server/test_phase_runs.rs` | 426 |  |
@@ -469,7 +469,7 @@
 | `services::discord::turn_bridge::terminal_delivery` | `src/services/discord/turn_bridge/terminal_delivery.rs` | 202 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1016 | giant-file |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 150 |  |
-| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 1790 | giant-file |
+| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 1783 | giant-file |
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 139 |  |
 | `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 1708 | giant-file |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 255 |  |
