@@ -16,6 +16,7 @@ pub(crate) struct VoiceConfig {
     pub idle: VoiceIdleTimings,
     pub wake_words: Vec<String>,
     pub allowed_user_ids: Vec<String>,
+    pub auto_join_channel_ids: Vec<String>,
 }
 
 impl Default for VoiceConfig {
@@ -28,6 +29,7 @@ impl Default for VoiceConfig {
             idle: VoiceIdleTimings::default(),
             wake_words: vec!["agentdesk".to_string()],
             allowed_user_ids: Vec::new(),
+            auto_join_channel_ids: Vec::new(),
         }
     }
 }
@@ -122,6 +124,7 @@ impl Default for VoiceDbThresholds {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct VoiceIdleTimings {
+    pub segment_idle_ms: u64,
     pub utterance_idle_ms: u64,
     pub channel_idle_disconnect_secs: u64,
     pub wake_listen_window_secs: u64,
@@ -130,7 +133,8 @@ pub(crate) struct VoiceIdleTimings {
 impl Default for VoiceIdleTimings {
     fn default() -> Self {
         Self {
-            utterance_idle_ms: 1_200,
+            segment_idle_ms: 2_200,
+            utterance_idle_ms: 4_500,
             channel_idle_disconnect_secs: 300,
             wake_listen_window_secs: 8,
         }
@@ -147,6 +151,7 @@ mod tests {
 
         assert!(!config.enabled);
         assert!(config.allowed_user_ids.is_empty());
+        assert!(config.auto_join_channel_ids.is_empty());
         assert_eq!(config.wake_words, vec!["agentdesk"]);
         assert_eq!(config.tts.backend, VoiceTtsBackendKind::Edge);
         assert_eq!(
@@ -166,11 +171,14 @@ audio:
 thresholds:
   speech_start_db: -42.5
 idle:
+  segment_idle_ms: 2000
   channel_idle_disconnect_secs: 120
 wake_words:
   - desk
 allowed_user_ids:
   - "343742347365974026"
+auto_join_channel_ids:
+  - "1500000000000000000"
 "#,
         )
         .unwrap();
@@ -189,10 +197,12 @@ allowed_user_ids:
         assert_eq!(config.tts.backend, VoiceTtsBackendKind::Edge);
         assert_eq!(config.tts.edge.command, DEFAULT_EDGE_TTS_COMMAND);
         assert_eq!(config.tts.edge.rate, DEFAULT_EDGE_TTS_RATE);
+        assert_eq!(config.idle.segment_idle_ms, 2_000);
         assert_eq!(config.idle.channel_idle_disconnect_secs, 120);
-        assert_eq!(config.idle.utterance_idle_ms, 1_200);
+        assert_eq!(config.idle.utterance_idle_ms, 4_500);
         assert_eq!(config.wake_words, vec!["desk"]);
         assert_eq!(config.allowed_user_ids, vec!["343742347365974026"]);
+        assert_eq!(config.auto_join_channel_ids, vec!["1500000000000000000"]);
     }
 
     #[test]

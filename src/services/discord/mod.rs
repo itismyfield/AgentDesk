@@ -2757,6 +2757,8 @@ pub(super) struct Data {
     pub(super) shared: Arc<SharedData>,
     pub(super) token: String,
     pub(super) provider: ProviderKind,
+    pub(super) voice_config: crate::voice::VoiceConfig,
+    pub(super) voice_receiver: crate::voice::VoiceReceiver,
 }
 
 pub(super) fn mark_reconcile_complete(shared: &SharedData) {

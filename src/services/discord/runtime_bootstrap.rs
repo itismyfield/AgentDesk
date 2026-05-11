@@ -680,6 +680,7 @@ pub(super) fn discord_gateway_intents() -> serenity::GatewayIntents {
     serenity::GatewayIntents::GUILDS
         | serenity::GatewayIntents::GUILD_MESSAGES
         | serenity::GatewayIntents::GUILD_MESSAGE_REACTIONS
+        | serenity::GatewayIntents::GUILD_VOICE_STATES
         | serenity::GatewayIntents::DIRECT_MESSAGES
         | serenity::GatewayIntents::DIRECT_MESSAGE_REACTIONS
         | serenity::GatewayIntents::MESSAGE_CONTENT
@@ -838,6 +839,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         provider.display_name(),
         skill_count
     );
+
+    let voice_config = crate::config::load_graceful().voice;
+    let voice_receiver = crate::voice::VoiceReceiver::from_voice_config(&voice_config);
 
     // Cleanup stale Discord uploads on process start
     cleanup_old_uploads(UPLOAD_MAX_AGE);
@@ -1129,6 +1133,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     let token_owned = token.to_string();
     let shared_clone = shared.clone();
+    let voice_config_for_setup = voice_config.clone();
+    let voice_receiver_for_setup = voice_receiver.clone();
 
     let mut slash_commands = vec![
         commands::cmd_start(),
@@ -1145,6 +1151,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         commands::cmd_fast(),
         commands::cmd_goals(),
         commands::cmd_adk(),
+        commands::cmd_vc_join(),
+        commands::cmd_vc_leave(),
     ];
     slash_commands.extend([
         commands::cmd_queue(),
@@ -1196,6 +1204,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             let health_registry_for_setup = health_registry.clone();
             let provider_for_setup = provider_for_framework.clone();
             let token_for_ready = token_owned.clone();
+            let voice_config_for_setup = voice_config_for_setup.clone();
+            let voice_receiver_for_setup = voice_receiver_for_setup.clone();
             Box::pin(async move {
                 // Register in each guild for instant slash command propagation
                 // (register_globally can take up to 1 hour)
@@ -1772,10 +1782,28 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     });
                 }
 
+                if voice_config_for_setup.enabled
+                    && !voice_config_for_setup.auto_join_channel_ids.is_empty()
+                {
+                    let ctx_for_voice = ctx.clone();
+                    let receiver_for_voice = voice_receiver_for_setup.clone();
+                    let config_for_voice = voice_config_for_setup.clone();
+                    tokio::spawn(async move {
+                        commands::auto_join_voice_channels(
+                            ctx_for_voice,
+                            receiver_for_voice,
+                            config_for_voice,
+                        )
+                        .await;
+                    });
+                }
+
                 Ok(Data {
                     shared: shared_clone,
                     token: token_owned,
                     provider: provider_for_setup,
+                    voice_config: voice_config_for_setup,
+                    voice_receiver: voice_receiver_for_setup,
                 })
             })
         })
@@ -1783,7 +1811,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     let intents = discord_gateway_intents();
 
-    let mut client = serenity::ClientBuilder::new(token, intents)
+    let mut client = commands::register_songbird(serenity::ClientBuilder::new(token, intents))
         .framework(framework)
         .await
         .expect("Failed to create Discord client");

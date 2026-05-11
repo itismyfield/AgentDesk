@@ -161,6 +161,10 @@ pub(in crate::services::discord) async fn handle_text_command(
     }
 
     match cmd {
+        "!vc" => {
+            super::handle_vc_text_command(ctx, msg, data, arg1).await?;
+            return Ok(true);
+        }
         "!start" => {
             let path_str = if arg1.is_empty() { "." } else { arg1 };
 

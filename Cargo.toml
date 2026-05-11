@@ -22,8 +22,9 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 poise = "0.6"
 
 # Voice
-songbird = { version = "0.4", default-features = false, features = ["gateway", "serenity", "rustls"] }
+songbird = { version = "0.4", default-features = false, features = ["driver", "gateway", "receive", "serenity", "rustls"] }
 hound = "3.5"
+async-trait = "0.1"
 
 # Policy engine (QuickJS)
 rquickjs = { version = "0.9", features = ["bindgen", "classes", "properties", "parallel"] }
