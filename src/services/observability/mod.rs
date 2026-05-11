@@ -2646,12 +2646,22 @@ async fn mark_quality_alert_sent_pg(pool: &PgPool, key: &str, now_ms: i64) -> Re
 /// WHERE`.
 async fn claim_quality_alert_slot_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<bool> {
     let dedupe_ms = QUALITY_ALERT_DEDUPE_MS;
+    // Defensive cast: kv_meta.value is shared by other writers and may hold
+    // non-numeric legacy strings (operator scripts, older code). A raw
+    // `value::bigint` cast would raise `invalid input syntax for type bigint`
+    // and break dedupe entirely for the alert key (#2049 F7 review). Match
+    // `^[0-9]+$` first and treat non-numeric values as "no prior claim" so
+    // the UPDATE proceeds and writes a fresh numeric stamp.
     let claimed = sqlx::query_scalar::<_, i32>(
         "INSERT INTO kv_meta (key, value)
          VALUES ($1, $2)
          ON CONFLICT (key) DO UPDATE
              SET value = EXCLUDED.value
-             WHERE COALESCE(NULLIF(kv_meta.value, '')::bigint, 0) + $3 <= ($2)::bigint
+             WHERE CASE
+                 WHEN kv_meta.value ~ '^[0-9]+$'
+                     THEN kv_meta.value::bigint + $3 <= ($2)::bigint
+                 ELSE TRUE
+             END
          RETURNING 1",
     )
     .bind(key)
