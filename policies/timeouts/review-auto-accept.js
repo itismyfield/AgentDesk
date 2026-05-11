@@ -25,6 +25,7 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
   var requestTurnWatchdogExtension = helpers.requestTurnWatchdogExtension;
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
+  var reviewTuningAggregateRetryKey = "review_tuning:auto_accept_aggregate_retry";
 
   timeouts._section_E = function() {
       // ─── [E] 자동-수용 결정 타임아웃 (suggestion_pending 15분) ──
@@ -43,7 +44,7 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
         "ORDER BY suggestion_pending_at ASC LIMIT 50",
         [eReview]
       );
-      var aggregateNeeded = false;
+      var aggregateNeeded = agentdesk.kv.get(reviewTuningAggregateRetryKey) === "pending";
       for (var s = 0; s < staleSuggestions.length; s++) {
         var sc = staleSuggestions[s];
         if (sc.assigned_agent_id) {
@@ -106,8 +107,12 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
           var aggPort = agentdesk.config.get("server_port");
           if (aggPort) {
             agentdesk.http.post("http://127.0.0.1:" + aggPort + "/api/reviews/tuning/aggregate", {});
+            agentdesk.kv.delete(reviewTuningAggregateRetryKey);
+          } else {
+            agentdesk.kv.set(reviewTuningAggregateRetryKey, "pending");
           }
         } catch (aggErr) {
+          agentdesk.kv.set(reviewTuningAggregateRetryKey, "pending");
           agentdesk.log.warn("[review-tuning] aggregate trigger failed (non-fatal): " + aggErr);
         }
       }

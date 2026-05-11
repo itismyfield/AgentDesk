@@ -225,6 +225,45 @@ test("timeouts review auto-accept triggers tuning aggregate once after batch ins
   assert.deepEqual(state.httpPosts, [
     { url: "http://127.0.0.1:8791/api/reviews/tuning/aggregate", body: {} }
   ]);
+  assert.equal(state.kv.has("review_tuning:auto_accept_aggregate_retry"), false);
+});
+
+test("timeouts review auto-accept retries pending tuning aggregate on later tick", () => {
+  const retryKey = "review_tuning:auto_accept_aggregate_retry";
+  let staleQueryCount = 0;
+  let postCount = 0;
+
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery(sql) {
+      if (sql.includes("review_status = 'suggestion_pending'")) {
+        staleQueryCount += 1;
+        return staleQueryCount === 1
+          ? [{ id: "card-review-1", assigned_agent_id: "agent-review-1", title: "Review card 1" }]
+          : [];
+      }
+      if (sql.includes("SELECT review_round, last_verdict FROM card_review_state")) {
+        return [{ review_round: 2, last_verdict: "changes_requested" }];
+      }
+      if (sql.includes("FROM task_dispatches")) return [];
+      return [];
+    },
+    httpPost() {
+      postCount += 1;
+      if (postCount === 1) throw new Error("temporary API failure");
+      return { ok: true };
+    }
+  });
+
+  policy._section_E();
+
+  assert.equal(state.kv.get(retryKey), "pending");
+  assert.equal(state.httpPosts.length, 1);
+
+  policy._section_E();
+
+  assert.equal(state.kv.has(retryKey), false);
+  assert.equal(state.httpPosts.length, 2);
 });
 
 test("timeouts dispatch maintenance module re-enqueues unnotified pending dispatches", () => {
