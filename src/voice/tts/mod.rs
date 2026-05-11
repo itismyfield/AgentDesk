@@ -1,6 +1,8 @@
 //! Text-to-speech backend abstraction and progress utterance cache.
 
+pub(crate) mod chunks;
 pub(crate) mod edge;
+pub(crate) mod playback;
 
 use crate::voice::config::{VoiceConfig, VoiceTtsBackendKind};
 use anyhow::{Context, Result};

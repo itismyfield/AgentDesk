@@ -13,8 +13,12 @@ use crate::voice::barge_in::{
     BargeInPlayerStop, BargeInSensitivity, BargeInSensitivityState, DeferredBargeInBuffer,
     LiveBargeInCut, LiveBargeInMonitor, ProcessingBargeInDecision, run_sensitivity_ttl_reset,
 };
+use crate::voice::sanitizer::spoken_result_only;
 use crate::voice::stt::SttRuntime;
-use crate::voice::tts::{TtsRuntime, TtsSynthesisKind};
+use crate::voice::tts::{
+    TtsRuntime, TtsSynthesisKind,
+    playback::{DEFAULT_TTS_CHUNK_MAX_CHARS, play_chunked_with_prefetch},
+};
 use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 
 use super::SharedData;
@@ -74,7 +78,7 @@ impl VoiceBargeInRuntime {
         } else {
             None
         };
-        let tts = if config.enabled && config.barge_in.acknowledgement_enabled {
+        let tts = if config.enabled {
             TtsRuntime::from_voice_config(config).ok()
         } else {
             None
@@ -127,7 +131,7 @@ impl VoiceBargeInRuntime {
         control_channel_id: ChannelId,
         guild_id: GuildId,
     ) {
-        if self.enabled {
+        if self.enabled || self.tts.is_some() {
             self.voice_guilds.insert(control_channel_id.get(), guild_id);
         }
     }
@@ -486,6 +490,105 @@ impl VoiceBargeInRuntime {
             path = %path.display(),
             "voice barge-in acknowledgement playback started"
         );
+    }
+
+    pub(in crate::services::discord) async fn spawn_spoken_result_playback(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        answer: &str,
+    ) {
+        let Some(tts) = self.tts.clone() else {
+            return;
+        };
+        let spoken = spoken_result_only(answer, "ko");
+        if spoken.trim().is_empty() {
+            return;
+        }
+
+        let Some(guild_id) = self
+            .voice_guilds
+            .get(&channel_id.get())
+            .map(|entry| *entry.value())
+        else {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                "voice final TTS playback skipped: no registered voice guild"
+            );
+            return;
+        };
+        let Some(ctx) = shared.cached_serenity_ctx.get() else {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                guild_id = guild_id.get(),
+                "voice final TTS playback skipped: no serenity context"
+            );
+            return;
+        };
+        let Some(manager) = songbird::get(ctx).await else {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                guild_id = guild_id.get(),
+                "voice final TTS playback skipped: songbird manager missing"
+            );
+            return;
+        };
+        let Some(call_lock) = manager.get(guild_id) else {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                guild_id = guild_id.get(),
+                "voice final TTS playback skipped: no active songbird call"
+            );
+            return;
+        };
+
+        let runtime = self.clone();
+        let cancellation = CancellationToken::new();
+        let playback_cancellation = cancellation.clone();
+        let register_cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            let runtime_for_track = runtime.clone();
+            let register_track = move |track| {
+                runtime_for_track.reset_after_playback_start(
+                    channel_id,
+                    Arc::new(track),
+                    register_cancellation.clone(),
+                );
+            };
+
+            let result = play_chunked_with_prefetch(
+                call_lock,
+                tts,
+                spoken,
+                DEFAULT_TTS_CHUNK_MAX_CHARS,
+                playback_cancellation,
+                register_track,
+            )
+            .await;
+
+            runtime.clear_playback(channel_id);
+            match result {
+                Ok(report) => {
+                    tracing::info!(
+                        channel_id = channel_id.get(),
+                        guild_id = guild_id.get(),
+                        chunks = report.chunk_count,
+                        played_chunks = report.played_chunks,
+                        first_chunk_synthesis_ms = ?report.first_chunk_synthesis_ms,
+                        first_audio_start_ms = ?report.first_audio_start_ms,
+                        "voice final TTS chunked playback finished"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        channel_id = channel_id.get(),
+                        guild_id = guild_id.get(),
+                        "voice final TTS chunked playback failed"
+                    );
+                }
+            }
+        });
     }
 
     async fn transcribe_completed_utterance(

@@ -3571,6 +3571,7 @@ pub(super) fn spawn_turn_bridge(
                     delivery_response.push_str(warning);
                 }
             }
+            let spoken_delivery_response = delivery_response.clone();
 
             // Headless silent trigger (metadata.silent=true): suppress assistant
             // text delivery entirely. Lifecycle/error/cancel notifications still
@@ -3664,6 +3665,17 @@ pub(super) fn spawn_turn_bridge(
                         }
                     }
                 }
+            }
+
+            if terminal_delivery_committed && !inflight_state.silent_turn {
+                shared_owned
+                    .voice_barge_in
+                    .spawn_spoken_result_playback(
+                        &shared_owned,
+                        channel_id,
+                        &spoken_delivery_response,
+                    )
+                    .await;
             }
 
             if should_complete_work_dispatch_after_terminal_delivery(
