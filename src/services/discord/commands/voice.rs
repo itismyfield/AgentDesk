@@ -501,8 +501,23 @@ async fn leave_voice_channel(
         .leave(guild_id)
         .await
         .with_context(|| format!("failed to leave voice guild {}", guild_id.get()))?;
+    // F2 (#2046): voice_guilds DashMap에서 guild_id에 매핑된 control_channel_id들을
+    // 먼저 모은 다음 unregister한다. 이후 receiver flush는 해당 channel scope으로만 한다 —
+    // 멀티-길드 환경에서 다른 길드의 진행 중인 utterance·SSRC 매핑을 보존한다.
+    let control_channel_ids = data
+        .shared
+        .voice_barge_in
+        .control_channel_ids_for_guild(guild_id);
     data.shared.voice_barge_in.unregister_voice_guild(guild_id);
-    Ok(data.voice_receiver.flush_all().await.len())
+    let mut flushed = 0usize;
+    for cc_id in control_channel_ids {
+        flushed += data
+            .voice_receiver
+            .flush_for_control_channel(cc_id)
+            .await
+            .len();
+    }
+    Ok(flushed)
 }
 
 fn resolve_user_voice_channel(

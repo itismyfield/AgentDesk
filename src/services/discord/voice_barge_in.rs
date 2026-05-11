@@ -397,6 +397,25 @@ impl VoiceBargeInRuntime {
             .retain(|_, registered_guild_id| *registered_guild_id != guild_id);
     }
 
+    /// F2 (#2046): 특정 길드에 매핑된 control_channel_id 목록을 반환.
+    /// `leave_voice_channel` 경로에서 `VoiceReceiver::flush_for_control_channel`을
+    /// 길드 단위로 한정 호출하기 위해 사용한다.
+    pub(in crate::services::discord) fn control_channel_ids_for_guild(
+        &self,
+        guild_id: GuildId,
+    ) -> Vec<u64> {
+        self.voice_guilds
+            .iter()
+            .filter_map(|entry| {
+                if *entry.value() == guild_id {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub(in crate::services::discord) fn spawn_sensitivity_ttl_reset(
         self: &Arc<Self>,
         shutdown_flag: Arc<AtomicBool>,

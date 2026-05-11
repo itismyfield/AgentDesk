@@ -150,6 +150,18 @@ impl VoiceReceiver {
         self.inner.flush_all().await
     }
 
+    /// F2 (#2046): 지정된 control_channel_id 범위로만 utterance를 flush.
+    /// 멀티-길드 환경에서 한 길드 leave가 다른 길드의 진행 중인 utterance/SSRC 매핑을
+    /// 망가뜨리지 않도록 한다.
+    pub(crate) async fn flush_for_control_channel(
+        &self,
+        control_channel_id: u64,
+    ) -> Vec<CompletedUtterance> {
+        self.inner
+            .flush_for_control_channel(control_channel_id)
+            .await
+    }
+
     pub(crate) async fn take_pending(&self) -> Vec<CompletedUtterance> {
         self.inner.take_pending().await
     }
@@ -271,25 +283,73 @@ impl ReceiverState {
             return Ok(false);
         }
 
-        let notify_control_channel_id = {
+        // F3 (#2046): tokio Mutex(`users`)를 잡은 채로 동기 WAV/디스크 I/O를 수행하면
+        // executor 워커 스레드가 차단되고 모든 user의 PCM tick이 직렬화된다.
+        // 짧은 메타데이터 갱신만 락 안에서 처리하고, 실제 WAV writer 생성/샘플 쓰기는
+        // 락을 풀고 spawn_blocking으로 옮긴 뒤 다시 락을 잡아 active를 복귀시킨다.
+        let mut active_opt: Option<ActiveUtterance> = {
             let mut users = self.users.lock().await;
             let user_state = users.entry(user_id).or_default();
-            if user_state.active.is_none() {
-                user_state.active =
-                    Some(self.create_active_utterance(user_id, control_channel_id)?);
-            }
-
-            let active = user_state.active.as_mut().expect("active utterance exists");
-            if active.control_channel_id.is_none() {
-                active.control_channel_id = control_channel_id;
-            }
-            active.ensure_segment_writer()?;
-            active.write_samples(samples)?;
-            let utterance_id = active.utterance_id.clone();
-            let notify_control_channel_id = control_channel_id.or(active.control_channel_id);
-            self.arm_timers(user_id, utterance_id, user_state);
-            notify_control_channel_id
+            user_state.active.take()
         };
+
+        if active_opt.is_none() {
+            // create_active_utterance는 create_dir_all + WavWriter::create(동기 syscall).
+            let receiver = self.clone();
+            active_opt = Some(
+                tokio::task::spawn_blocking(move || {
+                    receiver.create_active_utterance(user_id, control_channel_id)
+                })
+                .await
+                .map_err(|join_err| VoiceReceiverError::CreateDir {
+                    path: PathBuf::new(),
+                    source: std::io::Error::other(format!(
+                        "create_active_utterance blocking task join failed: {join_err}"
+                    )),
+                })??,
+            );
+        }
+
+        let mut active = active_opt.expect("active utterance present");
+        if active.control_channel_id.is_none() {
+            active.control_channel_id = control_channel_id;
+        }
+        let utterance_id = active.utterance_id.clone();
+        let notify_control_channel_id = control_channel_id.or(active.control_channel_id);
+
+        // 디스크 I/O가 발생할 수 있는 ensure_segment_writer + write_samples도 spawn_blocking.
+        let samples_owned: Vec<i16> = samples.to_vec();
+        let io_result = tokio::task::spawn_blocking(move || {
+            active.ensure_segment_writer()?;
+            active.write_samples(&samples_owned)?;
+            Ok::<ActiveUtterance, VoiceReceiverError>(active)
+        })
+        .await
+        .map_err(|join_err| VoiceReceiverError::Wav {
+            path: PathBuf::new(),
+            source: hound::Error::IoError(std::io::Error::other(format!(
+                "voice WAV write blocking task join failed: {join_err}"
+            ))),
+        })?;
+
+        let active = match io_result {
+            Ok(active) => active,
+            Err(err) => {
+                // 디스크 I/O 실패 시 active를 잃지 않도록 복귀하지 않고(이미 동기 함수에서 partial state),
+                // user_state는 깨끗하게 두어 다음 PCM에서 새 utterance가 시작되도록 한다.
+                // 단 timers는 비활성 상태로 유지된다.
+                return Err(err);
+            }
+        };
+
+        // active 복귀 + 타이머 재설정.
+        {
+            let mut users = self.users.lock().await;
+            let user_state = users.entry(user_id).or_default();
+            user_state.active = Some(active);
+            self.arm_timers(user_id, utterance_id, user_state);
+        }
+
         self.notify_pcm(notify_control_channel_id, user_id, samples);
         Ok(true)
     }
@@ -346,7 +406,11 @@ impl ReceiverState {
             return Ok(None);
         };
         let completed = active.finalize()?;
-        self.pending.lock().await.push(completed.clone());
+        // F1 (#2046): hook 기반 단방향 소비 시 pending Vec 누적을 스킵해 메모리 누수 방지.
+        // hook이 없을 때만 폴링(`take_pending`) 경로를 위해 pending에 보관.
+        if self.hook.is_none() {
+            self.pending.lock().await.push(completed.clone());
+        }
         self.notify_utterance_completed(&completed);
         Ok(Some(completed))
     }
@@ -372,7 +436,66 @@ impl ReceiverState {
                 Err(error) => tracing::warn!(error = %error, "failed to flush voice utterance"),
             }
         }
-        if !completed.is_empty() {
+        // F1 (#2046): hook 등록 시 pending에 push하지 않음.
+        if !completed.is_empty() && self.hook.is_none() {
+            self.pending.lock().await.extend(completed.clone());
+        }
+        for utterance in &completed {
+            self.notify_utterance_completed(utterance);
+        }
+        completed
+    }
+
+    /// F2 (#2046): 특정 control_channel_id에 묶인 utterance만 flush.
+    /// 다른 길드/채널의 진행 중인 utterance·SSRC 매핑은 보존된다.
+    async fn flush_for_control_channel(
+        self: &Arc<Self>,
+        control_channel_id: u64,
+    ) -> Vec<CompletedUtterance> {
+        let (active, drained_user_ids) = {
+            let mut users = self.users.lock().await;
+            // active.control_channel_id == 지정한 채널인 사용자만 골라 제거.
+            let matching_user_ids: Vec<u64> = users
+                .iter()
+                .filter_map(|(user_id, state)| {
+                    state.active.as_ref().and_then(|active| {
+                        if active.control_channel_id == Some(control_channel_id) {
+                            Some(*user_id)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect();
+            let mut drained = Vec::new();
+            let mut drained_user_ids: Vec<u64> = Vec::new();
+            for user_id in matching_user_ids {
+                if let Some(mut user_state) = users.remove(&user_id) {
+                    abort_timer(user_state.segment_timer.take());
+                    abort_timer(user_state.utterance_timer.take());
+                    if let Some(active) = user_state.active.take() {
+                        drained.push(active);
+                        drained_user_ids.push(user_id);
+                    }
+                }
+            }
+            (drained, drained_user_ids)
+        };
+
+        if !drained_user_ids.is_empty() {
+            // 해당 user들의 SSRC 매핑만 제거 (다른 길드 SSRC 보존).
+            let mut ssrc_users = self.ssrc_users.write().await;
+            ssrc_users.retain(|_, user_id| !drained_user_ids.contains(user_id));
+        }
+
+        let mut completed = Vec::new();
+        for active in active {
+            match active.finalize() {
+                Ok(utterance) => completed.push(utterance),
+                Err(error) => tracing::warn!(error = %error, "failed to flush voice utterance"),
+            }
+        }
+        if !completed.is_empty() && self.hook.is_none() {
             self.pending.lock().await.extend(completed.clone());
         }
         for utterance in &completed {
