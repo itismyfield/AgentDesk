@@ -43,6 +43,7 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
         "ORDER BY suggestion_pending_at ASC LIMIT 50",
         [eReview]
       );
+      var aggregateTriggered = false;
       for (var s = 0; s < staleSuggestions.length; s++) {
         var sc = staleSuggestions[s];
         if (sc.assigned_agent_id) {
@@ -86,13 +87,16 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
               agentdesk.log.info("[review-tuning] #119 recorded true_positive (auto-accept): card=" + sc.id);
               // #119: Trigger re-aggregation — other outcome paths (Rust) call
               // spawn_aggregate_if_needed directly; from JS we hit the HTTP API.
-              try {
-                var aggPort = agentdesk.config.get("server_port");
-                if (aggPort) {
-                  agentdesk.http.post("http://127.0.0.1:" + aggPort + "/api/reviews/tuning/aggregate", {});
+              if (!aggregateTriggered) {
+                try {
+                  var aggPort = agentdesk.config.get("server_port");
+                  if (aggPort) {
+                    agentdesk.http.post("http://127.0.0.1:" + aggPort + "/api/reviews/tuning/aggregate", {});
+                    aggregateTriggered = true;
+                  }
+                } catch (aggErr) {
+                  agentdesk.log.warn("[review-tuning] aggregate trigger failed (non-fatal): " + aggErr);
                 }
-              } catch (aggErr) {
-                agentdesk.log.warn("[review-tuning] aggregate trigger failed (non-fatal): " + aggErr);
               }
             }
             // #117: sync canonical review state
