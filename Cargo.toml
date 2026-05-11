@@ -22,8 +22,10 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
 poise = "0.6"
 
-# Voice
-songbird = { version = "0.4", default-features = false, features = ["driver", "gateway", "receive", "serenity", "rustls"] }
+# Voice — 0.6.0 (Hoopoe) 부터 Discord DAVE/E2EE 프로토콜 지원. 2026-03-02 이후
+# Discord 가 non-stage voice channel 에 DAVE 강제 (close code 4017). 0.4/0.5
+# 는 거부되므로 0.6+ 필수. MSRV 1.83 (현재 1.94 사용 중 → OK).
+songbird = { version = "0.6", default-features = false, features = ["driver", "gateway", "receive", "serenity", "rustls", "tungstenite"] }
 hound = "3.5"
 async-trait = "0.1"
 

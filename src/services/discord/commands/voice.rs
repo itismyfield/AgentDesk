@@ -658,10 +658,15 @@ fn parse_channel_id_arg(value: &str) -> Result<ChannelId, Error> {
 }
 
 pub(in crate::services::discord) fn songbird_decode_config() -> songbird::Config {
-    songbird::Config::default()
-        .decode_mode(songbird::driver::DecodeMode::Decode)
-        .decode_channels(songbird::driver::Channels::Stereo)
-        .decode_sample_rate(songbird::driver::SampleRate::Hz48000)
+    // songbird 0.6: DecodeMode::Decode is now a tuple variant holding a
+    // DecodeConfig (channels + sample_rate). 0.4 had separate `.decode_channels()`
+    // and `.decode_sample_rate()` builder methods — those were removed.
+    songbird::Config::default().decode_mode(songbird::driver::DecodeMode::Decode(
+        songbird::driver::DecodeConfig::new(
+            songbird::driver::Channels::Stereo,
+            songbird::driver::SampleRate::Hz48000,
+        ),
+    ))
 }
 
 pub(in crate::services::discord) fn register_songbird(
