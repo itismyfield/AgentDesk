@@ -4,11 +4,28 @@ pub(crate) mod edge;
 
 use crate::voice::config::{VoiceConfig, VoiceTtsBackendKind};
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::fs;
+use std::sync::{Arc, OnceLock};
+use tokio::{fs, sync::Mutex};
 use tracing::debug;
 
 pub(crate) use edge::EdgeTtsBackend;
+
+type ProgressCacheLockMap = Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>;
+
+fn progress_cache_locks() -> &'static ProgressCacheLockMap {
+    static LOCKS: OnceLock<ProgressCacheLockMap> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn progress_cache_lock(cache_path: &Path) -> Arc<Mutex<()>> {
+    let mut locks = progress_cache_locks().lock().await;
+    locks
+        .entry(cache_path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TtsSynthesisKind {
@@ -153,6 +170,19 @@ where
         });
     }
 
+    let cache_lock = progress_cache_lock(&cache_path).await;
+    let _cache_guard = cache_lock.lock().await;
+    if is_non_empty_file(&cache_path).await? {
+        debug!(
+            path = %cache_path.display(),
+            "voice progress TTS cache hit after single-flight wait; synthesis skipped"
+        );
+        return Ok(TtsSynthesisOutput {
+            path: cache_path,
+            cache_status: ProgressTtsCacheStatus::Hit,
+        });
+    }
+
     debug!(
         path = %cache_path.display(),
         "voice progress TTS cache miss; running backend"
@@ -166,14 +196,13 @@ where
     let synthesized = backend.synthesize(text, kind).await?;
     ensure_non_empty_file(&synthesized).await?;
     if synthesized != cache_path {
-        fs::copy(&synthesized, &cache_path).await.with_context(|| {
+        copy_to_cache_atomically(&synthesized, &cache_path).await?;
+        fs::remove_file(&synthesized).await.with_context(|| {
             format!(
-                "copy synthesized TTS output {} to cache {}",
-                synthesized.display(),
-                cache_path.display()
+                "remove synthesized TTS temp output {}",
+                synthesized.display()
             )
         })?;
-        let _ = fs::remove_file(&synthesized).await;
     }
     ensure_non_empty_file(&cache_path).await?;
 
@@ -181,6 +210,42 @@ where
         path: cache_path,
         cache_status: ProgressTtsCacheStatus::Miss,
     })
+}
+
+async fn copy_to_cache_atomically(synthesized: &Path, cache_path: &Path) -> Result<()> {
+    let temp_path = cache_write_temp_path(cache_path);
+    let result = async {
+        fs::copy(synthesized, &temp_path).await.with_context(|| {
+            format!(
+                "copy synthesized TTS output {} to cache temp {}",
+                synthesized.display(),
+                temp_path.display()
+            )
+        })?;
+        ensure_non_empty_file(&temp_path).await?;
+        fs::rename(&temp_path, cache_path).await.with_context(|| {
+            format!(
+                "rename TTS cache temp {} to {}",
+                temp_path.display(),
+                cache_path.display()
+            )
+        })?;
+        Ok(())
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path).await;
+    }
+    result
+}
+
+fn cache_write_temp_path(cache_path: &Path) -> PathBuf {
+    let file_name = cache_path
+        .file_name()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| "tts-cache".into());
+    cache_path.with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()))
 }
 
 pub(crate) fn progress_tts_cache_path(
@@ -244,12 +309,14 @@ async fn is_non_empty_file(path: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
+    #[derive(Clone)]
     struct CountingBackend {
         calls: Arc<AtomicUsize>,
         output_dir: PathBuf,
+        delay: Duration,
     }
 
     impl TtsBackend for CountingBackend {
@@ -263,6 +330,9 @@ mod tests {
 
         async fn synthesize(&self, text: &str, _kind: TtsSynthesisKind) -> Result<PathBuf> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
             let path = self.output_dir.join(format!("mock-{call}.mp3"));
             fs::write(&path, format!("audio:{text}:{call}")).await?;
             Ok(path)
@@ -288,6 +358,7 @@ mod tests {
         let backend = CountingBackend {
             calls: calls.clone(),
             output_dir: temp.path().join("tmp"),
+            delay: Duration::ZERO,
         };
         fs::create_dir_all(&backend.output_dir).await.unwrap();
         let cache_dir = temp.path().join("progress-cache");
@@ -313,6 +384,56 @@ mod tests {
         assert_eq!(second.cache_status, ProgressTtsCacheStatus::Hit);
         assert_eq!(first.path, second.path);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !temp.path().join("tmp").join("mock-1.mp3").exists(),
+            "synthesized temp output should be removed after cache write"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_progress_cache_call_singleflights_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = CountingBackend {
+            calls: calls.clone(),
+            output_dir: temp.path().join("tmp"),
+            delay: Duration::from_millis(50),
+        };
+        fs::create_dir_all(&backend.output_dir).await.unwrap();
+        let cache_dir = temp.path().join("progress-cache");
+
+        let backend_a = backend.clone();
+        let cache_dir_a = cache_dir.clone();
+        let first = tokio::spawn(async move {
+            synthesize_with_progress_cache(
+                &backend_a,
+                "동시 진행 안내",
+                TtsSynthesisKind::Progress,
+                &cache_dir_a,
+            )
+            .await
+        });
+        let backend_b = backend.clone();
+        let cache_dir_b = cache_dir.clone();
+        let second = tokio::spawn(async move {
+            synthesize_with_progress_cache(
+                &backend_b,
+                "동시 진행 안내",
+                TtsSynthesisKind::Progress,
+                &cache_dir_b,
+            )
+            .await
+        });
+
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap().unwrap();
+        let second = second.unwrap().unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(first.path, second.path);
+        assert_ne!(first.cache_status, second.cache_status);
+        assert!([first.cache_status, second.cache_status].contains(&ProgressTtsCacheStatus::Miss));
+        assert!([first.cache_status, second.cache_status].contains(&ProgressTtsCacheStatus::Hit));
     }
 
     #[test]

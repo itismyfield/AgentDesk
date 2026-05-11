@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 use tokio::process::Command;
+use tracing::warn;
 
 const DEFAULT_EDGE_TTS_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -108,16 +109,26 @@ impl TtsBackend for EdgeTtsBackend {
                 .with_context(|| format!("create edge-tts temp dir {}", parent.display()))?;
         }
 
-        (self.runner)(invocation.clone())
+        if let Err(error) = (self.runner)(invocation.clone())
             .await
-            .with_context(|| format!("run edge-tts for {} TTS", kind.as_str()))?;
+            .with_context(|| format!("run edge-tts for {} TTS", kind.as_str()))
+        {
+            cleanup_output_path(&invocation.output_path).await;
+            return Err(error);
+        }
 
-        let metadata = fs::metadata(&invocation.output_path)
+        let metadata = match fs::metadata(&invocation.output_path)
             .await
-            .with_context(|| {
-                format!("stat edge-tts output {}", invocation.output_path.display())
-            })?;
+            .with_context(|| format!("stat edge-tts output {}", invocation.output_path.display()))
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                cleanup_output_path(&invocation.output_path).await;
+                return Err(error);
+            }
+        };
         if !metadata.is_file() || metadata.len() == 0 {
+            cleanup_output_path(&invocation.output_path).await;
             bail!(
                 "edge-tts produced empty output: {}",
                 invocation.output_path.display()
@@ -158,6 +169,20 @@ fn subprocess_runner(timeout: Duration) -> EdgeTtsCommandRunner {
             Ok(())
         })
     })
+}
+
+async fn cleanup_output_path(path: &PathBuf) {
+    match fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(
+                path = %path.display(),
+                %error,
+                "failed to remove edge-tts temp output after synthesis failure"
+            );
+        }
+    }
 }
 
 fn preview_output(bytes: &[u8]) -> String {
@@ -242,6 +267,68 @@ mod tests {
         assert!(
             error.to_string().contains("stat edge-tts output"),
             "unexpected error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn edge_backend_removes_partial_output_on_runner_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let seen_path = Arc::new(Mutex::new(None::<PathBuf>));
+        let runner_seen_path = seen_path.clone();
+        let runner: EdgeTtsCommandRunner = Arc::new(move |invocation| {
+            let runner_seen_path = runner_seen_path.clone();
+            Box::pin(async move {
+                fs::write(&invocation.output_path, b"partial").await?;
+                *runner_seen_path.lock().unwrap() = Some(invocation.output_path.clone());
+                anyhow::bail!("mock edge-tts failure")
+            })
+        });
+        let backend = EdgeTtsBackend::with_runner(test_config(temp.path().to_path_buf()), runner);
+
+        let error = backend
+            .synthesize("안녕하세요", TtsSynthesisKind::Progress)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("run edge-tts for progress TTS"),
+            "unexpected error: {error:?}"
+        );
+        let path = seen_path.lock().unwrap().clone().unwrap();
+        assert!(
+            !path.exists(),
+            "partial edge-tts output should be removed on runner failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn edge_backend_removes_empty_output_on_validation_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let seen_path = Arc::new(Mutex::new(None::<PathBuf>));
+        let runner_seen_path = seen_path.clone();
+        let runner: EdgeTtsCommandRunner = Arc::new(move |invocation| {
+            let runner_seen_path = runner_seen_path.clone();
+            Box::pin(async move {
+                fs::write(&invocation.output_path, b"").await?;
+                *runner_seen_path.lock().unwrap() = Some(invocation.output_path.clone());
+                Ok(())
+            })
+        });
+        let backend = EdgeTtsBackend::with_runner(test_config(temp.path().to_path_buf()), runner);
+
+        let error = backend
+            .synthesize("안녕하세요", TtsSynthesisKind::Progress)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("edge-tts produced empty output"),
+            "unexpected error: {error:?}"
+        );
+        let path = seen_path.lock().unwrap().clone().unwrap();
+        assert!(
+            !path.exists(),
+            "empty edge-tts output should be removed on validation failure"
         );
     }
 }
