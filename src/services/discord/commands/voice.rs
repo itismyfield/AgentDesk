@@ -427,10 +427,18 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
     pairings: std::sync::Arc<super::super::voice_routing::VoiceChannelPairingStore>,
 ) {
     if !config.enabled {
+        tracing::info!("voice auto-join skipped: voice.enabled=false");
         return;
     }
 
-    for raw_channel_id in config.auto_join_channel_ids_with_lobby() {
+    let raw_ids: Vec<String> = config.auto_join_channel_ids_with_lobby();
+    tracing::info!(
+        target_count = raw_ids.len(),
+        targets = ?raw_ids,
+        "voice auto-join starting"
+    );
+
+    for raw_channel_id in raw_ids {
         let Ok(channel_id) = raw_channel_id.trim().parse::<u64>().map(ChannelId::new) else {
             tracing::warn!(
                 channel_id = raw_channel_id,
@@ -496,6 +504,12 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
         .await
         {
             Ok(()) => {
+                tracing::info!(
+                    guild_id = guild_channel.guild_id.get(),
+                    channel_id = channel_id.get(),
+                    control_channel_id = control_channel_id.get(),
+                    "voice auto-join Ok: songbird connected, receiver registered"
+                );
                 barge_in.register_voice_context(control_channel_id, guild_channel.guild_id);
             }
             Err(error) => {
