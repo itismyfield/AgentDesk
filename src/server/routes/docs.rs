@@ -2590,7 +2590,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/github/issues/create",
             "github",
-            "Create a GitHub issue with server-enforced PMD markdown format",
+            "Create a GitHub issue with server-enforced issue markdown format",
         )
         .with_params([
             (
@@ -2671,10 +2671,10 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({
                 "repo": "ADK",
                 "title": "create-issue 스킬을 ADK API로 승격",
-                "background": "AgentDesk 내부에서 PMD 포맷 이슈를 서버 API로 직접 생성해야 한다.",
+                "background": "AgentDesk 내부에서 issue 포맷을 서버 API로 직접 생성해야 한다.",
                 "content": [
                     "POST /api/github/issues/create 엔드포인트를 추가한다.",
-                    "서버에서 PMD 마크다운 포맷을 강제한다."
+                    "서버에서 issue 마크다운 포맷을 강제한다."
                 ],
                 "dod": [
                     "성공 시 GitHub issue URL을 반환한다",
@@ -2689,6 +2689,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "repo": "itismyfield/AgentDesk"
                 },
                 "applied_labels": ["agent:adk-backend"],
+                "issue_format_version": 1,
                 "pmd_format_version": 1
             }),
         )

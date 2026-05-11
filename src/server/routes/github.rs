@@ -45,7 +45,7 @@ pub struct CreateIssueBody {
     pub announcement_channel_id: Option<String>,
 }
 
-const PMD_FORMAT_VERSION: u32 = 1;
+const ISSUE_FORMAT_VERSION: u32 = 1;
 
 fn trim_non_empty(value: &str) -> Option<String> {
     let trimmed = value.trim();
@@ -301,7 +301,9 @@ pub async fn create_issue(
                                 "kanban_card_id": serde_json::Value::Null,
                                 "kanban_card_sync_error": error,
                                 "applied_labels": applied_labels,
-                                "pmd_format_version": PMD_FORMAT_VERSION,
+                                "issue_format_version": ISSUE_FORMAT_VERSION,
+                                // deprecated alias kept for transition; remove after clients migrate
+                                "pmd_format_version": ISSUE_FORMAT_VERSION,
                             })),
                         );
                     }
@@ -422,7 +424,9 @@ pub async fn create_issue(
                     "announcement_message_id": announcement_message_id,
                     "announcement_sync_error": announcement_sync_error,
                     "applied_labels": applied_labels,
-                    "pmd_format_version": PMD_FORMAT_VERSION,
+                    "issue_format_version": ISSUE_FORMAT_VERSION,
+                    // deprecated alias kept for transition; remove after clients migrate
+                    "pmd_format_version": ISSUE_FORMAT_VERSION,
                 })),
             )
         }

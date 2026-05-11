@@ -9879,6 +9879,8 @@ async fn create_issue_route_pg_builds_pmd_body_and_agent_label() {
         .to_string();
     assert!(json["kanban_card_sync_error"].is_null());
     assert_eq!(json["applied_labels"], json!(["agent:adk-backend"]));
+    assert_eq!(json["issue_format_version"], 1);
+    // deprecated alias kept for transition; verify both fields are emitted
     assert_eq!(json["pmd_format_version"], 1);
 
     let row: (
