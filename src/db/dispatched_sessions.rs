@@ -314,6 +314,62 @@ pub(crate) async fn create_retry_dispatch_pg(
     Ok(dispatch_id)
 }
 
+/// #2036 Surface 1+2: format a fresh dispatch-type label that the API response
+/// can substitute for the (possibly stale) `sessions.session_info` value. The
+/// session_info column lags behind same-thread dispatch transitions because it
+/// is only refreshed once codex receives the new dispatch prompt and emits its
+/// first message — during the queue-pending window between `task_dispatches`
+/// status flipping to `dispatched` and the bridge actually delivering the
+/// prompt, the row still reflects the *previous* dispatch.
+fn dispatch_type_label_for_session_info(dispatch_type: Option<&str>) -> String {
+    let kind = match dispatch_type {
+        Some("implementation") => "구현",
+        Some("review") => "리뷰",
+        Some("rework") => "리워크",
+        Some("review-decision") => "리뷰 검토",
+        Some("pm-decision") => "PM 판단",
+        Some("e2e-test") => "E2E 테스트",
+        Some("consultation") => "상담",
+        Some("phase-gate") => "phase-gate",
+        Some(other) => return format!("{other} dispatch"),
+        None => return "dispatch".to_string(),
+    };
+    format!("{kind} dispatch")
+}
+
+/// #2036 Surface 2: collapse `(task_dispatches.status, sessions.status,
+/// last_heartbeat, dispatch_delivery_events.sent_at)` into one of three
+/// observable sub-states so the API consumer can tell apart "bridge is still
+/// holding the prompt for an earlier turn" from "codex has the prompt and is
+/// actively processing it" from terminal states. Backward-compat: callers that
+/// only inspect the legacy `status` field see the same value as before.
+fn classify_delivery_state(
+    td_status: Option<&str>,
+    session_is_working: bool,
+    sent_at_is_set: bool,
+) -> &'static str {
+    match td_status.map(str::to_ascii_lowercase).as_deref() {
+        Some("completed") => "completed",
+        Some("failed") => "failed",
+        Some("cancelled") => "cancelled",
+        Some("dispatched") | Some("in_progress") => {
+            // sessions.is_working is the strongest "codex actually running"
+            // signal: it folds tmux liveness + recent heartbeat. The dispatch
+            // delivery event 'sent' timestamp is a secondary signal that the
+            // dispatch message at least made it onto the Discord channel.
+            if session_is_working {
+                "codex_active"
+            } else if sent_at_is_set {
+                "delivered"
+            } else {
+                "queued"
+            }
+        }
+        Some("pending") => "queued",
+        _ => "unknown",
+    }
+}
+
 pub(crate) async fn list_dispatched_sessions_pg(
     pool: &PgPool,
     include_all: bool,
@@ -341,6 +397,10 @@ pub(crate) async fn list_dispatched_sessions_pg(
             d.color AS department_color,
             s.thread_channel_id,
             td.thread_id AS dispatch_thread_id,
+            td.dispatch_type AS dispatch_type,
+            td.status AS dispatch_row_status,
+            td.created_at AS dispatch_created_at,
+            sent_evt.sent_at AS dispatch_sent_at,
             aqe.id AS auto_queue_entry_id,
             aqe.run_id AS auto_queue_run_id,
             aqe.slot_index::BIGINT AS auto_queue_slot_index,
@@ -349,6 +409,11 @@ pub(crate) async fn list_dispatched_sessions_pg(
          LEFT JOIN agents a ON s.agent_id = a.id
          LEFT JOIN departments d ON a.department = d.id
          LEFT JOIN task_dispatches td ON td.id = s.active_dispatch_id
+         LEFT JOIN LATERAL (
+            SELECT MIN(created_at) AS sent_at
+            FROM dispatch_delivery_events
+            WHERE dispatch_id = s.active_dispatch_id AND status = 'sent'
+         ) sent_evt ON TRUE
          LEFT JOIN LATERAL (
             SELECT id, run_id, slot_index, thread_group
             FROM auto_queue_entries
@@ -380,6 +445,10 @@ pub(crate) async fn list_dispatched_sessions_pg(
             d.color AS department_color,
             s.thread_channel_id,
             td.thread_id AS dispatch_thread_id,
+            td.dispatch_type AS dispatch_type,
+            td.status AS dispatch_row_status,
+            td.created_at AS dispatch_created_at,
+            sent_evt.sent_at AS dispatch_sent_at,
             aqe.id AS auto_queue_entry_id,
             aqe.run_id AS auto_queue_run_id,
             aqe.slot_index::BIGINT AS auto_queue_slot_index,
@@ -388,6 +457,11 @@ pub(crate) async fn list_dispatched_sessions_pg(
          LEFT JOIN agents a ON s.agent_id = a.id
          LEFT JOIN departments d ON a.department = d.id
          LEFT JOIN task_dispatches td ON td.id = s.active_dispatch_id
+         LEFT JOIN LATERAL (
+            SELECT MIN(created_at) AS sent_at
+            FROM dispatch_delivery_events
+            WHERE dispatch_id = s.active_dispatch_id AND status = 'sent'
+         ) sent_evt ON TRUE
          LEFT JOIN LATERAL (
             SELECT id, run_id, slot_index, thread_group
             FROM auto_queue_entries
@@ -478,6 +552,26 @@ pub(crate) async fn list_dispatched_sessions_pg(
             row.try_get("dispatch_thread_id").map_err(|error| {
                 format!("decode postgres dispatch_thread_id for session {id}: {error}")
             })?;
+        // #2036 Surface 1: dispatch_type, dispatch_row_status, dispatch_created_at
+        // are joined from the *currently linked* task_dispatches row, so the API
+        // response can substitute a fresh `── <type> dispatch ──`-shaped label
+        // instead of trusting the (possibly stale) sessions.session_info column.
+        let dispatch_type: Option<String> =
+            row.try_get("dispatch_type").map_err(|error| {
+                format!("decode postgres dispatch_type for session {id}: {error}")
+            })?;
+        let dispatch_row_status: Option<String> =
+            row.try_get("dispatch_row_status").map_err(|error| {
+                format!("decode postgres dispatch_row_status for session {id}: {error}")
+            })?;
+        let dispatch_created_at: Option<chrono::DateTime<chrono::Utc>> =
+            row.try_get("dispatch_created_at").map_err(|error| {
+                format!("decode postgres dispatch_created_at for session {id}: {error}")
+            })?;
+        let dispatch_sent_at: Option<chrono::DateTime<chrono::Utc>> =
+            row.try_get("dispatch_sent_at").map_err(|error| {
+                format!("decode postgres dispatch_sent_at for session {id}: {error}")
+            })?;
         let auto_queue_entry_id: Option<String> =
             row.try_get("auto_queue_entry_id").map_err(|error| {
                 format!("decode postgres auto_queue_entry_id for session {id}: {error}")
@@ -516,6 +610,53 @@ pub(crate) async fn list_dispatched_sessions_pg(
             continue;
         }
 
+        // #2036 Surface 1: when an active dispatch is linked, derive the
+        // session_info label from task_dispatches.dispatch_type instead of
+        // trusting the cached sessions.session_info string. The cached value
+        // only refreshes once codex receives the new dispatch prompt and emits
+        // its first reply, which leaves the row showing the *previous*
+        // dispatch's `── <type> dispatch ──` header for the entire
+        // queue-pending window after a same-thread phase-gate → impl handoff.
+        //
+        // We only override when the cached label clearly belongs to a
+        // different dispatch_type — i.e. it starts with `── ` (the dispatch
+        // decorator) but the type token in it does not match the live
+        // dispatch_type. Free-form `<repo> 작업 진행 중`-style summaries
+        // produced by `derive_adk_session_info` are preserved untouched.
+        let active_dispatch_present = effective.active_dispatch_id.is_some();
+        let dispatch_type_label = active_dispatch_present
+            .then(|| dispatch_type_label_for_session_info(dispatch_type.as_deref()));
+        let session_info_effective: Option<String> = match (
+            active_dispatch_present,
+            dispatch_type.as_deref(),
+            session_info.as_deref(),
+        ) {
+            (true, Some(td_type), Some(existing))
+                if existing.trim_start().starts_with("── ")
+                    && !existing.contains(&format!("── {td_type} dispatch ──")) =>
+            {
+                dispatch_type_label.map(|label| format!("── {label} ──"))
+            }
+            (true, Some(_), None) => dispatch_type_label.map(|label| format!("── {label} ──")),
+            _ => session_info.clone(),
+        };
+
+        // #2036 Surface 2: collapse the (task_dispatches.status,
+        // sessions.is_working, sent_at) tuple into a single `delivery_state`
+        // field so callers can tell apart bridge-queue-pending from
+        // codex-actively-running without re-deriving the join themselves.
+        let delivery_state = if active_dispatch_present {
+            classify_delivery_state(
+                dispatch_row_status.as_deref(),
+                effective.is_working,
+                dispatch_sent_at.is_some(),
+            )
+        } else {
+            "none"
+        };
+        let dispatch_created_at_iso = dispatch_created_at.map(|value| value.to_rfc3339());
+        let dispatch_sent_at_iso = dispatch_sent_at.map(|value| value.to_rfc3339());
+
         sessions.push(json!({
             "id": id.to_string(),
             "session_key": session_key,
@@ -528,7 +669,13 @@ pub(crate) async fn list_dispatched_sessions_pg(
             "tokens": tokens,
             "cwd": cwd,
             "last_heartbeat": last_heartbeat,
-            "session_info": session_info,
+            "session_info": session_info_effective,
+            "session_info_raw": session_info,
+            "dispatch_type": dispatch_type,
+            "dispatch_row_status": dispatch_row_status,
+            "delivery_state": delivery_state,
+            "dispatch_created_at": dispatch_created_at_iso,
+            "dispatch_sent_at": dispatch_sent_at_iso,
             "linked_agent_id": agent_id,
             "last_seen_at": last_heartbeat,
             "name": session_key,
@@ -588,6 +735,98 @@ mod recovery_identifier_tests {
             None
         );
         assert_eq!(tmux_session_name_from_session_key(Some("host:   ")), None);
+    }
+}
+
+#[cfg(test)]
+mod dispatch_surface_tests {
+    use super::{classify_delivery_state, dispatch_type_label_for_session_info};
+
+    // #2036 Surface 1: label resolver derives the dispatch decorator string
+    // straight from task_dispatches.dispatch_type so a same-thread
+    // phase-gate → implementation transition does not show a stale label.
+    #[test]
+    fn dispatch_type_label_covers_known_types() {
+        assert_eq!(
+            dispatch_type_label_for_session_info(Some("implementation")),
+            "구현 dispatch"
+        );
+        assert_eq!(
+            dispatch_type_label_for_session_info(Some("phase-gate")),
+            "phase-gate dispatch"
+        );
+        assert_eq!(
+            dispatch_type_label_for_session_info(Some("review")),
+            "리뷰 dispatch"
+        );
+        assert_eq!(
+            dispatch_type_label_for_session_info(Some("review-decision")),
+            "리뷰 검토 dispatch"
+        );
+        assert_eq!(dispatch_type_label_for_session_info(None), "dispatch");
+    }
+
+    // #2036 Surface 2: delivery_state collapses bridge-queue-pending vs
+    // codex-actively-running into a single API field.
+    #[test]
+    fn delivery_state_dispatched_and_working_is_codex_active() {
+        assert_eq!(
+            classify_delivery_state(Some("dispatched"), true, true),
+            "codex_active"
+        );
+        assert_eq!(
+            classify_delivery_state(Some("in_progress"), true, false),
+            "codex_active"
+        );
+    }
+
+    #[test]
+    fn delivery_state_dispatched_not_working_with_sent_event_is_delivered() {
+        assert_eq!(
+            classify_delivery_state(Some("dispatched"), false, true),
+            "delivered"
+        );
+    }
+
+    #[test]
+    fn delivery_state_dispatched_not_working_no_sent_event_is_queued() {
+        assert_eq!(
+            classify_delivery_state(Some("dispatched"), false, false),
+            "queued"
+        );
+        assert_eq!(
+            classify_delivery_state(Some("pending"), false, false),
+            "queued"
+        );
+    }
+
+    #[test]
+    fn delivery_state_terminal_statuses_pass_through() {
+        assert_eq!(
+            classify_delivery_state(Some("completed"), false, true),
+            "completed"
+        );
+        assert_eq!(
+            classify_delivery_state(Some("failed"), false, false),
+            "failed"
+        );
+        assert_eq!(
+            classify_delivery_state(Some("cancelled"), false, false),
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn delivery_state_uppercase_status_is_normalized() {
+        // Defensive: callers occasionally write status values uppercase.
+        assert_eq!(
+            classify_delivery_state(Some("DISPATCHED"), true, false),
+            "codex_active"
+        );
+        assert_eq!(
+            classify_delivery_state(Some("Completed"), false, false),
+            "completed"
+        );
     }
 }
 

@@ -3252,13 +3252,21 @@ pub(in crate::services::discord) async fn handle_text_message(
         // ✅ done. Round-9: enqueue already happened above; the reaction
         // safely reflects the actual queue state.
         //
-        // Known residual race: if the active turn finishes between this
-        // enqueue and the `add_reaction` await below, the dequeue path's
-        // 📬 cleanup can run before our add lands and leave the icon stuck
-        // on a turn that has already started — strictly less severe than
-        // the pre-PR regression of never showing 📬 at all, and benign in
-        // the user-reported scenario (long-running tool-call hang, where
-        // the active turn does not finish for many seconds).
+        // #2036 Surface 3 fix: previously, if the active turn finished
+        // between this enqueue and the `add_reaction` await below, the
+        // dequeue path's 📬 cleanup could run before our add landed and
+        // leave the icon stuck on a turn that had already started. The
+        // user-reported case (run 767447c8): dispatch message lands on a
+        // channel whose previous turn is wrapping up, so the message gets
+        // queued and reacted with 📬; the bridge then promotes it before
+        // the add_reaction await resolves, and the leftover 📬 lies about
+        // codex still being queue-pending while codex is in fact already
+        // responding to the dispatch. Round-12 fix: after the
+        // `add_reaction` await resolves, re-check whether our message is
+        // still in the queue. If the queued_placeholder mapping has been
+        // consumed (i.e. dispatch already promoted us into an active
+        // turn), strip the just-added queue-pending emoji so the visual
+        // state matches reality.
         if !is_thread_routed && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
         {
             // #1190 follow-up: merged messages get ➕ so the user can tell
@@ -3269,6 +3277,24 @@ pub(in crate::services::discord) async fn handle_text_message(
                 '📬'
             };
             add_reaction(http, channel_id, user_msg_id, emoji).await;
+            // #2036 Surface 3: detect queue→start races where the
+            // dispatch path consumed our mapping before this reaction
+            // landed and proactively unstick the emoji.
+            if !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id) {
+                super::super::formatting::remove_reaction_raw(
+                    http,
+                    channel_id,
+                    user_msg_id,
+                    emoji,
+                )
+                .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔁 RACE: queue-pending {emoji} reacted after dequeue promotion (channel {}, msg {}); removed stale reaction",
+                    channel_id,
+                    user_msg_id
+                );
+            }
         }
         // #796: Background-trigger turns (notify-bot driven, info-only) must
         // NOT have their placeholder deleted on race-loss. The placeholder is
