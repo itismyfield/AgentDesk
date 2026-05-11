@@ -167,8 +167,23 @@ fn load_voice_config_response() -> Result<VoiceConfigResponse, VoiceConfigError>
 fn load_editable_config() -> Result<(Config, PathBuf, bool), VoiceConfigError> {
     let root = crate::config::runtime_root()
         .ok_or_else(|| VoiceConfigError::Internal("runtime root unavailable".to_string()))?;
-    crate::services::discord::agentdesk_config::load_agent_setup_config(&root)
-        .map_err(VoiceConfigError::Internal)
+    for path in [
+        crate::runtime_layout::config_file_path(&root),
+        crate::runtime_layout::legacy_config_file_path(&root),
+    ] {
+        if path.is_file() {
+            let config = crate::config::load_from_path(&path).map_err(|error| {
+                VoiceConfigError::Internal(format!("load '{}': {error}", path.display()))
+            })?;
+            return Ok((config, path, true));
+        }
+    }
+
+    Ok((
+        Config::default(),
+        crate::runtime_layout::config_file_path(&root),
+        false,
+    ))
 }
 
 fn apply_voice_config_body(

@@ -607,10 +607,7 @@ impl VoiceBargeInRuntime {
         }
 
         super::rate_limit_wait(shared, channel_id).await;
-        if let Err(error) = channel_id
-            .send_message(&http, serenity::CreateMessage::new().content(content))
-            .await
-        {
+        if let Err(error) = super::http::send_channel_message(&http, channel_id, &content).await {
             tracing::warn!(
                 error = %error,
                 channel_id = channel_id.get(),
@@ -1040,12 +1037,8 @@ impl VoiceBargeInRuntime {
             return;
         };
         super::rate_limit_wait(shared, channel_id).await;
-        if let Err(error) = channel_id
-            .send_message(
-                &http,
-                serenity::CreateMessage::new().content("어느 에이전트?"),
-            )
-            .await
+        if let Err(error) =
+            super::http::send_channel_message(&http, channel_id, "어느 에이전트?").await
         {
             tracing::warn!(
                 error = %error,

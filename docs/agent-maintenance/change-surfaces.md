@@ -131,6 +131,9 @@
   - `src/services/discord/prompt_builder.rs` (2114 lines).
   - `src/services/discord/runtime_bootstrap.rs` (2844 lines).
   - `src/services/discord/session_runtime.rs` (1887 lines).
+  - `src/services/discord/voice_barge_in.rs` (1783 lines; voice STT/TTS,
+    lobby routing, progress mirroring, and barge-in orchestration surface;
+    split before adding non-bugfix behavior).
   - `src/services/discord/commands/config.rs` (1877 lines).
   - `src/services/discord/commands/inspect.rs` (1058 lines, post-#1701
     context-view manifest binding pushed it past the giant-file threshold).
