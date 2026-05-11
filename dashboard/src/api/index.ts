@@ -114,7 +114,16 @@ export {
   getCardAuditLog,
   getCardGitHubComments,
   onApiError,
+  ApiRequestError,
   VoiceConfigApiError,
+  // #2050 P3 finding 16 — surface helpers some components were importing
+  // from "../api/client" directly. Re-exporting here lets the dashboard
+  // converge on a single import path.
+  getRoundTableMeetingChannels,
+  discardRoundTableIssue,
+  discardAllRoundTableIssues,
+  resetGlobalAutoQueue,
+  getHomeKpiTrends,
 } from "./client";
 
 export type {
@@ -184,20 +193,26 @@ export type {
   PhaseGateInfo,
   VoiceConfigPutBody,
   VoiceConfigResponse,
+  // #2050 P3 finding 16 — type companions to getHomeKpiTrends.
+  HomeKpiTrendsResponse,
+  HomeKpiSeries,
+  HomeKpiRateLimit,
+  HomeKpiRateLimitProvider,
 } from "./client";
 
 // ── Error type guard ──
+// #2050 P2 finding 9 — defer to the real ApiRequestError class. The previous
+// guard tested for a `code` field the thrown Error never had, so it was dead
+// code. Now treats `instanceof ApiRequestError` *or* any error-like with a
+// `string` code as a match (the latter for HMR-boundary safety).
+import { ApiRequestError as ApiRequestErrorClass } from "./client";
 
-interface ApiRequestError {
-  code: string;
-  message?: string;
-}
-
-export function isApiRequestError(e: unknown): e is ApiRequestError {
+export function isApiRequestError(e: unknown): e is ApiRequestErrorClass {
+  if (e instanceof ApiRequestErrorClass) return true;
   return (
     typeof e === "object" &&
     e !== null &&
     "code" in e &&
-    typeof (e as ApiRequestError).code === "string"
+    typeof (e as { code: unknown }).code === "string"
   );
 }
