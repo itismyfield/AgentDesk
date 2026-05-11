@@ -49,6 +49,18 @@ voice:
     tts_cache_dir: "~/.adk/voice/tts-cache"
     # Directory for short-lived conversion and buffering files.
     temp_dir: "~/.adk/voice/tmp"
+  tts:
+    # TTS backend selector. Currently supported: edge.
+    backend: edge
+    # Stable cache for short progress utterances.
+    progress_cache_dir: ".cache/voice-tts-progress"
+    edge:
+      # edge-tts executable name or absolute path.
+      command: "edge-tts"
+      # Korean default voice used for AgentDesk spoken responses.
+      voice: "ko-KR-SunHiNeural"
+      # edge-tts rate argument, e.g. +0%, -10%, +15%.
+      rate: "+0%"
   thresholds:
     # dBFS threshold that marks the start of speech.
     speech_start_db: -45.0

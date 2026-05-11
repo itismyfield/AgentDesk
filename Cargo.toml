@@ -60,6 +60,7 @@ regex = "1"
 
 # From RCC — crypto/encoding
 base64 = "0.22"
+blake3 = "1"
 
 # From RCC — concurrency
 dashmap = "6"
