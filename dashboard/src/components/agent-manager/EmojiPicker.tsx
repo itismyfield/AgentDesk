@@ -60,11 +60,16 @@ export default function EmojiPicker({
         onClick={() => setOpen(!open)}
         className={`${btnSize} rounded-lg border flex items-center justify-center transition-all hover:scale-105 hover:shadow-md`}
         style={{ background: "var(--th-input-bg)", borderColor: "var(--th-input-border)" }}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={value ? `Change emoji (current: ${value})` : "Open emoji picker"}
       >
         {value || "❓"}
       </button>
       {open && (
         <div
+          role="dialog"
+          aria-label="Choose an emoji"
           className="absolute z-[60] top-full mt-1 left-0 rounded-xl shadow-2xl p-3 w-72 max-h-[60vh] overflow-y-auto overscroll-contain"
           style={{
             background:
@@ -97,6 +102,7 @@ export default function EmojiPicker({
                         ? "rgba(59,130,246,0.15)"
                         : "transparent",
                     }}
+                    aria-label={emoji}
                   >
                     {emoji}
                   </button>
