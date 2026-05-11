@@ -194,6 +194,39 @@ test("timeouts review auto-accept module creates rework dispatches before transi
   ]);
 });
 
+test("timeouts review auto-accept triggers tuning aggregate once after batch inserts", () => {
+  const staleCards = [
+    { id: "card-review-1", assigned_agent_id: "agent-review-1", title: "Review card 1" },
+    { id: "card-review-2", assigned_agent_id: "agent-review-2", title: "Review card 2" }
+  ];
+
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery(sql) {
+      if (sql.includes("review_status = 'suggestion_pending'")) return staleCards;
+      if (sql.includes("SELECT review_round, last_verdict FROM card_review_state")) {
+        return [{ review_round: 2, last_verdict: "changes_requested" }];
+      }
+      if (sql.includes("FROM task_dispatches")) return [];
+      return [];
+    },
+    httpPost(url, body, currentState) {
+      assert.equal(currentState.executions.length, 2);
+      return { ok: true };
+    }
+  });
+
+  policy._section_E();
+
+  const outcomeInserts = state.executions.filter((execution) =>
+    execution.sql.includes("INSERT INTO review_tuning_outcomes")
+  );
+  assert.equal(outcomeInserts.length, 2);
+  assert.deepEqual(state.httpPosts, [
+    { url: "http://127.0.0.1:8791/api/reviews/tuning/aggregate", body: {} }
+  ]);
+});
+
 test("timeouts dispatch maintenance module re-enqueues unnotified pending dispatches", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     dbQuery: createSqlRouter([
