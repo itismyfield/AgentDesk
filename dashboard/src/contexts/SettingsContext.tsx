@@ -53,7 +53,8 @@ export function SettingsProvider({ initialSettings, initialStats, children }: Se
     refreshStats();
   }, [refreshStats]);
 
-  // WS events that affect stats
+  // #2050 P2 finding 6 — debounce kanban_card_* refresh.
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     function handleWs(e: Event) {
       const event = (e as CustomEvent<WSEvent>).detail;
@@ -61,12 +62,22 @@ export function SettingsProvider({ initialSettings, initialStats, children }: Se
         case "kanban_card_created":
         case "kanban_card_updated":
         case "kanban_card_deleted":
-          refreshStats();
+          if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+          debounceTimerRef.current = setTimeout(() => {
+            debounceTimerRef.current = null;
+            refreshStats();
+          }, 350);
           break;
       }
     }
     window.addEventListener("pcd-ws-event", handleWs);
-    return () => window.removeEventListener("pcd-ws-event", handleWs);
+    return () => {
+      window.removeEventListener("pcd-ws-event", handleWs);
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+    };
   }, [refreshStats]);
 
   const isKo = settings.language === "ko";
