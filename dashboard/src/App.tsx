@@ -50,11 +50,17 @@ export default function App() {
   useEffect(() => {
     const lastFired = new Map<string, number>();
     onApiError((url, error) => {
+      // #2050 P3 finding 23 — normalize throttle key to endpoint without
+      // query so the same base path under different filters shares a
+      // throttle slot. Previously /api/dispatches?status=A and
+      // /api/dispatches?status=B were independent keys, allowing a single
+      // server outage to flood the toast stack.
       const apiPath = url.replace(/^\/api\//, "");
+      const throttleKey = url.replace(/\?.*$/, "");
       const now = Date.now();
-      const last = lastFired.get(url) ?? 0;
+      const last = lastFired.get(throttleKey) ?? 0;
       if (now - last < 3000) return;
-      lastFired.set(url, now);
+      lastFired.set(throttleKey, now);
       pushNotification(`API error: ${apiPath} - ${error.message}`, "error");
     });
     return () => onApiError(null);

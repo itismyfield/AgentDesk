@@ -244,8 +244,14 @@ async fn handle_socket(socket: WebSocket, tx: BroadcastTx, last_event_id: Option
                         Err(_) => break,
                     }
                 }
-                // Send ping every 30s to keep alive
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                // Send ping every 5s — #2050 P3 finding 21. The previous
+                // 30s tick let `send_task` linger up to 30s after a client
+                // disconnect before the next failed write tripped `break`.
+                // Under rapid HMR / large reconnect storms that produced
+                // pile-ups of stale tasks. 5s gives the loop a chance to
+                // observe broadcast errors and exit promptly while still
+                // being conservative on bandwidth.
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
                     if sender.send(Message::Ping(vec![].into())).await.is_err() {
                         break;
                     }
