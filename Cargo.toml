@@ -13,6 +13,7 @@ legacy-sqlite-tests = ["dep:sqlite_test"]
 axum = { version = "0.8", features = ["ws", "macros"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 
 # Database
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros", "chrono", "json", "uuid"] }

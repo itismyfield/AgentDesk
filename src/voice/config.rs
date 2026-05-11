@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::voice::barge_in::BargeInSensitivity;
+
 pub(crate) const DEFAULT_PROGRESS_TTS_CACHE_DIR: &str = ".cache/voice-tts-progress";
 pub(crate) const DEFAULT_EDGE_TTS_COMMAND: &str = "edge-tts";
 pub(crate) const DEFAULT_EDGE_TTS_VOICE: &str = "ko-KR-SunHiNeural";
 pub(crate) const DEFAULT_EDGE_TTS_RATE: &str = "+0%";
+pub(crate) const DEFAULT_BARGE_IN_ACKNOWLEDGEMENT: &str =
+    "그동안 말씀하신 거 같이 정리해서 작업할게요.";
+pub(crate) const DEFAULT_BARGE_IN_TTL_SECS: u64 = 15 * 60;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -14,6 +19,7 @@ pub(crate) struct VoiceConfig {
     pub tts: VoiceTtsConfig,
     pub thresholds: VoiceDbThresholds,
     pub idle: VoiceIdleTimings,
+    pub barge_in: VoiceBargeInConfig,
     pub wake_words: Vec<String>,
     pub allowed_user_ids: Vec<String>,
     pub auto_join_channel_ids: Vec<String>,
@@ -27,6 +33,7 @@ impl Default for VoiceConfig {
             tts: VoiceTtsConfig::default(),
             thresholds: VoiceDbThresholds::default(),
             idle: VoiceIdleTimings::default(),
+            barge_in: VoiceBargeInConfig::default(),
             wake_words: vec!["agentdesk".to_string()],
             allowed_user_ids: Vec::new(),
             auto_join_channel_ids: Vec::new(),
@@ -103,6 +110,28 @@ impl Default for VoiceAudioDirs {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct VoiceBargeInConfig {
+    pub enabled: bool,
+    pub sensitivity: BargeInSensitivity,
+    pub conservative_ttl_secs: u64,
+    pub acknowledgement_enabled: bool,
+    pub acknowledgement_text: String,
+}
+
+impl Default for VoiceBargeInConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sensitivity: BargeInSensitivity::Normal,
+            conservative_ttl_secs: DEFAULT_BARGE_IN_TTL_SECS,
+            acknowledgement_enabled: true,
+            acknowledgement_text: DEFAULT_BARGE_IN_ACKNOWLEDGEMENT.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub(crate) struct VoiceDbThresholds {
@@ -159,6 +188,13 @@ mod tests {
             PathBuf::from(DEFAULT_PROGRESS_TTS_CACHE_DIR)
         );
         assert_eq!(config.tts.edge.voice, DEFAULT_EDGE_TTS_VOICE);
+        assert!(config.barge_in.enabled);
+        assert_eq!(config.barge_in.sensitivity, BargeInSensitivity::Normal);
+        assert_eq!(
+            config.barge_in.conservative_ttl_secs,
+            DEFAULT_BARGE_IN_TTL_SECS
+        );
+        assert!(config.barge_in.acknowledgement_enabled);
     }
 
     #[test]
@@ -200,6 +236,7 @@ auto_join_channel_ids:
         assert_eq!(config.idle.segment_idle_ms, 2_000);
         assert_eq!(config.idle.channel_idle_disconnect_secs, 120);
         assert_eq!(config.idle.utterance_idle_ms, 4_500);
+        assert_eq!(config.barge_in, VoiceBargeInConfig::default());
         assert_eq!(config.wake_words, vec!["desk"]);
         assert_eq!(config.allowed_user_ids, vec!["343742347365974026"]);
         assert_eq!(config.auto_join_channel_ids, vec!["1500000000000000000"]);
@@ -228,5 +265,32 @@ tts:
         assert_eq!(config.tts.edge.command, "edge-tts");
         assert_eq!(config.tts.edge.voice, "ko-KR-InJoonNeural");
         assert_eq!(config.tts.edge.rate, "-10%");
+    }
+
+    #[test]
+    fn voice_config_deserializes_barge_in_settings() {
+        let config: VoiceConfig = serde_yaml::from_str(
+            r#"
+barge_in:
+  enabled: true
+  sensitivity: conservative
+  conservative_ttl_secs: 30
+  acknowledgement_enabled: false
+  acknowledgement_text: 잠시 후 이어서 볼게요.
+"#,
+        )
+        .unwrap();
+
+        assert!(config.barge_in.enabled);
+        assert_eq!(
+            config.barge_in.sensitivity,
+            BargeInSensitivity::Conservative
+        );
+        assert_eq!(config.barge_in.conservative_ttl_secs, 30);
+        assert!(!config.barge_in.acknowledgement_enabled);
+        assert_eq!(
+            config.barge_in.acknowledgement_text,
+            "잠시 후 이어서 볼게요."
+        );
     }
 }

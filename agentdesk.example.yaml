@@ -69,18 +69,32 @@ voice:
     # dBFS threshold used while listening for wake words.
     wake_word_db: -50.0
   idle:
+    # Silence after a PCM burst before closing the current segment file.
+    segment_idle_ms: 2200
     # Silence after an utterance before finalizing the transcript.
-    utterance_idle_ms: 1200
+    utterance_idle_ms: 4500
     # Empty voice-channel duration before disconnecting.
     channel_idle_disconnect_secs: 300
     # Time to keep listening for a command after a wake word.
     wake_listen_window_secs: 8
+  barge_in:
+    # Enables live playback cut and processing-time stop/defer decisions.
+    enabled: true
+    # normal cuts faster; conservative requires louder sustained speech.
+    sensitivity: normal
+    # Conservative sensitivity automatically returns to normal after 15 minutes.
+    conservative_ttl_secs: 900
+    # Speak a short acknowledgement before draining merged deferred utterances.
+    acknowledgement_enabled: true
+    acknowledgement_text: "그동안 말씀하신 거 같이 정리해서 작업할게요."
   # Wake words or phrases that activate voice commands.
   wake_words:
     - "agentdesk"
   # Discord user IDs allowed to invoke voice commands.
   allowed_user_ids:
     - "YOUR_DISCORD_USER_ID"
+  # Voice channel IDs that should be joined automatically on startup.
+  auto_join_channel_ids: []
 
 shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
 
