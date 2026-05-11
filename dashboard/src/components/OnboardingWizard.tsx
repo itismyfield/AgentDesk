@@ -1401,16 +1401,14 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             {draftNoticeDetail}
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
+            <button type="button"
               onClick={() => setDraftNoticeVisible(false)}
               className={btnSmall}
               style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}
             >
               {tr("계속 진행", "Keep going")}
             </button>
-            <button
-              type="button"
+            <button type="button"
               onClick={resetDraft}
               className={btnSmall}
               style={{ borderColor: "rgba(248,113,113,0.3)", color: "#fca5a5" }}
@@ -1525,7 +1523,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                   </span>
                   <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: "rgba(148,163,184,0.3)" }}>
                     {COMMAND_PROVIDERS.map((p) => (
-                      <button
+                      <button type="button"
                         key={p}
                         onClick={() => {
                           setCommandBots((prev) => {
@@ -1545,7 +1543,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                     ))}
                   </div>
                   {commandBots.length > 1 && (
-                    <button
+                    <button type="button"
                       onClick={() => setCommandBots((prev) => prev.filter((_, j) => j !== i))}
                       className="ml-auto text-xs text-red-400 hover:text-red-300"
                     >
@@ -1595,7 +1593,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             ))}
 
             {commandBots.length < 2 && (
-              <button
+              <button type="button"
                 onClick={() => {
                   const used = new Set(commandBots.map((bot) => bot.provider));
                   const other = COMMAND_PROVIDERS.find((provider) => !used.has(provider)) ?? "claude";
@@ -1712,7 +1710,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           <ChecklistPanel title={tr("Step 1 체크리스트", "Step 1 checklist")} items={step1Checklist} />
 
           <div className={actionRow}>
-            <button
+            <button type="button"
               onClick={() => void validateStep1()}
               disabled={!commandBots[0]?.token || !announceToken || validating}
               className={btnSecondary}
@@ -1725,11 +1723,11 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             </button>
             {/* "다음" only after all required bots are validated */}
             {commandBots[0]?.botInfo?.valid && announceBotInfo?.valid ? (
-              <button onClick={() => goToStep(2)} className={btnPrimary}>
+              <button type="button" onClick={() => goToStep(2)} className={btnPrimary}>
                 {tr("다음", "Next")}
               </button>
             ) : (
-              <button onClick={() => goToStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+              <button type="button" onClick={() => goToStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
                 {tr("나중에 입력", "Skip for now")}
               </button>
             )}
@@ -1839,13 +1837,13 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           <ChecklistPanel title={tr("Step 2 체크리스트", "Step 2 checklist")} items={step2Checklist} />
 
           <div className={actionRow}>
-            <button onClick={() => goToStep(1)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+            <button type="button" onClick={() => goToStep(1)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("이전", "Back")}
             </button>
-            <button onClick={() => void checkProviders()} disabled={checkingProviders} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+            <button type="button" onClick={() => void checkProviders()} disabled={checkingProviders} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("다시 확인", "Re-check")}
             </button>
-            <button
+            <button type="button"
               onClick={() => goToStep(3)}
               className={providersReady ? btnPrimary : btnSecondary}
               style={providersReady ? undefined : { borderColor: "rgba(148,163,184,0.3)" }}
@@ -1882,7 +1880,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           {/* Template cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {TEMPLATES.map((tpl) => (
-              <button
+              <button type="button"
                 key={tpl.key}
                 onClick={() => selectTemplate(tpl.key)}
                 className="rounded-xl p-4 border text-left transition-all hover:scale-[1.02]"
@@ -1940,7 +1938,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                       {expandedAgent === agent.id ? "▲" : "▼"}
                     </span>
                     {agent.custom && (
-                      <button
+                      <button type="button"
                         onClick={(e) => { e.stopPropagation(); removeAgent(agent.id); }}
                         className="text-xs text-red-400 hover:text-red-300"
                       >
@@ -1955,7 +1953,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                           {tr("시스템 프롬프트", "System Prompt")}
                         </label>
                         {agent.custom && (
-                          <button
+                          <button type="button"
                             onClick={() => void generateAiPrompt(agent.id)}
                             disabled={generatingPrompt}
                             className={btnSmall}
@@ -2024,7 +2022,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
                 style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
               />
-              <button
+              <button type="button"
                 onClick={addCustomAgent}
                 disabled={!customName.trim()}
                 className="w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
@@ -2043,10 +2041,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           <ChecklistPanel title={tr("Step 3 체크리스트", "Step 3 checklist")} items={step3Checklist} />
 
           <div className={actionRow}>
-            <button onClick={() => goToStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+            <button type="button" onClick={() => goToStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("이전", "Back")}
             </button>
-            <button onClick={() => goToStep(4)} disabled={agents.length === 0} className={btnPrimary}>
+            <button type="button" onClick={() => goToStep(4)} disabled={agents.length === 0} className={btnPrimary}>
               {tr("다음", "Next")} ({agents.length}{tr("개 에이전트", " agents")})
             </button>
           </div>
@@ -2173,10 +2171,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           <ChecklistPanel title={tr("Step 4 체크리스트", "Step 4 checklist")} items={step4Checklist} />
 
           <div className={actionRow}>
-            <button onClick={() => goToStep(3)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+            <button type="button" onClick={() => goToStep(3)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("이전", "Back")}
             </button>
-            <button onClick={() => goToStep(5)} disabled={!hasSelectedGuild || !channelAssignmentsReady} className={btnPrimary}>
+            <button type="button" onClick={() => goToStep(5)} disabled={!hasSelectedGuild || !channelAssignmentsReady} className={btnPrimary}>
               {tr("다음", "Next")}
             </button>
           </div>
@@ -2360,7 +2358,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
 
           <div className={actionRow}>
             {completionChecklist ? (
-              <button
+              <button type="button"
                 onClick={() => {
                   clearOnboardingDraft();
                   onComplete();
@@ -2371,10 +2369,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               </button>
             ) : (
               <>
-                <button onClick={() => goToStep(4)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+                <button type="button" onClick={() => goToStep(4)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
                   {tr("이전", "Back")}
                 </button>
-                <button onClick={() => void handleComplete()} disabled={completing || !completionReady} className={btnPrimary}>
+                <button type="button" onClick={() => void handleComplete()} disabled={completing || !completionReady} className={btnPrimary}>
                   {completing ? tr("설정 중...", "Setting up...") : tr("설정 완료", "Complete Setup")}
                 </button>
               </>
