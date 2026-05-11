@@ -122,21 +122,41 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
     active_dispatch_id: Option<&str>,
     retry: bool,
 ) -> Result<Option<RetryDispatchMeta>, String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| format!("begin postgres force-kill transaction: {error}"))?;
+    // #2045 Finding 4 (P0): force-kill used to issue a raw `UPDATE
+    // task_dispatches SET status='failed'` inside the same tx that disconnects
+    // the session row. That bypassed semaphore release, auto_queue_entries
+    // reconcile, phase-gate reconcile, observability emit, and wait-queue
+    // wake — i.e. the same cleanup hazards described in Finding 3. The fix:
+    //   1) disconnect the session row in its own short tx (so we don't hold a
+    //      tx open across the canonical pipeline call below),
+    //   2) load retry metadata (still pending/dispatched at that point),
+    //   3) delegate the dispatch terminal transition to the canonical
+    //      `set_dispatch_status_on_pg_async`, which owns the full cleanup
+    //      pipeline,
+    //   4) guard against `cancelled → failed` — cancelled is already terminal
+    //      and overwriting it would corrupt incident metrics and double-count
+    //      failures on retry.
+    {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin postgres force-kill transaction: {error}"))?;
 
-    sqlx::query(
-        "UPDATE sessions
-         SET status = 'disconnected',
-             active_dispatch_id = NULL
-         WHERE session_key = $1",
-    )
-    .bind(session_key)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| format!("disconnect postgres session {session_key}: {error}"))?;
+        sqlx::query(
+            "UPDATE sessions
+             SET status = 'disconnected',
+                 active_dispatch_id = NULL
+             WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("disconnect postgres session {session_key}: {error}"))?;
+
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit postgres force-kill transaction: {error}"))?;
+    }
 
     let mut retry_meta = None;
     if let Some(dispatch_id) = active_dispatch_id {
@@ -146,26 +166,51 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
              WHERE id = $1",
         )
         .bind(dispatch_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(pool)
         .await
         .map_err(|error| format!("load postgres dispatch status {dispatch_id}: {error}"))?
         .flatten();
 
-        if current_status.as_deref() != Some("completed") {
-            sqlx::query(
-                "UPDATE task_dispatches
-                 SET status = 'failed',
-                     updated_at = NOW(),
-                     completed_at = COALESCE(completed_at, NOW())
-                 WHERE id = $1",
+        let current_status_str = current_status.as_deref();
+        // Terminal states: never overwrite. `cancelled` in particular must
+        // remain `cancelled`; rewriting it to `failed` would corrupt
+        // incident metrics (Finding 4).
+        let is_terminal = matches!(
+            current_status_str,
+            Some("completed") | Some("cancelled") | Some("failed")
+        );
+
+        if !is_terminal {
+            let reason = json!({
+                "reason": "force_kill_session",
+                "session_key": session_key,
+            });
+            let allowed_from: &[&str] = &["pending", "dispatched"];
+            // Delegate to the canonical pipeline. The async variant is used
+            // here because we're already inside a tokio runtime (axum
+            // handler); the sync wrapper would `block_on` and panic.
+            crate::dispatch::set_dispatch_status_on_pg_async(
+                pool,
+                dispatch_id,
+                "failed",
+                Some(&reason),
+                "force_kill_session",
+                Some(allowed_from),
+                true,
             )
-            .bind(dispatch_id)
-            .execute(&mut *tx)
             .await
-            .map_err(|error| format!("mark postgres dispatch {dispatch_id} failed: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "canonical fail postgres dispatch {dispatch_id} during force-kill: {error}"
+                )
+            })?;
         }
 
-        if retry {
+        // #2045 Finding 4 cancelled→failed guard: if the dispatch was already
+        // `cancelled` (or otherwise terminal) before force-kill ran, do not
+        // synthesize a retry on top of that. The original cancel intent — or
+        // the completion that already happened — must remain authoritative.
+        if retry && !is_terminal {
             retry_meta = sqlx::query(
                 "SELECT
                     kanban_card_id,
@@ -178,7 +223,7 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
                  WHERE id = $1",
             )
             .bind(dispatch_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(pool)
             .await
             .map_err(|error| format!("load postgres retry metadata {dispatch_id}: {error}"))?
             .map(|row| {
@@ -197,10 +242,6 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
             })?;
         }
     }
-
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit postgres force-kill transaction: {error}"))?;
 
     Ok(retry_meta)
 }
@@ -353,16 +394,18 @@ fn classify_delivery_state(
         Some("failed") => "failed",
         Some("cancelled") => "cancelled",
         Some("dispatched") | Some("in_progress") => {
-            // sessions.is_working is the strongest "codex actually running"
-            // signal: it folds tmux liveness + recent heartbeat. The dispatch
-            // delivery event 'sent' timestamp is a secondary signal that the
-            // dispatch message at least made it onto the Discord channel.
-            if session_is_working {
-                "codex_active"
-            } else if sent_at_is_set {
-                "delivered"
-            } else {
+            // sent_at is the per-dispatch bridge delivery signal: it flips
+            // only after the bridge actually hands this dispatch's prompt to
+            // codex. session_is_working is per-session (tmux liveness +
+            // heartbeat) so during the bridge per-channel queue window it
+            // reflects the *previous* turn of the same session, not the new
+            // dispatch. sent_at must dominate is_working (#2036 review).
+            if !sent_at_is_set {
                 "queued"
+            } else if session_is_working {
+                "codex_active"
+            } else {
+                "delivered"
             }
         }
         Some("pending") => "queued",
@@ -774,9 +817,13 @@ mod dispatch_surface_tests {
             classify_delivery_state(Some("dispatched"), true, true),
             "codex_active"
         );
+        // #2036 review fix: when sent_at is NOT set, session.is_working reflects
+        // the previous turn on the same session (bridge per-channel queue
+        // window). The new dispatch hasn't been delivered to codex yet, so
+        // delivery_state must be "queued", not "codex_active".
         assert_eq!(
             classify_delivery_state(Some("in_progress"), true, false),
-            "codex_active"
+            "queued"
         );
     }
 
@@ -1030,6 +1077,77 @@ mod selector_cleanup_tests {
             1
         );
         assert_cleanup_preserved_selectors(&pool, session_key).await;
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2045 Finding 4 cancelled→failed guard:
+    /// force-kill on a session whose active dispatch is already `cancelled`
+    /// must NOT overwrite the dispatch status, and must NOT synthesize a retry.
+    /// The session row itself is still disconnected (operator intent).
+    #[tokio::test]
+    async fn disconnect_session_and_prepare_retry_pg_skips_cancelled_dispatch() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "host:selector-cancelled-guard";
+        let dispatch_id = "dispatch-2045-cancelled-guard";
+        let card_id = "card-2045-cancelled-guard";
+
+        // Seed: card + cancelled dispatch + session pointing at it.
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, current_status, created_at, updated_at)
+             VALUES ($1, 'guard card', 'backlog', NOW(), NOW())",
+        )
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches
+             (id, kanban_card_id, dispatch_type, status, title, context,
+              created_at, updated_at, completed_at)
+             VALUES ($1, $2, 'implementation', 'cancelled', 'guard',
+                     '{}', NOW(), NOW(), NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_session_with_selectors(&pool, session_key, "idle", Some(dispatch_id)).await;
+
+        // Caller asks for retry=true. Guard must reject both the failure
+        // overwrite and the retry creation.
+        let retry_meta = disconnect_session_and_prepare_retry_pg(
+            &pool,
+            session_key,
+            Some(dispatch_id),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            retry_meta.is_none(),
+            "cancelled dispatch must not produce retry metadata"
+        );
+
+        // Dispatch status remains 'cancelled' (NOT overwritten to 'failed').
+        let dispatch_status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind(dispatch_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            dispatch_status, "cancelled",
+            "force-kill must not overwrite cancelled → failed"
+        );
+
+        // Session row is still disconnected (force-kill side effect is fine).
+        let (session_status, active_dispatch_id, _, _) = session_state(&pool, session_key).await;
+        assert_eq!(session_status, "disconnected");
+        assert_eq!(active_dispatch_id, None);
 
         pool.close().await;
         pg_db.drop().await;

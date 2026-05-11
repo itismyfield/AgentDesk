@@ -1,7 +1,7 @@
 use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde_json::json;
-use sqlx::{PgPool, Row as SqlxRow};
+use sqlx::PgPool;
 
 // ── Dispatch ops ────────────────────────────────────────────────
 //
@@ -524,6 +524,13 @@ fn dispatch_set_retry_count_raw_sqlite_test(_db: &Db, _dispatch_id: &str, _count
         .to_string()
 }
 
+// #2045 Finding 3 (P0): JS-bridge mark_failed/mark_completed used to run an ad-hoc
+// `UPDATE task_dispatches + dispatch_events + dispatch_outbox` transaction that
+// skipped the full cleanup pipeline (semaphore release, auto_queue_entries
+// reconcile, phase-gate reconcile, sessions.active_dispatch_id clear,
+// observability emit, wait-queue wake). Delegate to the canonical
+// `set_dispatch_status_with_backends` which owns all of those side effects in
+// the same transactional unit.
 fn dispatch_set_status_raw_pg(
     pool: &PgPool,
     dispatch_id: &str,
@@ -532,187 +539,19 @@ fn dispatch_set_status_raw_pg(
     transition_source: &str,
     touch_completed_at: bool,
 ) -> String {
-    let dispatch_id = dispatch_id.to_string();
-    let to_status = to_status.to_string();
-    let transition_source = transition_source.to_string();
-    match crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            let mut tx = bridge_pool.begin().await.map_err(|error| {
-                format!("begin postgres dispatch status transaction {dispatch_id}: {error}")
-            })?;
-
-            let current = sqlx::query(
-                "SELECT status, kanban_card_id, dispatch_type
-                 FROM task_dispatches
-                 WHERE id = $1",
-            )
-            .bind(&dispatch_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| format!("load postgres dispatch {dispatch_id}: {error}"))?;
-            let Some(current) = current else {
-                tx.rollback().await.ok();
-                return Ok(0_u64);
-            };
-
-            let current_status = current
-                .try_get::<Option<String>, _>("status")
-                .map_err(|error| format!("decode postgres dispatch status {dispatch_id}: {error}"))?
-                .unwrap_or_default();
-            if !matches!(current_status.as_str(), "pending" | "dispatched") {
-                tx.rollback().await.ok();
-                return Ok(0_u64);
-            }
-
-            let payload_json = result.as_ref().map(serde_json::Value::to_string);
-            let changed = match (payload_json.as_deref(), touch_completed_at) {
-                (Some(payload), true) => sqlx::query(
-                    "UPDATE task_dispatches
-                     SET status = $1,
-                         result = $2,
-                         updated_at = NOW(),
-                         completed_at = CASE
-                             WHEN $1 = 'completed' THEN COALESCE(completed_at, NOW())
-                             ELSE completed_at
-                         END
-                     WHERE id = $3
-                       AND status = $4",
-                )
-                .bind(&to_status)
-                .bind(payload)
-                .bind(&dispatch_id)
-                .bind(&current_status)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("update postgres dispatch {dispatch_id}: {error}"))?
-                .rows_affected(),
-                (Some(payload), false) => sqlx::query(
-                    "UPDATE task_dispatches
-                     SET status = $1,
-                         result = $2,
-                         updated_at = NOW()
-                     WHERE id = $3
-                       AND status = $4",
-                )
-                .bind(&to_status)
-                .bind(payload)
-                .bind(&dispatch_id)
-                .bind(&current_status)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("update postgres dispatch {dispatch_id}: {error}"))?
-                .rows_affected(),
-                (None, true) => sqlx::query(
-                    "UPDATE task_dispatches
-                     SET status = $1,
-                         updated_at = NOW(),
-                         completed_at = CASE
-                             WHEN $1 = 'completed' THEN COALESCE(completed_at, NOW())
-                             ELSE completed_at
-                         END
-                     WHERE id = $2
-                       AND status = $3",
-                )
-                .bind(&to_status)
-                .bind(&dispatch_id)
-                .bind(&current_status)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("update postgres dispatch {dispatch_id}: {error}"))?
-                .rows_affected(),
-                (None, false) => sqlx::query(
-                    "UPDATE task_dispatches
-                     SET status = $1,
-                         updated_at = NOW()
-                     WHERE id = $2
-                       AND status = $3",
-                )
-                .bind(&to_status)
-                .bind(&dispatch_id)
-                .bind(&current_status)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("update postgres dispatch {dispatch_id}: {error}"))?
-                .rows_affected(),
-            };
-
-            if changed > 0 && current_status != to_status {
-                sqlx::query(
-                    "INSERT INTO dispatch_events (
-                        dispatch_id,
-                        kanban_card_id,
-                        dispatch_type,
-                        from_status,
-                        to_status,
-                        transition_source,
-                        payload_json
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                )
-                .bind(&dispatch_id)
-                .bind(
-                    current
-                        .try_get::<Option<String>, _>("kanban_card_id")
-                        .map_err(|error| {
-                            format!("decode postgres dispatch card id {dispatch_id}: {error}")
-                        })?,
-                )
-                .bind(
-                    current
-                        .try_get::<Option<String>, _>("dispatch_type")
-                        .map_err(|error| {
-                            format!("decode postgres dispatch type {dispatch_id}: {error}")
-                        })?,
-                )
-                .bind(Some(current_status.as_str()))
-                .bind(&to_status)
-                .bind(&transition_source)
-                .bind(payload_json.as_deref())
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| {
-                    format!("insert postgres dispatch event {dispatch_id}: {error}")
-                })?;
-
-                let enqueue = match to_status.as_str() {
-                    "failed" | "cancelled" => true,
-                    "completed" => {
-                        let src = transition_source.trim();
-                        !(src.starts_with("turn_bridge") || src.starts_with("watcher"))
-                    }
-                    _ => false,
-                };
-                if enqueue {
-                    sqlx::query(
-                        "INSERT INTO dispatch_outbox (dispatch_id, action)
-                         SELECT $1, 'status_reaction'
-                         WHERE NOT EXISTS (
-                             SELECT 1
-                             FROM dispatch_outbox
-                             WHERE dispatch_id = $1
-                               AND action = 'status_reaction'
-                               AND status IN ('pending', 'processing')
-                         )",
-                    )
-                    .bind(&dispatch_id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|error| {
-                        format!("insert postgres status reaction outbox for {dispatch_id}: {error}")
-                    })?;
-                }
-            }
-
-            tx.commit().await.map_err(|error| {
-                format!("commit postgres dispatch status {dispatch_id}: {error}")
-            })?;
-
-            Ok(changed)
-        },
-        |error| format!(r#"{{"error":"{error}"}}"#),
+    let allowed_from: &[&str] = &["pending", "dispatched"];
+    match crate::dispatch::set_dispatch_status_with_backends(
+        None,
+        Some(pool),
+        dispatch_id,
+        to_status,
+        result.as_ref(),
+        transition_source,
+        Some(allowed_from),
+        touch_completed_at,
     ) {
         Ok(rows_affected) => format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#),
-        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
+        Err(error) => crate::engine::ops::ensure_js_error_json(error.to_string()),
     }
 }
 

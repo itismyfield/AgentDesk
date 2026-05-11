@@ -55,7 +55,8 @@ pub(crate) use dispatch_status::set_dispatch_status_without_queue_sync_with_back
 pub use dispatch_status::{
     complete_dispatch, finalize_dispatch, finalize_dispatch_with_backends,
     load_dispatch_row_pg_first, load_dispatch_row_with_backends, mark_dispatch_completed_pg_first,
-    set_dispatch_status_pg_first, set_dispatch_status_with_backends,
+    set_dispatch_status_on_pg_async, set_dispatch_status_pg_first,
+    set_dispatch_status_with_backends,
 };
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 #[allow(unused_imports)]

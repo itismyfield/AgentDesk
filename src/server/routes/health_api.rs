@@ -1113,6 +1113,11 @@ mod tests {
 
     #[tokio::test]
     async fn discord_control_router_rejects_same_origin_bypass_without_bearer() {
+        // #2047 Finding 3 — the auth middleware now also requires the peer
+        // address itself to be loopback before honouring an `Origin: localhost`
+        // header. A LAN attacker (10.0.0.5) who forges the same-origin header
+        // is rejected by the middleware at 401 (Unauthorized), strictly tighter
+        // than the previous handler-layer 403.
         let mut config = crate::config::Config::default();
         config.server.host = "0.0.0.0".to_string();
         config.server.auth_token = Some("secret".to_string());
@@ -1125,7 +1130,7 @@ mod tests {
         );
         let response = app.oneshot(request).await.unwrap();
 
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

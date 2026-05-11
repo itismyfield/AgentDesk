@@ -1502,6 +1502,37 @@ pub fn set_dispatch_status_with_backends(
     )
 }
 
+/// #2045 Finding 4 (P0): async-friendly entry point for callers that already
+/// run inside a tokio runtime (force-kill API, future axum handlers). The sync
+/// `set_dispatch_status_with_backends` would otherwise try to call
+/// `block_on_pg_result`, which panics when invoked from a multi-threaded
+/// runtime. This wrapper runs the same canonical cleanup pipeline asynchronously
+/// so callers get the full set of side effects (semaphore release, auto_queue
+/// reconcile, phase-gate reconcile, sessions.active_dispatch_id clear,
+/// observability emit, wait-queue wake).
+pub async fn set_dispatch_status_on_pg_async(
+    pool: &PgPool,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+) -> Result<usize> {
+    set_dispatch_status_on_pg_with_sync(
+        pool,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+        true,
+        false,
+    )
+    .await
+}
+
 fn set_dispatch_status_with_backends_and_sync(
     db: Option<&Db>,
     pg_pool: Option<&PgPool>,
