@@ -98,10 +98,7 @@ pub fn finish_agent_start(channel_id: u64) -> Option<u64> {
         let mut map = agent_start_registry().lock().ok()?;
         map.remove(&channel_id)?
     };
-    let ms = started_at
-        .elapsed()
-        .as_millis()
-        .min(u64::MAX as u128) as u64;
+    let ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
     record_agent(channel_id, ms);
     Some(ms)
 }

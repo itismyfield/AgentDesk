@@ -332,6 +332,8 @@ replace_hardcoded_ids() {
     echo "skip hardcoded id replacement"
     return 0
   fi
+  local roots=()
+  mapfile -t roots < <(hardcoded_roots)
   ruby -e '
     from_id, to_id, *roots = ARGV
     timestamp = Time.now.utc.strftime("%Y%m%d%H%M%S")
@@ -358,7 +360,7 @@ replace_hardcoded_ids() {
       end
     end
     warn "updated #{changed} hardcoded id file(s)"
-  ' "$from_id" "$to_id" $(hardcoded_roots)
+  ' "$from_id" "$to_id" "${roots[@]}"
 }
 
 update_db_ids() {
@@ -391,9 +393,8 @@ update_db_ids() {
 
 scan_hardcoded_ids() {
   local channel_id="$1"
-  local roots=(
-    $(hardcoded_roots)
-  )
+  local roots=()
+  mapfile -t roots < <(hardcoded_roots)
   echo "hardcoded-id scan for $channel_id"
   local found="false"
   for root in "${roots[@]}"; do

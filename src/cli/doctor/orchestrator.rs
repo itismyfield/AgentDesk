@@ -1642,12 +1642,17 @@ fn check_voice_cli_present(
     };
 
     match resolved {
-        Some(path) => Check::ok(id, CheckGroup::Voice, name, format!("found at {}", path.display()))
-            .with_path(path.display().to_string())
-            .with_expected_actual(
-                format!("{name} CLI on PATH or absolute path"),
-                format!("resolved → {}", path.display()),
-            ),
+        Some(path) => Check::ok(
+            id,
+            CheckGroup::Voice,
+            name,
+            format!("found at {}", path.display()),
+        )
+        .with_path(path.display().to_string())
+        .with_expected_actual(
+            format!("{name} CLI on PATH or absolute path"),
+            format!("resolved → {}", path.display()),
+        ),
         None => Check::fail(
             id,
             CheckGroup::Voice,

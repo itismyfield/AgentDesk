@@ -1397,8 +1397,14 @@ impl VoiceBargeInRuntime {
             runtime.clear_spoken_result_playback_if_current(channel_id, playback_id);
             match result {
                 Ok(report) => {
-                    let synth_ms = report.first_chunk_synthesis_ms.unwrap_or(0).min(u64::MAX as u128) as u64;
-                    let play_ms = report.first_audio_start_ms.unwrap_or(0).min(u64::MAX as u128) as u64;
+                    let synth_ms = report
+                        .first_chunk_synthesis_ms
+                        .unwrap_or(0)
+                        .min(u64::MAX as u128) as u64;
+                    let play_ms = report
+                        .first_audio_start_ms
+                        .unwrap_or(0)
+                        .min(u64::MAX as u128) as u64;
                     crate::voice::metrics::record_tts(channel_id.get(), synth_ms, play_ms);
                     tracing::info!(
                         channel_id = channel_id.get(),
