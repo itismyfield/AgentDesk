@@ -31,11 +31,13 @@ use serenity::model::id::{ChannelId, MessageId};
 
 use super::SharedData;
 use super::formatting;
+use super::inflight::InflightTurnState;
 use crate::services::provider::ProviderKind;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(900); // 15 min
 const MAX_FILE_BYTES_PER_TICK: u64 = 1_048_576; // 1 MiB safety cap
+const INFLIGHT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Spawned per-turn on cluster-standby nodes. Returns when:
 /// - `cancel` or `shared.shutting_down` flips to true,
@@ -54,6 +56,7 @@ pub(super) async fn run_standby_relay(
 ) {
     let deadline = Instant::now() + timeout;
     let mut current_offset = start_offset;
+    let mut last_inflight_heartbeat = Instant::now();
     // Buffer for incomplete trailing line across reads.
     let mut tail_buf = String::new();
     let ts_start = chrono::Local::now().format("%H:%M:%S");
@@ -82,6 +85,16 @@ pub(super) async fn run_standby_relay(
                 current_offset
             );
             return;
+        }
+        if last_inflight_heartbeat.elapsed() >= INFLIGHT_HEARTBEAT_INTERVAL {
+            refresh_standby_inflight_heartbeat(
+                &provider,
+                channel_id,
+                &output_path,
+                placeholder_msg_id,
+                current_offset,
+            );
+            last_inflight_heartbeat = Instant::now();
         }
 
         let file_size = match std::fs::metadata(&output_path) {
@@ -125,7 +138,7 @@ pub(super) async fn run_standby_relay(
                     continue;
                 }
                 if let Some(result_text) = extract_result_text(line) {
-                    deliver_response(
+                    let delivered = deliver_response(
                         &http,
                         channel_id,
                         placeholder_msg_id,
@@ -134,6 +147,14 @@ pub(super) async fn run_standby_relay(
                         &result_text,
                     )
                     .await;
+                    if delivered {
+                        clear_standby_inflight_state(
+                            &provider,
+                            channel_id,
+                            &output_path,
+                            placeholder_msg_id,
+                        );
+                    }
                     return;
                 }
             }
@@ -170,6 +191,52 @@ fn extract_result_text(line: &str) -> Option<String> {
     Some(result_text.to_string())
 }
 
+fn standby_inflight_matches(
+    state: &InflightTurnState,
+    output_path: &str,
+    placeholder_msg_id: Option<MessageId>,
+) -> bool {
+    if state.output_path.as_deref() != Some(output_path) {
+        return false;
+    }
+    if let Some(msg_id) = placeholder_msg_id {
+        state.current_msg_id == msg_id.get()
+    } else {
+        true
+    }
+}
+
+fn refresh_standby_inflight_heartbeat(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    output_path: &str,
+    placeholder_msg_id: Option<MessageId>,
+    current_offset: u64,
+) {
+    let Some(mut state) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
+        return;
+    };
+    if !standby_inflight_matches(&state, output_path, placeholder_msg_id) {
+        return;
+    }
+    state.last_offset = current_offset;
+    let _ = super::inflight::save_inflight_state(&state);
+}
+
+fn clear_standby_inflight_state(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    output_path: &str,
+    placeholder_msg_id: Option<MessageId>,
+) {
+    let Some(state) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
+        return;
+    };
+    if standby_inflight_matches(&state, output_path, placeholder_msg_id) {
+        let _ = super::inflight::delete_inflight_state_file(provider, channel_id.get());
+    }
+}
+
 async fn deliver_response(
     http: &Arc<serenity::http::Http>,
     channel_id: ChannelId,
@@ -177,7 +244,7 @@ async fn deliver_response(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     response_text: &str,
-) {
+) -> bool {
     let formatted = if shared.status_panel_v2_enabled {
         formatting::format_for_discord_with_status_panel(response_text, provider)
     } else {
@@ -193,17 +260,23 @@ async fn deliver_response(
             .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             match outcome {
-                Ok(_) => tracing::info!(
-                    "  [{ts}] 👁 standby_relay ✓ delivered terminal response (edit) channel {} msg {} ({} chars)",
-                    channel_id.get(),
-                    msg_id.get(),
-                    chars
-                ),
-                Err(e) => tracing::warn!(
-                    "  [{ts}] ⚠ standby_relay edit failed for channel {} msg {}: {e}",
-                    channel_id.get(),
-                    msg_id.get()
-                ),
+                Ok(_) => {
+                    tracing::info!(
+                        "  [{ts}] 👁 standby_relay ✓ delivered terminal response (edit) channel {} msg {} ({} chars)",
+                        channel_id.get(),
+                        msg_id.get(),
+                        chars
+                    );
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "  [{ts}] ⚠ standby_relay edit failed for channel {} msg {}: {e}",
+                        channel_id.get(),
+                        msg_id.get()
+                    );
+                    false
+                }
             }
         }
         None => {
@@ -211,15 +284,21 @@ async fn deliver_response(
                 formatting::send_long_message_raw(http, channel_id, &formatted, shared).await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             match result {
-                Ok(()) => tracing::info!(
-                    "  [{ts}] 👁 standby_relay ✓ delivered terminal response (new message) channel {} ({} chars)",
-                    channel_id.get(),
-                    chars
-                ),
-                Err(e) => tracing::warn!(
-                    "  [{ts}] ⚠ standby_relay send failed for channel {}: {e}",
-                    channel_id.get()
-                ),
+                Ok(()) => {
+                    tracing::info!(
+                        "  [{ts}] 👁 standby_relay ✓ delivered terminal response (new message) channel {} ({} chars)",
+                        channel_id.get(),
+                        chars
+                    );
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "  [{ts}] ⚠ standby_relay send failed for channel {}: {e}",
+                        channel_id.get()
+                    );
+                    false
+                }
             }
         }
     }
@@ -251,5 +330,42 @@ mod tests {
     fn extract_result_text_handles_invalid_json() {
         assert!(extract_result_text("not json").is_none());
         assert!(extract_result_text("").is_none());
+    }
+
+    #[test]
+    fn standby_inflight_match_requires_same_output_and_placeholder() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            1234,
+            None,
+            42,
+            100,
+            5678,
+            "test".to_string(),
+            None,
+            Some("tmux".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+
+        assert!(standby_inflight_matches(
+            &state,
+            "/tmp/out.jsonl",
+            Some(MessageId::new(5678)),
+        ));
+        assert!(!standby_inflight_matches(
+            &state,
+            "/tmp/other.jsonl",
+            Some(MessageId::new(5678)),
+        ));
+        assert!(!standby_inflight_matches(
+            &state,
+            "/tmp/out.jsonl",
+            Some(MessageId::new(9999)),
+        ));
+
+        state.current_msg_id = 0;
+        assert!(standby_inflight_matches(&state, "/tmp/out.jsonl", None));
     }
 }

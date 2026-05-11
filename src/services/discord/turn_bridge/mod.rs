@@ -1207,6 +1207,7 @@ pub(super) fn spawn_turn_bridge(
         let mut watcher_owns_assistant_relay = bridge.inflight_state.watcher_owns_live_relay;
         let mut watcher_relay_available_for_turn = watcher_owns_assistant_relay
             && live_watcher_registered_for_relay(shared_owned.as_ref(), channel_id);
+        let mut standby_relay_owns_output = false;
         // #1452 (Codex iter 3 P1): track whether THIS turn published a
         // mailbox-finalization debt onto the watcher handle. Without this
         // flag, the bridge's non-delegation `compare_exchange(true, false, ...)`
@@ -2227,7 +2228,6 @@ pub(super) fn spawn_turn_bridge(
                             tmux_session_name,
                             last_offset,
                         } => {
-                            tmux_handed_off = true;
                             tmux_last_offset = Some(last_offset);
                             inflight_state.tmux_session_name = Some(tmux_session_name.clone());
                             inflight_state.output_path = Some(output_path.clone());
@@ -2368,6 +2368,8 @@ pub(super) fn spawn_turn_bridge(
                                                 provider_for_standby,
                                                 std::time::Duration::from_secs(900),
                                             ));
+                                            standby_relay_owns_output = true;
+                                            let _ = save_inflight_state(&inflight_state);
                                         } else {
                                             let ts = chrono::Local::now().format("%H:%M:%S");
                                             tracing::warn!(
@@ -2432,6 +2434,7 @@ pub(super) fn spawn_turn_bridge(
                                 }
                             }
                             if watcher_ready_for_relay {
+                                tmux_handed_off = true;
                                 inflight_state.watcher_owns_live_relay = true;
                                 watcher_owns_assistant_relay = true;
                                 if let Some(watcher) =
@@ -2817,12 +2820,11 @@ pub(super) fn spawn_turn_bridge(
         // exits so the controller does not leak an `Active` row and the
         // persisted `long_running_placeholder_active` flag does not survive
         // for the sweeper to abandon the card. Skip when `cancelled` (the
-        // dedicated cancel block below handles it). For tmux-handoff exits
-        // the dedicated handoff branch already calls `detach`, so we leave
-        // those alone.
-        if !cancelled
-            && !(rx_disconnected && tmux_handed_off && full_response.is_empty())
-        {
+        // dedicated cancel block below handles it) or when a relay owner will
+        // continue the visible output lifecycle.
+        let relay_owns_output_at_stream_end = standby_relay_owns_output
+            || (rx_disconnected && tmux_handed_off && full_response.is_empty());
+        if !cancelled && !relay_owns_output_at_stream_end {
             if let Some((key, _, _, _)) = long_running_placeholder_active.take() {
                 let target = if transport_error || rx_disconnected {
                     super::placeholder_controller::PlaceholderLifecycle::Aborted
@@ -2856,9 +2858,9 @@ pub(super) fn spawn_turn_bridge(
         // means we won't receive any more StreamMessage events for this turn.
         // If `current_tool_line` still carries the running ⚙ marker, the
         // ToolResult never landed (process exit, parser error, transport
-        // disconnect, or tmux handoff to a watcher that owns the rest of the
+        // disconnect, or relay ownership transfer for the rest of the
         // delivery). Promote it to its terminal ⚠ form and stash in
-        // prev_tool_status so any follow-on placeholder edit (handoff embed,
+        // prev_tool_status so any follow-on placeholder edit (recovery notice,
         // recovery notice, terminal response) reflects the orphaned state.
         if let Some(running) = current_tool_line.as_deref() {
             if running.starts_with("⚙") {
@@ -2920,6 +2922,14 @@ pub(super) fn spawn_turn_bridge(
             transport_error,
             recovery_retry,
         );
+        let bridge_output_owner = classify_bridge_output_owner(
+            standby_relay_owns_output
+                && !cancelled
+                && !is_prompt_too_long
+                && !transport_error
+                && !recovery_retry,
+            bridge_relay_delegated_to_watcher,
+        );
 
         // Explicitly complete implementation/rework dispatches only after the
         // terminal Discord delivery commits. Completing here used to let
@@ -2929,7 +2939,7 @@ pub(super) fn spawn_turn_bridge(
         let should_complete_work_dispatch_after_delivery = !cancelled
             && !is_prompt_too_long
             && !transport_error
-            && !bridge_relay_delegated_to_watcher;
+            && bridge_output_owner.is_none();
         let should_fail_dispatch_after_delivery = transport_error && !cancelled;
 
         let final_session_status = if cancelled || transport_error {
@@ -3110,15 +3120,12 @@ pub(super) fn spawn_turn_bridge(
         let mut terminal_delivery_committed = false;
         let mut status_panel_terminal_committed = false;
 
-        // Remove ⏳ only if NOT handing off to tmux watcher.
-        // When tmux watcher is handling the response, it will do ⏳→✅ after delivery.
-        let bridge_output_owner = classify_bridge_output_owner(
-            rx_disconnected,
-            tmux_handed_off,
-            full_response.is_empty(),
-            bridge_relay_delegated_to_watcher,
-        );
-        if !bridge_output_owner.skips_bridge_spinner_cleanup() {
+        // Remove ⏳ only if the bridge still owns output delivery.
+        // Relay owners commit their own visible lifecycle.
+        if !bridge_output_owner
+            .map(|owner| owner.skips_bridge_spinner_cleanup())
+            .unwrap_or(false)
+        {
             gateway.remove_reaction(channel_id, user_msg_id, '⏳').await;
         }
 
@@ -3158,13 +3165,6 @@ pub(super) fn spawn_turn_bridge(
                 .await;
             full_response = String::new();
         }
-
-        let bridge_output_owner_for_delivery = classify_bridge_output_owner(
-            rx_disconnected,
-            tmux_handed_off,
-            full_response.is_empty(),
-            bridge_relay_delegated_to_watcher,
-        );
 
         if cancelled {
             close_all_tracked_background_children(
@@ -3336,131 +3336,18 @@ pub(super) fn spawn_turn_bridge(
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!("  [{ts}] ⚠ Prompt too long (channel {})", channel_id);
-        } else if bridge_output_owner_for_delivery == BridgeOutputOwner::LegacyTmuxHandoff {
-            // Tmux watcher is handling response delivery — this is normal.
-            // Don't delete placeholder — update it so the user sees the turn is still active.
-            // The tmux watcher will replace this content when output arrives.
-            //
-            // #1114: information-rich monitor handoff placeholder. Uses
-            // <t:UNIX:R> for client-side relative-time rendering (no server
-            // refresh needed) and surfaces the last seen tool/command + the
-            // handoff reason so the user knows what's still in flight.
-            //
-            // #1255: route through PlaceholderController so this edit
-            // serializes against any concurrent live-turn Monitor placeholder
-            // edit on the same message_id. If the live-turn placeholder
-            // already reached a terminal state, the controller rejects this
-            // re-activation and we fall through to the legacy direct-edit
-            // path so the watcher still surfaces something to the user.
-            let started_at_unix = chrono::Utc::now().timestamp()
-                - i64::try_from(turn_start.elapsed().as_secs()).unwrap_or(0);
-            let key = super::placeholder_controller::PlaceholderKey {
-                provider: provider.clone(),
-                channel_id,
-                message_id: current_msg_id,
-            };
-            let (handoff_tool_summary, handoff_command_summary) = monitor_handoff_tool_context(
-                last_tool_name.as_deref(),
-                last_tool_summary.as_deref(),
-                current_tool_line.as_deref(),
-            );
-            let controller_input = super::placeholder_controller::PlaceholderActiveInput {
-                reason: super::formatting::MonitorHandoffReason::AsyncDispatch,
-                started_at_unix,
-                tool_summary: handoff_tool_summary.clone(),
-                command_summary: handoff_command_summary.clone(),
-                reason_detail: None,
-                context_line: last_assistant_text_line.clone(),
-                request_line: first_request_line(&user_text_owned),
-                progress_line: child_progress_line(
-                    shared_owned.pg_pool.as_ref(),
-                    adk_session_key.as_deref(),
-                )
-                .await,
-            };
-            let controller_outcome = ensure_active_placeholder_card(
-                shared_owned.as_ref(),
-                gateway.as_ref(),
-                key.clone(),
-                controller_input,
-            )
-            .await;
-            // Fall back to a direct edit only when the controller refused or
-            // failed — `Edited`/`Coalesced` already cover the happy path.
-            let handoff_edit: Result<(), String> = match controller_outcome {
-                super::placeholder_controller::PlaceholderControllerOutcome::Edited
-                | super::placeholder_controller::PlaceholderControllerOutcome::Coalesced => Ok(()),
-                _ => {
-                    let placeholder_text =
-                        super::formatting::build_monitor_handoff_placeholder(
-                            super::formatting::MonitorHandoffStatus::Active,
-                            super::formatting::MonitorHandoffReason::AsyncDispatch,
-                            started_at_unix,
-                            handoff_tool_summary.as_deref(),
-                            handoff_command_summary.as_deref(),
-                        );
-                    gateway
-                        .edit_message(channel_id, current_msg_id, &placeholder_text)
-                        .await
-                }
-            };
-            let handoff_operation =
-                super::placeholder_cleanup::PlaceholderCleanupOperation::EditHandoff;
-            let handoff_outcome = match handoff_edit {
-                Ok(_) => super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
-                Err(error) => super::placeholder_cleanup::PlaceholderCleanupOutcome::failed(error),
-            };
-            if let super::placeholder_cleanup::PlaceholderCleanupOutcome::Failed {
-                class,
-                detail,
-            } = &handoff_outcome
-            {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ placeholder cleanup {} failed ({}) for channel {} msg {}: {}",
-                    handoff_operation.as_str(),
-                    class.as_str(),
-                    channel_id.get(),
-                    current_msg_id.get(),
-                    detail
-                );
-            }
-            let handoff_committed = handoff_outcome.is_committed();
-            shared_owned.placeholder_cleanup.record(
-                super::placeholder_cleanup::PlaceholderCleanupRecord {
-                    provider: provider.clone(),
-                    channel_id,
-                    message_id: current_msg_id,
-                    tmux_session_name: inflight_state.tmux_session_name.clone(),
-                    operation: handoff_operation,
-                    outcome: handoff_outcome,
-                    source: "turn_bridge_tmux_handoff",
-                },
-            );
-            // codex round-5 P2 on PR #1308: after handoff, the watcher owns
-            // the placeholder lifecycle through `placeholder_cleanup` and
-            // direct edits — it never calls `transition`/`detach`. Drop the
-            // controller's `Active` entry now so it does not survive as a
-            // non-evictable row in the cap-bounded map.
-            shared_owned.placeholder_controller.detach(&key);
+        } else if let Some(owner) = bridge_output_owner {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            if handoff_committed {
-                tracing::warn!(
-                    "  [{ts}] ✓ tmux handoff complete, placeholder updated, watcher handles response (channel {})",
+            match owner {
+                BridgeOutputOwner::WatcherRelay => tracing::info!(
+                    "  [{ts}] 👁 tmux watcher owns assistant relay; bridge skipped direct response delivery (channel {})",
                     channel_id
-                );
-            } else {
-                tracing::warn!(
-                    "  [{ts}] ⚠ tmux handoff complete, but placeholder update failed; watcher still handles response (channel {})",
+                ),
+                BridgeOutputOwner::StandbyRelay => tracing::info!(
+                    "  [{ts}] 👁 standby relay owns assistant relay; bridge skipped direct response delivery (channel {})",
                     channel_id
-                );
+                ),
             }
-        } else if bridge_output_owner_for_delivery == BridgeOutputOwner::WatcherRelay {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 👁 tmux watcher owns assistant relay; bridge skipped direct response delivery (channel {})",
-                channel_id
-            );
         } else {
             // Check for stale resume failure BEFORE any other response handling.
             // This path is driven by explicit error/result events, not assistant text.
@@ -3863,7 +3750,7 @@ pub(super) fn spawn_turn_bridge(
             || resume_failure_detected
             || recovery_retry
             || (rx_disconnected && tmux_handed_off && full_response.is_empty())
-            || bridge_relay_delegated_to_watcher)
+            || bridge_output_owner.is_some())
             && !full_response.trim().is_empty();
 
         // Update in-memory session under lock.
@@ -4010,8 +3897,10 @@ pub(super) fn spawn_turn_bridge(
             "prompt_too_long"
         } else if transport_error {
             "transport_error"
-        } else if bridge_relay_delegated_to_watcher {
+        } else if bridge_output_owner == Some(BridgeOutputOwner::WatcherRelay) {
             "watcher_relay"
+        } else if bridge_output_owner == Some(BridgeOutputOwner::StandbyRelay) {
+            "standby_relay"
         } else if rx_disconnected && tmux_handed_off && full_response.is_empty() {
             "tmux_handoff"
         } else if full_response.trim().is_empty() {
@@ -4032,7 +3921,7 @@ pub(super) fn spawn_turn_bridge(
         );
         let turn_quality_event_type = if matches!(
             turn_outcome,
-            "completed" | "tmux_handoff" | "watcher_relay"
+            "completed" | "tmux_handoff" | "watcher_relay" | "standby_relay"
         ) {
             "turn_complete"
         } else {
@@ -4054,6 +3943,7 @@ pub(super) fn spawn_turn_bridge(
                 "transport_error": transport_error,
                 "tmux_handoff": rx_disconnected && tmux_handed_off && full_response.is_empty(),
                 "watcher_relay": bridge_relay_delegated_to_watcher,
+                "standby_relay": bridge_output_owner == Some(BridgeOutputOwner::StandbyRelay),
             }),
         );
 
@@ -4314,22 +4204,27 @@ pub(super) fn spawn_turn_bridge(
         if cancelled && cancel_token.restart_mode().is_some() {
             let _ = save_inflight_state(&inflight_state);
             inflight_guard.provider.take();
-        } else if preserve_inflight_for_cleanup_retry || bridge_relay_delegated_to_watcher {
+        } else if preserve_inflight_for_cleanup_retry || bridge_output_owner.is_some() {
             let _ = save_inflight_state(&inflight_state);
             inflight_guard.provider.take();
-            if bridge_relay_delegated_to_watcher {
+            if let Some(owner) = bridge_output_owner {
+                let lifecycle_event = match owner {
+                    BridgeOutputOwner::WatcherRelay => "delegated_to_watcher",
+                    BridgeOutputOwner::StandbyRelay => "delegated_to_standby_relay",
+                };
                 crate::services::observability::emit_inflight_lifecycle_event(
                     provider.as_str(),
                     channel_id.get(),
                     dispatch_id.as_deref(),
                     adk_session_key.as_deref(),
                     Some(turn_id.as_str()),
-                    "delegated_to_watcher",
+                    lifecycle_event,
                     serde_json::json!({
                         "preserve_inflight_for_cleanup_retry": preserve_inflight_for_cleanup_retry,
                         "full_response_len": inflight_state.full_response.len(),
                         "response_sent_offset": inflight_state.response_sent_offset,
                         "watcher_owns_live_relay": inflight_state.watcher_owns_live_relay,
+                        "standby_relay_owns_output": owner == BridgeOutputOwner::StandbyRelay,
                         // #1671 — record the dispatch outcome and notification
                         // kind on every bridge-side lifecycle event so
                         // same-class incidents (orphan inflight after the

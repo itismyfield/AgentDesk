@@ -1292,7 +1292,7 @@ mod tests {
         );
         let expected = concat!(
             "🔄 **응답 처리 중**\n",
-            "> **도구**: ⚙ Bash: cargo build · **사유**: 응답 스트림 전환 — watcher 이어받음\n",
+            "> **도구**: ⚙ Bash: cargo build · **사유**: 응답 스트리밍 중\n",
             "> **시작**: <t:1700000000:R>\n",
             "완료 시 이 채널로 결과를 이어서 표시합니다.",
         );
@@ -2854,7 +2854,7 @@ pub(super) enum MonitorHandoffReason {
 impl MonitorHandoffReason {
     fn label(self) -> &'static str {
         match self {
-            Self::AsyncDispatch => "응답 스트림 전환 — watcher 이어받음",
+            Self::AsyncDispatch => "응답 스트리밍 중",
             Self::InlineTimeout => "응답 지연 — watcher 이어받음",
             Self::ExplicitCall => "백그라운드 도구 실행 중",
             Self::Queued => "앞선 턴 진행 중",

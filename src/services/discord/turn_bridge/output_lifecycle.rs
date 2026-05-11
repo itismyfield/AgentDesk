@@ -1,28 +1,22 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BridgeOutputOwner {
-    /// Current cold-start/default path: bridge owns terminal delivery and
-    /// finalizes the turn itself.
-    Bridge,
-    /// Current warm-follow-up handoff: bridge received `TmuxReady` without
-    /// response text and leaves placeholder/terminal delivery to the watcher.
-    LegacyTmuxHandoff,
     /// Watcher already owns live assistant relay for this turn; bridge must not
     /// duplicate the terminal response.
     WatcherRelay,
+    /// Standby relay owns the JSONL -> Discord delivery path for this turn.
+    StandbyRelay,
 }
 
 pub(super) fn classify_bridge_output_owner(
-    rx_disconnected: bool,
-    tmux_handed_off: bool,
-    bridge_response_empty: bool,
+    standby_relay_owns_output: bool,
     bridge_relay_delegated_to_watcher: bool,
-) -> BridgeOutputOwner {
+) -> Option<BridgeOutputOwner> {
     if bridge_relay_delegated_to_watcher {
-        BridgeOutputOwner::WatcherRelay
-    } else if rx_disconnected && tmux_handed_off && bridge_response_empty {
-        BridgeOutputOwner::LegacyTmuxHandoff
+        Some(BridgeOutputOwner::WatcherRelay)
+    } else if standby_relay_owns_output {
+        Some(BridgeOutputOwner::StandbyRelay)
     } else {
-        BridgeOutputOwner::Bridge
+        None
     }
 }
 
@@ -30,7 +24,7 @@ impl BridgeOutputOwner {
     pub(super) fn skips_bridge_spinner_cleanup(self) -> bool {
         matches!(
             self,
-            BridgeOutputOwner::LegacyTmuxHandoff | BridgeOutputOwner::WatcherRelay
+            BridgeOutputOwner::WatcherRelay | BridgeOutputOwner::StandbyRelay
         )
     }
 }
@@ -40,32 +34,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bridge_output_owner_characterizes_current_cold_start_delivery() {
+    fn bridge_output_owner_is_absent_for_bridge_owned_delivery() {
         assert_eq!(
-            classify_bridge_output_owner(false, false, false, false),
-            BridgeOutputOwner::Bridge,
-            "cold/default turns keep bridge-owned terminal delivery today"
-        );
-        assert_eq!(
-            classify_bridge_output_owner(true, false, true, false),
-            BridgeOutputOwner::Bridge,
-            "rx disconnect alone is not a watcher handoff without TmuxReady"
+            classify_bridge_output_owner(false, false),
+            None,
+            "bridge-owned turns are represented by no external output owner"
         );
     }
 
     #[test]
-    fn bridge_output_owner_characterizes_warm_tmux_handoff_contract() {
-        let owner = classify_bridge_output_owner(true, true, true, false);
-        assert_eq!(owner, BridgeOutputOwner::LegacyTmuxHandoff);
+    fn bridge_disconnect_handoff_flags_do_not_create_legacy_owner() {
+        let bridge_response_empty = true;
+        let rx_disconnected = true;
+        let tmux_handed_off = true;
+
+        assert!(bridge_response_empty && rx_disconnected && tmux_handed_off);
+        assert_eq!(
+            classify_bridge_output_owner(false, false),
+            None,
+            "legacy bridge-to-watcher handoff flags must not create an output owner"
+        );
+    }
+
+    #[test]
+    fn bridge_output_owner_characterizes_standby_relay_contract() {
+        let owner = classify_bridge_output_owner(true, false).expect("standby owner");
+        assert_eq!(owner, BridgeOutputOwner::StandbyRelay);
         assert!(
             owner.skips_bridge_spinner_cleanup(),
-            "warm handoff leaves the visible turn lifecycle to the watcher"
+            "standby relay owns visible output delivery"
         );
     }
 
     #[test]
     fn bridge_output_owner_prefers_explicit_watcher_relay_delegation() {
-        let owner = classify_bridge_output_owner(true, true, true, true);
+        let owner = classify_bridge_output_owner(true, true).expect("watcher owner");
         assert_eq!(owner, BridgeOutputOwner::WatcherRelay);
         assert!(
             owner.skips_bridge_spinner_cleanup(),
