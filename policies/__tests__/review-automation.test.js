@@ -161,6 +161,11 @@ test("review-automation creates a review-decision dispatch when an auto-complete
             status: "review"
           }
         ]
+      },
+      // #2051 Finding 26 (P2) — dedupe lookup. No pre-existing pending review-decision.
+      {
+        match: "AND dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched')",
+        result: []
       }
     ])
   });

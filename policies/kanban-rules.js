@@ -331,8 +331,24 @@ function _runPreflight(cardId) {
   }
 
   // Check 3: Description/body too short or empty?
+  // #2051 Finding 22 (P3): completely empty descriptions are a different
+  // signal than "short". A card with no description at all is typically the
+  // shape produced by external automation (cron seeders, GH webhook hand-offs
+  // that haven't pulled the issue body yet, etc.); routing it through a
+  // consultation dispatch wastes tokens and time. Treat truly empty bodies as
+  // `assumption_ok` with a diagnostic marker so operators can see the gap
+  // without blocking dispatch. Short-but-present descriptions still get the
+  // consultation path because a human wrote something — there's something to
+  // clarify against.
   var body = c.description || "";
-  if (body.trim().length < 30) {
+  var bodyTrimmed = body.trim();
+  if (bodyTrimmed.length === 0) {
+    return {
+      status: "assumption_ok",
+      summary: "No description provided — proceeding with issue title only (no_dod_provided)"
+    };
+  }
+  if (bodyTrimmed.length < 30) {
     return { status: "consult_required", summary: "Issue body is too short or empty — needs clarification" };
   }
 
@@ -377,6 +393,18 @@ var rules = {
       [payload.dispatch_id]
     );
     if (cards.length === 0) return;
+    // #2051 Finding 5 (P2): a single dispatch_id should map to at most one
+    // card, but reopen/race paths can violate this invariant. Log every
+    // additional card so operators can spot drift without breaking the existing
+    // first-card semantics.
+    if (cards.length > 1) {
+      agentdesk.log.warn(
+        "[kanban] onSessionStatusChange dispatch " + payload.dispatch_id +
+        " matched " + cards.length + " cards — only " + cards[0].id +
+        " will be advanced; remaining card_ids=" +
+        cards.slice(1).map(function (c) { return c.id; }).join(",")
+      );
+    }
     var card = cards[0];
     var cfg = agentdesk.pipeline.resolveForCard(card.id);
     var initialState = agentdesk.pipeline.kickoffState(cfg);
@@ -391,10 +419,22 @@ var rules = {
       );
       if (dispatch.length === 0) return;
       var dtype = dispatch[0].dispatch_type;
+      var dstatus = dispatch[0].status;
+      // #2051 Finding 5 (P2): also require the dispatch to still be live
+      // (pending/dispatched). Without this guard a cancelled/failed dispatch
+      // could still drive the card forward via a stale session status event,
+      // and combined with Finding 1 (now fixed) used to bypass the
+      // has_active_dispatch gate entirely.
+      var dispatchLive = dstatus === "pending" || dstatus === "dispatched";
       // Only implementation and rework dispatches acknowledge work start
-      if (dtype === "implementation" || dtype === "rework") {
+      if ((dtype === "implementation" || dtype === "rework") && dispatchLive) {
         agentdesk.kanban.setStatus(card.id, nextFromInitial);
         agentdesk.log.info("[kanban] " + card.id + " " + initialState + " → " + nextFromInitial + " (ack via " + dtype + " dispatch " + payload.dispatch_id + ")");
+      } else if ((dtype === "implementation" || dtype === "rework") && !dispatchLive) {
+        agentdesk.log.info(
+          "[kanban] onSessionStatusChange skipped advance for " + card.id +
+          " — dispatch " + payload.dispatch_id + " no longer live (status=" + dstatus + ")"
+        );
       }
     }
 
@@ -406,93 +446,15 @@ var rules = {
     // Previously this JS policy also auto-completed review dispatches via direct DB UPDATE,
     // causing double processing (JS verdict extraction + Rust OnDispatchCompleted).
     // Now only Rust handles auto-complete; JS policy reacts via onDispatchCompleted hook.
-    var reviewState = agentdesk.pipeline.nextGatedTarget(nextFromInitial, cfg);
-
-    if (false && payload.status === "idle" && card.status === reviewState) {
-      var dispatch = agentdesk.db.query(
-        "SELECT id, dispatch_type, status, result, kanban_card_id FROM task_dispatches WHERE id = ?",
-        [payload.dispatch_id]
-      );
-      if (dispatch.length > 0 && dispatch[0].dispatch_type === "review" && dispatch[0].status === "pending") {
-        // ── Verdict extraction (structured, dispatch-correlated) ──
-        // Priority: 1) dispatch result JSON  2) GitHub comment with round marker  3) current review/manual-intervention state
-        var verdict = null;
-        var resultJson = dispatch[0].result;
-
-        // 1. Check dispatch result (set by /api/reviews/verdict callback)
-        if (resultJson) {
-          try {
-            var parsed = JSON.parse(resultJson);
-            if (parsed.verdict) verdict = parsed.verdict;
-          } catch(e) { /* parse fail */ }
-        }
-
-        // 2. GitHub comment fallback — filter by current round/dispatch correlation
-        if (!verdict) {
-          var cardInfo = agentdesk.db.query(
-            "SELECT github_issue_url, review_round FROM kanban_cards WHERE id = ?",
-            [dispatch[0].kanban_card_id]
-          );
-          if (cardInfo.length > 0 && cardInfo[0].github_issue_url) {
-            var urlMatch = (cardInfo[0].github_issue_url || "").match(/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)/);
-            if (urlMatch) {
-              try {
-                var round = cardInfo[0].review_round || 1;
-                var dispatchId = dispatch[0].id;
-                // Filter comments that match current round OR dispatch_id
-                // Round marker: "round 1", "R1", "라운드 1" etc.
-                // Dispatch marker: dispatch_id substring
-                var roundPattern = "round.?" + round + "|R" + round + "|라운드.?" + round + "|" + dispatchId.substring(0, 8);
-                var ghOutput = agentdesk.exec("gh", [
-                  "issue", "view", urlMatch[2], "--repo", urlMatch[1],
-                  "--comments", "--json", "comments", "--jq",
-                  "[.comments[].body] | map(select(test(\"" + roundPattern + "\"; \"i\"))) | last"
-                ]);
-                agentdesk.log.info("[kanban-debug] gh comment output for dispatch " + payload.dispatch_id + ": " + (ghOutput || "(empty)").substring(0, 300));
-                if (ghOutput && ghOutput.trim()) {
-                  var lower = ghOutput.toLowerCase();
-                  // Structured verdict markers
-                  if (lower.indexOf("verdict: pass") >= 0 || lower.indexOf("verdict: **pass**") >= 0) {
-                    verdict = "pass";
-                    agentdesk.log.info("[kanban-debug] MATCHED verdict:pass from comment");
-                  } else if (lower.indexOf("verdict: improve") >= 0 || lower.indexOf("verdict: **improve**") >= 0) {
-                    verdict = "improve";
-                    agentdesk.log.info("[kanban-debug] MATCHED verdict:improve from comment");
-                  } else if (lower.indexOf("✅") >= 0 && lower.indexOf("accept") >= 0) {
-                    verdict = "pass";
-                    agentdesk.log.info("[kanban-debug] MATCHED ✅+accept from comment");
-                  } else if (lower.indexOf("보완 필요") >= 0 || lower.indexOf("한 번 더") >= 0) {
-                    verdict = "improve";
-                    agentdesk.log.info("[kanban-debug] MATCHED 보완필요 from comment");
-                  } else {
-                    agentdesk.log.info("[kanban-debug] NO verdict match in comment");
-                  }
-                } else {
-                  agentdesk.log.info("[kanban-debug] gh comment output empty — no match");
-                }
-              } catch(e) {
-                agentdesk.log.warn("[kanban] GitHub comment parsing failed: " + e);
-              }
-            }
-          }
-        }
-
-        // 3. No verdict found → manual intervention (never default to pass)
-        if (!verdict) {
-          escalateToManualIntervention(card.id, "Review completed but verdict unclear — manual decision needed", { review: true });
-          agentdesk.log.warn("[kanban] review dispatch " + payload.dispatch_id + " — no clear verdict, → dilemma_pending");
-          return;
-        }
-
-        // 디스패치 completed 처리
-        var mcResult = agentdesk.dispatch.markCompleted(payload.dispatch_id, JSON.stringify({ verdict: verdict, auto_completed: true, source: "github_comment" }));
-        if (mcResult.rows_affected === 0) {
-          agentdesk.log.info("[kanban] dispatch " + payload.dispatch_id + " already terminal, skipping auto-complete");
-          return;
-        }
-        agentdesk.log.info("[kanban] review dispatch " + payload.dispatch_id + " auto-completed with verdict: " + verdict);
-      }
-    }
+    //
+    // #2051 Finding 4 (P3): the legacy `if (false && payload.status === "idle"
+    // ...)` block that previously performed synchronous `gh issue view
+    // --comments` calls from this hook has been deleted. It was unreachable but
+    // misleading — `var` hoisting kept the variable scope but ran no code, and
+    // grepping the file made it look like verdict extraction lived in two
+    // places. Auto-complete + verdict resolution for review dispatches is now
+    // owned exclusively by Rust (`dispatched_sessions.rs` →
+    // `complete_dispatch` → `OnDispatchCompleted`).
   },
 
   // ── Dispatch Completed — PM Decision Gate ─────────────────
@@ -507,15 +469,17 @@ var rules = {
     try { dispatchContext = JSON.parse(dispatch.context || "{}"); } catch (e) { dispatchContext = {}; }
     if (dispatchContext.phase_gate) return;
     if (!dispatch.kanban_card_id) return;
-    // #815: cancelled dispatches must not drive the card into the review
-    // state. A race can fire OnDispatchCompleted for a dispatch that was
-    // cancelled by the user between completion and hook fan-out; without
-    // this guard the card is force-transitioned to `review` and then
-    // marked `done` on the next terminal sweep, overriding the user's
-    // explicit stop.
-    if (dispatch.status === "cancelled") {
+    // #815 + #2051 Finding 27 (P3): only treat dispatches that are actually
+    // `completed` as triggers for the review pipeline. Previously this guard
+    // only skipped `cancelled`, which left `failed`/`superseded`/other
+    // non-completed statuses able to drive the card into review on a race.
+    // OnDispatchCompleted should only fan-out on the completed terminal state;
+    // any other terminal status (cancelled by user, marked failed by retry
+    // sweep, etc.) must be a no-op so the rest of the lifecycle can react.
+    if (dispatch.status !== "completed") {
       agentdesk.log.info(
-        "[kanban] onDispatchCompleted: skipping cancelled dispatch " + dispatch.id
+        "[kanban] onDispatchCompleted: skipping non-completed dispatch " +
+          dispatch.id + " (status=" + dispatch.status + ")"
       );
       return;
     }
@@ -557,21 +521,29 @@ var rules = {
         _writeCardMetadata(dispatch.kanban_card_id, meta);
         var aqEntries = _findAutoQueueEntriesByDispatch(dispatch.id, false);
         if (aqEntries.length > 0) {
+          // #2051 Finding 15 (P2): a consultation may be linked to multiple
+          // auto_queue_entries via auto_queue_entry_dispatch_history. Previously
+          // only `aqEntries[0]` was redispatched + status-updated, leaving the
+          // rest stuck in `dispatched` and prone to spurious dispatch creation
+          // on the next stuck-dispatched sweep. Dispatch implementation for
+          // the first entry (single agent owns the card) and mark every other
+          // entry as `skipped` so the queue does not loop them.
+          var primary = aqEntries[0];
           try {
             var nextDispatchId = agentdesk.dispatch.create(
               dispatch.kanban_card_id,
-              aqEntries[0].agent_id,
+              primary.agent_id,
               "implementation",
               card.title || "Implementation",
               {
                 auto_queue: true,
-                entry_id: aqEntries[0].id,
+                entry_id: primary.id,
                 parent_dispatch_id: dispatch.id
               }
             );
             if (nextDispatchId) {
               agentdesk.autoQueue.updateEntryStatus(
-                aqEntries[0].id,
+                primary.id,
                 "dispatched",
                 "consultation_resume",
                 { dispatchId: nextDispatchId }
@@ -580,6 +552,29 @@ var rules = {
             }
           } catch (e) {
             agentdesk.log.warn("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " but implementation redispatch failed: " + e);
+          }
+          if (aqEntries.length > 1) {
+            for (var aqi = 1; aqi < aqEntries.length; aqi++) {
+              try {
+                agentdesk.autoQueue.updateEntryStatus(
+                  aqEntries[aqi].id,
+                  "skipped",
+                  "consultation_resume_duplicate",
+                  { primaryEntryId: primary.id }
+                );
+              } catch (skipErr) {
+                agentdesk.log.warn(
+                  "[preflight] could not mark duplicate aq entry " +
+                  aqEntries[aqi].id + " as skipped: " + skipErr
+                );
+              }
+            }
+            agentdesk.log.warn(
+              "[preflight] Consultation dispatch " + dispatch.id +
+              " was linked to " + aqEntries.length +
+              " auto_queue entries — dispatched primary " + primary.id +
+              " and skipped the remaining " + (aqEntries.length - 1)
+            );
           }
         } else {
           agentdesk.log.info("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " → clear");
@@ -805,6 +800,24 @@ var rules = {
           ": " +
           retrospectiveResult.error
         );
+        // #2051 Finding 25 (P3): retrospective data feeds the QA/quality
+        // dashboards. Silent log-only failures previously meant operators only
+        // learnt about gaps from downstream dashboards going stale. Emit a
+        // supervisor signal so the failure is observable end-to-end.
+        try {
+          if (agentdesk.runtime && typeof agentdesk.runtime.emitSignal === "function") {
+            agentdesk.runtime.emitSignal("retrospective_record_failed", {
+              card_id: payload.card_id,
+              status: payload.status,
+              error: String(retrospectiveResult.error)
+            });
+          }
+        } catch (signalErr) {
+          agentdesk.log.warn(
+            "[kanban] retrospective_record_failed signal emit failed for " +
+            payload.card_id + ": " + signalErr
+          );
+        }
       }
     }
   }

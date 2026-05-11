@@ -69,8 +69,21 @@ function reviewLoopFingerprintInfo(cardId) {
       headSha = String(tracking.head_sha);
     }
   }
+  // #2051 Finding 10 (P2): When head_sha cannot be resolved (new card before
+  // first commit, transient `git rev-parse` failure, etc.), the legacy code
+  // baked the literal "unknown-head" into the fingerprint. Three rapid
+  // review re-entries with no resolvable head then tripped
+  // REVIEW_LOOP_CHURN_THRESHOLD even though each round was on a genuinely
+  // different commit. Now: when the SHA is unknown we use a non-collapsing
+  // fingerprint so each entry counts as its own — the guard only fires when
+  // we can _confirm_ the same head is being reviewed repeatedly.
   if (!headSha) {
-    headSha = "unknown-head";
+    return {
+      head_sha: "unknown-head",
+      // Per-entry timestamp guarantees the fingerprint mismatches the prior
+      // record, resetting `enter_count` instead of falsely accumulating.
+      fingerprint: String(cardId) + "::review::unknown-head::" + loopGuardNowIso()
+    };
   }
   return {
     head_sha: headSha,
@@ -162,6 +175,41 @@ var reviewAutomation = {
     var completedWorkCount = Number(entry.completed_work_count || 0);
     var shouldAdvanceRound = !!entry.should_advance_round;
     var newRound = Number(entry.next_round || currentRound);
+
+    // #2051 Finding 21 (P2): max-round guard MUST run BEFORE
+    // `agentdesk.review.recordEntry`. The bridge commits the new
+    // review_round to the DB immediately, so escalating afterwards left the
+    // card permanently above the cap — every subsequent reopen would re-enter,
+    // bump the round again, and re-escalate without ever doing real work.
+    // Checking here keeps review_round at its previous value when the cap is
+    // hit, so an operator-driven reopen can resume the round normally.
+    var maxRoundsGuard = Number(agentdesk.config.get("max_review_rounds") || 3);
+    if (shouldAdvanceRound && newRound > maxRoundsGuard) {
+      escalateToManualIntervention(
+        card.id,
+        "Max review rounds (" + maxRoundsGuard + ") exceeded — PM decision needed",
+        {
+          review: true,
+          reviewStateSync: { review_round: currentRound },
+          skipEscalate: true
+        }
+      );
+      agentdesk.log.warn(
+        "[review] Max review rounds (" + maxRoundsGuard + ") reached for " + card.id +
+        " before recordEntry — review_round retained at R" + currentRound + " for reopen recovery"
+      );
+      notifyDeadlockManager(
+        "⚠️ [Review Deadlock] " +
+          (card.github_issue_number ? ("#" + card.github_issue_number + " ") : "") +
+          card.id + "\n" +
+          "card_id: " + card.id + "\n" +
+          "agent: " + card.assigned_agent_id + "\n" +
+          "review round " + newRound + " exceeded max " + maxRoundsGuard,
+        "review-automation"
+      );
+      return;
+    }
+
     agentdesk.review.recordEntry(
       card.id,
       shouldAdvanceRound
@@ -413,17 +461,45 @@ var reviewAutomation = {
       );
       var completeCfg = agentdesk.pipeline.resolveForCard(dispatch.kanban_card_id);
       var completeTerminalState = agentdesk.pipeline.terminalState(completeCfg);
+      var lifecycleRows = agentdesk.db.query(
+        "SELECT status FROM kanban_cards WHERE id = ?",
+        [dispatch.kanban_card_id]
+      );
+      var currentStatus = lifecycleRows.length > 0 ? lifecycleRows[0].status : null;
       // Find review state by scanning for the state with a review_passed gated
       // outbound transition, rather than assuming a fixed 2-hop shape from kickoff.
+      //
+      // #2051 Finding 14 (P2): when a custom pipeline declares multiple
+      // `review_passed` gated transitions (e.g. peer-review → senior-review →
+      // done), prefer the transition whose `from` matches the card's current
+      // status. The legacy "first match" path used the first declaration
+      // which could point at the wrong review state, mis-routing the card.
       var completeReviewState = null;
       var completeReviewPassTarget = completeTerminalState;
       if (completeCfg && completeCfg.transitions) {
-        for (var ti = 0; ti < completeCfg.transitions.length; ti++) {
-          var tr = completeCfg.transitions[ti];
-          if (tr.type === "gated" && tr.gates && tr.gates.indexOf("review_passed") >= 0) {
-            completeReviewState = tr.from;
-            completeReviewPassTarget = tr.to;
-            break;
+        if (currentStatus) {
+          for (var tiPref = 0; tiPref < completeCfg.transitions.length; tiPref++) {
+            var trPref = completeCfg.transitions[tiPref];
+            if (
+              trPref.type === "gated" &&
+              trPref.gates &&
+              trPref.gates.indexOf("review_passed") >= 0 &&
+              trPref.from === currentStatus
+            ) {
+              completeReviewState = trPref.from;
+              completeReviewPassTarget = trPref.to;
+              break;
+            }
+          }
+        }
+        if (!completeReviewState) {
+          for (var ti = 0; ti < completeCfg.transitions.length; ti++) {
+            var tr = completeCfg.transitions[ti];
+            if (tr.type === "gated" && tr.gates && tr.gates.indexOf("review_passed") >= 0) {
+              completeReviewState = tr.from;
+              completeReviewPassTarget = tr.to;
+              break;
+            }
           }
         }
       }
@@ -434,11 +510,6 @@ var reviewAutomation = {
         completeReviewState = agentdesk.pipeline.nextGatedTarget(completeInProgressState, completeCfg);
         completeReviewPassTarget = agentdesk.pipeline.nextGatedTargetWithGate(completeReviewState, "review_passed", completeCfg) || completeTerminalState;
       }
-      var lifecycleRows = agentdesk.db.query(
-        "SELECT status FROM kanban_cards WHERE id = ?",
-        [dispatch.kanban_card_id]
-      );
-      var currentStatus = lifecycleRows.length > 0 ? lifecycleRows[0].status : null;
       var statusEligible =
         currentStatus === completeReviewState ||
         currentStatus === completeReviewPassTarget ||
@@ -504,6 +575,26 @@ var reviewAutomation = {
       if (cards.length > 0 && cards[0].assigned_agent_id) {
         var card = cards[0];
         var issueNum = card.github_issue_number || "?";
+        // #2051 Finding 26 (P2): dedupe pending review-decision dispatches.
+        // If the previous round's review-decision is still pending/dispatched
+        // (typically because nobody has responded yet), creating another one
+        // every time a fresh review auto-completes leads to a pile of
+        // un-answered decision dispatches per card. Skip creation when an
+        // active one already exists for the same card.
+        var pendingDecisionRows = agentdesk.db.query(
+          "SELECT id FROM task_dispatches " +
+          "WHERE kanban_card_id = ? AND dispatch_type = 'review-decision' " +
+          "AND status IN ('pending', 'dispatched') LIMIT 1",
+          [dispatch.kanban_card_id]
+        );
+        if (pendingDecisionRows.length > 0) {
+          agentdesk.log.info(
+            "[review] Card " + dispatch.kanban_card_id +
+            " already has an active review-decision dispatch (" +
+            pendingDecisionRows[0].id + ") — skipping duplicate creation"
+          );
+          return;
+        }
         try {
           agentdesk.dispatch.create(
             dispatch.kanban_card_id,
@@ -848,6 +939,13 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
   // can pick it up once an agent is assigned (or operators can see the
   // card's pr:create_failed marker). Callers must treat error → terminal
   // + blocked_reason via markPrCreateFailed.
+  // #2051 Finding 7 (P2): `no_agent` is not a retryable failure — automated
+  // retry will not assign an agent. The legacy path leaned on the 3-retry
+  // escalate from `recordPrCreateFailure`, which meant 3 silent rounds before
+  // the human alert and pollution of `retry_count` for the actual create-pr
+  // retries that follow once the agent is assigned. Surface it to manual
+  // intervention immediately and return `no_agent_escalated` so the caller
+  // skips the normal retry-bump path.
   var precheckRepoId = prCardInfo[0].repo_id
     || extractRepoFromIssueUrl(prCardInfo[0].github_issue_url);
   if (!prCardInfo[0].assigned_agent_id) {
@@ -863,7 +961,17 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
         "no_assigned_agent_for_create_pr"
       );
     }
-    return { status: "error", reason: "no_agent" };
+    try {
+      escalateToManualIntervention(
+        cardId,
+        "Create-PR aborted: card has no assigned_agent_id — operator must assign before retry"
+      );
+    } catch (escErr) {
+      agentdesk.log.warn(
+        "[review] no_agent escalation to manual intervention failed for " + cardId + ": " + escErr
+      );
+    }
+    return { status: "error", reason: "no_agent_escalated" };
   }
 
   var agentId = prCardInfo[0].assigned_agent_id;
@@ -1151,10 +1259,65 @@ function processVerdict(cardId, verdict, result, options) {
   // (rework continuation). Only pass/approved route to done/next-stage.
   if (verdict === "pass" || verdict === "approved") {
     emitReviewVerdictQualityEvent(cardId, verdict, result, opts, "review_pass");
-    agentdesk.kanban.setReviewStatus(cardId, null, {suggestion_pending_at: null});
+    // #2051 Finding 12 (P2): the two state-syncs below execute in separate
+    // bridge calls (each commits its own SQL transaction). A throw from one
+    // used to leave the card with `review_status = NULL` but
+    // `card_review_state = reviewing`, which confused timeouts.js [D] /
+    // review auto-accept paths. Wrap each call so we (1) emit a structured
+    // warning when only one half succeeds, and (2) attempt a best-effort
+    // re-sync so subsequent ticks see a consistent state. A true 2-table
+    // transaction would need a dedicated Rust op (`review.commitVerdict`);
+    // until then this best-effort guard at least surfaces the inconsistency.
+    var reviewStatusOk = false;
+    try {
+      agentdesk.kanban.setReviewStatus(cardId, null, {suggestion_pending_at: null});
+      reviewStatusOk = true;
+    } catch (e) {
+      agentdesk.log.error(
+        "[review] Finding12: setReviewStatus(null) failed for " + cardId +
+        " (verdict=" + verdict + "): " + e
+      );
+    }
 
     // #117: Update canonical card_review_state — review passed
-    agentdesk.reviewState.sync(cardId, "idle", { last_verdict: verdict });
+    var reviewStateOk = false;
+    try {
+      agentdesk.reviewState.sync(cardId, "idle", { last_verdict: verdict });
+      reviewStateOk = true;
+    } catch (e) {
+      agentdesk.log.error(
+        "[review] Finding12: reviewState.sync(idle) failed for " + cardId +
+        " (verdict=" + verdict + "): " + e
+      );
+      // Best-effort: if setReviewStatus succeeded but the canonical state
+      // sync failed, leave a warning marker on the card so operators / the
+      // next sweep can spot the drift instead of silently moving forward.
+      if (reviewStatusOk) {
+        try {
+          agentdesk.db.execute(
+            "UPDATE kanban_cards SET blocked_reason = COALESCE(blocked_reason, 'review:state_sync_failed'), " +
+            "updated_at = datetime('now') WHERE id = ? AND blocked_reason IS NULL",
+            [cardId]
+          );
+        } catch (markErr) {
+          agentdesk.log.warn(
+            "[review] Finding12: could not stamp state_sync_failed marker for " +
+            cardId + ": " + markErr
+          );
+        }
+      }
+    }
+    // If review_status update failed but reviewState.sync succeeded, the
+    // canonical state is now `idle` but `review_status` may still read the
+    // old value. A subsequent tick / reviewState.sync('idle') call will
+    // converge; log it so the discrepancy is observable.
+    if (!reviewStatusOk && reviewStateOk) {
+      agentdesk.log.warn(
+        "[review] Finding12: review_status NOT cleared for " + cardId +
+        " — reviewState=idle but review_status update threw. " +
+        "Subsequent tick should reconverge."
+      );
+    }
 
     // #701: PR creation is attempted in the review-pass branches that do NOT
     // queue a running pipeline stage — skip paths and the no-stage else branch.
@@ -1241,7 +1404,11 @@ function processVerdict(cardId, verdict, result, options) {
             "[review] Card " + cardId + " skipping pipeline stages (no .rs changes) — create-pr dispatched, awaiting CI/merge"
           );
         } else if (prResultNoRs.status === "error") {
-          markPrCreateFailed(cardId, prResultNoRs.reason);
+          // #2051 Finding 7 (P2): `no_agent_escalated` already raised a manual
+          // intervention upstream; skip the retry-bumping markPrCreateFailed.
+          if (prResultNoRs.reason !== "no_agent_escalated") {
+            markPrCreateFailed(cardId, prResultNoRs.reason);
+          }
         } else {
           agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
           agentdesk.log.info(
@@ -1276,7 +1443,11 @@ function processVerdict(cardId, verdict, result, options) {
             var prResultE2eSkip = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
             prDispatched = (prResultE2eSkip.status === "dispatched");
             if (prResultE2eSkip.status === "error") {
-              markPrCreateFailed(cardId, prResultE2eSkip.reason);
+              // #2051 Finding 7 (P2): suppress markPrCreateFailed if upstream
+              // already escalated to manual intervention.
+              if (prResultE2eSkip.reason !== "no_agent_escalated") {
+                markPrCreateFailed(cardId, prResultE2eSkip.reason);
+              }
             } else if (prResultE2eSkip.status === "noop") {
               var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
               var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
@@ -1346,7 +1517,11 @@ function processVerdict(cardId, verdict, result, options) {
       if (prResultNoStages.status === "dispatched") {
         agentdesk.log.info("[review] Card " + cardId + " passed review — create-pr dispatched, awaiting CI/merge");
       } else if (prResultNoStages.status === "error") {
-        markPrCreateFailed(cardId, prResultNoStages.reason);
+        // #2051 Finding 7 (P2): no_agent_escalated already raised manual
+        // intervention; do not bump retry_count via markPrCreateFailed.
+        if (prResultNoStages.reason !== "no_agent_escalated") {
+          markPrCreateFailed(cardId, prResultNoStages.reason);
+        }
       } else {
         agentdesk.kanban.setStatus(cardId, reviewPassTarget, true);
         agentdesk.log.info("[review] Card " + cardId + " passed review → " + reviewPassTarget);
