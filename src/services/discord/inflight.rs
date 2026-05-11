@@ -15,10 +15,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::InflightRestartMode;
 use super::runtime_store::{atomic_write, discord_inflight_root};
+use crate::dispatch::Source;
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::provider::ProviderKind;
 
-const INFLIGHT_STATE_VERSION: u32 = 6;
+const INFLIGHT_STATE_VERSION: u32 = 7;
 const INFLIGHT_MAX_AGE_SECS: u64 = 300; // 5 minutes
 const DRAIN_RESTART_MAX_AGE_SECS: u64 = 1800; // 30 minutes
 const HOT_SWAP_HANDOFF_MAX_AGE_SECS: u64 = 900; // 15 minutes
@@ -62,6 +63,10 @@ pub(super) struct InflightTurnState {
     pub current_msg_id: u64,
     pub current_msg_len: usize,
     pub user_text: String,
+    /// Origin of the user turn. Voice turns keep normal text mirroring but also
+    /// drive spoken result playback and voice progress subscribers.
+    #[serde(default)]
+    pub source: Source,
     pub session_id: Option<String>,
     pub tmux_session_name: Option<String>,
     pub output_path: Option<String>,
@@ -198,6 +203,7 @@ impl InflightTurnState {
             current_msg_id,
             current_msg_len: 0,
             user_text,
+            source: Source::Text,
             session_id,
             tmux_session_name,
             output_path,

@@ -19,6 +19,7 @@ pub(crate) const DEFAULT_BARGE_IN_TTL_SECS: u64 = 15 * 60;
 #[serde(default)]
 pub(crate) struct VoiceConfig {
     pub enabled: bool,
+    pub verbose_progress: bool,
     pub audio: VoiceAudioDirs,
     pub stt: VoiceSttConfig,
     pub tts: VoiceTtsConfig,
@@ -34,6 +35,7 @@ impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            verbose_progress: false,
             audio: VoiceAudioDirs::default(),
             stt: VoiceSttConfig::default(),
             tts: VoiceTtsConfig::default(),
@@ -205,6 +207,7 @@ mod tests {
         let config = VoiceConfig::default();
 
         assert!(!config.enabled);
+        assert!(!config.verbose_progress);
         assert!(config.allowed_user_ids.is_empty());
         assert!(config.auto_join_channel_ids.is_empty());
         assert_eq!(config.wake_words, vec!["agentdesk"]);
@@ -232,6 +235,7 @@ mod tests {
         let config: VoiceConfig = serde_yaml::from_str(
             r#"
 enabled: true
+verbose_progress: true
 audio:
   recordings_dir: /tmp/voice-recordings
 thresholds:
@@ -250,6 +254,7 @@ auto_join_channel_ids:
         .unwrap();
 
         assert!(config.enabled);
+        assert!(config.verbose_progress);
         assert_eq!(
             config.audio.recordings_dir,
             PathBuf::from("/tmp/voice-recordings")

@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, GuildId, MessageId};
-use tokio::sync::{Mutex, RwLock};
+use serenity::{ChannelId, GuildId, MessageId, UserId};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::services::provider::ProviderKind;
@@ -31,6 +31,7 @@ const STT_TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum VoiceBargeInTranscriptOutcome {
     Disabled,
+    BargeInDisabled,
     EmptyTranscript,
     SensitivityChanged(BargeInSensitivity),
     NoActiveTurn,
@@ -41,6 +42,16 @@ pub(in crate::services::discord) enum VoiceBargeInTranscriptOutcome {
     },
     IgnoredNoise,
     TranscriptUnavailable,
+    VoiceTurnStarted {
+        turn_id: String,
+    },
+    VoiceTurnStartFailed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct VoiceProgressEvent {
+    pub channel_id: u64,
+    pub label: String,
 }
 
 #[derive(Clone)]
@@ -62,14 +73,17 @@ struct DeferredBargeInDrain {
 
 pub(in crate::services::discord) struct VoiceBargeInRuntime {
     enabled: bool,
+    barge_in_enabled: bool,
     default_sensitivity: BargeInSensitivity,
     sensitivity_state: Arc<RwLock<BargeInSensitivityState>>,
     acknowledgement_enabled: bool,
     acknowledgement_text: String,
     transcript_dirs: Vec<PathBuf>,
     spoken_result_language: String,
+    verbose_progress: bool,
     stt: Option<SttRuntime>,
     tts: Option<TtsRuntime>,
+    progress_tx: broadcast::Sender<VoiceProgressEvent>,
     monitors: dashmap::DashMap<u64, Arc<std::sync::Mutex<LiveBargeInMonitor>>>,
     playbacks: dashmap::DashMap<u64, Arc<LivePlaybackSession>>,
     spoken_result_playbacks: dashmap::DashMap<u64, SpokenResultPlaybackSession>,
@@ -93,9 +107,11 @@ impl VoiceBargeInRuntime {
         } else {
             None
         };
+        let (progress_tx, _) = broadcast::channel(128);
 
         Self {
-            enabled: config.enabled && config.barge_in.enabled,
+            enabled: config.enabled,
+            barge_in_enabled: config.enabled && config.barge_in.enabled,
             default_sensitivity,
             sensitivity_state: Arc::new(RwLock::new(BargeInSensitivityState::new(
                 default_sensitivity,
@@ -105,8 +121,10 @@ impl VoiceBargeInRuntime {
             acknowledgement_text: config.barge_in.acknowledgement_text.clone(),
             transcript_dirs: transcript_dirs_from_config(config),
             spoken_result_language: config.stt.language.clone(),
+            verbose_progress: config.verbose_progress,
             stt,
             tts,
+            progress_tx,
             monitors: dashmap::DashMap::new(),
             playbacks: dashmap::DashMap::new(),
             spoken_result_playbacks: dashmap::DashMap::new(),
@@ -118,16 +136,20 @@ impl VoiceBargeInRuntime {
     }
 
     pub(in crate::services::discord) fn disabled() -> Self {
+        let (progress_tx, _) = broadcast::channel(128);
         Self {
             enabled: false,
+            barge_in_enabled: false,
             default_sensitivity: BargeInSensitivity::Normal,
             sensitivity_state: Arc::new(RwLock::new(BargeInSensitivityState::default())),
             acknowledgement_enabled: false,
             acknowledgement_text: String::new(),
             transcript_dirs: Vec::new(),
             spoken_result_language: DEFAULT_STT_LANGUAGE.to_string(),
+            verbose_progress: false,
             stt: None,
             tts: None,
+            progress_tx,
             monitors: dashmap::DashMap::new(),
             playbacks: dashmap::DashMap::new(),
             spoken_result_playbacks: dashmap::DashMap::new(),
@@ -140,6 +162,27 @@ impl VoiceBargeInRuntime {
 
     pub(in crate::services::discord) fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub(in crate::services::discord) fn subscribe_progress(
+        &self,
+    ) -> broadcast::Receiver<VoiceProgressEvent> {
+        self.progress_tx.subscribe()
+    }
+
+    pub(in crate::services::discord) fn publish_progress(
+        &self,
+        channel_id: ChannelId,
+        label: impl Into<String>,
+    ) {
+        let label = label.into();
+        if label.trim().is_empty() {
+            return;
+        }
+        let _ = self.progress_tx.send(VoiceProgressEvent {
+            channel_id: channel_id.get(),
+            label,
+        });
     }
 
     pub(in crate::services::discord) fn register_voice_context(
@@ -161,7 +204,7 @@ impl VoiceBargeInRuntime {
         self: &Arc<Self>,
         shutdown_flag: Arc<AtomicBool>,
     ) {
-        if !self.enabled {
+        if !self.barge_in_enabled {
             return;
         }
 
@@ -192,7 +235,7 @@ impl VoiceBargeInRuntime {
         &self,
         transcript: &str,
     ) -> Option<BargeInSensitivity> {
-        if !self.enabled {
+        if !self.barge_in_enabled {
             return None;
         }
         let sensitivity = self
@@ -224,7 +267,7 @@ impl VoiceBargeInRuntime {
     ) where
         P: BargeInPlayerStop + 'static,
     {
-        if !self.enabled {
+        if !self.barge_in_enabled {
             return;
         }
 
@@ -283,7 +326,7 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         samples: &[i16],
     ) -> Option<LiveBargeInCut> {
-        if !self.enabled || samples.is_empty() {
+        if !self.barge_in_enabled || samples.is_empty() {
             return None;
         }
 
@@ -328,6 +371,10 @@ impl VoiceBargeInRuntime {
         let transcript = transcript.trim();
         if transcript.is_empty() {
             return VoiceBargeInTranscriptOutcome::EmptyTranscript;
+        }
+
+        if !self.barge_in_enabled {
+            return VoiceBargeInTranscriptOutcome::BargeInDisabled;
         }
 
         if let Some(sensitivity) = self.apply_voice_command(transcript).await {
@@ -378,6 +425,85 @@ impl VoiceBargeInRuntime {
         }
     }
 
+    async fn start_voice_turn(
+        &self,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        utterance: &CompletedUtterance,
+        transcript: &str,
+    ) -> VoiceBargeInTranscriptOutcome {
+        let Some(ctx) = shared.cached_serenity_ctx.get() else {
+            return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(
+                "serenity context unavailable".to_string(),
+            );
+        };
+        let Some(token) = shared.cached_bot_token.get() else {
+            return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(
+                "bot token unavailable".to_string(),
+            );
+        };
+        let channel_name_hint = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .and_then(|session| session.channel_name.clone())
+        };
+        let prompt = crate::voice::prompt::voice_bridge_prompt(
+            transcript,
+            &self.spoken_result_language,
+            self.verbose_progress,
+            None,
+        );
+        let metadata = serde_json::json!({
+            "source": crate::dispatch::Source::Voice.as_str(),
+            "voice": {
+                "user_id": utterance.user_id.to_string(),
+                "utterance_id": utterance.utterance_id,
+                "language": self.spoken_result_language.clone(),
+                "verbose_progress": self.verbose_progress,
+                "started_at": utterance.started_at,
+                "completed_at": utterance.completed_at,
+                "samples_written": utterance.samples_written,
+            }
+        });
+        match super::router::start_voice_headless_turn(
+            ctx,
+            channel_id,
+            &prompt,
+            &format!("voice-user-{}", utterance.user_id),
+            UserId::new(utterance.user_id),
+            shared,
+            token,
+            Some(metadata),
+            channel_name_hint,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                tracing::info!(
+                    channel_id = channel_id.get(),
+                    user_id = utterance.user_id,
+                    utterance_id = %utterance.utterance_id,
+                    turn_id = %outcome.turn_id,
+                    "voice utterance started agent turn"
+                );
+                VoiceBargeInTranscriptOutcome::VoiceTurnStarted {
+                    turn_id: outcome.turn_id,
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    channel_id = channel_id.get(),
+                    user_id = utterance.user_id,
+                    utterance_id = %utterance.utterance_id,
+                    "voice utterance failed to start agent turn"
+                );
+                VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(error.to_string())
+            }
+        }
+    }
+
     pub(in crate::services::discord) async fn process_completed_utterance(
         &self,
         shared: &Arc<SharedData>,
@@ -397,7 +523,27 @@ impl VoiceBargeInRuntime {
             None => return VoiceBargeInTranscriptOutcome::TranscriptUnavailable,
         };
 
-        self.handle_processing_transcript(shared, provider, channel_id, &transcript)
+        let transcript = transcript.trim();
+        if transcript.is_empty() {
+            return VoiceBargeInTranscriptOutcome::EmptyTranscript;
+        }
+
+        if super::mailbox_has_active_turn(shared, channel_id).await {
+            return self
+                .handle_processing_transcript(shared, provider, channel_id, transcript)
+                .await;
+        }
+
+        if let Some(sensitivity) = self.apply_voice_command(transcript).await {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                sensitivity = ?sensitivity,
+                "voice barge-in sensitivity changed by spoken command"
+            );
+            return VoiceBargeInTranscriptOutcome::SensitivityChanged(sensitivity);
+        }
+
+        self.start_voice_turn(shared, channel_id, utterance, transcript)
             .await
     }
 
@@ -407,7 +553,7 @@ impl VoiceBargeInRuntime {
         provider: &ProviderKind,
         channel_id: ChannelId,
     ) -> bool {
-        if !self.enabled {
+        if !self.barge_in_enabled {
             return false;
         }
 
@@ -934,6 +1080,18 @@ mod tests {
 
         runtime.clear_spoken_result_playback_if_current(channel_id, second_id);
         assert!(!runtime.spoken_result_playbacks.contains_key(&42));
+    }
+
+    #[tokio::test]
+    async fn progress_subscriber_receives_voice_turn_events() {
+        let runtime = enabled_runtime();
+        let mut rx = runtime.subscribe_progress();
+
+        runtime.publish_progress(ChannelId::new(42), "tool:Bash");
+
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.channel_id, 42);
+        assert_eq!(event.label, "tool:Bash");
     }
 
     #[test]

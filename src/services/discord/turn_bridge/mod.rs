@@ -1522,6 +1522,11 @@ pub(super) fn spawn_turn_bridge(
                                 channel_id,
                                 vec![StatusEvent::Heartbeat],
                             );
+                            if inflight_state.source == crate::dispatch::Source::Voice {
+                                shared_owned
+                                    .voice_barge_in
+                                    .publish_progress(channel_id, "thinking");
+                            }
                             // #1113 implicit-terminate: a Thinking event after an
                             // unfinished ToolUse means the agent moved on without
                             // emitting a ToolResult. Promote the orphaned tool to
@@ -1597,6 +1602,11 @@ pub(super) fn spawn_turn_bridge(
                                 truncate_str(&summary, 120).to_string()
                             };
                             let display = format!("⚙ {}: {}", name, display_summary);
+                            if inflight_state.source == crate::dispatch::Source::Voice {
+                                shared_owned
+                                    .voice_barge_in
+                                    .publish_progress(channel_id, format!("tool:{name}"));
+                            }
                             record_placeholder_live_event(
                                 shared_owned.as_ref(),
                                 channel_id,
@@ -1791,6 +1801,16 @@ pub(super) fn spawn_turn_bridge(
                         }
                         StreamMessage::ToolResult { content, is_error } => {
                             let status_tool_name = pending_status_tool_results.pop_front();
+                            if inflight_state.source == crate::dispatch::Source::Voice {
+                                let label = if is_error {
+                                    "tool_result:error"
+                                } else {
+                                    "tool_result:ok"
+                                };
+                                shared_owned
+                                    .voice_barge_in
+                                    .publish_progress(channel_id, label);
+                            }
                             // #1084: flag oversize tool outputs + record metrics.
                             // Never mutates `content` — the agent and transcript
                             // still see the raw output; only a warn log + counters
@@ -3667,7 +3687,10 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
-            if terminal_delivery_committed && !inflight_state.silent_turn {
+            if terminal_delivery_committed
+                && !inflight_state.silent_turn
+                && inflight_state.source == crate::dispatch::Source::Voice
+            {
                 shared_owned
                     .voice_barge_in
                     .spawn_spoken_result_playback(

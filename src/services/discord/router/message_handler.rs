@@ -91,6 +91,21 @@ fn metadata_silent_flag(metadata: Option<&serde_json::Value>) -> bool {
         .unwrap_or(false)
 }
 
+fn metadata_turn_source(
+    source: Option<&str>,
+    metadata: Option<&serde_json::Value>,
+) -> crate::dispatch::Source {
+    source
+        .and_then(crate::dispatch::Source::from_label)
+        .or_else(|| {
+            metadata
+                .and_then(|value| value.get("source").or_else(|| value.get("turn_source")))
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::dispatch::Source::from_label)
+        })
+        .unwrap_or_default()
+}
+
 fn normalize_delivery_bot_name(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty()
@@ -793,6 +808,65 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     is_dm_hint: Option<bool>,
     reservation: HeadlessTurnReservation,
 ) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
+    start_reserved_headless_turn_with_owner(
+        ctx,
+        channel_id,
+        prompt,
+        request_owner_name,
+        UserId::new(1),
+        shared,
+        token,
+        source,
+        metadata,
+        channel_name_hint,
+        is_dm_hint,
+        reservation,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn start_voice_headless_turn(
+    ctx: &serenity::Context,
+    channel_id: ChannelId,
+    prompt: &str,
+    request_owner_name: &str,
+    request_owner: UserId,
+    shared: &Arc<SharedData>,
+    token: &str,
+    metadata: Option<serde_json::Value>,
+    channel_name_hint: Option<String>,
+) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
+    start_reserved_headless_turn_with_owner(
+        ctx,
+        channel_id,
+        prompt,
+        request_owner_name,
+        request_owner,
+        shared,
+        token,
+        Some(crate::dispatch::Source::Voice.as_str()),
+        metadata,
+        channel_name_hint,
+        Some(false),
+        reserve_headless_turn(),
+    )
+    .await
+}
+
+async fn start_reserved_headless_turn_with_owner(
+    ctx: &serenity::Context,
+    channel_id: ChannelId,
+    prompt: &str,
+    request_owner_name: &str,
+    request_owner: UserId,
+    shared: &Arc<SharedData>,
+    token: &str,
+    source: Option<&str>,
+    metadata: Option<serde_json::Value>,
+    channel_name_hint: Option<String>,
+    is_dm_hint: Option<bool>,
+    reservation: HeadlessTurnReservation,
+) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err(HeadlessTurnStartError::Internal(
@@ -800,7 +874,6 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
         ));
     }
 
-    let request_owner = UserId::new(1);
     shared.record_channel_speaker(
         channel_id,
         request_owner,
@@ -1544,6 +1617,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     inflight_state.session_key = adk_session_key.clone();
     inflight_state.delivery_bot = metadata_delivery_bot(metadata.as_ref());
     inflight_state.silent_turn = metadata_silent_flag(metadata.as_ref());
+    inflight_state.source = metadata_turn_source(source, metadata.as_ref());
     if let Err(error) = save_inflight_state(&inflight_state) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!("  [{ts}]   ⚠ inflight state save failed: {error}");
@@ -5889,6 +5963,24 @@ mod tests {
 
         let invalid = serde_json::json!({"delivery_bot": "not valid"});
         assert_eq!(metadata_delivery_bot(Some(&invalid)), None);
+    }
+
+    #[test]
+    fn metadata_turn_source_prefers_explicit_source_arg() {
+        let metadata = serde_json::json!({"source": "text"});
+
+        assert_eq!(
+            metadata_turn_source(Some("voice"), Some(&metadata)),
+            crate::dispatch::Source::Voice
+        );
+        assert_eq!(
+            metadata_turn_source(None, Some(&metadata)),
+            crate::dispatch::Source::Text
+        );
+        assert_eq!(
+            metadata_turn_source(None, None),
+            crate::dispatch::Source::Text
+        );
     }
 
     #[test]

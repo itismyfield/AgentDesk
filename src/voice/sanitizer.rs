@@ -61,8 +61,16 @@ fn is_noise_line(line: &str) -> bool {
         || lower.starts_with("stderr:")
         || lower.starts_with("output:")
         || lower.starts_with("logs:")
+        || lower.starts_with("log:")
+        || lower.starts_with("diff:")
+        || lower.starts_with("changed files:")
+        || lower.starts_with("verification log:")
+        || lower.starts_with("test output:")
         || lower.starts_with("run:")
         || lower.starts_with("command:")
+        || line.starts_with("변경 파일:")
+        || line.starts_with("검증 로그:")
+        || line.starts_with("테스트 출력:")
         || is_bare_command_line(&lower)
     {
         return true;
@@ -230,6 +238,16 @@ mod tests {
         );
 
         assert_eq!(spoken, "결과 cargo test 통과 문서를 확인했어요.");
+    }
+
+    #[test]
+    fn removes_diff_and_verification_headers_from_voice_result() {
+        let spoken = spoken_result_only(
+            "완료했습니다.\ndiff: src/lib.rs\nchanged files: 2\nverification log: cargo test\n테스트 출력: noisy\n다음은 텍스트 채널에 남겼습니다.",
+            "ko",
+        );
+
+        assert_eq!(spoken, "완료했습니다. 다음은 텍스트 채널에 남겼습니다.");
     }
 
     #[test]
