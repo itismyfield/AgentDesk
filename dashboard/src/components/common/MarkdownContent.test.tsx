@@ -10,7 +10,13 @@ test("MarkdownContent renders links safely with target blank and noopener norefe
   const root = createRoot(div);
 
   await act(async () => {
-    root.render(<MarkdownContent content={"[external](https://example.com) [anchor](#details) [evil](javascript:alert(1))"} />);
+    root.render(
+      <MarkdownContent
+        content={
+          "[external](https://example.com) [same-origin](http://localhost:3000/settings) [protocol-relative](//localhost:3000/help) [anchor](#details) [evil](javascript:alert(1))"
+        }
+      />
+    );
   });
 
   const links = div.querySelectorAll("a");
@@ -19,7 +25,11 @@ test("MarkdownContent renders links safely with target blank and noopener norefe
     if (link.getAttribute("href") === "https://example.com") {
       expect(link.getAttribute("target")).toBe("_blank");
       expect(link.getAttribute("rel")).toBe("noopener noreferrer");
-    } else if (link.getAttribute("href") === "#details") {
+    } else if (
+      link.getAttribute("href") === "http://localhost:3000/settings" ||
+      link.getAttribute("href") === "//localhost:3000/help" ||
+      link.getAttribute("href") === "#details"
+    ) {
       expect(link.hasAttribute("target")).toBe(false);
       expect(link.hasAttribute("rel")).toBe(false);
     } else {

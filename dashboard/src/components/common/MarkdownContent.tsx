@@ -7,7 +7,19 @@ interface Props {
 }
 
 function isExternalHref(href?: string) {
-  return Boolean(href && /^(https?:)?\/\//i.test(href));
+  if (!href || !/^(https?:)?\/\//i.test(href)) {
+    return false;
+  }
+
+  if (typeof window === "undefined" || !window.location?.href) {
+    return true;
+  }
+
+  try {
+    return new URL(href, window.location.href).origin !== window.location.origin;
+  } catch {
+    return true;
+  }
 }
 
 export default function MarkdownContent({ content, className }: Props) {
