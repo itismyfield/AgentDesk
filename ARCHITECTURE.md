@@ -265,7 +265,8 @@ src/
 │   │   ├── skills_api.rs
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
-│   │   └── v1.rs
+│   │   ├── v1.rs
+│   │   └── voice_config.rs
 │   ├── cluster.rs
 │   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
@@ -360,7 +361,8 @@ src/
 │   │   │   ├── restart.rs
 │   │   │   ├── session.rs
 │   │   │   ├── skill.rs
-│   │   │   └── text_commands.rs
+│   │   │   ├── text_commands.rs
+│   │   │   └── voice.rs
 │   │   ├── health/
 │   │   │   ├── mailbox.rs
 │   │   │   ├── provider_probe.rs
@@ -485,7 +487,9 @@ src/
 │   │   ├── tmux_reattach_offsets.rs
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_session_files.rs
-│   │   └── tmux_watcher.rs
+│   │   ├── tmux_watcher.rs
+│   │   ├── voice_barge_in.rs
+│   │   └── voice_routing.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/
 │   │   │   ├── guard.rs
@@ -620,6 +624,22 @@ src/
 │   ├── loopback_url.rs
 │   ├── mod.rs
 │   └── wip_detect.rs
+├── voice/
+│   ├── tts/
+│   │   ├── chunks.rs
+│   │   ├── edge.rs
+│   │   ├── mod.rs
+│   │   └── playback.rs
+│   ├── barge_in.rs
+│   ├── commands.rs
+│   ├── config.rs
+│   ├── metrics.rs
+│   ├── mod.rs
+│   ├── progress.rs
+│   ├── prompt.rs
+│   ├── receiver.rs
+│   ├── sanitizer.rs
+│   └── stt.rs
 ├── bootstrap.rs
 ├── config.rs
 ├── credential.rs
@@ -662,6 +682,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/supervisor/` | Runtime supervisor signals and recovery decisions for orphaned or stalled work. |
 | `src/ui/` | Compatibility shims for persisted UI/session types used by the Discord runtime. |
 | `src/utils/` | Shared formatting and Unicode-safe string utilities. |
+| `src/voice/` | Voice command, STT/TTS, prompt, progress, metrics, receiver, and barge-in helpers. |
 | `src/bootstrap.rs` | Builds config, database, policy engine, and shared app state before launch. |
 | `src/config.rs` | `agentdesk.yaml` parsing, configuration defaults, and shared test env helpers. |
 | `src/credential.rs` | Reads runtime credential files such as Discord bot tokens from the AgentDesk root. |

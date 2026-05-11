@@ -51,6 +51,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "supervisor/": "Runtime supervisor signals and recovery decisions for orphaned or stalled work.",
     "ui/": "Compatibility shims for persisted UI/session types used by the Discord runtime.",
     "utils/": "Shared formatting and Unicode-safe string utilities.",
+    "voice/": "Voice command, STT/TTS, prompt, progress, metrics, receiver, and barge-in helpers.",
 }
 
 FN_RE = re.compile(
