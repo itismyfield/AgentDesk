@@ -1325,6 +1325,16 @@ pub async fn upsert_meeting(
         );
     };
 
+    // #2050 P1 finding 1 — detect whether this upsert creates or updates a meeting
+    // so we can broadcast the correct round_table_new / round_table_update event.
+    let meeting_existed = sqlx::query_scalar::<_, i64>("SELECT 1 FROM meetings WHERE id = $1")
+        .bind(&body.id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
     let started_at_dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(started_at)
         .unwrap_or_else(chrono::Utc::now);
     let completed_at_dt = body
@@ -1509,10 +1519,20 @@ pub async fn upsert_meeting(
     }
 
     match load_meeting_pg(pool, &body.id).await {
-        Ok(Some(meeting)) => (
-            StatusCode::OK,
-            Json(json!({"ok": true, "meeting": meeting})),
-        ),
+        Ok(Some(meeting)) => {
+            // #2050 P1 finding 1 — broadcast round_table_new / round_table_update so
+            // other dashboard clients reflect the upsert without manual refresh.
+            let event_name = if meeting_existed {
+                "round_table_update"
+            } else {
+                "round_table_new"
+            };
+            crate::server::ws::emit_event(&state.broadcast_tx, event_name, meeting.clone());
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "meeting": meeting})),
+            )
+        }
         Ok(None) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "meeting was not persisted"})),

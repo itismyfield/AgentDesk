@@ -190,14 +190,28 @@ pub async fn create_dispatch(
     match result {
         Ok((dispatch_id, _, reused)) => {
             match crate::dispatch::query_dispatch_row_pg(pool, &dispatch_id).await {
-                Ok(dispatch) => (
-                    if reused {
-                        StatusCode::OK
+                Ok(dispatch) => {
+                    // #2050 P1 finding 1 — broadcast WS event so other dashboard
+                    // clients reflect the new/reused dispatch without manual refresh.
+                    let event_name = if reused {
+                        "task_dispatch_updated"
                     } else {
-                        StatusCode::CREATED
-                    },
-                    Json(DispatchRouteResponse::created_dispatch(dispatch)),
-                ),
+                        "task_dispatch_created"
+                    };
+                    crate::server::ws::emit_event(
+                        &state.broadcast_tx,
+                        event_name,
+                        dispatch.clone(),
+                    );
+                    (
+                        if reused {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::CREATED
+                        },
+                        Json(DispatchRouteResponse::created_dispatch(dispatch)),
+                    )
+                }
                 Err(error) => internal_error(format!("{error}")),
             }
         }
@@ -244,10 +258,18 @@ pub async fn update_dispatch(
             "api",
             body.result.as_ref(),
         ) {
-            Ok(dispatch) => (
-                StatusCode::OK,
-                Json(DispatchRouteResponse::dispatch(dispatch)),
-            ),
+            Ok(dispatch) => {
+                // #2050 P1 finding 1 — broadcast task_dispatch_updated on completion.
+                crate::server::ws::emit_event(
+                    &state.broadcast_tx,
+                    "task_dispatch_updated",
+                    dispatch.clone(),
+                );
+                (
+                    StatusCode::OK,
+                    Json(DispatchRouteResponse::dispatch(dispatch)),
+                )
+            }
             Err(error) => dispatch_update_error(&id, format!("{error}")),
         };
     }
@@ -331,10 +353,18 @@ pub async fn update_dispatch(
     }
 
     match crate::dispatch::query_dispatch_row_pg(pool, &id).await {
-        Ok(dispatch) => (
-            StatusCode::OK,
-            Json(DispatchRouteResponse::dispatch(dispatch)),
-        ),
+        Ok(dispatch) => {
+            // #2050 P1 finding 1 — broadcast task_dispatch_updated on PATCH success.
+            crate::server::ws::emit_event(
+                &state.broadcast_tx,
+                "task_dispatch_updated",
+                dispatch.clone(),
+            );
+            (
+                StatusCode::OK,
+                Json(DispatchRouteResponse::dispatch(dispatch)),
+            )
+        }
         Err(error) => internal_error(format!("{error}")),
     }
 }

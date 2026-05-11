@@ -3,6 +3,7 @@ use axum::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::HeaderMap,
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
@@ -162,6 +163,7 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(tx): State<BroadcastTx>,
     query: axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     // Check auth token if configured
     let config = crate::config::load_graceful();
@@ -177,11 +179,27 @@ pub async fn ws_handler(
             }
         }
     }
-    ws.on_upgrade(move |socket| handle_socket(socket, tx))
+
+    // #2050 P1 finding 2 — accept `?since=<id>` (or legacy `?last_event_id=`)
+    // query parameter, or `Last-Event-Id` header, so reconnecting clients can
+    // replay events they missed while disconnected. The id is the numeric
+    // envelope id assigned by BroadcastBus.
+    let last_event_id = query
+        .get("since")
+        .or_else(|| query.get("last_event_id"))
+        .cloned()
+        .or_else(|| {
+            headers
+                .get("last-event-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        });
+
+    ws.on_upgrade(move |socket| handle_socket(socket, tx, last_event_id))
         .into_response()
 }
 
-async fn handle_socket(socket: WebSocket, tx: BroadcastTx) {
+async fn handle_socket(socket: WebSocket, tx: BroadcastTx, last_event_id: Option<String>) {
     let (mut sender, mut receiver) = socket.split();
 
     // Send connected event
@@ -190,7 +208,24 @@ async fn handle_socket(socket: WebSocket, tx: BroadcastTx) {
         return;
     }
 
+    // Subscribe BEFORE replaying history so events emitted *after* the replay
+    // snapshot is taken still arrive via the live broadcast channel. The
+    // overlap window may produce duplicates (same envelope id), but clients
+    // dedupe by id so this is acceptable in exchange for zero loss.
     let mut rx = tx.subscribe();
+
+    // Flush any events that happened after the client's last seen id (#2050 P1 #2).
+    if let Some(since) = last_event_id.as_deref().filter(|s| !s.is_empty()) {
+        for replay in tx.replay_since(since) {
+            if sender
+                .send(Message::Text(replay.as_ws_message().into()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
 
     // Forward broadcast messages to this client
     let mut send_task = tokio::spawn(async move {

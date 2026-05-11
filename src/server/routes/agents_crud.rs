@@ -785,7 +785,16 @@ pub(super) async fn create_agent(
         }
 
         return match load_agent_pg(pool, &body.id).await {
-            Ok(Some(agent)) => (StatusCode::CREATED, Json(json!({"agent": agent}))),
+            Ok(Some(agent)) => {
+                // #2050 P1 finding 1 — broadcast agent_created so other dashboards
+                // refresh their agent rosters without a manual reload.
+                crate::server::ws::emit_event(
+                    &state.broadcast_tx,
+                    "agent_created",
+                    json!({ "id": body.id, "agent": agent }),
+                );
+                (StatusCode::CREATED, Json(json!({"agent": agent})))
+            }
             Ok(None) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "agent insert succeeded but readback failed"})),
@@ -1780,6 +1789,12 @@ pub(super) async fn delete_agent(
                     .bind(&id)
                     .execute(pool)
                     .await;
+                // #2050 P1 finding 1 — broadcast agent_deleted to other dashboards.
+                crate::server::ws::emit_event(
+                    &state.broadcast_tx,
+                    "agent_deleted",
+                    json!({ "id": id }),
+                );
                 return (StatusCode::OK, Json(json!({"ok": true})));
             }
             Err(error) => {
