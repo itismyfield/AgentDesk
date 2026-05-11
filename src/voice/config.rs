@@ -53,6 +53,25 @@ impl VoiceConfig {
     pub(crate) fn is_default(&self) -> bool {
         self == &Self::default()
     }
+
+    pub(crate) fn wake_word_required(&self) -> bool {
+        std::env::var("REQUIRE_WAKE_WORD")
+            .ok()
+            .and_then(|value| parse_bool_env(&value))
+            .unwrap_or_else(|| {
+                self.wake_words
+                    .iter()
+                    .any(|wake_word| !wake_word.trim().is_empty())
+            })
+    }
+}
+
+fn parse_bool_env(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

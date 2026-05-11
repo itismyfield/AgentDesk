@@ -286,6 +286,9 @@ impl TestHealthHarness {
             intake_dedup: dashmap::DashMap::new(),
             dispatch_thread_parents: dashmap::DashMap::new(),
             voice_barge_in: Arc::new(super::voice_barge_in::VoiceBargeInRuntime::disabled()),
+            voice_pairings: Arc::new(
+                super::voice_routing::VoiceChannelPairingStore::load_default(),
+            ),
             bot_connected: std::sync::atomic::AtomicBool::new(true),
             last_turn_at: std::sync::Mutex::new(None),
             model_overrides: dashmap::DashMap::new(),

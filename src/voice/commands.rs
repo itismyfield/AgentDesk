@@ -1,0 +1,558 @@
+//! Spoken voice command parsing and lobby routing helpers.
+
+use std::collections::HashMap;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+use regex::Regex;
+use unicode_normalization::UnicodeNormalization;
+
+use crate::config::{AgentDef, Config};
+use crate::voice::barge_in::{BargeInSensitivity, parse_sensitivity_command};
+use crate::voice::progress;
+
+pub(crate) const VOICE_ACTIVE_AGENT_CONTEXT_TTL: Duration = Duration::from_secs(180);
+pub(crate) const DEFAULT_WAKE_WORD: &str = "agentdesk";
+
+static LANGUAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?iu)(?:언어|language|lang)\s*(?:를|을|은|=|:|to|as)?\s*(한국어|한글|korean|ko|영어|english|en)\b|(?:한국어|한글|korean|ko|영어|english|en)\s*(?:로|으로)?\s*(?:말해|대답|전환|바꿔|변경)",
+    )
+    .expect("valid voice language regex")
+});
+static VOICE_CLONE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?iu)(?:voice\s*clone|보이스\s*클론|목소리\s*복제|음성\s*복제)")
+        .expect("valid voice clone regex")
+});
+static VOICE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?iu)(?:목소리|음성|voice)\s*(?:를|을|은|=|:|to|as)?\s*([[:alnum:]가-힣_.:\- ]{2,80})",
+    )
+    .expect("valid voice selection regex")
+});
+static WAKE_WORD_SET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?iu)(?:호출어|웨이크\s*워드|wake\s*word)\s*(?:를|을|은|=|:|to|as)?\s*(.+)")
+        .expect("valid wake word regex")
+});
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VoiceCommand {
+    Sensitivity(BargeInSensitivity),
+    VerboseProgress(bool),
+    Language(String),
+    TtsVoice(String),
+    VoiceClone { reference: Option<String> },
+    WakeWords(WakeWordCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WakeWordCommand {
+    EnableDefault,
+    Disable,
+    Set(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WakeWordMatch {
+    pub(crate) wake_word: String,
+    pub(crate) remaining: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WakeWordDecision {
+    NotRequired(String),
+    Matched(WakeWordMatch),
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VoiceAliasCollision {
+    pub(crate) normalized: String,
+    pub(crate) first_agent_id: String,
+    pub(crate) first_alias: String,
+    pub(crate) second_agent_id: String,
+    pub(crate) second_alias: String,
+}
+
+impl std::fmt::Display for VoiceAliasCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "voice alias collision `{}`: `{}` ({}) conflicts with `{}` ({})",
+            self.normalized,
+            self.first_alias,
+            self.first_agent_id,
+            self.second_alias,
+            self.second_agent_id
+        )
+    }
+}
+
+impl std::error::Error for VoiceAliasCollision {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VoiceAgentRoute {
+    pub(crate) agent_id: String,
+    pub(crate) channel_id: u64,
+    pub(crate) provider: String,
+    pub(crate) matched_alias: String,
+    pub(crate) remaining_transcript: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VoiceActiveAgentContext {
+    pub(crate) agent_id: String,
+    pub(crate) channel_id: u64,
+    pub(crate) updated_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VoiceLobbyRouteDecision {
+    Routed(VoiceAgentRoute),
+    ContinueActive {
+        agent_id: String,
+        channel_id: u64,
+        transcript: String,
+    },
+    NeedAgent,
+}
+
+pub(crate) fn parse_voice_command(transcript: &str) -> Option<VoiceCommand> {
+    let transcript = transcript.trim();
+    if transcript.is_empty() {
+        return None;
+    }
+
+    if let Some(command) = progress::parse_verbose_progress_command(transcript) {
+        return Some(VoiceCommand::VerboseProgress(command.enabled()));
+    }
+    if let Some(sensitivity) = parse_sensitivity_command(transcript) {
+        return Some(VoiceCommand::Sensitivity(sensitivity));
+    }
+    if let Some(command) = parse_wake_word_command(transcript) {
+        return Some(VoiceCommand::WakeWords(command));
+    }
+    if let Some(language) = parse_language_command(transcript) {
+        return Some(VoiceCommand::Language(language));
+    }
+    if let Some(command) = parse_voice_clone_command(transcript) {
+        return Some(command);
+    }
+    if let Some(voice) = parse_tts_voice_command(transcript) {
+        return Some(VoiceCommand::TtsVoice(voice));
+    }
+
+    None
+}
+
+pub(crate) fn wake_word_decision(
+    transcript: &str,
+    wake_words: &[String],
+    required: bool,
+) -> WakeWordDecision {
+    let transcript = transcript.trim();
+    if !required {
+        return WakeWordDecision::NotRequired(transcript.to_string());
+    }
+
+    let first_token = transcript
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|ch: char| !ch.is_alphanumeric());
+    let normalized_first = normalize_voice_alias_key(first_token);
+
+    for wake_word in wake_words
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        let normalized_wake_word = normalize_voice_alias_key(wake_word);
+        if normalized_wake_word.is_empty() {
+            continue;
+        }
+        if normalized_first == normalized_wake_word {
+            let remaining = transcript
+                .split_once(char::is_whitespace)
+                .map(|(_, rest)| rest.trim().to_string())
+                .unwrap_or_default();
+            return WakeWordDecision::Matched(WakeWordMatch {
+                wake_word: wake_word.to_string(),
+                remaining,
+            });
+        }
+    }
+
+    WakeWordDecision::Missing
+}
+
+pub(crate) fn normalize_voice_alias_key(value: &str) -> String {
+    value
+        .nfc()
+        .flat_map(char::to_lowercase)
+        .filter(|ch| ch.is_alphanumeric())
+        .collect::<String>()
+        .nfc()
+        .collect()
+}
+
+pub(crate) fn validate_agent_alias_collisions(
+    agents: &[AgentDef],
+) -> Result<(), VoiceAliasCollision> {
+    let mut seen: HashMap<String, (String, String)> = HashMap::new();
+    for agent in agents {
+        for alias in agent_voice_aliases(agent) {
+            let normalized = normalize_voice_alias_key(&alias);
+            if normalized.is_empty() {
+                continue;
+            }
+            if let Some((first_agent_id, first_alias)) = seen.get(&normalized) {
+                if first_agent_id != &agent.id {
+                    return Err(VoiceAliasCollision {
+                        normalized,
+                        first_agent_id: first_agent_id.clone(),
+                        first_alias: first_alias.clone(),
+                        second_agent_id: agent.id.clone(),
+                        second_alias: alias,
+                    });
+                }
+                continue;
+            }
+            seen.insert(normalized, (agent.id.clone(), alias));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_voice_lobby_route(
+    config: &Config,
+    transcript: &str,
+    active_context: Option<&VoiceActiveAgentContext>,
+    now: Instant,
+) -> Result<VoiceLobbyRouteDecision, VoiceAliasCollision> {
+    validate_agent_alias_collisions(&config.agents)?;
+
+    let transcript = transcript.trim();
+    let Some((first_token, rest)) = split_first_spoken_token(transcript) else {
+        return Ok(VoiceLobbyRouteDecision::NeedAgent);
+    };
+    let normalized_token = normalize_voice_alias_key(trim_agent_address_suffix(first_token));
+    if !normalized_token.is_empty() {
+        for agent in &config.agents {
+            if agent_voice_aliases(agent)
+                .iter()
+                .any(|alias| normalize_voice_alias_key(alias) == normalized_token)
+                && let Some((provider, channel_id)) = first_explicit_agent_channel(agent)
+            {
+                return Ok(VoiceLobbyRouteDecision::Routed(VoiceAgentRoute {
+                    agent_id: agent.id.clone(),
+                    channel_id,
+                    provider,
+                    matched_alias: first_token.to_string(),
+                    remaining_transcript: rest.trim().to_string(),
+                }));
+            }
+        }
+    }
+
+    if let Some(active_context) = active_context
+        && now.duration_since(active_context.updated_at) <= VOICE_ACTIVE_AGENT_CONTEXT_TTL
+    {
+        return Ok(VoiceLobbyRouteDecision::ContinueActive {
+            agent_id: active_context.agent_id.clone(),
+            channel_id: active_context.channel_id,
+            transcript: transcript.to_string(),
+        });
+    }
+
+    Ok(VoiceLobbyRouteDecision::NeedAgent)
+}
+
+fn parse_language_command(transcript: &str) -> Option<String> {
+    let captures = LANGUAGE_RE.captures(transcript)?;
+    for idx in 1..captures.len() {
+        if let Some(value) = captures
+            .get(idx)
+            .and_then(|m| normalize_language(m.as_str()))
+        {
+            return Some(value);
+        }
+    }
+    let normalized = normalize_voice_alias_key(transcript);
+    if normalized.contains("한국어") || normalized.contains("한글") || normalized.contains("korean")
+    {
+        Some("ko".to_string())
+    } else if normalized.contains("영어") || normalized.contains("english") {
+        Some("en".to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_voice_clone_command(transcript: &str) -> Option<VoiceCommand> {
+    if !VOICE_CLONE_RE.is_match(transcript) {
+        return None;
+    }
+    let reference = transcript
+        .split_once(':')
+        .map(|(_, rest)| rest.trim().to_string())
+        .filter(|value| !value.is_empty());
+    Some(VoiceCommand::VoiceClone { reference })
+}
+
+fn parse_tts_voice_command(transcript: &str) -> Option<String> {
+    if VOICE_CLONE_RE.is_match(transcript) {
+        return None;
+    }
+    let captures = VOICE_RE.captures(transcript)?;
+    let raw = captures.get(1)?.as_str();
+    let cleaned = raw
+        .trim()
+        .trim_end_matches("로 바꿔")
+        .trim_end_matches("으로 바꿔")
+        .trim_end_matches("로 변경")
+        .trim_end_matches("으로 변경")
+        .trim_end_matches("바꿔")
+        .trim_end_matches("변경")
+        .trim()
+        .trim_matches(|ch: char| ch == '"' || ch == '\'' || ch == '`')
+        .to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn parse_wake_word_command(transcript: &str) -> Option<WakeWordCommand> {
+    let normalized = normalize_voice_alias_key(transcript);
+    let mentions_wake_word = normalized.contains("호출어")
+        || normalized.contains("웨이크워드")
+        || normalized.contains("wakeword");
+    if !mentions_wake_word {
+        return None;
+    }
+
+    if normalized.contains("끄") || normalized.contains("해제") || normalized.contains("off") {
+        return Some(WakeWordCommand::Disable);
+    }
+    if normalized.contains("켜") || normalized.contains("on") || normalized.contains("enable") {
+        return Some(WakeWordCommand::EnableDefault);
+    }
+
+    let raw_value = WAKE_WORD_SET_RE
+        .captures(transcript)
+        .and_then(|captures| captures.get(1))
+        .map(|m| m.as_str().trim())?;
+    let wake_words = raw_value
+        .split([',', '/', '|'])
+        .map(|value| {
+            value
+                .trim()
+                .trim_end_matches("로 설정")
+                .trim_end_matches("으로 설정")
+                .trim_end_matches("설정")
+                .trim()
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!wake_words.is_empty()).then_some(WakeWordCommand::Set(wake_words))
+}
+
+fn normalize_language(value: &str) -> Option<String> {
+    match normalize_voice_alias_key(value).as_str() {
+        "한국어" | "한글" | "korean" | "ko" => Some("ko".to_string()),
+        "영어" | "english" | "en" => Some("en".to_string()),
+        _ => None,
+    }
+}
+
+fn agent_voice_aliases(agent: &AgentDef) -> Vec<String> {
+    let mut aliases = vec![agent.id.clone(), agent.name.clone()];
+    if let Some(name_ko) = agent
+        .name_ko
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    {
+        aliases.push(name_ko);
+    }
+    aliases.extend(agent.keywords.iter().cloned());
+    for (_, channel) in agent.channels.iter() {
+        let Some(channel) = channel else {
+            continue;
+        };
+        aliases.extend(channel.aliases());
+    }
+    aliases
+}
+
+fn first_explicit_agent_channel(agent: &AgentDef) -> Option<(String, u64)> {
+    for (provider, channel) in agent.channels.iter() {
+        let Some(channel) = channel else {
+            continue;
+        };
+        let Some(channel_id) = channel
+            .channel_id()
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        return Some((provider.to_string(), channel_id));
+    }
+    None
+}
+
+fn split_first_spoken_token(transcript: &str) -> Option<(&str, &str)> {
+    let transcript = transcript.trim();
+    if transcript.is_empty() {
+        return None;
+    }
+    Some(
+        transcript
+            .split_once(char::is_whitespace)
+            .unwrap_or((transcript, "")),
+    )
+}
+
+fn trim_agent_address_suffix(token: &str) -> &str {
+    token
+        .trim_matches(|ch: char| !ch.is_alphanumeric())
+        .trim_end_matches("에게")
+        .trim_end_matches('야')
+        .trim_end_matches('아')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AgentChannel, AgentChannelConfig, AgentChannels, AgentDef};
+
+    fn agent(id: &str, name: &str, name_ko: Option<&str>, channel_id: &str) -> AgentDef {
+        AgentDef {
+            id: id.to_string(),
+            name: name.to_string(),
+            name_ko: name_ko.map(str::to_string),
+            provider: "codex".to_string(),
+            channels: AgentChannels {
+                codex: Some(AgentChannel::Detailed(AgentChannelConfig {
+                    id: Some(channel_id.to_string()),
+                    aliases: vec![format!("{id}-alias")],
+                    ..AgentChannelConfig::default()
+                })),
+                ..AgentChannels::default()
+            },
+            keywords: Vec::new(),
+            department: None,
+            avatar_emoji: None,
+        }
+    }
+
+    #[test]
+    fn parses_voice_command_regex_cases() {
+        let cases = [
+            (
+                "외부 보수 모드로 바꿔",
+                VoiceCommand::Sensitivity(BargeInSensitivity::Conservative),
+            ),
+            (
+                "기본 감도로 돌아가",
+                VoiceCommand::Sensitivity(BargeInSensitivity::Normal),
+            ),
+            ("verbose on", VoiceCommand::VerboseProgress(true)),
+            ("상세 진행 꺼", VoiceCommand::VerboseProgress(false)),
+            ("언어 한국어", VoiceCommand::Language("ko".to_string())),
+            ("language en", VoiceCommand::Language("en".to_string())),
+            (
+                "voice ko-KR-SunHiNeural",
+                VoiceCommand::TtsVoice("ko-KR-SunHiNeural".to_string()),
+            ),
+            (
+                "보이스 클론: /tmp/ref.wav",
+                VoiceCommand::VoiceClone {
+                    reference: Some("/tmp/ref.wav".to_string()),
+                },
+            ),
+            (
+                "호출어 에이디케이로 설정",
+                VoiceCommand::WakeWords(WakeWordCommand::Set(vec!["에이디케이".to_string()])),
+            ),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(parse_voice_command(input), Some(expected), "input={input}");
+        }
+    }
+
+    #[test]
+    fn wake_word_required_strips_prefix() {
+        let wake_words = vec!["에이디케이".to_string()];
+
+        assert_eq!(
+            wake_word_decision("에이디케이 상태 알려줘", &wake_words, true),
+            WakeWordDecision::Matched(WakeWordMatch {
+                wake_word: "에이디케이".to_string(),
+                remaining: "상태 알려줘".to_string(),
+            })
+        );
+        assert_eq!(
+            wake_word_decision("상태 알려줘", &wake_words, true),
+            WakeWordDecision::Missing
+        );
+    }
+
+    #[test]
+    fn alias_normalization_is_case_nfc_and_symbol_insensitive() {
+        assert_eq!(normalize_voice_alias_key(" C D X! "), "cdx");
+        assert_eq!(normalize_voice_alias_key("에이전트"), "에이전트");
+    }
+
+    #[test]
+    fn duplicate_aliases_across_agents_are_rejected() {
+        let mut a = agent("agent-a", "Alpha", Some("알파"), "100");
+        a.keywords.push("공통 별칭".to_string());
+        let mut b = agent("agent-b", "Beta", Some("베타"), "200");
+        b.keywords.push("공통별칭".to_string());
+
+        let collision = validate_agent_alias_collisions(&[a, b]).unwrap_err();
+        assert_eq!(collision.normalized, "공통별칭");
+        assert_eq!(collision.first_agent_id, "agent-a");
+        assert_eq!(collision.second_agent_id, "agent-b");
+    }
+
+    #[test]
+    fn lobby_route_uses_first_token_alias_then_active_context() {
+        let config = Config {
+            agents: vec![agent(
+                "project-agentdesk",
+                "AgentDesk",
+                Some("에이디케이"),
+                "123",
+            )],
+            ..Config::default()
+        };
+        let now = Instant::now();
+
+        let routed = resolve_voice_lobby_route(&config, "에이디케이 이슈 봐줘", None, now).unwrap();
+        assert_eq!(
+            routed,
+            VoiceLobbyRouteDecision::Routed(VoiceAgentRoute {
+                agent_id: "project-agentdesk".to_string(),
+                channel_id: 123,
+                provider: "codex".to_string(),
+                matched_alias: "에이디케이".to_string(),
+                remaining_transcript: "이슈 봐줘".to_string(),
+            })
+        );
+
+        let active = VoiceActiveAgentContext {
+            agent_id: "project-agentdesk".to_string(),
+            channel_id: 123,
+            updated_at: now - Duration::from_secs(60),
+        };
+        assert_eq!(
+            resolve_voice_lobby_route(&config, "계속 진행해", Some(&active), now).unwrap(),
+            VoiceLobbyRouteDecision::ContinueActive {
+                agent_id: "project-agentdesk".to_string(),
+                channel_id: 123,
+                transcript: "계속 진행해".to_string(),
+            }
+        );
+    }
+}

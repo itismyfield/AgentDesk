@@ -59,6 +59,7 @@ which = "8.0.2"
 unicode-width = "0.2"
 textwrap = "0.16"
 regex = "1"
+unicode-normalization = "0.1"
 
 # From RCC — crypto/encoding
 base64 = "0.22"

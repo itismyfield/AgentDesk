@@ -73,6 +73,7 @@ mod tmux_reaper;
 mod tmux_restart_handoff;
 mod turn_bridge;
 mod voice_barge_in;
+mod voice_routing;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;
 
@@ -1246,6 +1247,10 @@ pub(crate) struct SharedData {
     /// Runtime bridge from songbird receive events and STT transcript sidecars
     /// into live playback cuts, explicit-stop cancellation, and deferred prompts.
     pub(in crate::services::discord) voice_barge_in: Arc<voice_barge_in::VoiceBargeInRuntime>,
+    /// Persistent mapping from Discord voice channel IDs to their text control
+    /// channels so voice turns can enter the same Kanban/session routing path
+    /// as typed Discord turns.
+    pub(in crate::services::discord) voice_pairings: Arc<voice_routing::VoiceChannelPairingStore>,
     /// Set to true after Discord gateway ready event fires.
     pub(super) bot_connected: std::sync::atomic::AtomicBool,
     /// ISO 8601 timestamp of the last completed turn (for health reporting).
@@ -1970,6 +1975,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         intake_dedup: dashmap::DashMap::new(),
         dispatch_thread_parents: dashmap::DashMap::new(),
         voice_barge_in: Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled()),
+        voice_pairings: Arc::new(voice_routing::VoiceChannelPairingStore::load_default()),
         bot_connected: std::sync::atomic::AtomicBool::new(false),
         last_turn_at: std::sync::Mutex::new(None),
         model_overrides: dashmap::DashMap::new(),

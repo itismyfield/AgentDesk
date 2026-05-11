@@ -969,6 +969,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         model_picker_pending: dashmap::DashMap::new(),
         dispatch_role_overrides: dashmap::DashMap::new(),
         voice_barge_in: voice_barge_in.clone(),
+        voice_pairings: Arc::new(voice_routing::VoiceChannelPairingStore::load_default()),
         last_message_ids: dashmap::DashMap::new(),
         catch_up_retry_pending: dashmap::DashMap::new(),
         turn_start_times: dashmap::DashMap::new(),
@@ -1167,6 +1168,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         commands::cmd_fast(),
         commands::cmd_goals(),
         commands::cmd_adk(),
+        commands::cmd_voice(),
         commands::cmd_vc_join(),
         commands::cmd_vc_leave(),
     ];
@@ -1805,12 +1807,14 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     let receiver_for_voice = voice_receiver_for_setup.clone();
                     let config_for_voice = voice_config_for_setup.clone();
                     let barge_in_for_voice = shared_clone.voice_barge_in.clone();
+                    let pairings_for_voice = shared_clone.voice_pairings.clone();
                     tokio::spawn(async move {
                         commands::auto_join_voice_channels(
                             ctx_for_voice,
                             receiver_for_voice,
                             config_for_voice,
                             barge_in_for_voice,
+                            pairings_for_voice,
                         )
                         .await;
                     });

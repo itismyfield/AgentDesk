@@ -14,6 +14,11 @@ use crate::voice::barge_in::{
     BargeInPlayerStop, BargeInSensitivity, BargeInSensitivityState, DeferredBargeInBuffer,
     LiveBargeInCut, LiveBargeInMonitor, ProcessingBargeInDecision, run_sensitivity_ttl_reset,
 };
+use crate::voice::commands::{
+    DEFAULT_WAKE_WORD, VoiceActiveAgentContext, VoiceCommand, VoiceLobbyRouteDecision,
+    WakeWordCommand, WakeWordDecision, parse_voice_command, resolve_voice_lobby_route,
+    wake_word_decision,
+};
 use crate::voice::config::DEFAULT_STT_LANGUAGE;
 use crate::voice::progress;
 use crate::voice::sanitizer::spoken_result_only;
@@ -39,6 +44,17 @@ pub(in crate::services::discord) enum VoiceBargeInTranscriptOutcome {
     VerboseProgressChanged {
         enabled: bool,
     },
+    LanguageChanged(String),
+    TtsVoiceChanged(String),
+    VoiceCloneRequested {
+        reference: Option<String>,
+    },
+    WakeWordsChanged {
+        required: bool,
+        wake_words: Vec<String>,
+    },
+    WakeWordRequired,
+    AgentRoutingRequired,
     NoActiveTurn,
     Deferred(String),
     ExplicitStop {
@@ -69,6 +85,13 @@ struct LivePlaybackSession {
 struct SpokenResultPlaybackSession {
     id: u64,
     cancellation: CancellationToken,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveVoiceRoute {
+    agent_id: String,
+    channel_id: ChannelId,
+    updated_at: Instant,
 }
 
 struct DeferredBargeInDrain {
@@ -116,15 +139,17 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     acknowledgement_enabled: bool,
     acknowledgement_text: String,
     transcript_dirs: Vec<PathBuf>,
-    spoken_result_language: String,
+    voice_config_state: RwLock<VoiceConfig>,
+    spoken_result_language: RwLock<String>,
     verbose_progress: AtomicBool,
-    stt: Option<SttRuntime>,
-    tts: Option<TtsRuntime>,
+    stt: RwLock<Option<SttRuntime>>,
+    tts: RwLock<Option<TtsRuntime>>,
     progress_tx: broadcast::Sender<VoiceProgressEvent>,
     monitors: dashmap::DashMap<u64, Arc<std::sync::Mutex<LiveBargeInMonitor>>>,
     playbacks: dashmap::DashMap<u64, Arc<LivePlaybackSession>>,
     spoken_result_playbacks: dashmap::DashMap<u64, SpokenResultPlaybackSession>,
     voice_guilds: dashmap::DashMap<u64, GuildId>,
+    active_voice_routes: dashmap::DashMap<u64, ActiveVoiceRoute>,
     deferred_buffers: dashmap::DashMap<u64, Arc<Mutex<DeferredBargeInBuffer>>>,
     next_spoken_result_playback_id: AtomicU64,
     next_internal_message_id: AtomicU64,
@@ -157,15 +182,17 @@ impl VoiceBargeInRuntime {
             acknowledgement_enabled: config.barge_in.acknowledgement_enabled,
             acknowledgement_text: config.barge_in.acknowledgement_text.clone(),
             transcript_dirs: transcript_dirs_from_config(config),
-            spoken_result_language: config.stt.language.clone(),
+            voice_config_state: RwLock::new(config.clone()),
+            spoken_result_language: RwLock::new(config.stt.language.clone()),
             verbose_progress: AtomicBool::new(config.verbose_progress),
-            stt,
-            tts,
+            stt: RwLock::new(stt),
+            tts: RwLock::new(tts),
             progress_tx,
             monitors: dashmap::DashMap::new(),
             playbacks: dashmap::DashMap::new(),
             spoken_result_playbacks: dashmap::DashMap::new(),
             voice_guilds: dashmap::DashMap::new(),
+            active_voice_routes: dashmap::DashMap::new(),
             deferred_buffers: dashmap::DashMap::new(),
             next_spoken_result_playback_id: AtomicU64::new(1),
             next_internal_message_id: AtomicU64::new(INTERNAL_VOICE_MESSAGE_ID_START),
@@ -182,15 +209,17 @@ impl VoiceBargeInRuntime {
             acknowledgement_enabled: false,
             acknowledgement_text: String::new(),
             transcript_dirs: Vec::new(),
-            spoken_result_language: DEFAULT_STT_LANGUAGE.to_string(),
+            voice_config_state: RwLock::new(VoiceConfig::default()),
+            spoken_result_language: RwLock::new(DEFAULT_STT_LANGUAGE.to_string()),
             verbose_progress: AtomicBool::new(false),
-            stt: None,
-            tts: None,
+            stt: RwLock::new(None),
+            tts: RwLock::new(None),
             progress_tx,
             monitors: dashmap::DashMap::new(),
             playbacks: dashmap::DashMap::new(),
             spoken_result_playbacks: dashmap::DashMap::new(),
             voice_guilds: dashmap::DashMap::new(),
+            active_voice_routes: dashmap::DashMap::new(),
             deferred_buffers: dashmap::DashMap::new(),
             next_spoken_result_playback_id: AtomicU64::new(1),
             next_internal_message_id: AtomicU64::new(INTERNAL_VOICE_MESSAGE_ID_START),
@@ -207,6 +236,113 @@ impl VoiceBargeInRuntime {
 
     pub(in crate::services::discord) fn set_verbose_progress_enabled(&self, enabled: bool) {
         self.verbose_progress.store(enabled, Ordering::Relaxed);
+    }
+
+    async fn spoken_result_language(&self) -> String {
+        self.spoken_result_language.read().await.clone()
+    }
+
+    async fn runtime_wake_word_decision(&self, transcript: &str) -> WakeWordDecision {
+        let config = self.voice_config_state.read().await;
+        wake_word_decision(transcript, &config.wake_words, config.wake_word_required())
+    }
+
+    async fn apply_dispatcher_command(
+        &self,
+        channel_id: ChannelId,
+        transcript: &str,
+    ) -> Option<VoiceBargeInTranscriptOutcome> {
+        match parse_voice_command(transcript)? {
+            VoiceCommand::Sensitivity(sensitivity) => {
+                self.set_sensitivity(sensitivity).await;
+                tracing::info!(
+                    channel_id = channel_id.get(),
+                    sensitivity = ?sensitivity,
+                    "voice barge-in sensitivity changed by spoken command"
+                );
+                Some(VoiceBargeInTranscriptOutcome::SensitivityChanged(
+                    sensitivity,
+                ))
+            }
+            VoiceCommand::VerboseProgress(enabled) => {
+                self.set_verbose_progress_enabled(enabled);
+                tracing::info!(
+                    channel_id = channel_id.get(),
+                    verbose_progress = enabled,
+                    "voice verbose progress changed by spoken command"
+                );
+                Some(VoiceBargeInTranscriptOutcome::VerboseProgressChanged { enabled })
+            }
+            VoiceCommand::Language(language) => {
+                self.set_runtime_language(language.clone()).await;
+                Some(VoiceBargeInTranscriptOutcome::LanguageChanged(language))
+            }
+            VoiceCommand::TtsVoice(voice) => {
+                self.set_runtime_tts_voice(voice.clone()).await;
+                Some(VoiceBargeInTranscriptOutcome::TtsVoiceChanged(voice))
+            }
+            VoiceCommand::VoiceClone { reference } => {
+                tracing::info!(
+                    channel_id = channel_id.get(),
+                    reference = ?reference,
+                    "voice clone command accepted for downstream implementation"
+                );
+                Some(VoiceBargeInTranscriptOutcome::VoiceCloneRequested { reference })
+            }
+            VoiceCommand::WakeWords(command) => {
+                let wake_words = self.apply_wake_word_command(command).await;
+                let required = self.voice_config_state.read().await.wake_word_required();
+                Some(VoiceBargeInTranscriptOutcome::WakeWordsChanged {
+                    required,
+                    wake_words,
+                })
+            }
+        }
+    }
+
+    async fn set_runtime_language(&self, language: String) {
+        let config = {
+            let mut config = self.voice_config_state.write().await;
+            config.stt.language = language.clone();
+            config.clone()
+        };
+        *self.spoken_result_language.write().await = language;
+        if self.enabled {
+            *self.stt.write().await = Some(SttRuntime::from_voice_config(&config));
+        }
+    }
+
+    async fn set_runtime_tts_voice(&self, voice: String) {
+        let config = {
+            let mut config = self.voice_config_state.write().await;
+            config.tts.edge.voice = voice;
+            config.clone()
+        };
+        if self.enabled {
+            *self.tts.write().await = TtsRuntime::from_voice_config(&config).ok();
+        }
+    }
+
+    async fn apply_wake_word_command(&self, command: WakeWordCommand) -> Vec<String> {
+        let mut config = self.voice_config_state.write().await;
+        match command {
+            WakeWordCommand::EnableDefault => {
+                if config
+                    .wake_words
+                    .iter()
+                    .all(|value| value.trim().is_empty())
+                {
+                    config.wake_words = vec![DEFAULT_WAKE_WORD.to_string()];
+                }
+            }
+            WakeWordCommand::Disable => {
+                config.wake_words.clear();
+            }
+            WakeWordCommand::Set(wake_words) => {
+                config.wake_words = wake_words;
+            }
+        }
+        config.wake_words.clone()
     }
 
     pub(in crate::services::discord) fn subscribe_progress(
@@ -235,7 +371,7 @@ impl VoiceBargeInRuntime {
         control_channel_id: ChannelId,
         guild_id: GuildId,
     ) {
-        if self.enabled || self.tts.is_some() {
+        if self.enabled {
             self.voice_guilds.insert(control_channel_id.get(), guild_id);
         }
     }
@@ -417,10 +553,11 @@ impl VoiceBargeInRuntime {
                 continue;
             }
 
+            let language = self.spoken_result_language().await;
             self.speak_progress_text(
                 shared,
                 channel_id,
-                progress::idle_notice(&self.spoken_result_language),
+                progress::idle_notice(&language),
                 "voice progress idle notice",
             )
             .await;
@@ -447,7 +584,8 @@ impl VoiceBargeInRuntime {
             );
             return;
         };
-        let content = progress::format_progress_message(label, &self.spoken_result_language);
+        let language = self.spoken_result_language().await;
+        let content = progress::format_progress_message(label, &language);
         if content.trim().is_empty() {
             return;
         }
@@ -471,7 +609,8 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         events: Vec<String>,
     ) {
-        let summary = progress::summarize_progress_events(&events, &self.spoken_result_language);
+        let language = self.spoken_result_language().await;
+        let summary = progress::summarize_progress_events(&events, &language);
         self.speak_progress_text(shared, channel_id, &summary, "voice progress summary")
             .await;
     }
@@ -650,24 +789,8 @@ impl VoiceBargeInRuntime {
             return VoiceBargeInTranscriptOutcome::BargeInDisabled;
         }
 
-        if let Some(command) = progress::parse_verbose_progress_command(transcript) {
-            let enabled = command.enabled();
-            self.set_verbose_progress_enabled(enabled);
-            tracing::info!(
-                channel_id = channel_id.get(),
-                verbose_progress = enabled,
-                "voice verbose progress changed by spoken command during active turn"
-            );
-            return VoiceBargeInTranscriptOutcome::VerboseProgressChanged { enabled };
-        }
-
-        if let Some(sensitivity) = self.apply_voice_command(transcript).await {
-            tracing::info!(
-                channel_id = channel_id.get(),
-                sensitivity = ?sensitivity,
-                "voice barge-in sensitivity changed by spoken command"
-            );
-            return VoiceBargeInTranscriptOutcome::SensitivityChanged(sensitivity);
+        if let Some(outcome) = self.apply_dispatcher_command(channel_id, transcript).await {
+            return outcome;
         }
 
         if !super::mailbox_has_active_turn(shared, channel_id).await {
@@ -733,9 +856,10 @@ impl VoiceBargeInRuntime {
                 .and_then(|session| session.channel_name.clone())
         };
         let verbose_progress = self.verbose_progress_enabled();
+        let language = self.spoken_result_language().await;
         let prompt = crate::voice::prompt::voice_bridge_prompt(
             transcript,
-            &self.spoken_result_language,
+            &language,
             verbose_progress,
             None,
         );
@@ -744,7 +868,7 @@ impl VoiceBargeInRuntime {
             "voice": {
                 "user_id": utterance.user_id.to_string(),
                 "utterance_id": utterance.utterance_id,
-                "language": self.spoken_result_language.clone(),
+                "language": language,
                 "verbose_progress": verbose_progress,
                 "started_at": utterance.started_at,
                 "completed_at": utterance.completed_at,
@@ -790,6 +914,108 @@ impl VoiceBargeInRuntime {
         }
     }
 
+    async fn resolve_voice_turn_target(
+        &self,
+        _shared: &Arc<SharedData>,
+        source_channel_id: ChannelId,
+        transcript: &str,
+    ) -> Option<(ChannelId, String)> {
+        if super::settings::resolve_role_binding(source_channel_id, None).is_some() {
+            return Some((source_channel_id, transcript.trim().to_string()));
+        }
+
+        let active_context = self
+            .active_voice_routes
+            .get(&source_channel_id.get())
+            .map(|entry| VoiceActiveAgentContext {
+                agent_id: entry.agent_id.clone(),
+                channel_id: entry.channel_id.get(),
+                updated_at: entry.updated_at,
+            });
+        let config = crate::config::load_graceful();
+        let now = Instant::now();
+        match resolve_voice_lobby_route(&config, transcript, active_context.as_ref(), now) {
+            Ok(VoiceLobbyRouteDecision::Routed(route)) => {
+                let remaining = route.remaining_transcript.trim();
+                if remaining.is_empty() {
+                    return None;
+                }
+                let target_channel_id = ChannelId::new(route.channel_id);
+                self.bind_routed_voice_context(source_channel_id, target_channel_id);
+                self.active_voice_routes.insert(
+                    source_channel_id.get(),
+                    ActiveVoiceRoute {
+                        agent_id: route.agent_id,
+                        channel_id: target_channel_id,
+                        updated_at: now,
+                    },
+                );
+                Some((target_channel_id, remaining.to_string()))
+            }
+            Ok(VoiceLobbyRouteDecision::ContinueActive {
+                agent_id,
+                channel_id,
+                transcript,
+            }) => {
+                let target_channel_id = ChannelId::new(channel_id);
+                self.bind_routed_voice_context(source_channel_id, target_channel_id);
+                self.active_voice_routes.insert(
+                    source_channel_id.get(),
+                    ActiveVoiceRoute {
+                        agent_id,
+                        channel_id: target_channel_id,
+                        updated_at: now,
+                    },
+                );
+                Some((target_channel_id, transcript))
+            }
+            Ok(VoiceLobbyRouteDecision::NeedAgent) => None,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    source_channel_id = source_channel_id.get(),
+                    "voice lobby routing rejected alias collision"
+                );
+                None
+            }
+        }
+    }
+
+    fn bind_routed_voice_context(
+        &self,
+        source_channel_id: ChannelId,
+        target_channel_id: ChannelId,
+    ) {
+        let Some(guild_id) = self
+            .voice_guilds
+            .get(&source_channel_id.get())
+            .map(|entry| *entry.value())
+        else {
+            return;
+        };
+        self.voice_guilds.insert(target_channel_id.get(), guild_id);
+    }
+
+    async fn ask_for_agent(&self, shared: &Arc<SharedData>, channel_id: ChannelId) {
+        let Some(http) = shared.serenity_http_or_token_fallback() else {
+            return;
+        };
+        super::rate_limit_wait(shared, channel_id).await;
+        if let Err(error) = channel_id
+            .send_message(
+                &http,
+                serenity::CreateMessage::new().content("어느 에이전트?"),
+            )
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                channel_id = channel_id.get(),
+                "failed to send voice lobby routing prompt"
+            );
+        }
+    }
+
     pub(in crate::services::discord) async fn process_completed_utterance(
         &self,
         shared: &Arc<SharedData>,
@@ -814,15 +1040,14 @@ impl VoiceBargeInRuntime {
             return VoiceBargeInTranscriptOutcome::EmptyTranscript;
         }
 
-        if let Some(command) = progress::parse_verbose_progress_command(transcript) {
-            let enabled = command.enabled();
-            self.set_verbose_progress_enabled(enabled);
-            tracing::info!(
-                channel_id = channel_id.get(),
-                verbose_progress = enabled,
-                "voice verbose progress changed by spoken command"
-            );
-            return VoiceBargeInTranscriptOutcome::VerboseProgressChanged { enabled };
+        let transcript = match self.runtime_wake_word_decision(transcript).await {
+            WakeWordDecision::NotRequired(transcript) => transcript,
+            WakeWordDecision::Matched(matched) => matched.remaining,
+            WakeWordDecision::Missing => return VoiceBargeInTranscriptOutcome::WakeWordRequired,
+        };
+        let transcript = transcript.trim();
+        if transcript.is_empty() {
+            return VoiceBargeInTranscriptOutcome::EmptyTranscript;
         }
 
         if super::mailbox_has_active_turn(shared, channel_id).await {
@@ -831,16 +1056,19 @@ impl VoiceBargeInRuntime {
                 .await;
         }
 
-        if let Some(sensitivity) = self.apply_voice_command(transcript).await {
-            tracing::info!(
-                channel_id = channel_id.get(),
-                sensitivity = ?sensitivity,
-                "voice barge-in sensitivity changed by spoken command"
-            );
-            return VoiceBargeInTranscriptOutcome::SensitivityChanged(sensitivity);
+        if let Some(outcome) = self.apply_dispatcher_command(channel_id, transcript).await {
+            return outcome;
         }
 
-        self.start_voice_turn(shared, channel_id, utterance, transcript)
+        let Some((target_channel_id, transcript)) = self
+            .resolve_voice_turn_target(shared, channel_id, transcript)
+            .await
+        else {
+            self.ask_for_agent(shared, channel_id).await;
+            return VoiceBargeInTranscriptOutcome::AgentRoutingRequired;
+        };
+
+        self.start_voice_turn(shared, target_channel_id, utterance, &transcript)
             .await
     }
 
@@ -913,7 +1141,7 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         context: &'static str,
     ) -> Option<PathBuf> {
-        let Some(tts) = self.tts.clone() else {
+        let Some(tts) = self.tts.read().await.clone() else {
             return None;
         };
         match tts.synthesize(text, TtsSynthesisKind::Progress).await {
@@ -1025,10 +1253,11 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         answer: &str,
     ) {
-        let Some(tts) = self.tts.clone() else {
+        let Some(tts) = self.tts.read().await.clone() else {
             return;
         };
-        let spoken = spoken_result_only(answer, &self.spoken_result_language);
+        let language = self.spoken_result_language().await;
+        let spoken = spoken_result_only(answer, &language);
         if spoken.trim().is_empty() {
             return;
         }
@@ -1125,7 +1354,7 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         utterance: &CompletedUtterance,
     ) -> Option<String> {
-        if let Some(stt) = self.stt.clone() {
+        if let Some(stt) = self.stt.read().await.clone() {
             match stt.transcribe(&utterance.path).await {
                 Ok(transcript) => return Some(transcript),
                 Err(error) => {

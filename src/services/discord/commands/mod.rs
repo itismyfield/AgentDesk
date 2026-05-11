@@ -61,7 +61,7 @@ pub(in crate::services::discord) use text_commands::handle_text_command;
 pub(in crate::services::discord) use voice::{
     auto_join_voice_channels, handle_vc_text_command, register_songbird,
 };
-pub(super) use voice::{cmd_vc_join, cmd_vc_leave};
+pub(super) use voice::{cmd_vc_join, cmd_vc_leave, cmd_voice};
 
 /// Apply the issue #1005 owner guard to a slash command.
 ///

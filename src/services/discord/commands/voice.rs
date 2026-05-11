@@ -5,10 +5,61 @@ use songbird::{CoreEvent, Event, SerenityInit as _};
 
 use super::super::{Context, Data, Error, check_auth};
 use crate::voice::barge_in::BargeInSensitivity;
+use crate::voice::commands::{VoiceCommand, parse_voice_command};
+
+#[derive(Debug, Clone, Copy, poise::ChoiceParameter)]
+enum VoiceSensitivityChoice {
+    #[name = "normal"]
+    Normal,
+    #[name = "conservative"]
+    Conservative,
+}
+
+impl VoiceSensitivityChoice {
+    const fn sensitivity(self) -> BargeInSensitivity {
+        match self {
+            Self::Normal => BargeInSensitivity::Normal,
+            Self::Conservative => BargeInSensitivity::Conservative,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Conservative => "conservative",
+        }
+    }
+}
+
+/// /voice — Voice capture and spoken-command namespace.
+#[poise::command(
+    slash_command,
+    rename = "voice",
+    subcommands(
+        "cmd_voice_join",
+        "cmd_voice_leave",
+        "cmd_voice_attach",
+        "cmd_voice_latency",
+        "cmd_voice_sensitivity"
+    )
+)]
+pub(in crate::services::discord) async fn cmd_voice(_ctx: Context<'_>) -> Result<(), Error> {
+    Ok(())
+}
 
 /// /vc_join — Join the caller's current voice channel and start WAV capture.
 #[poise::command(slash_command, rename = "vc_join")]
 pub(in crate::services::discord) async fn cmd_vc_join(ctx: Context<'_>) -> Result<(), Error> {
+    voice_join_impl(ctx).await
+}
+
+/// /voice join — Join the caller's current voice channel and start WAV capture.
+#[poise::command(slash_command, rename = "join")]
+async fn cmd_voice_join(ctx: Context<'_>) -> Result<(), Error> {
+    voice_join_impl(ctx).await
+}
+
+async fn voice_join_impl(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
@@ -23,22 +74,29 @@ pub(in crate::services::discord) async fn cmd_vc_join(ctx: Context<'_>) -> Resul
 
     let (guild_id, channel_id) =
         resolve_user_voice_channel(ctx.serenity_context(), ctx.guild_id(), user_id)?;
+    let control_channel_id = ctx
+        .data()
+        .shared
+        .voice_pairings
+        .target_channel(channel_id)
+        .unwrap_or(ctx.channel_id());
     join_voice_channel(
         ctx.serenity_context(),
         ctx.data().voice_receiver.clone(),
         guild_id,
         channel_id,
-        ctx.channel_id(),
+        control_channel_id,
     )
     .await?;
     ctx.data()
         .shared
         .voice_barge_in
-        .register_voice_context(ctx.channel_id(), guild_id);
+        .register_voice_context(control_channel_id, guild_id);
 
     ctx.say(format!(
-        "VC joined `{}`; WAV utterance capture is active.",
-        channel_id.get()
+        "VC joined `{}`; voice turns route to text channel `{}`.",
+        channel_id.get(),
+        control_channel_id.get()
     ))
     .await?;
     Ok(())
@@ -47,6 +105,16 @@ pub(in crate::services::discord) async fn cmd_vc_join(ctx: Context<'_>) -> Resul
 /// /vc_leave — Leave the current guild voice channel and flush active WAV capture.
 #[poise::command(slash_command, rename = "vc_leave")]
 pub(in crate::services::discord) async fn cmd_vc_leave(ctx: Context<'_>) -> Result<(), Error> {
+    voice_leave_impl(ctx).await
+}
+
+/// /voice leave — Leave the current guild voice channel and flush active WAV capture.
+#[poise::command(slash_command, rename = "leave")]
+async fn cmd_voice_leave(ctx: Context<'_>) -> Result<(), Error> {
+    voice_leave_impl(ctx).await
+}
+
+async fn voice_leave_impl(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
@@ -62,6 +130,89 @@ pub(in crate::services::discord) async fn cmd_vc_leave(ctx: Context<'_>) -> Resu
         flushed
     ))
     .await?;
+    Ok(())
+}
+
+/// /voice attach — Persist the caller voice channel → text channel routing pair.
+#[poise::command(slash_command, rename = "attach")]
+async fn cmd_voice_attach(
+    ctx: Context<'_>,
+    #[description = "Text channel ID or mention; defaults to this channel"] text_channel: Option<
+        String,
+    >,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+
+    let (guild_id, voice_channel_id) =
+        resolve_user_voice_channel(ctx.serenity_context(), ctx.guild_id(), user_id)?;
+    let text_channel_id = match text_channel.as_deref() {
+        Some(value) if !value.trim().is_empty() => parse_channel_id_arg(value)?,
+        _ => ctx.channel_id(),
+    };
+
+    ctx.data()
+        .shared
+        .voice_pairings
+        .attach(voice_channel_id, text_channel_id)
+        .map_err(anyhow::Error::msg)?;
+    ctx.data()
+        .shared
+        .voice_barge_in
+        .register_voice_context(text_channel_id, guild_id);
+
+    ctx.say(format!(
+        "Voice channel `{}` is attached to text channel `{}`.",
+        voice_channel_id.get(),
+        text_channel_id.get()
+    ))
+    .await?;
+    Ok(())
+}
+
+/// /voice latency — Report local voice capture routing status.
+#[poise::command(slash_command, rename = "latency")]
+async fn cmd_voice_latency(ctx: Context<'_>) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+
+    let verbose = ctx.data().shared.voice_barge_in.verbose_progress_enabled();
+    ctx.say(format!(
+        "Voice path: enabled=`{}`, verbose_progress=`{}`. Capture idle: segment=`{}ms`, utterance=`{}ms`.",
+        ctx.data().voice_config.enabled,
+        verbose,
+        ctx.data().voice_config.idle.segment_idle_ms,
+        ctx.data().voice_config.idle.utterance_idle_ms
+    ))
+    .await?;
+    Ok(())
+}
+
+/// /voice sensitivity <mode> — Set barge-in sensitivity.
+#[poise::command(slash_command, rename = "sensitivity")]
+async fn cmd_voice_sensitivity(
+    ctx: Context<'_>,
+    #[description = "Barge-in sensitivity mode"] mode: VoiceSensitivityChoice,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+
+    ctx.data()
+        .shared
+        .voice_barge_in
+        .set_sensitivity(mode.sensitivity())
+        .await;
+    ctx.say(format!("Voice barge-in sensitivity: {}.", mode.as_str()))
+        .await?;
     Ok(())
 }
 
@@ -88,23 +239,29 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
             }
             let (guild_id, channel_id) =
                 resolve_user_voice_channel(ctx, msg.guild_id, msg.author.id)?;
+            let control_channel_id = data
+                .shared
+                .voice_pairings
+                .target_channel(channel_id)
+                .unwrap_or(msg.channel_id);
             join_voice_channel(
                 ctx,
                 data.voice_receiver.clone(),
                 guild_id,
                 channel_id,
-                msg.channel_id,
+                control_channel_id,
             )
             .await?;
             data.shared
                 .voice_barge_in
-                .register_voice_context(msg.channel_id, guild_id);
+                .register_voice_context(control_channel_id, guild_id);
             let _ = msg
                 .reply(
                     &ctx.http,
                     format!(
-                        "VC joined `{}`; WAV utterance capture is active.",
-                        channel_id.get()
+                        "VC joined `{}`; voice turns route to text channel `{}`.",
+                        channel_id.get(),
+                        control_channel_id.get()
                     ),
                 )
                 .await;
@@ -139,11 +296,50 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
                 )
                 .await;
         }
-        _ => {
+        "latency" => {
             let _ = msg
                 .reply(
                     &ctx.http,
-                    "Usage: `!vc join`, `!vc leave`, `!vc conservative`, or `!vc normal`.",
+                    format!(
+                        "Voice path: enabled=`{}`, verbose_progress=`{}`.",
+                        data.voice_config.enabled,
+                        data.shared.voice_barge_in.verbose_progress_enabled()
+                    ),
+                )
+                .await;
+        }
+        _ => {
+            if let Some(command) = parse_voice_command(subcommand) {
+                match command {
+                    VoiceCommand::Sensitivity(sensitivity) => {
+                        data.shared
+                            .voice_barge_in
+                            .set_sensitivity(sensitivity)
+                            .await;
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                format!("Voice barge-in sensitivity: {sensitivity:?}."),
+                            )
+                            .await;
+                        return Ok(());
+                    }
+                    VoiceCommand::VerboseProgress(enabled) => {
+                        data.shared
+                            .voice_barge_in
+                            .set_verbose_progress_enabled(enabled);
+                        let _ = msg
+                            .reply(&ctx.http, format!("Voice verbose progress: {enabled}."))
+                            .await;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            let _ = msg
+                .reply(
+                    &ctx.http,
+                    "Usage: `!vc join`, `!vc leave`, `!vc latency`, `!vc conservative`, or `!vc normal`.",
                 )
                 .await;
         }
@@ -157,6 +353,7 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
     receiver: crate::voice::VoiceReceiver,
     config: crate::voice::VoiceConfig,
     barge_in: std::sync::Arc<super::super::voice_barge_in::VoiceBargeInRuntime>,
+    pairings: std::sync::Arc<super::super::voice_routing::VoiceChannelPairingStore>,
 ) {
     if !config.enabled {
         return;
@@ -186,12 +383,13 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
             continue;
         };
 
+        let control_channel_id = pairings.target_channel(channel_id).unwrap_or(channel_id);
         if let Err(error) = join_voice_channel(
             &ctx,
             receiver.clone(),
             guild_channel.guild_id,
             channel_id,
-            channel_id,
+            control_channel_id,
         )
         .await
         {
@@ -202,7 +400,7 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
                 "failed to auto-join voice channel"
             );
         } else {
-            barge_in.register_voice_context(channel_id, guild_channel.guild_id);
+            barge_in.register_voice_context(control_channel_id, guild_channel.guild_id);
         }
     }
 }
@@ -268,6 +466,17 @@ fn resolve_user_voice_channel(
         })
         .ok_or_else(|| anyhow!("caller is not connected to a voice channel"))?;
     Ok((guild_id, channel_id))
+}
+
+fn parse_channel_id_arg(value: &str) -> Result<ChannelId, Error> {
+    let raw = value
+        .trim()
+        .trim_start_matches("<#")
+        .trim_start_matches('#')
+        .trim_end_matches('>');
+    raw.parse::<u64>()
+        .map(ChannelId::new)
+        .map_err(|_| anyhow!("invalid text channel id `{}`", value).into())
 }
 
 pub(in crate::services::discord) fn songbird_decode_config() -> songbird::Config {
