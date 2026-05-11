@@ -401,7 +401,19 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
         };
 
         let control_channel_id = pairings.target_channel(channel_id).unwrap_or(channel_id);
-        if let Err(error) = join_voice_channel(
+        if let Some(manager) = songbird::get(&ctx).await
+            && manager.get(guild_channel.guild_id).is_some()
+        {
+            tracing::info!(
+                guild_id = guild_channel.guild_id.get(),
+                channel_id = channel_id.get(),
+                "voice auto-join skipped: songbird call already registered for guild (#2054 idempotency)"
+            );
+            barge_in.register_voice_context(control_channel_id, guild_channel.guild_id);
+            continue;
+        }
+
+        match join_voice_channel(
             &ctx,
             receiver.clone(),
             guild_channel.guild_id,
@@ -410,14 +422,24 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
         )
         .await
         {
-            tracing::warn!(
-                error = %error,
-                guild_id = guild_channel.guild_id.get(),
-                channel_id = channel_id.get(),
-                "failed to auto-join voice channel"
-            );
-        } else {
-            barge_in.register_voice_context(control_channel_id, guild_channel.guild_id);
+            Ok(()) => {
+                barge_in.register_voice_context(control_channel_id, guild_channel.guild_id);
+            }
+            Err(error) => {
+                let mut chain: Vec<String> = vec![error.to_string()];
+                let mut current = error.source();
+                while let Some(src) = current {
+                    chain.push(src.to_string());
+                    current = src.source();
+                }
+                tracing::warn!(
+                    error = %error,
+                    error_chain = ?chain,
+                    guild_id = guild_channel.guild_id.get(),
+                    channel_id = channel_id.get(),
+                    "failed to auto-join voice channel"
+                );
+            }
         }
     }
 }
@@ -432,13 +454,29 @@ async fn join_voice_channel(
     let manager = songbird::get(ctx)
         .await
         .ok_or_else(|| anyhow!("Songbird voice manager is not registered"))?;
-    let handler_lock = manager.join(guild_id, channel_id).await.with_context(|| {
-        format!(
-            "failed to join voice channel {} in guild {}",
-            channel_id.get(),
-            guild_id.get()
-        )
-    })?;
+    let handler_lock = match manager.join(guild_id, channel_id).await {
+        Ok(handle) => handle,
+        Err(join_err) => {
+            if let Some(existing) = manager.get(guild_id) {
+                tracing::warn!(
+                    join_error = %join_err,
+                    guild_id = guild_id.get(),
+                    channel_id = channel_id.get(),
+                    "songbird manager.join() returned Err but call already registered; \
+                     attaching receiver retroactively (#2054 fallback)"
+                );
+                existing
+            } else {
+                return Err(anyhow!(join_err)
+                    .context(format!(
+                        "songbird manager.join() failed for channel {} in guild {}",
+                        channel_id.get(),
+                        guild_id.get()
+                    ))
+                    .into());
+            }
+        }
+    };
 
     let mut handler = handler_lock.lock().await;
     handler.remove_all_global_events();
