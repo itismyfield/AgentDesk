@@ -15,10 +15,16 @@ const VALID_DISPATCH_STATUSES: &[&str] =
 
 // ── Query / Body types ─────────────────────────────────────────
 
+// #2050 P2 finding 4 — accept previously-silently-dropped client filters
+// (`from_agent_id` / `to_agent_id` / `limit`) so dashboard queries actually
+// scope the result instead of transferring the whole table.
 #[derive(Debug, Deserialize)]
 pub struct ListDispatchesQuery {
     pub status: Option<String>,
     pub kanban_card_id: Option<String>,
+    pub from_agent_id: Option<String>,
+    pub to_agent_id: Option<String>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +61,9 @@ pub async fn list_dispatches(
         pool,
         params.status.as_deref(),
         params.kanban_card_id.as_deref(),
+        params.from_agent_id.as_deref(),
+        params.to_agent_id.as_deref(),
+        params.limit,
     )
     .await
     {
@@ -249,6 +258,30 @@ pub async fn update_dispatch(
                     )),
                 );
             }
+
+            // #2045 Finding 2 (P2): honor caller-supplied `allowed_from`
+            // before delegating to `finalize_dispatch_with_backends`, which
+            // hard-codes the gate `["pending","dispatched"]` and silently
+            // ignores the caller's intent. This is the only way an external
+            // supervisor / recovery loop can guarantee "do not finalize a
+            // dispatch that something else already cancelled."
+            if let Some(allowed_from) = body.allowed_from.as_ref() {
+                let current_status = dispatch
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let is_allowed = allowed_from
+                    .iter()
+                    .any(|status| status.as_str() == current_status);
+                if !is_allowed {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(DispatchRouteResponse::error(format!(
+                            "dispatch {id} is in status '{current_status}' which is not in allowed_from {allowed_from:?}"
+                        ))),
+                    );
+                }
+            }
         }
 
         return match crate::dispatch::finalize_dispatch_with_backends(
@@ -441,7 +474,14 @@ async fn list_dispatches_pg(
     pool: &sqlx::PgPool,
     status: Option<&str>,
     kanban_card_id: Option<&str>,
+    from_agent_id: Option<&str>,
+    to_agent_id: Option<&str>,
+    limit: Option<i64>,
 ) -> Result<Vec<DispatchListItem>, String> {
+    // #2050 P2 finding 4 — honor optional filter + bounded limit.
+    let bounded_limit = limit
+        .map(|value| value.max(1).min(1_000))
+        .unwrap_or(1_000);
     let rows = sqlx::query(
         "SELECT
             id,
@@ -461,10 +501,16 @@ async fn list_dispatches_pg(
          FROM task_dispatches
          WHERE ($1::text IS NULL OR status = $1)
            AND ($2::text IS NULL OR kanban_card_id = $2)
-         ORDER BY created_at DESC",
+           AND ($3::text IS NULL OR from_agent_id = $3)
+           AND ($4::text IS NULL OR to_agent_id = $4)
+         ORDER BY created_at DESC
+         LIMIT $5",
     )
     .bind(status)
     .bind(kanban_card_id)
+    .bind(from_agent_id)
+    .bind(to_agent_id)
+    .bind(bounded_limit)
     .fetch_all(pool)
     .await
     .map_err(|error| format!("list postgres dispatches: {error}"))?;
@@ -577,24 +623,122 @@ async fn resolve_dispatch_target_agent_id_pg(
     .and_then(|row| row.try_get::<String, _>("id").ok())
 }
 
+/// PATCH /api/dispatches/:id with only `result` supplied.
+///
+/// #2045 Finding 1 (P1): the previous implementation issued a bare
+/// `UPDATE task_dispatches SET result = ..., updated_at = NOW()` and skipped
+/// the rest of the dispatch lifecycle pipeline. That meant phase-gate sidecars
+/// that PATCHed `{"checks":{...}}` were stuck — the durable phase-gate row
+/// never picked up the new verdict because
+/// `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx` runs only inside a
+/// terminal status transition, and there was no audit row in `dispatch_events`
+/// so incident-response could not see the result mutation. We now perform the
+/// update inside a transaction together with:
+///  1. an audit `dispatch_events` row (from_status=to_status=current, source
+///     `api_update_result`), and
+///  2. a phase-gate reconciliation pass scoped to the current status when the
+///     dispatch is already terminal — so a late PATCH of verdict / `checks`
+///     propagates into the durable phase-gate state instead of being stranded.
 async fn update_dispatch_result_pg(
     pool: &sqlx::PgPool,
     dispatch_id: &str,
     result: &serde_json::Value,
 ) -> Result<usize, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres update-result transaction: {error}"))?;
+
+    let current = sqlx::query(
+        "SELECT status, kanban_card_id, dispatch_type, context::TEXT AS context_text
+         FROM task_dispatches
+         WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("load postgres dispatch {dispatch_id} for result update: {error}"))?;
+    let Some(current) = current else {
+        let _ = tx.rollback().await;
+        return Ok(0);
+    };
+
+    let current_status: Option<String> = current
+        .try_get("status")
+        .map_err(|error| format!("decode dispatch status for {dispatch_id}: {error}"))?;
+    let kanban_card_id: Option<String> = current
+        .try_get("kanban_card_id")
+        .map_err(|error| format!("decode dispatch kanban_card_id for {dispatch_id}: {error}"))?;
+    let dispatch_type: Option<String> = current
+        .try_get("dispatch_type")
+        .map_err(|error| format!("decode dispatch type for {dispatch_id}: {error}"))?;
+    let context_text: Option<String> = current
+        .try_get("context_text")
+        .map_err(|error| format!("decode dispatch context for {dispatch_id}: {error}"))?;
+
     let result_json = serde_json::to_string(result)
         .map_err(|error| format!("serialize dispatch result {dispatch_id}: {error}"))?;
+
     let updated = sqlx::query(
         "UPDATE task_dispatches
-         SET result = $2,
+         SET result = CAST($2 AS jsonb),
              updated_at = NOW()
          WHERE id = $1",
     )
     .bind(dispatch_id)
-    .bind(result_json)
-    .execute(pool)
+    .bind(&result_json)
+    .execute(&mut *tx)
     .await
     .map_err(|error| format!("update postgres dispatch result {dispatch_id}: {error}"))?;
+
+    if updated.rows_affected() == 0 {
+        let _ = tx.rollback().await;
+        return Ok(0);
+    }
+
+    let status_for_audit = current_status.clone().unwrap_or_default();
+    sqlx::query(
+        "INSERT INTO dispatch_events (
+            dispatch_id,
+            kanban_card_id,
+            dispatch_type,
+            from_status,
+            to_status,
+            transition_source,
+            payload_json
+        ) VALUES ($1, $2, $3, $4, $5, 'api_update_result', CAST($6 AS jsonb))",
+    )
+    .bind(dispatch_id)
+    .bind(&kanban_card_id)
+    .bind(&dispatch_type)
+    .bind(&status_for_audit)
+    .bind(&status_for_audit)
+    .bind(&result_json)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("insert dispatch_events audit row for {dispatch_id}: {error}"))?;
+
+    if matches!(
+        current_status.as_deref(),
+        Some("completed" | "failed" | "cancelled")
+    ) {
+        let _ = crate::db::auto_queue::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+            &mut tx,
+            dispatch_id,
+            current_status.as_deref().unwrap_or("completed"),
+            context_text.as_deref(),
+            Some(&result_json),
+        )
+        .await
+        .map_err(|error| {
+            format!("reconcile phase-gate after result PATCH {dispatch_id}: {error}")
+        })?;
+    }
+
+    tx.commit().await.map_err(|error| {
+        format!("commit postgres update-result transaction {dispatch_id}: {error}")
+    })?;
+
     Ok(updated.rows_affected() as usize)
 }
 
