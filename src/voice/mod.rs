@@ -4,4 +4,4 @@ pub(crate) mod receiver;
 pub(crate) mod tts;
 
 pub(crate) use config::VoiceConfig;
-pub(crate) use receiver::VoiceReceiver;
+pub(crate) use receiver::{CompletedUtterance, VoiceReceiveHook, VoiceReceiver};

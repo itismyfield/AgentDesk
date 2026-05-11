@@ -23,6 +23,7 @@ type WavFileWriter = WavWriter<std::io::BufWriter<std::fs::File>>;
 #[derive(Debug, Clone)]
 pub(crate) struct CompletedUtterance {
     pub(crate) user_id: u64,
+    pub(crate) control_channel_id: Option<u64>,
     pub(crate) utterance_id: String,
     pub(crate) path: PathBuf,
     pub(crate) segment_paths: Vec<PathBuf>,
@@ -66,6 +67,12 @@ impl Default for VoiceReceiverConfig {
     }
 }
 
+pub(crate) trait VoiceReceiveHook: Send + Sync {
+    fn observe_pcm(&self, control_channel_id: u64, user_id: u64, samples: &[i16]);
+
+    fn utterance_completed(&self, control_channel_id: u64, utterance: &CompletedUtterance);
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum VoiceReceiverError {
     #[error("unknown voice SSRC {0}")]
@@ -86,13 +93,34 @@ pub(crate) struct VoiceReceiver {
 
 impl VoiceReceiver {
     pub(crate) fn new(config: VoiceReceiverConfig) -> Self {
+        Self::new_with_hook(config, None)
+    }
+
+    pub(crate) fn new_with_hook(
+        config: VoiceReceiverConfig,
+        hook: Option<Arc<dyn VoiceReceiveHook>>,
+    ) -> Self {
         Self {
-            inner: Arc::new(ReceiverState::new(config)),
+            inner: Arc::new(ReceiverState::new(config, hook)),
         }
     }
 
     pub(crate) fn from_voice_config(config: &VoiceConfig) -> Self {
         Self::new(VoiceReceiverConfig::from_voice_config(config))
+    }
+
+    pub(crate) fn from_voice_config_with_hook(
+        config: &VoiceConfig,
+        hook: Option<Arc<dyn VoiceReceiveHook>>,
+    ) -> Self {
+        Self::new_with_hook(VoiceReceiverConfig::from_voice_config(config), hook)
+    }
+
+    pub(crate) fn event_handler(&self, control_channel_id: u64) -> VoiceReceiverEventHandler {
+        VoiceReceiverEventHandler {
+            receiver: self.clone(),
+            control_channel_id,
+        }
     }
 
     pub(crate) async fn register_speaking(&self, ssrc: u32, user_id: u64) {
@@ -104,7 +132,18 @@ impl VoiceReceiver {
         ssrc: u32,
         samples: &[i16],
     ) -> Result<bool, VoiceReceiverError> {
-        self.inner.queue_pcm(ssrc, samples).await
+        self.inner.queue_pcm(ssrc, samples, None).await
+    }
+
+    pub(crate) async fn queue_pcm_for_control_channel(
+        &self,
+        control_channel_id: u64,
+        ssrc: u32,
+        samples: &[i16],
+    ) -> Result<bool, VoiceReceiverError> {
+        self.inner
+            .queue_pcm(ssrc, samples, Some(control_channel_id))
+            .await
     }
 
     pub(crate) async fn flush_all(&self) -> Vec<CompletedUtterance> {
@@ -114,6 +153,12 @@ impl VoiceReceiver {
     pub(crate) async fn take_pending(&self) -> Vec<CompletedUtterance> {
         self.inner.take_pending().await
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct VoiceReceiverEventHandler {
+    receiver: VoiceReceiver,
+    control_channel_id: u64,
 }
 
 #[async_trait]
@@ -150,8 +195,47 @@ impl EventHandler for VoiceReceiver {
     }
 }
 
+#[async_trait]
+impl EventHandler for VoiceReceiverEventHandler {
+    async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        match ctx {
+            EventContext::SpeakingStateUpdate(update) => {
+                if let Some(user_id) = update.user_id {
+                    let user_id = user_id.0;
+                    if user_id != 0 {
+                        self.receiver.register_speaking(update.ssrc, user_id).await;
+                    }
+                }
+            }
+            EventContext::VoiceTick(tick) => {
+                for (ssrc, voice) in &tick.speaking {
+                    let Some(samples) = voice.decoded_voice.as_deref() else {
+                        continue;
+                    };
+                    if samples.is_empty() {
+                        continue;
+                    }
+                    if let Err(error) = self
+                        .receiver
+                        .queue_pcm_for_control_channel(self.control_channel_id, *ssrc, samples)
+                        .await
+                    {
+                        if !matches!(error, VoiceReceiverError::UnknownSsrc(_)) {
+                            tracing::warn!(error = %error, ssrc, "failed to queue voice PCM");
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        None
+    }
+}
+
 struct ReceiverState {
     config: VoiceReceiverConfig,
+    hook: Option<Arc<dyn VoiceReceiveHook>>,
     ssrc_users: RwLock<HashMap<u32, u64>>,
     users: Mutex<HashMap<u64, UserAudioState>>,
     pending: Mutex<Vec<CompletedUtterance>>,
@@ -159,9 +243,10 @@ struct ReceiverState {
 }
 
 impl ReceiverState {
-    fn new(config: VoiceReceiverConfig) -> Self {
+    fn new(config: VoiceReceiverConfig, hook: Option<Arc<dyn VoiceReceiveHook>>) -> Self {
         Self {
             config,
+            hook,
             ssrc_users: RwLock::new(HashMap::new()),
             users: Mutex::new(HashMap::new()),
             pending: Mutex::new(Vec::new()),
@@ -177,6 +262,7 @@ impl ReceiverState {
         self: &Arc<Self>,
         ssrc: u32,
         samples: &[i16],
+        control_channel_id: Option<u64>,
     ) -> Result<bool, VoiceReceiverError> {
         let Some(user_id) = self.ssrc_users.read().await.get(&ssrc).copied() else {
             return Err(VoiceReceiverError::UnknownSsrc(ssrc));
@@ -185,17 +271,26 @@ impl ReceiverState {
             return Ok(false);
         }
 
-        let mut users = self.users.lock().await;
-        let user_state = users.entry(user_id).or_default();
-        if user_state.active.is_none() {
-            user_state.active = Some(self.create_active_utterance(user_id)?);
-        }
+        let notify_control_channel_id = {
+            let mut users = self.users.lock().await;
+            let user_state = users.entry(user_id).or_default();
+            if user_state.active.is_none() {
+                user_state.active =
+                    Some(self.create_active_utterance(user_id, control_channel_id)?);
+            }
 
-        let active = user_state.active.as_mut().expect("active utterance exists");
-        active.ensure_segment_writer()?;
-        active.write_samples(samples)?;
-        let utterance_id = active.utterance_id.clone();
-        self.arm_timers(user_id, utterance_id, user_state);
+            let active = user_state.active.as_mut().expect("active utterance exists");
+            if active.control_channel_id.is_none() {
+                active.control_channel_id = control_channel_id;
+            }
+            active.ensure_segment_writer()?;
+            active.write_samples(samples)?;
+            let utterance_id = active.utterance_id.clone();
+            let notify_control_channel_id = control_channel_id.or(active.control_channel_id);
+            self.arm_timers(user_id, utterance_id, user_state);
+            notify_control_channel_id
+        };
+        self.notify_pcm(notify_control_channel_id, user_id, samples);
         Ok(true)
     }
 
@@ -252,6 +347,7 @@ impl ReceiverState {
         };
         let completed = active.finalize()?;
         self.pending.lock().await.push(completed.clone());
+        self.notify_utterance_completed(&completed);
         Ok(Some(completed))
     }
 
@@ -279,6 +375,9 @@ impl ReceiverState {
         if !completed.is_empty() {
             self.pending.lock().await.extend(completed.clone());
         }
+        for utterance in &completed {
+            self.notify_utterance_completed(utterance);
+        }
         completed
     }
 
@@ -290,7 +389,11 @@ impl ReceiverState {
         self.config.allowed_user_ids.is_empty() || self.config.allowed_user_ids.contains(&user_id)
     }
 
-    fn create_active_utterance(&self, user_id: u64) -> Result<ActiveUtterance, VoiceReceiverError> {
+    fn create_active_utterance(
+        &self,
+        user_id: u64,
+        control_channel_id: Option<u64>,
+    ) -> Result<ActiveUtterance, VoiceReceiverError> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
         let started_at = chrono::Local::now();
         let timestamp = started_at.format("%Y%m%d-%H%M%S%.3f").to_string();
@@ -310,6 +413,7 @@ impl ReceiverState {
 
         Ok(ActiveUtterance {
             user_id,
+            control_channel_id,
             utterance_id,
             utterance_path,
             utterance_writer,
@@ -321,6 +425,24 @@ impl ReceiverState {
             samples_written: 0,
             started_at: started_at.to_rfc3339(),
         })
+    }
+
+    fn notify_pcm(&self, control_channel_id: Option<u64>, user_id: u64, samples: &[i16]) {
+        let Some(control_channel_id) = control_channel_id else {
+            return;
+        };
+        if let Some(hook) = &self.hook {
+            hook.observe_pcm(control_channel_id, user_id, samples);
+        }
+    }
+
+    fn notify_utterance_completed(&self, utterance: &CompletedUtterance) {
+        let Some(control_channel_id) = utterance.control_channel_id else {
+            return;
+        };
+        if let Some(hook) = &self.hook {
+            hook.utterance_completed(control_channel_id, utterance);
+        }
     }
 
     fn arm_timers(
@@ -378,6 +500,7 @@ struct UserAudioState {
 
 struct ActiveUtterance {
     user_id: u64,
+    control_channel_id: Option<u64>,
     utterance_id: String,
     utterance_path: PathBuf,
     utterance_writer: WavFileWriter,
@@ -458,6 +581,7 @@ impl ActiveUtterance {
             })?;
         Ok(CompletedUtterance {
             user_id: self.user_id,
+            control_channel_id: self.control_channel_id,
             utterance_id: self.utterance_id,
             path: self.utterance_path,
             segment_paths: self.segment_paths,
@@ -513,6 +637,8 @@ fn expand_tilde(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
 
     fn test_config(dir: PathBuf) -> VoiceReceiverConfig {
         VoiceReceiverConfig {
@@ -520,6 +646,31 @@ mod tests {
             segment_idle: Duration::from_millis(30),
             utterance_idle: Duration::from_millis(100),
             allowed_user_ids: HashSet::new(),
+        }
+    }
+
+    #[derive(Default)]
+    struct MockHook {
+        pcm_frames: AtomicUsize,
+        completions: AtomicUsize,
+        control_channels: StdMutex<Vec<u64>>,
+    }
+
+    impl VoiceReceiveHook for MockHook {
+        fn observe_pcm(&self, control_channel_id: u64, _user_id: u64, _samples: &[i16]) {
+            self.pcm_frames.fetch_add(1, Ordering::SeqCst);
+            self.control_channels
+                .lock()
+                .unwrap()
+                .push(control_channel_id);
+        }
+
+        fn utterance_completed(&self, control_channel_id: u64, _utterance: &CompletedUtterance) {
+            self.completions.fetch_add(1, Ordering::SeqCst);
+            self.control_channels
+                .lock()
+                .unwrap()
+                .push(control_channel_id);
         }
     }
 
@@ -577,5 +728,29 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(130)).await;
 
         assert!(receiver.take_pending().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn receive_hook_observes_pcm_and_completed_utterance_with_control_channel() {
+        let temp = tempfile::tempdir().unwrap();
+        let hook = StdArc::new(MockHook::default());
+        let receiver = VoiceReceiver::new_with_hook(
+            test_config(temp.path().to_path_buf()),
+            Some(hook.clone()),
+        );
+        receiver.register_speaking(42, 7).await;
+
+        receiver
+            .queue_pcm_for_control_channel(123, 42, &[1; 480])
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(130)).await;
+
+        let pending = receiver.take_pending().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].control_channel_id, Some(123));
+        assert_eq!(hook.pcm_frames.load(Ordering::SeqCst), 1);
+        assert_eq!(hook.completions.load(Ordering::SeqCst), 1);
+        assert_eq!(*hook.control_channels.lock().unwrap(), vec![123, 123]);
     }
 }

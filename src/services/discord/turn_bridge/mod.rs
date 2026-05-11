@@ -3072,7 +3072,10 @@ pub(super) fn spawn_turn_bridge(
                     "  [{ts}] watcher_finalized_before_bridge_revoke: skipping bridge mailbox_finish_turn for channel {} (#1452)",
                     channel_id.get()
                 );
-                false
+                shared_owned
+                    .voice_barge_in
+                    .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
+                    .await
             } else {
                 let finish =
                     super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
@@ -3108,12 +3111,17 @@ pub(super) fn spawn_turn_bridge(
                 shared_owned
                     .dispatch_thread_parents
                     .retain(|_, thread| *thread != channel_id);
+                let voice_deferred_enqueued = shared_owned
+                    .voice_barge_in
+                    .drain_deferred_after_turn(&shared_owned, &provider, channel_id)
+                    .await;
+                let has_pending_after_voice = finish.has_pending || voice_deferred_enqueued;
                 // Keep the override while queued turns remain so review/reused-thread routing
                 // survives restart-preserve and same-runtime dequeue paths.
-                if !finish.has_pending {
+                if !has_pending_after_voice {
                     shared_owned.dispatch_role_overrides.remove(&channel_id);
                 }
-                finish.has_pending
+                has_pending_after_voice
             }
         };
         let mut preserve_inflight_for_cleanup_retry = false;

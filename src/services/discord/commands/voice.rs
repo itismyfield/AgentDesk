@@ -4,6 +4,7 @@ use serenity::{ChannelId, GuildId, UserId};
 use songbird::{CoreEvent, Event, SerenityInit as _};
 
 use super::super::{Context, Data, Error, check_auth};
+use crate::voice::barge_in::BargeInSensitivity;
 
 /// /vc_join — Join the caller's current voice channel and start WAV capture.
 #[poise::command(slash_command, rename = "vc_join")]
@@ -27,8 +28,13 @@ pub(in crate::services::discord) async fn cmd_vc_join(ctx: Context<'_>) -> Resul
         ctx.data().voice_receiver.clone(),
         guild_id,
         channel_id,
+        ctx.channel_id(),
     )
     .await?;
+    ctx.data()
+        .shared
+        .voice_barge_in
+        .register_voice_context(ctx.channel_id(), guild_id);
 
     ctx.say(format!(
         "VC joined `{}`; WAV utterance capture is active.",
@@ -82,7 +88,17 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
             }
             let (guild_id, channel_id) =
                 resolve_user_voice_channel(ctx, msg.guild_id, msg.author.id)?;
-            join_voice_channel(ctx, data.voice_receiver.clone(), guild_id, channel_id).await?;
+            join_voice_channel(
+                ctx,
+                data.voice_receiver.clone(),
+                guild_id,
+                channel_id,
+                msg.channel_id,
+            )
+            .await?;
+            data.shared
+                .voice_barge_in
+                .register_voice_context(msg.channel_id, guild_id);
             let _ = msg
                 .reply(
                     &ctx.http,
@@ -91,6 +107,24 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
                         channel_id.get()
                     ),
                 )
+                .await;
+        }
+        "conservative" | "보수" | "보수모드" => {
+            data.shared
+                .voice_barge_in
+                .set_sensitivity(BargeInSensitivity::Conservative)
+                .await;
+            let _ = msg
+                .reply(&ctx.http, "Voice barge-in sensitivity: conservative.")
+                .await;
+        }
+        "normal" | "기본" | "기본감도" | "일반" => {
+            data.shared
+                .voice_barge_in
+                .set_sensitivity(BargeInSensitivity::Normal)
+                .await;
+            let _ = msg
+                .reply(&ctx.http, "Voice barge-in sensitivity: normal.")
                 .await;
         }
         "leave" => {
@@ -107,7 +141,10 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
         }
         _ => {
             let _ = msg
-                .reply(&ctx.http, "Usage: `!vc join` or `!vc leave`.")
+                .reply(
+                    &ctx.http,
+                    "Usage: `!vc join`, `!vc leave`, `!vc conservative`, or `!vc normal`.",
+                )
                 .await;
         }
     }
@@ -119,6 +156,7 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
     ctx: serenity::Context,
     receiver: crate::voice::VoiceReceiver,
     config: crate::voice::VoiceConfig,
+    barge_in: std::sync::Arc<super::super::voice_barge_in::VoiceBargeInRuntime>,
 ) {
     if !config.enabled {
         return;
@@ -148,8 +186,14 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
             continue;
         };
 
-        if let Err(error) =
-            join_voice_channel(&ctx, receiver.clone(), guild_channel.guild_id, channel_id).await
+        if let Err(error) = join_voice_channel(
+            &ctx,
+            receiver.clone(),
+            guild_channel.guild_id,
+            channel_id,
+            channel_id,
+        )
+        .await
         {
             tracing::warn!(
                 error = %error,
@@ -157,6 +201,8 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
                 channel_id = channel_id.get(),
                 "failed to auto-join voice channel"
             );
+        } else {
+            barge_in.register_voice_context(channel_id, guild_channel.guild_id);
         }
     }
 }
@@ -166,6 +212,7 @@ async fn join_voice_channel(
     receiver: crate::voice::VoiceReceiver,
     guild_id: GuildId,
     channel_id: ChannelId,
+    control_channel_id: ChannelId,
 ) -> Result<(), Error> {
     let manager = songbird::get(ctx)
         .await
@@ -180,11 +227,12 @@ async fn join_voice_channel(
 
     let mut handler = handler_lock.lock().await;
     handler.remove_all_global_events();
+    let receiver_handler = receiver.event_handler(control_channel_id.get());
     handler.add_global_event(
         Event::Core(CoreEvent::SpeakingStateUpdate),
-        receiver.clone(),
+        receiver_handler.clone(),
     );
-    handler.add_global_event(Event::Core(CoreEvent::VoiceTick), receiver);
+    handler.add_global_event(Event::Core(CoreEvent::VoiceTick), receiver_handler);
     Ok(())
 }
 
@@ -200,6 +248,7 @@ async fn leave_voice_channel(
         .leave(guild_id)
         .await
         .with_context(|| format!("failed to leave voice guild {}", guild_id.get()))?;
+    data.shared.voice_barge_in.unregister_voice_guild(guild_id);
     Ok(data.voice_receiver.flush_all().await.len())
 }
 

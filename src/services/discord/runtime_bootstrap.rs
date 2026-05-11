@@ -841,7 +841,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     );
 
     let voice_config = crate::config::load_graceful().voice;
-    let voice_receiver = crate::voice::VoiceReceiver::from_voice_config(&voice_config);
+    let voice_barge_in = Arc::new(voice_barge_in::VoiceBargeInRuntime::from_voice_config(
+        &voice_config,
+    ));
 
     // Cleanup stale Discord uploads on process start
     cleanup_old_uploads(UPLOAD_MAX_AGE);
@@ -966,6 +968,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         ),
         model_picker_pending: dashmap::DashMap::new(),
         dispatch_role_overrides: dashmap::DashMap::new(),
+        voice_barge_in: voice_barge_in.clone(),
         last_message_ids: dashmap::DashMap::new(),
         catch_up_retry_pending: dashmap::DashMap::new(),
         turn_start_times: dashmap::DashMap::new(),
@@ -995,6 +998,18 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // returns Err on already-set), preserving the leader's existing
     // semantics.
     let _ = shared.cached_bot_token.set(token.to_string());
+
+    let voice_hook: Option<Arc<dyn crate::voice::VoiceReceiveHook>> =
+        voice_barge_in.enabled().then(|| {
+            Arc::new(voice_barge_in::DiscordVoiceBargeInHook::new(
+                voice_barge_in.clone(),
+                shared.clone(),
+                provider.clone(),
+            )) as Arc<dyn crate::voice::VoiceReceiveHook>
+        });
+    let voice_receiver =
+        crate::voice::VoiceReceiver::from_voice_config_with_hook(&voice_config, voice_hook);
+    voice_barge_in.spawn_sensitivity_ttl_reset(shared.shutting_down.clone());
 
     // Phase 5.1 of intake-node-routing (issue #2007): spawn the
     // intake_worker poll loop NOW so cluster-standby nodes (whose
@@ -1788,11 +1803,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     let ctx_for_voice = ctx.clone();
                     let receiver_for_voice = voice_receiver_for_setup.clone();
                     let config_for_voice = voice_config_for_setup.clone();
+                    let barge_in_for_voice = shared_clone.voice_barge_in.clone();
                     tokio::spawn(async move {
                         commands::auto_join_voice_channels(
                             ctx_for_voice,
                             receiver_for_voice,
                             config_for_voice,
+                            barge_in_for_voice,
                         )
                         .await;
                     });

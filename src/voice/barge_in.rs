@@ -1,6 +1,6 @@
 //! Voice barge-in detection and processing-time interruption policy.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,8 +66,15 @@ pub(crate) enum ProcessingBargeInDecision {
     IgnoreNoise,
 }
 
-pub(crate) trait BargeInPlayerStop {
+pub(crate) trait BargeInPlayerStop: Send + Sync {
     fn stop(&self) -> Result<()>;
+}
+
+impl BargeInPlayerStop for songbird::tracks::TrackHandle {
+    fn stop(&self) -> Result<()> {
+        songbird::tracks::TrackHandle::stop(self)
+            .map_err(|error| anyhow!("failed to stop songbird playback track: {error}"))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -100,7 +107,7 @@ impl LiveBargeInMonitor {
     pub(crate) fn observe_pcm(
         &mut self,
         pcm16_stereo: &[u8],
-        player: &impl BargeInPlayerStop,
+        player: &dyn BargeInPlayerStop,
         cancellation: &CancellationToken,
     ) -> Result<Option<LiveBargeInCut>> {
         let levels = pcm16_stereo_levels_struct(pcm16_stereo);
@@ -301,6 +308,9 @@ pub(crate) fn pcm16_stereo_levels(buf: &[u8]) -> (f32, f32) {
 }
 
 pub(crate) fn pcm16_stereo_levels_struct(buf: &[u8]) -> PcmLevels {
+    // Songbird delivers stereo PCM as interleaved i16 samples; barge-in only
+    // needs aggregate loudness, so both channels are intentionally measured
+    // together instead of split into per-channel levels.
     let mut sample_count = 0_u64;
     let mut square_sum = 0.0_f64;
     let mut max_abs = 0.0_f32;

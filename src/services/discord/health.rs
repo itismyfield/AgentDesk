@@ -285,6 +285,7 @@ impl TestHealthHarness {
             shutdown_counted: std::sync::atomic::AtomicBool::new(false),
             intake_dedup: dashmap::DashMap::new(),
             dispatch_thread_parents: dashmap::DashMap::new(),
+            voice_barge_in: Arc::new(super::voice_barge_in::VoiceBargeInRuntime::disabled()),
             bot_connected: std::sync::atomic::AtomicBool::new(true),
             last_turn_at: std::sync::Mutex::new(None),
             model_overrides: dashmap::DashMap::new(),
