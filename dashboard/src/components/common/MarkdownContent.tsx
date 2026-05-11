@@ -6,6 +6,10 @@ interface Props {
   className?: string;
 }
 
+function isExternalHref(href?: string) {
+  return Boolean(href && /^(https?:)?\/\//i.test(href));
+}
+
 export default function MarkdownContent({ content, className }: Props) {
   if (!content.trim()) return null;
 
@@ -16,9 +20,13 @@ export default function MarkdownContent({ content, className }: Props) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: ({ node, ...props }) => (
-            <a {...props} target="_blank" rel="noopener noreferrer" />
-          )
+          a: ({ node, ...props }) => {
+            const externalProps = isExternalHref(props.href)
+              ? { target: "_blank", rel: "noopener noreferrer" }
+              : {};
+
+            return <a {...props} {...externalProps} />;
+          }
         }}
       >
         {content.replace(/\r\n/g, "\n")}
