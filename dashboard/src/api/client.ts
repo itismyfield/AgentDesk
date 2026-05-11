@@ -14,6 +14,8 @@ import type {
   SkillCatalogEntry,
   DispatchDeliveryEvent,
   TaskDispatch,
+  VoiceConfigPutBody,
+  VoiceConfigResponse,
 } from "../types";
 import { resolveAvatarSeed } from "../lib/pixel-avatar";
 
@@ -23,6 +25,8 @@ export type {
   KanbanCard,
   KanbanRepoSource,
   TokenAnalyticsResponse,
+  VoiceConfigPutBody,
+  VoiceConfigResponse,
 } from "../types";
 
 const BASE = "";
@@ -522,6 +526,46 @@ export async function saveSettings(
     method: "PUT",
     body: JSON.stringify(settings),
   });
+}
+
+export class VoiceConfigApiError extends Error {
+  status: number;
+  payload: unknown;
+
+  constructor(status: number, payload: unknown) {
+    const message =
+      typeof payload === "object" &&
+      payload !== null &&
+      "message" in payload &&
+      typeof (payload as { message?: unknown }).message === "string"
+        ? (payload as { message: string }).message
+        : `HTTP ${status}`;
+    super(message);
+    this.name = "VoiceConfigApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
+export async function getVoiceConfig(): Promise<VoiceConfigResponse> {
+  return request("/api/voice/config");
+}
+
+export async function saveVoiceConfig(
+  body: VoiceConfigPutBody,
+): Promise<VoiceConfigResponse> {
+  const response = await fetch("/api/voice/config", {
+    method: "PUT",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({ error: "unknown" }));
+  if (!response.ok) {
+    throw new VoiceConfigApiError(response.status, payload);
+  }
+  cachedGets.delete("/api/voice/config");
+  return payload as VoiceConfigResponse;
 }
 
 // ── Runtime Config ──

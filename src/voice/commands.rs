@@ -241,11 +241,17 @@ pub(crate) fn resolve_voice_lobby_route(
 
     let mut best_route: Option<(usize, VoiceAgentRoute)> = None;
     for agent in &config.agents {
+        if !agent.voice_enabled {
+            continue;
+        }
         let Some((provider, channel_id)) = first_explicit_agent_channel(agent) else {
             continue;
         };
+        let Some(route_transcript) = transcript_after_agent_wake_word(agent, transcript) else {
+            continue;
+        };
         for alias in agent_voice_aliases(agent) {
-            if let Some(alias_match) = match_spoken_alias_prefix(transcript, &alias) {
+            if let Some(alias_match) = match_spoken_alias_prefix(&route_transcript, &alias) {
                 let score = normalize_voice_alias_key(&alias_match.matched_alias).len();
                 if best_route
                     .as_ref()
@@ -272,11 +278,17 @@ pub(crate) fn resolve_voice_lobby_route(
 
     if let Some(active_context) = active_context
         && now.duration_since(active_context.updated_at) <= config.voice.active_agent_context_ttl()
+        && let Some(agent) = config
+            .agents
+            .iter()
+            .find(|agent| agent.id == active_context.agent_id)
+        && agent.voice_enabled
+        && let Some(transcript) = transcript_after_agent_wake_word(agent, transcript)
     {
         return Ok(VoiceLobbyRouteDecision::ContinueActive {
             agent_id: active_context.agent_id.clone(),
             channel_id: active_context.channel_id,
-            transcript: transcript.to_string(),
+            transcript,
         });
     }
 
@@ -388,6 +400,7 @@ fn agent_voice_aliases(agent: &AgentDef) -> Vec<String> {
     {
         aliases.push(name_ko);
     }
+    aliases.extend(agent.aliases.iter().cloned());
     aliases.extend(agent.keywords.iter().cloned());
     for (_, channel) in agent.channels.iter() {
         let Some(channel) = channel else {
@@ -396,6 +409,19 @@ fn agent_voice_aliases(agent: &AgentDef) -> Vec<String> {
         aliases.extend(channel.aliases());
     }
     aliases
+}
+
+fn transcript_after_agent_wake_word(agent: &AgentDef, transcript: &str) -> Option<String> {
+    let Some(wake_word) = agent
+        .wake_word
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Some(transcript.trim().to_string());
+    };
+
+    match_spoken_alias_prefix(transcript, wake_word).map(|matched| matched.remaining_transcript)
 }
 
 fn first_explicit_agent_channel(agent: &AgentDef) -> Option<(String, u64)> {
@@ -495,6 +521,10 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             name_ko: name_ko.map(str::to_string),
+            aliases: Vec::new(),
+            wake_word: None,
+            voice_enabled: true,
+            sensitivity_mode: None,
             provider: "codex".to_string(),
             channels: AgentChannels {
                 codex: Some(AgentChannel::Detailed(AgentChannelConfig {
@@ -619,6 +649,82 @@ mod tests {
         assert_eq!(collision.normalized, "공통별칭");
         assert_eq!(collision.first_agent_id, "agent-a");
         assert_eq!(collision.second_agent_id, "agent-b");
+    }
+
+    #[test]
+    fn dashboard_aliases_are_part_of_lobby_resolution_and_collision_checks() {
+        let mut td = agent("ch-td", "TD", Some("테크 디렉터"), "123");
+        td.aliases.push("기술 책임자".to_string());
+        let mut pd = agent("ch-pd", "PD", Some("프로덕트 디렉터"), "456");
+        pd.aliases.push("프로덕트".to_string());
+        let config = Config {
+            agents: vec![td.clone(), pd],
+            ..Config::default()
+        };
+
+        let routed =
+            resolve_voice_lobby_route(&config, "기술책임자 상태 알려줘", None, Instant::now())
+                .unwrap();
+        match routed {
+            VoiceLobbyRouteDecision::Routed(route) => {
+                assert_eq!(route.agent_id, "ch-td");
+                assert_eq!(route.remaining_transcript, "상태 알려줘");
+            }
+            other => panic!("expected routed, got {other:?}"),
+        }
+
+        let mut duplicate = td;
+        duplicate.id = "other".to_string();
+        duplicate.name = "Other".to_string();
+        duplicate.name_ko = Some("다른 에이전트".to_string());
+        let collision = validate_agent_alias_collisions(&[config.agents[0].clone(), duplicate])
+            .expect_err("duplicate dashboard alias should collide");
+        assert_eq!(collision.normalized, "기술책임자");
+    }
+
+    #[test]
+    fn agent_wake_word_gates_lobby_alias_and_active_context() {
+        let mut td = agent("ch-td", "TD", Some("테크 디렉터"), "123");
+        td.wake_word = Some("헤이 데스크".to_string());
+        let config = Config {
+            agents: vec![td],
+            ..Config::default()
+        };
+        let now = Instant::now();
+
+        assert_eq!(
+            resolve_voice_lobby_route(&config, "테크 디렉터 상태", None, now).unwrap(),
+            VoiceLobbyRouteDecision::NeedAgent
+        );
+
+        let routed =
+            resolve_voice_lobby_route(&config, "헤이 데스크 테크 디렉터 상태", None, now).unwrap();
+        match routed {
+            VoiceLobbyRouteDecision::Routed(route) => {
+                assert_eq!(route.agent_id, "ch-td");
+                assert_eq!(route.remaining_transcript, "상태");
+            }
+            other => panic!("expected routed, got {other:?}"),
+        }
+
+        let active = VoiceActiveAgentContext {
+            agent_id: "ch-td".to_string(),
+            channel_id: 123,
+            updated_at: now,
+        };
+        assert_eq!(
+            resolve_voice_lobby_route(&config, "상태 이어서", Some(&active), now).unwrap(),
+            VoiceLobbyRouteDecision::NeedAgent
+        );
+        assert_eq!(
+            resolve_voice_lobby_route(&config, "헤이 데스크 상태 이어서", Some(&active), now)
+                .unwrap(),
+            VoiceLobbyRouteDecision::ContinueActive {
+                agent_id: "ch-td".to_string(),
+                channel_id: 123,
+                transcript: "상태 이어서".to_string(),
+            }
+        );
     }
 
     #[test]

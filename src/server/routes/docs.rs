@@ -3003,6 +3003,90 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "GET",
+            "/api/voice/config",
+            "settings",
+            "Get dashboard-editable voice-lobby config from agentdesk.yaml with version for optimistic locking.",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "global": {
+                    "lobby_channel_id": "1503294653313712169",
+                    "active_agent_ttl_seconds": 180,
+                    "default_sensitivity_mode": "normal"
+                },
+                "agents": [{
+                    "id": "project-agentdesk",
+                    "name": "AgentDesk",
+                    "name_ko": "에이전트데스크",
+                    "voice_enabled": true,
+                    "wake_word": "에이전트",
+                    "aliases": ["ADK", "에이전트데스크"],
+                    "sensitivity_mode": "normal"
+                }],
+                "version": "sha256",
+                "source_path": "/Users/example/.adk/release/agentdesk.yaml"
+            }),
+        ),
+        ep(
+            "PUT",
+            "/api/voice/config",
+            "settings",
+            "Replace dashboard-editable voice-lobby config. Alias collisions return 409 with conflicting agent names.",
+        )
+        .with_example(
+            json!({
+                "version": "sha256",
+                "actor": "dashboard",
+                "global": {
+                    "lobby_channel_id": "1503294653313712169",
+                    "active_agent_ttl_seconds": 180,
+                    "default_sensitivity_mode": "normal"
+                },
+                "agents": [{
+                    "id": "project-agentdesk",
+                    "name": "AgentDesk",
+                    "name_ko": "에이전트데스크",
+                    "voice_enabled": true,
+                    "wake_word": "에이전트",
+                    "aliases": ["ADK"],
+                    "sensitivity_mode": "normal"
+                }]
+            }),
+            json!({
+                "global": {
+                    "lobby_channel_id": "1503294653313712169",
+                    "active_agent_ttl_seconds": 180,
+                    "default_sensitivity_mode": "normal"
+                },
+                "agents": [],
+                "version": "next-sha256",
+                "source_path": "/Users/example/.adk/release/agentdesk.yaml"
+            }),
+        )
+        .with_error_example(
+            409,
+            json!({
+                "version": "stale",
+                "global": {
+                    "lobby_channel_id": "1503294653313712169",
+                    "active_agent_ttl_seconds": 180,
+                    "default_sensitivity_mode": "normal"
+                },
+                "agents": []
+            }),
+            json!({
+                "error": "alias_conflict",
+                "message": "voice alias collision",
+                "conflict": {
+                    "normalized": "adk",
+                    "first_agent_name": "AgentDesk",
+                    "second_agent_name": "Another Agent"
+                }
+            }),
+        ),
+        ep(
+            "GET",
             "/api/dispatched-sessions",
             "dispatched-sessions",
             "List dispatched sessions with recovery identifiers for active dispatch, tmux session, thread channel, and linked auto-queue entry/run/slot when available.",

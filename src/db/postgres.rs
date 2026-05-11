@@ -1048,6 +1048,10 @@ mod tests {
             id: "pg-agent".to_string(),
             name: "PG Agent".to_string(),
             name_ko: Some("피지 에이전트".to_string()),
+            aliases: Vec::new(),
+            wake_word: None,
+            voice_enabled: true,
+            sensitivity_mode: None,
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels {
                 codex: Some(crate::config::AgentChannel::from("pg-agent-cdx")),
@@ -1297,6 +1301,10 @@ mod tests {
             id: "maker".to_string(),
             name: "Maker".to_string(),
             name_ko: Some("뚝딱이".to_string()),
+            aliases: Vec::new(),
+            wake_word: None,
+            voice_enabled: true,
+            sensitivity_mode: None,
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels {
                 codex: Some(crate::config::AgentChannel::from("maker-cdx")),
@@ -1430,6 +1438,10 @@ mod tests {
                 id: "maker".to_string(),
                 name: "Maker".to_string(),
                 name_ko: None,
+                aliases: Vec::new(),
+                wake_word: None,
+                voice_enabled: true,
+                sensitivity_mode: None,
                 provider: "codex".to_string(),
                 channels: crate::config::AgentChannels {
                     codex: Some(crate::config::AgentChannel::from("maker-cdx")),
@@ -1443,6 +1455,10 @@ mod tests {
                 id: "openclaw-maker".to_string(),
                 name: "Legacy Maker".to_string(),
                 name_ko: None,
+                aliases: Vec::new(),
+                wake_word: None,
+                voice_enabled: true,
+                sensitivity_mode: None,
                 provider: "codex".to_string(),
                 channels: crate::config::AgentChannels {
                     codex: Some(crate::config::AgentChannel::from("legacy-cdx")),

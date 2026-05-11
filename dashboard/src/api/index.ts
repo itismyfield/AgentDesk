@@ -26,6 +26,8 @@ export {
   deleteDepartment,
   getSettings,
   saveSettings,
+  getVoiceConfig,
+  saveVoiceConfig,
   getStats,
   getKanbanCards,
   createKanbanCard,
@@ -112,6 +114,7 @@ export {
   getCardAuditLog,
   getCardGitHubComments,
   onApiError,
+  VoiceConfigApiError,
 } from "./client";
 
 export type {
@@ -179,6 +182,8 @@ export type {
   TimelineEvent,
   PipelineConfigResponse,
   PhaseGateInfo,
+  VoiceConfigPutBody,
+  VoiceConfigResponse,
 } from "./client";
 
 // ── Error type guard ──

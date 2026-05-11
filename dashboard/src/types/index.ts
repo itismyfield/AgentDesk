@@ -47,6 +47,38 @@ export type MeetingReviewDecision = "reviewing" | "approved" | "hold";
 
 export type ActivitySource = "idle" | "agentdesk";
 
+export type VoiceSensitivityMode = "normal" | "conservative";
+
+export interface VoiceGlobalConfig {
+  lobby_channel_id: string | null;
+  active_agent_ttl_seconds: number;
+  default_sensitivity_mode: VoiceSensitivityMode;
+}
+
+export interface VoiceAgentConfig {
+  id: string;
+  name: string;
+  name_ko: string | null;
+  voice_enabled: boolean;
+  wake_word: string;
+  aliases: string[];
+  sensitivity_mode: VoiceSensitivityMode;
+}
+
+export interface VoiceConfigResponse {
+  global: VoiceGlobalConfig;
+  agents: VoiceAgentConfig[];
+  version: string;
+  source_path?: string | null;
+}
+
+export interface VoiceConfigPutBody {
+  version?: string;
+  actor?: string;
+  global: VoiceGlobalConfig;
+  agents: VoiceAgentConfig[];
+}
+
 export interface Agent {
   id: string;
   name: string;

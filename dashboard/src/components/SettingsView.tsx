@@ -1,6 +1,14 @@
 import { Check, ChevronDown, Eye, Info, Search } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
-import type { CompanySettings, Agent } from "../types";
+import type {
+  Agent,
+  CompanySettings,
+  VoiceAgentConfig,
+  VoiceConfigPutBody,
+  VoiceConfigResponse,
+  VoiceGlobalConfig,
+  VoiceSensitivityMode,
+} from "../types";
 import * as api from "../api";
 import type { GitHubRepoOption } from "../api";
 import { STORAGE_KEYS } from "../lib/storageKeys";
@@ -54,7 +62,7 @@ type ConfigEntry = {
 };
 
 type ConfigEditValue = string | boolean;
-type SettingsPanel = "general" | "runtime" | "pipeline" | "onboarding";
+type SettingsPanel = "general" | "runtime" | "pipeline" | "onboarding" | "voice";
 type AuditNoteStatus = "read-only" | "managed-elsewhere" | "backend-contract" | "typed-only" | "backend-followup";
 type SettingsNotificationType = "info" | "success" | "warning" | "error";
 
@@ -96,7 +104,7 @@ export type ValidationState =
   | { ok: true }
   | { ok: false; messageKo: string; messageEn: string };
 
-export type SettingGroupId = "pipeline" | "runtime" | "onboarding" | "general";
+export type SettingGroupId = "pipeline" | "runtime" | "onboarding" | "general" | "voice";
 
 /**
  * Canonical metadata that drives every SettingRow rendered in the settings page.
@@ -593,7 +601,7 @@ const AUDIT_NOTES: AuditNote[] = [
 ];
 
 function isSettingsPanel(value: string | null): value is SettingsPanel {
-  return value === "general" || value === "runtime" || value === "pipeline" || value === "onboarding";
+  return value === "general" || value === "runtime" || value === "pipeline" || value === "onboarding" || value === "voice";
 }
 
 function isRuntimeCategoryId(value: string | null): value is string {
@@ -622,6 +630,117 @@ function readStoredRuntimeCategory(): string {
     validate: (value): value is string => typeof value === "string" && isRuntimeCategoryId(value),
     legacy: (raw) => (isRuntimeCategoryId(raw) ? raw : null),
   });
+}
+
+const VOICE_SENSITIVITY_OPTIONS: Array<{
+  value: VoiceSensitivityMode;
+  labelKo: string;
+  labelEn: string;
+}> = [
+  { value: "normal", labelKo: "보통", labelEn: "Normal" },
+  { value: "conservative", labelKo: "보수적", labelEn: "Conservative" },
+];
+
+interface VoiceAliasConflict {
+  normalized: string;
+  firstAgent: VoiceAgentConfig;
+  firstAlias: string;
+  secondAgent: VoiceAgentConfig;
+  secondAlias: string;
+}
+
+function cloneVoiceConfig(config: VoiceConfigResponse): VoiceConfigResponse {
+  return {
+    ...config,
+    global: { ...config.global },
+    agents: config.agents.map((agent) => ({
+      ...agent,
+      aliases: [...agent.aliases],
+    })),
+  };
+}
+
+function normalizeVoiceAliasKey(value: string): string {
+  return Array.from(value.normalize("NFC").toLocaleLowerCase())
+    .filter((ch) => /[\p{Letter}\p{Number}]/u.test(ch))
+    .join("")
+    .normalize("NFC");
+}
+
+function splitVoiceAliases(value: string): string[] {
+  return value
+    .split(/[,\n]/)
+    .map((alias) => alias.trim())
+    .filter((alias, index, aliases) => alias.length > 0 && aliases.indexOf(alias) === index);
+}
+
+function voiceAgentBuiltInAliases(agent: VoiceAgentConfig): string[] {
+  return [agent.id, agent.name, agent.name_ko ?? ""].filter((value) => value.trim().length > 0);
+}
+
+function findVoiceAliasConflict(config: VoiceConfigResponse | null): VoiceAliasConflict | null {
+  if (!config) return null;
+  const seen = new Map<string, { agent: VoiceAgentConfig; alias: string }>();
+  for (const agent of config.agents) {
+    for (const alias of [...voiceAgentBuiltInAliases(agent), ...agent.aliases]) {
+      const normalized = normalizeVoiceAliasKey(alias);
+      if (!normalized) continue;
+      const existing = seen.get(normalized);
+      if (existing && existing.agent.id !== agent.id) {
+        return {
+          normalized,
+          firstAgent: existing.agent,
+          firstAlias: existing.alias,
+          secondAgent: agent,
+          secondAlias: alias,
+        };
+      }
+      if (!existing) {
+        seen.set(normalized, { agent, alias });
+      }
+    }
+  }
+  return null;
+}
+
+function voiceAgentKeys(agentId: string): string[] {
+  return [
+    `voice.agent.${agentId}.enabled`,
+    `voice.agent.${agentId}.wake_word`,
+    `voice.agent.${agentId}.aliases`,
+    `voice.agent.${agentId}.sensitivity`,
+  ];
+}
+
+function voiceConfigComparable(config: VoiceConfigResponse | null): unknown {
+  if (!config) return null;
+  return {
+    global: config.global,
+    agents: config.agents.map((agent) => ({
+      id: agent.id,
+      voice_enabled: agent.voice_enabled,
+      wake_word: agent.wake_word,
+      aliases: agent.aliases,
+      sensitivity_mode: agent.sensitivity_mode,
+    })),
+  };
+}
+
+function voiceSaveBody(config: VoiceConfigResponse): VoiceConfigPutBody {
+  return {
+    version: config.version,
+    actor: "dashboard",
+    global: {
+      lobby_channel_id: config.global.lobby_channel_id?.trim() || null,
+      active_agent_ttl_seconds: Math.max(1, Math.round(config.global.active_agent_ttl_seconds || 180)),
+      default_sensitivity_mode: config.global.default_sensitivity_mode,
+    },
+    agents: config.agents.map((agent) => ({
+      ...agent,
+      wake_word: agent.wake_word.trim(),
+      aliases: splitVoiceAliases(agent.aliases.join("\n")),
+    })),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -971,6 +1090,13 @@ const SETTING_GROUPS: SettingGroupMeta[] = [
     nameEn: "Runtime",
     descKo: "실행 환경과 리소스 제어, 컨텍스트 정책을 다룹니다.",
     descEn: "Execution environment, resource controls, and context policy.",
+  },
+  {
+    id: "voice",
+    nameKo: "음성",
+    nameEn: "Voice",
+    descKo: "voice-lobby와 에이전트별 wake word, alias, 민감도를 관리합니다.",
+    descEn: "Voice-lobby plus per-agent wake words, aliases, and sensitivity.",
   },
   {
     id: "onboarding",
@@ -1572,6 +1698,11 @@ export default function SettingsView({
   const [configEntries, setConfigEntries] = useState<ConfigEntry[]>([]);
   const [configEdits, setConfigEdits] = useState<Record<string, ConfigEditValue>>({});
   const [configSaving, setConfigSaving] = useState(false);
+  const [voiceConfig, setVoiceConfig] = useState<VoiceConfigResponse | null>(null);
+  const [voiceDraft, setVoiceDraft] = useState<VoiceConfigResponse | null>(null);
+  const [voiceLoaded, setVoiceLoaded] = useState(false);
+  const [voiceSaving, setVoiceSaving] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [pipelineRepos, setPipelineRepos] = useState<GitHubRepoOption[]>([]);
   const [pipelineAgents, setPipelineAgents] = useState<Agent[]>([]);
   const [selectedPipelineRepo, setSelectedPipelineRepo] = useState("");
@@ -1616,6 +1747,20 @@ export default function SettingsView({
     setConfigEntries(entries);
     return entries;
   }, []);
+  const loadVoiceConfig = useCallback(async () => {
+    setVoiceError(null);
+    try {
+      const data = await api.getVoiceConfig();
+      setVoiceConfig(data);
+      setVoiceDraft(cloneVoiceConfig(data));
+      setVoiceLoaded(true);
+      return data;
+    } catch {
+      setVoiceLoaded(true);
+      setVoiceError(tr("음성 설정을 불러오지 못했습니다.", "Failed to load voice settings."));
+      return null;
+    }
+  }, [tr]);
 
   useEffect(() => {
     setCompanyName(settings.companyName);
@@ -1708,6 +1853,13 @@ export default function SettingsView({
     void loadConfigEntries()
       .catch(() => {});
   }, [loadConfigEntries]);
+
+  useEffect(() => {
+    if (activePanel !== "voice" || voiceLoaded) {
+      return;
+    }
+    void loadVoiceConfig();
+  }, [activePanel, loadVoiceConfig, voiceLoaded]);
 
   useEffect(() => {
     if (activePanel !== "pipeline") {
@@ -1831,6 +1983,11 @@ export default function SettingsView({
     theme !== settings.theme;
   const configDirty = Object.keys(configEdits).length > 0;
   const runtimeFieldCount = CATEGORIES.reduce((sum, category) => sum + category.fields.length, 0);
+  const voiceAliasConflict = useMemo(() => findVoiceAliasConflict(voiceDraft), [voiceDraft]);
+  const voiceDirty = useMemo(
+    () => JSON.stringify(voiceConfigComparable(voiceConfig)) !== JSON.stringify(voiceConfigComparable(voiceDraft)),
+    [voiceConfig, voiceDraft],
+  );
 
   const visibleConfigEntries = useMemo(() => configEntries, [configEntries]);
 
@@ -2119,15 +2276,172 @@ export default function SettingsView({
     [],
   );
 
+  const voiceMetas = useMemo<SettingRowMeta[]>(() => {
+    const global = voiceDraft?.global;
+    const metas: SettingRowMeta[] = [
+      {
+        key: "voice.global.lobby_channel_id",
+        group: "voice",
+        source: "repo_canonical",
+        editable: true,
+        restartRequired: false,
+        effectiveValue: global?.lobby_channel_id ?? "",
+        flags: [],
+        labelKo: "Lobby 채널 ID",
+        labelEn: "Lobby channel ID",
+        hintKo: "단일 voice-lobby로 들어오는 음성을 agent alias 라우팅에 사용합니다.",
+        hintEn: "Single voice-lobby channel used for agent alias routing.",
+        inputKind: "text",
+        storageLayerKo: "agentdesk.yaml voice.lobby_channel_id",
+        storageLayerEn: "agentdesk.yaml voice.lobby_channel_id",
+      },
+      {
+        key: "voice.global.active_agent_ttl_seconds",
+        group: "voice",
+        source: "repo_canonical",
+        editable: true,
+        restartRequired: false,
+        defaultValue: 180,
+        effectiveValue: global?.active_agent_ttl_seconds ?? 180,
+        flags: [],
+        labelKo: "Active agent TTL",
+        labelEn: "Active agent TTL",
+        hintKo: "alias 없이 이어 말할 수 있는 최근 agent 유지 시간입니다.",
+        hintEn: "How long follow-up speech can continue without repeating an alias.",
+        inputKind: "number",
+        valueUnit: "s",
+        numericRange: { min: 30, max: 1800, step: 30 },
+        storageLayerKo: "agentdesk.yaml voice.active_agent_ttl_seconds",
+        storageLayerEn: "agentdesk.yaml voice.active_agent_ttl_seconds",
+      },
+      {
+        key: "voice.global.default_sensitivity_mode",
+        group: "voice",
+        source: "repo_canonical",
+        editable: true,
+        restartRequired: false,
+        defaultValue: "normal",
+        effectiveValue: global?.default_sensitivity_mode ?? "normal",
+        flags: [],
+        labelKo: "기본 민감도",
+        labelEn: "Default sensitivity",
+        hintKo: "agent별 override가 없을 때 적용할 barge-in 민감도입니다.",
+        hintEn: "Barge-in sensitivity used when an agent has no override.",
+        inputKind: "select",
+        selectOptions: VOICE_SENSITIVITY_OPTIONS,
+        storageLayerKo: "agentdesk.yaml voice.default_sensitivity_mode",
+        storageLayerEn: "agentdesk.yaml voice.default_sensitivity_mode",
+      },
+      {
+        key: "voice.global.version",
+        group: "voice",
+        source: "repo_canonical",
+        editable: false,
+        restartRequired: false,
+        effectiveValue: voiceDraft?.version ?? "",
+        flags: ["read_only"],
+        labelKo: "설정 버전",
+        labelEn: "Config version",
+        hintKo: "저장 시 optimistic locking에 사용하는 버전 해시입니다.",
+        hintEn: "Version hash used for optimistic locking on save.",
+        inputKind: "readonly",
+        storageLayerKo: "server-computed",
+        storageLayerEn: "server-computed",
+      },
+    ];
+    for (const agent of voiceDraft?.agents ?? []) {
+      metas.push(
+        {
+          key: `voice.agent.${agent.id}.enabled`,
+          group: "voice",
+          source: "repo_canonical",
+          editable: true,
+          restartRequired: false,
+          effectiveValue: agent.voice_enabled,
+          flags: [],
+          labelKo: `${agent.name_ko ?? agent.name} 음성 활성화`,
+          labelEn: `${agent.name} voice enabled`,
+          hintKo: "voice-lobby 라우팅 대상에 포함할지 결정합니다.",
+          hintEn: "Controls whether this agent participates in voice-lobby routing.",
+          inputKind: "toggle",
+          storageLayerKo: `agentdesk.yaml agents.${agent.id}.voice_enabled`,
+          storageLayerEn: `agentdesk.yaml agents.${agent.id}.voice_enabled`,
+        },
+        {
+          key: `voice.agent.${agent.id}.wake_word`,
+          group: "voice",
+          source: "repo_canonical",
+          editable: true,
+          restartRequired: false,
+          effectiveValue: agent.wake_word,
+          flags: [],
+          labelKo: `${agent.name_ko ?? agent.name} wake word`,
+          labelEn: `${agent.name} wake word`,
+          hintKo: "비어 있으면 agent alias만으로 라우팅합니다.",
+          hintEn: "When empty, the agent routes by alias only.",
+          inputKind: "text",
+          storageLayerKo: `agentdesk.yaml agents.${agent.id}.wake_word`,
+          storageLayerEn: `agentdesk.yaml agents.${agent.id}.wake_word`,
+        },
+        {
+          key: `voice.agent.${agent.id}.aliases`,
+          group: "voice",
+          source: "repo_canonical",
+          editable: true,
+          restartRequired: false,
+          effectiveValue: agent.aliases.join(", "),
+          validation: voiceAliasConflict &&
+            (voiceAliasConflict.firstAgent.id === agent.id || voiceAliasConflict.secondAgent.id === agent.id)
+            ? {
+                ok: false,
+                messageKo: `alias 충돌: ${voiceAliasConflict.normalized}`,
+                messageEn: `alias collision: ${voiceAliasConflict.normalized}`,
+              }
+            : { ok: true },
+          flags: voiceAliasConflict &&
+            (voiceAliasConflict.firstAgent.id === agent.id || voiceAliasConflict.secondAgent.id === agent.id)
+            ? ["alert"]
+            : [],
+          labelKo: `${agent.name_ko ?? agent.name} aliases`,
+          labelEn: `${agent.name} aliases`,
+          hintKo: "쉼표 또는 줄바꿈으로 여러 호출명을 입력합니다.",
+          hintEn: "Enter multiple spoken aliases separated by commas or new lines.",
+          inputKind: "text",
+          storageLayerKo: `agentdesk.yaml agents.${agent.id}.aliases`,
+          storageLayerEn: `agentdesk.yaml agents.${agent.id}.aliases`,
+        },
+        {
+          key: `voice.agent.${agent.id}.sensitivity`,
+          group: "voice",
+          source: "repo_canonical",
+          editable: true,
+          restartRequired: false,
+          effectiveValue: agent.sensitivity_mode,
+          flags: [],
+          labelKo: `${agent.name_ko ?? agent.name} 민감도`,
+          labelEn: `${agent.name} sensitivity`,
+          hintKo: "agent별 barge-in 감지 민감도입니다.",
+          hintEn: "Per-agent barge-in detection sensitivity.",
+          inputKind: "select",
+          selectOptions: VOICE_SENSITIVITY_OPTIONS,
+          storageLayerKo: `agentdesk.yaml agents.${agent.id}.sensitivity_mode`,
+          storageLayerEn: `agentdesk.yaml agents.${agent.id}.sensitivity_mode`,
+        },
+      );
+    }
+    return metas;
+  }, [voiceAliasConflict, voiceDraft]);
+
   const allMetas = useMemo<SettingRowMeta[]>(
-    () => [...pipelineMetas, ...runtimeMetas, ...onboardingMetas, ...generalMetas],
-    [pipelineMetas, runtimeMetas, onboardingMetas, generalMetas],
+    () => [...pipelineMetas, ...runtimeMetas, ...voiceMetas, ...onboardingMetas, ...generalMetas],
+    [pipelineMetas, runtimeMetas, voiceMetas, onboardingMetas, generalMetas],
   );
 
   const groupCounts = useMemo(() => {
     const counts: Record<string, number> = {
       pipeline: 0,
       runtime: 0,
+      voice: 0,
       onboarding: 0,
       general: 0,
     };
@@ -2302,6 +2616,63 @@ export default function SettingsView({
       );
     } finally {
       setConfigSaving(false);
+    }
+  };
+
+  const updateVoiceGlobal = useCallback(
+    <K extends keyof VoiceGlobalConfig>(key: K, value: VoiceGlobalConfig[K]) => {
+      setVoiceDraft((current) =>
+        current
+          ? {
+              ...current,
+              global: {
+                ...current.global,
+                [key]: value,
+              },
+            }
+          : current,
+      );
+    },
+    [],
+  );
+
+  const updateVoiceAgent = useCallback(
+    (agentId: string, patch: Partial<VoiceAgentConfig>) => {
+      setVoiceDraft((current) =>
+        current
+          ? {
+              ...current,
+              agents: current.agents.map((agent) =>
+                agent.id === agentId ? { ...agent, ...patch } : agent,
+              ),
+            }
+          : current,
+      );
+    },
+    [],
+  );
+
+  const handleVoiceSave = async () => {
+    if (!voiceDraft || !voiceDirty || voiceAliasConflict) return;
+    setVoiceSaving(true);
+    setVoiceError(null);
+    try {
+      const saved = await api.saveVoiceConfig(voiceSaveBody(voiceDraft));
+      setVoiceConfig(saved);
+      setVoiceDraft(cloneVoiceConfig(saved));
+      notify("음성 설정을 저장했습니다.", "Saved voice settings.", "success");
+    } catch (error) {
+      const message =
+        error instanceof api.VoiceConfigApiError
+          ? error.message
+          : tr("음성 설정 저장에 실패했습니다.", "Failed to save voice settings.");
+      setVoiceError(message);
+      notify("음성 설정 저장에 실패했습니다.", "Failed to save voice settings.", "error");
+      if (error instanceof api.VoiceConfigApiError && error.status === 409) {
+        void loadVoiceConfig();
+      }
+    } finally {
+      setVoiceSaving(false);
     }
   };
 
@@ -2822,6 +3193,312 @@ export default function SettingsView({
     </div>
   );
 
+  const renderVoicePanel = () => {
+    if (!voiceLoaded) {
+      return (
+        <SettingsEmptyState className="text-sm">
+          {tr("음성 설정을 불러오는 중...", "Loading voice config...")}
+        </SettingsEmptyState>
+      );
+    }
+    if (!voiceDraft) {
+      return (
+        <div className="space-y-4">
+          <SettingsEmptyState className="text-sm">
+            {voiceError ?? tr("음성 설정을 불러오지 못했습니다.", "Failed to load voice settings.")}
+          </SettingsEmptyState>
+          <button
+            type="button"
+            onClick={() => void loadVoiceConfig()}
+            className={secondaryActionClass}
+            style={secondaryActionStyle}
+          >
+            {tr("다시 불러오기", "Retry")}
+          </button>
+        </div>
+      );
+    }
+
+    const visibleGlobalCards = [
+      isRowVisible("voice.global.lobby_channel_id") ? (
+        <CompactFieldCard
+          key="lobby"
+          label={tr("Lobby 채널 ID", "Lobby channel ID")}
+          description={tr(
+            "단일 voice-lobby로 들어오는 음성을 agent alias 라우팅에 사용합니다.",
+            "Single voice-lobby channel used for agent alias routing.",
+          )}
+        >
+          <input
+            value={voiceDraft.global.lobby_channel_id ?? ""}
+            onChange={(event) => updateVoiceGlobal("lobby_channel_id", event.target.value)}
+            className="w-full rounded-2xl px-3 py-2.5 text-sm"
+            style={inputStyle}
+            placeholder={tr("예: 1503294653313712169", "e.g. 1503294653313712169")}
+          />
+        </CompactFieldCard>
+      ) : null,
+      isRowVisible("voice.global.active_agent_ttl_seconds") ? (
+        <CompactFieldCard
+          key="ttl"
+          label={tr("Active agent TTL", "Active agent TTL")}
+          description={tr(
+            "alias 없이 이어 말할 수 있는 최근 agent 유지 시간입니다.",
+            "How long follow-up speech can continue without repeating an alias.",
+          )}
+        >
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={30}
+              max={1800}
+              step={30}
+              value={voiceDraft.global.active_agent_ttl_seconds}
+              onChange={(event) =>
+                updateVoiceGlobal("active_agent_ttl_seconds", Number(event.target.value))
+              }
+              className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
+              style={{ accentColor: "var(--th-accent-primary)" }}
+            />
+            <input
+              type="number"
+              min={1}
+              step={30}
+              value={voiceDraft.global.active_agent_ttl_seconds}
+              onChange={(event) =>
+                updateVoiceGlobal("active_agent_ttl_seconds", Number(event.target.value) || 180)
+              }
+              className="w-24 rounded-xl px-2 py-1.5 text-right text-xs"
+              style={{
+                ...inputStyle,
+                fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+              }}
+            />
+          </div>
+        </CompactFieldCard>
+      ) : null,
+      isRowVisible("voice.global.default_sensitivity_mode") ? (
+        <CompactFieldCard
+          key="sensitivity"
+          label={tr("기본 민감도", "Default sensitivity")}
+          description={tr(
+            "agent별 override가 없을 때 적용할 barge-in 민감도입니다.",
+            "Barge-in sensitivity used when an agent has no override.",
+          )}
+        >
+          <select
+            value={voiceDraft.global.default_sensitivity_mode}
+            onChange={(event) =>
+              updateVoiceGlobal("default_sensitivity_mode", event.target.value as VoiceSensitivityMode)
+            }
+            className="w-full rounded-2xl px-3 py-2.5 text-sm"
+            style={inputStyle}
+          >
+            {VOICE_SENSITIVITY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {tr(option.labelKo, option.labelEn)}
+              </option>
+            ))}
+          </select>
+        </CompactFieldCard>
+      ) : null,
+      isRowVisible("voice.global.version") ? (
+        <CompactFieldCard
+          key="version"
+          label={tr("설정 버전", "Config version")}
+          description={tr(
+            "저장 시 optimistic locking에 사용하는 버전 해시입니다.",
+            "Version hash used for optimistic locking on save.",
+          )}
+        >
+          <code
+            className="block truncate rounded-xl px-3 py-2 text-xs"
+            style={{
+              background: "color-mix(in srgb, var(--th-overlay-medium) 80%, transparent)",
+              color: "var(--th-text-muted)",
+              fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+            }}
+          >
+            {voiceDraft.version}
+          </code>
+        </CompactFieldCard>
+      ) : null,
+    ].filter(Boolean);
+
+    const agentCards = voiceDraft.agents
+      .filter((agent) =>
+        voiceAgentKeys(agent.id).some((key) => isRowVisible(key)),
+      )
+      .map((agent) => {
+        const displayName = isKo && agent.name_ko ? agent.name_ko : agent.name;
+        const conflictInAgent =
+          voiceAliasConflict &&
+          (voiceAliasConflict.firstAgent.id === agent.id || voiceAliasConflict.secondAgent.id === agent.id);
+        return (
+          <SettingsCard
+            key={agent.id}
+            className="rounded-2xl p-4"
+            style={{
+              borderColor: conflictInAgent
+                ? "rgba(248,113,113,0.45)"
+                : "color-mix(in srgb, var(--th-border) 72%, transparent)",
+              background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
+            }}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                  {displayName}
+                </div>
+                <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                  {agent.id} · {agent.name}
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={agent.voice_enabled}
+                onClick={() => updateVoiceAgent(agent.id, { voice_enabled: !agent.voice_enabled })}
+                className="relative inline-flex h-7 w-12 items-center rounded-full transition-colors"
+                style={{
+                  background: agent.voice_enabled
+                    ? "var(--th-accent-primary)"
+                    : "color-mix(in srgb, var(--th-border) 80%, transparent)",
+                }}
+              >
+                <span
+                  className="inline-block h-6 w-6 rounded-full bg-white shadow transition-transform"
+                  style={{ transform: agent.voice_enabled ? "translateX(1.45rem)" : "translateX(0.13rem)" }}
+                />
+              </button>
+            </div>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              {isRowVisible(`voice.agent.${agent.id}.wake_word`) ? (
+                <CompactFieldCard
+                  label={tr("Wake word", "Wake word")}
+                  description={tr("비어 있으면 agent alias만으로 라우팅합니다.", "When empty, the agent routes by alias only.")}
+                >
+                  <input
+                    value={agent.wake_word}
+                    onChange={(event) => updateVoiceAgent(agent.id, { wake_word: event.target.value })}
+                    className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                    style={inputStyle}
+                    placeholder={tr("예: 에이전트", "e.g. agent")}
+                  />
+                </CompactFieldCard>
+              ) : null}
+              {isRowVisible(`voice.agent.${agent.id}.sensitivity`) ? (
+                <CompactFieldCard
+                  label={tr("민감도", "Sensitivity")}
+                  description={tr("agent별 barge-in 감지 민감도입니다.", "Per-agent barge-in detection sensitivity.")}
+                >
+                  <select
+                    value={agent.sensitivity_mode}
+                    onChange={(event) =>
+                      updateVoiceAgent(agent.id, { sensitivity_mode: event.target.value as VoiceSensitivityMode })
+                    }
+                    className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                    style={inputStyle}
+                  >
+                    {VOICE_SENSITIVITY_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {tr(option.labelKo, option.labelEn)}
+                      </option>
+                    ))}
+                  </select>
+                </CompactFieldCard>
+              ) : null}
+              {isRowVisible(`voice.agent.${agent.id}.aliases`) ? (
+                <CompactFieldCard
+                  label={tr("Aliases", "Aliases")}
+                  description={tr("쉼표 또는 줄바꿈으로 여러 호출명을 입력합니다.", "Enter multiple spoken aliases separated by commas or new lines.")}
+                  footer={tr(
+                    `기본 alias: ${voiceAgentBuiltInAliases(agent).join(", ")}`,
+                    `Built-in aliases: ${voiceAgentBuiltInAliases(agent).join(", ")}`,
+                  )}
+                >
+                  <textarea
+                    value={agent.aliases.join("\n")}
+                    onChange={(event) => updateVoiceAgent(agent.id, { aliases: splitVoiceAliases(event.target.value) })}
+                    className="min-h-[92px] w-full resize-y rounded-2xl px-3 py-2.5 text-sm"
+                    style={inputStyle}
+                  />
+                </CompactFieldCard>
+              ) : null}
+            </div>
+          </SettingsCard>
+        );
+      });
+
+    return (
+      <div className="space-y-5">
+        <SettingsCallout
+          action={(
+            <button
+              type="button"
+              onClick={() => void handleVoiceSave()}
+              disabled={voiceSaving || !voiceDirty || Boolean(voiceAliasConflict)}
+              className={primaryActionClass}
+              style={primaryActionStyle}
+            >
+              {voiceSaving ? tr("저장 중...", "Saving...") : tr("음성 설정 저장", "Save voice")}
+            </button>
+          )}
+        >
+          <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+            {tr(
+              "음성 설정은 agentdesk.yaml에 저장되며 runtime voice routing이 다음 발화부터 다시 읽습니다. alias는 NFC/lowercase/공백·특수문자 제거 기준으로 충돌을 막습니다.",
+              "Voice settings are stored in agentdesk.yaml and runtime voice routing reloads them on the next utterance. Aliases reject collisions after NFC/lowercase and removing spaces/special characters.",
+            )}
+          </p>
+        </SettingsCallout>
+
+        {voiceError ? (
+          <SettingsEmptyState className="text-sm">{voiceError}</SettingsEmptyState>
+        ) : null}
+
+        {voiceAliasConflict ? (
+          <SettingsCallout>
+            <p className="text-sm leading-6" style={{ color: "rgba(252,165,165,0.95)" }}>
+              {tr(
+                `alias 충돌: ${voiceAliasConflict.firstAgent.name} "${voiceAliasConflict.firstAlias}" ↔ ${voiceAliasConflict.secondAgent.name} "${voiceAliasConflict.secondAlias}" (${voiceAliasConflict.normalized})`,
+                `Alias collision: ${voiceAliasConflict.firstAgent.name} "${voiceAliasConflict.firstAlias}" ↔ ${voiceAliasConflict.secondAgent.name} "${voiceAliasConflict.secondAlias}" (${voiceAliasConflict.normalized})`,
+              )}
+            </p>
+          </SettingsCallout>
+        ) : null}
+
+        {renderSettingGroupCard({
+          titleKo: "Voice lobby",
+          titleEn: "Voice lobby",
+          descriptionKo: "lobby 채널, active-agent TTL, 기본 민감도와 버전입니다.",
+          descriptionEn: "Lobby channel, active-agent TTL, default sensitivity, and version.",
+          totalCount: 4,
+          rows: visibleGlobalCards,
+        })}
+
+        <SettingsSubsection
+          title={tr("에이전트 음성 라우팅", "Agent voice routing")}
+          description={tr(
+            "각 agent의 음성 활성화, wake word, 호출 alias, 민감도 override를 편집합니다.",
+            "Edit each agent's voice enablement, wake word, spoken aliases, and sensitivity override.",
+          )}
+        >
+          <div className="grid gap-3">
+            {agentCards.length > 0 ? (
+              agentCards
+            ) : (
+              <SettingsEmptyState className="text-sm">
+                {tr("검색 결과가 없습니다.", "No matching agents.")}
+              </SettingsEmptyState>
+            )}
+          </div>
+        </SettingsSubsection>
+      </div>
+    );
+  };
+
   const renderOnboardingPanel = () => (
     <div className="space-y-5">
       {renderSettingGroupCard({
@@ -2877,6 +3554,8 @@ export default function SettingsView({
         return renderRuntimePanel();
       case "pipeline":
         return renderPipelinePanel();
+      case "voice":
+        return renderVoicePanel();
       case "onboarding":
         return renderOnboardingPanel();
       case "general":
@@ -2940,6 +3619,31 @@ export default function SettingsView({
       );
     }
 
+    if (activePanel === "voice") {
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() => void loadVoiceConfig()}
+            className={secondaryActionClass}
+            style={secondaryActionStyle}
+          >
+            {tr("다시 불러오기", "Reload")}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleVoiceSave()}
+            disabled={voiceSaving || !voiceDirty || Boolean(voiceAliasConflict)}
+            className={primaryActionClass}
+            style={primaryActionStyle}
+          >
+            <Check size={12} />
+            {voiceSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
+          </button>
+        </>
+      );
+    }
+
     return (
       <button
         onClick={() => void handleSave()}
@@ -2982,8 +3686,8 @@ export default function SettingsView({
           kv_meta
         </code>{" "}
         {tr(
-          "키만 편집합니다. read-only 항목도 숨기지 않고 현재 상태를 그대로 보여줍니다.",
-          "keys are editable. Read-only items stay visible so the current state remains explicit.",
+          "키와 agentdesk.yaml 음성 설정만 편집합니다. read-only 항목도 숨기지 않고 현재 상태를 그대로 보여줍니다.",
+          "keys and agentdesk.yaml voice settings are editable. Read-only items stay visible so the current state remains explicit.",
         )}
       </div>
     </div>

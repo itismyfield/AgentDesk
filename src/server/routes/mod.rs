@@ -46,6 +46,7 @@ pub mod state;
 pub mod stats;
 pub mod termination_events;
 pub mod v1;
+pub mod voice_config;
 
 use axum::{
     Router,

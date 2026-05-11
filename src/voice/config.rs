@@ -32,6 +32,7 @@ pub(crate) struct VoiceConfig {
     pub allowed_user_ids: Vec<String>,
     pub lobby_channel_id: Option<String>,
     pub active_agent_ttl_seconds: u64,
+    pub default_sensitivity_mode: BargeInSensitivity,
     pub auto_join_channel_ids: Vec<String>,
 }
 
@@ -50,6 +51,7 @@ impl Default for VoiceConfig {
             allowed_user_ids: Vec::new(),
             lobby_channel_id: None,
             active_agent_ttl_seconds: DEFAULT_ACTIVE_AGENT_TTL_SECS,
+            default_sensitivity_mode: BargeInSensitivity::Normal,
             auto_join_channel_ids: Vec::new(),
         }
     }

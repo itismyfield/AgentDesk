@@ -1,4 +1,4 @@
-use crate::voice::VoiceConfig;
+use crate::voice::{VoiceConfig, barge_in::BargeInSensitivity};
 use anyhow::{Context, Result};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -223,6 +223,14 @@ pub struct AgentDef {
     pub name: String,
     #[serde(default)]
     pub name_ko: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_word: Option<String>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub voice_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity_mode: Option<BargeInSensitivity>,
     #[serde(default = "default_provider")]
     pub provider: String,
     #[serde(default, skip_serializing_if = "AgentChannels::is_empty")]
@@ -1418,6 +1426,12 @@ fn default_host() -> String {
 fn default_provider() -> String {
     "claude".into()
 }
+fn default_true() -> bool {
+    true
+}
+fn is_true(value: &bool) -> bool {
+    *value
+}
 
 fn normalized_channel_value(value: Option<String>) -> Option<String> {
     value
@@ -1430,9 +1444,6 @@ fn default_sync_interval() -> u64 {
 }
 fn default_policies_dir() -> PathBuf {
     PathBuf::from("./policies")
-}
-fn default_true() -> bool {
-    true
 }
 fn is_false(value: &bool) -> bool {
     !*value
@@ -2328,6 +2339,10 @@ routines:
             id: "agent-1".to_string(),
             name: "Agent One".to_string(),
             name_ko: Some("에이전트 원".to_string()),
+            aliases: Vec::new(),
+            wake_word: None,
+            voice_enabled: true,
+            sensitivity_mode: None,
             provider: "codex".to_string(),
             channels: AgentChannels {
                 claude: Some("123456789012345678".into()),

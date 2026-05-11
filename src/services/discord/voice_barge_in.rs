@@ -1074,10 +1074,19 @@ impl VoiceBargeInRuntime {
             return VoiceBargeInTranscriptOutcome::EmptyTranscript;
         }
 
-        let transcript = match self.runtime_wake_word_decision(transcript).await {
-            WakeWordDecision::NotRequired(transcript) => transcript,
-            WakeWordDecision::Matched(matched) => matched.remaining,
-            WakeWordDecision::Missing => return VoiceBargeInTranscriptOutcome::WakeWordRequired,
+        let config_snapshot = crate::config::load_graceful();
+        let source_is_lobby = super::settings::resolve_role_binding(channel_id, None).is_none()
+            && voice_lobby_accepts_source_channel(&config_snapshot.voice, channel_id);
+        let transcript = if source_is_lobby {
+            transcript.to_string()
+        } else {
+            match self.runtime_wake_word_decision(transcript).await {
+                WakeWordDecision::NotRequired(transcript) => transcript,
+                WakeWordDecision::Matched(matched) => matched.remaining,
+                WakeWordDecision::Missing => {
+                    return VoiceBargeInTranscriptOutcome::WakeWordRequired;
+                }
+            }
         };
         let transcript = transcript.trim();
         if transcript.is_empty() {

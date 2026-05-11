@@ -2367,6 +2367,10 @@ fn write_agentdesk_channel_bindings(
                 id: mapping.role_id.clone(),
                 name: mapping.role_id.clone(),
                 name_ko: None,
+                aliases: Vec::new(),
+                wake_word: None,
+                voice_enabled: true,
+                sensitivity_mode: None,
                 provider: provider.to_string(),
                 channels: crate::config::AgentChannels::default(),
                 keywords: Vec::new(),
@@ -4822,6 +4826,10 @@ mod tests {
             id: "adk-cdx".to_string(),
             name: "adk-cdx".to_string(),
             name_ko: None,
+            aliases: Vec::new(),
+            wake_word: None,
+            voice_enabled: true,
+            sensitivity_mode: None,
             provider: "claude".to_string(),
             channels: crate::config::AgentChannels {
                 codex: Some(crate::config::AgentChannel::Detailed(
