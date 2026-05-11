@@ -326,6 +326,31 @@ pub(super) async fn rate_limit_wait(shared: &Arc<SharedData>, channel_id: Channe
             now
         };
         shared.api_timestamps.insert(channel_id, target);
+
+        // #2044 F5: lazy GC of stale `api_timestamps` entries. The map
+        // accumulates one entry per ChannelId ever rate-limited (every
+        // dispatch thread creates a fresh ChannelId) and was never
+        // pruned outside the dedicated session-expire path
+        // (`mod.rs::cleanup_expired_sessions`). On long-lived dcserver
+        // instances that meant unbounded growth + DashMap shard
+        // contention even after threads closed.
+        //
+        // Amortize sweep cost by running every ~256 calls; remove any
+        // entry whose target is more than 10 minutes in the past
+        // (effectively idle channels we will not rate-limit again any
+        // time soon — when they do reappear `insert` re-creates them).
+        {
+            static GC_COUNTER: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let count = GC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count % 256 == 0 {
+                let gc_cutoff = now - tokio::time::Duration::from_secs(600);
+                shared
+                    .api_timestamps
+                    .retain(|_, last_target| *last_target > gc_cutoff);
+            }
+        }
+
         target
     };
     tokio::time::sleep_until(sleep_until).await;

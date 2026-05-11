@@ -3260,11 +3260,29 @@ pub(super) fn spawn_turn_bridge(
                     )
                     .await
                     {
+                        // #2044 F8: when the PG cancel fails, the
+                        // dispatch row stays in its previous (possibly
+                        // "running") state while our local cleanup
+                        // proceeds. Without setting
+                        // `preserve_inflight_for_cleanup_retry`, the
+                        // inflight file would also be deleted, so a
+                        // subsequent dispatch_followup could re-use
+                        // the dispatch id thinking the turn is still
+                        // healthy — producing a dispatch-state ↔
+                        // inflight-state inconsistency. Set the retry
+                        // flag so the next cleanup pass re-attempts
+                        // the cancel, and emit a structured tracing
+                        // event so ops can alarm on
+                        // `dispatch_cancel_pg_failed`.
                         tracing::warn!(
-                            "[turn_bridge] failed to cancel dispatch {} during cancelled turn cleanup in postgres: {}",
-                            dispatch_id,
-                            error
+                            event = "dispatch_cancel_pg_failed",
+                            dispatch_id = %dispatch_id,
+                            channel_id = channel_id.get(),
+                            cancel_source = %cancel_source,
+                            error = %error,
+                            "[turn_bridge] failed to cancel dispatch in postgres; preserving inflight for cleanup retry",
                         );
+                        preserve_inflight_for_cleanup_retry = true;
                     }
                 } else {
                     #[cfg(all(test, feature = "legacy-sqlite-tests"))]

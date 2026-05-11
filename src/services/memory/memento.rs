@@ -213,6 +213,12 @@ impl MementoBackend {
     }
 
     async fn initialize_session(&self, config: &MementoRuntimeConfig) -> Result<String, String> {
+        // #2049 Finding 12: do *not* include `accessKey` in the JSON-RPC body.
+        // Authentication is already carried by the `Authorization: Bearer`
+        // header in `auth_request`; duplicating the secret in the body means
+        // any reverse-proxy / access-log / error echo that captures the body
+        // leaks the credential into tracing logs and (via warnings) into
+        // user-facing turn results. Keep the body free of long-lived secrets.
         let response = self
             .auth_request(self.client.post(mcp_url(&config.endpoint)), config)
             .json(&json!({
@@ -226,7 +232,6 @@ impl MementoBackend {
                         "name": "agentdesk",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "accessKey": config.access_key,
                 }
             }))
             .send()
@@ -241,11 +246,15 @@ impl MementoBackend {
             .map_err(|err| format!("memento initialize response read failed: {err}"))?;
 
         if !status.is_success() {
-            return Err(format!("memento initialize failed with {status}: {text}"));
+            // #2049 Finding 12: redact any value resembling the configured
+            // access_key before bubbling the error text up the stack.
+            let safe = redact_memento_secret(&text, &config.access_key);
+            return Err(format!("memento initialize failed with {status}: {safe}"));
         }
 
         let payload: Value = serde_json::from_str(&text).map_err(|err| {
-            format!("memento initialize response decode failed: {err}; body={text}")
+            let safe = redact_memento_secret(&text, &config.access_key);
+            format!("memento initialize response decode failed: {err}; body={safe}")
         })?;
         if let Some(error) = payload.get("error") {
             return Err(format!(
@@ -255,7 +264,8 @@ impl MementoBackend {
         }
 
         session_id.ok_or_else(|| {
-            format!("memento initialize succeeded without MCP-Session-Id header; body={text}")
+            let safe = redact_memento_secret(&text, &config.access_key);
+            format!("memento initialize succeeded without MCP-Session-Id header; body={safe}")
         })
     }
 
@@ -307,11 +317,15 @@ impl MementoBackend {
                     session_id = self.initialize_session(config).await?;
                     continue;
                 }
-                return Err(format!("memento {tool_name} failed with {status}: {text}"));
+                // #2049 Finding 12: redact bearer-like substrings from error
+                // bubbling so any memento-side echo cannot expose credentials.
+                let safe = redact_memento_secret(&text, &config.access_key);
+                return Err(format!("memento {tool_name} failed with {status}: {safe}"));
             }
 
             let payload: Value = serde_json::from_str(&text).map_err(|err| {
-                format!("memento {tool_name} response decode failed: {err}; body={text}")
+                let safe = redact_memento_secret(&text, &config.access_key);
+                format!("memento {tool_name} response decode failed: {err}; body={safe}")
             })?;
 
             if let Some(error) = payload.get("error") {
@@ -615,6 +629,19 @@ fn render_rpc_error(error: &Value) -> String {
         Some(code) => format!("{message} (code={code})"),
         None => message,
     }
+}
+
+/// #2049 Finding 12: replace any occurrence of the live memento access key
+/// with a fixed placeholder before the value lands in error logs / user-facing
+/// warnings. We never want a bearer token to be inlined into tracing output or
+/// Discord messages. Short access keys (<12 chars, which would over-match) are
+/// passed through unchanged.
+fn redact_memento_secret(body: &str, access_key: &str) -> String {
+    let key = access_key.trim();
+    if key.len() < 12 {
+        return body.to_string();
+    }
+    body.replace(key, "***redacted-memento-secret***")
 }
 
 fn is_session_error(message: &str) -> bool {

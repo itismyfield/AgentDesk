@@ -238,8 +238,15 @@ pub struct AnalyticsCounterSnapshot {
     pub recovery_fires: u64,
     pub turn_successes: u64,
     pub turn_failures: u64,
-    pub success_rate: f64,
-    pub failure_rate: f64,
+    /// #2049 Finding 20: `Option<f64>` so consumers (dashboards) can tell
+    /// "no observations yet" apart from "0% success". Before this change
+    /// `turn_attempts.max(1)` divided successes by 1 whenever attempts=0,
+    /// which made a stray success on a never-started counter render as
+    /// "100% success rate of 0 attempts".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_rate: Option<f64>,
     pub snapshot_at: String,
     pub source: String,
 }
@@ -2601,6 +2608,8 @@ async fn quality_alert_target_pg(pool: &PgPool) -> Result<Option<String>> {
     Ok(value.as_deref().and_then(normalize_channel_target))
 }
 
+#[allow(dead_code)] // #2049 Finding 7: superseded by claim_quality_alert_slot_pg.
+                    // Kept for unit tests and operator-facing ad-hoc tooling.
 async fn quality_alert_recently_sent_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<bool> {
     let last_ms =
         sqlx::query_scalar::<_, Option<String>>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
@@ -2613,6 +2622,7 @@ async fn quality_alert_recently_sent_pg(pool: &PgPool, key: &str, now_ms: i64) -
     Ok(last_ms.is_some_and(|last_ms| now_ms.saturating_sub(last_ms) < QUALITY_ALERT_DEDUPE_MS))
 }
 
+#[allow(dead_code)] // #2049 Finding 7: superseded by claim_quality_alert_slot_pg.
 async fn mark_quality_alert_sent_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<()> {
     sqlx::query(
         "INSERT INTO kv_meta (key, value)
@@ -2624,6 +2634,44 @@ async fn mark_quality_alert_sent_pg(pool: &PgPool, key: &str, now_ms: i64) -> Re
     .execute(pool)
     .await
     .map_err(|error| anyhow!("mark quality alert dedupe key {key}: {error}"))?;
+    Ok(())
+}
+
+/// #2049 Finding 7: atomically claim the dedupe slot for `key` if and only if
+/// the previous claim is older than `QUALITY_ALERT_DEDUPE_MS`. Returns `true`
+/// when this caller won the race and may proceed to enqueue the outbox row;
+/// `false` when another concurrent rollup already claimed the slot. Compresses
+/// the prior `quality_alert_recently_sent_pg` + `mark_quality_alert_sent_pg`
+/// two-step (TOCTOU) into a single statement using `INSERT ... ON CONFLICT ...
+/// WHERE`.
+async fn claim_quality_alert_slot_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<bool> {
+    let dedupe_ms = QUALITY_ALERT_DEDUPE_MS;
+    let claimed = sqlx::query_scalar::<_, i32>(
+        "INSERT INTO kv_meta (key, value)
+         VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE
+             SET value = EXCLUDED.value
+             WHERE COALESCE(NULLIF(kv_meta.value, '')::bigint, 0) + $3 <= ($2)::bigint
+         RETURNING 1",
+    )
+    .bind(key)
+    .bind(now_ms.to_string())
+    .bind(dedupe_ms)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| anyhow!("claim quality alert dedupe key {key}: {error}"))?;
+    Ok(claimed.is_some())
+}
+
+/// #2049 Finding 7: best-effort rollback for `claim_quality_alert_slot_pg`
+/// when the subsequent outbox INSERT fails. Deletes the freshly-claimed
+/// dedupe row so the next rollup cycle can retry.
+async fn release_quality_alert_slot_pg(pool: &PgPool, key: &str) -> Result<()> {
+    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+        .bind(key)
+        .execute(pool)
+        .await
+        .map_err(|error| anyhow!("release quality alert dedupe key {key}: {error}"))?;
     Ok(())
 }
 
@@ -2654,10 +2702,14 @@ async fn enqueue_quality_alert_pg(
     content: &str,
     now_ms: i64,
 ) -> Result<bool> {
-    if quality_alert_recently_sent_pg(pool, dedupe_key, now_ms).await? {
+    // #2049 Finding 7: claim the dedupe slot atomically *before* enqueueing the
+    // outbox row. Previously (SELECT, ENQUEUE, MARK) could interleave across
+    // concurrent rollup callers and double-post the regression alert.
+    if !claim_quality_alert_slot_pg(pool, dedupe_key, now_ms).await? {
         return Ok(false);
     }
-    let enqueued = crate::services::message_outbox::enqueue_outbox_pg(
+
+    let enqueued = match crate::services::message_outbox::enqueue_outbox_pg(
         pool,
         crate::services::message_outbox::OutboxMessage {
             target,
@@ -2669,10 +2721,20 @@ async fn enqueue_quality_alert_pg(
         },
     )
     .await
-    .map_err(|error| anyhow!("enqueue quality regression alert: {error}"))?;
-    if enqueued {
-        mark_quality_alert_sent_pg(pool, dedupe_key, now_ms).await?;
-    }
+    {
+        Ok(enqueued) => enqueued,
+        Err(error) => {
+            // Slot was claimed but outbox INSERT failed: roll back the claim
+            // so we don't suppress the next dedupe window.
+            if let Err(rollback_err) = release_quality_alert_slot_pg(pool, dedupe_key).await {
+                tracing::warn!(
+                    "[quality] failed to release dedupe slot {dedupe_key} after outbox error: {rollback_err}"
+                );
+            }
+            return Err(anyhow!("enqueue quality regression alert: {error}"));
+        }
+    };
+
     Ok(enqueued)
 }
 
@@ -3076,7 +3138,25 @@ fn counter_snapshot_from_values(
     source: &str,
     snapshot_at: String,
 ) -> AnalyticsCounterSnapshot {
-    let attempt_count = values.turn_attempts.max(1) as f64;
+    // #2049 Finding 20: divide by the *actual* observation count and elide the
+    // ratio when no successes/failures observed instead of saturating the
+    // denominator to 1. The previous formulation produced "100% of 0" when
+    // emit_turn_started was lost but emit_turn_finished still fired (race),
+    // which misled the dashboards. Using `successes + failures` as the
+    // denominator keeps the rates self-consistent even when `turn_attempts`
+    // is briefly skewed.
+    let total = values
+        .turn_successes
+        .saturating_add(values.turn_failures);
+    let (success_rate, failure_rate) = if total == 0 {
+        (None, None)
+    } else {
+        let denom = total as f64;
+        (
+            Some(values.turn_successes as f64 / denom),
+            Some(values.turn_failures as f64 / denom),
+        )
+    };
     AnalyticsCounterSnapshot {
         provider: provider.to_string(),
         channel_id: channel_id.to_string(),
@@ -3086,8 +3166,8 @@ fn counter_snapshot_from_values(
         recovery_fires: values.recovery_fires,
         turn_successes: values.turn_successes,
         turn_failures: values.turn_failures,
-        success_rate: values.turn_successes as f64 / attempt_count,
-        failure_rate: values.turn_failures as f64 / attempt_count,
+        success_rate,
+        failure_rate,
         snapshot_at,
         source: source.to_string(),
     }

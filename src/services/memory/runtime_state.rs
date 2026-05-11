@@ -93,6 +93,16 @@ fn lock_write() -> std::sync::RwLockWriteGuard<'static, MemoryBackendRuntimeStat
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// #2049 Finding 14: hot-path readers (every turn's recall) acquire the
+/// read-side lock so they don't serialize behind sync/refresh writers. The
+/// `configured` mismatch correction is handled lazily — if the cached state
+/// disagrees with the latest config we upgrade to the write side in `snapshot`.
+fn lock_read() -> std::sync::RwLockReadGuard<'static, MemoryBackendRuntimeState> {
+    MEMORY_BACKEND_STATE
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn runtime_memory_backend_config() -> Option<runtime_layout::MemoryBackendConfig> {
     crate::config::runtime_root().map(|root| runtime_layout::load_memory_backend(&root))
 }
@@ -229,6 +239,18 @@ async fn probe_memento() -> ProbeOutcome {
 }
 
 pub(crate) fn snapshot() -> MemoryBackendRuntimeSnapshot {
+    // #2049 Finding 14: try the read-side first so concurrent hot-path callers
+    // don't serialize on a write lock. Only upgrade to write when the cached
+    // `configured` slot disagrees with the latest runtime config.
+    let configured_now = memento_runtime_config().is_some();
+    {
+        let state = lock_read();
+        if state.memento.configured == configured_now {
+            return MemoryBackendRuntimeSnapshot {
+                memento: state.memento.clone(),
+            };
+        }
+    }
     let mut state = lock_write();
     sync_configured_backends(&mut state);
     MemoryBackendRuntimeSnapshot {
@@ -251,6 +273,10 @@ pub(crate) fn backend_is_active(kind: MemoryBackendKind) -> bool {
 }
 
 pub(crate) async fn refresh_backend_health(reason: &str) -> MemoryBackendRuntimeSnapshot {
+    // #2049 Finding 14: capture `configured` at the start of the refresh so
+    // we can detect a config change that landed between the probe and the
+    // apply, and avoid resurrecting a dropped backend with a stale probe.
+    let configured_at_start = memento_runtime_config().is_some();
     {
         let mut state = lock_write();
         sync_configured_backends(&mut state);
@@ -260,8 +286,22 @@ pub(crate) async fn refresh_backend_health(reason: &str) -> MemoryBackendRuntime
     let now = SystemTime::now();
 
     let snapshot = {
+        let configured_now = memento_runtime_config().is_some();
         let mut state = lock_write();
-        apply_probe_outcome(&mut state.memento, memento_outcome, now);
+        if configured_now != configured_at_start {
+            // Config flipped under us during the probe. Discard the stale
+            // outcome and re-sync from the latest config.
+            let _ = memento_outcome;
+            sync_configured_backends(&mut state);
+            tracing::info!(
+                "[memory] {} discarded stale memento probe (configured flipped {} -> {})",
+                reason,
+                configured_at_start,
+                configured_now,
+            );
+        } else {
+            apply_probe_outcome(&mut state.memento, memento_outcome, now);
+        }
         MemoryBackendRuntimeSnapshot {
             memento: state.memento.clone(),
         }

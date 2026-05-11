@@ -151,13 +151,19 @@ impl WatcherLatencyMetrics {
     /// Sweep pending attach records older than `ATTACH_TIMEOUT`. Called
     /// opportunistically on `record_attach` / `snapshot`. Throttled to at most
     /// one full scan per `SWEEP_MIN_INTERVAL`.
+    ///
+    /// #2049 Finding 18: hold the histogram lock for the entire throttle
+    /// check + sweep + last_sweep_at update so two concurrent callers can no
+    /// longer both pass the throttle gate and double-count eviction stats.
+    /// The pending map iteration is cheap (≈ active channels) so the
+    /// critical section stays bounded.
     fn maybe_sweep(&self, now: Instant) {
-        // Quick gate without locking the histogram if we just swept.
-        if let Ok(h) = self.histogram.lock() {
-            if let Some(last) = h.last_sweep_at {
-                if now.saturating_duration_since(last) < SWEEP_MIN_INTERVAL {
-                    return;
-                }
+        let Ok(mut h) = self.histogram.lock() else {
+            return;
+        };
+        if let Some(last) = h.last_sweep_at {
+            if now.saturating_duration_since(last) < SWEEP_MIN_INTERVAL {
+                return;
             }
         }
         // Collect-then-remove to avoid holding DashMap shard locks while we
@@ -184,9 +190,7 @@ impl WatcherLatencyMetrics {
         if evicted > 0 {
             self.timeout_total.fetch_add(evicted, Ordering::Relaxed);
         }
-        if let Ok(mut h) = self.histogram.lock() {
-            h.last_sweep_at = Some(now);
-        }
+        h.last_sweep_at = Some(now);
     }
 
     /// Force a sweep at `now`. Test-only escape hatch used by unit tests to

@@ -528,6 +528,24 @@ async fn render_visible_queued_ack(
                 "queued_card_skipped",
                 &error.to_string(),
             );
+            // #2044 F13: best-effort user-visible fallback. Without
+            // this, a Discord 5xx on the queued-card POST left users
+            // with "no card / no reaction yet / message silently
+            // queued" until the per-message 📬 reaction landed later
+            // — surface a short text reply so the user knows their
+            // message is in the queue even when the card path
+            // failed. Reply is rate-limited and best-effort.
+            rate_limit_wait(&data.shared, channel_id).await;
+            let _ = channel_id
+                .send_message(
+                    &ctx.http,
+                    serenity::builder::CreateMessage::new()
+                        .reference_message((channel_id, user_msg_id))
+                        .content(
+                            "📬 큐에 추가됨 — 카드 표시는 실패했지만 메시지는 큐잉되었습니다.",
+                        ),
+                )
+                .await;
             return false;
         }
     };
@@ -542,9 +560,28 @@ async fn render_visible_queued_ack(
     let already_started = snapshot.active_user_message_id == Some(user_msg_id);
     if already_started || !still_queued {
         drop(persist_guard);
-        let _ = channel_id
+        // #2044 F13: route Discord 5xx/404 on delete_message into the
+        // deferred clear queue instead of silently swallowing them.
+        // Without this, a stale "📬 메시지 대기 중" card could remain
+        // visible after the turn already started or the queue moved on.
+        if let Err(error) = channel_id
             .delete_message(&ctx.http, placeholder_msg_id)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                "  [{ts}] ⚠ QUEUE-ACK: delete placeholder {} in channel {} failed ({error}); deferring cleanup",
+                placeholder_msg_id,
+                channel_id,
+                ts = chrono::Local::now().format("%H:%M:%S"),
+            );
+            data.shared
+                .add_pending_queue_exit_placeholder_clear_one(
+                    channel_id,
+                    user_msg_id,
+                    placeholder_msg_id,
+                )
+                .await;
+        }
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] 🔁 QUEUE-ACK: queued message {} in channel {} no longer needs a queued card",
@@ -600,9 +637,28 @@ async fn render_visible_queued_ack(
     data.shared
         .remove_queued_placeholder_locked(channel_id, user_msg_id);
     drop(persist_guard);
-    let _ = channel_id
+    // #2044 F13: same deferred-cleanup fallback as the early-return
+    // branch above — a delete_message error here is logged + enqueued
+    // for the next `drain_pending_queue_exit_placeholder_clears` pass
+    // instead of being silently discarded.
+    if let Err(error) = channel_id
         .delete_message(&ctx.http, placeholder_msg_id)
-        .await;
+        .await
+    {
+        tracing::warn!(
+            "  [{ts}] ⚠ QUEUE-ACK: delete placeholder {} in channel {} failed after render miss ({error}); deferring cleanup",
+            placeholder_msg_id,
+            channel_id,
+            ts = chrono::Local::now().format("%H:%M:%S"),
+        );
+        data.shared
+            .add_pending_queue_exit_placeholder_clear_one(
+                channel_id,
+                user_msg_id,
+                placeholder_msg_id,
+            )
+            .await;
+    }
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
         "  [{ts}] ⚠ QUEUE-ACK: queued placeholder render failed for message {} in channel {}; deleted placeholder",

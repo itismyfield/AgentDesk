@@ -168,6 +168,12 @@ pub async fn mark_recovery_audit_consumed(
         return Ok(None);
     }
 
+    // #2049 Finding 8: under READ COMMITTED two concurrent CTE selects can
+    // each pick the same `id`; the second UPDATE then *overwrites* the first
+    // turn's recorded `consumed_by_turn_id`. Lock the CTE row with
+    // `FOR UPDATE SKIP LOCKED` so concurrent claimers skip past it, and add
+    // `records.consumed_by_turn_id IS NULL` to the UPDATE WHERE as a
+    // defence-in-depth guard.
     let row = sqlx::query(
         "WITH next_record AS (
              SELECT id
@@ -176,11 +182,13 @@ pub async fn mark_recovery_audit_consumed(
                AND consumed_by_turn_id IS NULL
              ORDER BY created_at DESC, id DESC
              LIMIT 1
+             FOR UPDATE SKIP LOCKED
          )
          UPDATE recovery_audit_records records
          SET consumed_by_turn_id = $2
          FROM next_record
          WHERE records.id = next_record.id
+           AND records.consumed_by_turn_id IS NULL
          RETURNING records.id,
                    records.created_at,
                    records.channel_id,

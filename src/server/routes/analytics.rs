@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration as StdDuration, Instant},
 };
 
@@ -22,6 +22,12 @@ pub(crate) use crate::services::analytics::build_rate_limit_provider_payloads_pg
 
 const ANALYTICS_CACHE_TTL: StdDuration = StdDuration::from_secs(60);
 const ANALYTICS_CACHE_MAX_ENTRIES: usize = 4096;
+/// #2049 Finding 10: prefix appended to every analytics cache key. Bumping
+/// this constant invalidates every cached response across the process (useful
+/// for emergency cache-busting without an explicit restart). When auth-aware
+/// caching is wired in later, the per-caller identity hash will be folded
+/// into the key alongside this prefix.
+const ANALYTICS_CACHE_NAMESPACE: &str = "anon";
 
 #[derive(Clone)]
 struct CachedJson {
@@ -81,12 +87,75 @@ fn reset_analytics_cache() {
     }
 }
 
+/// #2049 Finding 10: deterministic ETag computed over a *canonicalized* JSON
+/// rendering of the response (BTreeMap-backed sort) and hashed with BLAKE3.
+/// `serde_json::to_string` of a `Value` whose underlying object is a `Map`
+/// uses insertion order, so the original `DefaultHasher` could see different
+/// strings for logically-equal payloads (e.g. across re-renders) and produce
+/// flapping ETags. Canonicalization + BLAKE3 fixes that.
 fn compute_etag(body: &Value) -> String {
-    use std::hash::{Hash, Hasher};
-    let serialized = serde_json::to_string(body).unwrap_or_default();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    serialized.hash(&mut hasher);
-    format!("\"{:016x}\"", hasher.finish())
+    let canonical = canonical_json_string(body);
+    let hash = blake3::hash(canonical.as_bytes());
+    let hex = hash.to_hex();
+    // 64-char hex hash is plenty for cache validation; truncate to 32 to keep
+    // the header tame.
+    format!("\"{}\"", &hex.as_str()[..32])
+}
+
+/// Canonical JSON serialization: object keys sorted lexically at every depth,
+/// arrays preserved in order. Used by `compute_etag` so two `Value`s that
+/// serialize the same data produce byte-identical strings regardless of
+/// HashMap iteration order.
+fn canonical_json_string(value: &Value) -> String {
+    let canonical = canonicalize(value);
+    serde_json::to_string(&canonical).unwrap_or_default()
+}
+
+fn canonicalize(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut sorted: std::collections::BTreeMap<String, Value> =
+                std::collections::BTreeMap::new();
+            for (k, v) in map {
+                sorted.insert(k.clone(), canonicalize(v));
+            }
+            Value::Object(sorted.into_iter().collect())
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(canonicalize).collect()),
+        other => other.clone(),
+    }
+}
+
+/// #2049 Finding 10: singleflight registry keyed by canonical cache key.
+/// When N concurrent requests miss the cache for the same key, only the first
+/// one queries Postgres while the rest await the shared async mutex and read
+/// the freshly-written entry. Prevents thundering-herd PG bursts (e.g.
+/// dashboard initial load with many widgets fetching the same endpoint).
+fn analytics_singleflight()
+-> &'static Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+    static GROUP: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    GROUP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn singleflight_handle(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut guard = analytics_singleflight()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(existing) = guard.get(key) {
+        existing.clone()
+    } else {
+        let handle = Arc::new(tokio::sync::Mutex::new(()));
+        guard.insert(key.to_string(), handle.clone());
+        handle
+    }
+}
+
+/// #2049 Finding 10: namespace every cache key so future auth/role
+/// differentiation (e.g. a role-specific endpoint variant) cannot collide
+/// with the anonymous shared cache. The namespace prefix lives in the key
+/// itself so the cache HashMap remains a single global structure.
+fn namespaced_key(base: &str) -> String {
+    format!("{}|{}", ANALYTICS_CACHE_NAMESPACE, base)
 }
 
 fn response_value<T: Serialize>(body: T) -> Value {
@@ -214,13 +283,16 @@ pub async fn analytics(
         event_limit: params.limit.unwrap_or(100),
         counter_limit: 200,
     };
-    let cache_key = format!(
+    // #2049 Finding 10: namespace the cache key so future per-caller variants
+    // cannot collide with the shared cache, and route the miss path through
+    // the singleflight guard below.
+    let cache_key = namespaced_key(&format!(
         "analytics|{}|{}|{}|{}",
         filters.provider.as_deref().unwrap_or(""),
         filters.channel_id.as_deref().unwrap_or(""),
         filters.event_type.as_deref().unwrap_or(""),
         filters.event_limit,
-    );
+    ));
     if let Some(entry) = read_analytics_cache(&cache_key) {
         return build_analytics_response(&entry, "hit");
     }
@@ -231,6 +303,14 @@ pub async fn analytics(
             "postgres pool unavailable".to_string(),
         );
     };
+    // #2049 Finding 10: singleflight — N concurrent miss callers serialize on
+    // this async mutex, so only the first one queries PG; the rest re-check
+    // the cache and serve the freshly-cached entry.
+    let flight = singleflight_handle(&cache_key);
+    let _guard = flight.lock().await;
+    if let Some(entry) = read_analytics_cache(&cache_key) {
+        return build_analytics_response(&entry, "hit");
+    }
     match analytics_service::query_analytics_pg(pool, &filters).await {
         Ok(body) => cache_miss_response(cache_key, body),
         Err(error) => analytics_error(

@@ -82,7 +82,16 @@ fn compute_fully_recovered(
     degraded_reasons.is_empty() && status.is_http_ready()
 }
 
+/// #2049 Finding 11 — constant-time bearer comparison.
+/// `str` PartialEq short-circuits on the first byte mismatch, exposing the
+/// token length and prefix to remote timing observation when the server is
+/// reachable from non-loopback hosts. Use `subtle::ConstantTimeEq` so every
+/// matched-length comparison takes the same wall-clock regardless of where
+/// the bytes differ. Length itself is not secret in our threat model so the
+/// length check happens outside the constant-time path.
 fn bearer_token_matches(config: &crate::config::Config, headers: &HeaderMap) -> bool {
+    use subtle::ConstantTimeEq;
+
     let Some(expected_token) = config.server.auth_token.as_deref() else {
         return false;
     };
@@ -90,11 +99,18 @@ fn bearer_token_matches(config: &crate::config::Config, headers: &HeaderMap) -> 
         return false;
     }
 
-    headers
+    let Some(supplied) = headers
         .get(AUTHORIZATION)
         .and_then(|header| header.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected_token)
+    else {
+        return false;
+    };
+
+    if supplied.len() != expected_token.len() {
+        return false;
+    }
+    supplied.as_bytes().ct_eq(expected_token.as_bytes()).into()
 }
 
 fn discord_control_endpoints_allowed(
@@ -162,12 +178,14 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             .as_array()
             .cloned()
             .unwrap_or_default();
+        // #2049 Finding 3: detect cluster-standby up-front (so we know to
+        // suppress the `no_providers_registered` noise), but defer the
+        // `status = Healthy` rewrite until *after* every worsen check below
+        // — otherwise standby would mask the worsen signal it just unmasked.
         let cluster_standby_without_gateway =
             cluster_standby_without_gateway(state, server_up, &degraded_reasons).await;
         if cluster_standby_without_gateway {
-            status = health::HealthStatus::Healthy;
             degraded_reasons.retain(|reason| reason.as_str() != Some("no_providers_registered"));
-            json["fully_recovered"] = serde_json::json!(true);
             json["cluster_standby"] = serde_json::json!(true);
         }
 
@@ -224,7 +242,13 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             )));
         }
 
-        // #2049 Finding 2 (+ partial Finding 3): recompute `fully_recovered`
+        // #2049 Finding 3: now that every worsen check has run, lift status
+        // to Healthy only when standby has *no other* degraded reasons.
+        if cluster_standby_without_gateway && degraded_reasons.is_empty() {
+            status = health::HealthStatus::Healthy;
+        }
+
+        // #2049 Finding 2 (+ Finding 3): recompute `fully_recovered`
         // from the final set of degraded reasons + final status so that
         // DB/disk/outbox/pipeline/doctor regressions cannot leave the field
         // stale-true. This also overrides the cluster_standby short-circuit
@@ -463,6 +487,12 @@ async fn load_channel_session_state(
     None
 }
 
+/// #2049 Finding 16: the handler-layer pre-check uses
+/// `dispatch_id.trim().is_empty()` but the UPDATE WHERE used
+/// `active_dispatch_id = ''`. A whitespace-only dispatch id (e.g. `' '`)
+/// would pass the UPDATE but be rejected by the pre-check, so the two
+/// definitions of "no live work" disagreed. `COALESCE(btrim(...), '') = ''`
+/// makes them match.
 async fn mark_channel_sessions_disconnected(
     pg_pool: Option<&PgPool>,
     channel_id: u64,
@@ -475,7 +505,7 @@ async fn mark_channel_sessions_disconnected(
                     active_dispatch_id = NULL
               WHERE thread_channel_id = $1
                 AND status IN ('turn_active', 'working')
-                AND (active_dispatch_id IS NULL OR active_dispatch_id = '')",
+                AND COALESCE(btrim(active_dispatch_id), '') = ''",
         )
         .bind(&channel_id)
         .execute(pool)

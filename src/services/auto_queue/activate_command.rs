@@ -1167,3 +1167,50 @@ pub(crate) async fn activate_with_deps_pg(
         })),
     )
 }
+
+/// #2048 F4: RAII guard that releases the per-run `aq_activate` session
+/// advisory lock acquired at the start of `activate_with_deps_pg`. We can't
+/// hold the lock across the (many) early `return` sites without a closure
+/// rewrite, so a Drop impl keeps the unlock-on-exit invariant intact even
+/// for panic paths. Unlock runs on a detached tokio task; if the runtime is
+/// unavailable, Postgres releases session locks when the session ends.
+struct ActivateLockReleaseGuard {
+    conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
+    run_id: String,
+}
+
+impl ActivateLockReleaseGuard {
+    fn new(conn: sqlx::pool::PoolConnection<sqlx::Postgres>, run_id: String) -> Self {
+        Self {
+            conn: Some(conn),
+            run_id,
+        }
+    }
+}
+
+impl Drop for ActivateLockReleaseGuard {
+    fn drop(&mut self) {
+        let Some(mut conn) = self.conn.take() else {
+            return;
+        };
+        let run_id = std::mem::take(&mut self.run_id);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(error) =
+                    sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
+                        .bind("aq_activate")
+                        .bind(&run_id)
+                        .execute(&mut *conn)
+                        .await
+                {
+                    tracing::warn!(
+                        run_id,
+                        error = %error,
+                        "[auto-queue] failed to release activate advisory lock"
+                    );
+                }
+            });
+        }
+    }
+}
+

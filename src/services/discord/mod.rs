@@ -1600,6 +1600,30 @@ impl SharedData {
         );
     }
 
+    /// #2044 F13: enqueue a single deferred placeholder-clear when an
+    /// inline `delete_message` from a non-queue-exit path (e.g.
+    /// `render_visible_queued_ack`) fails. Mirrors the persistence
+    /// behaviour of `add_pending_queue_exit_placeholder_clears` so the
+    /// retry survives a restart and is drained by the same
+    /// `drain_pending_queue_exit_placeholder_clears` worker.
+    pub(in crate::services::discord) async fn add_pending_queue_exit_placeholder_clear_one(
+        &self,
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+        placeholder_msg_id: MessageId,
+    ) {
+        let persist_lock = self.queued_placeholders_persist_lock(channel_id);
+        let _persist_guard = persist_lock.lock().await;
+        self.queue_exit_placeholder_clears
+            .insert((channel_id, user_msg_id), placeholder_msg_id);
+        queued_placeholders_store::persist_queue_exit_placeholder_clears_channel_from_map(
+            &self.queue_exit_placeholder_clears,
+            &self.provider,
+            &self.token_hash,
+            channel_id,
+        );
+    }
+
     async fn remove_pending_queue_exit_placeholder_clears(
         &self,
         channel_id: ChannelId,
@@ -2430,9 +2454,20 @@ async fn apply_queue_exit_feedback(
         // to this intervention. After #1190 follow-up, merged messages carry ➕
         // and standalone heads carry 📬; remove both unconditionally so cancel /
         // expiry / supersede leaves only the exit-state reaction visible.
+        //
+        // #2044 F9: when the intervention has a single source message
+        // (standalone head, no merges), there was never a ➕ reaction
+        // to remove. Previously we called `remove_reaction_raw('➕')`
+        // anyway, doubling the channel-level rate-limited HTTP traffic
+        // per exit. Skip it for standalone messages — merged groups
+        // (`len() > 1`) still receive both removals because the merge
+        // path adds ➕ to every non-head source.
+        let is_standalone = event.intervention.source_message_ids.len() <= 1;
         for message_id in &event.intervention.source_message_ids {
             formatting::remove_reaction_raw(&http, channel_id, *message_id, '📬').await;
-            formatting::remove_reaction_raw(&http, channel_id, *message_id, '➕').await;
+            if !is_standalone {
+                formatting::remove_reaction_raw(&http, channel_id, *message_id, '➕').await;
+            }
         }
         formatting::add_reaction_raw(
             &http,

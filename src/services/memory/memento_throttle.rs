@@ -13,6 +13,20 @@ const RECALL_DEDUP_WINDOW: Duration = Duration::from_secs(60);
 const REMEMBER_DEDUP_WINDOW: Duration = Duration::from_secs(5 * 60);
 const MAX_METRIC_RETENTION_HOURS: i64 = 7 * 24;
 const KST_OFFSET_SECONDS: i32 = 9 * 60 * 60;
+/// #2049 Finding 15: cap each cache so the hashmap can't grow without bound
+/// between prune ticks. Combined with the amortized `prune_if_due` (which
+/// replaces the per-call O(N) retain scan), the hot path stays O(1).
+const MAX_RECALL_CACHE_ENTRIES: usize = 4_096;
+const MAX_REMEMBER_CACHE_ENTRIES: usize = 4_096;
+/// #2049 Finding 15: hard cap on the metric event ring + feedback ring so
+/// they can't inflate to hundreds of MB on a high-traffic deployment.
+const MAX_METRIC_EVENTS: usize = 100_000;
+const MAX_FEEDBACK_EVENTS: usize = 10_000;
+/// #2049 Finding 15: amortize prune cost. Run the full retain scan at most
+/// once per `HOT_PATH_PRUNE_INTERVAL`. Lookups still check `expires_at`, so
+/// we never serve an expired entry — this only affects when memory is
+/// reclaimed.
+const HOT_PATH_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug)]
 struct CachedRecallEntry {
@@ -90,15 +104,33 @@ struct HourBucket {
     tools: BTreeMap<String, CallCounts>,
 }
 
-#[derive(Default)]
 struct MementoThrottleState {
     recall_cache: HashMap<String, CachedRecallEntry>,
     remember_cache: HashMap<String, CachedRememberEntry>,
     metrics: VecDeque<MementoMetricEvent>,
     feedback_triggers: VecDeque<MementoFeedbackTriggerEvent>,
+    /// #2049 Finding 15: last prune wall-clock. Used to throttle the O(N)
+    /// hashmap retain scans so hot-path callers don't pay them on every turn.
+    last_prune_at: Instant,
+}
+
+impl Default for MementoThrottleState {
+    fn default() -> Self {
+        Self {
+            recall_cache: HashMap::new(),
+            remember_cache: HashMap::new(),
+            metrics: VecDeque::new(),
+            feedback_triggers: VecDeque::new(),
+            last_prune_at: Instant::now(),
+        }
+    }
 }
 
 impl MementoThrottleState {
+    /// Drop expired hashmap entries + retention-aged metric events.
+    /// O(N) on the hashmaps; do *not* call from the hot path. Use
+    /// `prune_if_due` instead, which throttles to once per
+    /// `HOT_PATH_PRUNE_INTERVAL`.
     fn prune(&mut self) {
         let now = Instant::now();
         self.recall_cache.retain(|_, entry| entry.expires_at > now);
@@ -122,6 +154,65 @@ impl MementoThrottleState {
         {
             self.feedback_triggers.pop_front();
         }
+        self.last_prune_at = now;
+    }
+
+    /// #2049 Finding 15: skip the expensive full prune unless
+    /// `HOT_PATH_PRUNE_INTERVAL` has elapsed since the last run.
+    fn prune_if_due(&mut self) {
+        if Instant::now().saturating_duration_since(self.last_prune_at) >= HOT_PATH_PRUNE_INTERVAL {
+            self.prune();
+        }
+    }
+
+    /// #2049 Finding 15: enforce the recall cache size cap. Called after each
+    /// insert so an unbounded sequence of distinct keys cannot blow past the
+    /// hard limit even when the periodic prune hasn't fired.
+    fn enforce_recall_cache_cap(&mut self) {
+        if self.recall_cache.len() <= MAX_RECALL_CACHE_ENTRIES {
+            return;
+        }
+        // Drop the oldest-expiring entries first; this approximates LRU well
+        // enough for short TTL caches without paying for an LRU data structure.
+        let mut by_expiry: Vec<(String, Instant)> = self
+            .recall_cache
+            .iter()
+            .map(|(k, v)| (k.clone(), v.expires_at))
+            .collect();
+        by_expiry.sort_by_key(|(_, t)| *t);
+        let drop = self.recall_cache.len() - MAX_RECALL_CACHE_ENTRIES;
+        for (key, _) in by_expiry.into_iter().take(drop) {
+            self.recall_cache.remove(&key);
+        }
+    }
+
+    /// #2049 Finding 15: same cap-enforcement story for the remember cache.
+    fn enforce_remember_cache_cap(&mut self) {
+        if self.remember_cache.len() <= MAX_REMEMBER_CACHE_ENTRIES {
+            return;
+        }
+        let mut by_expiry: Vec<(String, Instant)> = self
+            .remember_cache
+            .iter()
+            .map(|(k, v)| (k.clone(), v.expires_at))
+            .collect();
+        by_expiry.sort_by_key(|(_, t)| *t);
+        let drop = self.remember_cache.len() - MAX_REMEMBER_CACHE_ENTRIES;
+        for (key, _) in by_expiry.into_iter().take(drop) {
+            self.remember_cache.remove(&key);
+        }
+    }
+
+    /// #2049 Finding 15: drop the oldest metric/feedback events when the ring
+    /// exceeds its cap. Combined with retention pruning this keeps memory
+    /// bounded even under heavy traffic.
+    fn enforce_metric_ring_cap(&mut self) {
+        while self.metrics.len() > MAX_METRIC_EVENTS {
+            self.metrics.pop_front();
+        }
+        while self.feedback_triggers.len() > MAX_FEEDBACK_EVENTS {
+            self.feedback_triggers.pop_front();
+        }
     }
 }
 
@@ -130,11 +221,14 @@ fn throttle_state() -> &'static Mutex<MementoThrottleState> {
     STATE.get_or_init(|| Mutex::new(MementoThrottleState::default()))
 }
 
+/// #2049 Finding 15: hot-path entry point. Runs the cheap amortized prune
+/// (no-op unless `HOT_PATH_PRUNE_INTERVAL` has elapsed) rather than the
+/// per-call O(N) retain scan that was previously here.
 fn with_state<R>(f: impl FnOnce(&mut MementoThrottleState) -> R) -> R {
     let mut guard = throttle_state()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.prune();
+    guard.prune_if_due();
     f(&mut guard)
 }
 
@@ -145,6 +239,7 @@ fn record_metric(tool_name: &'static str, action: MementoMetricAction) {
             tool_name,
             action,
         });
+        state.enforce_metric_ring_cap();
     });
 }
 
@@ -169,14 +264,19 @@ pub(crate) fn note_memento_tool_feedback_trigger(trigger_type: &str) {
                 timestamp: Utc::now(),
                 trigger_type,
             });
+        state.enforce_metric_ring_cap();
     });
 }
 
 pub(crate) fn cached_recall_response(key: &str) -> Option<Option<String>> {
     with_state(|state| {
+        // #2049 Finding 15: explicit expiry check here so the lookup is strict
+        // even when the amortized prune hasn't fired yet.
+        let now = Instant::now();
         state
             .recall_cache
             .get(key)
+            .filter(|entry| entry.expires_at > now)
             .map(|entry| entry.external_recall.clone())
     })
 }
@@ -190,14 +290,19 @@ pub(crate) fn store_recall_response(key: String, external_recall: Option<String>
                 expires_at: Instant::now() + RECALL_DEDUP_WINDOW,
             },
         );
+        state.enforce_recall_cache_cap();
     });
 }
 
 pub(crate) fn should_dedup_remember(key: &str, importance: Option<f64>) -> bool {
     with_state(|state| {
+        // #2049 Finding 15: strict expiry check; the amortized prune may not
+        // have run yet.
+        let now = Instant::now();
         state
             .remember_cache
             .get(key)
+            .filter(|entry| entry.expires_at > now)
             .map(|entry| match importance {
                 Some(current) => entry
                     .importance
@@ -218,6 +323,7 @@ pub(crate) fn store_remember_fingerprint(key: String, importance: Option<f64>) {
                 expires_at: Instant::now() + REMEMBER_DEDUP_WINDOW,
             },
         );
+        state.enforce_remember_cache_cap();
     });
 }
 
