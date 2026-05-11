@@ -13,6 +13,7 @@ use crate::voice::barge_in::{
     BargeInPlayerStop, BargeInSensitivity, BargeInSensitivityState, DeferredBargeInBuffer,
     LiveBargeInCut, LiveBargeInMonitor, ProcessingBargeInDecision, run_sensitivity_ttl_reset,
 };
+use crate::voice::config::DEFAULT_STT_LANGUAGE;
 use crate::voice::sanitizer::spoken_result_only;
 use crate::voice::stt::SttRuntime;
 use crate::voice::tts::{
@@ -46,6 +47,12 @@ pub(in crate::services::discord) enum VoiceBargeInTranscriptOutcome {
 struct LivePlaybackSession {
     player: Arc<dyn BargeInPlayerStop>,
     cancellation: CancellationToken,
+    owner: Option<u64>,
+}
+
+struct SpokenResultPlaybackSession {
+    id: u64,
+    cancellation: CancellationToken,
 }
 
 struct DeferredBargeInDrain {
@@ -60,12 +67,15 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     acknowledgement_enabled: bool,
     acknowledgement_text: String,
     transcript_dirs: Vec<PathBuf>,
+    spoken_result_language: String,
     stt: Option<SttRuntime>,
     tts: Option<TtsRuntime>,
     monitors: dashmap::DashMap<u64, Arc<std::sync::Mutex<LiveBargeInMonitor>>>,
     playbacks: dashmap::DashMap<u64, Arc<LivePlaybackSession>>,
+    spoken_result_playbacks: dashmap::DashMap<u64, SpokenResultPlaybackSession>,
     voice_guilds: dashmap::DashMap<u64, GuildId>,
     deferred_buffers: dashmap::DashMap<u64, Arc<Mutex<DeferredBargeInBuffer>>>,
+    next_spoken_result_playback_id: AtomicU64,
     next_internal_message_id: AtomicU64,
 }
 
@@ -94,12 +104,15 @@ impl VoiceBargeInRuntime {
             acknowledgement_enabled: config.barge_in.acknowledgement_enabled,
             acknowledgement_text: config.barge_in.acknowledgement_text.clone(),
             transcript_dirs: transcript_dirs_from_config(config),
+            spoken_result_language: config.stt.language.clone(),
             stt,
             tts,
             monitors: dashmap::DashMap::new(),
             playbacks: dashmap::DashMap::new(),
+            spoken_result_playbacks: dashmap::DashMap::new(),
             voice_guilds: dashmap::DashMap::new(),
             deferred_buffers: dashmap::DashMap::new(),
+            next_spoken_result_playback_id: AtomicU64::new(1),
             next_internal_message_id: AtomicU64::new(INTERNAL_VOICE_MESSAGE_ID_START),
         }
     }
@@ -112,12 +125,15 @@ impl VoiceBargeInRuntime {
             acknowledgement_enabled: false,
             acknowledgement_text: String::new(),
             transcript_dirs: Vec::new(),
+            spoken_result_language: DEFAULT_STT_LANGUAGE.to_string(),
             stt: None,
             tts: None,
             monitors: dashmap::DashMap::new(),
             playbacks: dashmap::DashMap::new(),
+            spoken_result_playbacks: dashmap::DashMap::new(),
             voice_guilds: dashmap::DashMap::new(),
             deferred_buffers: dashmap::DashMap::new(),
+            next_spoken_result_playback_id: AtomicU64::new(1),
             next_internal_message_id: AtomicU64::new(INTERNAL_VOICE_MESSAGE_ID_START),
         }
     }
@@ -196,6 +212,18 @@ impl VoiceBargeInRuntime {
     ) where
         P: BargeInPlayerStop + 'static,
     {
+        self.reset_after_playback_start_with_owner(channel_id, player, cancellation, None);
+    }
+
+    fn reset_after_playback_start_with_owner<P>(
+        &self,
+        channel_id: ChannelId,
+        player: Arc<P>,
+        cancellation: CancellationToken,
+        owner: Option<u64>,
+    ) where
+        P: BargeInPlayerStop + 'static,
+    {
         if !self.enabled {
             return;
         }
@@ -214,12 +242,40 @@ impl VoiceBargeInRuntime {
             Arc::new(LivePlaybackSession {
                 player,
                 cancellation,
+                owner,
             }),
         );
     }
 
     pub(in crate::services::discord) fn clear_playback(&self, channel_id: ChannelId) {
         self.playbacks.remove(&channel_id.get());
+    }
+
+    fn clear_playback_if_owner(&self, channel_id: ChannelId, owner: u64) {
+        self.playbacks
+            .remove_if(&channel_id.get(), |_, session| session.owner == Some(owner));
+    }
+
+    fn start_spoken_result_playback(&self, channel_id: ChannelId) -> (u64, CancellationToken) {
+        let id = self
+            .next_spoken_result_playback_id
+            .fetch_add(1, Ordering::SeqCst);
+        let cancellation = CancellationToken::new();
+        if let Some(previous) = self.spoken_result_playbacks.insert(
+            channel_id.get(),
+            SpokenResultPlaybackSession {
+                id,
+                cancellation: cancellation.clone(),
+            },
+        ) {
+            previous.cancellation.cancel();
+        }
+        (id, cancellation)
+    }
+
+    fn clear_spoken_result_playback_if_current(&self, channel_id: ChannelId, id: u64) {
+        self.spoken_result_playbacks
+            .remove_if(&channel_id.get(), |_, session| session.id == id);
     }
 
     pub(in crate::services::discord) fn observe_live_pcm_i16(
@@ -501,7 +557,7 @@ impl VoiceBargeInRuntime {
         let Some(tts) = self.tts.clone() else {
             return;
         };
-        let spoken = spoken_result_only(answer, "ko");
+        let spoken = spoken_result_only(answer, &self.spoken_result_language);
         if spoken.trim().is_empty() {
             return;
         }
@@ -543,16 +599,17 @@ impl VoiceBargeInRuntime {
         };
 
         let runtime = self.clone();
-        let cancellation = CancellationToken::new();
+        let (playback_id, cancellation) = self.start_spoken_result_playback(channel_id);
         let playback_cancellation = cancellation.clone();
         let register_cancellation = cancellation.clone();
         tokio::spawn(async move {
             let runtime_for_track = runtime.clone();
             let register_track = move |track| {
-                runtime_for_track.reset_after_playback_start(
+                runtime_for_track.reset_after_playback_start_with_owner(
                     channel_id,
                     Arc::new(track),
                     register_cancellation.clone(),
+                    Some(playback_id),
                 );
             };
 
@@ -566,7 +623,8 @@ impl VoiceBargeInRuntime {
             )
             .await;
 
-            runtime.clear_playback(channel_id);
+            runtime.clear_playback_if_owner(channel_id, playback_id);
+            runtime.clear_spoken_result_playback_if_current(channel_id, playback_id);
             match result {
                 Ok(report) => {
                     tracing::info!(
@@ -857,6 +915,50 @@ mod tests {
         assert_eq!(player.stops.load(Ordering::SeqCst), 1);
         assert!(cancellation.is_cancelled());
         assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
+    }
+
+    #[test]
+    fn new_spoken_result_playback_cancels_previous_channel_playback() {
+        let runtime = enabled_runtime();
+        let channel_id = ChannelId::new(42);
+
+        let (first_id, first_cancellation) = runtime.start_spoken_result_playback(channel_id);
+        let (second_id, second_cancellation) = runtime.start_spoken_result_playback(channel_id);
+
+        assert_ne!(first_id, second_id);
+        assert!(first_cancellation.is_cancelled());
+        assert!(!second_cancellation.is_cancelled());
+
+        runtime.clear_spoken_result_playback_if_current(channel_id, first_id);
+        assert!(runtime.spoken_result_playbacks.contains_key(&42));
+
+        runtime.clear_spoken_result_playback_if_current(channel_id, second_id);
+        assert!(!runtime.spoken_result_playbacks.contains_key(&42));
+    }
+
+    #[test]
+    fn stale_spoken_result_clear_does_not_remove_newer_live_playback() {
+        let runtime = enabled_runtime();
+        let channel_id = ChannelId::new(42);
+        let first_player = Arc::new(MockPlayer::default());
+        let second_player = Arc::new(MockPlayer::default());
+
+        runtime.reset_after_playback_start_with_owner(
+            channel_id,
+            first_player,
+            CancellationToken::new(),
+            Some(1),
+        );
+        runtime.reset_after_playback_start_with_owner(
+            channel_id,
+            second_player,
+            CancellationToken::new(),
+            Some(2),
+        );
+
+        runtime.clear_playback_if_owner(channel_id, 1);
+
+        assert_eq!(runtime.playbacks.get(&42).unwrap().owner, Some(2));
     }
 
     #[tokio::test]

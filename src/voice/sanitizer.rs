@@ -63,14 +63,68 @@ fn is_noise_line(line: &str) -> bool {
         || lower.starts_with("logs:")
         || lower.starts_with("run:")
         || lower.starts_with("command:")
-        || lower.starts_with("cargo ")
-        || lower.starts_with("git ")
+        || is_bare_command_line(&lower)
     {
         return true;
     }
 
     let mut chars = line.chars();
     matches!(chars.next(), Some('+') | Some('-')) && !matches!(chars.next(), Some(' '))
+}
+
+fn is_bare_command_line(lower: &str) -> bool {
+    let mut parts = lower.split_whitespace();
+    let Some(binary) = parts.next() else {
+        return false;
+    };
+    let Some(subcommand) = parts.next() else {
+        return false;
+    };
+
+    match binary {
+        "cargo" => matches!(
+            subcommand,
+            "bench"
+                | "build"
+                | "check"
+                | "clippy"
+                | "doc"
+                | "fmt"
+                | "install"
+                | "metadata"
+                | "nextest"
+                | "publish"
+                | "run"
+                | "test"
+                | "tree"
+                | "update"
+        ),
+        "git" => matches!(
+            subcommand,
+            "add"
+                | "bisect"
+                | "branch"
+                | "checkout"
+                | "cherry-pick"
+                | "clone"
+                | "commit"
+                | "diff"
+                | "fetch"
+                | "log"
+                | "merge"
+                | "pull"
+                | "push"
+                | "rebase"
+                | "remote"
+                | "reset"
+                | "restore"
+                | "rev-parse"
+                | "show"
+                | "status"
+                | "switch"
+        ),
+        _ => false,
+    }
 }
 
 fn strip_markdown_noise(line: &str) -> String {
@@ -176,6 +230,19 @@ mod tests {
         );
 
         assert_eq!(spoken, "결과 cargo test 통과 문서를 확인했어요.");
+    }
+
+    #[test]
+    fn removes_bare_cargo_and_git_commands_without_dropping_korean_prose() {
+        let spoken = spoken_result_only(
+            "cargo test --all\ncargo 는 러스트 빌드 도구입니다.\ngit status\ngit 이 익숙하면 작업이 빨라져요.",
+            "ko",
+        );
+
+        assert_eq!(
+            spoken,
+            "cargo 는 러스트 빌드 도구입니다. git 이 익숙하면 작업이 빨라져요."
+        );
     }
 
     #[test]

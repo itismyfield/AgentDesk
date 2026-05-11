@@ -7,12 +7,18 @@ use songbird::{
     Event, EventContext, EventHandler, events::TrackEvent, input::File, tracks::TrackHandle,
 };
 use std::{
+    io::ErrorKind,
+    path::Path,
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::{
+    fs,
+    sync::{Mutex, mpsc, oneshot},
+};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 pub(crate) const DEFAULT_TTS_CHUNK_MAX_CHARS: usize = 220;
 
@@ -94,6 +100,7 @@ where
             report.first_chunk_synthesis_ms = Some(synthesized.synthesis_elapsed.as_millis());
         }
         if cancellation.is_cancelled() {
+            cleanup_synthesized_chunk(&synthesized.path).await;
             break;
         }
 
@@ -117,28 +124,54 @@ where
 
         tokio::select! {
             result = wait_for_track_end(track.clone()) => {
-                result.with_context(|| {
+                let wait_result = result.with_context(|| {
                     format!("wait for final TTS chunk {}/{} playback", synthesized.index + 1, total_chunks)
-                })?;
+                });
+                cleanup_synthesized_chunk(&synthesized.path).await;
+                wait_result?;
                 report.played_chunks += 1;
             }
             _ = cancellation.cancelled() => {
                 let _ = track.stop();
+                cleanup_synthesized_chunk(&synthesized.path).await;
                 break;
             }
         }
     }
 
-    if cancellation.is_cancelled() {
+    let synth_result = if cancellation.is_cancelled() {
         synth_task.abort();
         let _ = synth_task.await;
+        Ok(())
     } else {
         synth_task
             .await
-            .context("join final TTS synthesis prefetch task")??;
-    }
+            .context("join final TTS synthesis prefetch task")?
+    };
+    cleanup_queued_synthesized_chunks(&mut rx).await;
+    synth_result?;
 
     Ok(report)
+}
+
+async fn cleanup_queued_synthesized_chunks(rx: &mut mpsc::Receiver<Result<SynthesizedChunk>>) {
+    while let Ok(Ok(synthesized)) = rx.try_recv() {
+        cleanup_synthesized_chunk(&synthesized.path).await;
+    }
+}
+
+async fn cleanup_synthesized_chunk(path: &Path) {
+    match fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(
+                path = %path.display(),
+                %error,
+                "failed to remove voice final TTS chunk after playback"
+            );
+        }
+    }
 }
 
 async fn wait_for_track_end(track: TrackHandle) -> Result<()> {
@@ -168,5 +201,41 @@ impl EventHandler for TrackEndNotifier {
             }
         }
         Some(Event::Cancel)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cleanup_queued_synthesized_chunks_removes_prefetched_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.mp3");
+        let second = dir.path().join("second.mp3");
+        fs::write(&first, b"first").await.unwrap();
+        fs::write(&second, b"second").await.unwrap();
+
+        let (tx, mut rx) = mpsc::channel(2);
+        tx.send(Ok(SynthesizedChunk {
+            index: 0,
+            path: first.clone(),
+            synthesis_elapsed: Duration::from_millis(5),
+        }))
+        .await
+        .unwrap();
+        tx.send(Ok(SynthesizedChunk {
+            index: 1,
+            path: second.clone(),
+            synthesis_elapsed: Duration::from_millis(6),
+        }))
+        .await
+        .unwrap();
+        drop(tx);
+
+        cleanup_queued_synthesized_chunks(&mut rx).await;
+
+        assert!(!first.exists());
+        assert!(!second.exists());
     }
 }
