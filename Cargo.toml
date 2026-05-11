@@ -21,6 +21,10 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
 poise = "0.6"
 
+# Voice
+songbird = { version = "0.4", default-features = false, features = ["gateway", "serenity", "rustls"] }
+hound = "3.5"
+
 # Policy engine (QuickJS)
 rquickjs = { version = "0.9", features = ["bindgen", "classes", "properties", "parallel"] }
 

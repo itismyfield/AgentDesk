@@ -1,3 +1,4 @@
+use crate::voice::VoiceConfig;
 use anyhow::{Context, Result};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,8 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub discord: DiscordConfig,
+    #[serde(default, skip_serializing_if = "VoiceConfig::is_default")]
+    pub voice: VoiceConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -1711,6 +1714,7 @@ impl Default for Config {
         Self {
             server: ServerConfig::default(),
             discord: DiscordConfig::default(),
+            voice: VoiceConfig::default(),
             shared_prompt: None,
             mcp_servers: std::collections::BTreeMap::new(),
             review_mcp_allowlist: Vec::new(),
@@ -2134,6 +2138,32 @@ mod tests {
         let parsed: Config = serde_yaml::from_str("server: {}\n").unwrap();
         assert!(parsed.placeholder.live_events_enabled);
         assert!(parsed.placeholder.status_panel_v2_enabled);
+    }
+
+    #[test]
+    fn config_deserializes_voice_section_with_defaults() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+server:
+  port: 9010
+voice:
+  enabled: true
+  thresholds:
+    speech_start_db: -40.0
+  wake_words:
+    - desk
+"#,
+        )
+        .unwrap();
+
+        assert!(config.voice.enabled);
+        assert_eq!(config.voice.thresholds.speech_start_db, -40.0);
+        assert_eq!(config.voice.thresholds.speech_end_db, -55.0);
+        assert_eq!(config.voice.wake_words, vec!["desk"]);
+        assert_eq!(
+            config.voice.audio.recordings_dir,
+            PathBuf::from("~/.adk/voice/recordings")
+        );
     }
 
     #[test]

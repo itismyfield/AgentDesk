@@ -15,3 +15,8 @@ This product includes software derived from the following projects:
   Licensed under the Apache License 2.0
   Sprite images used in the office view dashboard were sourced from
   claw-empire and adapted for use in AgentDesk.
+
+- VerbalCoding (https://github.com/ca1773130n/VerbalCoding)
+  Licensed under the MIT License
+  Algorithms and parameter values referenced from VerbalCoding, MIT,
+  https://github.com/ca1773130n/VerbalCoding.

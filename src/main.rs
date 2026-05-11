@@ -26,6 +26,7 @@ mod services;
 pub(crate) mod supervisor;
 mod ui;
 mod utils;
+pub(crate) mod voice;
 
 #[cfg(test)]
 mod high_risk_recovery;

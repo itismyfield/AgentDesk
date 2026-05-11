@@ -37,6 +37,39 @@ discord:
     notify:
       token: "YOUR_NOTIFY_BOT_TOKEN"
 
+voice:
+  # Enables Discord voice capture, transcription, and TTS paths.
+  enabled: false
+  audio:
+    # Directory for captured voice clips before transcription.
+    recordings_dir: "~/.adk/voice/recordings"
+    # Directory for persisted transcription text and metadata.
+    transcripts_dir: "~/.adk/voice/transcripts"
+    # Directory for generated edge-tts audio cache files.
+    tts_cache_dir: "~/.adk/voice/tts-cache"
+    # Directory for short-lived conversion and buffering files.
+    temp_dir: "~/.adk/voice/tmp"
+  thresholds:
+    # dBFS threshold that marks the start of speech.
+    speech_start_db: -45.0
+    # dBFS threshold below which speech is considered ended.
+    speech_end_db: -55.0
+    # dBFS threshold used while listening for wake words.
+    wake_word_db: -50.0
+  idle:
+    # Silence after an utterance before finalizing the transcript.
+    utterance_idle_ms: 1200
+    # Empty voice-channel duration before disconnecting.
+    channel_idle_disconnect_secs: 300
+    # Time to keep listening for a command after a wake word.
+    wake_listen_window_secs: 8
+  # Wake words or phrases that activate voice commands.
+  wake_words:
+    - "agentdesk"
+  # Discord user IDs allowed to invoke voice commands.
+  allowed_user_ids:
+    - "YOUR_DISCORD_USER_ID"
+
 shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
 
 shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
