@@ -23,10 +23,32 @@ fn progress_cache_locks() -> &'static ProgressCacheLockMap {
 
 async fn progress_cache_lock(cache_path: &Path) -> Arc<Mutex<()>> {
     let mut locks = progress_cache_locks().lock().await;
+    // F15 (#2046): 너무 커지면 unused 엔트리(strong_count == 1, 즉 map 만 보유)를
+    // 즉시 정리. 매번 hit 시 ~O(n) 비용이지만 entry 수는 캐시 텍스트 다양성에
+    // 비례하므로 실무적으로 수백 단위에서 안정. 임계 초과 시에만 청소한다.
+    if locks.len() >= PROGRESS_CACHE_LOCK_MAX_ENTRIES {
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
     locks
         .entry(cache_path.to_path_buf())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
+}
+
+const PROGRESS_CACHE_LOCK_MAX_ENTRIES: usize = 1024;
+
+// F17 (#2046): STT/Receiver/EdgeTts 와 동일한 `~` 확장 로직.
+fn expand_tilde(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
+    }
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    path.to_path_buf()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +135,9 @@ impl TtsRuntime {
     pub(crate) fn from_voice_config(config: &VoiceConfig) -> Result<Self> {
         Ok(Self {
             backend: ConfiguredTtsBackend::from_voice_config(config)?,
-            progress_cache_dir: config.tts.progress_cache_dir.clone(),
+            // F17 (#2046): `~/...` 같은 home-relative 경로가 와도 STT/Receiver 와
+            // 동일하게 절대경로로 풀어 dcserver CWD 차이로 위치가 갈리는 문제를 막는다.
+            progress_cache_dir: expand_tilde(&config.tts.progress_cache_dir),
         })
     }
 

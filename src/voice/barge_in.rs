@@ -37,6 +37,21 @@ impl BargeInSensitivity {
             },
         }
     }
+
+    /// F18 (#2046): AtomicU8 mirror 와 호환되는 인코딩.
+    pub(crate) fn as_u8(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::Conservative => 1,
+        }
+    }
+
+    pub(crate) fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Conservative,
+            _ => Self::Normal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -351,6 +366,10 @@ pub(crate) fn is_explicit_barge_in_transcript(transcript: &str) -> bool {
         return false;
     }
 
+    // F11 (#2046): 두 글자 단음절("취소", "정지", "잠깐") 은 일상 발화에서
+    // STT 가 짧게 잘렸을 때 false-positive 가 잦았다. 호출어/조사 결합형
+    // ("취소해", "정지해", "잠깐만") 만 EXACT 로 인정하고, 단음절 형태는
+    // CONTAINED_COMMANDS 패턴(wake word/맥락이 붙은 경우)에서만 매칭한다.
     const EXACT_COMMANDS: &[&str] = &[
         "stop",
         "스톱",
@@ -361,11 +380,8 @@ pub(crate) fn is_explicit_barge_in_transcript(transcript: &str) -> bool {
         "그만해줘",
         "중단",
         "중단해",
-        "취소",
         "취소해",
-        "정지",
         "정지해",
-        "잠깐",
         "잠깐만",
     ];
     if EXACT_COMMANDS.iter().any(|phrase| normalized == *phrase) {
@@ -657,6 +673,25 @@ mod tests {
             assert!(
                 !is_explicit_barge_in_transcript(transcript),
                 "expected non-stop: {transcript}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_stop_transcript_classifier_rejects_ambiguous_short_words() {
+        // F11 (#2046): 두 글자 단음절("취소", "정지", "잠깐")은 일상 발화에서
+        // STT 가 잘렸을 때 false-positive 가 잦아 EXACT_COMMANDS 에서 제거되었다.
+        // 호출어/조사가 결합된 "취소해", "정지해", "잠깐만" 만 stop 으로 인정.
+        for transcript in ["취소", "정지", "잠깐"] {
+            assert!(
+                !is_explicit_barge_in_transcript(transcript),
+                "expected non-stop for ambiguous short word: {transcript}"
+            );
+        }
+        for transcript in ["취소해", "정지해", "잠깐만"] {
+            assert!(
+                is_explicit_barge_in_transcript(transcript),
+                "expected explicit stop for combined form: {transcript}"
             );
         }
     }

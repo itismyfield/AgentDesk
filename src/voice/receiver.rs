@@ -869,9 +869,11 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(130)).await;
 
+        // F1 (#2046): hook 가 등록된 경로에서는 pending Vec 누적이 꺼져 있으므로
+        // take_pending 은 비어 있어야 한다 (메모리 누수 방지). hook 콜백으로만
+        // utterance 가 통보된다.
         let pending = receiver.take_pending().await;
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].control_channel_id, Some(123));
+        assert!(pending.is_empty());
         assert_eq!(hook.pcm_frames.load(Ordering::SeqCst), 1);
         assert_eq!(hook.completions.load(Ordering::SeqCst), 1);
         assert_eq!(*hook.control_channels.lock().unwrap(), vec![123, 123]);

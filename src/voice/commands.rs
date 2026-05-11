@@ -344,7 +344,32 @@ fn parse_tts_voice_command(transcript: &str) -> Option<String> {
         .trim()
         .trim_matches(|ch: char| ch == '"' || ch == '\'' || ch == '`')
         .to_string();
-    (!cleaned.is_empty()).then_some(cleaned)
+    if cleaned.is_empty() {
+        return None;
+    }
+    // F9 (#2046): "음성 채널 들어가", "voice memo 켜", "목소리 안 들려" 같은
+    // 평범한 발화가 TTS voice id 로 오인되던 false-positive 방지. Edge/Azure
+    // TTS voice id 형식(예: "ko-KR-SunHiNeural", "en-US-AriaNeural")에 매치되는
+    // ASCII 영어 패턴만 허용. 한글/공백 포함 자연어는 invalid 로 reject.
+    if !is_tts_voice_id_shape(&cleaned) {
+        return None;
+    }
+    Some(cleaned)
+}
+
+fn is_tts_voice_id_shape(value: &str) -> bool {
+    // ko-KR-SunHiNeural, en-US-AriaNeural 같은 ASCII 형식만 허용.
+    // 최소 두 개 이상의 hyphen 으로 구분된 토큰, 알파넘만, 길이 3..=80.
+    if value.len() < 3 || value.len() > 80 {
+        return false;
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return false;
+    }
+    value.matches('-').count() >= 2
 }
 
 fn parse_wake_word_command(transcript: &str) -> Option<WakeWordCommand> {
@@ -574,6 +599,21 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(parse_voice_command(input), Some(expected), "input={input}");
         }
+    }
+
+    #[test]
+    fn parse_voice_command_rejects_natural_phrases_as_voice_id() {
+        // F9 (#2046): "음성 채널 들어가", "voice memo 켜" 같은 일상 발화에서
+        // TtsVoice 가 false-positive 매치되던 회귀 방지. voice id 형식
+        // (XX-XX-Neural)만 인정한다.
+        assert_eq!(parse_voice_command("음성 채널 들어가"), None);
+        assert_eq!(parse_voice_command("voice memo 켜"), None);
+        assert_eq!(parse_voice_command("목소리 안 들려"), None);
+        // 정상 TTS voice id 는 여전히 매치돼야 한다.
+        assert_eq!(
+            parse_voice_command("voice ko-KR-SunHiNeural"),
+            Some(VoiceCommand::TtsVoice("ko-KR-SunHiNeural".to_string()))
+        );
     }
 
     #[test]

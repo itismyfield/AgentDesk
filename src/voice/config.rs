@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use crate::voice::barge_in::BargeInSensitivity;
 
-pub(crate) const DEFAULT_PROGRESS_TTS_CACHE_DIR: &str = ".cache/voice-tts-progress";
+// F17 (#2046): 상대경로(`.cache/...`)는 dcserver CWD 에 따라 위치가 달라져 launchd
+// 실행 시 `/` CWD 에서 권한 거부가 발생했다. STT/Receiver 와 동일하게 `~/.adk/...`
+// 절대경로(틸드 확장)로 변경.
+pub(crate) const DEFAULT_PROGRESS_TTS_CACHE_DIR: &str = "~/.adk/voice/tts-cache-progress";
 pub(crate) const DEFAULT_EDGE_TTS_COMMAND: &str = "edge-tts";
 pub(crate) const DEFAULT_EDGE_TTS_VOICE: &str = "ko-KR-SunHiNeural";
 pub(crate) const DEFAULT_EDGE_TTS_RATE: &str = "+0%";

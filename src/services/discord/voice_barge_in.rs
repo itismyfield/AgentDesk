@@ -32,6 +32,11 @@ use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 use super::SharedData;
 
 const INTERNAL_VOICE_MESSAGE_ID_START: u64 = 9_000_000_000_000_000_000;
+// F4 (#2046): progress/ack 재생 owner id 시작점. spoken_result owner 공간(1..)과
+// 분리하기 위해 high range 사용.
+const PROGRESS_PLAYBACK_OWNER_START: u64 = 1u64 << 63;
+// F6 (#2046): voice config 핫캐시 TTL. 5초 안 utterance 는 캐시 재사용.
+const VOICE_CONFIG_CACHE_TTL: Duration = Duration::from_secs(5);
 const STT_TRANSCRIPT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const STT_TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -151,6 +156,10 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     enabled: bool,
     barge_in_enabled: bool,
     default_sensitivity: BargeInSensitivity,
+    // F18 (#2046): RwLock try_read 실패 시 default 로 폴백하면 사용자가 설정한
+    // Conservative 가 잠깐 Normal 로 잘못 평가될 수 있다. 최신 값을 lock-free 로
+    // 읽을 수 있도록 atomic mirror 유지.
+    sensitivity_atom: std::sync::atomic::AtomicU8,
     sensitivity_state: Arc<RwLock<BargeInSensitivityState>>,
     acknowledgement_enabled: bool,
     acknowledgement_text: String,
@@ -168,7 +177,16 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     active_voice_routes: dashmap::DashMap<u64, ActiveVoiceRoute>,
     deferred_buffers: dashmap::DashMap<u64, Arc<Mutex<DeferredBargeInBuffer>>>,
     next_spoken_result_playback_id: AtomicU64,
+    // F4 (#2046): progress/ack 재생 owner id 발급용. 30s 만료 타이머가 owner 일치
+    // 시에만 playback entry 를 정리하도록 한다.
+    next_progress_playback_id: AtomicU64,
     next_internal_message_id: AtomicU64,
+    // F6 (#2046): `resolve_voice_turn_target` 가 매 utterance 마다 YAML 을
+    // 재파싱하지 않도록 한 `Config` snapshot 핫캐시.
+    config_cache: std::sync::Mutex<Option<(Instant, Arc<crate::config::Config>)>>,
+    // F12 (#2046): voice alias collision 경고를 1회만 노출. utterance 마다 같은
+    // collision 으로 warn 이 쏟아져 운영 로그가 묻히는 것을 막는다.
+    alias_collision_signature: std::sync::Mutex<Option<String>>,
 }
 
 impl VoiceBargeInRuntime {
@@ -191,6 +209,7 @@ impl VoiceBargeInRuntime {
             enabled: config.enabled,
             barge_in_enabled: config.enabled && config.barge_in.enabled,
             default_sensitivity,
+            sensitivity_atom: std::sync::atomic::AtomicU8::new(default_sensitivity.as_u8()),
             sensitivity_state: Arc::new(RwLock::new(BargeInSensitivityState::new(
                 default_sensitivity,
                 conservative_ttl,
@@ -211,7 +230,10 @@ impl VoiceBargeInRuntime {
             active_voice_routes: dashmap::DashMap::new(),
             deferred_buffers: dashmap::DashMap::new(),
             next_spoken_result_playback_id: AtomicU64::new(1),
+            next_progress_playback_id: AtomicU64::new(PROGRESS_PLAYBACK_OWNER_START),
             next_internal_message_id: AtomicU64::new(INTERNAL_VOICE_MESSAGE_ID_START),
+            config_cache: std::sync::Mutex::new(None),
+            alias_collision_signature: std::sync::Mutex::new(None),
         }
     }
 
@@ -221,6 +243,9 @@ impl VoiceBargeInRuntime {
             enabled: false,
             barge_in_enabled: false,
             default_sensitivity: BargeInSensitivity::Normal,
+            sensitivity_atom: std::sync::atomic::AtomicU8::new(
+                BargeInSensitivity::Normal.as_u8(),
+            ),
             sensitivity_state: Arc::new(RwLock::new(BargeInSensitivityState::default())),
             acknowledgement_enabled: false,
             acknowledgement_text: String::new(),
@@ -238,7 +263,10 @@ impl VoiceBargeInRuntime {
             active_voice_routes: dashmap::DashMap::new(),
             deferred_buffers: dashmap::DashMap::new(),
             next_spoken_result_playback_id: AtomicU64::new(1),
+            next_progress_playback_id: AtomicU64::new(PROGRESS_PLAYBACK_OWNER_START),
             next_internal_message_id: AtomicU64::new(INTERNAL_VOICE_MESSAGE_ID_START),
+            config_cache: std::sync::Mutex::new(None),
+            alias_collision_signature: std::sync::Mutex::new(None),
         }
     }
 
@@ -316,6 +344,30 @@ impl VoiceBargeInRuntime {
         }
     }
 
+    // F8 (#2046): 텍스트 디스패처(`!vc <subcommand>`)도 음성 디스패처와 동일하게
+    // Language/TtsVoice/VoiceClone/WakeWords 명령을 모두 적용할 수 있도록 setter
+    // 들을 노출한다.
+    pub(in crate::services::discord) async fn set_runtime_language_external(
+        &self,
+        language: String,
+    ) {
+        self.set_runtime_language(language).await;
+    }
+
+    pub(in crate::services::discord) async fn set_runtime_tts_voice_external(
+        &self,
+        voice: String,
+    ) {
+        self.set_runtime_tts_voice(voice).await;
+    }
+
+    pub(in crate::services::discord) async fn apply_wake_word_command_external(
+        &self,
+        command: WakeWordCommand,
+    ) -> Vec<String> {
+        self.apply_wake_word_command(command).await
+    }
+
     async fn set_runtime_language(&self, language: String) {
         let config = {
             let mut config = self.voice_config_state.write().await;
@@ -331,11 +383,24 @@ impl VoiceBargeInRuntime {
     async fn set_runtime_tts_voice(&self, voice: String) {
         let config = {
             let mut config = self.voice_config_state.write().await;
-            config.tts.edge.voice = voice;
+            config.tts.edge.voice = voice.clone();
             config.clone()
         };
         if self.enabled {
-            *self.tts.write().await = TtsRuntime::from_voice_config(&config).ok();
+            // F10 (#2046): `.ok()` 가 Err 를 사일런트로 삼켜 TTS 가 통째로 꺼지던
+            // 회귀를 방지. 실패 시 경고 로그만 남기고 기존 TTS 인스턴스를 보존.
+            match TtsRuntime::from_voice_config(&config) {
+                Ok(rt) => {
+                    *self.tts.write().await = Some(rt);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        voice = %voice,
+                        "voice change ignored: TtsRuntime build failed, keeping previous TTS"
+                    );
+                }
+            }
         }
     }
 
@@ -393,8 +458,34 @@ impl VoiceBargeInRuntime {
     }
 
     pub(in crate::services::discord) fn unregister_voice_guild(&self, guild_id: GuildId) {
+        // F7 (#2046): voice_guilds 만 지우면 channel_id 키로 적재된 monitors /
+        // playbacks / spoken_result_playbacks / active_voice_routes /
+        // deferred_buffers 가 남아 join/leave 반복 시 누수. 같은 guild 의 모든
+        // control_channel_id 를 먼저 수집해 채널 단위 state 도 함께 정리한다.
+        let stale_channels: Vec<u64> = self
+            .voice_guilds
+            .iter()
+            .filter_map(|entry| {
+                if *entry.value() == guild_id {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
         self.voice_guilds
             .retain(|_, registered_guild_id| *registered_guild_id != guild_id);
+        for channel_id in stale_channels {
+            self.monitors.remove(&channel_id);
+            if let Some((_, session)) = self.playbacks.remove(&channel_id) {
+                session.cancellation.cancel();
+            }
+            if let Some((_, session)) = self.spoken_result_playbacks.remove(&channel_id) {
+                session.cancellation.cancel();
+            }
+            self.active_voice_routes.remove(&channel_id);
+            self.deferred_buffers.remove(&channel_id);
+        }
     }
 
     /// F2 (#2046): 특정 길드에 매핑된 control_channel_id 목록을 반환.
@@ -428,9 +519,13 @@ impl VoiceBargeInRuntime {
         let token = CancellationToken::new();
         let reset_token = token.clone();
         tokio::spawn(run_sensitivity_ttl_reset(state, reset_token));
+        // F21 (#2046): shutdown_flag 폴링 주기를 1초 → 5초 로 늘려 cpu wakeup 비용을
+        // 1/5 로 줄인다. shutdown 전체 latency 가 최대 5초 늘지만 sensitivity TTL
+        // 자체가 분 단위 주기라 실효 영향이 거의 없다. (Full CancellationToken
+        // 통합은 SharedData 차원 리팩토링이라 follow-up 으로 남긴다.)
         tokio::spawn(async move {
             while !shutdown_flag.load(Ordering::Relaxed) {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
             token.cancel();
         });
@@ -668,6 +763,10 @@ impl VoiceBargeInRuntime {
         &self,
         sensitivity: BargeInSensitivity,
     ) {
+        // F18 (#2046): atomic mirror 를 먼저 갱신해 두면 try_read 충돌 윈도우에서도
+        // current_sensitivity 가 최신 값을 본다.
+        self.sensitivity_atom
+            .store(sensitivity.as_u8(), Ordering::Relaxed);
         self.sensitivity_state
             .write()
             .await
@@ -842,10 +941,17 @@ impl VoiceBargeInRuntime {
                     "voice_barge_in_explicit_stop",
                 )
                 .await;
+                // F22 (#2046): 사후 분석 라벨 강화. transcript 글자 수, 현재
+                // sensitivity, 활성 progress playback 보유 여부.
+                let sensitivity = self.current_sensitivity();
+                let playback_active = self.playbacks.contains_key(&channel_id.get());
                 tracing::info!(
                     channel_id = channel_id.get(),
                     cancelled = result.token.is_some(),
                     already_stopping = result.already_stopping,
+                    transcript_chars = transcript.chars().count(),
+                    sensitivity = ?sensitivity,
+                    playback_active,
                     "voice explicit-stop barge-in processed"
                 );
                 VoiceBargeInTranscriptOutcome::ExplicitStop {
@@ -951,6 +1057,28 @@ impl VoiceBargeInRuntime {
         }
     }
 
+    /// F6 (#2046): `Config` 핫캐시. TTL 안이면 캐시된 `Arc<Config>` 반환,
+    /// 만료 시 spawn_blocking 으로 `load_graceful` 을 1회 호출해 갱신한다.
+    /// 매 utterance 마다 동기 std::fs read + serde_yaml 파싱이 발생하던 hot path 를
+    /// 5초 TTL 로 묶어 부하를 줄이고 async executor 블록도 회피한다.
+    async fn cached_config(&self) -> Arc<crate::config::Config> {
+        let now = Instant::now();
+        if let Ok(guard) = self.config_cache.lock()
+            && let Some((loaded_at, cached)) = guard.as_ref()
+            && now.duration_since(*loaded_at) < VOICE_CONFIG_CACHE_TTL
+        {
+            return cached.clone();
+        }
+        let fresh = tokio::task::spawn_blocking(crate::config::load_graceful)
+            .await
+            .unwrap_or_else(|_| crate::config::Config::default());
+        let arc = Arc::new(fresh);
+        if let Ok(mut guard) = self.config_cache.lock() {
+            *guard = Some((Instant::now(), arc.clone()));
+        }
+        arc
+    }
+
     async fn resolve_voice_turn_target(
         &self,
         _shared: &Arc<SharedData>,
@@ -964,7 +1092,7 @@ impl VoiceBargeInRuntime {
             };
         }
 
-        let config = crate::config::load_graceful();
+        let config = self.cached_config().await;
         if !voice_lobby_accepts_source_channel(&config.voice, source_channel_id) {
             tracing::debug!(
                 source_channel_id = source_channel_id.get(),
@@ -1026,11 +1154,33 @@ impl VoiceBargeInRuntime {
             }
             Ok(VoiceLobbyRouteDecision::NeedAgent) => VoiceTurnTargetResolution::NeedsAgent,
             Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    source_channel_id = source_channel_id.get(),
-                    "voice lobby routing rejected alias collision"
-                );
+                // F12 (#2046): 매 utterance 마다 같은 collision 으로 warn 이
+                // 쏟아지는 것을 막기 위해 normalized signature 단위로 1회만 warn.
+                let signature = error.normalized.clone();
+                let first_time = if let Ok(mut guard) = self.alias_collision_signature.lock() {
+                    if guard.as_deref() == Some(&signature) {
+                        false
+                    } else {
+                        *guard = Some(signature.clone());
+                        true
+                    }
+                } else {
+                    true
+                };
+                if first_time {
+                    tracing::warn!(
+                        error = %error,
+                        source_channel_id = source_channel_id.get(),
+                        normalized = %signature,
+                        "voice lobby routing disabled: alias collision detected (suppressed until alias changes)"
+                    );
+                } else {
+                    tracing::debug!(
+                        error = %error,
+                        source_channel_id = source_channel_id.get(),
+                        "voice lobby routing still blocked by previously logged alias collision"
+                    );
+                }
                 VoiceTurnTargetResolution::NeedsAgent
             }
         }
@@ -1301,17 +1451,30 @@ impl VoiceBargeInRuntime {
             let mut call = call_lock.lock().await;
             call.play_input(input)
         };
-        self.reset_after_playback_start(channel_id, Arc::new(track), CancellationToken::new());
+        // F4 (#2046): owner id 발급 + reset_after_playback_start_with_owner 로 등록.
+        // 30s 만료 타이머는 `clear_playback_if_owner` 로 동일 owner 일 때만 정리.
+        // 후속 progress/spoken_result playback 이 entry 를 덮어쓰면 mismatch 로
+        // no-op → 후속 playback 의 barge-in 이 깨지지 않는다.
+        let playback_id = self
+            .next_progress_playback_id
+            .fetch_add(1, Ordering::SeqCst);
+        self.reset_after_playback_start_with_owner(
+            channel_id,
+            Arc::new(track),
+            CancellationToken::new(),
+            Some(playback_id),
+        );
         let runtime = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            runtime.clear_playback(channel_id);
+            runtime.clear_playback_if_owner(channel_id, playback_id);
         });
         tracing::info!(
             channel_id = channel_id.get(),
             guild_id = guild_id.get(),
             path = %path.display(),
             context,
+            playback_id,
             "voice progress playback started"
         );
     }
@@ -1547,10 +1710,16 @@ impl VoiceBargeInRuntime {
     }
 
     fn current_sensitivity(&self) -> BargeInSensitivity {
+        // F18 (#2046): try_read 실패 시 boot-time default 가 아닌 가장 최근에
+        // 설정된 sensitivity 를 반환하도록 atomic mirror 로 폴백한다. TTL reset
+        // 이 일어나는 짧은 윈도우라도 사용자가 설정한 Conservative 가 잠깐
+        // Normal 로 평가되는 회귀를 막는다.
         self.sensitivity_state
             .try_read()
             .map(|state| state.sensitivity())
-            .unwrap_or(self.default_sensitivity)
+            .unwrap_or_else(|_| {
+                BargeInSensitivity::from_u8(self.sensitivity_atom.load(Ordering::Relaxed))
+            })
     }
 
     fn update_existing_monitor_sensitivity(&self, sensitivity: BargeInSensitivity) {
@@ -1588,6 +1757,13 @@ impl VoiceReceiveHook for DiscordVoiceBargeInHook {
         };
 
         let shared = self.shared.clone();
+        // F22 (#2046): playback_owner 라벨 추가 — 어떤 progress / spoken_result
+        // playback 이 cut 되었는지 사후 분석 가능.
+        let playback_owner = self
+            .runtime
+            .playbacks
+            .get(&channel_id.get())
+            .and_then(|entry| entry.value().owner);
         tokio::spawn(async move {
             let result = super::mailbox_cancel_active_turn_with_reason(
                 &shared,
@@ -1601,6 +1777,7 @@ impl VoiceReceiveHook for DiscordVoiceBargeInHook {
                 max_db = cut.levels.max_db,
                 sensitivity = ?cut.sensitivity,
                 candidate_frames = cut.candidate_frames,
+                playback_owner = ?playback_owner,
                 cancelled = result.token.is_some(),
                 already_stopping = result.already_stopping,
                 "voice live barge-in cut processed"

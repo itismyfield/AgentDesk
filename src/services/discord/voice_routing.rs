@@ -53,18 +53,39 @@ impl VoiceChannelPairingStore {
         voice_channel_id: ChannelId,
         text_channel_id: ChannelId,
     ) -> Result<(), String> {
-        self.pairings
+        // F13 (#2046): in-memory 변경을 먼저 적용하고 persist 가 실패하면
+        // 이전 값(또는 부재 상태)로 되돌려 디스크/메모리 일관성을 유지한다.
+        let previous = self
+            .pairings
             .insert(voice_channel_id.get(), text_channel_id.get());
-        self.persist()
+        if let Err(error) = self.persist() {
+            match previous {
+                Some(prev) => {
+                    self.pairings.insert(voice_channel_id.get(), prev);
+                }
+                None => {
+                    self.pairings.remove(&voice_channel_id.get());
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(in crate::services::discord) fn detach(
         &self,
         voice_channel_id: ChannelId,
     ) -> Result<bool, String> {
-        let removed = self.pairings.remove(&voice_channel_id.get()).is_some();
-        self.persist()?;
-        Ok(removed)
+        // F13 (#2046): remove 후 persist 실패 시 in-memory 만 비고 디스크엔
+        // 남아 재시작 후 살아나는 불일치 회피. 실패 시 이전 값을 복구.
+        let previous = self.pairings.remove(&voice_channel_id.get());
+        if let Err(error) = self.persist() {
+            if let Some((key, value)) = previous {
+                self.pairings.insert(key, value);
+            }
+            return Err(error);
+        }
+        Ok(previous.is_some())
     }
 
     fn load_from_disk(&self) {

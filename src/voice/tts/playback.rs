@@ -95,7 +95,18 @@ where
     };
 
     while let Some(synthesized) = rx.recv().await {
-        let synthesized = synthesized?;
+        // F16 (#2046): mpsc capacity=2 라 이미 합성 완료된 후속 chunk 가 채널/synth_task
+        // 에 남아 있을 수 있다. ?-early-return 으로 unwind 되면 그 mp3 파일이 디스크에
+        // 누수되므로 에러 path 에서 명시적으로 cleanup + synth_task.abort 한다.
+        let synthesized = match synthesized {
+            Ok(value) => value,
+            Err(error) => {
+                synth_task.abort();
+                let _ = synth_task.await;
+                cleanup_queued_synthesized_chunks(&mut rx).await;
+                return Err(error);
+            }
+        };
         if synthesized.index == 0 {
             report.first_chunk_synthesis_ms = Some(synthesized.synthesis_elapsed.as_millis());
         }
@@ -128,7 +139,13 @@ where
                     format!("wait for final TTS chunk {}/{} playback", synthesized.index + 1, total_chunks)
                 });
                 cleanup_synthesized_chunk(&synthesized.path).await;
-                wait_result?;
+                if let Err(error) = wait_result {
+                    // F16 (#2046): wait_for_track_end 실패 시에도 후속 chunk 누수 방지.
+                    synth_task.abort();
+                    let _ = synth_task.await;
+                    cleanup_queued_synthesized_chunks(&mut rx).await;
+                    return Err(error);
+                }
                 report.played_chunks += 1;
             }
             _ = cancellation.cancelled() => {

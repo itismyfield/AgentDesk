@@ -2,7 +2,7 @@ use super::{TtsBackend, TtsSynthesisKind};
 use crate::voice::config::VoiceConfig;
 use anyhow::{Context, Result, bail};
 use futures::future::BoxFuture;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
@@ -26,10 +26,26 @@ impl EdgeTtsConfig {
             command: config.tts.edge.command.clone(),
             voice: config.tts.edge.voice.clone(),
             rate: config.tts.edge.rate.clone(),
-            temp_dir: config.audio.temp_dir.clone(),
+            // F5 (#2046): STT/Receiver 와 동일하게 `~` 확장. config 가
+            // `~/.adk/voice/tmp` 같은 home-relative 경로를 갖더라도 CWD 의
+            // `~` 디렉터리에 임시 파일을 만들지 않도록 한다.
+            temp_dir: expand_tilde(&config.audio.temp_dir),
             timeout: DEFAULT_EDGE_TTS_TIMEOUT,
         }
     }
+}
+
+fn expand_tilde(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
+    }
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    path.to_path_buf()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,6 +315,24 @@ mod tests {
             !path.exists(),
             "partial edge-tts output should be removed on runner failure"
         );
+    }
+
+    #[test]
+    fn from_voice_config_expands_tilde_in_temp_dir() {
+        // F5 (#2046): config 의 `~/.adk/voice/tmp` 가 절대경로로 풀려야 한다.
+        let mut voice = VoiceConfig::default();
+        voice.audio.temp_dir = PathBuf::from("~/.adk/voice/tmp");
+        let cfg = EdgeTtsConfig::from_voice_config(&voice);
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(cfg.temp_dir, home.join(".adk/voice/tmp"));
+        } else {
+            assert_eq!(cfg.temp_dir, PathBuf::from("~/.adk/voice/tmp"));
+        }
+
+        let mut absolute = VoiceConfig::default();
+        absolute.audio.temp_dir = PathBuf::from("/var/tmp/agentdesk-voice");
+        let cfg = EdgeTtsConfig::from_voice_config(&absolute);
+        assert_eq!(cfg.temp_dir, PathBuf::from("/var/tmp/agentdesk-voice"));
     }
 
     #[tokio::test]

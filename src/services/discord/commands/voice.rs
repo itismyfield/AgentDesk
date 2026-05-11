@@ -350,7 +350,61 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
                             .await;
                         return Ok(());
                     }
-                    _ => {}
+                    // F8 (#2046): 텍스트 디스패처에서도 Language/TtsVoice/VoiceClone/
+                    // WakeWords 명령을 모두 처리한다. 기존엔 무성공으로 끝나 사용자가
+                    // 변경 적용 여부를 알 수 없었다.
+                    VoiceCommand::Language(language) => {
+                        data.shared
+                            .voice_barge_in
+                            .set_runtime_language_external(language.clone())
+                            .await;
+                        let _ = msg
+                            .reply(&ctx.http, format!("Voice STT language: `{language}`."))
+                            .await;
+                        return Ok(());
+                    }
+                    VoiceCommand::TtsVoice(voice) => {
+                        data.shared
+                            .voice_barge_in
+                            .set_runtime_tts_voice_external(voice.clone())
+                            .await;
+                        let _ = msg
+                            .reply(&ctx.http, format!("Voice TTS voice: `{voice}`."))
+                            .await;
+                        return Ok(());
+                    }
+                    VoiceCommand::VoiceClone { reference } => {
+                        let detail = reference.as_deref().unwrap_or("<none>");
+                        tracing::info!(
+                            reference = %detail,
+                            "voice clone command accepted via text dispatcher"
+                        );
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                format!(
+                                    "Voice clone request acknowledged (reference=`{detail}`)."
+                                ),
+                            )
+                            .await;
+                        return Ok(());
+                    }
+                    VoiceCommand::WakeWords(wake_command) => {
+                        let words = data
+                            .shared
+                            .voice_barge_in
+                            .apply_wake_word_command_external(wake_command)
+                            .await;
+                        let summary = if words.is_empty() {
+                            "<disabled>".to_string()
+                        } else {
+                            words.join(", ")
+                        };
+                        let _ = msg
+                            .reply(&ctx.http, format!("Voice wake words: {summary}"))
+                            .await;
+                        return Ok(());
+                    }
                 }
             }
             let _ = msg
