@@ -266,6 +266,29 @@ test("timeouts review auto-accept retries pending tuning aggregate on later tick
   assert.equal(state.httpPosts.length, 2);
 });
 
+test("timeouts review auto-accept keeps aggregate retry when POST returns error payload", () => {
+  const retryKey = "review_tuning:auto_accept_aggregate_retry";
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery: createSqlRouter([
+      {
+        match: "WHERE status = ? AND review_status = 'suggestion_pending'",
+        result: []
+      }
+    ]),
+    httpPost() {
+      return { error: "temporary API failure" };
+    }
+  });
+  state.kv.set(retryKey, "pending");
+
+  policy._section_E();
+
+  assert.equal(state.kv.get(retryKey), "pending");
+  assert.equal(state.httpPosts.length, 1);
+  assert.match(state.logs.warn.at(-1), /aggregate trigger returned error/);
+});
+
 test("timeouts dispatch maintenance module re-enqueues unnotified pending dispatches", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     dbQuery: createSqlRouter([

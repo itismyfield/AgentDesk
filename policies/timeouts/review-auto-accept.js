@@ -106,8 +106,19 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
         try {
           var aggPort = agentdesk.config.get("server_port");
           if (aggPort) {
-            agentdesk.http.post("http://127.0.0.1:" + aggPort + "/api/reviews/tuning/aggregate", {});
-            agentdesk.kv.delete(reviewTuningAggregateRetryKey);
+            var aggregateResponse = agentdesk.http.post(
+              "http://127.0.0.1:" + aggPort + "/api/reviews/tuning/aggregate",
+              {}
+            );
+            if (aggregateResponse && aggregateResponse.error) {
+              agentdesk.kv.set(reviewTuningAggregateRetryKey, "pending");
+              agentdesk.log.warn(
+                "[review-tuning] aggregate trigger returned error (non-fatal): " +
+                (aggregateResponse.error.message || aggregateResponse.error)
+              );
+            } else {
+              agentdesk.kv.delete(reviewTuningAggregateRetryKey);
+            }
           } else {
             agentdesk.kv.set(reviewTuningAggregateRetryKey, "pending");
           }
