@@ -32,6 +32,10 @@ export type {
 const BASE = "";
 const REQUEST_TIMEOUT_MS = 15_000;
 const TOKEN_ANALYTICS_TIMEOUT_MS = 60_000;
+// #2050 P3 finding 15 — mutations hitting GitHub/Discord can exceed 15s
+// under rate-limit pressure; a longer ceiling prevents client-side timeouts
+// for requests the server is still happily processing.
+const SLOW_MUTATION_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 2;
 const INITIAL_BACKOFF_MS = 500;
 
@@ -41,13 +45,56 @@ interface CachedGetEntry<T = unknown> {
   data: T;
   fetchedAt: number;
 }
+// #2050 P3 finding 12 — bound response cache (insertion-order LRU) + TTL on
+// read so a long-lived SPA tab stops leaking memory linearly with unique
+// query strings.
+const CACHED_GET_MAX_ENTRIES = 200;
+const CACHED_GET_TTL_MS = 60_000;
 const cachedGets = new Map<string, CachedGetEntry>();
+
+// #2050 P3 finding 17 — strip `fresh=1` from cache key so forceRefresh
+// updates the same slot non-fresh callers look up.
+function cacheKeyForUrl(url: string): string {
+  if (!url.includes("fresh=1")) return url;
+  return url
+    .replace(/([?&])fresh=1(&|$)/, (_match, prefix, suffix) =>
+      suffix === "&" ? prefix : prefix === "?" ? "" : "",
+    )
+    .replace(/\?$/, "");
+}
+
+function storeCachedGet(url: string, payload: unknown): void {
+  const key = cacheKeyForUrl(url);
+  if (cachedGets.size >= CACHED_GET_MAX_ENTRIES) {
+    const oldest = cachedGets.keys().next().value;
+    if (typeof oldest === "string") cachedGets.delete(oldest);
+  }
+  cachedGets.set(key, { data: payload, fetchedAt: Date.now() });
+}
 
 // ── Global error listener for toast integration ──
 type ApiErrorListener = (url: string, error: Error) => void;
 let apiErrorListener: ApiErrorListener | null = null;
 export function onApiError(listener: ApiErrorListener | null): void {
   apiErrorListener = listener;
+}
+
+// #2050 P2 finding 9 — typed API error carrying status + server `code` so
+// the previously-dead isApiRequestError guard has real fields to branch on.
+export class ApiRequestError extends Error {
+  readonly code: string;
+  readonly status: number;
+  readonly serverCode?: string;
+  constructor(
+    message: string,
+    options: { status: number; code?: string; serverCode?: string },
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = options.status;
+    this.code = options.code ?? `HTTP_${options.status}`;
+    this.serverCode = options.serverCode;
+  }
 }
 
 interface RequestOptions extends RequestInit {
@@ -98,8 +145,14 @@ function isAbortError(error: Error): boolean {
 }
 
 function readCachedGet<T>(url: string): CachedGetEntry<T> | null {
-  const cached = cachedGets.get(url);
+  // #2050 P3 finding 12/17 — normalize fresh=1 + expire stale entries on read.
+  const key = cacheKeyForUrl(url);
+  const cached = cachedGets.get(key);
   if (!cached) return null;
+  if (Date.now() - cached.fetchedAt > CACHED_GET_TTL_MS) {
+    cachedGets.delete(key);
+    return null;
+  }
   return cached as CachedGetEntry<T>;
 }
 
@@ -155,7 +208,18 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
         cleanup();
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: "unknown" }));
-          const error = new Error(err.error || `HTTP ${res.status}`);
+          // #2050 P2 finding 9 — throw typed ApiRequestError with status +
+          // server-supplied code so isApiRequestError has a real field.
+          const serverCode =
+            typeof err.code === "string"
+              ? err.code
+              : typeof err.error_code === "string"
+                ? err.error_code
+                : undefined;
+          const error = new ApiRequestError(
+            err.error || `HTTP ${res.status}`,
+            { status: res.status, serverCode },
+          );
           if (isGet && isRetryable(res.status) && attempt < maxRetries) {
             lastError = error;
             continue;
@@ -164,10 +228,8 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
         }
         const payload = await res.json();
         if (isGet) {
-          cachedGets.set(url, {
-            data: payload,
-            fetchedAt: Date.now(),
-          });
+          // #2050 P3 finding 12/17 — bounded cache + fresh=1 normalization.
+          storeCachedGet(url, payload);
         }
         return payload;
       } catch (error) {
@@ -193,20 +255,26 @@ async function request<T>(url: string, opts?: RequestOptions): Promise<T> {
     throw lastError ?? new Error(`Request failed: ${url}`);
   };
 
-  const promise = execute().finally(() => {
-    if (shouldDedupe) inflightGets.delete(url);
-  });
+  // #2050 P2 finding 11 — wire apiErrorListener into the deduplicated promise
+  // so concurrent callers sharing the same in-flight GET observe consistent
+  // error reporting. Previously only the *first* caller's outer .catch
+  // triggered the toast; B/C/etc got the rejection silently.
+  const decorated = execute()
+    .catch((error) => {
+      const resolvedError =
+        error instanceof Error ? error : new Error(String(error));
+      if (!isAbortError(resolvedError)) {
+        apiErrorListener?.(url, resolvedError);
+      }
+      throw resolvedError;
+    })
+    .finally(() => {
+      if (shouldDedupe) inflightGets.delete(url);
+    });
 
-  if (shouldDedupe) inflightGets.set(url, promise);
+  if (shouldDedupe) inflightGets.set(url, decorated);
 
-  return promise.catch((error) => {
-    const resolvedError =
-      error instanceof Error ? error : new Error(String(error));
-    if (!isAbortError(resolvedError)) {
-      apiErrorListener?.(url, resolvedError);
-    }
-    throw resolvedError;
-  });
+  return decorated;
 }
 
 function normalizeAgent(agent: Agent): Agent {
@@ -655,12 +723,50 @@ export interface HealthResponse {
   dispatch_outbox?: HealthDispatchOutboxStats;
 }
 
+// #2050 P3 finding 18 — normalize optional fields so consumers don't have
+// to defensively `??` everything. Adds default `providers: []` /
+// `degraded_reasons: []` / `dispatch_outbox` zero shape so UI render paths
+// can rely on consistent typing under transient server omissions.
+function normalizeHealth(raw: unknown): HealthResponse {
+  const source = (raw ?? {}) as Partial<HealthResponse>;
+  return {
+    status: source.status ?? "unhealthy",
+    version: source.version,
+    uptime_secs: source.uptime_secs,
+    global_active: source.global_active,
+    global_finalizing: source.global_finalizing,
+    deferred_hooks: source.deferred_hooks,
+    queue_depth: source.queue_depth,
+    watcher_count: source.watcher_count,
+    recovery_duration: source.recovery_duration,
+    degraded_reasons: Array.isArray(source.degraded_reasons)
+      ? source.degraded_reasons
+      : [],
+    providers: Array.isArray(source.providers) ? source.providers : [],
+    db: source.db,
+    dashboard: source.dashboard,
+    outbox_age: source.outbox_age,
+    dispatch_outbox: source.dispatch_outbox ?? {
+      pending: 0,
+      retrying: 0,
+      permanent_failures: 0,
+      oldest_pending_age: 0,
+    },
+  };
+}
+
 export async function getHealth(): Promise<HealthResponse> {
-  return request("/api/health");
+  const raw = await request<unknown>("/api/health");
+  return normalizeHealth(raw);
 }
 
 export function getCachedHealth(): CachedGetEntry<HealthResponse> | null {
-  return readCachedGet<HealthResponse>("/api/health");
+  const cached = readCachedGet<unknown>("/api/health");
+  if (!cached) return null;
+  return {
+    data: normalizeHealth(cached.data),
+    fetchedAt: cached.fetchedAt,
+  };
 }
 
 export interface PromptManifestRetentionStatus {
@@ -778,8 +884,23 @@ export async function getHomeKpiTrends(
 
 // ── Kanban & Dispatches ──
 
-export async function getKanbanCards(): Promise<KanbanCard[]> {
-  const data = await request<{ cards: KanbanCard[] }>("/api/kanban-cards");
+// #2050 P2 finding 5 — surface server-side filters (status / repo_id /
+// assignee_agent_id) the API already supports, so callers no longer have to
+// ship the whole table over the wire and filter client-side.
+export async function getKanbanCards(filters?: {
+  status?: string;
+  repoId?: string;
+  assigneeAgentId?: string;
+}): Promise<KanbanCard[]> {
+  const params = new URLSearchParams();
+  if (filters?.status) params.set("status", filters.status);
+  if (filters?.repoId) params.set("repo_id", filters.repoId);
+  if (filters?.assigneeAgentId)
+    params.set("assigned_agent_id", filters.assigneeAgentId);
+  const q = params.toString();
+  const data = await request<{ cards: KanbanCard[] }>(
+    `/api/kanban-cards${q ? `?${q}` : ""}`,
+  );
   return data.cards;
 }
 
@@ -885,9 +1006,12 @@ export async function retryKanbanCard(
   payload?: { assignee_agent_id?: string | null; request_now?: boolean },
 ): Promise<KanbanDispatchMutationResponse> {
   const endpoint = `/api/kanban-cards/${id}/retry`;
+  // #2050 P3 finding 15 — retry hits GitHub + Discord; 15s would race
+  // ahead of a still-processing server. Bump to 60s.
   const res = await request<unknown>(endpoint, {
     method: "POST",
     body: JSON.stringify(payload ?? {}),
+    timeoutMs: SLOW_MUTATION_TIMEOUT_MS,
   });
   return parseKanbanDispatchMutationResponse(endpoint, res);
 }
@@ -897,9 +1021,11 @@ export async function redispatchKanbanCard(
   payload?: { reason?: string | null },
 ): Promise<KanbanDispatchMutationResponse> {
   const endpoint = `/api/kanban-cards/${id}/redispatch`;
+  // #2050 P3 finding 15 — same external-I/O envelope as retry.
   const res = await request<unknown>(endpoint, {
     method: "POST",
     body: JSON.stringify(payload ?? {}),
+    timeoutMs: SLOW_MUTATION_TIMEOUT_MS,
   });
   return parseKanbanDispatchMutationResponse(endpoint, res);
 }
@@ -1079,23 +1205,34 @@ export async function bulkKanbanAction(
     }
   }
 
-  const results = await Promise.all(
-    card_ids.map(async (id) => {
-      try {
-        await request(`/api/kanban-cards/${encodeURIComponent(id)}/transition`, {
-          method: "POST",
-          body: JSON.stringify({ status: resolvedTarget }),
-        });
-        return { id, ok: true };
-      } catch (error) {
-        return {
-          id,
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-    }),
-  );
+  // #2050 P3 finding 22 — chunked concurrency. The previous Promise.all
+  // unleashed N parallel transitions, each emitting an immediate
+  // kanban_card_updated broadcast. With N=100 the dashboard pile-driver
+  // triggered a stats refresh per emit. Limiting to 5 in flight keeps
+  // per-emit latency reasonable while preventing the broadcast storm.
+  const CONCURRENCY = 5;
+  const results: Array<{ id: string; ok: boolean; error?: string }> = [];
+  for (let i = 0; i < card_ids.length; i += CONCURRENCY) {
+    const chunk = card_ids.slice(i, i + CONCURRENCY);
+    const chunkResults = await Promise.all(
+      chunk.map(async (id) => {
+        try {
+          await request(`/api/kanban-cards/${encodeURIComponent(id)}/transition`, {
+            method: "POST",
+            body: JSON.stringify({ status: resolvedTarget }),
+          });
+          return { id, ok: true };
+        } catch (error) {
+          return {
+            id,
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }),
+    );
+    results.push(...chunkResults);
+  }
 
   return { action, results };
 }
@@ -1877,6 +2014,10 @@ export async function getAchievements(
 
 // ── Messages (Chat) ──
 
+// #2050 P2 finding 8 — align ChatMessage with the server contract.
+// `messages.created_at` is a TIMESTAMPTZ serialized as ISO via
+// `created_at::TEXT`, and `before` keyset binds directly into that
+// comparison. Both fields are strings.
 export interface ChatMessage {
   id: number;
   sender_type: "ceo" | "agent" | "system";
@@ -1887,7 +2028,8 @@ export interface ChatMessage {
   receiver_name_ko?: string | null;
   content: string;
   message_type: string;
-  created_at: number;
+  /** ISO 8601 timestamp from the server (`created_at::TEXT`). */
+  created_at: string;
   sender_name?: string | null;
   sender_name_ko?: string | null;
   sender_avatar?: string | null;
@@ -1898,7 +2040,8 @@ export async function getMessages(opts?: {
   receiverType?: string;
   messageType?: string;
   limit?: number;
-  before?: number;
+  /** ISO 8601 timestamp (matches server `before` TIMESTAMPTZ binding). */
+  before?: string;
 }): Promise<{ messages: ChatMessage[] }> {
   const params = new URLSearchParams();
   if (opts?.receiverId) params.set("receiverId", opts.receiverId);
@@ -1906,7 +2049,7 @@ export async function getMessages(opts?: {
   if (opts?.messageType && opts.messageType !== "all")
     params.set("messageType", opts.messageType);
   if (opts?.limit) params.set("limit", String(opts.limit));
-  if (opts?.before) params.set("before", String(opts.before));
+  if (opts?.before) params.set("before", opts.before);
   const q = params.toString();
   return request(`/api/messages${q ? `?${q}` : ""}`);
 }
@@ -1948,6 +2091,9 @@ export async function closeGitHubIssue(
     `/api/github-issues/${owner}/${repoName}/${issueNumber}/close`,
     {
       method: "PATCH",
+      // #2050 P3 finding 15 — GitHub close round-trip exceeds 15s under
+      // rate-limit pressure; treat as slow mutation to avoid double-close.
+      timeoutMs: SLOW_MUTATION_TIMEOUT_MS,
     },
   );
 }
@@ -2214,12 +2360,17 @@ export async function generateAutoQueue(
   });
 }
 
+// #2050 P3 finding 10 — server actually returns DispatchQueueEntry objects
+// + active/pending group counts; previous KanbanCard[] declaration was wrong.
+// Callers reading `result.dispatched[0].title` were silently undefined.
 export async function activateAutoQueue(
   repo?: string | null,
   agentId?: string | null,
 ): Promise<{
-  dispatched: KanbanCard[];
+  dispatched: DispatchQueueEntry[];
   count: number;
+  active_groups?: number;
+  pending_groups?: number;
 }> {
   const body: Record<string, unknown> = {};
   if (repo) body.repo = repo;
