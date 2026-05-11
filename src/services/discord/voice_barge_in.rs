@@ -891,6 +891,7 @@ impl VoiceBargeInRuntime {
                 "samples_written": utterance.samples_written,
             }
         });
+        crate::voice::metrics::mark_agent_start(channel_id.get());
         match super::router::start_voice_headless_turn(
             ctx,
             channel_id,
@@ -918,6 +919,10 @@ impl VoiceBargeInRuntime {
                 }
             }
             Err(error) => {
+                // Drop the partially-built record + the agent-start instant so
+                // the next turn isn't polluted by the failed start.
+                crate::voice::metrics::discard(channel_id.get());
+                crate::voice::metrics::discard_agent_start(channel_id.get());
                 tracing::warn!(
                     error = %error,
                     channel_id = channel_id.get(),
@@ -1305,12 +1310,21 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         answer: &str,
     ) {
+        // Voice #10: agent stage ends when the answer is ready for TTS.
+        // Record even if TTS bails below — keeps the partial latency state
+        // monotonic with the agent timeline.
+        crate::voice::metrics::finish_agent_start(channel_id.get());
+
         let Some(tts) = self.tts.read().await.clone() else {
+            // Voice #10: drop the partial latency record so the next turn
+            // doesn't inherit stale stt/agent ms.
+            crate::voice::metrics::discard(channel_id.get());
             return;
         };
         let language = self.spoken_result_language().await;
         let spoken = spoken_result_only(answer, &language);
         if spoken.trim().is_empty() {
+            crate::voice::metrics::discard(channel_id.get());
             return;
         }
 
@@ -1319,6 +1333,7 @@ impl VoiceBargeInRuntime {
             .get(&channel_id.get())
             .map(|entry| *entry.value())
         else {
+            crate::voice::metrics::discard(channel_id.get());
             tracing::debug!(
                 channel_id = channel_id.get(),
                 "voice final TTS playback skipped: no registered voice guild"
@@ -1326,6 +1341,7 @@ impl VoiceBargeInRuntime {
             return;
         };
         let Some(ctx) = shared.cached_serenity_ctx.get() else {
+            crate::voice::metrics::discard(channel_id.get());
             tracing::debug!(
                 channel_id = channel_id.get(),
                 guild_id = guild_id.get(),
@@ -1334,6 +1350,7 @@ impl VoiceBargeInRuntime {
             return;
         };
         let Some(manager) = songbird::get(ctx).await else {
+            crate::voice::metrics::discard(channel_id.get());
             tracing::warn!(
                 channel_id = channel_id.get(),
                 guild_id = guild_id.get(),
@@ -1342,6 +1359,7 @@ impl VoiceBargeInRuntime {
             return;
         };
         let Some(call_lock) = manager.get(guild_id) else {
+            crate::voice::metrics::discard(channel_id.get());
             tracing::debug!(
                 channel_id = channel_id.get(),
                 guild_id = guild_id.get(),
@@ -1379,6 +1397,9 @@ impl VoiceBargeInRuntime {
             runtime.clear_spoken_result_playback_if_current(channel_id, playback_id);
             match result {
                 Ok(report) => {
+                    let synth_ms = report.first_chunk_synthesis_ms.unwrap_or(0).min(u64::MAX as u128) as u64;
+                    let play_ms = report.first_audio_start_ms.unwrap_or(0).min(u64::MAX as u128) as u64;
+                    crate::voice::metrics::record_tts(channel_id.get(), synth_ms, play_ms);
                     tracing::info!(
                         channel_id = channel_id.get(),
                         guild_id = guild_id.get(),
@@ -1390,6 +1411,7 @@ impl VoiceBargeInRuntime {
                     );
                 }
                 Err(error) => {
+                    crate::voice::metrics::discard(channel_id.get());
                     tracing::warn!(
                         error = %error,
                         channel_id = channel_id.get(),
@@ -1406,9 +1428,17 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         utterance: &CompletedUtterance,
     ) -> Option<String> {
+        let stt_started_at = std::time::Instant::now();
         if let Some(stt) = self.stt.read().await.clone() {
             match stt.transcribe(&utterance.path).await {
-                Ok(transcript) => return Some(transcript),
+                Ok(transcript) => {
+                    crate::voice::metrics::record_stt(
+                        channel_id.get(),
+                        Some(&utterance.utterance_id),
+                        stt_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    );
+                    return Some(transcript);
+                }
                 Err(error) => {
                     tracing::warn!(
                         error = %error,
@@ -1430,6 +1460,11 @@ impl VoiceBargeInRuntime {
             );
             return None;
         };
+        crate::voice::metrics::record_stt(
+            channel_id.get(),
+            Some(&utterance.utterance_id),
+            stt_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        );
         Some(transcript)
     }
 

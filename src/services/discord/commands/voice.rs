@@ -173,7 +173,7 @@ async fn cmd_voice_attach(
     Ok(())
 }
 
-/// /voice latency — Report local voice capture routing status.
+/// /voice latency — Report recent voice turn latency averages (Voice #10).
 #[poise::command(slash_command, rename = "latency")]
 async fn cmd_voice_latency(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;
@@ -183,14 +183,31 @@ async fn cmd_voice_latency(ctx: Context<'_>) -> Result<(), Error> {
     }
 
     let verbose = ctx.data().shared.voice_barge_in.verbose_progress_enabled();
-    ctx.say(format!(
-        "Voice path: enabled=`{}`, verbose_progress=`{}`. Capture idle: segment=`{}ms`, utterance=`{}ms`.",
-        ctx.data().voice_config.enabled,
-        verbose,
-        ctx.data().voice_config.idle.segment_idle_ms,
-        ctx.data().voice_config.idle.utterance_idle_ms
-    ))
-    .await?;
+    let summary = crate::voice::metrics::recent_summary(5);
+    let body = if summary.sample_count == 0 {
+        format!(
+            "Voice path: enabled=`{}`, verbose_progress=`{}`. Capture idle: segment=`{}ms`, utterance=`{}ms`.\nNo `voice_latency_turn` events recorded yet.",
+            ctx.data().voice_config.enabled,
+            verbose,
+            ctx.data().voice_config.idle.segment_idle_ms,
+            ctx.data().voice_config.idle.utterance_idle_ms
+        )
+    } else {
+        format!(
+            "Voice path: enabled=`{}`, verbose_progress=`{}`. Capture idle: segment=`{}ms`, utterance=`{}ms`.\nLast {} turn(s) — avg stt=`{}ms` / agent=`{}ms` / tts_synth=`{}ms` / tts_play=`{}ms` / total=`{}ms`.",
+            ctx.data().voice_config.enabled,
+            verbose,
+            ctx.data().voice_config.idle.segment_idle_ms,
+            ctx.data().voice_config.idle.utterance_idle_ms,
+            summary.sample_count,
+            summary.avg_stt_ms,
+            summary.avg_agent_ms,
+            summary.avg_tts_synth_ms,
+            summary.avg_tts_play_ms,
+            summary.avg_total_ms,
+        )
+    };
+    ctx.say(body).await?;
     Ok(())
 }
 

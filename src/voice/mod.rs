@@ -1,6 +1,7 @@
 pub(crate) mod barge_in;
 pub(crate) mod commands;
 pub(crate) mod config;
+pub(crate) mod metrics;
 pub(crate) mod progress;
 pub(crate) mod prompt;
 pub(crate) mod receiver;

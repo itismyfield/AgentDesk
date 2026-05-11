@@ -29,6 +29,7 @@ pub(crate) struct DoctorOptions {
 enum CheckGroup {
     Core,
     ProviderRuntime,
+    Voice,
 }
 
 impl CheckGroup {
@@ -36,6 +37,7 @@ impl CheckGroup {
         match self {
             CheckGroup::Core => "core",
             CheckGroup::ProviderRuntime => "provider_runtime",
+            CheckGroup::Voice => "voice",
         }
     }
 
@@ -43,6 +45,7 @@ impl CheckGroup {
         match self {
             CheckGroup::Core => "server",
             CheckGroup::ProviderRuntime => "provider_runtime",
+            CheckGroup::Voice => "voice",
         }
     }
 }
@@ -1569,7 +1572,171 @@ fn check_credential_permissions(cfg: &config::Config) -> Check {
 fn build_all_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Check> {
     let mut checks = build_core_checks(cfg, snapshot);
     checks.extend(build_provider_checks(cfg, snapshot));
+    checks.extend(build_voice_checks(cfg));
     checks
+}
+
+fn build_voice_checks(cfg: &config::Config) -> Vec<Check> {
+    let voice_cfg = &cfg.voice;
+    // Skip CLI checks whenever voice is disabled — even if the user customized
+    // other voice fields the dependencies should not gate doctor.
+    if !voice_cfg.enabled {
+        return vec![Check::ok(
+            "voice_disabled",
+            CheckGroup::Voice,
+            "voice subsystem",
+            "voice features are disabled (config.voice.enabled=false); skipping CLI checks",
+        )];
+    }
+    vec![
+        check_voice_whisper_cli(voice_cfg),
+        check_voice_edge_tts(voice_cfg),
+        check_voice_ffmpeg(voice_cfg),
+        check_voice_udp_socket(),
+    ]
+}
+
+fn check_voice_cli_present(
+    id: &'static str,
+    name: &'static str,
+    binary: &str,
+    install_hint: &str,
+) -> Check {
+    let trimmed = binary.trim();
+    if trimmed.is_empty() {
+        return Check::fail(
+            id,
+            CheckGroup::Voice,
+            name,
+            format!("voice CLI `{name}` is not configured"),
+            format!("set the corresponding voice config field. {install_hint}"),
+        )
+        .with_severity(Severity::Error);
+    }
+    let resolved = if trimmed.contains('/') || trimmed.starts_with('~') {
+        let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
+            std::env::var("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(rest))
+                .unwrap_or_else(|_| std::path::PathBuf::from(trimmed))
+        } else {
+            std::path::PathBuf::from(trimmed)
+        };
+        if expanded.is_file() {
+            Some(expanded)
+        } else {
+            None
+        }
+    } else {
+        // Resolve via PATH using `which` semantics — mirror the existing
+        // ProviderRuntime checks which simply call the binary with --version.
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths).find_map(|dir| {
+                let candidate = dir.join(trimmed);
+                if candidate.is_file() {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            })
+        })
+    };
+
+    match resolved {
+        Some(path) => Check::ok(id, CheckGroup::Voice, name, format!("found at {}", path.display()))
+            .with_path(path.display().to_string())
+            .with_expected_actual(
+                format!("{name} CLI on PATH or absolute path"),
+                format!("resolved → {}", path.display()),
+            ),
+        None => Check::fail(
+            id,
+            CheckGroup::Voice,
+            name,
+            format!("voice CLI `{name}` (`{trimmed}`) not found"),
+            format!(
+                "voice features depend on `{trimmed}`. {install_hint} \
+                 If you intentionally disabled voice, set config.voice.enabled=false."
+            ),
+        )
+        .with_expected_actual(
+            format!("`{trimmed}` available on PATH or as absolute path"),
+            "binary not resolvable".to_string(),
+        )
+        .with_next_steps(vec![
+            format!("which {trimmed}"),
+            format!("ls -la {trimmed}"),
+        ]),
+    }
+}
+
+fn check_voice_whisper_cli(cfg: &crate::voice::VoiceConfig) -> Check {
+    check_voice_cli_present(
+        "voice_whisper_cli",
+        "whisper-cli",
+        &cfg.stt.whisper_command,
+        "Install whisper.cpp (`brew install whisper-cpp`) and ensure the binary `whisper-cli` is on PATH or set voice.stt.whisper_command to an absolute path.",
+    )
+}
+
+fn check_voice_edge_tts(cfg: &crate::voice::VoiceConfig) -> Check {
+    check_voice_cli_present(
+        "voice_edge_tts",
+        "edge-tts",
+        &cfg.tts.edge.command,
+        "Install edge-tts (`pipx install edge-tts` or `pip install edge-tts`) and ensure the binary is on PATH or set voice.tts.edge.command.",
+    )
+}
+
+fn check_voice_ffmpeg(cfg: &crate::voice::VoiceConfig) -> Check {
+    check_voice_cli_present(
+        "voice_ffmpeg",
+        "ffmpeg",
+        &cfg.stt.ffmpeg_command,
+        "Install ffmpeg (`brew install ffmpeg`) and ensure it is on PATH or set voice.stt.ffmpeg_command.",
+    )
+}
+
+fn check_voice_udp_socket() -> Check {
+    use std::net::UdpSocket;
+    // Best-effort placeholder: songbird negotiates outbound UDP to Discord
+    // media gateways on dynamic ports, so we can only verify the local process
+    // can bind a UDP socket at all. A pass here does NOT prove songbird will
+    // be reachable; a fail almost certainly means voice will fail. Bind to
+    // ephemeral port to avoid stomping on an existing media session.
+    match UdpSocket::bind("0.0.0.0:0") {
+        Ok(socket) => {
+            let local = socket.local_addr().ok();
+            let detail = match local {
+                Some(addr) => format!("local UDP bind ok (local={addr}); outbound UDP path is best-effort only"),
+                None => "local UDP bind ok (local addr unavailable)".to_string(),
+            };
+            Check::ok(
+                "voice_udp_socket",
+                CheckGroup::Voice,
+                "voice UDP socket",
+                detail,
+            )
+            .with_expected_actual(
+                "process able to bind a UDP socket for songbird voice",
+                "UDP bind succeeded (best-effort placeholder)",
+            )
+        }
+        Err(error) => Check::warn(
+            "voice_udp_socket",
+            CheckGroup::Voice,
+            "voice UDP socket",
+            format!("failed to bind UDP socket: {error}"),
+            "Songbird requires outbound UDP. Check the macOS firewall (System Settings → Network → Firewall) or any sandbox that blocks UDP. This is a heuristic — voice can still fail even when the bind succeeds.",
+        )
+        .with_expected_actual(
+            "UDP bind succeeds for outbound voice",
+            format!("bind error: {error}"),
+        )
+        .with_next_steps(vec![
+            "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate".to_string(),
+            "lsof -iUDP".to_string(),
+        ]),
+    }
 }
 
 fn summarize_checks(checks: &[Check]) -> DoctorSummary {
