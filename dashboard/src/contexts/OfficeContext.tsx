@@ -193,6 +193,9 @@ export function OfficeProvider({
   const pushNotificationRef = useRef(pushNotification);
   useEffect(() => { pushNotificationRef.current = pushNotification; }, [pushNotification]);
 
+  // #2050 P2 finding 6 — debounce handle for kanban_card_* → refreshAuditLogs.
+  const auditDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // ── WS event handling ──
   useEffect(() => {
     function handleWs(e: Event) {
@@ -255,12 +258,24 @@ export function OfficeProvider({
         case "kanban_card_created":
         case "kanban_card_updated":
         case "kanban_card_deleted":
-          refreshAuditLogs();
+          // #2050 P2 finding 6 — coalesce bursty kanban events into a
+          // single audit-log refetch instead of one per emit.
+          if (auditDebounceRef.current) clearTimeout(auditDebounceRef.current);
+          auditDebounceRef.current = setTimeout(() => {
+            auditDebounceRef.current = null;
+            refreshAuditLogs();
+          }, 350);
           break;
       }
     }
     window.addEventListener("pcd-ws-event", handleWs);
-    return () => window.removeEventListener("pcd-ws-event", handleWs);
+    return () => {
+      window.removeEventListener("pcd-ws-event", handleWs);
+      if (auditDebounceRef.current) {
+        clearTimeout(auditDebounceRef.current);
+        auditDebounceRef.current = null;
+      }
+    };
     // selectedOfficeId is needed for scoped refresh calls inside the handler
   }, [selectedOfficeId]);
 

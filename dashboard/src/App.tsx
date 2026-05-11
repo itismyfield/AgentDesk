@@ -62,9 +62,18 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      // #2050 P2 finding 7 — guard every bootstrap call individually so a
+      // single API hiccup (e.g. /api/settings 500) no longer wipes the
+      // whole dashboard.
+      const safe = <T,>(p: Promise<T>, fallback: T): Promise<T> =>
+        p.catch((err) => {
+          console.warn("[bootstrap] partial failure:", err);
+          return fallback;
+        });
+
       try {
-        await api.getSession();
-        const offices = await api.getOffices();
+        await safe(api.getSession(), { ok: false, csrf_token: "" });
+        const offices = await safe(api.getOffices(), [] as Office[]);
         const defaultOfficeId = offices.length > 0 ? offices[0].id : undefined;
         const [
           allAgents,
@@ -79,17 +88,17 @@ export default function App() {
           cards,
           dispatches,
         ] = await Promise.all([
-          api.getAgents(),
-          api.getAgents(defaultOfficeId),
-          api.getDepartments(),
-          api.getDepartments(defaultOfficeId),
-          api.getDispatchedSessions(true),
-          api.getStats(defaultOfficeId),
-          api.getSettings(),
-          api.getRoundTableMeetings().catch(() => [] as RoundTableMeeting[]),
-          api.getAuditLogs(12).catch(() => [] as AuditLogEntry[]),
-          api.getKanbanCards().catch(() => [] as KanbanCard[]),
-          api.getTaskDispatches({ limit: 200 }).catch(() => [] as TaskDispatch[]),
+          safe(api.getAgents(), [] as Agent[]),
+          safe(api.getAgents(defaultOfficeId), [] as Agent[]),
+          safe(api.getDepartments(), [] as Department[]),
+          safe(api.getDepartments(defaultOfficeId), [] as Department[]),
+          safe(api.getDispatchedSessions(true), [] as DispatchedSession[]),
+          safe(api.getStats(defaultOfficeId), null as DashboardStats | null),
+          safe(api.getSettings(), DEFAULT_SETTINGS as Partial<CompanySettings>),
+          safe(api.getRoundTableMeetings(), [] as RoundTableMeeting[]),
+          safe(api.getAuditLogs(12), [] as AuditLogEntry[]),
+          safe(api.getKanbanCards(), [] as KanbanCard[]),
+          safe(api.getTaskDispatches({ limit: 200 }), [] as TaskDispatch[]),
         ]);
         const resolvedSettings = {
           ...DEFAULT_SETTINGS,
