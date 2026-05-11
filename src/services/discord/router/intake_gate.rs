@@ -328,6 +328,26 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
     );
 }
 
+/// #2044 F7 (P3 — documentation): invariant note.
+///
+/// This recovery path delegates the `cancelled` flag + `global_active`
+/// decrement to `stall_recovery::finalize_orphaned_clear`, which has
+/// owned both side-effects since #1446 (see `stall_recovery.rs:65-89`):
+///   1. it calls `turn_bridge::cancel_active_token` on the removed
+///      token — that helper sets `token.cancelled = true` so any
+///      watchdog/voice-barge-in holding an Arc to the same token sees
+///      the cancellation;
+///   2. it calls `saturating_decrement_global_active`, mirroring what
+///      the normal `turn_bridge::mod.rs:3132-3141` and
+///      `tmux.rs:2052-2061` cleanup sites do inline.
+///
+/// Therefore this site MUST NOT also poke `cancelled` / `global_active`
+/// — doing so would double-decrement the counter (already saturating
+/// in `finalize_orphaned_clear`, but the duplicate is still a smell)
+/// and confuse audit logs. If a future change splits
+/// `finalize_orphaned_clear` or makes either side-effect conditional,
+/// this comment and the comments in the bridge/tmux peer sites must
+/// move in lockstep.
 async fn release_queue_blocked_stale_active_turn(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
@@ -348,6 +368,8 @@ async fn release_queue_blocked_stale_active_turn(
     super::super::inflight::delete_inflight_state_file(provider, channel_id.get());
     super::super::clear_watchdog_deadline_override(channel_id.get()).await;
     let finish = mailbox_finish_turn(shared, provider, channel_id).await;
+    // #2044 F7: `finalize_orphaned_clear` owns both `cancelled.store(true)`
+    // and `global_active.fetch_sub(1)` — do not duplicate them here.
     super::super::stall_recovery::finalize_orphaned_clear(
         shared,
         channel_id,
@@ -934,12 +956,39 @@ pub(in crate::services::discord) async fn handle_event(
                 let key = format!("mid:{}", new_message.id);
 
                 // Lazy cleanup of expired mid:* entries to prevent unbounded growth.
-                // Only runs every ~50 messages to amortize cost.
+                //
+                // #2044 F10: previously this ran every 50 messages
+                // (`CLEANUP_COUNTER % 50 == 0`), which meant a quiet
+                // instance could hold thousands of expired mid:* entries
+                // indefinitely (49 messages had to arrive before any
+                // cleanup, regardless of how stale the existing entries
+                // were). Switched to a wall-clock interval — at most one
+                // sweep per `MSG_DEDUP_CLEANUP_INTERVAL` regardless of
+                // message volume, and a sweep is guaranteed within the
+                // interval after the next message arrives.
                 {
-                    static CLEANUP_COUNTER: std::sync::atomic::AtomicU64 =
+                    const MSG_DEDUP_CLEANUP_INTERVAL: std::time::Duration =
+                        std::time::Duration::from_secs(30);
+                    static LAST_CLEANUP_NANOS: std::sync::atomic::AtomicU64 =
                         std::sync::atomic::AtomicU64::new(0);
-                    let count = CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if count % 50 == 0 {
+                    static CLEANUP_EPOCH: std::sync::LazyLock<std::time::Instant> =
+                        std::sync::LazyLock::new(std::time::Instant::now);
+                    let elapsed_since_epoch_nanos =
+                        now.duration_since(*CLEANUP_EPOCH).as_nanos() as u64;
+                    let last = LAST_CLEANUP_NANOS.load(std::sync::atomic::Ordering::Relaxed);
+                    let should_sweep = last == 0
+                        || elapsed_since_epoch_nanos.saturating_sub(last)
+                            >= MSG_DEDUP_CLEANUP_INTERVAL.as_nanos() as u64;
+                    if should_sweep
+                        && LAST_CLEANUP_NANOS
+                            .compare_exchange(
+                                last,
+                                elapsed_since_epoch_nanos,
+                                std::sync::atomic::Ordering::Relaxed,
+                                std::sync::atomic::Ordering::Relaxed,
+                            )
+                            .is_ok()
+                    {
                         data.shared.intake_dedup.retain(|k, v| {
                             if k.starts_with("mid:") {
                                 now.duration_since(v.0) < MSG_DEDUP_TTL
@@ -951,10 +1000,22 @@ pub(in crate::services::discord) async fn handle_event(
                 }
 
                 // Check if this arrival is from a thread context
-                let is_thread_context = resolve_thread_parent(&ctx.http, new_message.channel_id)
-                    .await
-                    .is_some();
+                let thread_parent =
+                    resolve_thread_parent(&ctx.http, new_message.channel_id).await;
+                let is_thread_context = thread_parent.is_some();
 
+                // #2044 F6: when promoting a parent → thread arrival, verify
+                // that the first (parent) arrival did NOT already make it
+                // into the mailbox. Otherwise the second (thread) arrival
+                // would produce a double intake for the same user_msg_id
+                // — same response sent twice, dispatch automation steps
+                // re-executed, etc. The first arrival can sneak through
+                // the parent path because regular text passes
+                // `should_process_turn_message` (`Regular|InlineReply`)
+                // and the dispatch-thread guard only fires for
+                // `is_allowed_bot`. We trust the mailbox as the source
+                // of truth.
+                let mut thread_promotion_blocked = false;
                 let is_dup = match data.shared.intake_dedup.entry(key.clone()) {
                     dashmap::mapref::entry::Entry::Occupied(mut e) => {
                         let (ts, was_thread) = *e.get();
@@ -964,9 +1025,30 @@ pub(in crate::services::discord) async fn handle_event(
                             false
                         } else if is_thread_context && !was_thread {
                             // Thread event for a message previously seen via parent —
-                            // allow thread through and mark as thread-processed.
-                            e.insert((now, true));
-                            false
+                            // allow thread through ONLY if the parent path
+                            // did not already create mailbox state for
+                            // this message_id.
+                            let parent_channel = thread_parent
+                                .as_ref()
+                                .map(|(parent_id, _)| *parent_id)
+                                .unwrap_or(new_message.channel_id);
+                            let snapshot =
+                                mailbox_snapshot(&data.shared, parent_channel).await;
+                            let already_intake = snapshot.active_user_message_id
+                                == Some(new_message.id)
+                                || snapshot.intervention_queue.iter().any(|iv| {
+                                    iv.message_id == new_message.id
+                                        || iv.source_message_ids.contains(&new_message.id)
+                                });
+                            if already_intake {
+                                thread_promotion_blocked = true;
+                                // Mark thread-processed so subsequent duplicates are no-ops.
+                                e.insert((now, true));
+                                true
+                            } else {
+                                e.insert((now, true));
+                                false
+                            }
                         } else {
                             true // genuine duplicate (same context or already thread-processed)
                         }
@@ -976,6 +1058,15 @@ pub(in crate::services::discord) async fn handle_event(
                         false
                     }
                 };
+                if thread_promotion_blocked {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ⏭ MSG-DEDUP: blocking thread-promotion of message {} in channel {} (parent path already intook it)",
+                        new_message.id,
+                        new_message.channel_id
+                    );
+                    return Ok(());
+                }
                 if is_dup {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
@@ -1198,10 +1289,20 @@ pub(in crate::services::discord) async fn handle_event(
             }
 
             // ── Text commands (!start, !meeting, !stop, !clear) ──
-            // Strip leading bot mention to get the actual command text
+            // Strip leading bot mention to get the actual command text.
+            //
+            // #2044 F11: the pattern is constant — compile once via
+            // `LazyLock` instead of paying the per-message compile cost
+            // and exposing intake to a panic on a hypothetical compile
+            // failure (the previous code used `.unwrap()` on a
+            // `regex::Regex::new` result inside the hot path).
             let cmd_text = {
-                let re = regex::Regex::new(r"^<@!?\d+>\s*").unwrap();
-                re.replace(text, "").to_string()
+                static BOT_MENTION_RE: std::sync::LazyLock<regex::Regex> =
+                    std::sync::LazyLock::new(|| {
+                        regex::Regex::new(r"^<@!?\d+>\s*")
+                            .expect("static bot-mention regex is valid")
+                    });
+                BOT_MENTION_RE.replace(text, "").to_string()
             };
             if cmd_text.starts_with('!') {
                 let handled = super::message_handler::handle_text_command(
@@ -1385,9 +1486,18 @@ pub(in crate::services::discord) async fn handle_event(
                                 queue_pending_reaction_for(outcome),
                             )
                             .await;
-                            data.shared
-                                .last_message_ids
-                                .insert(channel_id, new_message.id.get());
+                            // #2044 F12: use monotonic checkpoint helper
+                            // so this hot intake path matches the cancel
+                            // reaction path
+                            // (`mod.rs:advance_last_message_checkpoint`)
+                            // and never regresses the per-channel
+                            // last-processed id.
+                            super::super::advance_last_message_checkpoint(
+                                &data.shared,
+                                &data.provider,
+                                channel_id,
+                                new_message.id,
+                            );
                             return Ok(());
                         }
                     } else {
@@ -1433,9 +1543,13 @@ pub(in crate::services::discord) async fn handle_event(
                         queue_pending_reaction_for(outcome),
                     )
                     .await;
-                    data.shared
-                        .last_message_ids
-                        .insert(channel_id, new_message.id.get());
+                    // #2044 F12: monotonic checkpoint (see comment above).
+                    super::super::advance_last_message_checkpoint(
+                        &data.shared,
+                        &data.provider,
+                        channel_id,
+                        new_message.id,
+                    );
                     return Ok(());
                 }
                 // No active turn — fall through to normal processing below
@@ -1486,10 +1600,13 @@ pub(in crate::services::discord) async fn handle_event(
                 )
                 .await;
 
-                // Checkpoint: message successfully queued
-                data.shared
-                    .last_message_ids
-                    .insert(channel_id, new_message.id.get());
+                // Checkpoint: message successfully queued (#2044 F12 — monotonic).
+                super::super::advance_last_message_checkpoint(
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                    new_message.id,
+                );
                 if is_shutting_down {
                     let ids: std::collections::HashMap<u64, u64> = data
                         .shared
@@ -1519,10 +1636,13 @@ pub(in crate::services::discord) async fn handle_event(
                     merge_consecutive,
                 )
                 .await;
-                // Checkpoint: track last processed message
-                data.shared
-                    .last_message_ids
-                    .insert(channel_id, new_message.id.get());
+                // Checkpoint: track last processed message (#2044 F12 — monotonic).
+                super::super::advance_last_message_checkpoint(
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                    new_message.id,
+                );
                 formatting::add_reaction_raw(&ctx.http, channel_id, new_message.id, '🔄').await;
                 return Ok(());
             }
@@ -1567,9 +1687,13 @@ pub(in crate::services::discord) async fn handle_event(
                 .await;
 
                 // Checkpoint: message successfully queued in drain mode
-                data.shared
-                    .last_message_ids
-                    .insert(channel_id, new_message.id.get());
+                // (#2044 F12 — monotonic).
+                super::super::advance_last_message_checkpoint(
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                    new_message.id,
+                );
 
                 if is_shutting_down {
                     // Persist checkpoint to disk immediately during shutdown
@@ -1634,9 +1758,13 @@ pub(in crate::services::discord) async fn handle_event(
                         queue_pending_reaction_for(outcome),
                     )
                     .await;
-                    data.shared
-                        .last_message_ids
-                        .insert(channel_id, new_message.id.get());
+                    // #2044 F12: monotonic checkpoint helper.
+                    super::super::advance_last_message_checkpoint(
+                        &data.shared,
+                        &data.provider,
+                        channel_id,
+                        new_message.id,
+                    );
                 } else {
                     tracing::info!(
                         "  [{ts}] ↪ IDLE-QUEUE: duplicate message from [{user_name}] already pending in channel {}",
@@ -1687,9 +1815,13 @@ pub(in crate::services::discord) async fn handle_event(
             tracing::info!("  [{ts}] ◀ [{user_name}] {preview}");
 
             // Checkpoint: message about to be processed as a turn
-            data.shared
-                .last_message_ids
-                .insert(channel_id, new_message.id.get());
+            // (#2044 F12 — monotonic).
+            super::super::advance_last_message_checkpoint(
+                &data.shared,
+                &data.provider,
+                channel_id,
+                new_message.id,
+            );
 
             // #796: classify the originating sender so the race handler in
             // `handle_text_message` knows whether it's safe to delete the
