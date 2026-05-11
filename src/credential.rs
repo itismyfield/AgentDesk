@@ -14,9 +14,39 @@ fn read_trimmed_token(path: &Path) -> Option<String> {
     }
 }
 
+/// Validate a bot name as a safe path segment.
+///
+/// Issue #2047 Finding 8 — `name` is concatenated into a filesystem path inside
+/// `runtime_layout::credential_token_path`, so an attacker (or buggy caller)
+/// that smuggles `..`, `/`, NUL, or other separators could traverse outside
+/// the credential directory and trick the loader into reading
+/// (and later sending as `Bot <secret>`) an arbitrary file like
+/// `../auth_token` or `../../etc/passwd`.
+///
+/// Restrict the alphabet to `[A-Za-z0-9_-]` and the length to 1..=32 so the
+/// resulting path is always a child of `credential/`. Whitespace, empty
+/// strings, and path separators are rejected.
+pub fn is_valid_bot_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 32 {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Read a bot token from the canonical runtime credential path.
 /// Legacy `config/credential/` entries are migrated into `credential/` on read.
+///
+/// Returns `None` (without touching disk) when `name` fails
+/// [`is_valid_bot_name`] — see Issue #2047 Finding 8.
 pub fn read_bot_token(name: &str) -> Option<String> {
+    if !is_valid_bot_name(name) {
+        tracing::warn!(
+            bot_name = %name,
+            "rejecting read_bot_token call with non-conforming bot name (Issue #2047 Finding 8)"
+        );
+        return None;
+    }
     let root = agentdesk_root()?;
     let _ = crate::runtime_layout::ensure_credential_layout(&root);
     let path = crate::runtime_layout::credential_token_path(&root, name);
@@ -88,6 +118,42 @@ mod tests {
         let _ = crate::runtime_layout::ensure_credential_layout(root);
 
         assert_eq!(read_bot_token("missing_bot"), None);
+    }
+
+    #[test]
+    fn is_valid_bot_name_accepts_canonical_names() {
+        assert!(is_valid_bot_name("announce"));
+        assert!(is_valid_bot_name("notify"));
+        assert!(is_valid_bot_name("agent_alpha-7"));
+        assert!(is_valid_bot_name("A"));
+        assert!(is_valid_bot_name(&"a".repeat(32)));
+    }
+
+    #[test]
+    fn is_valid_bot_name_rejects_traversal_attempts() {
+        // Issue #2047 Finding 8 — none of these should be allowed to reach the
+        // filesystem layer.
+        assert!(!is_valid_bot_name(""));
+        assert!(!is_valid_bot_name(".."));
+        assert!(!is_valid_bot_name("../auth_token"));
+        assert!(!is_valid_bot_name("nested/notify"));
+        assert!(!is_valid_bot_name("notify\\windows"));
+        assert!(!is_valid_bot_name("notify\0"));
+        assert!(!is_valid_bot_name("notify.token"));
+        assert!(!is_valid_bot_name(" announce"));
+        assert!(!is_valid_bot_name("announce "));
+        assert!(!is_valid_bot_name(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn read_bot_token_rejects_traversal_without_touching_disk() {
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        // Even if the caller controls AGENTDESK_ROOT, an invalid name must be
+        // refused before the path join happens.
+        assert_eq!(read_bot_token("../auth_token"), None);
+        assert_eq!(read_bot_token(""), None);
+        assert_eq!(read_bot_token("nested/notify"), None);
     }
 
     #[test]

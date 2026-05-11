@@ -176,26 +176,74 @@ impl HealthRegistry {
     /// Load announce + notify bot tokens from the canonical runtime credential path.
     /// Call once at startup before the axum server begins accepting requests.
     pub async fn init_bot_tokens(&self) {
+        self.reload_bot_tokens_inner(false).await;
+    }
+
+    /// Issue #2047 Finding 11 — operator-triggered token rotation.
+    ///
+    /// Re-read the announce/notify credential files and rebuild the
+    /// `serenity::Http` clients in place. The previous tokens cached in
+    /// `announce_http` / `notify_http` are replaced atomically (per-mutex)
+    /// and the cached user ids are cleared so the next call to
+    /// `utility_bot_user_id` re-derives them against the new token.
+    ///
+    /// Returns a tuple `(announce_loaded, notify_loaded)` so callers can
+    /// surface a clean status. Tokens that fail [`crate::credential::is_valid_bot_name`]
+    /// or whose credential file is absent leave the corresponding HTTP slot
+    /// untouched (caller can decide whether to treat that as an error).
+    pub async fn reload_bot_tokens(&self) -> (bool, bool) {
+        self.reload_bot_tokens_inner(true).await
+    }
+
+    async fn reload_bot_tokens_inner(&self, rotation: bool) -> (bool, bool) {
+        let mut announce_loaded = false;
+        let mut notify_loaded = false;
         if super::runtime_store::agentdesk_root().is_some() {
-            for (bot_name, field) in [
-                ("announce", &self.announce_http),
-                ("notify", &self.notify_http),
+            for (bot_name, http_field, user_id_field, loaded_flag) in [
+                (
+                    "announce",
+                    &self.announce_http,
+                    &self.announce_user_id,
+                    &mut announce_loaded,
+                ),
+                (
+                    "notify",
+                    &self.notify_http,
+                    &self.notify_user_id,
+                    &mut notify_loaded,
+                ),
             ] {
                 if let Some(token) = crate::credential::read_bot_token(bot_name) {
                     let http = Arc::new(serenity::Http::new(&format!("Bot {token}")));
-                    *field.lock().await = Some(http);
+                    *http_field.lock().await = Some(http);
+                    // Invalidate the cached user-id so the next utility call
+                    // re-resolves it via the rotated token; otherwise a stale
+                    // id from a revoked bot account could leak into routing.
+                    *user_id_field.lock().await = None;
+                    *loaded_flag = true;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     let emoji = if bot_name == "announce" {
                         "📢"
                     } else {
                         "🔔"
                     };
+                    let action = if rotation { "reloaded" } else { "loaded" };
                     tracing::info!(
-                        "  [{ts}] {emoji} {bot_name} bot loaded for /api/discord/send routing"
+                        "  [{ts}] {emoji} {bot_name} bot {action} for /api/discord/send routing"
+                    );
+                } else if rotation {
+                    tracing::warn!(
+                        bot = bot_name,
+                        "reload_bot_tokens: credential file missing or invalid; keeping previous client"
                     );
                 }
             }
+        } else if rotation {
+            tracing::warn!(
+                "reload_bot_tokens called before agentdesk runtime root is initialised"
+            );
         }
+        (announce_loaded, notify_loaded)
     }
 
     pub async fn utility_bot_user_id(&self, bot_name: &str) -> Option<u64> {
@@ -1412,14 +1460,20 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
 
     let channel_id = ChannelId::new(channel_id_raw);
 
-    // Validate source is a known agent role_id or internal system source
+    // Validate source is a known agent role_id or internal system source.
+    // Issue #2047 Finding 9 — don't echo the caller-supplied label back in the
+    // response body. That made enumerating the whitelist trivial and gave a
+    // log-injection assist. The full label is preserved in `tracing::warn!`
+    // for operators.
     if !is_allowed_send_source(source) {
+        tracing::warn!(
+            source,
+            bot,
+            "/api/discord/send rejected: source label not allowed for caller class"
+        );
         return (
             "403 Forbidden",
-            format!(
-                r#"{{"ok":false,"error":"unknown source role: {}"}}"#,
-                source
-            ),
+            r#"{"ok":false,"error":"source not allowed for this caller"}"#.to_string(),
         );
     }
 
@@ -1430,10 +1484,30 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
         let routine_parent_hint = routine_thread_parent_hint(pg_pool, channel_id).await;
         let mut authorized = false;
         let mut target_channel_accessible = false;
-        // Try resolving as a thread: fetch channel info and check parent_id
+        // Try resolving as a thread: fetch channel info and check parent_id.
+        //
+        // Issue #2047 Finding 10 — also use the fetched channel name to retry
+        // the byChannelName fallback for the target channel itself. The first
+        // `resolve_role_binding(channel_id, None)` above can only match
+        // `byChannelId` entries; a channel registered with `byChannelName`
+        // only was previously blocked even though it is legitimately mapped.
         if let Ok(http) = resolve_bot_http(registry, bot).await {
             if let Ok(channel) = channel_id.to_channel(&*http).await {
                 target_channel_accessible = true;
+                // `Channel::guild` consumes the value, so derive the target
+                // channel name first via `clone()`; the original `channel`
+                // is then consumed by the thread/parent walk below.
+                let target_name = channel.clone().guild().map(|gc| gc.name.clone());
+                // First: byChannelName retry on the *target* channel itself.
+                if !authorized
+                    && super::settings::resolve_role_binding(
+                        channel_id,
+                        target_name.as_deref(),
+                    )
+                    .is_some()
+                {
+                    authorized = true;
+                }
                 if let Some(guild_channel) = channel.guild() {
                     if let Some(parent_id) = guild_channel.parent_id {
                         if let Some(expected_parent) = routine_parent_hint {
@@ -1505,30 +1579,93 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
     .await
 }
 
+/// Caller-class for `/api/discord/send` and friends.
+///
+/// Issue #2047 Finding 7 — the `source` JSON label was previously a free-form
+/// string that any authenticated caller could set to e.g. `"system"` and have
+/// observability dashboards treat the message as if it were emitted by the
+/// internal automation plane. We now require callers to attest their class via
+/// the `X-AgentDesk-Source` header (or, for backwards compat, by being on the
+/// loopback interface) and only honour `source` labels that match that class.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SendCallerClass {
+    /// In-process dcserver call (loopback peer + matching bearer, or no
+    /// bearer when auth is disabled). Allowed to use any internal label.
+    LoopbackInternal,
+    /// External CLI/agent presenting `X-AgentDesk-Source: cli` and a valid
+    /// bearer token. Restricted to a small set of labels.
+    Cli,
+    /// Browser dashboard with same-origin loopback. Can only attribute
+    /// messages to `dashboard` or to a known agent role id.
+    Dashboard,
+    /// Fallback when no header is provided and the request isn't loopback —
+    /// most restrictive bucket.
+    Unknown,
+}
+
+impl SendCallerClass {
+    /// Parse the `X-AgentDesk-Source` header value (case-insensitive). Returns
+    /// `None` for unknown / empty values so the caller can fall back to
+    /// peer-based inference.
+    pub fn from_header(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "loopback" | "dcserver" | "internal" => Some(Self::LoopbackInternal),
+            "cli" | "agentdesk-cli" => Some(Self::Cli),
+            "dashboard" | "browser" => Some(Self::Dashboard),
+            _ => None,
+        }
+    }
+
+    fn allowed_internal_labels(self) -> &'static [&'static str] {
+        // The 강력 라벨 (`system`, `headless_turn`, …) are loopback-only —
+        // dashboard/cli must not be able to impersonate them.
+        const LOOPBACK_ONLY: &[&str] = &[
+            "kanban-rules",
+            "triage-rules",
+            "review-automation",
+            "auto-queue",
+            "pipeline",
+            "system",
+            "timeouts",
+            "merge-automation",
+            "lifecycle_notifier",
+            "routine-runtime",
+            "headless_turn",
+            "slo_alerter",
+            "auto-queue-monitor",
+            "inventory",
+        ];
+        const CLI_ALLOWED: &[&str] = &["agentdesk-cli", "operator"];
+        const DASHBOARD_ALLOWED: &[&str] = &["dashboard"];
+        match self {
+            SendCallerClass::LoopbackInternal => LOOPBACK_ONLY,
+            SendCallerClass::Cli => CLI_ALLOWED,
+            SendCallerClass::Dashboard => DASHBOARD_ALLOWED,
+            SendCallerClass::Unknown => &[],
+        }
+    }
+}
+
+/// Backward-compatible label gate. New code paths should call
+/// [`is_allowed_send_source_for`] with an explicit caller-class. This wrapper
+/// behaves as if the call came from `LoopbackInternal` so existing in-process
+/// publishers (lifecycle notifier, headless turn, …) keep working without
+/// surface-level rewrites.
 fn is_allowed_send_source(source: &str) -> bool {
-    const INTERNAL_SOURCES: &[&str] = &[
-        "kanban-rules",
-        "triage-rules",
-        "review-automation",
-        "auto-queue",
-        "pipeline",
-        "system",
-        "timeouts",
-        "merge-automation",
-        "dashboard",
-        "lifecycle_notifier",
-        "routine-runtime",
-        "headless_turn",
-        "slo_alerter",
-        "auto-queue-monitor",
-        "inventory",
-    ];
-    INTERNAL_SOURCES.contains(&source) || super::settings::is_known_agent(source)
+    is_allowed_send_source_for(source, SendCallerClass::LoopbackInternal)
+}
+
+/// Issue #2047 Finding 7 — gate the `source` label by caller-class.
+pub fn is_allowed_send_source_for(source: &str, caller: SendCallerClass) -> bool {
+    if super::settings::is_known_agent(source) {
+        return true;
+    }
+    caller.allowed_internal_labels().contains(&source)
 }
 
 #[cfg(test)]
 mod send_source_tests {
-    use super::is_allowed_send_source;
+    use super::{is_allowed_send_source, is_allowed_send_source_for, SendCallerClass};
 
     #[test]
     fn headless_turn_is_allowed_internal_send_source() {
@@ -1539,6 +1676,104 @@ mod send_source_tests {
         assert!(is_allowed_send_source("auto-queue-monitor"));
         assert!(is_allowed_send_source("inventory"));
         assert!(!is_allowed_send_source("not-a-real-source"));
+    }
+
+    #[test]
+    fn dashboard_cannot_impersonate_system_or_headless_turn() {
+        // Issue #2047 Finding 7 — dashboards / browser callers must not be
+        // able to claim 강력 internal labels.
+        assert!(!is_allowed_send_source_for(
+            "system",
+            SendCallerClass::Dashboard
+        ));
+        assert!(!is_allowed_send_source_for(
+            "headless_turn",
+            SendCallerClass::Dashboard
+        ));
+        assert!(!is_allowed_send_source_for(
+            "auto-queue",
+            SendCallerClass::Dashboard
+        ));
+    }
+
+    #[test]
+    fn cli_cannot_impersonate_loopback_only_labels() {
+        assert!(!is_allowed_send_source_for(
+            "system",
+            SendCallerClass::Cli
+        ));
+        assert!(!is_allowed_send_source_for(
+            "kanban-rules",
+            SendCallerClass::Cli
+        ));
+        assert!(is_allowed_send_source_for(
+            "agentdesk-cli",
+            SendCallerClass::Cli
+        ));
+        assert!(is_allowed_send_source_for(
+            "operator",
+            SendCallerClass::Cli
+        ));
+    }
+
+    #[test]
+    fn unknown_caller_class_only_allows_known_agents() {
+        // Without a verified caller class we still let messages through when
+        // the source matches a registered agent role id (the agent identity
+        // itself is the attestation). Strong internal labels are denied.
+        assert!(!is_allowed_send_source_for(
+            "system",
+            SendCallerClass::Unknown
+        ));
+        assert!(!is_allowed_send_source_for(
+            "dashboard",
+            SendCallerClass::Unknown
+        ));
+    }
+
+    #[test]
+    fn loopback_internal_keeps_existing_internal_label_acceptance() {
+        for label in [
+            "kanban-rules",
+            "triage-rules",
+            "review-automation",
+            "auto-queue",
+            "system",
+            "headless_turn",
+            "lifecycle_notifier",
+            "routine-runtime",
+        ] {
+            assert!(
+                is_allowed_send_source_for(label, SendCallerClass::LoopbackInternal),
+                "loopback caller must keep accepting `{label}`"
+            );
+        }
+    }
+
+    #[test]
+    fn from_header_parses_known_caller_classes() {
+        assert_eq!(
+            SendCallerClass::from_header("cli"),
+            Some(SendCallerClass::Cli)
+        );
+        assert_eq!(
+            SendCallerClass::from_header("AgentDesk-CLI"),
+            Some(SendCallerClass::Cli)
+        );
+        assert_eq!(
+            SendCallerClass::from_header("dashboard"),
+            Some(SendCallerClass::Dashboard)
+        );
+        assert_eq!(
+            SendCallerClass::from_header("loopback"),
+            Some(SendCallerClass::LoopbackInternal)
+        );
+        assert_eq!(
+            SendCallerClass::from_header("dcserver"),
+            Some(SendCallerClass::LoopbackInternal)
+        );
+        assert_eq!(SendCallerClass::from_header(""), None);
+        assert_eq!(SendCallerClass::from_header("attacker"), None);
     }
 }
 

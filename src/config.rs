@@ -95,14 +95,30 @@ fn default_credential_notify_dedupe_secs() -> u64 {
     300
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default = "default_host")]
     pub host: String,
-    #[serde(default)]
+    // Issue #2047 Finding 6 — never echo the bearer token via Serialize or Debug.
+    // The struct is reachable through many tracing call sites and JSON dumps, so
+    // the secret is stripped on the wire and replaced with `<redacted>` in Debug.
+    #[serde(default, skip_serializing)]
     pub auth_token: Option<String>,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("port", &self.port)
+            .field("host", &self.host)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -121,10 +137,15 @@ pub struct DiscordConfig {
     pub owner_id: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct BotConfig {
-    #[serde(default)]
+    // Issue #2047 Finding 6 — bot token must never leave the process via
+    // Serialize/Debug. Settings.runtime-config and any future debug log
+    // (`tracing::debug!("{:?}", state.config)`) would otherwise echo the raw
+    // Discord secret. `skip_serializing` drops the field from JSON output and
+    // the manual `Debug` impl below masks the value as `<redacted>`.
+    #[serde(default, skip_serializing)]
     pub token: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
@@ -134,6 +155,18 @@ pub struct BotConfig {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "DiscordBotAuthConfig::is_empty")]
     pub auth: DiscordBotAuthConfig,
+}
+
+impl std::fmt::Debug for BotConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BotConfig")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("description", &self.description)
+            .field("provider", &self.provider)
+            .field("agent", &self.agent)
+            .field("auth", &self.auth)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
