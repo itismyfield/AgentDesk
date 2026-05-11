@@ -282,3 +282,82 @@ test("loadLatestReviewDispatchContext falls back to newest and warns when no rou
   assert.equal(state.logs.warn.length, 1);
   assert.ok(/no review dispatch context matched/.test(state.logs.warn[0]));
 });
+
+// #2051 Finding 26 (P2): when an active review-decision dispatch already exists
+// for the card, an auto-completed review fallback must NOT spawn another one.
+test("review-automation dedupes review-decision dispatches when one is already pending", () => {
+  const { policy, state } = loadPolicy("policies/review-automation.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "review-dispatch-dup",
+            kanban_card_id: "card-dup",
+            dispatch_type: "review",
+            result: JSON.stringify({ auto_completed: true }),
+            context: "{}"
+          }
+        ]
+      },
+      {
+        match: "FROM kanban_cards WHERE id = ?",
+        result: [
+          {
+            assigned_agent_id: "agent-dup",
+            title: "Dup decision card",
+            github_issue_number: 999,
+            status: "review"
+          }
+        ]
+      },
+      // Pre-existing review-decision still pending → must short-circuit.
+      {
+        match: "AND dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched')",
+        result: [{ id: "existing-review-decision" }]
+      }
+    ])
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "review-dispatch-dup" });
+
+  assert.equal(state.dispatchCreates.length, 0);
+  assert.ok(state.logs.info.some(function (m) {
+    return m.indexOf("already has an active review-decision dispatch") >= 0;
+  }));
+});
+
+// #2051 Finding 21 (P2): max-round guard runs BEFORE recordEntry so the round
+// is not committed when the cap has been hit. Reopen recovery depends on this:
+// the card keeps its previous review_round and can resume.
+test("review-automation skips recordEntry when shouldAdvanceRound would exceed max_review_rounds", () => {
+  const { policy, state } = loadPolicy("policies/review-automation.js", {
+    cards: {
+      "card-cap": {
+        id: "card-cap",
+        status: "review",
+        review_status: null,
+        assigned_agent_id: "agent-cap"
+      }
+    },
+    counterChannels: {
+      "agent-cap": "discord://counter-cap"
+    },
+    config: { max_review_rounds: 3 },
+    reviewEntryContext: {
+      current_round: 3,
+      completed_work_count: 4,
+      should_advance_round: true,
+      next_round: 4
+    }
+  });
+
+  policy.onReviewEnter({ card_id: "card-cap" });
+
+  // recordEntry must NOT have been called — the new round (4) was never committed.
+  assert.equal(state.reviewRecordCalls.length, 0);
+  // Manual intervention must have been raised so a reopen can resume cleanly.
+  assert.equal(state.manualInterventions.length, 1);
+  assert.equal(state.manualInterventions[0].cardId, "card-cap");
+  assert.ok(/Max review rounds/.test(state.manualInterventions[0].reason));
+});
