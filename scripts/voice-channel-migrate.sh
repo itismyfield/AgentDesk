@@ -335,8 +335,11 @@ replace_hardcoded_ids() {
     echo "skip hardcoded id replacement"
     return 0
   fi
+  # mapfile -t roots < <(hardcoded_roots) is bash 4+ only; macOS ships bash 3.2.
   local roots=()
-  mapfile -t roots < <(hardcoded_roots)
+  while IFS= read -r _r; do
+    roots+=("$_r")
+  done < <(hardcoded_roots)
   ruby -e '
     from_id, to_id, *roots = ARGV
     timestamp = Time.now.utc.strftime("%Y%m%d%H%M%S")
@@ -396,8 +399,11 @@ update_db_ids() {
 
 scan_hardcoded_ids() {
   local channel_id="$1"
+  # mapfile is bash 4+ only; portable read loop for macOS bash 3.2.
   local roots=()
-  mapfile -t roots < <(hardcoded_roots)
+  while IFS= read -r _r; do
+    roots+=("$_r")
+  done < <(hardcoded_roots)
   echo "hardcoded-id scan for $channel_id"
   local found="false"
   for root in "${roots[@]}"; do
