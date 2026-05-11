@@ -16,6 +16,7 @@ SKIP_DISCORD="false"
 SKIP_DB="false"
 SKIP_ARCHIVE="false"
 SKIP_HARDCODED="false"
+SKIP_PERMISSIONS="false"
 ROLLBACK="false"
 
 usage() {
@@ -41,6 +42,7 @@ Options:
   --skip-db                  Do not update the agents DB materialization.
   --skip-archive             Do not rename/move/readonly the old text channel.
   --skip-hardcoded           Do not replace old ids in release prompts, memories, and skills.
+  --skip-permissions         Do not grant CONNECT/SPEAK/USE_VAD to dcserver bots on the new voice channel (#2053).
   --confirm                  Required for --apply.
   -h, --help                 Show this help.
 
@@ -68,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --skip-db) SKIP_DB="true" ;;
     --skip-archive) SKIP_ARCHIVE="true" ;;
     --skip-hardcoded) SKIP_HARDCODED="true" ;;
+    --skip-permissions) SKIP_PERMISSIONS="true" ;;
     --confirm) CONFIRM="true" ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 64 ;;
@@ -411,12 +414,92 @@ scan_hardcoded_ids() {
   fi
 }
 
+# #2053: enumerate dcserver bot tokens from agentdesk.yaml so we can grant
+# CONNECT/SPEAK/USE_VAD overwrites on the new voice channel. Tokens stay only
+# in the local subshell — we resolve each token to its bot user id via the
+# Discord /users/@me endpoint instead of trying to parse the JWT-like token.
+bot_tokens_tsv() {
+  ruby -ryaml -e '
+    config_path = ARGV[0]
+    cfg = YAML.load_file(config_path)
+    bots = cfg.dig("discord", "bots") || {}
+    bots.each do |bot_name, bot_cfg|
+      next unless bot_cfg.is_a?(Hash)
+      token = bot_cfg["token"].to_s
+      next if token.empty?
+      puts [bot_name, token].join("\t")
+    end
+  ' "$CONFIG_PATH"
+}
+
+grant_voice_permissions() {
+  local channel_id="$1"
+  if [[ "$SKIP_PERMISSIONS" == "true" ]]; then
+    echo "skip voice permission grant"
+    return 0
+  fi
+  if [[ "$SKIP_DISCORD" == "true" ]]; then
+    echo "skip voice permission grant (--skip-discord set)"
+    return 0
+  fi
+  if [[ -z "$channel_id" ]]; then
+    echo "skip voice permission grant (empty channel id)" >&2
+    return 0
+  fi
+
+  # Allow bits: CONNECT (0x100000) + SPEAK (0x200000) + USE_VAD (0x2000000)
+  # = 1048576 + 2097152 + 33554432 = 36700160
+  local allow_bits="36700160"
+  local granted=0
+  local skipped=0
+  while IFS=$'\t' read -r bot_name bot_token; do
+    [[ -z "$bot_token" ]] && continue
+    local bot_user_id
+    if ! bot_user_id="$(
+      curl -fsS -X GET "https://discord.com/api/v10/users/@me" \
+        -H "Authorization: Bot $bot_token" 2>/dev/null | jq -r '.id // empty'
+    )"; then
+      echo "warn: failed to resolve user id for bot '$bot_name'; skipping permission grant" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if [[ -z "$bot_user_id" || "$bot_user_id" == "null" ]]; then
+      echo "warn: empty user id for bot '$bot_name'; skipping permission grant" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    local payload
+    payload="$(jq -nc --arg allow "$allow_bits" '{type:1, allow:$allow, deny:"0"}')"
+    # Use this bot's own token so we don't require an admin token; bots can
+    # always edit overwrites for themselves on channels they can see.
+    if curl -fsS -X PUT \
+        "https://discord.com/api/v10/channels/$channel_id/permissions/$bot_user_id" \
+        -H "Authorization: Bot $bot_token" \
+        -H "Content-Type: application/json" \
+        -d "$payload" >/dev/null 2>&1; then
+      echo "granted CONNECT/SPEAK/USE_VAD to bot '$bot_name' ($bot_user_id) on channel $channel_id"
+      granted=$((granted + 1))
+    else
+      echo "warn: failed to grant voice permissions for bot '$bot_name' ($bot_user_id) on channel $channel_id" >&2
+      skipped=$((skipped + 1))
+    fi
+  done < <(bot_tokens_tsv)
+  echo "voice permission grant summary: granted=$granted, skipped=$skipped, channel=$channel_id"
+}
+
 if [[ "$MODE" == "dry-run" ]]; then
   print_plan
   echo
   printf '%s\n' "$selected_targets" | awk -F '\t' '{print $3}' | sort -u | while read -r channel_id; do
     [[ -n "$channel_id" ]] && scan_hardcoded_ids "$channel_id"
   done
+  if [[ "$SKIP_PERMISSIONS" == "true" ]]; then
+    echo
+    echo "dry-run note: voice permission grant is disabled (--skip-permissions)"
+  else
+    echo
+    echo "dry-run note: --apply will grant CONNECT/SPEAK/USE_VAD to each dcserver bot on the new voice channel"
+  fi
   exit 0
 fi
 
@@ -444,6 +527,14 @@ update_db_ids "$from_id" "$to_id"
 if [[ "$ROLLBACK" != "true" && "$SKIP_DISCORD" != "true" && "$SKIP_ARCHIVE" != "true" ]]; then
   archive_text_channel "$OLD_CHANNEL_ID"
   echo "archived old text channel: $OLD_CHANNEL_ID"
+fi
+
+# #2053: auto-grant CONNECT/SPEAK/USE_VAD to dcserver bots on the new voice
+# channel so songbird auto-join doesn't fail with "Missing Permissions".
+# Skipped on rollback (we're putting things back to a text channel) and when
+# --skip-permissions / --skip-discord is set.
+if [[ "$ROLLBACK" != "true" ]]; then
+  grant_voice_permissions "$to_id"
 fi
 
 echo "completed: $from_id -> $to_id"
