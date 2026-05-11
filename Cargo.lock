@@ -78,6 +78,7 @@ dependencies = [
  "sha2",
  "songbird",
  "sqlx",
+ "subtle",
  "tempfile",
  "textwrap",
  "thiserror 2.0.18",
