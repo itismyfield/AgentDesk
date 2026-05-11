@@ -248,6 +248,20 @@ pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Str
         .begin()
         .await
         .map_err(|error| format!("begin postgres complete auto-queue run {run_id}: {error}"))?;
+    // #2048 F17: even an explicit "manual complete" call must drop any
+    // pending/failed phase-gate rows AND release the run's slot bindings.
+    // Otherwise a completed run leaves stale phase_gate rows that next
+    // restore/audit treats as still-pending, plus zombie slot assignments
+    // that block other runs from picking up the slot. We perform the
+    // delete + release inside the same transaction so the operation is
+    // atomic with the status flip.
+    sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = $1")
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!("delete phase gates for completed run {run_id}: {error}")
+        })?;
     let updated = sqlx::query(
         "UPDATE auto_queue_runs
          SET status = 'completed',
@@ -266,6 +280,10 @@ pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Str
         })?;
         return Ok(false);
     }
+
+    release_run_slots_on_pg_tx(&mut tx, run_id)
+        .await
+        .map_err(|error| format!("release slots for completed run {run_id}: {error}"))?;
 
     queue_run_completion_notify_on_pg(&mut tx, run_id).await?;
     tx.commit()

@@ -41,13 +41,18 @@ pub async fn ensure_agent_slot_pool_rows_pg(
 
 pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
+        // #2048 F14: include `restoring` so a run in mid-restore does not
+        // have its slots yanked by a concurrent activate call. `restoring`
+        // is a transient holding status (see fsm::apply_restore_state_changes_pg)
+        // and must be treated as held-open for slot purposes.
         "UPDATE auto_queue_slots
          SET assigned_run_id = NULL,
              assigned_thread_group = NULL,
              updated_at = NOW()
          WHERE assigned_run_id IS NOT NULL
            AND assigned_run_id NOT IN (
-               SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
+               SELECT id FROM auto_queue_runs
+               WHERE status IN ('active', 'paused', 'restoring')
            )",
     )
     .execute(pool)
@@ -136,13 +141,19 @@ pub async fn slot_has_active_dispatch_excluding_pg(
     exclude_dispatch_id: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
     let exclude_id = exclude_dispatch_id.unwrap_or("");
+    // #2048 F5: paused/cancelled-run dispatched entries no longer block the
+    // slot — their dispatches are being cancelled and the slot should be
+    // reusable. Without the join, paused-run entries kept the slot
+    // permanently "active" until `clear_inactive_slot_assignments_pg` ran.
     let auto_queue_active = sqlx::query_scalar::<_, bool>(
         "SELECT COUNT(*) > 0
-         FROM auto_queue_entries
-         WHERE agent_id = $1
-           AND slot_index = $2
-           AND status = 'dispatched'
-           AND COALESCE(dispatch_id, '') != $3",
+         FROM auto_queue_entries e
+         LEFT JOIN auto_queue_runs r ON r.id = e.run_id
+         WHERE e.agent_id = $1
+           AND e.slot_index = $2
+           AND e.status = 'dispatched'
+           AND COALESCE(e.dispatch_id, '') != $3
+           AND COALESCE(r.status, 'active') NOT IN ('paused', 'cancelled')",
     )
     .bind(agent_id)
     .bind(slot_index)

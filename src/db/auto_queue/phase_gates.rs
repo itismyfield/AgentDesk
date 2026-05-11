@@ -31,6 +31,10 @@ pub async fn current_batch_phase_pg(
     //   active `review` / `review-decision` rows added in
     //   migrations/postgres/0001_initial_schema.sql; if production-scale runs
     //   show planner regressions, add a dedicated covering index.
+    // #2048 F21: skip done-entry rows whose linked card has been deleted
+    // (orphan reference). Without `c.id IS NOT NULL` the LEFT JOIN yields
+    // a NULL row that COALESCE turns into the 'unknown' bucket — which the
+    // NOT IN check treats as still-active, locking the phase forever.
     sqlx::query_scalar::<_, Option<i64>>(
         "SELECT MIN(COALESCE(e.batch_phase, 0))::BIGINT
          FROM auto_queue_entries e
@@ -41,6 +45,7 @@ pub async fn current_batch_phase_pg(
                OR (
                    e.status = 'done'
                    AND e.kanban_card_id IS NOT NULL
+                   AND c.id IS NOT NULL
                    AND (
                        COALESCE(c.status, 'unknown') NOT IN ('done', 'cancelled', 'failed')
                        OR EXISTS (
@@ -780,12 +785,19 @@ fn is_js_truthy(value: &Value) -> bool {
 /// trim whitespace before comparing — only lowercases via `String(...)`. We
 /// match that exactly so a status like `" pass "` is rejected here and in JS.
 fn js_check_entry_is_pass(entry: &Value) -> bool {
+    // #2048 F12: mirror JS `entry.status || entry.result` truthiness. JS
+    // treats an empty string as falsy and falls through to `entry.result`;
+    // the previous Rust port short-circuited on `status` key presence even
+    // when its value was `""`, causing a Rust→JS verdict divergence. Now
+    // we ignore empty strings on the `status` side and fall back to
+    // `result` just like JS.
     let raw = match entry {
         Value::String(text) => Some(text.as_str()),
         Value::Object(map) => map
             .get("status")
-            .or_else(|| map.get("result"))
-            .and_then(Value::as_str),
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .or_else(|| map.get("result").and_then(Value::as_str)),
         _ => None,
     };
     raw.map(|status| {

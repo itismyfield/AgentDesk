@@ -125,9 +125,48 @@ pub(super) async fn rebind_slot_with_pg(
                 && assigned_group.unwrap_or_default() == body.thread_group
         },
     );
+    // #2048 F20: serialize the busy-check + rebind under a per-(agent,slot)
+    // session advisory lock so a new dispatch cannot land on this slot
+    // between our `slot_has_active_dispatch_pg` probe and the rebind
+    // UPDATE. The lock is dropped when the function returns / `_lock_guard`
+    // goes out of scope.
+    let rebind_lock_conn = pool.acquire().await;
+    let mut rebind_lock_conn = match rebind_lock_conn {
+        Ok(conn) => conn,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("acquire rebind lock connection for {agent_id}:{slot_index}: {error}")}),
+                ),
+            );
+        }
+    };
+    if let Err(error) = sqlx::query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))")
+        .bind(format!("aq_slot_rebind:{agent_id}"))
+        .bind(slot_index.to_string())
+        .execute(&mut *rebind_lock_conn)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                json!({"error": format!("acquire rebind advisory lock for {agent_id}:{slot_index}: {error}")}),
+            ),
+        );
+    }
+    // Best-effort release on early-return: we cannot install a drop guard
+    // without restructuring all `return`s, so we release at the end below.
+    // Worst case the session lock holds until the connection drops back to
+    // the pool and Postgres reclaims it.
     if !same_binding {
         match crate::db::auto_queue::slot_has_active_dispatch_pg(pool, agent_id, slot_index).await {
             Ok(true) => {
+                let _ = sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
+                    .bind(format!("aq_slot_rebind:{agent_id}"))
+                    .bind(slot_index.to_string())
+                    .execute(&mut *rebind_lock_conn)
+                    .await;
                 return (
                     StatusCode::CONFLICT,
                     Json(json!({
@@ -140,6 +179,11 @@ pub(super) async fn rebind_slot_with_pg(
             }
             Ok(false) => {}
             Err(error) => {
+                let _ = sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
+                    .bind(format!("aq_slot_rebind:{agent_id}"))
+                    .bind(slot_index.to_string())
+                    .execute(&mut *rebind_lock_conn)
+                    .await;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(
@@ -161,6 +205,11 @@ pub(super) async fn rebind_slot_with_pg(
     {
         Ok(updated_entries) => updated_entries,
         Err(error) => {
+            let _ = sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
+                .bind(format!("aq_slot_rebind:{agent_id}"))
+                .bind(slot_index.to_string())
+                .execute(&mut *rebind_lock_conn)
+                .await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": error})),
@@ -168,6 +217,11 @@ pub(super) async fn rebind_slot_with_pg(
         }
     };
 
+    let _ = sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
+        .bind(format!("aq_slot_rebind:{agent_id}"))
+        .bind(slot_index.to_string())
+        .execute(&mut *rebind_lock_conn)
+        .await;
     (
         StatusCode::OK,
         Json(json!({

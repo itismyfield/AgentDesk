@@ -71,6 +71,12 @@ async fn create_activate_dispatch_pg_inner(
     // the owning auto-queue run is paused. force_transition uses a separate
     // path (kanban_cards/{id}/transition) and is not gated here, matching
     // the "circuit breaker" intent of pause.
+    //
+    // #2048 F1: the pool-scoped probe is informational only; the
+    // authoritative check is re-evaluated inside the activate transaction
+    // below under a per-run advisory lock that `force_pause_with_pg` (F2)
+    // also acquires before flipping status. The early probe still lets us
+    // fail fast on the common case.
     let paused_run_id = sqlx::query_scalar::<_, String>(
         "SELECT r.id
          FROM auto_queue_entries e
@@ -314,6 +320,47 @@ async fn create_activate_dispatch_pg_inner(
         .begin()
         .await
         .map_err(|error| format!("open postgres activate dispatch transaction: {error}"))?;
+
+    // #2048 F1: re-check paused-run state INSIDE the transaction under a
+    // per-run advisory lock. The earlier pool-scoped probe is TOCTOU-prone:
+    // `force_pause_with_pg` or `pause_run_on_pg` can flip the run to
+    // `paused` between probe and INSERT, breaking the #1564 RC10 circuit
+    // breaker. `force_pause_with_pg` (F2) acquires the same lock before
+    // flipping status, so the post-lock re-check observes the committed
+    // pause state if the race would otherwise have slipped through.
+    let paused_run_id_locked = sqlx::query_scalar::<_, String>(
+        "WITH candidate_runs AS (
+             SELECT r.id, r.status, MAX(e.created_at) AS latest_created_at
+             FROM auto_queue_entries e
+             JOIN auto_queue_runs r ON r.id = e.run_id
+             WHERE e.kanban_card_id = $1
+             GROUP BY r.id, r.status
+         ),
+         locked AS (
+             SELECT id,
+                    status,
+                    latest_created_at,
+                    pg_advisory_xact_lock(hashtext('aq_run:' || id)) AS _lock
+             FROM candidate_runs
+         )
+         SELECT id
+         FROM locked
+         WHERE status = 'paused'
+         ORDER BY latest_created_at DESC NULLS LAST
+         LIMIT 1",
+    )
+    .bind(card_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| {
+        format!("recheck paused run for {card_id} inside dispatch tx: {error}")
+    })?;
+    if let Some(run_id) = paused_run_id_locked {
+        tx.rollback().await.ok();
+        return Err(format!(
+            "auto-queue run {run_id} paused: refusing to create {dispatch_type} dispatch for card {card_id}"
+        ));
+    }
 
     if let Some(attachment) = entry_attachment.as_ref() {
         let row = sqlx::query(

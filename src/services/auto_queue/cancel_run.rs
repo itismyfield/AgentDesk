@@ -123,6 +123,12 @@ pub(crate) async fn load_live_dispatch_ids_for_runs_pg(
         return Ok(Vec::new());
     }
 
+    // #2048 F13: guard the jsonb cast against malformed `context` rows.
+    // A single corrupt context (legacy migration / direct DB edit) would
+    // otherwise crash the WHOLE cancel/force-pause query with a JSON parse
+    // error, leaving the operator unable to stop the auto-queue. We probe
+    // the leading non-whitespace char before casting; anything that does
+    // not start with `{` or `[` is treated as non-JSON and yields NULL.
     sqlx::query_scalar(
         "SELECT DISTINCT td.id
          FROM task_dispatches td
@@ -143,6 +149,7 @@ pub(crate) async fn load_live_dispatch_ids_for_runs_pg(
                OR (
                    CASE
                        WHEN td.context IS NULL OR BTRIM(td.context) = '' THEN NULL
+                       WHEN substring(BTRIM(td.context) FROM 1 FOR 1) NOT IN ('{', '[') THEN NULL
                        ELSE (td.context::jsonb #>> '{phase_gate,run_id}')
                    END
                ) = ANY($1)
@@ -403,16 +410,27 @@ async fn transition_entry_to_skipped_pg(
         .await
         .map_err(|error| format!("begin postgres entry skip transaction {entry_id}: {error}"))?;
 
-    let current_status = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT status
+    let current_row = sqlx::query(
+        "SELECT status, dispatch_id
          FROM auto_queue_entries
          WHERE id = $1",
     )
     .bind(entry_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|error| format!("load postgres entry status {entry_id}: {error}"))?
-    .flatten();
+    .map_err(|error| format!("load postgres entry status {entry_id}: {error}"))?;
+    let Some(current_row) = current_row else {
+        tx.rollback()
+            .await
+            .map_err(|error| format!("rollback missing postgres entry {entry_id}: {error}"))?;
+        return Ok(false);
+    };
+    let current_status: Option<String> = current_row
+        .try_get("status")
+        .map_err(|error| format!("decode postgres entry status {entry_id}: {error}"))?;
+    let previous_dispatch_id: Option<String> = current_row
+        .try_get("dispatch_id")
+        .map_err(|error| format!("decode postgres entry dispatch_id {entry_id}: {error}"))?;
     let Some(current_status) = current_status else {
         tx.rollback()
             .await
@@ -427,6 +445,27 @@ async fn transition_entry_to_skipped_pg(
             format!("rollback non-skippable postgres entry {entry_id}: {error}")
         })?;
         return Ok(false);
+    }
+
+    // #2048 F15: preserve dispatch history before nulling the pointer.
+    // `auto_queue_entry_dispatch_history` is the canonical join table for
+    // entry↔dispatch correlation in audits/dashboards. Clearing dispatch_id
+    // without inserting here makes the cancelled entry's dispatch lineage
+    // unrecoverable post-cancel.
+    if let Some(previous_dispatch_id) = previous_dispatch_id.as_deref() {
+        let _ = sqlx::query(
+            "INSERT INTO auto_queue_entry_dispatch_history (
+                 entry_id, dispatch_id, trigger_source
+             )
+             SELECT $1, $2, $3
+             WHERE EXISTS (SELECT 1 FROM task_dispatches WHERE id = $2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(entry_id)
+        .bind(previous_dispatch_id)
+        .bind(trigger_source)
+        .execute(&mut *tx)
+        .await;
     }
 
     let changed = sqlx::query(
@@ -825,6 +864,13 @@ pub(crate) async fn cancel_selected_runs_with_pg(
 ) -> Result<Value, String> {
     let rollback_candidate_card_ids =
         load_dispatched_card_ids_for_runs_pg(pool, target_run_ids).await?;
+    // #2048 F7: delete phase-gate rows BEFORE cancelling live dispatches.
+    // Otherwise the dispatch cancel path fires `reconcile_phase_gate_for_
+    // terminal_dispatch_on_pg_tx`, which marks the gate `failed` and may
+    // trigger spurious operator alerts (handlePhaseGateFailure /
+    // notifyHumanAlert) while the cancel is still in flight. Deleting the
+    // rows first means the reconciliation step finds no row to mark.
+    let deleted_phase_gates = delete_phase_gate_rows_for_runs_pg(pool, target_run_ids).await?;
     let cleanup = cancel_and_release_runs_with_pg(
         health_registry,
         pool,
@@ -833,7 +879,6 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         Some("run_cancel_orphan_self_heal"),
     )
     .await?;
-    let deleted_phase_gates = delete_phase_gate_rows_for_runs_pg(pool, target_run_ids).await?;
 
     let cancelled_runs = if target_run_ids.is_empty() {
         0

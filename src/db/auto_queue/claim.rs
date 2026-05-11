@@ -227,13 +227,19 @@ async fn bind_slot_index_for_group_entries_pg(
     thread_group: i64,
     slot_index: i64,
 ) -> Result<u64, sqlx::Error> {
+    // #2048 F10: only bind PENDING entries. Dispatched entries already
+    // have their slot_index pinned to the live dispatch row's context
+    // (`context.slot_index`); rewriting it here would desync the entry
+    // from its dispatch and cause observability/cleanup to point at the
+    // wrong slot. New entries that share the group still pick up the
+    // newly chosen slot via this query, since they enter as 'pending'.
     let result = sqlx::query(
         "UPDATE auto_queue_entries
          SET slot_index = $1
          WHERE run_id = $2
            AND agent_id = $3
            AND COALESCE(thread_group, 0) = $4
-           AND status IN ('pending', 'dispatched')
+           AND status = 'pending'
            AND (slot_index IS NULL OR slot_index != $1)",
     )
     .bind(slot_index)
@@ -328,6 +334,50 @@ pub async fn allocate_slot_for_group_agent_pg(
             format!("prepare postgres slot rows for run {run_id} agent {agent_id}: {error}")
         })?;
 
+    // #2048 F3: serialize the whole allocation per-agent against concurrent
+    // calls. The compare-and-set pattern across "existing → reusable → free"
+    // probe + UPDATE + busy-recheck is racy — two calls for the same agent
+    // could both observe the same slot, claim it, and bind the same
+    // `slot_index` on different entries before either's post-claim busy
+    // probe fires. An agent-scoped session advisory lock pinned to a
+    // dedicated connection orders the probe+claim without changing
+    // wire-level UPDATE semantics for any single step.
+    let mut conn = pool.acquire().await.map_err(|error| {
+        format!("acquire slot allocation connection for agent {agent_id}: {error}")
+    })?;
+    sqlx::query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))")
+        .bind("aq_slot_alloc")
+        .bind(agent_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|error| {
+            format!("acquire slot allocation advisory lock for agent {agent_id}: {error}")
+        })?;
+    let result =
+        allocate_slot_for_group_agent_pg_inner(pool, run_id, thread_group, agent_id).await;
+    if let Err(unlock_error) =
+        sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
+            .bind("aq_slot_alloc")
+            .bind(agent_id)
+            .execute(&mut *conn)
+            .await
+    {
+        tracing::warn!(
+            agent_id,
+            error = %unlock_error,
+            "[auto-queue] failed to release slot allocation advisory lock"
+        );
+    }
+    drop(conn);
+    result
+}
+
+async fn allocate_slot_for_group_agent_pg_inner(
+    pool: &PgPool,
+    run_id: &str,
+    thread_group: i64,
+    agent_id: &str,
+) -> Result<Option<SlotAllocation>, String> {
     for attempt in 1..=SLOT_ALLOCATION_MAX_RETRIES {
         let existing = sqlx::query_scalar::<_, i64>(
             "SELECT slot_index::BIGINT

@@ -174,23 +174,10 @@ pub(super) async fn count_live_dispatches_for_runs_pg(
         .map(|rows| rows.len() as i64)
 }
 
-pub(super) async fn cancel_live_dispatches_for_runs_pg(
-    pool: &sqlx::PgPool,
-    run_ids: &[String],
-    reason: &str,
-) -> Result<usize, String> {
-    let dispatch_ids = load_live_dispatch_ids_for_runs_pg(pool, run_ids).await?;
-    let mut cancelled = 0usize;
-    for dispatch_id in dispatch_ids {
-        cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
-            pool,
-            &dispatch_id,
-            Some(reason),
-        )
-        .await?;
-    }
-    Ok(cancelled)
-}
+// #2048 F6: dead duplicate of `cancel_run::cancel_live_dispatches_for_runs_pg`
+// removed. The cancel_run.rs implementation is the single authoritative
+// path (it uses the queue-sync-skipping `set_dispatch_status_*` variant);
+// the legacy command.rs version was uncalled but tempted future drift.
 
 pub(super) async fn clear_sessions_for_dispatches_pg(
     pool: &sqlx::PgPool,
@@ -661,15 +648,39 @@ pub(super) async fn reorder_with_pg(body: &ReorderBody, pool: &sqlx::PgPool) -> 
         .begin()
         .await
         .map_err(|error| format!("begin reorder transaction: {error}"))?;
+    // #2048 F19: when a `body.agent_id` is provided we must NOT renumber
+    // entries belonging to other agents in the same run. `reorder_entry_ids`
+    // already filters its output to the scoped set, but the UPDATE itself
+    // needs the same scope guard so a stale set member (e.g. an entry that
+    // changed agent between load and update) cannot leak the renumber into
+    // another agent's queue. Without agent_id scope, the global-run reorder
+    // path remains.
     for (rank, id) in reordered_ids.iter().enumerate() {
-        sqlx::query("UPDATE auto_queue_entries SET priority_rank = $1 WHERE id = $2")
+        if let Some(agent_id) = body.agent_id.as_deref() {
+            sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET priority_rank = $1
+                 WHERE id = $2
+                   AND agent_id = $3",
+            )
             .bind(rank as i64)
             .bind(id)
+            .bind(agent_id)
             .execute(&mut *tx)
             .await
             .map_err(|error| {
                 format!("update auto_queue_entries priority_rank for {id}: {error}")
             })?;
+        } else {
+            sqlx::query("UPDATE auto_queue_entries SET priority_rank = $1 WHERE id = $2")
+                .bind(rank as i64)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    format!("update auto_queue_entries priority_rank for {id}: {error}")
+                })?;
+        }
     }
     tx.commit()
         .await
@@ -703,13 +714,59 @@ pub(super) async fn force_pause_with_pg(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &sqlx::PgPool,
 ) -> Result<serde_json::Value, String> {
-    let active_run_ids =
-        crate::services::auto_queue::cancel_run::load_run_ids_with_status_pg(pool, &["active"])
-            .await?;
+    // #2048 F2: capture the run set AND flip them to `paused` in a single
+    // transaction, taking the same per-run advisory lock that
+    // `create_activate_dispatch_pg_inner` (F1) uses for its paused-run
+    // re-check. This closes two races:
+    //   1. runs that became `active` AFTER our snapshot were previously
+    //      also flipped to `paused` by a broad `WHERE status='active'`
+    //      UPDATE without being included in cleanup, leaving zombie live
+    //      dispatches on a paused run.
+    //   2. follow-up dispatches created concurrently on these runs went
+    //      uncancelled because cleanup operated on a stale run set.
+    // After this, cleanup runs on exactly the run set we paused, and any
+    // concurrent dispatch-create path observes `paused` under the lock and
+    // refuses to insert.
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin force_pause transaction: {error}"))?;
+    let pause_target_ids: Vec<String> = sqlx::query_scalar::<_, String>(
+        "WITH active_runs AS (
+             SELECT id
+             FROM auto_queue_runs
+             WHERE status = 'active'
+             ORDER BY created_at ASC, id ASC
+         ),
+         locked AS (
+             SELECT id,
+                    pg_advisory_xact_lock(hashtext('aq_run:' || id)) AS _lock
+             FROM active_runs
+         ),
+         flipped AS (
+             UPDATE auto_queue_runs r
+             SET status = 'paused',
+                 completed_at = NULL
+             FROM locked l
+             WHERE r.id = l.id
+               AND r.status = 'active'
+             RETURNING r.id
+         )
+         SELECT id FROM flipped",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("flip active runs to paused for force_pause: {error}"))?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit force_pause flip transaction: {error}"))?;
+
+    let paused = pause_target_ids.len();
+
     let cleanup = crate::services::auto_queue::cancel_run::cancel_and_release_runs_with_pg(
         health_registry,
         pool,
-        &active_run_ids,
+        &pause_target_ids,
         "auto_queue_pause",
         Some("run_pause_orphan_self_heal"),
     )
@@ -717,26 +774,16 @@ pub(super) async fn force_pause_with_pg(
     let _deleted_phase_gates =
         crate::services::auto_queue::cancel_run::delete_phase_gate_rows_for_runs_pg(
             pool,
-            &active_run_ids,
+            &pause_target_ids,
         )
         .await?;
     let _skipped_entries =
         crate::services::auto_queue::cancel_run::skip_dispatched_entries_for_runs_pg(
             pool,
-            &active_run_ids,
+            &pause_target_ids,
             "run_pause",
         )
         .await?;
-    let paused = sqlx::query(
-        "UPDATE auto_queue_runs
-         SET status = 'paused',
-             completed_at = NULL
-         WHERE status = 'active'",
-    )
-    .execute(pool)
-    .await
-    .map_err(|error| format!("pause postgres auto_queue_runs: {error}"))?
-    .rows_affected() as usize;
 
     let mut response = json!({
         "ok": true,

@@ -59,6 +59,39 @@ pub(crate) async fn activate_with_deps_pg(
         }
     };
     let run_log_ctx = AutoQueueLogContext::new().run(&run_id);
+    // #2048 F4: serialize per-run activate so concurrent
+    // `POST /api/queue/activate` and `policy::activateRun` invocations cannot
+    // both observe the same `active_turn_count` snapshot and each create
+    // `(max_concurrent_threads - N)` dispatches, exceeding the cap. Lock is
+    // session-scoped, pinned to a dedicated connection so it survives the
+    // multi-step pool-based loop. A drop guard releases the lock on every
+    // early-return path.
+    let activate_lock_conn_result = pool.acquire().await;
+    let mut activate_lock_conn = match activate_lock_conn_result {
+        Ok(conn) => conn,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("acquire activate lock connection for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
+    if let Err(error) = sqlx::query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))")
+        .bind("aq_activate")
+        .bind(&run_id)
+        .execute(&mut *activate_lock_conn)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                json!({"error": format!("acquire activate advisory lock for {run_id}: {error}")}),
+            ),
+        );
+    }
+    let _activate_lock_guard = ActivateLockReleaseGuard::new(activate_lock_conn, run_id.clone());
     if !active_only
         && let Err(error) = sqlx::query(
             "UPDATE auto_queue_runs
@@ -105,10 +138,15 @@ pub(crate) async fn activate_with_deps_pg(
     };
     if entry_count == 0 {
         if let Err(error) = sqlx::query(
+            // #2048 F18: only auto-complete runs that are still active /
+            // promotable. A caller passing a cancelled/completed run_id
+            // should not flip its status — only the explicit cancel/complete
+            // paths may finalize. The activate path is best-effort.
             "UPDATE auto_queue_runs
              SET status = 'completed',
                  completed_at = NOW()
-             WHERE id = $1",
+             WHERE id = $1
+               AND status IN ('active', 'paused', 'generated', 'pending')",
         )
         .bind(&run_id)
         .execute(pool)
@@ -465,10 +503,32 @@ pub(crate) async fn activate_with_deps_pg(
 
     let mut dispatched_groups_this_activate = 0_i64;
     for group in &groups_to_dispatch {
-        // #2034: cap on TOTAL active turns (impl + review + rework + create-pr),
-        // not just impl thread groups. active_turn_count already excludes
-        // phase-gate sidecar dispatches. dispatched_groups_this_activate
-        // increments once per new impl turn created in this call.
+        // #2034 + #2048 F4: cap on TOTAL active turns. Refresh from DB at
+        // every iteration so policy-driven follow-ups (review-decision,
+        // rework, create-pr) created between iterations are seen. The
+        // per-run advisory lock prevents concurrent activate from
+        // interleaving; mid-loop turn increase comes only from these
+        // follow-up paths.
+        let active_turn_count_now = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM task_dispatches d
+             WHERE d.status IN ('pending', 'dispatched')
+               AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+               AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
+               AND EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   WHERE e.run_id = $1
+                     AND e.agent_id = d.to_agent_id
+               )",
+        )
+        .bind(&run_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(active_turn_count + dispatched_groups_this_activate);
+        if active_turn_count_now >= max_concurrent {
+            break;
+        }
         if (active_turn_count + dispatched_groups_this_activate) >= max_concurrent {
             break;
         }

@@ -187,14 +187,22 @@ pub async fn slot_has_active_dispatch_excluding_pg(
 ) -> Result<bool, String> {
     let exclude_id = exclude_dispatch_id.unwrap_or("");
     let exclude_entry_id = exclude_entry_id.unwrap_or("");
+    // #2048 F5 + F8: align with claim.rs `active_dispatch_slot_guard_sql`.
+    // (1) Paused/cancelled-run entries no longer block — their dispatches
+    //     are being cancelled. (2) review / review-decision / create-pr
+    //     dispatches only block when a live session is attached. Slot reset
+    //     and slot allocation must agree; before this fix operators could
+    //     not reset slots that allocation already treated as free.
     let auto_queue_active: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)
-         FROM auto_queue_entries
-         WHERE agent_id = $1
-           AND slot_index = $2
-           AND status = 'dispatched'
-           AND COALESCE(dispatch_id, '') != $3
-           AND id != $4",
+        "SELECT COUNT(*)::BIGINT
+         FROM auto_queue_entries e
+         LEFT JOIN auto_queue_runs r ON r.id = e.run_id
+         WHERE e.agent_id = $1
+           AND e.slot_index = $2
+           AND e.status = 'dispatched'
+           AND COALESCE(e.dispatch_id, '') != $3
+           AND e.id != $4
+           AND COALESCE(r.status, 'active') NOT IN ('paused', 'cancelled')",
     )
     .bind(agent_id)
     .bind(slot_index)
@@ -210,7 +218,7 @@ pub async fn slot_has_active_dispatch_excluding_pg(
     }
 
     let rows = sqlx::query(
-        "SELECT id, context
+        "SELECT id, dispatch_type, context
          FROM task_dispatches
          WHERE to_agent_id = $1
            AND status IN ('pending', 'dispatched')",
@@ -229,6 +237,7 @@ pub async fn slot_has_active_dispatch_excluding_pg(
         if dispatch_id == exclude_id {
             continue;
         }
+        let dispatch_type: Option<String> = row.try_get("dispatch_type").ok().flatten();
         let context: Option<String> = row.try_get("context").ok().flatten();
         let Some(context) = context else {
             continue;
@@ -252,6 +261,31 @@ pub async fn slot_has_active_dispatch_excluding_pg(
         }
         if context_json.get("phase_gate").is_some() {
             continue;
+        }
+        let is_review_class = matches!(
+            dispatch_type.as_deref().unwrap_or("implementation"),
+            "review" | "review-decision" | "create-pr"
+        );
+        if is_review_class {
+            let has_live_session = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM sessions s
+                     WHERE s.active_dispatch_id = $1
+                       AND COALESCE(s.status, '') NOT IN ('disconnected', 'completed', 'failed', 'cancelled')
+                 )",
+            )
+            .bind(&dispatch_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| {
+                format!(
+                    "probe live session for review-class dispatch {dispatch_id}: {error}"
+                )
+            })?;
+            if !has_live_session {
+                continue;
+            }
         }
         return Ok(true);
     }
@@ -323,8 +357,17 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
         return Ok(0);
     }
 
-    let token = crate::credential::read_bot_token("announce")
-        .ok_or_else(|| "no announce bot token".to_string())?;
+    // #2048 F16: missing announce token → graceful skip (slot reset is
+    // best-effort; environments that wire tokens under different names
+    // should still be able to reset slot session state). The session/clear
+    // path already covers the data side; archive is the optional Discord
+    // side-effect.
+    let Some(token) = crate::credential::read_bot_token("announce") else {
+        tracing::warn!(
+            "[auto-queue] skipping archive_slot_threads: no announce bot token configured"
+        );
+        return Ok(0);
+    };
     let client = reqwest::Client::new();
     let mut archived = 0usize;
 
@@ -339,6 +382,20 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
         {
             Ok(resp) if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND => {
                 archived += 1;
+            }
+            Ok(resp) if resp.status().is_client_error() => {
+                // #2048 F16: 4xx is non-retryable and usually means the thread
+                // is already archived / permission changed / rate-limited;
+                // skip rather than fail the whole slot reset. The data-side
+                // session clear has already completed.
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(
+                    thread_channel_id,
+                    %status,
+                    %body,
+                    "[auto-queue] skipping archive_slot_threads on 4xx"
+                );
             }
             Ok(resp) => {
                 let status = resp.status();

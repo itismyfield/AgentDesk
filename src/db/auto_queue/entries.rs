@@ -420,7 +420,20 @@ pub async fn update_entry_status_on_pg(
     let normalized = normalize_entry_status(new_status).map_err(|error| error.to_string())?;
     let mut current = load_entry_status_row_pg(pool, entry_id).await?;
 
+    // #2048 F11: bound the stale-retry loop. Without a cap, two concurrent
+    // updaters on the same entry can keep losing the optimistic update and
+    // re-reading without progress, livelocking the tokio task and starving
+    // other queue work. 8 attempts is enough for legitimate ordering races
+    // while still surfacing a hard failure on pathological contention.
+    const MAX_STALE_RETRIES: usize = 8;
+    let mut attempts: usize = 0;
     loop {
+        attempts += 1;
+        if attempts > MAX_STALE_RETRIES {
+            return Err(format!(
+                "auto-queue entry {entry_id} status update livelock: exceeded {MAX_STALE_RETRIES} stale retries (target={normalized})"
+            ));
+        }
         let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
             .run(&current.run_id)
             .entry(entry_id)
