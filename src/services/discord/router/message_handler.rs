@@ -4646,6 +4646,44 @@ pub(super) async fn cancel_text_stop_token_mailbox(
     }
 }
 
+/// #2044 F1: identity-checked variant — cancels active turn ONLY if the
+/// current mailbox cancel-token is the same `Arc` as `expected_token`.
+///
+/// Required by the reaction-remove path: between the mailbox snapshot
+/// and the cancel await, the mailbox actor can finish the old turn and
+/// start a new one for a queued message, which would otherwise be
+/// cancelled here (a stale ⏳-remove cancelling an unrelated follow-up
+/// turn). The mailbox's `CancelActiveTurnIfCurrent` does a pointer-eq
+/// check, so token identity prevents the wrong turn from being killed.
+pub(super) async fn cancel_text_stop_token_mailbox_if_current(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    expected_token: Arc<CancelToken>,
+    reason: &'static str,
+) -> TextStopLookup {
+    let result = super::super::mailbox_cancel_active_turn_if_current_with_reason(
+        shared,
+        channel_id,
+        expected_token,
+        reason,
+    )
+    .await;
+    match result.token {
+        Some(_) if result.already_stopping => TextStopLookup::AlreadyStopping,
+        Some(token) => {
+            super::super::ensure_cancel_token_bound_from_inflight(
+                provider,
+                channel_id,
+                &token,
+                "text stop mailbox lookup (if_current)",
+            );
+            TextStopLookup::Stop(token)
+        }
+        None => TextStopLookup::NoActiveTurn,
+    }
+}
+
 /// Handle text-based commands (!start, !meeting, !stop, !clear, etc.).
 /// Returns true if the command was handled, false otherwise.
 pub(super) async fn handle_text_command(

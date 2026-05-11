@@ -65,6 +65,26 @@ pub(super) fn watcher_should_kickoff_idle_queue_at(
     channel_has_pending_soft_queue_at(intervention_queue, channel_id, now)
 }
 
+/// #2044 F3: RAII guard that ensures `deferred_hook_backlog` is
+/// decremented even if the spawned future panics inside
+/// `kickoff_idle_queues` (which awaits multiple IO calls and may
+/// unwind). The previous code used a plain `fetch_sub` at the end of
+/// the spawned future, so any panic between the matching `fetch_add`
+/// and the trailing decrement permanently leaked the counter — which
+/// the shutdown drain loop and operator dashboards both rely on for
+/// "is the deferred backlog empty yet?" decisions.
+struct DeferredHookBacklogGuard {
+    shared: Arc<SharedData>,
+}
+
+impl Drop for DeferredHookBacklogGuard {
+    fn drop(&mut self) {
+        self.shared
+            .deferred_hook_backlog
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub(super) fn schedule_deferred_idle_queue_kickoff(
     shared: Arc<SharedData>,
     provider: ProviderKind,
@@ -75,6 +95,11 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
         .deferred_hook_backlog
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
+        // #2044 F3: bind the decrement to a Drop guard so it fires on
+        // panic-unwind as well as on normal return.
+        let _backlog_guard = DeferredHookBacklogGuard {
+            shared: shared.clone(),
+        };
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         if let (Some(ctx), Some(tok)) = (
             shared.cached_serenity_ctx.get(),
@@ -93,9 +118,7 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
                 channel_id
             );
         }
-        shared
-            .deferred_hook_backlog
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // Drop guard at end of scope decrements the backlog counter.
     });
 }
 

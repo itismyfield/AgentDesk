@@ -15,7 +15,13 @@ pub(super) async fn check_auth(
     shared: &Arc<SharedData>,
     _token: &str,
 ) -> bool {
-    let settings = shared.settings.write().await;
+    // #2044 F2: this function only reads owner_user_id / allowed_user_ids
+    // (via `user_is_authorized`), so a write lock here previously
+    // serialised every Discord intake message against settings reads
+    // happening elsewhere (voice, dispatch, management commands).
+    // Use a read lock so per-message auth checks no longer fight
+    // unrelated settings readers.
+    let settings = shared.settings.read().await;
     match settings.owner_user_id {
         None => {
             let ts = chrono::Local::now().format("%H:%M:%S");

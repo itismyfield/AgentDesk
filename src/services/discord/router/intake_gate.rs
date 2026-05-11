@@ -636,10 +636,26 @@ async fn handle_reaction_remove(
     let is_bot = match cache_result {
         Some(bot) => bot,
         None => {
-            // Cache miss — fetch from Discord API to determine bot status
+            // Cache miss — fetch from Discord API to determine bot status.
+            //
+            // #2044 F4: on API failure (transient 5xx, timeout, or
+            // restart-warmup with empty cache) the previous fallback
+            // treated the user as a bot, which silently dropped
+            // legitimate user stop/cancel reactions. The reaction event
+            // already carried the user_id and we've passed the bot
+            // self-check above, so fail-open + warn is the safer
+            // default: a missed bot-self event will be re-filtered on
+            // the next cache fill, but a missed human stop is
+            // user-visible.
             match ctx.http.get_user(user_id).await {
                 Ok(user) => user.bot,
-                Err(_) => true, // API error — safe to treat as bot (ignore)
+                Err(err) => {
+                    tracing::warn!(
+                        "  [reaction-remove] failed to fetch user {} from API: {err}; defaulting to non-bot (#2044 F4 fail-open)",
+                        user_id
+                    );
+                    false
+                }
             }
         }
     };
@@ -699,23 +715,51 @@ async fn handle_reaction_remove(
             // #441: flows through cancel_text_stop_token_mailbox (mailbox_cancel_active_turn)
             // → cancel_active_token → token.cancelled triggers turn_bridge loop exit
             // → mailbox_finish_turn canonical cleanup
-            let active_message_id = mailbox_snapshot(&data.shared, channel_id)
-                .await
-                .active_user_message_id
-                .or_else(|| {
-                    super::super::inflight::load_inflight_state(&data.provider, channel_id.get())
-                        .map(|state| serenity::MessageId::new(state.user_msg_id))
-                });
+            //
+            // #2044 F1 (TOCTOU): snapshot the cancel-token together with
+            // the active user_message_id. Between this snapshot and the
+            // cancel await, the mailbox actor may finish the current turn
+            // and start a new one for a queued message — using the
+            // snapshotted token identity via
+            // `cancel_text_stop_token_mailbox_if_current` ensures we only
+            // cancel if the mailbox is still on the same turn we just
+            // observed. The inflight-file fallback intentionally does NOT
+            // carry a token (it's only consulted when the mailbox snapshot
+            // lacks an active turn), so in that branch we fall back to the
+            // legacy unchecked cancel as before.
+            let snapshot = mailbox_snapshot(&data.shared, channel_id).await;
+            let (active_message_id, expected_token) = match snapshot.active_user_message_id {
+                Some(active_id) => (Some(active_id), snapshot.cancel_token.clone()),
+                None => {
+                    let inflight_id = super::super::inflight::load_inflight_state(
+                        &data.provider,
+                        channel_id.get(),
+                    )
+                    .map(|state| serenity::MessageId::new(state.user_msg_id));
+                    (inflight_id, None)
+                }
+            };
             if active_message_id != Some(removed_reaction.message_id) {
                 return Ok(());
             }
 
-            let stop_lookup = super::message_handler::cancel_text_stop_token_mailbox(
-                &data.shared,
-                &data.provider,
-                channel_id,
-            )
-            .await;
+            let stop_lookup = if let Some(expected) = expected_token {
+                super::message_handler::cancel_text_stop_token_mailbox_if_current(
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                    expected,
+                    "reaction remove ⏳ (if_current)",
+                )
+                .await
+            } else {
+                super::message_handler::cancel_text_stop_token_mailbox(
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                )
+                .await
+            };
             match stop_lookup {
                 super::message_handler::TextStopLookup::Stop(token) => {
                     // #1218: stop_active_turn sends the provider abort key
