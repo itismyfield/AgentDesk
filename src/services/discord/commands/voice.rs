@@ -456,15 +456,34 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
 
         let control_channel_id = pairings.target_channel(channel_id).unwrap_or(channel_id);
         if let Some(manager) = songbird::get(&ctx).await
-            && manager.get(guild_channel.guild_id).is_some()
+            && let Some(call_lock) = manager.get(guild_channel.guild_id)
         {
-            tracing::info!(
+            let call = call_lock.lock().await;
+            // current_connection() is Some only when ConnectionProgress::Complete,
+            // i.e. voice gateway WS + UDP handshake actually finished. A stale
+            // `Some(call)` from a previous failed get_or_insert is NOT enough —
+            // it returns a zombie handle that never produces VoiceTick events.
+            // The earlier #2054 check (`manager.get().is_some()`) was wrong:
+            // it matched every empty Call object created by get_or_insert.
+            if call.current_connection().is_some() {
+                drop(call);
+                tracing::info!(
+                    guild_id = guild_channel.guild_id.get(),
+                    channel_id = channel_id.get(),
+                    "voice auto-join skipped: songbird call already connected for guild (#2054 idempotency)"
+                );
+                barge_in.register_voice_context(control_channel_id, guild_channel.guild_id);
+                continue;
+            }
+            // Zombie call detected — drop the lock then remove so manager.join() below
+            // starts fresh instead of inheriting the dead ConnectionProgress.
+            drop(call);
+            let _ = manager.remove(guild_channel.guild_id).await;
+            tracing::warn!(
                 guild_id = guild_channel.guild_id.get(),
                 channel_id = channel_id.get(),
-                "voice auto-join skipped: songbird call already registered for guild (#2054 idempotency)"
+                "removed zombie songbird call before retrying auto-join (#2054 zombie-cleanup)"
             );
-            barge_in.register_voice_context(control_channel_id, guild_channel.guild_id);
-            continue;
         }
 
         match join_voice_channel(
@@ -511,21 +530,56 @@ async fn join_voice_channel(
     let handler_lock = match manager.join(guild_id, channel_id).await {
         Ok(handle) => handle,
         Err(join_err) => {
+            // Surface the full underlying songbird/serenity error chain so we
+            // can diagnose `ConnectionError::*` variants (gateway timeout,
+            // driver setup, encryption, etc.) which Display alone hides
+            // behind "establishing connection failed".
+            let mut chain: Vec<String> = vec![join_err.to_string()];
+            let mut current = std::error::Error::source(&join_err);
+            while let Some(src) = current {
+                chain.push(src.to_string());
+                current = src.source();
+            }
+            // Earlier #2054 fallback re-used `manager.get(guild_id)` as
+            // proof-of-connection — that was wrong. `get()` returns Some after
+            // any `get_or_insert`, including the empty Call created at the
+            // start of every join(). The receiver attached to such a zombie
+            // never fires SpeakingStateUpdate/VoiceTick because no UDP socket
+            // is bound. Detect real connection via current_connection() and
+            // only re-attach if Complete.
             if let Some(existing) = manager.get(guild_id) {
-                tracing::warn!(
-                    join_error = %join_err,
-                    guild_id = guild_id.get(),
-                    channel_id = channel_id.get(),
-                    "songbird manager.join() returned Err but call already registered; \
-                     attaching receiver retroactively (#2054 fallback)"
-                );
-                existing
+                let call = existing.lock().await;
+                let connected = call.current_connection().is_some();
+                drop(call);
+                if connected {
+                    tracing::warn!(
+                        join_error = %join_err,
+                        error_chain = ?chain,
+                        guild_id = guild_id.get(),
+                        channel_id = channel_id.get(),
+                        "songbird manager.join() Err but call is actually connected; \
+                         attaching receiver retroactively (#2054 connected-zombie fallback)"
+                    );
+                    existing
+                } else {
+                    // Zombie call — clean it up so the next attempt starts fresh.
+                    let _ = manager.remove(guild_id).await;
+                    return Err(anyhow!(join_err)
+                        .context(format!(
+                            "songbird manager.join() failed (zombie call cleaned) for channel {} in guild {}; error_chain={:?}",
+                            channel_id.get(),
+                            guild_id.get(),
+                            chain
+                        ))
+                        .into());
+                }
             } else {
                 return Err(anyhow!(join_err)
                     .context(format!(
-                        "songbird manager.join() failed for channel {} in guild {}",
+                        "songbird manager.join() failed for channel {} in guild {}; error_chain={:?}",
                         channel_id.get(),
-                        guild_id.get()
+                        guild_id.get(),
+                        chain
                     ))
                     .into());
             }
