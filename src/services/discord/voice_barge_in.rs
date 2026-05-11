@@ -31,7 +31,21 @@ use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 
 use super::SharedData;
 
-const INTERNAL_VOICE_MESSAGE_ID_START: u64 = 9_000_000_000_000_000_000;
+pub(in crate::services::discord) const INTERNAL_VOICE_MESSAGE_ID_START: u64 =
+    9_000_000_000_000_000_000;
+
+/// `true` iff `msg_id` is a synthetic voice-originated id (≥
+/// `INTERNAL_VOICE_MESSAGE_ID_START`). Real Discord snowflakes encode
+/// timestamps and worker/process/sequence fields and stay well below 2^63
+/// for the foreseeable future, so the 9e18 prefix is safely above them.
+/// Used by the message intake to skip ⏳/📬 reactions, placeholder POSTs,
+/// and `message_reference` lookups that would fail with "Unknown message"
+/// for a non-existent Discord message id.
+pub(in crate::services::discord) fn is_synthetic_voice_message_id(
+    msg_id: poise::serenity_prelude::MessageId,
+) -> bool {
+    msg_id.get() >= INTERNAL_VOICE_MESSAGE_ID_START
+}
 // F4 (#2046): progress/ack 재생 owner id 시작점. spoken_result owner 공간(1..)과
 // 분리하기 위해 high range 사용.
 const PROGRESS_PLAYBACK_OWNER_START: u64 = 1u64 << 63;

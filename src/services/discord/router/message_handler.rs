@@ -2268,7 +2268,13 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
 
     let dispatch_id_for_thread = super::super::adk_session::parse_dispatch_id(user_text);
-    if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref()) {
+    if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
+        && !super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
+    {
+        // Voice-originated turns use a synthetic msg id (>= 9e18) that does
+        // not correspond to a real Discord message, so add_reaction would
+        // return "Unknown Message". TTS already plays an acknowledgement
+        // for the user — the ⏳ reaction is text-intake only.
         add_reaction(http, channel_id, user_msg_id, '⏳').await;
     }
 
@@ -3527,7 +3533,10 @@ pub(in crate::services::discord) async fn handle_text_message(
             http.clone(),
             shared.clone(),
             channel_id,
-            if reply_to_user_message && dispatch_id_for_thread.is_none() {
+            if reply_to_user_message
+                && dispatch_id_for_thread.is_none()
+                && !super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
+            {
                 Some((channel_id, user_msg_id))
             } else {
                 None
