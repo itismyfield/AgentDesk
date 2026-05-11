@@ -640,25 +640,80 @@ fn codex_goals_override_for_turn(
     }
 }
 
-fn is_codex_goal_start_request(text: &str) -> bool {
+#[derive(Debug, PartialEq)]
+enum GoalCommandKind {
+    NotGoal,
+    ChainedStart,
+    FreshStart,
+    Lifecycle,
+}
+
+const GOAL_LIFECYCLE_SUBCOMMANDS: &[&str] = &["pause", "resume", "clear"];
+
+fn classify_codex_goal_command(text: &str) -> GoalCommandKind {
     let Some(first_line) = text.trim_start().lines().next() else {
-        return false;
+        return GoalCommandKind::NotGoal;
     };
     let first_line = first_line.trim_end();
     let Some(rest) = first_line.strip_prefix("/goal") else {
-        return false;
+        return GoalCommandKind::NotGoal;
     };
-    rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)
+    if !rest.is_empty() && !rest.chars().next().is_some_and(char::is_whitespace) {
+        return GoalCommandKind::NotGoal;
+    }
+    let args = rest.trim_start();
+    if args.is_empty() {
+        return GoalCommandKind::ChainedStart;
+    }
+    for sub in GOAL_LIFECYCLE_SUBCOMMANDS {
+        let Some(after) = args.strip_prefix(sub) else {
+            continue;
+        };
+        if after.is_empty() || after.chars().next().is_some_and(char::is_whitespace) {
+            return GoalCommandKind::Lifecycle;
+        }
+    }
+    if let Some(after_fresh) = args.strip_prefix("--fresh") {
+        if after_fresh.is_empty() || after_fresh.chars().next().is_some_and(char::is_whitespace) {
+            return GoalCommandKind::FreshStart;
+        }
+    }
+    GoalCommandKind::ChainedStart
 }
 
-fn should_start_fresh_codex_goal_session(
+fn classify_codex_goal_command_for_provider(
     provider: &ProviderKind,
     text: &str,
     channel_codex_goals_setting: Option<bool>,
-) -> bool {
-    matches!(provider, ProviderKind::Codex)
-        && channel_codex_goals_setting.unwrap_or(true)
-        && is_codex_goal_start_request(text)
+) -> GoalCommandKind {
+    if matches!(provider, ProviderKind::Codex) && channel_codex_goals_setting.unwrap_or(true) {
+        classify_codex_goal_command(text)
+    } else {
+        GoalCommandKind::NotGoal
+    }
+}
+
+fn rewrite_fresh_goal_prompt(text: &str) -> String {
+    let trimmed = text.trim_start();
+    let prefix_len = text.len() - trimmed.len();
+    let leading = &text[..prefix_len];
+    let Some(rest) = trimmed.strip_prefix("/goal") else {
+        return text.to_string();
+    };
+    let after_goal = rest.trim_start_matches(|c: char| c == ' ' || c == '\t');
+    let Some(after_fresh) = after_goal.strip_prefix("--fresh") else {
+        return text.to_string();
+    };
+    let objective = after_fresh.trim_start_matches(|c: char| c == ' ' || c == '\t');
+    if objective.is_empty() {
+        format!("{}/goal", leading)
+    } else {
+        format!("{}/goal {}", leading, objective)
+    }
+}
+
+fn is_codex_goal_start_request(text: &str) -> bool {
+    !matches!(classify_codex_goal_command(text), GoalCommandKind::NotGoal)
 }
 
 async fn clear_codex_goal_start_provider_session(
@@ -947,12 +1002,14 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
             let _ = super::super::internal_api::clear_stale_session_id(session_id_to_clear).await;
         }
     }
-    let fresh_codex_goal_session_requested = should_start_fresh_codex_goal_session(
+    let headless_goal_kind = classify_codex_goal_command_for_provider(
         &provider,
         prompt,
         super::super::commands::channel_codex_goals_setting(shared, fast_mode_channel_id).await,
     );
-    if fresh_codex_goal_session_requested {
+    let force_fresh_provider_session = matches!(headless_goal_kind, GoalCommandKind::FreshStart);
+    let fresh_codex_goal_session_requested = force_fresh_provider_session;
+    if force_fresh_provider_session {
         clear_codex_goal_start_provider_session(
             shared,
             channel_id,
@@ -963,6 +1020,11 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
         )
         .await;
     }
+    let effective_prompt: std::borrow::Cow<str> = if force_fresh_provider_session {
+        std::borrow::Cow::Owned(rewrite_fresh_goal_prompt(prompt))
+    } else {
+        std::borrow::Cow::Borrowed(prompt)
+    };
     if session_id.is_none() {
         if fresh_codex_goal_session_requested {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1152,7 +1214,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     context_chunks.push(wrap_user_prompt_with_author(
         request_owner_name,
         request_owner,
-        ai_screen::sanitize_user_input(prompt),
+        ai_screen::sanitize_user_input(&effective_prompt),
     ));
     let context_prompt = context_chunks.join("\n\n");
 
@@ -1608,6 +1670,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
                             native_fast_mode_override,
                             codex_goals_override,
                             compact_token_limit_for_codex,
+                            force_fresh_provider_session,
                         ),
                         ProviderKind::Gemini => gemini::execute_command_streaming(
                             &context_prompt,
@@ -2666,14 +2729,18 @@ pub(in crate::services::discord) async fn handle_text_message(
             let _ = super::super::internal_api::clear_stale_session_id(session_id_to_clear).await;
         }
     }
-    let fresh_codex_goal_session_requested = !dispatch_reset_provider_state
-        && !dispatch_recreate_tmux
-        && should_start_fresh_codex_goal_session(
+    let turn_goal_kind = if !dispatch_reset_provider_state && !dispatch_recreate_tmux {
+        classify_codex_goal_command_for_provider(
             &provider,
             user_text,
             super::super::commands::channel_codex_goals_setting(shared, fast_mode_channel_id).await,
-        );
-    if fresh_codex_goal_session_requested {
+        )
+    } else {
+        GoalCommandKind::NotGoal
+    };
+    let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);
+    let fresh_codex_goal_session_requested = force_fresh_provider_session;
+    if force_fresh_provider_session {
         clear_codex_goal_start_provider_session(
             shared,
             channel_id,
@@ -2684,6 +2751,11 @@ pub(in crate::services::discord) async fn handle_text_message(
         )
         .await;
     }
+    let sanitized_input = if force_fresh_provider_session {
+        rewrite_fresh_goal_prompt(&sanitized_input)
+    } else {
+        sanitized_input
+    };
     if session_id.is_none() {
         if fresh_codex_goal_session_requested {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -4106,6 +4178,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                             native_fast_mode_override,
                             codex_goals_override,
                             compact_token_limit_for_codex,
+                            force_fresh_provider_session,
                         ),
                         ProviderKind::Gemini => gemini::execute_command_streaming(
                             &context_prompt,
@@ -6257,32 +6330,113 @@ mod tests {
     }
 
     #[test]
-    fn fresh_codex_goal_session_requires_codex_and_enabled_goals() {
-        assert!(should_start_fresh_codex_goal_session(
-            &ProviderKind::Codex,
-            "/goal 새 목표",
-            None
-        ));
-        assert!(should_start_fresh_codex_goal_session(
-            &ProviderKind::Codex,
-            "/goal 새 목표",
-            Some(true)
-        ));
-        assert!(!should_start_fresh_codex_goal_session(
-            &ProviderKind::Codex,
-            "/goal 새 목표",
-            Some(false)
-        ));
-        assert!(!should_start_fresh_codex_goal_session(
-            &ProviderKind::Claude,
-            "/goal 새 목표",
-            Some(true)
-        ));
-        assert!(!should_start_fresh_codex_goal_session(
-            &ProviderKind::Codex,
-            "/goals",
-            Some(true)
-        ));
+    fn classify_codex_goal_command_basic() {
+        // ChainedStart: plain /goal
+        assert_eq!(
+            classify_codex_goal_command("/goal 새 목표"),
+            GoalCommandKind::ChainedStart
+        );
+        assert_eq!(
+            classify_codex_goal_command("/goal\n다음 줄"),
+            GoalCommandKind::ChainedStart
+        );
+        assert_eq!(
+            classify_codex_goal_command("  /goal 탭 뒤"),
+            GoalCommandKind::ChainedStart
+        );
+
+        // FreshStart: /goal --fresh
+        assert_eq!(
+            classify_codex_goal_command("/goal --fresh 새 목표"),
+            GoalCommandKind::FreshStart
+        );
+        assert_eq!(
+            classify_codex_goal_command("/goal --fresh"),
+            GoalCommandKind::FreshStart
+        );
+
+        // Lifecycle
+        assert_eq!(
+            classify_codex_goal_command("/goal pause"),
+            GoalCommandKind::Lifecycle
+        );
+        assert_eq!(
+            classify_codex_goal_command("/goal resume"),
+            GoalCommandKind::Lifecycle
+        );
+        assert_eq!(
+            classify_codex_goal_command("/goal clear"),
+            GoalCommandKind::Lifecycle
+        );
+
+        // NotGoal
+        assert_eq!(
+            classify_codex_goal_command("/goals"),
+            GoalCommandKind::NotGoal
+        );
+        assert_eq!(
+            classify_codex_goal_command("/goalkeeper"),
+            GoalCommandKind::NotGoal
+        );
+        assert_eq!(
+            classify_codex_goal_command("질문 /goal"),
+            GoalCommandKind::NotGoal
+        );
+        assert_eq!(classify_codex_goal_command(""), GoalCommandKind::NotGoal);
+    }
+
+    #[test]
+    fn classify_codex_goal_command_for_provider_gates_non_codex() {
+        // Non-Codex provider → always NotGoal
+        assert_eq!(
+            classify_codex_goal_command_for_provider(&ProviderKind::Claude, "/goal 새 목표", None),
+            GoalCommandKind::NotGoal
+        );
+        // goals disabled → NotGoal
+        assert_eq!(
+            classify_codex_goal_command_for_provider(
+                &ProviderKind::Codex,
+                "/goal 새 목표",
+                Some(false)
+            ),
+            GoalCommandKind::NotGoal
+        );
+        // Codex + goals enabled (or unset) → classify
+        assert_eq!(
+            classify_codex_goal_command_for_provider(
+                &ProviderKind::Codex,
+                "/goal 새 목표",
+                Some(true)
+            ),
+            GoalCommandKind::ChainedStart
+        );
+        assert_eq!(
+            classify_codex_goal_command_for_provider(
+                &ProviderKind::Codex,
+                "/goal --fresh 새 목표",
+                None
+            ),
+            GoalCommandKind::FreshStart
+        );
+        assert_eq!(
+            classify_codex_goal_command_for_provider(
+                &ProviderKind::Codex,
+                "/goal pause",
+                Some(true)
+            ),
+            GoalCommandKind::Lifecycle
+        );
+    }
+
+    #[test]
+    fn rewrite_fresh_goal_prompt_strips_fresh_marker() {
+        assert_eq!(
+            rewrite_fresh_goal_prompt("/goal --fresh 새 목표"),
+            "/goal 새 목표"
+        );
+        assert_eq!(rewrite_fresh_goal_prompt("/goal --fresh"), "/goal");
+        // Non-fresh prompts are returned unchanged
+        assert_eq!(rewrite_fresh_goal_prompt("/goal 새 목표"), "/goal 새 목표");
     }
 
     #[test]

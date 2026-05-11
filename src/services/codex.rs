@@ -21,7 +21,7 @@ use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
     insert_process_session, process_session_is_alive, process_session_probe,
     read_output_file_until_result, read_output_file_until_result_tracked, remove_process_session,
-    send_process_session_input,
+    send_process_session_input, terminate_process_handle,
 };
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -108,6 +108,13 @@ fn render_goals_wrapper_arg(goals_override: Option<bool>) -> String {
         Some(false) => " \\\n  --goals-state disabled".to_string(),
         None => String::new(),
     }
+}
+
+fn should_reuse_existing_provider_session(
+    existing_session_usable: bool,
+    force_fresh_provider_session: bool,
+) -> bool {
+    existing_session_usable && !force_fresh_provider_session
 }
 
 #[cfg(unix)]
@@ -230,6 +237,7 @@ pub fn execute_command_streaming(
     fast_mode_enabled: Option<bool>,
     goals_enabled: Option<bool>,
     compact_token_limit: Option<u64>,
+    force_fresh_provider_session: bool,
 ) -> Result<(), String> {
     let readonly_mode = is_readonly_tool_policy(allowed_tools);
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
@@ -290,6 +298,7 @@ pub fn execute_command_streaming(
                 report_channel_id,
                 report_provider,
                 compact_token_limit,
+                force_fresh_provider_session,
             );
         }
         // ProcessBackend fallback for Codex (no tmux or non-unix)
@@ -304,6 +313,7 @@ pub fn execute_command_streaming(
             cancel_token,
             tmux_name,
             compact_token_limit,
+            force_fresh_provider_session,
         );
     }
 
@@ -503,6 +513,7 @@ fn execute_streaming_local_tmux(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     compact_token_limit: Option<u64>,
+    force_fresh_provider_session: bool,
 ) -> Result<(), String> {
     let output_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let input_fifo_path =
@@ -522,7 +533,7 @@ fn execute_streaming_local_tmux(
         && resolved_output.is_some()
         && resolved_input.is_some();
 
-    if session_usable {
+    if should_reuse_existing_provider_session(session_usable, force_fresh_provider_session) {
         let output_path = resolved_output
             .clone()
             .unwrap_or_else(|| output_path.clone());
@@ -551,13 +562,15 @@ fn execute_streaming_local_tmux(
             }
         }
     } else if session_exists {
-        record_tmux_exit_reason(
-            tmux_session_name,
-            "stale local session cleanup before recreate",
-        );
+        let cleanup_reason = if force_fresh_provider_session {
+            "codex fresh provider session requested"
+        } else {
+            "stale local session cleanup before recreate"
+        };
+        record_tmux_exit_reason(tmux_session_name, cleanup_reason);
         crate::services::platform::tmux::kill_session_with_reason(
             tmux_session_name,
-            "stale local session cleanup before recreate",
+            cleanup_reason,
         );
     }
 
@@ -838,6 +851,7 @@ fn execute_streaming_local_process_codex(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     session_name: &str,
     compact_token_limit: Option<u64>,
+    force_fresh_provider_session: bool,
 ) -> Result<(), String> {
     use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
 
@@ -853,7 +867,8 @@ fn execute_streaming_local_process_codex(
     );
 
     // Check for existing process session
-    if process_session_is_alive(session_name) {
+    let process_session_alive = process_session_is_alive(session_name);
+    if should_reuse_existing_provider_session(process_session_alive, force_fresh_provider_session) {
         // Snapshot file length BEFORE sending input to avoid race:
         // Codex wrapper appends JSONL immediately on stdin, so a fast
         // response could be written before we read the offset.
@@ -893,6 +908,12 @@ fn execute_streaming_local_process_codex(
             },
         );
         return Ok(());
+    }
+
+    if force_fresh_provider_session && process_session_alive {
+        if let Some(handle) = remove_process_session(session_name) {
+            terminate_process_handle(handle);
+        }
     }
 
     // Clean up and create new session
@@ -1285,7 +1306,7 @@ mod tests {
     use super::{
         CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
         TMUX_PROMPT_B64_PREFIX, base_exec_args, build_tmux_launch_env_lines, compose_codex_prompt,
-        handle_codex_json_line,
+        handle_codex_json_line, should_reuse_existing_provider_session,
     };
     use crate::services::agent_protocol::StreamMessage;
     use crate::services::discord::restart_report::{
@@ -1409,6 +1430,14 @@ mod tests {
     fn test_compose_codex_prompt_returns_plain_prompt_without_overrides() {
         let prompt = compose_codex_prompt("just answer", None, None);
         assert_eq!(prompt, "just answer");
+    }
+
+    #[test]
+    fn test_provider_session_reuse_decision_honors_explicit_fresh_flag() {
+        assert!(should_reuse_existing_provider_session(true, false));
+        assert!(!should_reuse_existing_provider_session(true, true));
+        assert!(!should_reuse_existing_provider_session(false, false));
+        assert!(!should_reuse_existing_provider_session(false, true));
     }
 
     #[test]
