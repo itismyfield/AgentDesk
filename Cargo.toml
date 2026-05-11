@@ -26,6 +26,11 @@ poise = "0.6"
 # Discord 가 non-stage voice channel 에 DAVE 강제 (close code 4017). 0.4/0.5
 # 는 거부되므로 0.6+ 필수. MSRV 1.83 (현재 1.94 사용 중 → OK).
 songbird = { version = "0.6", default-features = false, features = ["driver", "gateway", "receive", "serenity", "rustls", "tungstenite"] }
+# #2054 v5 — songbird 0.6 의 File input 은 symphonia 만으로 디코드한다 (ffmpeg
+# 의존성 0.5 에서 제거). symphonia 의 default features 에는 mp3 코덱이 빠져
+# 있어서 edge-tts 로 받은 mp3 파일이 즉시 EOF 로 끝나며 무음 트랙이 된다.
+# 여기에 직접 의존하여 mp3 codec 을 켜야 TTS 가 실제로 출력된다.
+symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
 hound = "3.5"
 async-trait = "0.1"
 
