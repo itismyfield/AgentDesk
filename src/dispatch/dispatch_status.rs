@@ -400,6 +400,25 @@ async fn validate_dispatch_completion_evidence_on_pg(
         return Ok(());
     }
 
+    // #2045 Finding 13 (P2): the transcript write that satisfies this
+    // evidence check often lands a few hundred milliseconds after the
+    // dispatch finalize call. Without a retry the timeouts handler can
+    // promote the same dispatch to `failed` even though the agent did
+    // produce output — we just observed the rows in the brief window before
+    // COMMIT visibility. Re-query with two short backoffs (50 + 150 ms)
+    // before rejecting; if the transcript is genuinely missing the surface
+    // still rejects.
+    for delay_ms in [50_u64, 150_u64] {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        if crate::db::session_transcripts::dispatch_has_assistant_response_db(
+            db,
+            Some(pool),
+            dispatch_id,
+        )? {
+            return Ok(());
+        }
+    }
+
     let dispatch_label = dispatch_type.as_deref().unwrap_or("work");
     let completion_source = result
         .get("completion_source")
@@ -530,6 +549,40 @@ async fn set_dispatch_status_on_pg_with_sync(
             return Ok(0);
         }
     }
+
+    // #2045 Finding 14 (P1): when a caller pushes a phase-gate dispatch into
+    // `completed` directly through this path (CRUD route, supervisor, JS
+    // bridge `markCompleted`, recovery helpers) without supplying an explicit
+    // verdict, infer one from `result.checks` against the dispatch context the
+    // same way `complete_dispatch_inner_with_backends` (the finalize path)
+    // does. Without this, the downstream
+    // `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx` call observes a
+    // verdict-less result and either parks the gate row or marks it failed.
+    let effective_result_owned: Option<serde_json::Value> = if to_status == "completed"
+        && result.is_some()
+    {
+        let ctx_text_for_verdict = current
+            .try_get::<Option<String>, _>("context_text")
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "decode postgres dispatch context for verdict inference {dispatch_id}: {error}"
+                )
+            })?;
+        ctx_text_for_verdict
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|ctx| {
+                ctx.get("phase_gate")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+            })
+            .and_then(|phase_gate_ctx| {
+                infer_phase_gate_verdict(dispatch_id, &phase_gate_ctx, result.unwrap())
+            })
+    } else {
+        None
+    };
+    let result: Option<&serde_json::Value> = effective_result_owned.as_ref().or(result);
 
     let result_json = result.map(|value| value.to_string());
     let changed = match (result_json.as_deref(), touch_completed_at) {
@@ -828,6 +881,18 @@ async fn set_dispatch_status_on_pg_with_sync(
                 tracing::info!(
                     "[dispatch] cleared {} stale session link(s) for terminal dispatch {} ({})",
                     cleared,
+                    dispatch_id,
+                    to_status
+                );
+            } else {
+                // #2045 Finding 12 (P3): record a diagnostic when no session
+                // row had `active_dispatch_id == dispatch_id` at the moment
+                // of terminal write. This happens when another dispatch
+                // already took the slot (hook upsert, supervisor restart)
+                // and is observably benign, but surfacing it makes incident
+                // debugging easier.
+                tracing::debug!(
+                    "[dispatch] no session row to update for terminal dispatch {} ({}): another dispatch may have re-claimed the slot",
                     dispatch_id,
                     to_status
                 );

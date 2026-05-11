@@ -205,21 +205,37 @@ async fn lookup_active_dispatch_id_pg(
     card_id: &str,
     dispatch_type: &str,
 ) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
+    // #2045 Finding 15 (P3): pull up to 2 rows so we can surface a warning
+    // when more than one active dispatch of the same `(card_id,
+    // dispatch_type)` exists. UNIQUE constraints cover `review` / `review-
+    // decision` / `create-pr` but not `implementation`/`rework`; if a partial
+    // index ever drifts (migration race, supervisor bug), the dedup helper
+    // used to silently pick one of the rows and hide the inconsistency.
+    let rows = sqlx::query_scalar::<_, String>(
         "SELECT id
          FROM task_dispatches
          WHERE kanban_card_id = $1
            AND dispatch_type = $2
            AND status IN ('pending', 'dispatched')
          ORDER BY created_at DESC, id DESC
-         LIMIT 1",
+         LIMIT 2",
     )
     .bind(card_id)
     .bind(dispatch_type)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
-    .ok()
-    .flatten()
+    .ok()?;
+
+    if rows.len() > 1 {
+        tracing::warn!(
+            card_id,
+            dispatch_type,
+            duplicate_dispatch_ids = ?rows,
+            "[dispatch] multiple active dispatches of the same type — dedup will reuse newest but state is inconsistent"
+        );
+    }
+
+    rows.into_iter().next()
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -783,7 +799,15 @@ async fn create_dispatch_core_internal(
         ));
     }
 
+    // #2045 Finding 11 (P2): if the caller is requesting a sidecar dispatch
+    // (phase-gate / phase-side run / supervisor diagnostic), do NOT silently
+    // reuse a non-sidecar dispatch of the same type. The caller-supplied
+    // context for sidecars differs in ways the old reuse path would drop
+    // (extra `phase_gate` config, different required_capabilities, etc.),
+    // which would make the caller think a new sidecar exists while in
+    // reality they got the mainline implementation row back.
     if dispatch_type != "review-decision"
+        && !options.sidecar_dispatch
         && let Some(existing_id) =
             lookup_active_dispatch_id_pg(pg_pool, kanban_card_id, dispatch_type).await
     {

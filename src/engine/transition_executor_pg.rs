@@ -118,15 +118,19 @@ pub(crate) async fn execute_pg_transition_intent(
             .map_err(|error| format!("insert audit log for {card_id}: {error}"))?;
         }
         crate::engine::transition::TransitionIntent::CancelDispatch { dispatch_id } => {
-            sqlx::query(
-                "UPDATE task_dispatches
-                 SET status = 'cancelled',
-                     updated_at = NOW(),
-                     completed_at = COALESCE(completed_at, NOW())
-                 WHERE id = $1 AND status IN ('pending', 'dispatched')",
+            // #2045 Finding 5 (P1): delegate cancellation to the canonical
+            // helper so the cleanup pipeline (semaphore release, session
+            // active_dispatch_id clear, auto_queue_entries reset,
+            // dispatch_events insert, status_reaction outbox enqueue, thread
+            // link teardown) runs inside this transaction. The previous raw
+            // UPDATE only flipped the row status and left the rest of the
+            // graph stale, which is the same class of leak fixed for the JS
+            // bridge in Finding 3.
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+                tx,
+                dispatch_id,
+                Some("transition_intent_cancel"),
             )
-            .bind(dispatch_id)
-            .execute(&mut **tx)
             .await
             .map_err(|error| format!("cancel dispatch {dispatch_id}: {error}"))?;
         }
@@ -174,8 +178,6 @@ pub(crate) async fn cancel_live_dispatches_for_terminal_card_pg(
     .await
     .map_err(|error| format!("load live dispatches for {card_id}: {error}"))?;
 
-    let reason_payload =
-        serde_json::json!({ "reason": "auto_cancelled_on_terminal_card" }).to_string();
     let mut cancelled = 0usize;
     let mut preserved_review_dispatches = Vec::new();
 
@@ -195,30 +197,23 @@ pub(crate) async fn cancel_live_dispatches_for_terminal_card_pg(
             preserved_review_dispatches.push(dispatch_id);
             continue;
         }
-        sqlx::query(
-            "UPDATE sessions
-             SET status = CASE WHEN status IN ('turn_active', 'working') THEN 'idle' ELSE status END,
-                 active_dispatch_id = NULL
-             WHERE active_dispatch_id = $1",
+        // #2045 Finding 5 (P1): route cancellation through the canonical
+        // helper so semaphore release, auto_queue_entries reset,
+        // dispatch_events audit, status_reaction outbox enqueue, and thread
+        // link teardown all happen inside the same terminal-card transaction.
+        // The old raw UPDATE only flipped task_dispatches.status and cleared
+        // sessions, leaving the rest of the dispatch graph stale (Finding
+        // 3 / 4 class).
+        let changed = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+            tx,
+            &dispatch_id,
+            Some("auto_cancelled_on_terminal_card"),
         )
-        .bind(&dispatch_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| format!("clear session active_dispatch_id for {dispatch_id}: {error}"))?;
-        sqlx::query(
-            "UPDATE task_dispatches
-             SET status = 'cancelled',
-                 updated_at = NOW(),
-                 completed_at = COALESCE(completed_at, NOW()),
-                 result = COALESCE(result, $2)
-             WHERE id = $1 AND status IN ('pending', 'dispatched')",
-        )
-        .bind(&dispatch_id)
-        .bind(&reason_payload)
-        .execute(&mut **tx)
         .await
         .map_err(|error| format!("cancel live dispatch {dispatch_id}: {error}"))?;
-        cancelled += 1;
+        if changed > 0 {
+            cancelled += 1;
+        }
     }
 
     if let Some(first_review_dispatch_id) = preserved_review_dispatches.first() {

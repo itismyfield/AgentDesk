@@ -586,8 +586,21 @@ async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
                 ));
             }
             if let Err(err) = archive_dispatch_thread(tid, dispatch_id, config).await {
-                tracing::warn!(
-                    "[dispatch] Failed to archive thread {tid} for completed dispatch {dispatch_id}: {err}"
+                // #2045 Finding 17 (P3): surface archive failures at error
+                // level so operators can correlate with Discord rate-limit /
+                // permission incidents. The previous warn-only path made the
+                // failures invisible — the dispatch_outbox row gets marked
+                // done because the rest of the followup succeeded, so the
+                // archive attempt never retried and threads piled up. A
+                // dedicated `dispatch_outbox(action='archive_thread')` retry
+                // lane needs a worker counterpart; track that as a follow-up
+                // (#2045 Finding 17) and at least make the failure visible
+                // in the meantime.
+                tracing::error!(
+                    dispatch_id = %dispatch_id,
+                    thread_id = %tid,
+                    error = %err,
+                    "[dispatch] Failed to archive thread for completed dispatch — manual review or worker re-run required"
                 );
             } else {
                 tracing::info!(

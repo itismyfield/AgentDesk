@@ -235,10 +235,14 @@ fn dispatch_create_raw_pg(
     let context: serde_json::Value = match serde_json::from_str(context_json) {
         Ok(value) => value,
         Err(e) => {
-            return format!(
-                r#"{{"error":"invalid dispatch context JSON: {}"}}"#,
-                e.to_string().replace('"', "'")
-            );
+            // #2045 Finding 8 (P2): emit a properly-escaped JSON document so
+            // the JS wrapper's JSON.parse cannot trip on backslashes or
+            // control characters that the legacy `replace('"', "'")` shim
+            // leaked through.
+            return serde_json::json!({
+                "error": format!("invalid dispatch context JSON: {e}"),
+            })
+            .to_string();
         }
     };
     let options = crate::dispatch::DispatchCreateOptions {
@@ -256,10 +260,17 @@ fn dispatch_create_raw_pg(
     let agent_id_owned = agent_id.to_string();
     let dispatch_type_owned = dispatch_type.to_string();
     let title_owned = title.to_string();
+    let card_id_state = card_id.to_string();
+    let dispatch_type_str = dispatch_type.to_string();
+    // #2045 Finding 9 (P2): collapse dispatch insert + card_review_state upsert
+    // into a single async block so they share the same connection. The earlier
+    // implementation issued two `block_on_pg_result` calls and could leave a
+    // dispatch row committed without the matching `pending_dispatch_id`
+    // update, putting supervisor recovery on a stale state.
     match crate::utils::async_bridge::block_on_pg_result(
         pg_pool,
         move |bridge_pool| async move {
-            crate::dispatch::create_dispatch_core_with_options(
+            let outcome = crate::dispatch::create_dispatch_core_with_options(
                 &bridge_pool,
                 &card_id_owned,
                 &agent_id_owned,
@@ -268,49 +279,40 @@ fn dispatch_create_raw_pg(
                 &context,
                 options,
             )
-            .await
+            .await?;
+            let (dispatch_id, _old_status, reused) = &outcome;
+            if !reused && dispatch_type_str == "review-decision" {
+                sqlx::query(
+                    "INSERT INTO card_review_state (
+                        card_id,
+                        state,
+                        pending_dispatch_id,
+                        updated_at
+                     ) VALUES ($1, 'suggestion_pending', $2, NOW())
+                     ON CONFLICT (card_id) DO UPDATE
+                     SET state = 'suggestion_pending',
+                         pending_dispatch_id = EXCLUDED.pending_dispatch_id,
+                         updated_at = NOW()",
+                )
+                .bind(&card_id_state)
+                .bind(dispatch_id)
+                .execute(&bridge_pool)
+                .await
+                .map(|_| ())
+                .map_err(anyhow::Error::from)?;
+            }
+            Ok(outcome)
         },
         |error| anyhow::anyhow!(error),
     ) {
         Ok((dispatch_id, _old_status, reused)) => {
             if reused {
-                return format!(r#"{{"dispatch_id":"{dispatch_id}","reused":true}}"#);
+                serde_json::json!({"dispatch_id": dispatch_id, "reused": true}).to_string()
+            } else {
+                serde_json::json!({"dispatch_id": dispatch_id}).to_string()
             }
-            if dispatch_type == "review-decision" {
-                let card_id_state = card_id.to_string();
-                let dispatch_id_state = dispatch_id.clone();
-                if let Err(error) = crate::utils::async_bridge::block_on_pg_result(
-                    pg_pool,
-                    move |bridge_pool| async move {
-                        sqlx::query(
-                            "INSERT INTO card_review_state (
-                                card_id,
-                                state,
-                                pending_dispatch_id,
-                                updated_at
-                             ) VALUES ($1, 'suggestion_pending', $2, NOW())
-                             ON CONFLICT (card_id) DO UPDATE
-                             SET state = 'suggestion_pending',
-                                 pending_dispatch_id = EXCLUDED.pending_dispatch_id,
-                                 updated_at = NOW()",
-                        )
-                        .bind(&card_id_state)
-                        .bind(&dispatch_id_state)
-                        .execute(&bridge_pool)
-                        .await
-                        .map(|_| ())
-                        .map_err(anyhow::Error::from)
-                    },
-                    |error| anyhow::anyhow!(error),
-                ) {
-                    return format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'"));
-                }
-            }
-            format!(r#"{{"dispatch_id":"{dispatch_id}"}}"#)
         }
-        Err(e) => {
-            format!(r#"{{"error":"{}"}}"#, e.to_string().replace('"', "'"))
-        }
+        Err(e) => crate::engine::ops::ensure_js_error_json(e.to_string()),
     }
 }
 

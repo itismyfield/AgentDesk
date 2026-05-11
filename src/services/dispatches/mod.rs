@@ -351,6 +351,11 @@ fn list_dispatches_pg(
     )
 }
 
+/// Service-layer twin of `crud.rs::update_dispatch_result_pg`.
+///
+/// #2045 Finding 1 (P1): see the route handler doc for the rationale. We run
+/// the update inside a transaction, emit a `dispatch_events` audit row, and
+/// reconcile phase-gate state when the dispatch is already terminal.
 fn update_dispatch_result_pg(
     pool: &sqlx::PgPool,
     dispatch_id: &str,
@@ -362,16 +367,106 @@ fn update_dispatch_result_pg(
     crate::utils::async_bridge::block_on_pg_result(
         pool,
         move |pool| async move {
+            let mut tx = pool.begin().await.map_err(|error| {
+                format!("begin postgres update-result transaction {dispatch_id}: {error}")
+            })?;
+
+            let current = sqlx::query(
+                "SELECT status, kanban_card_id, dispatch_type, context::TEXT AS context_text
+                 FROM task_dispatches
+                 WHERE id = $1",
+            )
+            .bind(&dispatch_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!("load postgres dispatch {dispatch_id} for result update: {error}")
+            })?;
+            let Some(current) = current else {
+                let _ = tx.rollback().await;
+                return Ok(0);
+            };
+
+            let current_status: Option<String> = current
+                .try_get("status")
+                .map_err(|error| format!("decode dispatch status for {dispatch_id}: {error}"))?;
+            let kanban_card_id: Option<String> = current.try_get("kanban_card_id").map_err(
+                |error| format!("decode dispatch kanban_card_id for {dispatch_id}: {error}"),
+            )?;
+            let dispatch_type: Option<String> = current
+                .try_get("dispatch_type")
+                .map_err(|error| format!("decode dispatch type for {dispatch_id}: {error}"))?;
+            let context_text: Option<String> = current
+                .try_get("context_text")
+                .map_err(|error| format!("decode dispatch context for {dispatch_id}: {error}"))?;
+
             let updated = sqlx::query(
                 "UPDATE task_dispatches
-                 SET result = $2, updated_at = NOW()
+                 SET result = CAST($2 AS jsonb),
+                     updated_at = NOW()
                  WHERE id = $1",
             )
             .bind(&dispatch_id)
             .bind(&result_json)
-            .execute(&pool)
+            .execute(&mut *tx)
             .await
-            .map_err(|error| format!("update postgres dispatch result {dispatch_id}: {error}"))?;
+            .map_err(|error| {
+                format!("update postgres dispatch result {dispatch_id}: {error}")
+            })?;
+
+            if updated.rows_affected() == 0 {
+                let _ = tx.rollback().await;
+                return Ok(0);
+            }
+
+            let status_for_audit = current_status.clone().unwrap_or_default();
+            sqlx::query(
+                "INSERT INTO dispatch_events (
+                    dispatch_id,
+                    kanban_card_id,
+                    dispatch_type,
+                    from_status,
+                    to_status,
+                    transition_source,
+                    payload_json
+                ) VALUES ($1, $2, $3, $4, $5, 'api_update_result', CAST($6 AS jsonb))",
+            )
+            .bind(&dispatch_id)
+            .bind(&kanban_card_id)
+            .bind(&dispatch_type)
+            .bind(&status_for_audit)
+            .bind(&status_for_audit)
+            .bind(&result_json)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!("insert dispatch_events audit row for {dispatch_id}: {error}")
+            })?;
+
+            if matches!(
+                current_status.as_deref(),
+                Some("completed" | "failed" | "cancelled")
+            ) {
+                let _ =
+                    crate::db::auto_queue::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+                        &mut tx,
+                        &dispatch_id,
+                        current_status.as_deref().unwrap_or("completed"),
+                        context_text.as_deref(),
+                        Some(&result_json),
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "reconcile phase-gate after result PATCH {dispatch_id}: {error}"
+                        )
+                    })?;
+            }
+
+            tx.commit().await.map_err(|error| {
+                format!("commit postgres update-result transaction {dispatch_id}: {error}")
+            })?;
+
             Ok(updated.rows_affected() as usize)
         },
         |error| error,

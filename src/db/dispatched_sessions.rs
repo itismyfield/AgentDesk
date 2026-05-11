@@ -1636,11 +1636,20 @@ pub(crate) async fn session_exists_pg(pool: &PgPool, session_key: &str) -> Resul
         .map_err(|error| format!("load postgres session existence for {session_key}: {error}"))
 }
 
+/// Upsert a hook session row.
+///
+/// #2045 Finding 7 (P2): the helper now returns whether the row was inserted
+/// (`Ok(true)`) or already existed (`Ok(false)`). The previous design relied
+/// on a separate `session_exists_pg` SELECT in the caller to decide between
+/// `dispatched_session_new` and `dispatched_session_update` WS broadcasts,
+/// which races with concurrent hook calls on the same `session_key`. The new
+/// signature decides inside the same INSERT statement via `xmax = 0` so the
+/// caller can emit the correct WS event even under cluster hand-off.
 pub(crate) async fn upsert_hook_session_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
-) -> Result<(), String> {
-    sqlx::query(
+) -> Result<bool, String> {
+    let row = sqlx::query(
         "INSERT INTO sessions (
             session_key,
             instance_id,
@@ -1676,7 +1685,8 @@ pub(crate) async fn upsert_hook_session_pg(
             thread_channel_id = COALESCE(EXCLUDED.thread_channel_id, sessions.thread_channel_id),
             claude_session_id = COALESCE(EXCLUDED.claude_session_id, sessions.claude_session_id),
             raw_provider_session_id = COALESCE(EXCLUDED.raw_provider_session_id, sessions.raw_provider_session_id),
-            last_heartbeat = NOW()",
+            last_heartbeat = NOW()
+         RETURNING (xmax = 0) AS inserted",
     )
     .bind(params.session_key)
     .bind(params.instance_id)
@@ -1691,10 +1701,15 @@ pub(crate) async fn upsert_hook_session_pg(
     .bind(params.thread_channel_id)
     .bind(params.claude_session_id)
     .bind(params.raw_provider_session_id)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .map(|_| ())
-    .map_err(|error| format!("upsert postgres session {}: {error}", params.session_key))
+    .map_err(|error| format!("upsert postgres session {}: {error}", params.session_key))?;
+    row.try_get::<bool, _>("inserted").map_err(|error| {
+        format!(
+            "decode upsert outcome for session {}: {error}",
+            params.session_key
+        )
+    })
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -1865,14 +1880,27 @@ pub(crate) async fn update_session_pg(
     id: i64,
     params: UpdateSessionParams<'_>,
 ) -> Result<u64, String> {
+    // #2045 Finding 6 (P1): mirror `upsert_hook_session_pg` semantics so PATCH
+    // callers cannot leave a zombie `active_dispatch_id` linked to a session
+    // they just transitioned to `disconnected`/`aborted`, and so the PATCH
+    // bumps `last_heartbeat` the same way the hook does. Without these two,
+    // PATCH self-reports from a worker would leave dashboard rows displaying
+    // stale active dispatches and the SessionActivityResolver would treat the
+    // session as inactive even when the caller has just provided a fresh
+    // state report.
     sqlx::query(
         "UPDATE sessions
          SET status = COALESCE($1, status),
-             active_dispatch_id = COALESCE($2, active_dispatch_id),
+             active_dispatch_id = CASE
+                 WHEN $1 IS NOT NULL AND lower($1) IN ('disconnected', 'aborted') THEN NULL
+                 WHEN $2 IS NOT NULL THEN $2
+                 ELSE active_dispatch_id
+             END,
              model = COALESCE($3, model),
              tokens = COALESCE($4, tokens),
              cwd = COALESCE($5, cwd),
-             session_info = COALESCE($6, session_info)
+             session_info = COALESCE($6, session_info),
+             last_heartbeat = NOW()
          WHERE id = $7",
     )
     .bind(params.status)

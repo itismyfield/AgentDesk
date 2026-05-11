@@ -97,7 +97,10 @@ fn message_queue_raw(
             );
             format!(r#"{{"ok":true,"id":{id}}}"#)
         }
-        Err(error) => format!(r#"{{"error":"{error}"}}"#),
+        // #2045 Finding 8 (P2): properly escape arbitrary error text so the
+        // JS wrapper's `JSON.parse` cannot trip on backslashes / newlines
+        // that Postgres or sqlx error messages may include.
+        Err(error) => crate::engine::ops::ensure_js_error_json(error),
     }
 }
 

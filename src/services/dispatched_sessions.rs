@@ -62,17 +62,11 @@ async fn hook_session_pg(
     let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
     let raw_provider_session_id = body.session_id.as_deref().filter(|s| !s.is_empty());
 
-    let is_new_session =
-        match dispatched_sessions_db::session_exists_pg(pool, &body.session_key).await {
-            Ok(exists) => !exists,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        };
-
+    // #2045 Finding 7 (P2): the upsert helper now reports whether the row
+    // was inserted in this transaction (`xmax = 0` RETURNING). The earlier
+    // pattern of "SELECT exists, then upsert" raced under cluster hand-off
+    // and could broadcast `dispatched_session_new` twice for the same
+    // session_key — once per concurrent webhook.
     let result = dispatched_sessions_db::upsert_hook_session_pg(
         pool,
         dispatched_sessions_db::HookSessionUpsert {
@@ -94,7 +88,7 @@ async fn hook_session_pg(
     .await;
 
     match result {
-        Ok(_) => {
+        Ok(is_new_session) => {
             let dispatch_id = body.dispatch_id.clone();
 
             crate::kanban::fire_event_hooks_with_backends(
@@ -963,7 +957,20 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
 }
 
 fn classify_session_termination_reason(reason: &str) -> &'static str {
-    let lower = reason.to_ascii_lowercase();
+    // #2045 Finding 16 (P3): honor an explicit `auto:` / `manual:` prefix
+    // from callers that know their own intent. Substring matching alone
+    // mis-classifies user-supplied reasons such as "user idle for 5 min"
+    // as `auto_cleanup`, which downstream metrics treat as a system event.
+    let trimmed = reason.trim();
+    let lower_trimmed = trimmed.to_ascii_lowercase();
+    if lower_trimmed.starts_with("auto:") || lower_trimmed.starts_with("system:") {
+        return "auto_cleanup";
+    }
+    if lower_trimmed.starts_with("manual:") || lower_trimmed.starts_with("user:") {
+        return "force_kill";
+    }
+
+    let lower = lower_trimmed.as_str();
     if lower.contains("idle")
         || lower.contains("auto cleanup")
         || lower.contains("자동 정리")
