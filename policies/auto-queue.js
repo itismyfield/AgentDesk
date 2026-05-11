@@ -447,6 +447,15 @@ var autoQueue = {
       "AND NOT EXISTS (" +
       "  SELECT 1 FROM auto_queue_entries e " +
       "  WHERE e.run_id = r.id AND e.status = 'user_cancelled'" +
+      ") " +
+      "AND NOT EXISTS (" +
+      "  SELECT 1 FROM auto_queue_phase_gates pg " +
+      "  WHERE pg.run_id = r.id AND pg.status IN ('pending', 'failed')" +
+      ") " +
+      "AND (" +
+      "  r.phase_gate_grace_until IS NULL " +
+      "  OR datetime(r.phase_gate_grace_until) IS NULL " +
+      "  OR datetime(r.phase_gate_grace_until) <= datetime('now')" +
       ") ORDER BY r.id ASC LIMIT 50",
       []
     );
