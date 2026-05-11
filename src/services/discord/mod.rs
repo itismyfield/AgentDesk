@@ -165,6 +165,10 @@ pub(crate) use inflight::latest_request_owner_user_id_for_channel;
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
 };
+// #2047 Finding 5 — expose role-map resolver to the HTTP routes layer so the
+// `/api/discord/channels/{id}` proxy can deny lookups for channels that are
+// not registered with this AgentDesk instance.
+pub(crate) use settings::resolve_role_binding as resolve_channel_role_binding;
 
 /// Discord message length limit
 pub(super) const DISCORD_MSG_LIMIT: usize = 2000;

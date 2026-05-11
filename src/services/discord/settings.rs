@@ -51,10 +51,15 @@ pub use read::{
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use validation::bot_settings_allow_agent;
 pub(crate) use validation::list_registered_channel_bindings;
+// #2047 Finding 5 — `resolve_role_binding` is exposed crate-wide so the HTTP
+// routes layer (`src/server/routes/discord.rs`) can deny `/api/discord/channels/*`
+// proxy lookups for channels that are not registered with this AgentDesk
+// instance. All other validation helpers remain super-scoped.
+pub(crate) use validation::resolve_role_binding;
 pub(super) use validation::{
     BotChannelRoutingGuardFailure, bot_settings_allow_channel, channel_supports_provider,
     has_configured_channel_binding, resolve_cache_ttl_minutes, resolve_dispatch_profile,
-    resolve_role_binding, resolve_workspace, validate_bot_channel_routing,
+    resolve_workspace, validate_bot_channel_routing,
     validate_bot_channel_routing_with_provider_channel,
 };
 pub(super) use write::save_bot_settings;
