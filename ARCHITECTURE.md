@@ -91,6 +91,7 @@ src/
 │   │   ├── storage_stats.rs
 │   │   └── tests.rs
 │   ├── agents.rs
+│   ├── automation_candidates.rs
 │   ├── cancel_tombstones.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
@@ -227,6 +228,7 @@ src/
 │   │   ├── analytics_tests.rs
 │   │   ├── auth.rs
 │   │   ├── auto_queue.rs
+│   │   ├── automation_candidates.rs
 │   │   ├── cluster.rs
 │   │   ├── cron_api.rs
 │   │   ├── departments.rs
@@ -575,6 +577,8 @@ src/
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
 │   ├── auto_queue.rs
+│   ├── automation_candidate_contract.rs
+│   ├── automation_candidate_materializer.rs
 │   ├── claude.rs
 │   ├── codex.rs
 │   ├── codex_tmux_wrapper.rs

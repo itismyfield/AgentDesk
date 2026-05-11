@@ -18,6 +18,17 @@ pub struct EnsuredWorktreeInfo {
     pub created: bool,
 }
 
+impl From<WorktreeInfo> for EnsuredWorktreeInfo {
+    fn from(wt: WorktreeInfo) -> Self {
+        Self {
+            path: wt.path,
+            branch: wt.branch,
+            commit: wt.commit,
+            created: false,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ManagedWorktreeCleanup {
     pub removed: usize,
@@ -25,6 +36,54 @@ pub struct ManagedWorktreeCleanup {
     pub skipped_unmerged: usize,
     pub skipped_unmanaged: usize,
     pub failed: usize,
+}
+
+/// Parse `git worktree list --porcelain` output into a flat list of worktrees.
+fn parse_worktree_list(repo_dir: &str) -> Vec<WorktreeInfo> {
+    let output = match git_command()
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_dir)
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    let mut result = Vec::new();
+    let mut wt_path = String::new();
+    let mut wt_branch = String::new();
+    let mut wt_head = String::new();
+
+    for line in text.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            wt_path = p.to_string();
+        } else if let Some(h) = line.strip_prefix("HEAD ") {
+            wt_head = h.to_string();
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            wt_branch = b.strip_prefix("refs/heads/").unwrap_or(b).to_string();
+        } else if line.is_empty() && !wt_path.is_empty() {
+            if !wt_branch.is_empty() {
+                result.push(WorktreeInfo {
+                    path: std::mem::take(&mut wt_path),
+                    branch: std::mem::take(&mut wt_branch),
+                    commit: std::mem::take(&mut wt_head),
+                });
+            } else {
+                wt_path.clear();
+                wt_branch.clear();
+                wt_head.clear();
+            }
+        }
+    }
+    if !wt_path.is_empty() && !wt_branch.is_empty() {
+        result.push(WorktreeInfo {
+            path: wt_path,
+            branch: wt_branch,
+            commit: wt_head,
+        });
+    }
+    result
 }
 
 /// Find an active git worktree whose recent commits reference the given issue number.
@@ -39,71 +98,31 @@ pub struct ManagedWorktreeCleanup {
 /// 1. Preferring branches whose name contains the issue number
 /// 2. Among ties, preferring the worktree with the newest HEAD commit
 pub fn find_worktree_for_issue(repo_dir: &str, issue_number: i64) -> Option<WorktreeInfo> {
-    let output = git_command()
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_dir)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-
-    let mut candidates: Vec<(String, String, String)> = Vec::new();
-    let mut wt_path = String::new();
-    let mut wt_branch = String::new();
-    let mut wt_head = String::new();
-    for line in text.lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            wt_path = path.to_string();
-        } else if let Some(head) = line.strip_prefix("HEAD ") {
-            wt_head = head.to_string();
-        } else if let Some(branch) = line.strip_prefix("branch ") {
-            wt_branch = branch
-                .strip_prefix("refs/heads/")
-                .unwrap_or(branch)
-                .to_string();
-        } else if line.is_empty() && !wt_path.is_empty() {
-            if wt_branch != "main" && wt_branch != "master" && !wt_branch.is_empty() {
-                candidates.push((wt_path.clone(), wt_branch.clone(), wt_head.clone()));
-            }
-            wt_path.clear();
-            wt_branch.clear();
-            wt_head.clear();
-        }
-    }
-    if !wt_path.is_empty() && wt_branch != "main" && wt_branch != "master" && !wt_branch.is_empty()
-    {
-        candidates.push((wt_path, wt_branch, wt_head));
-    }
+    let candidates: Vec<WorktreeInfo> = parse_worktree_list(repo_dir)
+        .into_iter()
+        .filter(|wt| wt.branch != "main" && wt.branch != "master")
+        .collect();
 
     let base_ref = upstream_base_ref(repo_dir);
     let needle = format!("#{issue_number}");
     let mut matches: Vec<WorktreeInfo> = Vec::new();
 
-    for (path, branch, head) in &candidates {
-        let check = git_command()
+    for wt in &candidates {
+        let out = git_command()
             .args([
                 "-C",
-                path,
+                &wt.path,
                 "log",
                 "--oneline",
                 "--grep",
                 &needle,
-                &format!("{base_ref}..{branch}"),
+                &format!("{base_ref}..{}", wt.branch),
             ])
             .output()
             .ok();
-        if let Some(out) = check {
-            if out.status.success() {
-                let log = String::from_utf8_lossy(&out.stdout);
-                if !log.trim().is_empty() {
-                    matches.push(WorktreeInfo {
-                        path: path.clone(),
-                        branch: branch.clone(),
-                        commit: head.clone(),
-                    });
-                }
+        if let Some(out) = out {
+            if out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty() {
+                matches.push(wt.clone());
             }
         }
     }
@@ -184,12 +203,7 @@ pub fn ensure_worktree_for_issue(
     issue_number: i64,
 ) -> Result<EnsuredWorktreeInfo, String> {
     if let Some(existing) = find_worktree_for_issue(repo_dir, issue_number) {
-        return Ok(EnsuredWorktreeInfo {
-            path: existing.path,
-            branch: existing.branch,
-            commit: existing.commit,
-            created: false,
-        });
+        return Ok(existing.into());
     }
 
     let root = managed_worktrees_root(repo_dir)
@@ -239,6 +253,126 @@ pub fn ensure_worktree_for_issue(
         created: true,
     })
 }
+
+// ── Automation-candidate worktree helpers ────────────────────────────────────
+
+/// Canonical branch name for an automation candidate iteration.
+pub fn automation_branch_name(card_id: &str, iteration: i32) -> String {
+    format!("automation/{card_id}/iter-{iteration}")
+}
+
+/// Find an active automation worktree for `card_id`/`iteration` by scanning `git worktree list`.
+pub fn find_automation_worktree(
+    repo_dir: &str,
+    card_id: &str,
+    iteration: i32,
+) -> Option<WorktreeInfo> {
+    let target = automation_branch_name(card_id, iteration);
+    parse_worktree_list(repo_dir)
+        .into_iter()
+        .find(|wt| wt.branch == target)
+}
+
+/// Create (or return existing) automation worktree for `card_id` iteration `iteration`.
+///
+/// Branch: `automation/{card_id}/iter-{iteration}`
+/// Path:   `{managed_worktrees_root}/automation-{card_id_safe}-iter-{iteration}`
+pub fn ensure_automation_worktree(
+    repo_dir: &str,
+    card_id: &str,
+    iteration: i32,
+) -> Result<EnsuredWorktreeInfo, String> {
+    if let Some(existing) = find_automation_worktree(repo_dir, card_id, iteration) {
+        return Ok(existing.into());
+    }
+
+    let root = managed_worktrees_root(repo_dir)
+        .ok_or_else(|| "cannot resolve AgentDesk runtime root for managed worktree".to_string())?;
+    std::fs::create_dir_all(&root)
+        .map_err(|e| format!("create managed worktree root '{}': {e}", root.display()))?;
+
+    let branch = automation_branch_name(card_id, iteration);
+    let card_safe = sanitize_path_segment(card_id);
+    let path = root.join(format!("automation-{card_safe}-iter-{iteration}"));
+    let base_ref = upstream_base_ref(repo_dir);
+
+    let output = git_command()
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            path.to_str()
+                .ok_or_else(|| format!("worktree path is not UTF-8: {}", path.display()))?,
+            &base_ref,
+        ])
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|e| format!("git worktree add failed for {card_id}/iter-{iteration}: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "git worktree add failed for {card_id}/iter-{iteration}: {} {}",
+            String::from_utf8_lossy(&output.stderr).trim(),
+            String::from_utf8_lossy(&output.stdout).trim()
+        ));
+    }
+
+    let commit = git_command()
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&path)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    Ok(EnsuredWorktreeInfo {
+        path: path.to_string_lossy().into_owned(),
+        branch,
+        commit,
+        created: true,
+    })
+}
+
+/// Force-remove an automation worktree and delete its branch.
+///
+/// Automation worktrees are disposable; dirty-state is not checked.
+pub fn remove_automation_worktree(
+    repo_dir: &str,
+    worktree_path: &str,
+    branch: &str,
+) -> Result<(), String> {
+    let remove = git_command()
+        .args(["worktree", "remove", "--force", worktree_path])
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|e| format!("git worktree remove: {e}"))?;
+    if !remove.status.success() {
+        return Err(format!(
+            "git worktree remove --force: {}",
+            String::from_utf8_lossy(&remove.stderr).trim()
+        ));
+    }
+    let _ = git_command()
+        .args(["worktree", "prune"])
+        .current_dir(repo_dir)
+        .output();
+    let del = git_command()
+        .args(["branch", "-D", branch])
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|e| format!("git branch -D: {e}"))?;
+    if !del.status.success() {
+        return Err(format!(
+            "git branch -D {branch}: {}",
+            String::from_utf8_lossy(&del.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn is_managed_worktree_path(repo_dir: &str, worktree_path: &str) -> bool {
     let Some(root) = managed_worktrees_root(repo_dir) else {
@@ -313,6 +447,23 @@ pub fn cleanup_managed_worktree(repo_dir: &str, worktree_path: &str) -> ManagedW
         cleanup.failed += 1;
     }
     cleanup
+}
+
+#[cfg(test)]
+mod automation_worktree_tests {
+    use super::*;
+
+    #[test]
+    fn branch_name_format() {
+        assert_eq!(
+            automation_branch_name("abc-123", 1),
+            "automation/abc-123/iter-1"
+        );
+        assert_eq!(
+            automation_branch_name("550e8400-e29b-41d4-a716-446655440000", 7),
+            "automation/550e8400-e29b-41d4-a716-446655440000/iter-7"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

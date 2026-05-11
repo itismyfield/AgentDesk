@@ -280,7 +280,9 @@ const CANONICAL_CATEGORIES: [&str; 8] = [
 fn canonical_category(category: &str) -> &'static str {
     match category {
         "agents" => "agents",
-        "kanban" | "kanban-repos" | "pipeline" | "pm" | "reviews" => "kanban",
+        "kanban" | "kanban-repos" | "pipeline" | "pm" | "reviews" | "automation-candidates" => {
+            "kanban"
+        }
         "dispatches" | "dispatched-sessions" | "internal" | "messages" | "sessions" => "dispatches",
         "auto-queue" | "cron" | "queue" => "queue",
         "routines" => "routines",
@@ -335,7 +337,9 @@ fn category_to_group(category: &str) -> &'static str {
         // integrations — discord, github, meetings, provider, mcp
         "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
         // automation — auto-queue, policies, scheduler, cron, maintenance
-        "auto-queue" | "queue" | "cron" | "policies" | "routines" => "automation",
+        "auto-queue" | "automation-candidates" | "queue" | "cron" | "policies" | "routines" => {
+            "automation"
+        }
         // config — settings, onboarding, knowledge, source-of-truth, skills,
         // offices, departments, memory (#1066 /api/memory dual-mode)
         "settings" | "onboarding" | "skills" | "offices" | "departments" | "memory" => "config",
@@ -414,6 +418,9 @@ fn category_description(category: &str) -> &'static str {
         "auth" => "Current authentication session state.",
         "auto-queue" => {
             "Auto-queue generation, activation, slot repair, and queue execution control."
+        }
+        "automation-candidates" => {
+            "Loop-enabled automation candidate cards, iteration results, worktrees, and final gates."
         }
         "cron" => "Registered cron jobs per agent.",
         "cluster" => "Multinode worker-node registry, heartbeat, and role diagnostics.",
@@ -1724,6 +1731,60 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             )
             .with_curl("curl -X POST http://localhost:8787/api/kanban-cards -H 'Content-Type: application/json' -d '{\"title\":\"Test Card\",\"priority\":\"high\"}'"),
         ep(
+            "POST",
+            "/api/automation-candidates",
+            "automation-candidates",
+            "Create or upsert an automation candidate card. Cards enter the iteration loop when pipeline_stage_id='automation-candidate' and metadata.program contains repo_dir, allowed_write_paths, metric_name, and metric_target. pipeline_stage_id alone is the discriminator — no extra boolean flags required.",
+        )
+        .with_params([
+            ("title", body_param("string", true, "Candidate card title")),
+            ("repo_id", body_param("string", false, "Repository id or full name")),
+            ("assigned_agent_id", body_param("string", false, "Agent that should run the loop")),
+            ("source", body_param("string", false, "Origin such as user, routine_recommender, memento_digest, or api_friction").with_default("user")),
+            ("dedupe_key", body_param("string", false, "Stable candidate identity for idempotent upsert")),
+            ("start_ready", body_param("boolean", false, "When true, mark the candidate ready for executor-v2 immediately").with_default(false)),
+            ("program.repo_dir", body_param("string", true, "Absolute repository path used to create isolated worktrees")),
+            ("program.allowed_write_paths", body_param("array<string>", true, "Non-empty clean relative path allowlist")),
+            ("program.metric_name", body_param("string", true, "Metric name measured by the iteration")),
+            ("program.metric_target", body_param("number", true, "Target metric value")),
+            ("program.metric_direction", body_param("string", false, "lower_is_better or higher_is_better").with_default("lower_is_better")),
+            ("program.final_gate", body_param("string", false, "manual_review or auto_apply_after_green").with_default("manual_review")),
+            ("program.iteration_budget", body_param("integer", false, "Maximum iteration count, clamped to 1..10").with_default(3)),
+        ])
+        .with_example(
+            json!({"body": {
+                "title": "Reduce repeated Discord routing failures",
+                "source": "routine_recommender",
+                "dedupe_key": "api-friction:discord-routing-timeout",
+                "start_ready": false,
+                "program": {
+                    "repo_dir": "/Users/kunkun/kunkunGames/agentdesk",
+                    "allowed_write_paths": ["src/services/discord", "src/server/routes/discord.rs"],
+                    "metric_name": "routing_failure_rate",
+                    "metric_target": 0.0,
+                    "metric_direction": "lower_is_better",
+                    "final_gate": "manual_review",
+                    "iteration_budget": 3
+                }
+            }}),
+            json!({
+                "card_id": "uuid-card-1",
+                "created": true,
+                "status": "backlog",
+                "pipeline_stage_id": "automation-candidate",
+                "discriminator": {
+                    "pipeline_stage_id": "automation-candidate",
+                    "required_program_fields": ["repo_dir", "allowed_write_paths", "metric_name", "metric_target"]
+                }
+            }),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"title": "x", "program": {"allowed_write_paths": ["../src"]}}}),
+            json!({"error": "program.repo_dir is required", "code": "MISSING_PROGRAM_CONTRACT"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/automation-candidates -H 'Content-Type: application/json' -d '{\"title\":\"Reduce repeated routing failures\",\"dedupe_key\":\"api-friction:routing\",\"program\":{\"repo_dir\":\"/Users/kunkun/kunkunGames/agentdesk\",\"allowed_write_paths\":[\"src/services/discord\"],\"metric_name\":\"routing_failure_rate\",\"metric_target\":0,\"metric_direction\":\"lower_is_better\"}}'"),
+        ep(
             "GET",
             "/api/kanban-cards/stalled",
             "kanban",
@@ -2187,6 +2248,100 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Get GitHub comments for linked card issue // TODO: example",
         )
         .with_params([("id", path_param("Kanban card ID"))]),
+        ep(
+            "POST",
+            "/api/automation-candidates/{card_id}/prepare-worktree",
+            "automation-candidates",
+            "Prepare or reuse an isolated git worktree for one automation-candidate iteration.",
+        )
+        .with_params([
+            ("card_id", path_param("Automation candidate card ID")),
+            ("iteration", body_param("integer", true, "Iteration number, starting at 1")),
+        ])
+        .with_example(
+            json!({"path": {"card_id": "card-1"}, "body": {"iteration": 1}}),
+            json!({"path": "/tmp/agentdesk-worktrees/card-1-1", "branch": "automation/card-1/iter-1", "commit": "abc123", "created": true}),
+        )
+        .with_error_example(
+            400,
+            json!({"path": {"card_id": "card-1"}, "body": {"iteration": 0}}),
+            json!({"error": "iteration must be >= 1"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/automation-candidates/card-1/prepare-worktree -H 'Content-Type: application/json' -d '{\"iteration\":1}'"),
+        ep(
+            "POST",
+            "/api/automation-candidates/{card_id}/iteration-result",
+            "automation-candidates",
+            "Submit one iteration result. Rust computes keep/discard deterministically from the card program contract.",
+        )
+        .with_params([
+            ("card_id", path_param("Automation candidate card ID")),
+            ("iteration", body_param("integer", true, "Iteration number")),
+            ("branch", body_param("string", true, "Automation branch name")),
+            ("metric_before", body_param("number", false, "Metric value before changes")),
+            ("metric_after", body_param("number", false, "Metric value after changes")),
+            ("allowed_write_paths_used", body_param("array<string>", false, "Reported changed paths; all must be within program.allowed_write_paths")),
+        ])
+        .with_example(
+            json!({"path": {"card_id": "card-1"}, "body": {"iteration": 1, "branch": "automation/card-1/iter-1", "metric_before": 0.4, "metric_after": 0.2, "status": "keep", "allowed_write_paths_used": ["src/services/discord/router.rs"]}}),
+            json!({"verdict": "keep", "action": "keep_continue", "child_card_id": null}),
+        )
+        .with_error_example(
+            403,
+            json!({"path": {"card_id": "card-1"}, "body": {"iteration": 1, "branch": "automation/card-1/iter-1", "allowed_write_paths_used": ["migrations/secret.sql"]}}),
+            json!({"error": "path 'migrations/secret.sql' is not in allowed_write_paths", "code": "ALLOWED_PATHS_VIOLATION", "path": "migrations/secret.sql"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/automation-candidates/card-1/iteration-result -H 'Content-Type: application/json' -d '{\"iteration\":1,\"branch\":\"automation/card-1/iter-1\",\"metric_before\":0.4,\"metric_after\":0.2,\"status\":\"keep\",\"allowed_write_paths_used\":[\"src/services/discord/router.rs\"]}'"),
+        ep(
+            "GET",
+            "/api/automation-candidates/{card_id}/iterations",
+            "automation-candidates",
+            "List all iteration records for a card in chronological order.",
+        )
+        .with_params([("card_id", path_param("Automation candidate card ID"))])
+        .with_example(
+            json!({}),
+            json!({
+                "iterations": [
+                    { "iteration": 1, "status": "keep", "metric_before": 0.4, "metric_after": 0.2, "description": "Reduced routing failure rate", "branch": "automation/card-1/iter-1" }
+                ]
+            }),
+        )
+        .with_curl("curl http://localhost:8787/api/automation-candidates/card-1/iterations"),
+        ep(
+            "GET",
+            "/api/automation-candidates/{card_id}/automation-inventory",
+            "automation-candidates",
+            "Return per-card iteration history wrapped with card_id, in the shape consumed by ctx.automationInventory[cardId] in the automation executor routine.",
+        )
+        .with_params([("card_id", path_param("Automation candidate card ID"))])
+        .with_example(
+            json!({}),
+            json!({
+                "card_id": "card-1",
+                "iterations": [
+                    { "iteration": 1, "status": "keep", "metric_before": 0.4, "metric_after": 0.2, "description": "Reduced routing failure rate", "branch": "automation/card-1/iter-1" }
+                ]
+            }),
+        )
+        .with_curl("curl http://localhost:8787/api/automation-candidates/card-1/automation-inventory"),
+        ep(
+            "POST",
+            "/api/automation-candidates/{card_id}/approve",
+            "automation-candidates",
+            "Approve the final candidate. The side-effect simulator may downgrade auto_apply_after_green to manual_review.",
+        )
+        .with_params([("card_id", path_param("Automation candidate card ID"))])
+        .with_example(
+            json!({"path": {"card_id": "card-1"}}),
+            json!({"status": "approved", "card_id": "card-1", "final_gate": "auto_apply_after_green", "effective_final_gate": "manual_review", "next_action": "await_manual_merge", "side_effect_simulation": {"safe_for_auto_apply": false}}),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"card_id": "ghost"}}),
+            json!({"error": "automation candidate card not found"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/automation-candidates/card-1/approve"),
         ep(
             "GET",
             "/api/kanban-repos",
