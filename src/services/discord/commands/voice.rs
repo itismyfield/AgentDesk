@@ -425,6 +425,8 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
     config: crate::voice::VoiceConfig,
     barge_in: std::sync::Arc<super::super::voice_barge_in::VoiceBargeInRuntime>,
     pairings: std::sync::Arc<super::super::voice_routing::VoiceChannelPairingStore>,
+    provider: crate::services::provider::ProviderKind,
+    channel_provider_map: std::collections::HashMap<String, String>,
 ) {
     if !config.enabled {
         tracing::info!("voice auto-join skipped: voice.enabled=false");
@@ -433,12 +435,30 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
 
     let raw_ids: Vec<String> = config.auto_join_channel_ids_with_lobby();
     tracing::info!(
+        provider = provider.as_str(),
         target_count = raw_ids.len(),
         targets = ?raw_ids,
         "voice auto-join starting"
     );
 
     for raw_channel_id in raw_ids {
+        // #2054 v6: 같은 voice 채널에 claude + codex 양 봇이 모두 입장해서
+        // 사용자 발화에 두 번 응답(텍스트/TTS 중복) 하는 회귀를 차단한다.
+        // agent yaml binding 으로 채널이 특정 provider 에 매핑돼 있으면
+        // 그 provider 의 bot 만 입장한다. 매핑이 없으면 (legacy 호환)
+        // 모든 provider 가 입장.
+        if let Some(mapped) = channel_provider_map.get(raw_channel_id.trim())
+            && mapped.as_str() != provider.as_str()
+        {
+            tracing::info!(
+                provider = provider.as_str(),
+                channel_id = raw_channel_id,
+                mapped_provider = mapped,
+                "voice auto-join skipped: channel bound to a different provider"
+            );
+            continue;
+        }
+
         let Ok(channel_id) = raw_channel_id.trim().parse::<u64>().map(ChannelId::new) else {
             tracing::warn!(
                 channel_id = raw_channel_id,

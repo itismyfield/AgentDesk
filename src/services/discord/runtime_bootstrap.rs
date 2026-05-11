@@ -1810,6 +1810,28 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     let config_for_voice = voice_config_for_setup.clone();
                     let barge_in_for_voice = shared_clone.voice_barge_in.clone();
                     let pairings_for_voice = shared_clone.voice_pairings.clone();
+                    let provider_for_voice = provider_for_setup.clone();
+                    // #2054 v6: agent yaml binding 에서 channel_id → provider
+                    // 매핑을 build 해서 voice auto-join 가 매핑된 provider
+                    // bot 만 입장하도록. 같은 voice 채널에 양 bot 이 들어가
+                    // STT/TTS 가 이중으로 트리거되던 회귀 차단.
+                    let channel_provider_map: std::collections::HashMap<String, String> = {
+                        let cfg = crate::config::load_graceful();
+                        let mut map = std::collections::HashMap::new();
+                        for agent in &cfg.agents {
+                            for (slot_provider, channel) in agent.channels.iter() {
+                                let Some(channel) = channel else { continue };
+                                let Some(channel_id) = channel.channel_id() else {
+                                    continue;
+                                };
+                                let provider = channel
+                                    .provider()
+                                    .unwrap_or_else(|| slot_provider.to_string());
+                                map.insert(channel_id.to_string(), provider);
+                            }
+                        }
+                        map
+                    };
                     tokio::spawn(async move {
                         commands::auto_join_voice_channels(
                             ctx_for_voice,
@@ -1817,6 +1839,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             config_for_voice,
                             barge_in_for_voice,
                             pairings_for_voice,
+                            provider_for_voice,
+                            channel_provider_map,
                         )
                         .await;
                     });
