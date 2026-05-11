@@ -7,6 +7,10 @@ pub(crate) const DEFAULT_PROGRESS_TTS_CACHE_DIR: &str = ".cache/voice-tts-progre
 pub(crate) const DEFAULT_EDGE_TTS_COMMAND: &str = "edge-tts";
 pub(crate) const DEFAULT_EDGE_TTS_VOICE: &str = "ko-KR-SunHiNeural";
 pub(crate) const DEFAULT_EDGE_TTS_RATE: &str = "+0%";
+pub(crate) const DEFAULT_STT_FFMPEG_COMMAND: &str = "ffmpeg";
+pub(crate) const DEFAULT_STT_WHISPER_COMMAND: &str = "whisper-cli";
+pub(crate) const DEFAULT_STT_MODEL_PATH: &str = "~/.adk/voice/models/ggml-large-v3-turbo.bin";
+pub(crate) const DEFAULT_STT_LANGUAGE: &str = "ko";
 pub(crate) const DEFAULT_BARGE_IN_ACKNOWLEDGEMENT: &str =
     "그동안 말씀하신 거 같이 정리해서 작업할게요.";
 pub(crate) const DEFAULT_BARGE_IN_TTL_SECS: u64 = 15 * 60;
@@ -16,6 +20,7 @@ pub(crate) const DEFAULT_BARGE_IN_TTL_SECS: u64 = 15 * 60;
 pub(crate) struct VoiceConfig {
     pub enabled: bool,
     pub audio: VoiceAudioDirs,
+    pub stt: VoiceSttConfig,
     pub tts: VoiceTtsConfig,
     pub thresholds: VoiceDbThresholds,
     pub idle: VoiceIdleTimings,
@@ -30,6 +35,7 @@ impl Default for VoiceConfig {
         Self {
             enabled: false,
             audio: VoiceAudioDirs::default(),
+            stt: VoiceSttConfig::default(),
             tts: VoiceTtsConfig::default(),
             thresholds: VoiceDbThresholds::default(),
             idle: VoiceIdleTimings::default(),
@@ -44,6 +50,26 @@ impl Default for VoiceConfig {
 impl VoiceConfig {
     pub(crate) fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct VoiceSttConfig {
+    pub ffmpeg_command: String,
+    pub whisper_command: String,
+    pub model_path: PathBuf,
+    pub language: String,
+}
+
+impl Default for VoiceSttConfig {
+    fn default() -> Self {
+        Self {
+            ffmpeg_command: DEFAULT_STT_FFMPEG_COMMAND.to_string(),
+            whisper_command: DEFAULT_STT_WHISPER_COMMAND.to_string(),
+            model_path: PathBuf::from(DEFAULT_STT_MODEL_PATH),
+            language: DEFAULT_STT_LANGUAGE.to_string(),
+        }
     }
 }
 
@@ -182,6 +208,10 @@ mod tests {
         assert!(config.allowed_user_ids.is_empty());
         assert!(config.auto_join_channel_ids.is_empty());
         assert_eq!(config.wake_words, vec!["agentdesk"]);
+        assert_eq!(config.stt.ffmpeg_command, DEFAULT_STT_FFMPEG_COMMAND);
+        assert_eq!(config.stt.whisper_command, DEFAULT_STT_WHISPER_COMMAND);
+        assert_eq!(config.stt.model_path, PathBuf::from(DEFAULT_STT_MODEL_PATH));
+        assert_eq!(config.stt.language, DEFAULT_STT_LANGUAGE);
         assert_eq!(config.tts.backend, VoiceTtsBackendKind::Edge);
         assert_eq!(
             config.tts.progress_cache_dir,
@@ -230,6 +260,7 @@ auto_join_channel_ids:
         );
         assert_eq!(config.thresholds.speech_start_db, -42.5);
         assert_eq!(config.thresholds.speech_end_db, -55.0);
+        assert_eq!(config.stt, VoiceSttConfig::default());
         assert_eq!(config.tts.backend, VoiceTtsBackendKind::Edge);
         assert_eq!(config.tts.edge.command, DEFAULT_EDGE_TTS_COMMAND);
         assert_eq!(config.tts.edge.rate, DEFAULT_EDGE_TTS_RATE);
@@ -240,6 +271,28 @@ auto_join_channel_ids:
         assert_eq!(config.wake_words, vec!["desk"]);
         assert_eq!(config.allowed_user_ids, vec!["343742347365974026"]);
         assert_eq!(config.auto_join_channel_ids, vec!["1500000000000000000"]);
+    }
+
+    #[test]
+    fn voice_config_deserializes_stt_settings() {
+        let config: VoiceConfig = serde_yaml::from_str(
+            r#"
+stt:
+  ffmpeg_command: /opt/homebrew/bin/ffmpeg
+  whisper_command: /opt/homebrew/bin/whisper-cli
+  model_path: /models/ggml-large-v3-turbo.bin
+  language: ko
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.stt.ffmpeg_command, "/opt/homebrew/bin/ffmpeg");
+        assert_eq!(config.stt.whisper_command, "/opt/homebrew/bin/whisper-cli");
+        assert_eq!(
+            config.stt.model_path,
+            PathBuf::from("/models/ggml-large-v3-turbo.bin")
+        );
+        assert_eq!(config.stt.language, "ko");
     }
 
     #[test]

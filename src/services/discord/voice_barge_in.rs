@@ -13,6 +13,7 @@ use crate::voice::barge_in::{
     BargeInPlayerStop, BargeInSensitivity, BargeInSensitivityState, DeferredBargeInBuffer,
     LiveBargeInCut, LiveBargeInMonitor, ProcessingBargeInDecision, run_sensitivity_ttl_reset,
 };
+use crate::voice::stt::SttRuntime;
 use crate::voice::tts::{TtsRuntime, TtsSynthesisKind};
 use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 
@@ -55,6 +56,7 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     acknowledgement_enabled: bool,
     acknowledgement_text: String,
     transcript_dirs: Vec<PathBuf>,
+    stt: Option<SttRuntime>,
     tts: Option<TtsRuntime>,
     monitors: dashmap::DashMap<u64, Arc<std::sync::Mutex<LiveBargeInMonitor>>>,
     playbacks: dashmap::DashMap<u64, Arc<LivePlaybackSession>>,
@@ -67,6 +69,11 @@ impl VoiceBargeInRuntime {
     pub(in crate::services::discord) fn from_voice_config(config: &VoiceConfig) -> Self {
         let default_sensitivity = config.barge_in.sensitivity;
         let conservative_ttl = Duration::from_secs(config.barge_in.conservative_ttl_secs.max(1));
+        let stt = if config.enabled {
+            Some(SttRuntime::from_voice_config(config))
+        } else {
+            None
+        };
         let tts = if config.enabled && config.barge_in.acknowledgement_enabled {
             TtsRuntime::from_voice_config(config).ok()
         } else {
@@ -83,6 +90,7 @@ impl VoiceBargeInRuntime {
             acknowledgement_enabled: config.barge_in.acknowledgement_enabled,
             acknowledgement_text: config.barge_in.acknowledgement_text.clone(),
             transcript_dirs: transcript_dirs_from_config(config),
+            stt,
             tts,
             monitors: dashmap::DashMap::new(),
             playbacks: dashmap::DashMap::new(),
@@ -100,6 +108,7 @@ impl VoiceBargeInRuntime {
             acknowledgement_enabled: false,
             acknowledgement_text: String::new(),
             transcript_dirs: Vec::new(),
+            stt: None,
             tts: None,
             monitors: dashmap::DashMap::new(),
             playbacks: dashmap::DashMap::new(),
@@ -320,14 +329,12 @@ impl VoiceBargeInRuntime {
             return VoiceBargeInTranscriptOutcome::Disabled;
         }
 
-        let Some(transcript) = self.wait_for_stt_transcript(utterance).await else {
-            tracing::debug!(
-                channel_id = channel_id.get(),
-                utterance_id = %utterance.utterance_id,
-                path = %utterance.path.display(),
-                "voice barge-in skipped utterance because no STT transcript sidecar appeared"
-            );
-            return VoiceBargeInTranscriptOutcome::TranscriptUnavailable;
+        let transcript = match self
+            .transcribe_completed_utterance(channel_id, utterance)
+            .await
+        {
+            Some(transcript) => transcript,
+            None => return VoiceBargeInTranscriptOutcome::TranscriptUnavailable,
         };
 
         self.handle_processing_transcript(shared, provider, channel_id, &transcript)
@@ -479,6 +486,38 @@ impl VoiceBargeInRuntime {
             path = %path.display(),
             "voice barge-in acknowledgement playback started"
         );
+    }
+
+    async fn transcribe_completed_utterance(
+        &self,
+        channel_id: ChannelId,
+        utterance: &CompletedUtterance,
+    ) -> Option<String> {
+        if let Some(stt) = self.stt.clone() {
+            match stt.transcribe(&utterance.path).await {
+                Ok(transcript) => return Some(transcript),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        channel_id = channel_id.get(),
+                        utterance_id = %utterance.utterance_id,
+                        path = %utterance.path.display(),
+                        "voice STT transcription failed; falling back to transcript sidecar"
+                    );
+                }
+            }
+        }
+
+        let Some(transcript) = self.wait_for_stt_transcript(utterance).await else {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                utterance_id = %utterance.utterance_id,
+                path = %utterance.path.display(),
+                "voice barge-in skipped utterance because no STT transcript sidecar appeared"
+            );
+            return None;
+        };
+        Some(transcript)
     }
 
     async fn wait_for_stt_transcript(&self, utterance: &CompletedUtterance) -> Option<String> {

@@ -49,6 +49,15 @@ voice:
     tts_cache_dir: "~/.adk/voice/tts-cache"
     # Directory for short-lived conversion and buffering files.
     temp_dir: "~/.adk/voice/tmp"
+  stt:
+    # ffmpeg executable name or absolute path.
+    ffmpeg_command: "ffmpeg"
+    # whisper.cpp CLI executable name or absolute path.
+    whisper_command: "whisper-cli"
+    # whisper.cpp model used for Korean STT.
+    model_path: "~/.adk/voice/models/ggml-large-v3-turbo.bin"
+    # whisper.cpp language code.
+    language: "ko"
   tts:
     # TTS backend selector. Currently supported: edge.
     backend: edge
