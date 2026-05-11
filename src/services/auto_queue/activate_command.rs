@@ -271,6 +271,39 @@ pub(crate) async fn activate_with_deps_pg(
         groups
     };
     let active_group_count = active_groups.len() as i64;
+    // #2034: max_concurrent_threads now caps the total active turn count
+    // across implementation + review + review-decision + rework + create-pr
+    // dispatches (not just impl thread groups). Count any non-phase-gate
+    // task_dispatch row in 'pending' or 'dispatched' status that belongs to
+    // the run's agent(s). Phase-gate sidecar dispatches stay excluded so
+    // gate evaluation does not occupy a concurrency slot.
+    let active_turn_count = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM task_dispatches d
+         WHERE d.status IN ('pending', 'dispatched')
+           AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+           AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
+           AND EXISTS (
+               SELECT 1
+               FROM auto_queue_entries e
+               WHERE e.run_id = $1
+                 AND e.agent_id = d.to_agent_id
+           )",
+    )
+    .bind(&run_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("load postgres active turn count for {run_id}: {error}")}),
+                ),
+            );
+        }
+    };
     let pending_group_rows = match sqlx::query(
         "SELECT DISTINCT COALESCE(thread_group, 0)::BIGINT AS thread_group,
                          COALESCE(batch_phase, 0)::BIGINT AS batch_phase
@@ -432,6 +465,17 @@ pub(crate) async fn activate_with_deps_pg(
 
     let mut dispatched_groups_this_activate = 0_i64;
     for group in &groups_to_dispatch {
+        // #2034: cap on TOTAL active turns (impl + review + rework + create-pr),
+        // not just impl thread groups. active_turn_count already excludes
+        // phase-gate sidecar dispatches. dispatched_groups_this_activate
+        // increments once per new impl turn created in this call.
+        if (active_turn_count + dispatched_groups_this_activate) >= max_concurrent {
+            break;
+        }
+        // Legacy guard preserved as a no-op fallback so that impl-only runs
+        // (where active_turn_count == active_group_count) keep the same
+        // termination behaviour even if turn_count is briefly under-counted
+        // due to dispatch row write lag.
         if (active_group_count + dispatched_groups_this_activate) >= max_concurrent {
             break;
         }
@@ -1031,12 +1075,34 @@ pub(crate) async fn activate_with_deps_pg(
         }
     };
 
+    // #2034: surface active_turn_count (impl + review + rework + create-pr,
+    // excluding phase-gate sidecar dispatches) so the dashboard and ops
+    // tooling can see when max_concurrent_threads is the limiting factor.
+    let active_turn_count_after = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM task_dispatches d
+         WHERE d.status IN ('pending', 'dispatched')
+           AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+           AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
+           AND EXISTS (
+               SELECT 1
+               FROM auto_queue_entries e
+               WHERE e.run_id = $1
+                 AND e.agent_id = d.to_agent_id
+           )",
+    )
+    .bind(&run_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
     (
         StatusCode::OK,
         Json(json!({
             "dispatched": dispatched,
             "count": dispatched.len(),
             "active_groups": active_group_count,
+            "active_turn_count": active_turn_count_after,
             "pending_groups": pending_group_count,
         })),
     )

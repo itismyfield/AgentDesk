@@ -176,6 +176,12 @@ pub struct AutoQueueStatusResponse {
     pub agents: BTreeMap<String, AutoQueueStatusCounts>,
     pub thread_groups: BTreeMap<String, AutoQueueThreadGroupView>,
     pub phase_gates: Vec<PhaseGateView>,
+    // #2034: number of ACTIVE turns counted across implementation, review,
+    // review-decision, rework, and create-pr task_dispatches (excluding
+    // phase-gate sidecar dispatches). Compared against
+    // run.max_concurrent_threads to surface the real concurrency budget.
+    #[serde(default)]
+    pub active_turn_count: i64,
     #[serde(default, skip_serializing_if = "AutoQueueStatusDiagnostics::is_empty")]
     pub diagnostics: AutoQueueStatusDiagnostics,
 }
@@ -853,12 +859,40 @@ async fn build_status_response_pg(
     }
 
     let phase_gates = query_phase_gates_pg(pool, &run.id).await?;
-    Ok(assemble_status_response(
+    // #2034: count active turns across impl + review + review-decision + rework
+    // + create-pr (excluding phase-gate sidecar dispatches) for this run's
+    // agent(s) so dashboards can show "active / max_concurrent_threads".
+    let active_turn_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM task_dispatches d
+         WHERE d.status IN ('pending', 'dispatched')
+           AND COALESCE(((COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+           AND (COALESCE(NULLIF(d.context, ''), '{}')::jsonb)->'phase_gate' IS NULL
+           AND EXISTS (
+               SELECT 1
+               FROM auto_queue_entries e
+               WHERE e.run_id = $1
+                 AND e.agent_id = d.to_agent_id
+           )",
+    )
+    .bind(&run.id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        ServiceError::internal(format!("load active turn count: {error}"))
+            .with_code(ErrorCode::Database)
+            .with_operation("status_for_run.active_turn_count")
+            .with_context("run_id", &run.id)
+    })?;
+
+    let mut response = assemble_status_response(
         run,
         entries,
         phase_gates,
         chrono::Utc::now().timestamp_millis(),
-    ))
+    );
+    response.active_turn_count = active_turn_count;
+    Ok(response)
 }
 
 async fn query_phase_gates_pg(pool: &PgPool, run_id: &str) -> ServiceResult<Vec<PhaseGateView>> {
@@ -1240,6 +1274,8 @@ fn assemble_status_response(
         agents,
         thread_groups,
         phase_gates,
+        // #2034: filled in by build_status_response_pg after assembly.
+        active_turn_count: 0,
         diagnostics,
     }
 }
