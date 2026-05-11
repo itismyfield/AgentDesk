@@ -522,7 +522,7 @@
 | `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 904 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
 | `services::onboarding` | `src/services/onboarding.rs` | 5287 | giant-file |
-| `services::opencode` | `src/services/opencode.rs` | 2136 | giant-file |
+| `services::opencode` | `src/services/opencode.rs` | 2133 | giant-file |
 | `services::pipeline_override` | `src/services/pipeline_override.rs` | 608 |  |
 | `services::pipeline_routes` | `src/services/pipeline_routes.rs` | 644 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 25 |  |

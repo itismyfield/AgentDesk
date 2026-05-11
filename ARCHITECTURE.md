@@ -94,6 +94,7 @@ src/
 │   ├── cancel_tombstones.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
+│   ├── intake_outbox.rs
 │   ├── kanban.rs
 │   ├── memento_feedback_stats.rs
 │   ├── mod.rs
@@ -333,6 +334,11 @@ src/
 │   │   ├── slot_routes.rs
 │   │   ├── view.rs
 │   │   └── view_admin_routes.rs
+│   ├── cluster/
+│   │   ├── intake_router_hook.rs
+│   │   ├── intake_routing.rs
+│   │   ├── intake_worker.rs
+│   │   └── mod.rs
 │   ├── discord/
 │   │   ├── commands/
 │   │   │   ├── inspect/
@@ -476,6 +482,7 @@ src/
 │   │   ├── settings.rs
 │   │   ├── shared_memory.rs
 │   │   ├── stall_recovery.rs
+│   │   ├── standby_relay.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
