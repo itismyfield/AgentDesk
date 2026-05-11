@@ -43,7 +43,7 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
         "ORDER BY suggestion_pending_at ASC LIMIT 50",
         [eReview]
       );
-      var aggregateTriggered = false;
+      var aggregateNeeded = false;
       for (var s = 0; s < staleSuggestions.length; s++) {
         var sc = staleSuggestions[s];
         if (sc.assigned_agent_id) {
@@ -85,19 +85,7 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
                 [sc.id, rs.review_round || null, rs.last_verdict || "unknown", findingCats]
               );
               agentdesk.log.info("[review-tuning] #119 recorded true_positive (auto-accept): card=" + sc.id);
-              // #119: Trigger re-aggregation — other outcome paths (Rust) call
-              // spawn_aggregate_if_needed directly; from JS we hit the HTTP API.
-              if (!aggregateTriggered) {
-                aggregateTriggered = true;
-                try {
-                  var aggPort = agentdesk.config.get("server_port");
-                  if (aggPort) {
-                    agentdesk.http.post("http://127.0.0.1:" + aggPort + "/api/reviews/tuning/aggregate", {});
-                  }
-                } catch (aggErr) {
-                  agentdesk.log.warn("[review-tuning] aggregate trigger failed (non-fatal): " + aggErr);
-                }
-              }
+              aggregateNeeded = true;
             }
             // #117: sync canonical review state
             agentdesk.reviewState.sync(sc.id, "rework_pending", { last_decision: "auto_accept" });
@@ -109,6 +97,18 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
           }
         } else {
           agentdesk.log.warn("[timeout] Auto-accepted card " + sc.id + " but no agent assigned — no rework dispatch");
+        }
+      }
+      // #119: Trigger re-aggregation after the batch so all newly inserted
+      // outcomes are visible while still bounding this JS path to one POST.
+      if (aggregateNeeded) {
+        try {
+          var aggPort = agentdesk.config.get("server_port");
+          if (aggPort) {
+            agentdesk.http.post("http://127.0.0.1:" + aggPort + "/api/reviews/tuning/aggregate", {});
+          }
+        } catch (aggErr) {
+          agentdesk.log.warn("[review-tuning] aggregate trigger failed (non-fatal): " + aggErr);
         }
       }
     };
