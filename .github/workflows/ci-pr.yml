@@ -146,6 +146,12 @@ jobs:
         if: runner.os == 'macOS'
         run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
+      - name: Install Opus on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install opus pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
       - name: Setup sccache
         if: runner.os != 'macOS'
         uses: mozilla-actions/sccache-action@v0.0.9

@@ -55,7 +55,7 @@
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 |  |
 | `cli::doctor::health` | `src/cli/doctor/health.rs` | 164 |  |
 | `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 256 |  |
-| `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4598 | giant-file |
+| `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4603 | giant-file |
 | `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 357 |  |
 | `cli::init` | `src/cli/init.rs` | 1573 | giant-file |
 | `cli::migrate` | `src/cli/migrate.rs` | 348 |  |
@@ -469,7 +469,7 @@
 | `services::discord::turn_bridge::terminal_delivery` | `src/services/discord/turn_bridge/terminal_delivery.rs` | 202 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1016 | giant-file |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 150 |  |
-| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 1784 | giant-file |
+| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 1790 | giant-file |
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 139 |  |
 | `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 1708 | giant-file |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 255 |  |
@@ -590,7 +590,7 @@
 | `voice::barge_in` | `src/voice/barge_in.rs` | 788 |  |
 | `voice::commands` | `src/voice/commands.rs` | 794 |  |
 | `voice::config` | `src/voice/config.rs` | 439 |  |
-| `voice::metrics` | `src/voice/metrics.rs` | 304 |  |
+| `voice::metrics` | `src/voice/metrics.rs` | 301 |  |
 | `voice::progress` | `src/voice/progress.rs` | 445 |  |
 | `voice::prompt` | `src/voice/prompt.rs` | 91 |  |
 | `voice::receiver` | `src/voice/receiver.rs` | 756 |  |
