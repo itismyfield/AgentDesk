@@ -88,11 +88,11 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
               // #119: Trigger re-aggregation — other outcome paths (Rust) call
               // spawn_aggregate_if_needed directly; from JS we hit the HTTP API.
               if (!aggregateTriggered) {
+                aggregateTriggered = true;
                 try {
                   var aggPort = agentdesk.config.get("server_port");
                   if (aggPort) {
                     agentdesk.http.post("http://127.0.0.1:" + aggPort + "/api/reviews/tuning/aggregate", {});
-                    aggregateTriggered = true;
                   }
                 } catch (aggErr) {
                   agentdesk.log.warn("[review-tuning] aggregate trigger failed (non-fatal): " + aggErr);
