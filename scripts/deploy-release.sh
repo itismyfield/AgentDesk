@@ -444,6 +444,10 @@ _finalize_detached_helper() {
     if [ "$status" -eq 0 ]; then
         content="✅ release deploy complete"
     else
+        # Emit a deterministic failure marker into the helper log so an operator
+        # tailing the log can poll for a single regex covering both outcomes
+        # (success: `═══ Deploy Complete ═══`, failure: this line).
+        echo "═══ DEPLOY FAILED (exit=${status}) ═══"
         content="❌ release deploy failed (exit ${status})
 log: ${DEPLOY_LOG_PATH:-n/a}"
         local summary
@@ -644,7 +648,20 @@ EOF
     echo "▸ Self-hosted release deploy detected — using detached helper"
     echo "  helper tmux: $helper_session"
     echo "  helper log: $log_path"
-    echo "  current turn will finish before dcserver restart; final result will be reported automatically"
+    echo ""
+    echo "  ⚠ DO NOT end the turn yet."
+    echo "    The deploy runs detached so this operator turn is not killed mid-restart,"
+    echo "    but the success/failure outcome must be verified BEFORE you reply."
+    echo ""
+    echo "    Poll the helper log in this turn until one terminal line appears:"
+    echo "      success: ═══ Deploy Complete ═══"
+    echo "      failure: ═══ DEPLOY FAILED (exit=N) ═══"
+    echo ""
+    echo "    One-shot wait command:"
+    echo "      tail -n +1 -F $log_path | grep -m1 -E '═══ Deploy Complete ═══|═══ DEPLOY FAILED'"
+    echo ""
+    echo "    On failure: read the log tail, diagnose the root cause (e.g. freshness gate,"
+    echo "    codesign, health timeout), fix it in this same turn, and re-run deploy-release.sh."
 }
 
 if _self_hosted_release_session; then
