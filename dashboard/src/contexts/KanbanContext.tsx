@@ -27,12 +27,28 @@ export function KanbanProvider({ initialCards, initialDispatches, children }: Ka
   const [kanbanCards, setKanbanCards] = useState<KanbanCard[]>(initialCards);
   const [taskDispatches, setTaskDispatches] = useState<TaskDispatch[]>(initialDispatches);
 
+  // #2050 P2 finding 3 — preserve existing order on update. Only prepend when
+  // the id is genuinely new; otherwise replace in place. The previous version
+  // moved every updated card to the top, causing kanban-board flicker and
+  // misclicks under high-traffic emit storms (auto-queue, GitHub sync, etc).
   const upsertKanbanCard = useCallback((card: KanbanCard) => {
-    setKanbanCards((prev) => [card, ...prev.filter((p) => p.id !== card.id)]);
+    setKanbanCards((prev) => {
+      const idx = prev.findIndex((p) => p.id === card.id);
+      if (idx === -1) return [card, ...prev];
+      const next = prev.slice();
+      next[idx] = card;
+      return next;
+    });
   }, []);
 
   const upsertTaskDispatch = useCallback((dispatch: TaskDispatch) => {
-    setTaskDispatches((prev) => [dispatch, ...prev.filter((p) => p.id !== dispatch.id)].slice(0, 200));
+    setTaskDispatches((prev) => {
+      const idx = prev.findIndex((p) => p.id === dispatch.id);
+      if (idx === -1) return [dispatch, ...prev].slice(0, 200);
+      const next = prev.slice();
+      next[idx] = dispatch;
+      return next;
+    });
   }, []);
 
   const deleteKanbanCard = useCallback((id: string) => {
