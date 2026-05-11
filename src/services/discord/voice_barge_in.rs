@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,6 +15,7 @@ use crate::voice::barge_in::{
     LiveBargeInCut, LiveBargeInMonitor, ProcessingBargeInDecision, run_sensitivity_ttl_reset,
 };
 use crate::voice::config::DEFAULT_STT_LANGUAGE;
+use crate::voice::progress;
 use crate::voice::sanitizer::spoken_result_only;
 use crate::voice::stt::SttRuntime;
 use crate::voice::tts::{
@@ -34,6 +36,9 @@ pub(in crate::services::discord) enum VoiceBargeInTranscriptOutcome {
     BargeInDisabled,
     EmptyTranscript,
     SensitivityChanged(BargeInSensitivity),
+    VerboseProgressChanged {
+        enabled: bool,
+    },
     NoActiveTurn,
     Deferred(String),
     ExplicitStop {
@@ -71,6 +76,38 @@ struct DeferredBargeInDrain {
     prompt: String,
 }
 
+struct VoiceProgressChannelState {
+    active: bool,
+    pending_events: Vec<String>,
+    last_activity_at: Instant,
+    next_idle_delay: Duration,
+    next_summary_at: Option<Instant>,
+}
+
+impl VoiceProgressChannelState {
+    fn new(now: Instant) -> Self {
+        Self {
+            active: true,
+            pending_events: Vec::new(),
+            last_activity_at: now,
+            next_idle_delay: progress::PROGRESS_IDLE_NOTICE_INITIAL,
+            next_summary_at: None,
+        }
+    }
+
+    fn mark_active(&mut self, now: Instant) {
+        self.active = true;
+        self.last_activity_at = now;
+        self.next_idle_delay = progress::PROGRESS_IDLE_NOTICE_INITIAL;
+    }
+
+    fn mark_done(&mut self) {
+        self.active = false;
+        self.pending_events.clear();
+        self.next_summary_at = None;
+    }
+}
+
 pub(in crate::services::discord) struct VoiceBargeInRuntime {
     enabled: bool,
     barge_in_enabled: bool,
@@ -80,7 +117,7 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     acknowledgement_text: String,
     transcript_dirs: Vec<PathBuf>,
     spoken_result_language: String,
-    verbose_progress: bool,
+    verbose_progress: AtomicBool,
     stt: Option<SttRuntime>,
     tts: Option<TtsRuntime>,
     progress_tx: broadcast::Sender<VoiceProgressEvent>,
@@ -121,7 +158,7 @@ impl VoiceBargeInRuntime {
             acknowledgement_text: config.barge_in.acknowledgement_text.clone(),
             transcript_dirs: transcript_dirs_from_config(config),
             spoken_result_language: config.stt.language.clone(),
-            verbose_progress: config.verbose_progress,
+            verbose_progress: AtomicBool::new(config.verbose_progress),
             stt,
             tts,
             progress_tx,
@@ -146,7 +183,7 @@ impl VoiceBargeInRuntime {
             acknowledgement_text: String::new(),
             transcript_dirs: Vec::new(),
             spoken_result_language: DEFAULT_STT_LANGUAGE.to_string(),
-            verbose_progress: false,
+            verbose_progress: AtomicBool::new(false),
             stt: None,
             tts: None,
             progress_tx,
@@ -162,6 +199,14 @@ impl VoiceBargeInRuntime {
 
     pub(in crate::services::discord) fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub(in crate::services::discord) fn verbose_progress_enabled(&self) -> bool {
+        self.verbose_progress.load(Ordering::Relaxed)
+    }
+
+    pub(in crate::services::discord) fn set_verbose_progress_enabled(&self, enabled: bool) {
+        self.verbose_progress.store(enabled, Ordering::Relaxed);
     }
 
     pub(in crate::services::discord) fn subscribe_progress(
@@ -218,6 +263,234 @@ impl VoiceBargeInRuntime {
             }
             token.cancel();
         });
+    }
+
+    pub(in crate::services::discord) fn spawn_progress_worker(
+        self: &Arc<Self>,
+        shared: Arc<SharedData>,
+        shutdown_flag: Arc<AtomicBool>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+
+        let runtime = self.clone();
+        let mut rx = self.subscribe_progress();
+        tokio::spawn(async move {
+            let mut states: HashMap<u64, VoiceProgressChannelState> = HashMap::new();
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        if shutdown_flag.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        runtime.flush_due_progress_summaries(&shared, &mut states).await;
+                        runtime.emit_due_idle_notices(&shared, &mut states).await;
+                    }
+                    event = rx.recv() => {
+                        match event {
+                            Ok(event) => {
+                                runtime.handle_progress_event(&shared, &mut states, event).await;
+                            }
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!(
+                                    skipped,
+                                    "voice progress worker lagged behind broadcast events"
+                                );
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    async fn handle_progress_event(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        states: &mut HashMap<u64, VoiceProgressChannelState>,
+        event: VoiceProgressEvent,
+    ) {
+        let label = event.label.trim().to_string();
+        if label.is_empty() {
+            return;
+        }
+
+        let channel_id = ChannelId::new(event.channel_id);
+        if progress::is_turn_done_event(&label) {
+            if let Some(state) = states.get_mut(&event.channel_id) {
+                state.mark_done();
+            }
+            return;
+        }
+
+        let now = Instant::now();
+        states
+            .entry(event.channel_id)
+            .or_insert_with(|| VoiceProgressChannelState::new(now))
+            .mark_active(now);
+
+        if !self.verbose_progress_enabled() {
+            return;
+        }
+
+        self.mirror_progress_line(shared, channel_id, &label).await;
+
+        let summary_events = if let Some(state) = states.get_mut(&event.channel_id) {
+            state.pending_events.push(label);
+            if state.pending_events.len() >= progress::PROGRESS_BATCH_MAX_EVENTS {
+                let events = std::mem::take(&mut state.pending_events);
+                state.next_summary_at = None;
+                Some(events)
+            } else {
+                if state.next_summary_at.is_none() {
+                    state.next_summary_at = Some(now + Duration::from_millis(1200));
+                }
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(events) = summary_events {
+            self.speak_progress_summary(shared, channel_id, events)
+                .await;
+        }
+    }
+
+    async fn flush_due_progress_summaries(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        states: &mut HashMap<u64, VoiceProgressChannelState>,
+    ) {
+        if !self.verbose_progress_enabled() {
+            return;
+        }
+
+        let now = Instant::now();
+        let due_channels = states
+            .iter()
+            .filter_map(|(channel_id, state)| {
+                state
+                    .next_summary_at
+                    .filter(|deadline| *deadline <= now && !state.pending_events.is_empty())
+                    .map(|_| *channel_id)
+            })
+            .collect::<Vec<_>>();
+
+        for raw_channel_id in due_channels {
+            let events = if let Some(state) = states.get_mut(&raw_channel_id) {
+                state.next_summary_at = None;
+                std::mem::take(&mut state.pending_events)
+            } else {
+                Vec::new()
+            };
+            if !events.is_empty() {
+                self.speak_progress_summary(shared, ChannelId::new(raw_channel_id), events)
+                    .await;
+            }
+        }
+    }
+
+    async fn emit_due_idle_notices(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        states: &mut HashMap<u64, VoiceProgressChannelState>,
+    ) {
+        let now = Instant::now();
+        let due_channels = states
+            .iter()
+            .filter(|(_, state)| {
+                state.active && now.duration_since(state.last_activity_at) >= state.next_idle_delay
+            })
+            .map(|(channel_id, _)| *channel_id)
+            .collect::<Vec<_>>();
+
+        for raw_channel_id in due_channels {
+            let channel_id = ChannelId::new(raw_channel_id);
+            if !super::mailbox_has_active_turn(shared, channel_id).await {
+                if let Some(state) = states.get_mut(&raw_channel_id) {
+                    state.mark_done();
+                }
+                continue;
+            }
+
+            self.speak_progress_text(
+                shared,
+                channel_id,
+                progress::idle_notice(&self.spoken_result_language),
+                "voice progress idle notice",
+            )
+            .await;
+
+            if let Some(state) = states.get_mut(&raw_channel_id) {
+                state.last_activity_at = Instant::now();
+                state.next_idle_delay = progress::next_idle_notice_delay(state.next_idle_delay);
+            }
+        }
+
+        states.retain(|_, state| state.active || !state.pending_events.is_empty());
+    }
+
+    async fn mirror_progress_line(
+        &self,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        label: &str,
+    ) {
+        let Some(http) = shared.serenity_http_or_token_fallback() else {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                "voice progress text mirror skipped: no Discord HTTP client"
+            );
+            return;
+        };
+        let content = progress::format_progress_message(label, &self.spoken_result_language);
+        if content.trim().is_empty() {
+            return;
+        }
+
+        super::rate_limit_wait(shared, channel_id).await;
+        if let Err(error) = channel_id
+            .send_message(&http, serenity::CreateMessage::new().content(content))
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                channel_id = channel_id.get(),
+                "voice progress text mirror failed"
+            );
+        }
+    }
+
+    async fn speak_progress_summary(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        events: Vec<String>,
+    ) {
+        let summary = progress::summarize_progress_events(&events, &self.spoken_result_language);
+        self.speak_progress_text(shared, channel_id, &summary, "voice progress summary")
+            .await;
+    }
+
+    async fn speak_progress_text(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        text: &str,
+        context: &'static str,
+    ) {
+        let Some(path) = self
+            .synthesize_progress_tts(text, channel_id, context)
+            .await
+        else {
+            return;
+        };
+        self.play_progress_audio(shared, channel_id, path, context)
+            .await;
     }
 
     pub(in crate::services::discord) async fn set_sensitivity(
@@ -377,6 +650,17 @@ impl VoiceBargeInRuntime {
             return VoiceBargeInTranscriptOutcome::BargeInDisabled;
         }
 
+        if let Some(command) = progress::parse_verbose_progress_command(transcript) {
+            let enabled = command.enabled();
+            self.set_verbose_progress_enabled(enabled);
+            tracing::info!(
+                channel_id = channel_id.get(),
+                verbose_progress = enabled,
+                "voice verbose progress changed by spoken command during active turn"
+            );
+            return VoiceBargeInTranscriptOutcome::VerboseProgressChanged { enabled };
+        }
+
         if let Some(sensitivity) = self.apply_voice_command(transcript).await {
             tracing::info!(
                 channel_id = channel_id.get(),
@@ -448,10 +732,11 @@ impl VoiceBargeInRuntime {
                 .get(&channel_id)
                 .and_then(|session| session.channel_name.clone())
         };
+        let verbose_progress = self.verbose_progress_enabled();
         let prompt = crate::voice::prompt::voice_bridge_prompt(
             transcript,
             &self.spoken_result_language,
-            self.verbose_progress,
+            verbose_progress,
             None,
         );
         let metadata = serde_json::json!({
@@ -460,7 +745,7 @@ impl VoiceBargeInRuntime {
                 "user_id": utterance.user_id.to_string(),
                 "utterance_id": utterance.utterance_id,
                 "language": self.spoken_result_language.clone(),
-                "verbose_progress": self.verbose_progress,
+                "verbose_progress": verbose_progress,
                 "started_at": utterance.started_at,
                 "completed_at": utterance.completed_at,
                 "samples_written": utterance.samples_written,
@@ -487,6 +772,7 @@ impl VoiceBargeInRuntime {
                     turn_id = %outcome.turn_id,
                     "voice utterance started agent turn"
                 );
+                self.publish_progress(channel_id, "agent:start");
                 VoiceBargeInTranscriptOutcome::VoiceTurnStarted {
                     turn_id: outcome.turn_id,
                 }
@@ -526,6 +812,17 @@ impl VoiceBargeInRuntime {
         let transcript = transcript.trim();
         if transcript.is_empty() {
             return VoiceBargeInTranscriptOutcome::EmptyTranscript;
+        }
+
+        if let Some(command) = progress::parse_verbose_progress_command(transcript) {
+            let enabled = command.enabled();
+            self.set_verbose_progress_enabled(enabled);
+            tracing::info!(
+                channel_id = channel_id.get(),
+                verbose_progress = enabled,
+                "voice verbose progress changed by spoken command"
+            );
+            return VoiceBargeInTranscriptOutcome::VerboseProgressChanged { enabled };
         }
 
         if super::mailbox_has_active_turn(shared, channel_id).await {
@@ -606,6 +903,16 @@ impl VoiceBargeInRuntime {
         text: &str,
         channel_id: ChannelId,
     ) -> Option<PathBuf> {
+        self.synthesize_progress_tts(text, channel_id, "voice barge-in acknowledgement")
+            .await
+    }
+
+    async fn synthesize_progress_tts(
+        &self,
+        text: &str,
+        channel_id: ChannelId,
+        context: &'static str,
+    ) -> Option<PathBuf> {
         let Some(tts) = self.tts.clone() else {
             return None;
         };
@@ -615,7 +922,8 @@ impl VoiceBargeInRuntime {
                     channel_id = channel_id.get(),
                     path = %output.path.display(),
                     cache_status = ?output.cache_status,
-                    "voice barge-in acknowledgement TTS synthesized"
+                    context,
+                    "voice progress TTS synthesized"
                 );
                 Some(output.path)
             }
@@ -623,7 +931,8 @@ impl VoiceBargeInRuntime {
                 tracing::warn!(
                     error = %error,
                     channel_id = channel_id.get(),
-                    "voice barge-in acknowledgement TTS synthesis failed"
+                    context,
+                    "voice progress TTS synthesis failed"
                 );
                 None
             }
@@ -636,6 +945,17 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         path: PathBuf,
     ) {
+        self.play_progress_audio(shared, channel_id, path, "voice barge-in acknowledgement")
+            .await;
+    }
+
+    async fn play_progress_audio(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        path: PathBuf,
+        context: &'static str,
+    ) {
         let Some(guild_id) = self
             .voice_guilds
             .get(&channel_id.get())
@@ -644,7 +964,8 @@ impl VoiceBargeInRuntime {
             tracing::debug!(
                 channel_id = channel_id.get(),
                 path = %path.display(),
-                "voice barge-in acknowledgement playback skipped: no registered voice guild"
+                context,
+                "voice progress playback skipped: no registered voice guild"
             );
             return;
         };
@@ -653,7 +974,8 @@ impl VoiceBargeInRuntime {
                 channel_id = channel_id.get(),
                 guild_id = guild_id.get(),
                 path = %path.display(),
-                "voice barge-in acknowledgement playback skipped: no serenity context"
+                context,
+                "voice progress playback skipped: no serenity context"
             );
             return;
         };
@@ -661,7 +983,8 @@ impl VoiceBargeInRuntime {
             tracing::warn!(
                 channel_id = channel_id.get(),
                 guild_id = guild_id.get(),
-                "voice barge-in acknowledgement playback skipped: songbird manager missing"
+                context,
+                "voice progress playback skipped: songbird manager missing"
             );
             return;
         };
@@ -670,7 +993,8 @@ impl VoiceBargeInRuntime {
                 channel_id = channel_id.get(),
                 guild_id = guild_id.get(),
                 path = %path.display(),
-                "voice barge-in acknowledgement playback skipped: no active songbird call"
+                context,
+                "voice progress playback skipped: no active songbird call"
             );
             return;
         };
@@ -690,7 +1014,8 @@ impl VoiceBargeInRuntime {
             channel_id = channel_id.get(),
             guild_id = guild_id.get(),
             path = %path.display(),
-            "voice barge-in acknowledgement playback started"
+            context,
+            "voice progress playback started"
         );
     }
 

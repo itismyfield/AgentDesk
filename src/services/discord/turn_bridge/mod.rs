@@ -1470,6 +1470,20 @@ pub(super) fn spawn_turn_bridge(
                             state_dirty = true;
                         }
                         StreamMessage::Text { content } => {
+                            let (content, progress_markers) =
+                                if inflight_state.source == crate::dispatch::Source::Voice {
+                                    crate::voice::progress::extract_progress_markers(&content)
+                                } else {
+                                    (content, Vec::new())
+                                };
+                            for marker in progress_markers {
+                                shared_owned
+                                    .voice_barge_in
+                                    .publish_progress(channel_id, marker);
+                            }
+                            if content.is_empty() {
+                                continue;
+                            }
                             full_response.push_str(&content);
                             // #1255: remember the last non-empty single-line
                             // assistant prose so we can surface it on a
@@ -1603,9 +1617,10 @@ pub(super) fn spawn_turn_bridge(
                             };
                             let display = format!("⚙ {}: {}", name, display_summary);
                             if inflight_state.source == crate::dispatch::Source::Voice {
-                                shared_owned
-                                    .voice_barge_in
-                                    .publish_progress(channel_id, format!("tool:{name}"));
+                                shared_owned.voice_barge_in.publish_progress(
+                                    channel_id,
+                                    format!("tool:{name}:{display_summary}"),
+                                );
                             }
                             record_placeholder_live_event(
                                 shared_owned.as_ref(),
@@ -3687,18 +3702,21 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
-            if terminal_delivery_committed
-                && !inflight_state.silent_turn
-                && inflight_state.source == crate::dispatch::Source::Voice
+            if terminal_delivery_committed && inflight_state.source == crate::dispatch::Source::Voice
             {
+                if !inflight_state.silent_turn {
+                    shared_owned
+                        .voice_barge_in
+                        .spawn_spoken_result_playback(
+                            &shared_owned,
+                            channel_id,
+                            &spoken_delivery_response,
+                        )
+                        .await;
+                }
                 shared_owned
                     .voice_barge_in
-                    .spawn_spoken_result_playback(
-                        &shared_owned,
-                        channel_id,
-                        &spoken_delivery_response,
-                    )
-                    .await;
+                    .publish_progress(channel_id, "agent:done");
             }
 
             if should_complete_work_dispatch_after_terminal_delivery(

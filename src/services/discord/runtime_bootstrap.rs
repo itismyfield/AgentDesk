@@ -1010,6 +1010,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let voice_receiver =
         crate::voice::VoiceReceiver::from_voice_config_with_hook(&voice_config, voice_hook);
     voice_barge_in.spawn_sensitivity_ttl_reset(shared.shutting_down.clone());
+    voice_barge_in.spawn_progress_worker(shared.clone(), shared.shutting_down.clone());
 
     // Phase 5.1 of intake-node-routing (issue #2007): spawn the
     // intake_worker poll loop NOW so cluster-standby nodes (whose
