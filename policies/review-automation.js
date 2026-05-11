@@ -1066,14 +1066,50 @@ function loadLatestReviewDispatchContext(cardId, dispatchId) {
     }
   }
 
+  // #2051 Finding 6 (P1): when no explicit dispatch_id is provided we used to
+  // return the single newest review dispatch (pending/dispatched preferred,
+  // otherwise the newest completed). That could pull a STALE round's context
+  // (e.g. an R1 noop_verification record after R2 had moved on), making the
+  // caller mis-classify the current verdict as `noop_verification` and skip
+  // PR creation. Constrain candidates to the card's current `review_round`
+  // by parsing the `review_round_at_dispatch` field that
+  // `review_automation_ops` stamps into the dispatch context.
+  var roundRows = agentdesk.db.query(
+    "SELECT review_round FROM kanban_cards WHERE id = ? LIMIT 1",
+    [cardId]
+  );
+  var currentRound = (roundRows.length > 0 && roundRows[0].review_round != null)
+    ? Number(roundRows[0].review_round)
+    : null;
+
   var rows = agentdesk.db.query(
-    "SELECT context FROM task_dispatches " +
+    "SELECT context, status FROM task_dispatches " +
     "WHERE kanban_card_id = ? AND dispatch_type = 'review' " +
     "ORDER BY CASE WHEN status IN ('pending', 'dispatched') THEN 0 ELSE 1 END ASC, " +
-    "COALESCE(completed_at, updated_at, created_at) DESC, rowid DESC LIMIT 1",
+    "COALESCE(completed_at, updated_at, created_at) DESC, rowid DESC LIMIT 10",
     [cardId]
   );
   if (rows.length === 0) return {};
+
+  if (currentRound != null && isFinite(currentRound)) {
+    for (var i = 0; i < rows.length; i++) {
+      var ctxCandidate = parseJsonObject(rows[i].context);
+      var ctxRound = (ctxCandidate && ctxCandidate.review_round_at_dispatch != null)
+        ? Number(ctxCandidate.review_round_at_dispatch)
+        : null;
+      if (ctxRound != null && isFinite(ctxRound) && ctxRound === currentRound) {
+        return ctxCandidate;
+      }
+    }
+    // No round-matched dispatch found; fall through to legacy behaviour but
+    // log so operators can spot stale-context misroutes during multi-round
+    // flows.
+    agentdesk.log.warn(
+      "[review] loadLatestReviewDispatchContext: no review dispatch context matched card " +
+      cardId + " review_round=" + currentRound + " — falling back to newest"
+    );
+  }
+
   return parseJsonObject(rows[0].context);
 }
 
@@ -1546,7 +1582,8 @@ if (typeof module !== "undefined" && module.exports) {
     __test: {
       buildNoopReviewContext: buildNoopReviewContext,
       processVerdict: processVerdict,
-      setNormalSuggestionPending: setNormalSuggestionPending
+      setNormalSuggestionPending: setNormalSuggestionPending,
+      loadLatestReviewDispatchContext: loadLatestReviewDispatchContext
     }
   };
 }

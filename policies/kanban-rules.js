@@ -229,13 +229,29 @@ function _autoRefreshInventoryDocs(card, dispatch, dispatchContext, workResult) 
       return;
     }
 
-    _execOrThrow("git", ["-C", worktreePath, "add", "--"].concat(INVENTORY_DOC_PATHS));
+    // #2051 Finding 3 (P1): policy hooks run on a single actor thread
+    // (`PolicyEngineActor`); long synchronous `git push` calls block every
+    // other hook (OnSessionStatusChange / OnDispatchCompleted /
+    // OnCardTransition) until the timeout expires. Cap each git call to a
+    // tight bound so a misbehaving remote cannot stall the queue for minutes.
+    // Long-term TODO: move inventory refresh to an async/queued job
+    // (`agentdesk.runtime.scheduleInventoryRefresh`) and only mark metadata
+    // from the hook itself.
+    _execOrThrow(
+      "git",
+      ["-C", worktreePath, "add", "--"].concat(INVENTORY_DOC_PATHS),
+      { timeout_ms: 10000 }
+    );
     if (!_inventoryDocsChanged(worktreePath)) {
       agentdesk.log.info("[inventory] dispatch " + dispatch.id + " had no staged generated-doc diff");
       return;
     }
 
-    _execOrThrow("git", ["-C", worktreePath, "commit", "-m", "chore: refresh inventory"]);
+    _execOrThrow(
+      "git",
+      ["-C", worktreePath, "commit", "-m", "chore: refresh inventory"],
+      { timeout_ms: 10000 }
+    );
 
     var branch = _resolveCompletedBranch(worktreePath, dispatchContext, workResult);
     if (!branch) {
@@ -245,7 +261,7 @@ function _autoRefreshInventoryDocs(card, dispatch, dispatchContext, workResult) 
     _execOrThrow(
       "git",
       ["-C", worktreePath, "push", "-u", "origin", branch],
-      { timeout_ms: 120000 }
+      { timeout_ms: 20000 }
     );
     agentdesk.log.info("[inventory] dispatch " + dispatch.id + " auto-refreshed generated docs on " + branch);
   } catch (e) {
@@ -280,14 +296,22 @@ function _runPreflight(cardId) {
   if (!c) return { status: "invalid", summary: "Card not found" };
 
   // Check 1: GitHub issue closed? (uses gh CLI since no bridge exists)
+  // #2051 Finding 11 (P1): _runPreflight runs inside OnCardTransition on the
+  // single policy actor thread. A bare `agentdesk.exec("gh", ...)` without a
+  // timeout could block every other hook indefinitely if GitHub hangs or
+  // `gh` enters an auth retry loop. Cap the call so the actor cannot stall.
   if (c.github_issue_number && c.github_issue_url) {
     var repo = _extractRepoFromUrl(c.github_issue_url);
     if (repo) {
       try {
-        var ghOutput = agentdesk.exec("gh", [
-          "issue", "view", String(c.github_issue_number),
-          "--repo", repo, "--json", "state", "--jq", ".state"
-        ]);
+        var ghOutput = agentdesk.exec(
+          "gh",
+          [
+            "issue", "view", String(c.github_issue_number),
+            "--repo", repo, "--json", "state", "--jq", ".state"
+          ],
+          { timeout_ms: 10000 }
+        );
         if (ghOutput && ghOutput.trim() === "CLOSED") {
           return { status: "already_applied", summary: "GitHub issue #" + c.github_issue_number + " is closed" };
         }
@@ -721,8 +745,16 @@ var rules = {
       });
 
       if (preflight.status === "invalid" || preflight.status === "already_applied") {
-        // Move to done without implementation dispatch
-        agentdesk.kanban.setStatus(payload.card_id, "done", true); // force
+        // #2051 Finding 2 (P1): resolve terminal state dynamically from the
+        // effective pipeline instead of hardcoding "done". Custom pipelines
+        // may use different terminal labels (e.g. "completed", "closed"); a
+        // literal "done" force-transition would bypass terminal cleanup hooks
+        // (`ClearTerminalFields`, `SyncAutoQueue`) when the terminal name
+        // differs.
+        var preflightCfg = agentdesk.pipeline.resolveForCard(payload.card_id);
+        var preflightTerminal = agentdesk.pipeline.terminalState(preflightCfg) || "done";
+        // Move to terminal state without implementation dispatch
+        agentdesk.kanban.setStatus(payload.card_id, preflightTerminal, true); // force
         // Clean up any auto-queue entries so the run doesn't stall
         var pendingEntries = agentdesk.db.query(
           "SELECT id FROM auto_queue_entries WHERE kanban_card_id = ? AND status = 'pending'",

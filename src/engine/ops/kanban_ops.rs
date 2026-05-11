@@ -308,6 +308,15 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
             }
         }
 
+        // #2051 Finding 1 (P1): align `set_status_raw_pg` semantics with
+        // `decide_pipeline_transition` (transition.rs). Previously this path
+        // only stamped a `warning` and proceeded with the UPDATE, while the
+        // intent path (`TransitionCard` → `transition_status_with_opts_pg`)
+        // returned `TransitionDecision::Blocked`. The asymmetry let JS
+        // policies (`agentdesk.kanban.setStatus`) bypass the
+        // `has_active_dispatch` gate. Now: when force=false and the gate is
+        // violated, return `Err` so the JS bridge surfaces a real failure;
+        // force=true callers keep the bypass-but-warn behaviour.
         let mut active_dispatch_warning: Option<&'static str> = None;
         if let Some(t) = transition_rule {
             let needs_active_dispatch = t.gates.iter().any(|g| {
@@ -329,6 +338,11 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
                 .map_err(|error| format!("load active dispatch count for {card_id}: {error}"))?
                     > 0;
                 if !has_active_dispatch {
+                    if !force {
+                        return Err(format!(
+                            "gate blocked: has_active_dispatch — no active dispatch (from {old_status} to {new_status})"
+                        ));
+                    }
                     active_dispatch_warning = Some(
                         "transition bypassed has_active_dispatch gate without an active dispatch",
                     );

@@ -224,3 +224,56 @@ test("review-automation noop verification passes go terminal without creating a 
   assert.deepEqual(state.statusCalls, [{ cardId: "card-5", status: "done", force: true }]);
   assert.equal(state.dispatchCreates.length, 0);
 });
+
+// #2051 Finding 6 (P1): without a round filter, the loader used to fall back
+// to the newest review dispatch context — which could be an R1 noop record
+// even though the card had moved on to R2. Confirm that when card.review_round
+// is provided, the loader returns the matching round's context instead of the
+// newest one.
+test("loadLatestReviewDispatchContext returns the context matching card.review_round, not the newest", () => {
+  const { module, state } = loadPolicy("policies/review-automation.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT review_round FROM kanban_cards WHERE id = ?",
+        result: [{ review_round: 2 }]
+      },
+      {
+        // Newest-first order: a fresher R3 dispatch is listed before the
+        // matching R2 dispatch. The loader must skip R3 and pick R2.
+        match: "FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'review'",
+        result: [
+          { context: JSON.stringify({ review_mode: "noop_verification", review_round_at_dispatch: 3 }), status: "completed" },
+          { context: JSON.stringify({ review_mode: "normal", review_round_at_dispatch: 2 }), status: "completed" }
+        ]
+      }
+    ])
+  });
+
+  const ctx = module.__test.loadLatestReviewDispatchContext("card-6", null);
+  assert.equal(ctx.review_mode, "normal");
+  assert.equal(ctx.review_round_at_dispatch, 2);
+  // No warning expected when a matching round is found.
+  assert.equal(state.logs.warn.length, 0);
+});
+
+test("loadLatestReviewDispatchContext falls back to newest and warns when no round matches", () => {
+  const { module, state } = loadPolicy("policies/review-automation.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT review_round FROM kanban_cards WHERE id = ?",
+        result: [{ review_round: 5 }]
+      },
+      {
+        match: "FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'review'",
+        result: [
+          { context: JSON.stringify({ review_round_at_dispatch: 1 }), status: "completed" }
+        ]
+      }
+    ])
+  });
+
+  const ctx = module.__test.loadLatestReviewDispatchContext("card-7", null);
+  assert.equal(ctx.review_round_at_dispatch, 1);
+  assert.equal(state.logs.warn.length, 1);
+  assert.ok(/no review dispatch context matched/.test(state.logs.warn[0]));
+});
