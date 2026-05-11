@@ -1030,6 +1030,7 @@ impl RoutineStore {
                        AS stuck_hours
             FROM kanban_cards
             WHERE status NOT IN ('done', 'cancelled', 'archived', 'detached')
+              AND (pipeline_stage_id IS NULL OR pipeline_stage_id != 'automation-candidate')
               AND GREATEST(updated_at, created_at) < NOW() - INTERVAL '24 hours'
               AND (
                     blocked_reason IS NOT NULL
@@ -1217,6 +1218,98 @@ impl RoutineStore {
             }));
         }
 
+        // --- Source 8: kanban_ready – automation-candidate cards awaiting execution (cap 20) ---
+        let kanban_ready_rows = match sqlx::query(
+            r#"
+            SELECT id,
+                   COALESCE(NULLIF(TRIM(title), ''), id) AS title,
+                   COALESCE(assigned_agent_id, '') AS assigned_agent_id,
+                   metadata,
+                   created_at,
+                   updated_at
+            FROM kanban_cards
+            WHERE status = 'ready'
+              AND pipeline_stage_id = 'automation-candidate'
+            ORDER BY updated_at ASC
+            LIMIT 20
+            "#,
+        )
+        .fetch_all(&*self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping kanban_ready observation source");
+                Vec::new()
+            }
+        };
+
+        let mut kanban_ready_obs: Vec<serde_json::Value> = Vec::new();
+        for row in &kanban_ready_rows {
+            let card_id: String = row.try_get("id").unwrap_or_default();
+            let title: String = row.try_get("title").unwrap_or_default();
+            let assigned: String = row.try_get("assigned_agent_id").unwrap_or_default();
+            let updated_at: DateTime<Utc> =
+                row.try_get("updated_at").unwrap_or_else(|_| Utc::now());
+            let metadata: serde_json::Value =
+                row.try_get::<serde_json::Value, _>("metadata").unwrap_or(serde_json::Value::Null);
+            kanban_ready_obs.push(serde_json::json!({
+                "timestamp": updated_at.to_rfc3339(),
+                "source": "kanban_ready",
+                "category": "automation-candidate",
+                "signature": format!("kanban-ready:{card_id}"),
+                "summary": format!("automation candidate ready: {} (agent={})", truncate_chars(&title, 100), assigned),
+                "weight": 3,
+                "occurrences": 1,
+                "evidence_ref": format!("kanban_cards:{card_id}"),
+                "card_id": card_id,
+                "metadata": metadata,
+            }));
+        }
+
+        // --- Source 9: kanban_dispatched – recently completed automation-candidate cards (cap 20) ---
+        let kanban_dispatched_rows = match sqlx::query(
+            r#"
+            SELECT id,
+                   COALESCE(NULLIF(TRIM(title), ''), id) AS title,
+                   updated_at
+            FROM kanban_cards
+            WHERE status = 'done'
+              AND pipeline_stage_id = 'automation-candidate'
+              AND updated_at > NOW() - INTERVAL '7 days'
+            ORDER BY updated_at DESC
+            LIMIT 20
+            "#,
+        )
+        .fetch_all(&*self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping kanban_dispatched observation source");
+                Vec::new()
+            }
+        };
+
+        let mut kanban_dispatched_obs: Vec<serde_json::Value> = Vec::new();
+        for row in &kanban_dispatched_rows {
+            let card_id: String = row.try_get("id").unwrap_or_default();
+            let title: String = row.try_get("title").unwrap_or_default();
+            let updated_at: DateTime<Utc> =
+                row.try_get("updated_at").unwrap_or_else(|_| Utc::now());
+            kanban_dispatched_obs.push(serde_json::json!({
+                "timestamp": updated_at.to_rfc3339(),
+                "source": "kanban_dispatched",
+                "category": "automation-candidate",
+                "signature": format!("kanban-dispatched:{card_id}"),
+                "summary": format!("automation candidate dispatched: {}", truncate_chars(&title, 120)),
+                "weight": 1,
+                "occurrences": 1,
+                "evidence_ref": format!("kanban_cards:{card_id}"),
+                "card_id": card_id,
+            }));
+        }
+
         // --- Fair merge: round-robin across all sources so no single source starves others ---
         use std::collections::VecDeque;
         let mut sources: Vec<VecDeque<serde_json::Value>> = vec![
@@ -1227,6 +1320,8 @@ impl RoutineStore {
             kanban_obs.into(),
             dispatch_obs.into(),
             session_obs.into(),
+            kanban_ready_obs.into(),
+            kanban_dispatched_obs.into(),
         ];
         let mut observations = Vec::with_capacity(max_items.min(100));
         let mut total_bytes: usize = 0;
