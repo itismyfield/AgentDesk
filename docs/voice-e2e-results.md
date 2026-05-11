@@ -4,16 +4,28 @@
 구현: #2018 ~ #2031 (Voice 1~13). #2027 (Voice #10) 마무리 작업의 일부.
 
 이 문서는 Voice 에픽 마무리에 필요한 E2E 5개 시나리오를 정의한다. 시나리오 자체는
-mac-mini 의 실제 voice channel + 마이크 환경에서 사람이 음성으로 수행해야 하므로
-자동화 대신 **실측 체크리스트**로 보존한다. 본문은 시나리오·기대 동작·관찰 포인트·
-체크박스를 포함하며, 실측 후 결과(통과/실패 + 짧은 메모)를 직접 기록한다.
+실제 voice channel + 마이크가 필요하므로 자동화 대신 **실측 체크리스트**로 보존한다.
+본문은 시나리오·기대 동작·관찰 포인트·체크박스를 포함하며, 실측 후 결과(통과/실패 +
+짧은 메모)를 직접 기록한다.
+
+## 머신/클라이언트 분리 (중요)
+
+ADK voice는 Discord 표준 voice channel을 그대로 사용하므로 **사용자 마이크/스피커는
+어느 Discord 클라이언트(폰/맥/iPad)에서든 동작한다**. 처리는 dcserver가 동작 중인
+머신에서 일어난다.
+
+| 책임 | 머신 |
+|------|------|
+| 사용자 마이크 입력 / 봇 TTS 출력 듣기 | 임의 Discord 클라이언트 |
+| voice 패킷 수신 (songbird) / STT (whisper-cli) / TTS (edge-tts) | dcserver 호스트 — 현재 `mac-book-release` |
+| `agentdesk doctor` 실행 | dcserver 호스트와 같은 머신 |
 
 ## 사전 준비
 
-- mac-mini 에 voice channel 이 join 되어 있을 것 (`/voice join` 슬래시 명령 또는
+- 봇이 voice channel 에 join 되어 있을 것 (`/voice join` 슬래시 명령 또는
   `auto_join_channel_ids` 자동 join).
-- `agentdesk doctor` 의 voice 섹션이 모두 `PASS`(특히 `voice_whisper_cli`,
-  `voice_edge_tts`, `voice_ffmpeg`, `voice_udp_socket`).
+- dcserver 호스트에서 `agentdesk doctor` 의 voice 섹션이 모두 `PASS`
+  (특히 `voice_whisper_cli`, `voice_edge_tts`, `voice_ffmpeg`, `voice_udp_socket`).
 - `~/.adk/release/logs/observability-events.jsonl` 가 비어 있거나 직전 위치를
   기록해 둘 것 — 시나리오마다 새 `voice_latency_turn` 라인을 확인해야 한다.
 
