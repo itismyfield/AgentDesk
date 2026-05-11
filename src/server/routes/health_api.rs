@@ -69,6 +69,19 @@ fn local_or_configured_control_endpoint_allowed(
     matches!(config.server.host.trim(), "127.0.0.1" | "localhost" | "::1")
 }
 
+/// #2049 Finding 2: ground truth `fully_recovered` predicate. The field must
+/// be `true` if and only if (a) no `degraded_reasons` were collected by the
+/// composed health pipeline AND (b) the final `HealthStatus` is HTTP-ready
+/// (Healthy/Degraded — *not* Unhealthy). Centralised here so any future
+/// degradation check appended to `health_response` automatically participates
+/// in the recovery signal.
+fn compute_fully_recovered(
+    status: health::HealthStatus,
+    degraded_reasons: &[serde_json::Value],
+) -> bool {
+    degraded_reasons.is_empty() && status.is_http_ready()
+}
+
 fn bearer_token_matches(config: &crate::config::Config, headers: &HeaderMap) -> bool {
     let Some(expected_token) = config.server.auth_token.as_deref() else {
         return false;
@@ -189,6 +202,35 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
                 pipeline_override_warnings
             )));
         }
+
+        // #2049 Finding 4: surface startup_doctor failed/warned counts in the
+        // top-level status + degraded_reasons so external health watchers see
+        // the boot-time damage. The doctor summary itself is still attached
+        // by `with_latest_startup_doctor` below.
+        let (doctor_failed, doctor_warned) =
+            crate::cli::doctor::startup::latest_startup_doctor_counts();
+        if doctor_failed > 0 {
+            status = status.worsen(health::HealthStatus::Unhealthy);
+            degraded_reasons.push(serde_json::json!(format!(
+                "startup_doctor_failed:{}",
+                doctor_failed
+            )));
+        }
+        if doctor_warned > 0 {
+            status = status.worsen(health::HealthStatus::Degraded);
+            degraded_reasons.push(serde_json::json!(format!(
+                "startup_doctor_warned:{}",
+                doctor_warned
+            )));
+        }
+
+        // #2049 Finding 2 (+ partial Finding 3): recompute `fully_recovered`
+        // from the final set of degraded reasons + final status so that
+        // DB/disk/outbox/pipeline/doctor regressions cannot leave the field
+        // stale-true. This also overrides the cluster_standby short-circuit
+        // above when later checks discover real degradation.
+        let fully_recovered = compute_fully_recovered(status, &degraded_reasons);
+        json["fully_recovered"] = serde_json::json!(fully_recovered);
 
         json["status"] =
             serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!("unhealthy"));
@@ -1157,6 +1199,51 @@ mod tests {
         assert!(stale_mailbox_repair_applied(true, false, 0));
         assert!(stale_mailbox_repair_applied(false, true, 0));
         assert!(!stale_mailbox_repair_applied(false, false, 0));
+    }
+
+    /// #2049 Finding 2 regression guard: any time the composed health
+    /// pipeline pushes a `degraded_reason`, `fully_recovered` must flip
+    /// to false even if Discord's per-provider snapshot reported true.
+    #[test]
+    fn compute_fully_recovered_flips_to_false_when_degraded_reasons_present() {
+        use super::compute_fully_recovered;
+        use crate::services::discord::health;
+
+        // Clean state — healthy + no reasons → fully_recovered=true.
+        assert!(compute_fully_recovered(health::HealthStatus::Healthy, &[]));
+
+        // Any reason flips the recovery signal off, even when the snapshot
+        // reported Healthy upstream.
+        let reasons_db = vec![json!("db_unavailable")];
+        assert!(!compute_fully_recovered(
+            health::HealthStatus::Healthy,
+            &reasons_db
+        ));
+
+        // Multiple reasons stay false.
+        let reasons_outbox_disk = vec![
+            json!("dispatch_outbox_oldest_pending_age:120"),
+            json!("disk_low_free_bytes:104857600"),
+        ];
+        assert!(!compute_fully_recovered(
+            health::HealthStatus::Degraded,
+            &reasons_outbox_disk
+        ));
+
+        // Unhealthy status → false even when (theoretically) reasons list
+        // is empty. Guards against future code paths that worsen status
+        // without pushing a reason string.
+        assert!(!compute_fully_recovered(
+            health::HealthStatus::Unhealthy,
+            &[]
+        ));
+
+        // Doctor failure reason → false.
+        let reasons_doctor = vec![json!("startup_doctor_failed:6")];
+        assert!(!compute_fully_recovered(
+            health::HealthStatus::Unhealthy,
+            &reasons_doctor
+        ));
     }
 }
 

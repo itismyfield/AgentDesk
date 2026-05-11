@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -25,6 +25,12 @@ pub mod watcher_latency;
 const EVENT_BATCH_SIZE: usize = 64;
 const EVENT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const SNAPSHOT_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
+// #2049 Finding 9: hourly retention sweep on observability tables. Defaults
+// are conservative; tunable via `ADK_OBSERVABILITY_*_RETENTION_DAYS` env.
+const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
+const DEFAULT_OBSERVABILITY_EVENT_RETENTION_DAYS: i64 = 90;
+const DEFAULT_QUALITY_EVENT_RETENTION_DAYS: i64 = 90;
+const DEFAULT_COUNTER_SNAPSHOT_RETENTION_DAYS: i64 = 7;
 const DEFAULT_EVENT_LIMIT: usize = 100;
 const DEFAULT_COUNTER_LIMIT: usize = 200;
 const MAX_EVENT_LIMIT: usize = 500;
@@ -138,7 +144,7 @@ impl CounterDelta {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct QueuedEvent {
     event_type: String,
     provider: Option<String>,
@@ -150,7 +156,7 @@ struct QueuedEvent {
     payload_json: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct QueuedQualityEvent {
     source_event_id: Option<String>,
     correlation_id: Option<String>,
@@ -991,8 +997,11 @@ async fn worker_loop(
     let mut quality_batch = Vec::new();
     let mut flush_tick = tokio::time::interval(EVENT_FLUSH_INTERVAL);
     let mut snapshot_tick = tokio::time::interval(SNAPSHOT_FLUSH_INTERVAL);
+    // #2049 Finding 9: hourly retention sweep.
+    let mut retention_tick = tokio::time::interval(RETENTION_SWEEP_INTERVAL);
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     snapshot_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    retention_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -1026,6 +1035,9 @@ async fn worker_loop(
             _ = snapshot_tick.tick() => {
                 flush_counter_snapshots(&runtime).await;
             }
+            _ = retention_tick.tick() => {
+                run_retention_sweep(&runtime).await;
+            }
         }
     }
 
@@ -1034,23 +1046,38 @@ async fn worker_loop(
     flush_counter_snapshots(&runtime).await;
 }
 
+/// #2049 Finding 1: Flush observability events with multi-tier fallback.
+/// (1) Try bulk insert in one tx. (2) On bulk failure, retry each row in its
+/// own tx so a single broken row does not lose its 63 healthy neighbors.
+/// (3) Rows that still fail are appended to a dead-letter JSONL on disk so
+/// the sample is recoverable. (4) If JSONL fallback also fails, push the
+/// events back to the front of the worker batch so the next tick retries.
 async fn flush_event_batch(runtime: &Arc<ObservabilityRuntime>, batch: &mut Vec<QueuedEvent>) {
     if batch.is_empty() {
         return;
     }
-    let events = std::mem::take(batch);
+    let drained = std::mem::take(batch);
     let handles = storage_handles(runtime);
 
-    if let Some(pool) = handles.pg_pool.as_ref() {
-        match insert_events_pg(pool, &events).await {
-            Ok(()) => return,
-            Err(error) => {
-                tracing::warn!("[observability] postgres event flush failed: {error}");
-            }
+    let Some(pool) = handles.pg_pool.as_ref() else {
+        // No PG configured (standalone mode) — preserve pre-#2049 behaviour;
+        // standalone mode never persisted these events.
+        return;
+    };
+
+    if let Err(error) = insert_events_pg(pool, &drained).await {
+        tracing::warn!(
+            "[observability] postgres event bulk flush failed ({} events): {error}; retrying per-row",
+            drained.len()
+        );
+        let failed = insert_events_pg_row_isolated(pool, &drained).await;
+        if !failed.is_empty() {
+            handle_event_flush_fallback(batch, failed, "events");
         }
     }
 }
 
+/// #2049 Finding 1 — same multi-tier fallback for `agent_quality_event`.
 async fn flush_quality_event_batch(
     runtime: &Arc<ObservabilityRuntime>,
     batch: &mut Vec<QueuedQualityEvent>,
@@ -1058,15 +1085,68 @@ async fn flush_quality_event_batch(
     if batch.is_empty() {
         return;
     }
-    let events = std::mem::take(batch);
+    let drained = std::mem::take(batch);
     let handles = storage_handles(runtime);
 
-    if let Some(pool) = handles.pg_pool.as_ref() {
-        match insert_quality_events_pg(pool, &events).await {
-            Ok(()) => return,
-            Err(error) => {
-                tracing::warn!("[quality] postgres event flush failed: {error}");
-            }
+    let Some(pool) = handles.pg_pool.as_ref() else {
+        return;
+    };
+
+    if let Err(error) = insert_quality_events_pg(pool, &drained).await {
+        tracing::warn!(
+            "[quality] postgres event bulk flush failed ({} events): {error}; retrying per-row",
+            drained.len()
+        );
+        let failed = insert_quality_events_pg_row_isolated(pool, &drained).await;
+        if !failed.is_empty() {
+            handle_quality_event_flush_fallback(batch, failed);
+        }
+    }
+}
+
+/// #2049 Finding 1: Dump failed event rows to JSONL; if disk fallback fails,
+/// push them back to the front of `batch` so the next worker tick retries.
+fn handle_event_flush_fallback(
+    batch: &mut Vec<QueuedEvent>,
+    failed: Vec<QueuedEvent>,
+    suffix: &str,
+) {
+    let count = failed.len();
+    match events::flush_dead_letter_jsonl(suffix, &failed) {
+        Ok(()) => {
+            tracing::warn!(
+                "[observability] {count} events dumped to dead-letter JSONL (suffix={suffix}) after PG flush failure"
+            );
+        }
+        Err(disk_error) => {
+            tracing::error!(
+                "[observability] dead-letter JSONL also failed (suffix={suffix}, {count} events): {disk_error}; pushing back to worker batch"
+            );
+            let mut rescued = failed;
+            rescued.extend(std::mem::take(batch));
+            *batch = rescued;
+        }
+    }
+}
+
+fn handle_quality_event_flush_fallback(
+    batch: &mut Vec<QueuedQualityEvent>,
+    failed: Vec<QueuedQualityEvent>,
+) {
+    let count = failed.len();
+    match events::flush_dead_letter_jsonl("quality-events", &failed) {
+        Ok(()) => {
+            tracing::warn!(
+                "[quality] {count} events dumped to dead-letter JSONL after PG flush failure"
+            );
+        }
+        Err(disk_error) => {
+            tracing::error!(
+                "[quality] dead-letter JSONL also failed ({count} events): {disk_error}; pushing back to worker batch"
+            );
+            let mut rescued = failed;
+            rescued.extend(std::mem::take(batch));
+            *batch = rescued;
         }
     }
 }
@@ -1084,6 +1164,92 @@ async fn flush_counter_snapshots(runtime: &Arc<ObservabilityRuntime>) {
             Err(error) => {
                 tracing::warn!("[observability] postgres snapshot flush failed: {error}");
             }
+        }
+    }
+}
+
+/// #2049 Finding 9: prune old rows from observability tables to bound disk
+/// and index growth on long-lived single-node deployments. Retention windows
+/// are conservative; `observability_counter_snapshots` is pruned aggressively
+/// (7d) because analytics only queries the latest snapshot per
+/// `(provider, channel_id)`.
+async fn run_retention_sweep(runtime: &Arc<ObservabilityRuntime>) {
+    let handles = storage_handles(runtime);
+    let Some(pool) = handles.pg_pool.as_ref() else {
+        return;
+    };
+
+    let event_days = env_retention_days(
+        "ADK_OBSERVABILITY_EVENT_RETENTION_DAYS",
+        DEFAULT_OBSERVABILITY_EVENT_RETENTION_DAYS,
+    );
+    let quality_days = env_retention_days(
+        "ADK_OBSERVABILITY_QUALITY_RETENTION_DAYS",
+        DEFAULT_QUALITY_EVENT_RETENTION_DAYS,
+    );
+    let snapshot_days = env_retention_days(
+        "ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS",
+        DEFAULT_COUNTER_SNAPSHOT_RETENTION_DAYS,
+    );
+
+    if event_days > 0 {
+        prune_table_by_created_at(pool, "observability_events", event_days).await;
+    }
+    if quality_days > 0 {
+        prune_table_by_created_at(pool, "agent_quality_event", quality_days).await;
+    }
+    if snapshot_days > 0 {
+        prune_table_by_snapshot_at(pool, "observability_counter_snapshots", snapshot_days).await;
+    }
+}
+
+fn env_retention_days(var: &str, default_days: i64) -> i64 {
+    std::env::var(var)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(default_days)
+}
+
+async fn prune_table_by_created_at(pool: &PgPool, table: &'static str, days: i64) {
+    // `table` is sourced from a `&'static str` whitelist — never user input.
+    let sql = format!(
+        "DELETE FROM {table} WHERE created_at < NOW() - ($1::bigint || ' days')::interval"
+    );
+    match sqlx::query(&sql).bind(days).execute(pool).await {
+        Ok(result) => {
+            let affected = result.rows_affected();
+            if affected > 0 {
+                tracing::info!(
+                    "[observability] retention sweep deleted {affected} rows from {table} (>{days}d)"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[observability] retention sweep on {table} failed (days={days}): {error}"
+            );
+        }
+    }
+}
+
+async fn prune_table_by_snapshot_at(pool: &PgPool, table: &'static str, days: i64) {
+    let sql = format!(
+        "DELETE FROM {table} WHERE snapshot_at < NOW() - ($1::bigint || ' days')::interval"
+    );
+    match sqlx::query(&sql).bind(days).execute(pool).await {
+        Ok(result) => {
+            let affected = result.rows_affected();
+            if affected > 0 {
+                tracing::info!(
+                    "[observability] retention sweep deleted {affected} rows from {table} (>{days}d)"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[observability] retention sweep on {table} failed (days={days}): {error}"
+            );
         }
     }
 }
@@ -1989,17 +2155,44 @@ fn buckets_to_synth_records(
     buckets: Vec<SynthDailyBucket>,
 ) -> Vec<AgentQualityDailyRecord> {
     let now = now_kst();
+    // #2049 Finding 6: index buckets by calendar date so rolling windows sum
+    // over `target_day - N + 1 ..= target_day` (calendar-day semantics),
+    // matching the SQL `upsert_agent_quality_daily_pg` rollup. Previously the
+    // window walked `buckets[idx..idx+N]` which used "Nth event-having day"
+    // — agents that only had events on 5 of the last 30 days would have
+    // their `rolling_7d` silently aggregate over 25+ calendar days.
+    let indexed: BTreeMap<chrono::NaiveDate, &SynthDailyBucket> = buckets
+        .iter()
+        .filter_map(|b| {
+            chrono::NaiveDate::parse_from_str(&b.day, "%Y-%m-%d")
+                .ok()
+                .map(|d| (d, b))
+        })
+        .collect();
     buckets
         .iter()
-        .enumerate()
-        .map(|(idx, bucket)| {
-            let window = |size: usize| -> (i64, i64, i64, i64) {
-                let end = (idx + size).min(buckets.len());
-                let slice = &buckets[idx..end];
-                let ts = slice.iter().map(|b| b.turn_success).sum::<i64>();
-                let te = slice.iter().map(|b| b.turn_error).sum::<i64>();
-                let rp = slice.iter().map(|b| b.review_pass).sum::<i64>();
-                let rf = slice.iter().map(|b| b.review_fail).sum::<i64>();
+        .map(|bucket| {
+            let target_day = chrono::NaiveDate::parse_from_str(&bucket.day, "%Y-%m-%d").ok();
+            let window = |size: i64| -> (i64, i64, i64, i64) {
+                let Some(target) = target_day else {
+                    return (
+                        bucket.turn_success,
+                        bucket.turn_error,
+                        bucket.review_pass,
+                        bucket.review_fail,
+                    );
+                };
+                let start = target - chrono::Duration::days(size - 1);
+                let mut ts = 0i64;
+                let mut te = 0i64;
+                let mut rp = 0i64;
+                let mut rf = 0i64;
+                for (_, b) in indexed.range(start..=target) {
+                    ts += b.turn_success;
+                    te += b.turn_error;
+                    rp += b.review_pass;
+                    rf += b.review_fail;
+                }
                 (ts, te, rp, rf)
             };
             let (ts7, te7, rp7, rf7) = window(7);
@@ -2714,6 +2907,50 @@ async fn insert_events_pg(pool: &PgPool, events: &[QueuedEvent]) -> Result<()> {
     Ok(())
 }
 
+/// #2049 Finding 1 / Finding 5: When bulk insert rolls back the whole tx,
+/// re-attempt each row in its own short tx so good rows still land. Returns
+/// the rows that still failed (candidates for dead-letter JSONL or queue
+/// push-back).
+async fn insert_events_pg_row_isolated(
+    pool: &PgPool,
+    events: &[QueuedEvent],
+) -> Vec<QueuedEvent> {
+    let mut failed = Vec::new();
+    for event in events {
+        let result = sqlx::query(
+            "INSERT INTO observability_events (
+                event_type,
+                provider,
+                channel_id,
+                dispatch_id,
+                session_key,
+                turn_id,
+                status,
+                payload_json
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, CAST($8 AS jsonb))",
+        )
+        .bind(&event.event_type)
+        .bind(&event.provider)
+        .bind(&event.channel_id)
+        .bind(&event.dispatch_id)
+        .bind(&event.session_key)
+        .bind(&event.turn_id)
+        .bind(&event.status)
+        .bind(&event.payload_json)
+        .execute(pool)
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(
+                "[observability] per-row insert failed (event_type={}, dispatch_id={:?}): {error}",
+                event.event_type,
+                event.dispatch_id
+            );
+            failed.push(event.clone());
+        }
+    }
+    failed
+}
+
 async fn insert_quality_events_pg(pool: &PgPool, events: &[QueuedQualityEvent]) -> Result<()> {
     let mut tx = pool
         .begin()
@@ -2750,6 +2987,50 @@ async fn insert_quality_events_pg(pool: &PgPool, events: &[QueuedQualityEvent]) 
         .await
         .map_err(|error| anyhow!("commit postgres agent quality event tx: {error}"))?;
     Ok(())
+}
+
+/// #2049 Finding 1 / Finding 5: Row-isolated retry for `agent_quality_event`
+/// so one enum-cast failure cannot lose the whole 64-row batch.
+async fn insert_quality_events_pg_row_isolated(
+    pool: &PgPool,
+    events: &[QueuedQualityEvent],
+) -> Vec<QueuedQualityEvent> {
+    let mut failed = Vec::new();
+    for event in events {
+        let result = sqlx::query(
+            "INSERT INTO agent_quality_event (
+                source_event_id,
+                correlation_id,
+                agent_id,
+                provider,
+                channel_id,
+                card_id,
+                dispatch_id,
+                event_type,
+                payload
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::agent_quality_event_type, CAST($9 AS jsonb))",
+        )
+        .bind(&event.source_event_id)
+        .bind(&event.correlation_id)
+        .bind(&event.agent_id)
+        .bind(&event.provider)
+        .bind(&event.channel_id)
+        .bind(&event.card_id)
+        .bind(&event.dispatch_id)
+        .bind(&event.event_type)
+        .bind(&event.payload_json)
+        .execute(pool)
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(
+                "[quality] per-row insert failed (event_type={}, agent_id={:?}): {error}",
+                event.event_type,
+                event.agent_id
+            );
+            failed.push(event.clone());
+        }
+    }
+    failed
 }
 
 async fn insert_snapshots_pg(pool: &PgPool, snapshots: &[SnapshotRow]) -> Result<()> {

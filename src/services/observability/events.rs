@@ -225,6 +225,39 @@ pub fn flush_events_to_disk(events: &[StructuredEvent]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// #2049 Finding 1: Dead-letter JSONL dump for event batches that failed to
+/// flush to PostgreSQL. Output lives in the same logs directory as
+/// `flush_target_path()`, with the file name
+/// `observability-<suffix>-dlq.jsonl` so operators can grep by event family.
+/// Callers pass arbitrary serializable rows so this helper can be reused for
+/// both `observability_events` and `agent_quality_event` batches.
+pub fn flush_dead_letter_jsonl<T: serde::Serialize>(
+    suffix: &str,
+    rows: &[T],
+) -> std::io::Result<()> {
+    use std::fs::{OpenOptions, create_dir_all};
+    use std::io::Write;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let base = flush_target_path();
+    let parent = base.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".adk").join("release").join("logs")
+    });
+    let _ = create_dir_all(&parent);
+    let file_name = format!("observability-{suffix}-dlq.jsonl");
+    let path = parent.join(file_name);
+    let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
+    for row in rows {
+        let line = serde_json::to_string(row)
+            .unwrap_or_else(|_| "{\"_serialize_error\":true}".to_string());
+        f.write_all(line.as_bytes())?;
+        f.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
 /// Spawn the background flush task (idempotent).
 pub fn ensure_flusher() {
     if FLUSHER_STARTED.set(()).is_err() {

@@ -184,6 +184,24 @@ fn startup_doctor_summary_json(path: &PathBuf, report: &Value, detailed: bool) -
     summary
 }
 
+/// #2049 Finding 4: Surface failed/warned counts from the latest startup
+/// doctor artifact so `/api/health` can worsen `status` + `degraded_reasons`
+/// when boot-time checks regressed. Returns `(failed_count, warned_count)`;
+/// missing/error artifacts return `(0, 0)` so the doctor signal cannot mask
+/// other degradation signals via false positives.
+pub(crate) fn latest_startup_doctor_counts() -> (u64, u64) {
+    match load_latest_startup_doctor_artifact() {
+        LatestStartupDoctorArtifact::Available { report, .. } => {
+            let failed = summary_count(&report, "failed", "fail");
+            let warned = summary_count(&report, "warned", "warn");
+            (failed, warned)
+        }
+        LatestStartupDoctorArtifact::Missing { .. } | LatestStartupDoctorArtifact::Error { .. } => {
+            (0, 0)
+        }
+    }
+}
+
 pub(crate) fn latest_startup_doctor_health_json(detailed: bool) -> Value {
     match load_latest_startup_doctor_artifact() {
         LatestStartupDoctorArtifact::Available { path, report } => {
