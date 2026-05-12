@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::services::automation_candidate_contract::PIPELINE_STAGE_ID;
 
@@ -56,6 +56,20 @@ pub struct MaterializedCandidateCard {
     pub card_id: String,
     pub created: bool,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IterationOutcomeAction {
+    KeepContinue,
+    KeepFinalGate,
+    DiscardRequeue,
+    DiscardFinalGate,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistedIterationOutcome {
+    pub record: IterationRecord,
+    pub child_card_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +329,86 @@ pub async fn insert_iteration_pg(
     row_to_record(&row)
 }
 
+pub async fn persist_iteration_outcome_pg(
+    pool: &PgPool,
+    params: InsertIterationParams,
+    action: IterationOutcomeAction,
+) -> Result<PersistedIterationOutcome, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin iteration transaction: {error}"))?;
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO automation_candidate_iterations (
+            card_id, iteration, branch, commit_hash,
+            metric_before, metric_after, is_simplification,
+            status, description, allowed_write_paths_used,
+            run_seconds, crash_trace
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        RETURNING id::text AS id, card_id, iteration, branch, commit_hash,
+                  metric_before, metric_after, is_simplification,
+                  status, description, allowed_write_paths_used,
+                  run_seconds, crash_trace, created_at
+        "#,
+    )
+    .bind(&params.card_id)
+    .bind(params.iteration)
+    .bind(&params.branch)
+    .bind(params.commit_hash.as_deref())
+    .bind(params.metric_before)
+    .bind(params.metric_after)
+    .bind(params.is_simplification)
+    .bind(&params.status)
+    .bind(params.description.as_deref())
+    .bind(&params.allowed_write_paths_used)
+    .bind(params.run_seconds)
+    .bind(params.crash_trace.as_deref())
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| format!("insert iteration: {error}"))?;
+
+    let record = row_to_record(&row)?;
+    let child_card_id = match action {
+        IterationOutcomeAction::KeepContinue => {
+            update_card_program_current_iteration_in_tx(&mut tx, &params.card_id, params.iteration)
+                .await?;
+            None
+        }
+        IterationOutcomeAction::KeepFinalGate | IterationOutcomeAction::DiscardFinalGate => {
+            update_card_program_current_iteration_in_tx(&mut tx, &params.card_id, params.iteration)
+                .await?;
+            transition_card_status_in_tx(&mut tx, &params.card_id, "review").await?;
+            None
+        }
+        IterationOutcomeAction::DiscardRequeue => {
+            let (parent_title, parent_metadata) =
+                load_card_header_in_tx(&mut tx, &params.card_id).await?;
+            transition_card_status_in_tx(&mut tx, &params.card_id, "review").await?;
+            Some(
+                create_child_candidate_card_in_tx(
+                    &mut tx,
+                    &params.card_id,
+                    &parent_title,
+                    params.iteration + 1,
+                    &parent_metadata,
+                )
+                .await?,
+            )
+        }
+    };
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit iteration transaction: {error}"))?;
+
+    Ok(PersistedIterationOutcome {
+        record,
+        child_card_id,
+    })
+}
+
 pub async fn list_iterations_for_card_pg(
     pool: &PgPool,
     card_id: &str,
@@ -343,12 +437,19 @@ pub async fn load_card_header_pg(
     pool: &PgPool,
     card_id: &str,
 ) -> Result<Option<(String, serde_json::Value)>, String> {
-    let row =
-        sqlx::query("SELECT title, metadata::text AS metadata FROM kanban_cards WHERE id = $1")
-            .bind(card_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| format!("load card header: {e}"))?;
+    let row = sqlx::query(
+        r#"
+        SELECT title, metadata::text AS metadata
+        FROM kanban_cards
+        WHERE id = $1
+          AND pipeline_stage_id = $2
+        "#,
+    )
+    .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("load card header: {e}"))?;
 
     let Some(row) = row else { return Ok(None) };
     let title: String = row.try_get("title").unwrap_or_else(|_| card_id.to_string());
@@ -358,6 +459,138 @@ pub async fn load_card_header_pg(
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or(serde_json::Value::Object(Default::default()));
     Ok(Some((title, meta)))
+}
+
+async fn load_card_header_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    card_id: &str,
+) -> Result<(String, serde_json::Value), String> {
+    let row = sqlx::query(
+        r#"
+        SELECT title, metadata::text AS metadata
+        FROM kanban_cards
+        WHERE id = $1
+          AND pipeline_stage_id = $2
+        "#,
+    )
+    .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("load card header: {error}"))?;
+
+    let Some(row) = row else {
+        return Err(format!("automation candidate card not found: {card_id}"));
+    };
+    let title: String = row.try_get("title").unwrap_or_else(|_| card_id.to_string());
+    let meta_raw: Option<String> = row.try_get("metadata").unwrap_or(None);
+    let meta = meta_raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+    Ok((title, meta))
+}
+
+async fn update_card_program_current_iteration_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    card_id: &str,
+    current_iteration: i32,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE kanban_cards
+           SET metadata = jsonb_set(
+                   COALESCE(metadata, '{}'::jsonb),
+                   '{program,current_iteration}',
+                   to_jsonb($1::int),
+                   true
+               ),
+               updated_at = NOW()
+         WHERE id = $2
+           AND pipeline_stage_id = $3
+        "#,
+    )
+    .bind(current_iteration)
+    .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("update card {card_id} program current_iteration to {current_iteration}: {error}")
+    })?;
+    Ok(())
+}
+
+async fn transition_card_status_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    card_id: &str,
+    new_status: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE kanban_cards
+           SET status = $1, updated_at = NOW()
+         WHERE id = $2
+           AND pipeline_stage_id = $3
+        "#,
+    )
+    .bind(new_status)
+    .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("transition card {card_id} to {new_status}: {error}"))?;
+    Ok(())
+}
+
+async fn create_child_candidate_card_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    parent_card_id: &str,
+    parent_title: &str,
+    iteration: i32,
+    parent_metadata: &serde_json::Value,
+) -> Result<String, String> {
+    let child_id = uuid::Uuid::new_v4().to_string();
+    let child_title = format!("{parent_title} [iter {iteration}]");
+
+    let mut child_meta = parent_metadata.clone();
+    if let Some(program) = child_meta.get_mut("program") {
+        if let Some(obj) = program.as_object_mut() {
+            obj.insert(
+                "current_iteration".to_string(),
+                serde_json::Value::Number((iteration - 1).into()),
+            );
+        }
+    }
+    child_meta["parent_iteration"] = serde_json::Value::Number((iteration - 1).into());
+    child_meta["iteration"] = serde_json::Value::Number(iteration.into());
+
+    let child_meta_json = serde_json::to_string(&child_meta)
+        .map_err(|error| format!("serialize child metadata: {error}"))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO kanban_cards (
+            id, title, status, priority,
+            pipeline_stage_id, parent_card_id,
+            metadata, created_at, updated_at
+        ) VALUES (
+            $1, $2, 'ready', 'medium',
+            $3, $4,
+            CAST($5 AS jsonb), NOW(), NOW()
+        )
+        "#,
+    )
+    .bind(&child_id)
+    .bind(&child_title)
+    .bind(PIPELINE_STAGE_ID)
+    .bind(parent_card_id)
+    .bind(&child_meta_json)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("create child card: {error}"))?;
+
+    Ok(child_id)
 }
 
 pub async fn materialize_candidate_card_pg(
@@ -413,7 +646,16 @@ pub async fn materialize_candidate_card_pg(
                        priority = COALESCE($3, priority),
                        assigned_agent_id = COALESCE($4, assigned_agent_id),
                        description = COALESCE($5, description),
-                       metadata = CAST($6 AS jsonb),
+                       metadata = CASE
+                           WHEN metadata->'program' ? 'current_iteration'
+                           THEN jsonb_set(
+                               CAST($6 AS jsonb),
+                               '{program,current_iteration}',
+                               metadata->'program'->'current_iteration',
+                               true
+                           )
+                           ELSE CAST($6 AS jsonb)
+                       END,
                        status = CASE WHEN $7 THEN 'ready' ELSE status END,
                        pipeline_stage_id = $8,
                        updated_at = NOW()
@@ -537,13 +779,15 @@ pub async fn load_card_program_pg(
     pool: &PgPool,
     card_id: &str,
 ) -> Result<Option<serde_json::Value>, String> {
-    let metadata_raw: Option<String> =
-        sqlx::query_scalar("SELECT metadata::text FROM kanban_cards WHERE id = $1")
-            .bind(card_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| format!("load card metadata: {error}"))?
-            .flatten();
+    let metadata_raw: Option<String> = sqlx::query_scalar(
+        "SELECT metadata::text FROM kanban_cards WHERE id = $1 AND pipeline_stage_id = $2",
+    )
+    .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load card metadata: {error}"))?
+    .flatten();
 
     let program = metadata_raw
         .as_deref()
@@ -559,12 +803,20 @@ pub async fn transition_card_status_pg(
     card_id: &str,
     new_status: &str,
 ) -> Result<(), String> {
-    sqlx::query("UPDATE kanban_cards SET status = $1, updated_at = NOW() WHERE id = $2")
-        .bind(new_status)
-        .bind(card_id)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("transition card {card_id} to {new_status}: {error}"))?;
+    sqlx::query(
+        r#"
+        UPDATE kanban_cards
+           SET status = $1, updated_at = NOW()
+         WHERE id = $2
+           AND pipeline_stage_id = $3
+        "#,
+    )
+    .bind(new_status)
+    .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("transition card {card_id} to {new_status}: {error}"))?;
     Ok(())
 }
 
@@ -655,9 +907,15 @@ pub async fn create_child_candidate_card_pg(
 /// Returns `None` if the card doesn't exist or the field isn't set.
 pub async fn load_card_repo_dir_pg(pool: &PgPool, card_id: &str) -> Result<Option<String>, String> {
     let value: Option<String> = sqlx::query_scalar(
-        "SELECT metadata->'program'->>'repo_dir' FROM kanban_cards WHERE id = $1",
+        r#"
+        SELECT metadata->'program'->>'repo_dir'
+        FROM kanban_cards
+        WHERE id = $1
+          AND pipeline_stage_id = $2
+        "#,
     )
     .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("load card repo_dir: {e}"))?
@@ -674,9 +932,15 @@ pub async fn load_card_final_gate_pg(
     card_id: &str,
 ) -> Result<Option<String>, String> {
     let value: Option<String> = sqlx::query_scalar(
-        "SELECT metadata->'program'->>'final_gate' FROM kanban_cards WHERE id = $1",
+        r#"
+        SELECT metadata->'program'->>'final_gate'
+        FROM kanban_cards
+        WHERE id = $1
+          AND pipeline_stage_id = $2
+        "#,
     )
     .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("load card final_gate: {e}"))?

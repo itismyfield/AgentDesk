@@ -18,8 +18,8 @@ function makeReadyObs(cardId, overrides = {}) {
     summary: overrides.summary || `Test card ${cardId}`,
     metadata: {
       automation_candidate: {
-        enabled: overrides.enabled ?? true,
-        loop_enabled: overrides.loop_enabled ?? true,
+        source: overrides.source || "test",
+        dedupe_key: overrides.dedupe_key || `test:${cardId}`,
         ...(overrides.automation_candidate || {}),
       },
       program: {
@@ -149,6 +149,45 @@ test("previous iterations are included in prompt when automationInventory provid
   assert.equal(r.action, "agent");
   assert.ok(r.prompt.includes("First attempt"), "prompt should include previous iteration description");
   assert.ok(r.prompt.includes("0.7"), "prompt should include metric_before from previous iter");
+});
+
+test("previous iterations are read from API inventory response shape", () => {
+  const { tick } = loadRoutine(ROUTINE_PATH);
+  const cardId = "card-api-inventory";
+  const obs = [makeReadyObs(cardId, { current_iteration: 1 })];
+  const prevIterations = [
+    { iteration: 1, status: "keep", metric_before: 5, metric_after: 3, description: "API shaped history" },
+  ];
+
+  const r = tick({
+    now: BASE_NOW,
+    checkpoint: null,
+    observations: obs,
+    automationInventory: { card_id: cardId, iterations: prevIterations },
+  });
+
+  assert.equal(r.action, "agent");
+  assert.ok(r.prompt.includes("API shaped history"), "prompt should include API-shaped history");
+  assert.ok(r.prompt.includes("5"), "prompt should include metric_before from API-shaped history");
+});
+
+test("previous iterations are read from keyed API inventory response shape", () => {
+  const { tick } = loadRoutine(ROUTINE_PATH);
+  const cardId = "card-keyed-api-inventory";
+  const obs = [makeReadyObs(cardId, { current_iteration: 1 })];
+  const prevIterations = [
+    { iteration: 1, status: "discard", metric_before: 5, metric_after: 5, description: "Keyed API history" },
+  ];
+
+  const r = tick({
+    now: BASE_NOW,
+    checkpoint: null,
+    observations: obs,
+    automationInventory: { [cardId]: { iterations: prevIterations } },
+  });
+
+  assert.equal(r.action, "agent");
+  assert.ok(r.prompt.includes("Keyed API history"), "prompt should include keyed API-shaped history");
 });
 
 // --- kanban_dispatched suppression ---

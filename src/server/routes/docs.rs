@@ -2280,11 +2280,16 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ("branch", body_param("string", true, "Automation branch name")),
             ("metric_before", body_param("number", false, "Metric value before changes")),
             ("metric_after", body_param("number", false, "Metric value after changes")),
-            ("allowed_write_paths_used", body_param("array<string>", false, "Reported changed paths; all must be within program.allowed_write_paths")),
+            ("allowed_write_paths_used", body_param("array<string>", true, "Non-empty changed-path report; all paths must be within program.allowed_write_paths")),
         ])
         .with_example(
             json!({"path": {"card_id": "card-1"}, "body": {"iteration": 1, "branch": "automation/card-1/iter-1", "metric_before": 0.4, "metric_after": 0.2, "status": "keep", "allowed_write_paths_used": ["src/services/discord/router.rs"]}}),
             json!({"verdict": "keep", "action": "keep_continue", "child_card_id": null}),
+        )
+        .with_error_example(
+            400,
+            json!({"path": {"card_id": "card-1"}, "body": {"iteration": 1, "branch": "automation/card-1/iter-1", "status": "keep"}}),
+            json!({"error": "allowed_write_paths_used is required and must be non-empty", "code": "MISSING_CHANGED_PATHS_REPORT"}),
         )
         .with_error_example(
             403,

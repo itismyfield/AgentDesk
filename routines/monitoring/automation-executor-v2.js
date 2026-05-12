@@ -94,6 +94,19 @@ function candidateIterationBudget(program) {
   return Math.max(1, Math.min(MAX_ITERATIONS, Math.floor(value)));
 }
 
+function previousIterationsFor(inventory, cardId) {
+  if (!inventory) return [];
+  if (Array.isArray(inventory)) return inventory;
+  if (Array.isArray(inventory[cardId])) return inventory[cardId];
+  if (inventory[cardId] && Array.isArray(inventory[cardId].iterations)) {
+    return inventory[cardId].iterations;
+  }
+  if (inventory.card_id === cardId && Array.isArray(inventory.iterations)) {
+    return inventory.iterations;
+  }
+  return [];
+}
+
 // --- Build executor prompt (autoresearch-style: program contract + previous findings) ---
 
 function buildIterationPrompt(cardId, card, iteration, previousIterations) {
@@ -264,7 +277,7 @@ agentdesk.routines.register({
     };
 
     // Read previous iteration results from ctx.automationInventory if available
-    const previousIterations = (ctx.automationInventory && ctx.automationInventory[cardId]) || [];
+    const previousIterations = previousIterationsFor(ctx.automationInventory, cardId);
 
     const prevPending = cp.pending[cardId];
     cp.pending[cardId] = {

@@ -28,6 +28,13 @@ fn materializer_error_response(error: MaterializerError) -> (StatusCode, Json<se
             StatusCode::BAD_REQUEST,
             Json(json!({"error": msg, "code": "MISSING_PROGRAM_CONTRACT"})),
         ),
+        MaterializerError::MissingChangedPathsReport => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "allowed_write_paths_used is required and must be non-empty",
+                "code": "MISSING_CHANGED_PATHS_REPORT",
+            })),
+        ),
         MaterializerError::AllowedPathsViolation { path } => (
             StatusCode::FORBIDDEN,
             Json(json!({
@@ -59,7 +66,6 @@ fn materializer_error_response(error: MaterializerError) -> (StatusCode, Json<se
 /// Materialize a loop-enabled automation candidate Kanban card.
 /// A card enters the executor loop only when:
 /// `pipeline_stage_id='automation-candidate'`,
-/// `metadata.automation_candidate.enabled=true`,
 /// and `metadata.program` contains the required contract fields.
 pub async fn materialize_candidate(
     State(state): State<AppState>,

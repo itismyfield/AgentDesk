@@ -3,12 +3,10 @@ use std::path::{Component, Path};
 use sqlx::PgPool;
 
 use crate::db::automation_candidates::{
-    InsertIterationParams, IterationRecord, MaterializeCandidateCardParams,
+    InsertIterationParams, IterationOutcomeAction, IterationRecord, MaterializeCandidateCardParams,
     MaterializedCandidateCard, MetricDirection, approve_candidate_card_pg, compute_verdict,
-    create_child_candidate_card_pg, insert_iteration_pg, is_final_iteration,
-    list_iterations_for_card_pg, load_card_header_pg, load_card_program_pg, load_card_repo_dir_pg,
-    materialize_candidate_card_pg, transition_card_status_pg,
-    update_card_program_current_iteration_pg,
+    is_final_iteration, list_iterations_for_card_pg, load_card_program_pg, load_card_repo_dir_pg,
+    materialize_candidate_card_pg, persist_iteration_outcome_pg,
 };
 use crate::services::automation_candidate_contract::{
     AutomationCandidateDiscriminator, MARKER_METADATA_KEY, PIPELINE_STAGE_ID,
@@ -89,6 +87,8 @@ pub enum MaterializerAction {
     KeepFinalGate,
     /// Iteration discarded; current card → review, child card created for retry.
     DiscardRequeue,
+    /// Iteration discarded at budget boundary; card moved to review without requeue.
+    DiscardFinalGate,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -164,6 +164,7 @@ pub struct SideEffectCheck {
 pub enum MaterializerError {
     CardNotFound,
     MissingProgram(String),
+    MissingChangedPathsReport,
     AllowedPathsViolation { path: String },
     DuplicateIteration,
     WorktreeError(String),
@@ -175,6 +176,12 @@ impl std::fmt::Display for MaterializerError {
         match self {
             Self::CardNotFound => write!(f, "card not found"),
             Self::MissingProgram(msg) => write!(f, "program contract missing: {msg}"),
+            Self::MissingChangedPathsReport => {
+                write!(
+                    f,
+                    "allowed_write_paths_used is required and must be non-empty"
+                )
+            }
             Self::AllowedPathsViolation { path } => {
                 write!(f, "path '{path}' is not in allowed_write_paths")
             }
@@ -264,7 +271,7 @@ impl AutomationCandidateMaterializer {
         }
 
         // 2. Validate allowed_write_paths_used against contract
-        let paths_used = input.allowed_write_paths_used.clone().unwrap_or_default();
+        let paths_used = normalize_changed_paths_report(input.allowed_write_paths_used.clone())?;
         for path in &paths_used {
             if !allowed_write_paths
                 .iter()
@@ -290,8 +297,30 @@ impl AutomationCandidateMaterializer {
             metric_direction,
         );
 
-        // 4. Insert iteration record
-        let record = insert_iteration_pg(
+        let is_final = is_final_iteration(input.iteration)
+            || is_final_program_iteration(input.iteration, &program);
+        let db_action = iteration_outcome_action(verdict, is_final);
+        let action = materializer_action_for(db_action);
+
+        if matches!(
+            db_action,
+            IterationOutcomeAction::DiscardRequeue | IterationOutcomeAction::DiscardFinalGate
+        ) {
+            // Best-effort worktree cleanup for the discarded iteration.
+            if let Some(repo_dir) = program
+                .get("repo_dir")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                let branch = automation_branch_name(card_id, input.iteration);
+                if let Some(wt) = find_automation_worktree(repo_dir, card_id, input.iteration) {
+                    let _ = remove_automation_worktree(repo_dir, &wt.path, &branch);
+                }
+            }
+        }
+
+        // 4. Insert iteration record and apply card state changes atomically.
+        let outcome = persist_iteration_outcome_pg(
             &self.pool,
             InsertIterationParams {
                 card_id: card_id.to_string(),
@@ -307,6 +336,7 @@ impl AutomationCandidateMaterializer {
                 run_seconds: input.run_seconds,
                 crash_trace: input.crash_trace.clone(),
             },
+            db_action,
         )
         .await
         .map_err(|error| {
@@ -317,69 +347,11 @@ impl AutomationCandidateMaterializer {
             }
         })?;
 
-        // 5. Act on verdict
-        let (action, child_card_id) = match verdict {
-            "keep"
-                if is_final_iteration(input.iteration)
-                    || is_final_program_iteration(input.iteration, &program) =>
-            {
-                update_card_program_current_iteration_pg(&self.pool, card_id, input.iteration)
-                    .await
-                    .map_err(MaterializerError::Database)?;
-                // All iterations done — move to review for final gate
-                transition_card_status_pg(&self.pool, card_id, "review")
-                    .await
-                    .map_err(MaterializerError::Database)?;
-                (MaterializerAction::KeepFinalGate, None)
-            }
-            "keep" => {
-                update_card_program_current_iteration_pg(&self.pool, card_id, input.iteration)
-                    .await
-                    .map_err(MaterializerError::Database)?;
-                (MaterializerAction::KeepContinue, None)
-            }
-            _ => {
-                // Discard: transition current card to review, create child ready card
-                let (parent_title, parent_metadata) = load_card_header_pg(&self.pool, card_id)
-                    .await
-                    .map_err(MaterializerError::Database)?
-                    .ok_or(MaterializerError::CardNotFound)?;
-
-                // Best-effort worktree cleanup for the discarded iteration.
-                if let Some(repo_dir) = program
-                    .get("repo_dir")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                {
-                    let branch = automation_branch_name(card_id, input.iteration);
-                    if let Some(wt) = find_automation_worktree(repo_dir, card_id, input.iteration) {
-                        let _ = remove_automation_worktree(repo_dir, &wt.path, &branch);
-                    }
-                }
-
-                transition_card_status_pg(&self.pool, card_id, "review")
-                    .await
-                    .map_err(MaterializerError::Database)?;
-
-                let child_id = create_child_candidate_card_pg(
-                    &self.pool,
-                    card_id,
-                    &parent_title,
-                    input.iteration + 1,
-                    &parent_metadata,
-                )
-                .await
-                .map_err(MaterializerError::Database)?;
-
-                (MaterializerAction::DiscardRequeue, Some(child_id))
-            }
-        };
-
         Ok(IterationResultOutput {
-            record: record.into(),
+            record: outcome.record.into(),
             verdict,
             action,
-            child_card_id,
+            child_card_id: outcome.child_card_id,
         })
     }
 
@@ -438,10 +410,6 @@ impl AutomationCandidateMaterializer {
             .map_err(MaterializerError::Database)?
             .ok_or(MaterializerError::CardNotFound)?;
 
-        approve_candidate_card_pg(&self.pool, card_id)
-            .await
-            .map_err(MaterializerError::Database)?;
-
         let final_gate = program
             .get("final_gate")
             .and_then(|v| v.as_str())
@@ -449,6 +417,9 @@ impl AutomationCandidateMaterializer {
             .to_string();
 
         let simulation = self.simulate_side_effects(card_id, &program).await?;
+        approve_candidate_card_pg(&self.pool, card_id)
+            .await
+            .map_err(MaterializerError::Database)?;
         let effective_final_gate =
             if final_gate == "auto_apply_after_green" && simulation.safe_for_auto_apply {
                 "auto_apply_after_green"
@@ -711,6 +682,39 @@ fn is_final_program_iteration(iteration: i32, program: &serde_json::Value) -> bo
     iteration >= budget
 }
 
+fn normalize_changed_paths_report(
+    paths: Option<Vec<String>>,
+) -> Result<Vec<String>, MaterializerError> {
+    let normalized: Vec<String> = paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect();
+    if normalized.is_empty() {
+        return Err(MaterializerError::MissingChangedPathsReport);
+    }
+    Ok(normalized)
+}
+
+fn iteration_outcome_action(verdict: &str, is_final: bool) -> IterationOutcomeAction {
+    match (verdict, is_final) {
+        ("keep", true) => IterationOutcomeAction::KeepFinalGate,
+        ("keep", false) => IterationOutcomeAction::KeepContinue,
+        (_, true) => IterationOutcomeAction::DiscardFinalGate,
+        (_, false) => IterationOutcomeAction::DiscardRequeue,
+    }
+}
+
+fn materializer_action_for(action: IterationOutcomeAction) -> MaterializerAction {
+    match action {
+        IterationOutcomeAction::KeepContinue => MaterializerAction::KeepContinue,
+        IterationOutcomeAction::KeepFinalGate => MaterializerAction::KeepFinalGate,
+        IterationOutcomeAction::DiscardRequeue => MaterializerAction::DiscardRequeue,
+        IterationOutcomeAction::DiscardFinalGate => MaterializerAction::DiscardFinalGate,
+    }
+}
+
 fn allowed_path_matches(path: &str, allowed: &str) -> bool {
     let path = Path::new(path);
     let allowed = Path::new(allowed);
@@ -736,9 +740,12 @@ fn is_clean_relative_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod allowed_path_tests {
+    use crate::db::automation_candidates::IterationOutcomeAction;
+
     use super::{
         CandidateProgramInput, MaterializeCandidateInput, allowed_path_matches,
-        is_final_program_iteration, normalize_candidate_metadata,
+        is_final_program_iteration, iteration_outcome_action, normalize_candidate_metadata,
+        normalize_changed_paths_report,
     };
 
     #[test]
@@ -759,6 +766,29 @@ mod allowed_path_tests {
         assert!(!allowed_path_matches("/src/foo.rs", "src"));
         assert!(!allowed_path_matches("src/foo.rs", ""));
         assert!(!allowed_path_matches("", "src"));
+    }
+
+    #[test]
+    fn changed_paths_report_is_required() {
+        assert!(normalize_changed_paths_report(None).is_err());
+        assert!(normalize_changed_paths_report(Some(vec![])).is_err());
+        assert!(normalize_changed_paths_report(Some(vec!["  ".to_string()])).is_err());
+        assert_eq!(
+            normalize_changed_paths_report(Some(vec![" src/foo.rs ".to_string()])).unwrap(),
+            vec!["src/foo.rs"]
+        );
+    }
+
+    #[test]
+    fn final_discard_does_not_requeue() {
+        assert_eq!(
+            iteration_outcome_action("discard", true),
+            IterationOutcomeAction::DiscardFinalGate
+        );
+        assert_eq!(
+            iteration_outcome_action("discard", false),
+            IterationOutcomeAction::DiscardRequeue
+        );
     }
 
     #[test]
