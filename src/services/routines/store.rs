@@ -140,6 +140,13 @@ fn default_observation_source(source_kind: &str) -> &'static str {
     }
 }
 
+fn include_automation_candidate_card_observations(current_script_ref: Option<&str>) -> bool {
+    matches!(
+        current_script_ref.map(str::trim),
+        Some("monitoring/automation-executor-v2.js" | "monitoring/automation-executor.js")
+    )
+}
+
 /// Build one observation item from a `kv_meta` precomputed digest row.
 ///
 /// # kv_meta digest ingestion surface contract
@@ -1344,9 +1351,11 @@ impl RoutineStore {
             kanban_obs.into(),
             dispatch_obs.into(),
             session_obs.into(),
-            kanban_ready_obs.into(),
-            kanban_dispatched_obs.into(),
         ];
+        if include_automation_candidate_card_observations(current_script_ref) {
+            sources.push(kanban_ready_obs.into());
+            sources.push(kanban_dispatched_obs.into());
+        }
         let mut observations = Vec::with_capacity(max_items.min(100));
         let mut total_bytes: usize = 0;
         'merge: loop {
@@ -2514,8 +2523,9 @@ struct CloseRun<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_due_after, next_due_after_anchor, parse_schedule_interval,
-        precomputed_observation_from_kv, truncate_chars, validate_routine_schedule,
+        include_automation_candidate_card_observations, next_due_after, next_due_after_anchor,
+        parse_schedule_interval, precomputed_observation_from_kv, truncate_chars,
+        validate_routine_schedule,
     };
     use chrono::{TimeZone, Timelike, Utc};
     use serde_json::Value;
@@ -2525,6 +2535,20 @@ mod tests {
     // The store SQL is compiled by `cargo check`; concurrent claim/recovery
     // behavior should be covered by PG integration tests once the runtime
     // harness starts executing routines.
+
+    #[test]
+    fn automation_candidate_card_observations_are_executor_only() {
+        assert!(include_automation_candidate_card_observations(Some(
+            "monitoring/automation-executor-v2.js"
+        )));
+        assert!(include_automation_candidate_card_observations(Some(
+            " monitoring/automation-executor.js "
+        )));
+        assert!(!include_automation_candidate_card_observations(Some(
+            "monitoring/automation-candidate-recommender.js"
+        )));
+        assert!(!include_automation_candidate_card_observations(None));
+    }
 
     #[test]
     fn parses_supported_interval_schedules() {
