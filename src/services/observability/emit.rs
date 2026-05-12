@@ -474,4 +474,3 @@ pub(super) fn emit_event(
         let _ = sender.send(WorkerMessage::Event(queued));
     }
 }
-

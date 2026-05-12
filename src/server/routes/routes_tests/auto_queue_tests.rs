@@ -11584,4 +11584,3 @@ async fn auto_queue_reset_requires_agent_id_and_reset_global_requires_confirmati
     assert_eq!(active_entries, 1);
     assert_eq!(remaining_entries, 1);
 }
-

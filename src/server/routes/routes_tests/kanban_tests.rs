@@ -5101,4 +5101,3 @@ async fn batch_rereview_processes_multiple_issues() {
         .unwrap();
     assert_eq!(status_2, "review");
 }
-

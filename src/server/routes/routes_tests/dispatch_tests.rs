@@ -1969,4 +1969,3 @@ async fn patch_dispatch_accepts_valid_status_cancelled() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["dispatch"]["status"], "cancelled");
 }
-

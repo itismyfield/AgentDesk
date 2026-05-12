@@ -333,7 +333,11 @@ pub(super) fn local_get_request(uri: &str) -> Request<Body> {
     request
 }
 
-pub(super) fn write_test_skill(runtime_root: &std::path::Path, skill_name: &str, description: &str) {
+pub(super) fn write_test_skill(
+    runtime_root: &std::path::Path,
+    skill_name: &str,
+    description: &str,
+) {
     let skill_dir = runtime_root.join("skills").join(skill_name);
     fs::create_dir_all(&skill_dir).unwrap();
     fs::write(
@@ -988,7 +992,13 @@ pub(super) fn ensure_auto_queue_tables(db: &Db) {
     .unwrap();
 }
 
-pub(super) fn seed_auto_queue_card(db: &Db, card_id: &str, issue_number: i64, status: &str, agent_id: &str) {
+pub(super) fn seed_auto_queue_card(
+    db: &Db,
+    card_id: &str,
+    issue_number: i64,
+    status: &str,
+    agent_id: &str,
+) {
     let conn = db.lock().unwrap();
     conn.execute(
         "INSERT INTO kanban_cards (
@@ -1406,4 +1416,3 @@ pub(super) fn seed_similarity_group_cards(db: &Db) -> Vec<String> {
 
     ids
 }
-

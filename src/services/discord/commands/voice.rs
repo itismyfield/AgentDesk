@@ -455,8 +455,7 @@ pub(in crate::services::discord) async fn auto_join_voice_channels(
         let Some(mapped) = channel_provider_map.get(raw_channel_id.trim()) else {
             // Unmapped channels never receive a bot. Surface the gap once via
             // the notify bot so the operator can fix the agent yaml.
-            let Ok(notify_channel_id) =
-                raw_channel_id.trim().parse::<u64>().map(ChannelId::new)
+            let Ok(notify_channel_id) = raw_channel_id.trim().parse::<u64>().map(ChannelId::new)
             else {
                 tracing::warn!(
                     channel_id = raw_channel_id,
@@ -645,8 +644,10 @@ async fn try_join_for_provider(
                 "voice auto-join skipped: songbird call already connected for guild (#2054 idempotency)"
             );
             barge_in.register_voice_context(control_channel_id, guild_id);
-            voice_occupancy()
-                .insert((self_provider.to_string(), guild_id.get()), recorded_channel);
+            voice_occupancy().insert(
+                (self_provider.to_string(), guild_id.get()),
+                recorded_channel,
+            );
             return;
         }
         // Zombie call detected — drop the lock then remove so manager.join() below
@@ -678,7 +679,10 @@ async fn try_join_for_provider(
                 "voice auto-join Ok: songbird connected, receiver registered"
             );
             barge_in.register_voice_context(control_channel_id, guild_id);
-            voice_occupancy().insert((self_provider.to_string(), guild_id.get()), channel_id.get());
+            voice_occupancy().insert(
+                (self_provider.to_string(), guild_id.get()),
+                channel_id.get(),
+            );
         }
         Err(error) => {
             let mut chain: Vec<String> = vec![error.to_string()];

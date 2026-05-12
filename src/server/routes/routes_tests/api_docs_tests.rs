@@ -2943,4 +2943,3 @@ async fn v1_stream_pg_emits_snapshot_and_replays_shared_bus_events() {
     pg_pool.close().await;
     pg_db.drop().await;
 }
-

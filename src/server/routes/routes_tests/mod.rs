@@ -16,11 +16,11 @@ macro_rules! sqlite_params {
 
 mod common;
 
-mod infra_tests;
-mod health_tests;
 mod agents_tests;
-mod kanban_tests;
+mod api_docs_tests;
+mod auto_queue_tests;
 mod dispatch_tests;
 mod github_tests;
-mod auto_queue_tests;
-mod api_docs_tests;
+mod health_tests;
+mod infra_tests;
+mod kanban_tests;

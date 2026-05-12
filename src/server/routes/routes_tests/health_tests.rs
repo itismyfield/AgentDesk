@@ -1446,4 +1446,3 @@ async fn stats_pg_only_without_sqlite_mirror() {
     pg_pool.close().await;
     pg_db.drop().await;
 }
-

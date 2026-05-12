@@ -2087,4 +2087,3 @@ fn callsites_migrated_off_legacy_api_paths_1069() {
         hits.join("\n  ")
     );
 }
-
