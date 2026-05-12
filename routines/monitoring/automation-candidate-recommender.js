@@ -11,6 +11,7 @@ const PROMPT_CAP_BYTES = 12288;
 const CHECKPOINT_CAP_BYTES = 65536;
 const CHECKPOINT_VERSION = 1;
 const CANDIDATE_TTL_DAYS = 30;
+const REPO_DIR_PLACEHOLDER = "<determine from your workspace context>";
 
 // seen_evidence dedup: prevents the same evidence from incrementing score/evidence_count
 // across multiple ticks.  TTL covers the 24h observation query window with margin.
@@ -871,7 +872,7 @@ function candidateAssessment(patternId, candidate) {
         dedupe_key: patternId,
         start_ready: false,
         program: {
-          repo_dir: "<required: absolute repo path>",
+          repo_dir: REPO_DIR_PLACEHOLDER,
           allowed_write_paths: allowedWritePaths,
           metric_name: candidateMetricName(category),
           metric_target: 0,

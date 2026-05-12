@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde_json::Value;
 
 pub const PIPELINE_STAGE_ID: &str = "automation-candidate";
@@ -34,7 +36,7 @@ pub fn discriminator() -> AutomationCandidateDiscriminator {
 }
 
 pub fn has_complete_loop_contract(metadata: &Value) -> bool {
-    program_non_empty_string(metadata, PROGRAM_REPO_DIR_KEY)
+    program_has_absolute_repo_dir(metadata)
         && program_non_empty_string(metadata, PROGRAM_METRIC_NAME_KEY)
         && program_has_metric_target(metadata)
         && program_has_allowed_write_paths(metadata)
@@ -50,6 +52,14 @@ fn program_non_empty_string(metadata: &Value, key: &str) -> bool {
         .and_then(Value::as_str)
         .map(str::trim)
         .is_some_and(|value| !value.is_empty())
+}
+
+fn program_has_absolute_repo_dir(metadata: &Value) -> bool {
+    program(metadata)
+        .and_then(|value| value.get(PROGRAM_REPO_DIR_KEY))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty() && Path::new(value).is_absolute())
 }
 
 fn program_has_allowed_write_paths(metadata: &Value) -> bool {
@@ -104,6 +114,11 @@ mod tests {
         let mut missing_repo = valid_metadata();
         missing_repo["program"]["repo_dir"] = serde_json::Value::String(String::new());
         assert!(!has_complete_loop_contract(&missing_repo));
+
+        let mut placeholder_repo = valid_metadata();
+        placeholder_repo["program"]["repo_dir"] =
+            serde_json::Value::String("<required: absolute repo path>".to_string());
+        assert!(!has_complete_loop_contract(&placeholder_repo));
 
         let mut empty_paths = valid_metadata();
         empty_paths["program"]["allowed_write_paths"] = serde_json::json!([]);

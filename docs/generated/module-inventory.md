@@ -83,7 +83,7 @@
 | `db::auto_queue::runs` | `src/db/auto_queue/runs.rs` | 291 |  |
 | `db::auto_queue::slots` | `src/db/auto_queue/slots.rs` | 208 |  |
 | `db::auto_queue::test_support` | `src/db/auto_queue/test_support.rs` | 178 |  |
-| `db::automation_candidates` | `src/db/automation_candidates.rs` | 966 |  |
+| `db::automation_candidates` | `src/db/automation_candidates.rs` | 863 |  |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
 | `db::dispatch_semaphores` | `src/db/dispatch_semaphores.rs` | 331 |  |
 | `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1910 | giant-file |
@@ -106,7 +106,7 @@
 | `db::kanban_cards::metadata` | `src/db/kanban_cards/metadata.rs` | 235 |  |
 | `db::kanban_cards::transitions` | `src/db/kanban_cards/transitions.rs` | 595 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 265 |  |
-| `db::postgres` | `src/db/postgres.rs` | 1705 | giant-file |
+| `db::postgres` | `src/db/postgres.rs` | 1704 | giant-file |
 | `db::prompt_manifests` | `src/db/prompt_manifests/mod.rs` | 26 |  |
 | `db::prompt_manifests::builder` | `src/db/prompt_manifests/builder.rs` | 86 |  |
 | `db::prompt_manifests::model` | `src/db/prompt_manifests/model.rs` | 181 |  |
@@ -215,7 +215,7 @@
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 568 |  |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 257 |  |
 | `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 151 |  |
-| `server::routes::automation_candidates` | `src/server/routes/automation_candidates.rs` | 304 |  |
+| `server::routes::automation_candidates` | `src/server/routes/automation_candidates.rs` | 313 |  |
 | `server::routes::cluster` | `src/server/routes/cluster.rs` | 408 |  |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
@@ -227,7 +227,7 @@
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 43 |  |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1411 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 |  |
-| `server::routes::docs` | `src/server/routes/docs.rs` | 5747 | giant-file |
+| `server::routes::docs` | `src/server/routes/docs.rs` | 5752 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 13 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 93 |  |
@@ -328,8 +328,8 @@
 | `services::auto_queue::slot_routes` | `src/services/auto_queue/slot_routes.rs` | 322 |  |
 | `services::auto_queue::view` | `src/services/auto_queue/view.rs` | 330 |  |
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 725 |  |
-| `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 112 |  |
-| `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 845 |  |
+| `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 |  |
+| `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 932 |  |
 | `services::claude` | `src/services/claude.rs` | 2667 | giant-file |
 | `services::cluster` | `src/services/cluster/mod.rs` | 13 |  |
 | `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 798 |  |

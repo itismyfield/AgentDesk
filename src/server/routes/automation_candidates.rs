@@ -50,6 +50,15 @@ fn materializer_error_response(error: MaterializerError) -> (StatusCode, Json<se
                 "code": "DUPLICATE_ITERATION",
             })),
         ),
+        MaterializerError::IterationOutOfSequence { expected, actual } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("iteration out of sequence: expected {expected}, got {actual}"),
+                "code": "ITERATION_OUT_OF_SEQUENCE",
+                "expected": expected,
+                "actual": actual,
+            })),
+        ),
         MaterializerError::WorktreeError(msg) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"error": msg, "code": "WORKTREE_ERROR"})),

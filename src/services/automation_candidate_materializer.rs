@@ -167,6 +167,7 @@ pub enum MaterializerError {
     MissingChangedPathsReport,
     AllowedPathsViolation { path: String },
     DuplicateIteration,
+    IterationOutOfSequence { expected: i32, actual: i32 },
     WorktreeError(String),
     Database(String),
 }
@@ -187,6 +188,12 @@ impl std::fmt::Display for MaterializerError {
             }
             Self::DuplicateIteration => {
                 write!(f, "iteration result already exists for this card/iteration")
+            }
+            Self::IterationOutOfSequence { expected, actual } => {
+                write!(
+                    f,
+                    "iteration out of sequence: expected {expected}, got {actual}"
+                )
             }
             Self::WorktreeError(msg) => write!(f, "worktree error: {msg}"),
             Self::Database(msg) => write!(f, "database error: {msg}"),
@@ -269,6 +276,7 @@ impl AutomationCandidateMaterializer {
                 "allowed_write_paths must be non-empty".to_string(),
             ));
         }
+        validate_iteration_sequence(input.iteration, &program)?;
 
         // 2. Validate allowed_write_paths_used against contract
         let paths_used = normalize_changed_paths_report(input.allowed_write_paths_used.clone())?;
@@ -521,15 +529,31 @@ fn extract_allowed_write_paths(program: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn expected_next_iteration(program: &serde_json::Value) -> i32 {
+    let current = program
+        .get(PROGRAM_CURRENT_ITERATION_KEY)
+        .and_then(|v| v.as_i64())
+        .filter(|value| *value >= 0)
+        .and_then(|value| i32::try_from(value).ok())
+        .unwrap_or(0);
+    current.saturating_add(1)
+}
+
+fn validate_iteration_sequence(
+    actual: i32,
+    program: &serde_json::Value,
+) -> Result<(), MaterializerError> {
+    let expected = expected_next_iteration(program);
+    if actual != expected {
+        return Err(MaterializerError::IterationOutOfSequence { expected, actual });
+    }
+    Ok(())
+}
+
 fn normalize_candidate_metadata(
     input: &MaterializeCandidateInput,
 ) -> Result<serde_json::Value, MaterializerError> {
-    let repo_dir = input.program.repo_dir.trim();
-    if repo_dir.is_empty() {
-        return Err(MaterializerError::MissingProgram(
-            "program.repo_dir is required".to_string(),
-        ));
-    }
+    let repo_dir = normalize_repo_dir(&input.program.repo_dir)?;
 
     let allowed_write_paths = normalize_allowed_paths(&input.program.allowed_write_paths)?;
     let metric_name = input.program.metric_name.trim();
@@ -590,7 +614,7 @@ fn normalize_candidate_metadata(
     let mut program = serde_json::Map::new();
     program.insert(
         PROGRAM_REPO_DIR_KEY.to_string(),
-        serde_json::Value::String(repo_dir.to_string()),
+        serde_json::Value::String(repo_dir),
     );
     program.insert(
         PROGRAM_ALLOWED_WRITE_PATHS_KEY.to_string(),
@@ -646,6 +670,21 @@ fn normalize_candidate_metadata(
         serde_json::Value::Object(program),
     );
     Ok(serde_json::Value::Object(metadata))
+}
+
+fn normalize_repo_dir(raw: &str) -> Result<String, MaterializerError> {
+    let repo_dir = raw.trim();
+    if repo_dir.is_empty() {
+        return Err(MaterializerError::MissingProgram(
+            "program.repo_dir is required".to_string(),
+        ));
+    }
+    if !Path::new(repo_dir).is_absolute() {
+        return Err(MaterializerError::MissingProgram(
+            "program.repo_dir must be an absolute repo path".to_string(),
+        ));
+    }
+    Ok(repo_dir.to_string())
 }
 
 fn normalize_allowed_paths(paths: &[String]) -> Result<Vec<String>, MaterializerError> {
@@ -743,9 +782,9 @@ mod allowed_path_tests {
     use crate::db::automation_candidates::IterationOutcomeAction;
 
     use super::{
-        CandidateProgramInput, MaterializeCandidateInput, allowed_path_matches,
-        is_final_program_iteration, iteration_outcome_action, normalize_candidate_metadata,
-        normalize_changed_paths_report,
+        CandidateProgramInput, MaterializeCandidateInput, MaterializerError, allowed_path_matches,
+        expected_next_iteration, is_final_program_iteration, iteration_outcome_action,
+        normalize_candidate_metadata, normalize_changed_paths_report, validate_iteration_sequence,
     };
 
     #[test]
@@ -777,6 +816,28 @@ mod allowed_path_tests {
             normalize_changed_paths_report(Some(vec![" src/foo.rs ".to_string()])).unwrap(),
             vec!["src/foo.rs"]
         );
+    }
+
+    #[test]
+    fn iteration_sequence_must_match_current_iteration_plus_one() {
+        let program = serde_json::json!({ "current_iteration": 2 });
+        assert!(validate_iteration_sequence(3, &program).is_ok());
+
+        let error = validate_iteration_sequence(4, &program).unwrap_err();
+        assert!(matches!(
+            error,
+            MaterializerError::IterationOutOfSequence {
+                expected: 3,
+                actual: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn missing_current_iteration_starts_at_one() {
+        let program = serde_json::json!({});
+        assert_eq!(expected_next_iteration(&program), 1);
+        assert!(validate_iteration_sequence(1, &program).is_ok());
     }
 
     #[test]
@@ -825,6 +886,32 @@ mod allowed_path_tests {
             metadata["program"]["iteration_budget"],
             serde_json::json!(4)
         );
+    }
+
+    #[test]
+    fn materialized_metadata_rejects_placeholder_repo_dir() {
+        let error = normalize_candidate_metadata(&MaterializeCandidateInput {
+            title: "candidate".to_string(),
+            repo_id: None,
+            priority: None,
+            assigned_agent_id: None,
+            description: None,
+            source: None,
+            dedupe_key: None,
+            start_ready: false,
+            program: CandidateProgramInput {
+                repo_dir: "<required: absolute repo path>".to_string(),
+                allowed_write_paths: vec!["src".to_string()],
+                metric_name: "failure_count".to_string(),
+                metric_target: 0.0,
+                metric_direction: None,
+                final_gate: None,
+                iteration_budget: None,
+            },
+        })
+        .expect_err("placeholder repo_dir must fail validation");
+
+        assert!(error.to_string().contains("absolute repo path"));
     }
 
     #[test]

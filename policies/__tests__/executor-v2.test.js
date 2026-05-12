@@ -171,6 +171,30 @@ test("previous iterations are read from API inventory response shape", () => {
   assert.ok(r.prompt.includes("5"), "prompt should include metric_before from API-shaped history");
 });
 
+test("array automation inventory is filtered by card before prompt injection", () => {
+  const { tick } = loadRoutine(ROUTINE_PATH);
+  const cardId = "card-array-inventory";
+  const obs = [makeReadyObs(cardId, { current_iteration: 1 })];
+
+  const r = tick({
+    now: BASE_NOW,
+    checkpoint: null,
+    observations: obs,
+    automationInventory: [
+      { pattern_id: "routine-only", status: "active", description: "Unrelated routine inventory" },
+      { card_id: "other-card", iteration: 1, status: "discard", description: "Other card history" },
+      { card_id: cardId, iterations: [
+        { iteration: 1, status: "keep", metric_before: 4, metric_after: 2, description: "Matching card history" },
+      ] },
+    ],
+  });
+
+  assert.equal(r.action, "agent");
+  assert.ok(r.prompt.includes("Matching card history"), "prompt should include matching card history");
+  assert.ok(!r.prompt.includes("Unrelated routine inventory"), "prompt must not include routine inventory rows");
+  assert.ok(!r.prompt.includes("Other card history"), "prompt must not include another card history");
+});
+
 test("previous iterations are read from keyed API inventory response shape", () => {
   const { tick } = loadRoutine(ROUTINE_PATH);
   const cardId = "card-keyed-api-inventory";

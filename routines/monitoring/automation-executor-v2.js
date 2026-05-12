@@ -96,7 +96,15 @@ function candidateIterationBudget(program) {
 
 function previousIterationsFor(inventory, cardId) {
   if (!inventory) return [];
-  if (Array.isArray(inventory)) return inventory;
+  if (Array.isArray(inventory)) {
+    return inventory.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const itemCardId = item.card_id || item.kanban_card_id;
+      if (itemCardId !== cardId) return [];
+      if (Array.isArray(item.iterations)) return item.iterations;
+      return [item];
+    });
+  }
   if (Array.isArray(inventory[cardId])) return inventory[cardId];
   if (inventory[cardId] && Array.isArray(inventory[cardId].iterations)) {
     return inventory[cardId].iterations;

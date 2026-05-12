@@ -125,172 +125,21 @@ pub fn is_final_iteration(iteration: i32) -> bool {
     iteration >= MAX_ITERATIONS
 }
 
-#[cfg(test)]
-mod verdict_tests {
-    use super::*;
-
-    #[test]
-    fn crashed_always_discards() {
-        assert_eq!(
-            compute_verdict(
-                Some(0.9),
-                Some(0.95),
-                false,
-                "crashed",
-                MetricDirection::LowerIsBetter
-            ),
-            "discard"
-        );
-        assert_eq!(
-            compute_verdict(None, None, true, "crashed", MetricDirection::LowerIsBetter),
-            "discard"
-        );
+fn ensure_one_card_row_affected(
+    rows_affected: u64,
+    action: &str,
+    card_id: &str,
+) -> Result<(), String> {
+    if rows_affected == 1 {
+        return Ok(());
     }
-
-    #[test]
-    fn timeout_always_discards() {
-        assert_eq!(
-            compute_verdict(
-                Some(0.8),
-                Some(0.9),
-                false,
-                "timeout",
-                MetricDirection::LowerIsBetter
-            ),
-            "discard"
-        );
-    }
-
-    #[test]
-    fn simplification_always_keeps() {
-        assert_eq!(
-            compute_verdict(
-                Some(0.9),
-                Some(0.5),
-                true,
-                "ok",
-                MetricDirection::LowerIsBetter
-            ),
-            "keep"
-        );
-        assert_eq!(
-            compute_verdict(None, None, true, "ok", MetricDirection::HigherIsBetter),
-            "keep"
-        );
-    }
-
-    #[test]
-    fn lower_metric_improvement_keeps() {
-        assert_eq!(
-            compute_verdict(
-                Some(0.9),
-                Some(0.8),
-                false,
-                "ok",
-                MetricDirection::LowerIsBetter
-            ),
-            "keep"
-        );
-        assert_eq!(
-            compute_verdict(
-                Some(1.0),
-                Some(0.0),
-                false,
-                "ok",
-                MetricDirection::LowerIsBetter
-            ),
-            "keep"
-        );
-    }
-
-    #[test]
-    fn higher_metric_improvement_keeps() {
-        assert_eq!(
-            compute_verdict(
-                Some(0.8),
-                Some(0.9),
-                false,
-                "ok",
-                MetricDirection::HigherIsBetter
-            ),
-            "keep"
-        );
-    }
-
-    #[test]
-    fn metric_regression_or_equal_discards() {
-        assert_eq!(
-            compute_verdict(
-                Some(0.8),
-                Some(0.9),
-                false,
-                "ok",
-                MetricDirection::LowerIsBetter
-            ),
-            "discard"
-        );
-        assert_eq!(
-            compute_verdict(
-                Some(0.9),
-                Some(0.8),
-                false,
-                "ok",
-                MetricDirection::HigherIsBetter
-            ),
-            "discard"
-        );
-        assert_eq!(
-            compute_verdict(
-                Some(0.5),
-                Some(0.5),
-                false,
-                "ok",
-                MetricDirection::LowerIsBetter
-            ),
-            "discard"
-        );
-    }
-
-    #[test]
-    fn no_metrics_discards() {
-        assert_eq!(
-            compute_verdict(None, None, false, "ok", MetricDirection::LowerIsBetter),
-            "discard"
-        );
-        assert_eq!(
-            compute_verdict(Some(0.8), None, false, "ok", MetricDirection::LowerIsBetter),
-            "discard"
-        );
-        assert_eq!(
-            compute_verdict(None, Some(0.8), false, "ok", MetricDirection::LowerIsBetter),
-            "discard"
-        );
-    }
-
-    #[test]
-    fn parses_metric_direction_aliases() {
-        assert_eq!(
-            MetricDirection::parse(Some("higher")),
-            MetricDirection::HigherIsBetter
-        );
-        assert_eq!(
-            MetricDirection::parse(Some("higher_is_better")),
-            MetricDirection::HigherIsBetter
-        );
-        assert_eq!(
-            MetricDirection::parse(Some("lower")),
-            MetricDirection::LowerIsBetter
-        );
-        assert_eq!(MetricDirection::parse(None), MetricDirection::LowerIsBetter);
-    }
-
-    #[test]
-    fn final_iteration_boundary() {
-        assert!(!is_final_iteration(9));
-        assert!(is_final_iteration(10));
-        assert!(is_final_iteration(11));
-    }
+    Err(format!(
+        "{action} affected {rows_affected} rows for automation candidate card {card_id}; expected 1"
+    ))
 }
+
+#[cfg(test)]
+mod verdict_tests;
 
 pub async fn insert_iteration_pg(
     pool: &PgPool,
@@ -383,6 +232,8 @@ pub async fn persist_iteration_outcome_pg(
             None
         }
         IterationOutcomeAction::DiscardRequeue => {
+            update_card_program_current_iteration_in_tx(&mut tx, &params.card_id, params.iteration)
+                .await?;
             let (parent_title, parent_metadata) =
                 load_card_header_in_tx(&mut tx, &params.card_id).await?;
             transition_card_status_in_tx(&mut tx, &params.card_id, "review").await?;
@@ -496,7 +347,7 @@ async fn update_card_program_current_iteration_in_tx(
     card_id: &str,
     current_iteration: i32,
 ) -> Result<(), String> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE kanban_cards
            SET metadata = jsonb_set(
@@ -518,6 +369,11 @@ async fn update_card_program_current_iteration_in_tx(
     .map_err(|error| {
         format!("update card {card_id} program current_iteration to {current_iteration}: {error}")
     })?;
+    ensure_one_card_row_affected(
+        result.rows_affected(),
+        "update card program current_iteration",
+        card_id,
+    )?;
     Ok(())
 }
 
@@ -526,7 +382,7 @@ async fn transition_card_status_in_tx(
     card_id: &str,
     new_status: &str,
 ) -> Result<(), String> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE kanban_cards
            SET status = $1, updated_at = NOW()
@@ -540,6 +396,7 @@ async fn transition_card_status_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(|error| format!("transition card {card_id} to {new_status}: {error}"))?;
+    ensure_one_card_row_affected(result.rows_affected(), "transition card status", card_id)?;
     Ok(())
 }
 
@@ -602,13 +459,21 @@ pub async fn materialize_candidate_card_pg(
     } else {
         "backlog"
     };
-
-    if let Some(dedupe_key) = params
+    let dedupe_key = params
         .dedupe_key
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    {
+        .map(str::to_string);
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin materialize candidate transaction: {error}"))?;
+
+    if let Some(dedupe_key) = dedupe_key.as_deref() {
+        lock_candidate_dedupe_key_in_tx(&mut tx, dedupe_key).await?;
+
         let existing_id: Option<String> = sqlx::query_scalar(
             r#"
             SELECT id
@@ -621,7 +486,7 @@ pub async fn materialize_candidate_card_pg(
         )
         .bind(PIPELINE_STAGE_ID)
         .bind(dedupe_key)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|error| format!("find automation candidate by dedupe_key: {error}"))?;
 
@@ -633,12 +498,12 @@ pub async fn materialize_candidate_card_pg(
                     "SELECT status FROM kanban_cards WHERE id = $1 LIMIT 1",
                 )
                 .bind(&card_id)
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(|error| format!("load existing candidate status: {error}"))?
             };
 
-            sqlx::query(
+            let result = sqlx::query(
                 r#"
                 UPDATE kanban_cards
                    SET title = $1,
@@ -671,9 +536,18 @@ pub async fn materialize_candidate_card_pg(
             .bind(params.start_ready)
             .bind(PIPELINE_STAGE_ID)
             .bind(&card_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(|error| format!("update automation candidate card: {error}"))?;
+            ensure_one_card_row_affected(
+                result.rows_affected(),
+                "update automation candidate card",
+                &card_id,
+            )?;
+
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit update automation candidate card: {error}"))?;
 
             return Ok(MaterializedCandidateCard {
                 card_id,
@@ -706,15 +580,31 @@ pub async fn materialize_candidate_card_pg(
     .bind(params.description.as_deref())
     .bind(&params.metadata_json)
     .bind(PIPELINE_STAGE_ID)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|error| format!("insert automation candidate card: {error}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit insert automation candidate card: {error}"))?;
 
     Ok(MaterializedCandidateCard {
         card_id,
         created: true,
         status: create_status.to_string(),
     })
+}
+
+async fn lock_candidate_dedupe_key_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    dedupe_key: &str,
+) -> Result<(), String> {
+    sqlx::query("SELECT pg_advisory_xact_lock(2064, hashtext($1))")
+        .bind(dedupe_key)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("lock automation candidate dedupe_key: {error}"))?;
+    Ok(())
 }
 
 pub async fn iteration_count_for_card_pg(pool: &PgPool, card_id: &str) -> Result<i64, String> {
@@ -803,7 +693,7 @@ pub async fn transition_card_status_pg(
     card_id: &str,
     new_status: &str,
 ) -> Result<(), String> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE kanban_cards
            SET status = $1, updated_at = NOW()
@@ -817,6 +707,7 @@ pub async fn transition_card_status_pg(
     .execute(pool)
     .await
     .map_err(|error| format!("transition card {card_id} to {new_status}: {error}"))?;
+    ensure_one_card_row_affected(result.rows_affected(), "transition card status", card_id)?;
     Ok(())
 }
 
@@ -826,7 +717,7 @@ pub async fn update_card_program_current_iteration_pg(
     card_id: &str,
     current_iteration: i32,
 ) -> Result<(), String> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE kanban_cards
            SET metadata = jsonb_set(
@@ -848,6 +739,11 @@ pub async fn update_card_program_current_iteration_pg(
     .map_err(|error| {
         format!("update card {card_id} program current_iteration to {current_iteration}: {error}")
     })?;
+    ensure_one_card_row_affected(
+        result.rows_affected(),
+        "update card program current_iteration",
+        card_id,
+    )?;
     Ok(())
 }
 
@@ -950,7 +846,7 @@ pub async fn load_card_final_gate_pg(
 
 /// Approve a card for final application (manual_review gate).
 pub async fn approve_candidate_card_pg(pool: &PgPool, card_id: &str) -> Result<(), String> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"UPDATE kanban_cards
            SET review_status = 'approved',
                updated_at    = NOW()
@@ -962,5 +858,6 @@ pub async fn approve_candidate_card_pg(pool: &PgPool, card_id: &str) -> Result<(
     .execute(pool)
     .await
     .map_err(|error| format!("approve candidate card: {error}"))?;
+    ensure_one_card_row_affected(result.rows_affected(), "approve candidate card", card_id)?;
     Ok(())
 }

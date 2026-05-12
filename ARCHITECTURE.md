@@ -62,6 +62,8 @@ src/
 │   │   ├── slots.rs
 │   │   ├── test_support.rs
 │   │   └── tests.rs
+│   ├── automation_candidates/
+│   │   └── verdict_tests.rs
 │   ├── dispatches/
 │   │   ├── outbox/
 │   │   │   ├── claim.rs
