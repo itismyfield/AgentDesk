@@ -1,4 +1,3 @@
-/* giant-file-exemption: reason=kanban-core-lifecycle-pending-split ticket=#1078 */
 /**
  * kanban-rules.js — ADK Policy: Core Kanban Lifecycle
  * priority: 10 (runs first)
@@ -8,358 +7,43 @@
  *   onDispatchCompleted   — 완료 검증 (PM Decision Gate) + review 진입
  *   onCardTransition      — 상태별 부수효과 (dispatch 생성, PMD 알림 등)
  *   onCardTerminal        — completed_at 기록 + 자동큐 진행
+ *
+ * #1078: Helper functions live in policies/lib/kanban-*.js submodules to keep
+ * this file focused on the registered policy hooks. The shapes exposed via
+ * `module.exports` (policy, _loadCardAlertContext, __test.runPreflight,
+ * __test._loadCardAlertContext) are preserved.
  */
 
-// ── Helpers ──────────────────────────────────────────────────
+// ── Submodule helpers ────────────────────────────────────────
+var _notifications = require("./lib/kanban-notifications");
+var sendDiscordNotification = _notifications.sendDiscordNotification;
+var emitQualityEvent = _notifications.emitQualityEvent;
+var _loadCardAlertContext = _notifications._loadCardAlertContext;
+var _formatCardAlertLabel = _notifications._formatCardAlertLabel;
+var notifyCardOwner = _notifications.notifyCardOwner;
 
-function sendDiscordNotification(target, content, bot) {
-  agentdesk.message.queue(target, content, bot || "announce", "system");
-}
+var _cardMetadata = require("./lib/kanban-card-metadata");
+var _loadCardMetadata = _cardMetadata._loadCardMetadata;
+var _mergeCardMetadata = _cardMetadata._mergeCardMetadata;
+var _metadataParam = _cardMetadata._metadataParam;
+var _writeCardMetadata = _cardMetadata._writeCardMetadata;
+var _findAutoQueueEntriesByDispatch = _cardMetadata._findAutoQueueEntriesByDispatch;
 
-function emitQualityEvent(event) {
-  if (agentdesk.quality && typeof agentdesk.quality.emit === "function") {
-    agentdesk.quality.emit(event);
-  }
-}
+var _inventory = require("./lib/kanban-inventory-refresh");
+var INVENTORY_DOC_PATHS = _inventory.INVENTORY_DOC_PATHS;
+var _extractRepoFromUrl = _inventory._extractRepoFromUrl;
+var _firstPresent = _inventory._firstPresent;
+var _execOrThrow = _inventory._execOrThrow;
+var _splitNonEmptyLines = _inventory._splitNonEmptyLines;
+var _normalizeDispatchTimestamp = _inventory._normalizeDispatchTimestamp;
+var _resolveCompletedWorktreePath = _inventory._resolveCompletedWorktreePath;
+var _resolveCompletedBranch = _inventory._resolveCompletedBranch;
+var _dispatchTouchedSrcSinceCreated = _inventory._dispatchTouchedSrcSinceCreated;
+var _inventoryDocsChanged = _inventory._inventoryDocsChanged;
+var _autoRefreshInventoryDocs = _inventory._autoRefreshInventoryDocs;
 
-function _loadCardAlertContext(cardId) {
-  var card = agentdesk.cards.get(cardId);
-  if (!card) return null;
-  return {
-    card_id: cardId,
-    assigned_agent_id: card.assigned_agent_id || null,
-    title: card.title || cardId,
-    github_issue_number: card.github_issue_number || null
-  };
-}
-
-function _formatCardAlertLabel(card) {
-  if (!card) return null;
-  if (card.github_issue_number) {
-    return "#" + card.github_issue_number + " " + (card.title || card.card_id);
-  }
-  return card.title || card.card_id;
-}
-
-function notifyCardOwner(cardId, reason, source) {
-  var card = _loadCardAlertContext(cardId);
-  var src = source || "system";
-  if (!card) {
-    agentdesk.log.warn("[notify] Card not found for owner notification: " + cardId);
-    return notifyHumanAlert("⚠️ 카드 " + cardId + "\n" + reason, src);
-  }
-
-  var message = "⚠️ " + _formatCardAlertLabel(card) + "\n" + reason;
-  if (!card.assigned_agent_id) {
-    agentdesk.log.warn("[notify] Card " + cardId + " has no assigned agent — escalating to human");
-    return notifyHumanAlert(message + "\n담당 에이전트가 없어 사람이 확인해야 합니다.", src);
-  }
-
-  var target = agentdesk.agents.resolvePrimaryChannel(card.assigned_agent_id);
-  if (!target) {
-    agentdesk.log.warn(
-      "[notify] No primary channel for assigned agent " + card.assigned_agent_id +
-      " on card " + cardId + " — escalating to human"
-    );
-    return notifyHumanAlert(message + "\n담당 에이전트 채널을 찾지 못해 사람이 확인해야 합니다.", src);
-  }
-
-  agentdesk.message.queue(target, message, "announce", src);
-  return true;
-}
-
-// ── Preflight helpers (#256) ─────────────────────────────────
-
-function _extractRepoFromUrl(url) {
-  if (!url) return null;
-  var match = url.match(/github\.com\/([^\/]+\/[^\/]+)/);
-  return match ? match[1] : null;
-}
-
-function _loadCardMetadata(cardId) {
-  var rows = agentdesk.db.query(
-    "SELECT metadata FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  if (rows.length === 0 || !rows[0].metadata) return {};
-  try {
-    var parsed = JSON.parse(rows[0].metadata);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch (e) {
-    return {};
-  }
-}
-
-function _mergeCardMetadata(cardId, patch) {
-  var meta = _loadCardMetadata(cardId);
-  for (var key in patch) {
-    if (Object.prototype.hasOwnProperty.call(patch, key)) {
-      meta[key] = patch[key];
-    }
-  }
-  _writeCardMetadata(cardId, meta);
-  return meta;
-}
-
-function _metadataParam(metadata) {
-  return metadata && typeof metadata === "object" ? metadata : {};
-}
-
-function _writeCardMetadata(cardId, metadata) {
-  agentdesk.db.execute(
-    "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
-    [_metadataParam(metadata), cardId]
-  );
-}
-
-var INVENTORY_DOC_PATHS = [
-  "docs/generated/module-inventory.md",
-  "docs/generated/route-inventory.md",
-  "docs/generated/worker-inventory.md"
-];
-
-function _firstPresent() {
-  for (var i = 0; i < arguments.length; i++) {
-    var value = arguments[i];
-    if (typeof value === "string" && value.trim() !== "") return value;
-  }
-  return null;
-}
-
-function _execOrThrow(cmd, args, options) {
-  var output = agentdesk.exec(cmd, args, options);
-  if (typeof output === "string" && output.indexOf("ERROR:") === 0) {
-    throw new Error(output.substring("ERROR:".length).trim() || (cmd + " failed"));
-  }
-  return output || "";
-}
-
-function _splitNonEmptyLines(text) {
-  if (!text) return [];
-  return String(text)
-    .split(/\r?\n/)
-    .map(function(line) { return line.trim(); })
-    .filter(function(line) { return line !== ""; });
-}
-
-function _normalizeDispatchTimestamp(createdAt) {
-  if (!createdAt || typeof createdAt !== "string") return null;
-  if (createdAt.indexOf("T") !== -1) return createdAt;
-  return createdAt.replace(" ", "T") + "Z";
-}
-
-function _resolveCompletedWorktreePath(dispatchContext, workResult) {
-  return _firstPresent(
-    workResult && workResult.completed_worktree_path,
-    workResult && workResult.worktree_path,
-    dispatchContext && dispatchContext.completed_worktree_path,
-    dispatchContext && dispatchContext.worktree_path
-  );
-}
-
-function _resolveCompletedBranch(worktreePath, dispatchContext, workResult) {
-  var branch = _firstPresent(
-    workResult && workResult.completed_branch,
-    workResult && workResult.worktree_branch,
-    dispatchContext && dispatchContext.completed_branch,
-    dispatchContext && dispatchContext.worktree_branch,
-    dispatchContext && dispatchContext.branch
-  );
-  if (branch) return branch;
-  if (!worktreePath) return null;
-  var resolved = _execOrThrow("git", ["-C", worktreePath, "branch", "--show-current"]);
-  return resolved ? resolved.trim() : null;
-}
-
-function _dispatchTouchedSrcSinceCreated(worktreePath, createdAt) {
-  if (!worktreePath) return false;
-
-  var dirtySrc = _splitNonEmptyLines(
-    _execOrThrow("git", ["-C", worktreePath, "status", "--porcelain", "--", "src"])
-  );
-  if (dirtySrc.length > 0) return true;
-
-  var since = _normalizeDispatchTimestamp(createdAt);
-  if (!since) return true;
-
-  var baseCommit = _execOrThrow(
-    "git",
-    ["-C", worktreePath, "rev-list", "-n", "1", "--before=" + since, "HEAD"]
-  ).trim();
-
-  var diffArgs = baseCommit
-    ? ["-C", worktreePath, "diff", "--name-only", baseCommit + "..HEAD", "--", "src"]
-    : ["-C", worktreePath, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD", "--", "src"];
-
-  return _splitNonEmptyLines(_execOrThrow("git", diffArgs)).length > 0;
-}
-
-function _inventoryDocsChanged(worktreePath) {
-  var args = ["-C", worktreePath, "status", "--porcelain", "--"].concat(INVENTORY_DOC_PATHS);
-  return _splitNonEmptyLines(_execOrThrow("git", args)).length > 0;
-}
-
-function _autoRefreshInventoryDocs(card, dispatch, dispatchContext, workResult) {
-  if (dispatch.dispatch_type !== "implementation" && dispatch.dispatch_type !== "rework") return;
-
-  var worktreePath = _resolveCompletedWorktreePath(dispatchContext, workResult);
-  if (!worktreePath) {
-    agentdesk.log.info("[inventory] dispatch " + dispatch.id + " skipped: no completed worktree path");
-    return;
-  }
-
-  try {
-    if (!_dispatchTouchedSrcSinceCreated(worktreePath, dispatch.created_at)) {
-      agentdesk.log.info("[inventory] dispatch " + dispatch.id + " skipped: no src changes since dispatch start");
-      return;
-    }
-  } catch (e) {
-    var probeError = e && e.message ? e.message : String(e);
-    agentdesk.log.warn(
-      "[inventory] dispatch " + dispatch.id + " skipped: src-change probe failed for " +
-      worktreePath + ": " + probeError
-    );
-    return;
-  }
-
-  try {
-    agentdesk.runtime.refreshInventoryDocs(worktreePath, { timeout_ms: 60000 });
-    if (!_inventoryDocsChanged(worktreePath)) {
-      agentdesk.log.info("[inventory] dispatch " + dispatch.id + " refreshed generator but docs were already up to date");
-      return;
-    }
-
-    // #2051 Finding 3 (P1): policy hooks run on a single actor thread
-    // (`PolicyEngineActor`); long synchronous `git push` calls block every
-    // other hook (OnSessionStatusChange / OnDispatchCompleted /
-    // OnCardTransition) until the timeout expires. Cap each git call to a
-    // tight bound so a misbehaving remote cannot stall the queue for minutes.
-    // Long-term TODO: move inventory refresh to an async/queued job
-    // (`agentdesk.runtime.scheduleInventoryRefresh`) and only mark metadata
-    // from the hook itself.
-    _execOrThrow(
-      "git",
-      ["-C", worktreePath, "add", "--"].concat(INVENTORY_DOC_PATHS),
-      { timeout_ms: 10000 }
-    );
-    if (!_inventoryDocsChanged(worktreePath)) {
-      agentdesk.log.info("[inventory] dispatch " + dispatch.id + " had no staged generated-doc diff");
-      return;
-    }
-
-    _execOrThrow(
-      "git",
-      ["-C", worktreePath, "commit", "-m", "chore: refresh inventory"],
-      { timeout_ms: 10000 }
-    );
-
-    var branch = _resolveCompletedBranch(worktreePath, dispatchContext, workResult);
-    if (!branch) {
-      throw new Error("could not resolve worktree branch for inventory push");
-    }
-
-    _execOrThrow(
-      "git",
-      ["-C", worktreePath, "push", "-u", "origin", branch],
-      { timeout_ms: 20000 }
-    );
-    agentdesk.log.info("[inventory] dispatch " + dispatch.id + " auto-refreshed generated docs on " + branch);
-  } catch (e) {
-    var errorText = e && e.message ? e.message : String(e);
-    agentdesk.log.warn(
-      "[inventory] dispatch " + dispatch.id + " auto-refresh failed for " + card.id + ": " + errorText
-    );
-    notifyCardOwner(
-      card.id,
-      "module-inventory 자동 갱신 실패\n" + errorText,
-      "inventory"
-    );
-  }
-}
-
-function _findAutoQueueEntriesByDispatch(dispatchId, liveOnly) {
-  var statusClause = liveOnly
-    ? "e.status IN ('pending', 'dispatched')"
-    : "e.status = 'dispatched'";
-  return agentdesk.db.query(
-    "SELECT DISTINCT e.id, e.agent_id FROM auto_queue_entries e " +
-    "LEFT JOIN auto_queue_entry_dispatch_history h " +
-    "  ON h.entry_id = e.id AND h.dispatch_id = ? " +
-    "WHERE " + statusClause + " " +
-    "  AND (e.dispatch_id = ? OR h.dispatch_id IS NOT NULL)",
-    [dispatchId, dispatchId]
-  );
-}
-
-function _runPreflight(cardId) {
-  var c = agentdesk.cards.get(cardId);
-  if (!c) return { status: "invalid", summary: "Card not found" };
-
-  // Check 1: GitHub issue closed? (uses gh CLI since no bridge exists)
-  // #2051 Finding 11 (P1): _runPreflight runs inside OnCardTransition on the
-  // single policy actor thread. A bare `agentdesk.exec("gh", ...)` without a
-  // timeout could block every other hook indefinitely if GitHub hangs or
-  // `gh` enters an auth retry loop. Cap the call so the actor cannot stall.
-  if (c.github_issue_number && c.github_issue_url) {
-    var repo = _extractRepoFromUrl(c.github_issue_url);
-    if (repo) {
-      try {
-        var ghOutput = agentdesk.exec(
-          "gh",
-          [
-            "issue", "view", String(c.github_issue_number),
-            "--repo", repo, "--json", "state", "--jq", ".state"
-          ],
-          { timeout_ms: 10000 }
-        );
-        if (ghOutput && ghOutput.trim() === "CLOSED") {
-          return { status: "already_applied", summary: "GitHub issue #" + c.github_issue_number + " is closed" };
-        }
-      } catch (e) {
-        agentdesk.log.warn("[preflight] gh issue view failed for card " + cardId + " issue #" + c.github_issue_number + ": " + e);
-      }
-    }
-  }
-
-  // Check 2: Already has terminal dispatch?
-  var terminalDispatch = agentdesk.db.query(
-    "SELECT id FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'implementation' AND status = 'completed'",
-    [cardId]
-  );
-  if (terminalDispatch.length > 0) {
-    return { status: "already_applied", summary: "Implementation dispatch already completed" };
-  }
-
-  // Check 3: Description/body too short or empty?
-  // #2051 Finding 22 (P3): completely empty descriptions are a different
-  // signal than "short". A card with no description at all is typically the
-  // shape produced by external automation (cron seeders, GH webhook hand-offs
-  // that haven't pulled the issue body yet, etc.); routing it through a
-  // consultation dispatch wastes tokens and time. Treat truly empty bodies as
-  // `assumption_ok` with a diagnostic marker so operators can see the gap
-  // without blocking dispatch. Short-but-present descriptions still get the
-  // consultation path because a human wrote something — there's something to
-  // clarify against.
-  var body = c.description || "";
-  var bodyTrimmed = body.trim();
-  if (bodyTrimmed.length === 0) {
-    return {
-      status: "assumption_ok",
-      summary: "No description provided — proceeding with issue title only (no_dod_provided)"
-    };
-  }
-  if (bodyTrimmed.length < 30) {
-    return { status: "consult_required", summary: "Issue body is too short or empty — needs clarification" };
-  }
-
-  // Check 4: No DoD section?
-  if (body.indexOf("DoD") === -1 && body.indexOf("Definition of Done") === -1 && body.indexOf("완료 기준") === -1) {
-    return { status: "assumption_ok", summary: "No explicit DoD found, assuming spec is sufficient" };
-  }
-
-  // All checks passed
-  return { status: "clear", summary: "Preflight checks passed" };
-}
+var _preflight = require("./lib/kanban-preflight");
+var _runPreflight = _preflight._runPreflight;
 
 // ── Policy ───────────────────────────────────────────────────
 
