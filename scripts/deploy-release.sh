@@ -3,7 +3,12 @@ set -euo pipefail
 
 # ENV (operator-overridable; defaults preserve current behavior):
 #   AGENTDESK_BUNDLE_ID         codesign --identifier value (default: com.itismyfield.agentdesk)
-#   AGENTDESK_PLIST_REL         release launchd plist label (default: com.agentdesk.release)
+#   AGENTDESK_DCSERVER_LABEL    release launchd plist Label / file basename.
+#                               Read by the Rust dcserver as well — use this to keep
+#                               launchd label and plist filename in sync across both sides.
+#                               (default: com.agentdesk.release)
+#   AGENTDESK_PLIST_REL         Deprecated alias for AGENTDESK_DCSERVER_LABEL; honored as
+#                               fallback when AGENTDESK_DCSERVER_LABEL is unset.
 #   OBSIDIAN_VAULT_ROOT         Obsidian vault root used for agent prompt staging
 #                               (default: $HOME/ObsidianVault; full source path is
 #                               $OBSIDIAN_VAULT_ROOT/RemoteVault/adk-config/agents)
@@ -18,7 +23,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/_defaults.sh"
 
 ADK_REL="$HOME/.adk/release"
-PLIST_REL="${AGENTDESK_PLIST_REL:-com.agentdesk.release}"
+# The Rust dcserver reads AGENTDESK_DCSERVER_LABEL for the plist Label; honor it first
+# so launchd Label and plist filename never diverge when the operator overrides one side.
+PLIST_REL="${AGENTDESK_DCSERVER_LABEL:-${AGENTDESK_PLIST_REL:-com.agentdesk.release}}"
 BUNDLE_ID="${AGENTDESK_BUNDLE_ID:-com.itismyfield.agentdesk}"
 REL_LAUNCHD_ENV_FILE="$ADK_REL/config/launchd.env"
 REPO="${AGENTDESK_REPO_DIR:-}"
@@ -165,9 +172,14 @@ sign_binary_with_fallback() {
             echo "▸ Existing ad-hoc signature detected — re-signing with Developer ID"
         else
             current_authority=$(printf '%s\n' "$signature_details" | grep "^Authority=" | head -1 || true)
-            if printf '%s\n' "$current_authority" | grep -qF "$identity" 2>/dev/null; then
+            current_identifier=$(printf '%s\n' "$signature_details" | grep "^Identifier=" | head -1 || true)
+            identifier_matches=0
+            if [ -n "$current_identifier" ] && printf '%s\n' "$current_identifier" | grep -qF "=$BUNDLE_ID" 2>/dev/null; then
+                identifier_matches=1
+            fi
+            if printf '%s\n' "$current_authority" | grep -qF "$identity" 2>/dev/null && [ "$identifier_matches" = "1" ]; then
                 RESOLVED_RELEASE_SIGNING_MODE="developer-id"
-                echo "✓ Already signed with matching identity — skipping re-sign (TCC preserved)"
+                echo "✓ Already signed with matching identity and identifier — skipping re-sign (TCC preserved)"
                 return 0
             fi
         fi
@@ -651,6 +663,11 @@ export AGENTDESK_DEPLOY_ALL_NODES=$(printf '%q' "${AGENTDESK_DEPLOY_ALL_NODES:-0
 export AGENTDESK_DEPLOY_PEERS=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS:-}")
 export AGENTDESK_DEPLOY_PEERS_FILE=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS_FILE:-}")
 export AGENTDESK_DEPLOY_PEER_INVOCATION=$(printf '%q' "${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}")
+export AGENTDESK_BUNDLE_ID=$(printf '%q' "$BUNDLE_ID")
+export AGENTDESK_DCSERVER_LABEL=$(printf '%q' "$PLIST_REL")
+export AGENTDESK_PLIST_REL=$(printf '%q' "${AGENTDESK_PLIST_REL:-}")
+export OBSIDIAN_VAULT_ROOT=$(printf '%q' "${OBSIDIAN_VAULT_ROOT:-}")
+export AGENTDESK_OBSIDIAN_AGENTS_SRC=$(printf '%q' "${AGENTDESK_OBSIDIAN_AGENTS_SRC:-}")
 unset AGENTDESK_DEPLOY_LOCK_HELD
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/deploy-release.sh")${quoted_args}
