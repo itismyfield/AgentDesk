@@ -281,3 +281,93 @@ async fn persist_iteration_outcome_pg_rolls_back_when_card_is_inactive() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[tokio::test]
+async fn materialize_dedupe_prefers_ready_child_over_review_parent() {
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let dedupe_key = "candidate-review:dedupe-tie";
+    let metadata = serde_json::json!({
+        "automation_candidate": {"dedupe_key": dedupe_key},
+        "program": {
+            "repo_dir": "/tmp/agentdesk-test",
+            "allowed_write_paths": ["src"],
+            "metric_name": "test",
+            "metric_target": 1.0,
+            "current_iteration": 0
+        }
+    })
+    .to_string();
+
+    let parent = materialize_candidate_card_pg(
+        &pool,
+        MaterializeCandidateCardParams {
+            title: "dedupe parent".to_string(),
+            repo_id: Some("test-repo".to_string()),
+            priority: Some("medium".to_string()),
+            assigned_agent_id: None,
+            description: None,
+            metadata_json: metadata.clone(),
+            dedupe_key: Some(dedupe_key.to_string()),
+            start_ready: true,
+        },
+    )
+    .await
+    .expect("materialize parent candidate");
+
+    let outcome = persist_iteration_outcome_pg(
+        &pool,
+        InsertIterationParams {
+            card_id: parent.card_id.clone(),
+            iteration: 1,
+            branch: "automation-candidate/dedupe/1".to_string(),
+            commit_hash: None,
+            metric_before: Some(10.0),
+            metric_after: Some(11.0),
+            is_simplification: false,
+            status: "discard".to_string(),
+            description: Some("force requeue".to_string()),
+            allowed_write_paths_used: vec!["src/example.rs".to_string()],
+            run_seconds: Some(1),
+            crash_trace: None,
+        },
+        IterationOutcomeAction::DiscardRequeue,
+    )
+    .await
+    .expect("discard requeue creates child");
+    let child_id = outcome.child_card_id.expect("child card id");
+
+    let rematerialized = materialize_candidate_card_pg(
+        &pool,
+        MaterializeCandidateCardParams {
+            title: "dedupe rematerialized".to_string(),
+            repo_id: Some("test-repo".to_string()),
+            priority: Some("medium".to_string()),
+            assigned_agent_id: None,
+            description: None,
+            metadata_json: metadata,
+            dedupe_key: Some(dedupe_key.to_string()),
+            start_ready: true,
+        },
+    )
+    .await
+    .expect("rematerialize candidate");
+
+    assert_eq!(rematerialized.card_id, child_id);
+
+    let parent_status: String = sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+        .bind(&parent.card_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load parent status");
+    let child_status: String = sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+        .bind(&child_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load child status");
+    assert_eq!(parent_status, "review");
+    assert_eq!(child_status, "ready");
+
+    pool.close().await;
+    pg_db.drop().await;
+}

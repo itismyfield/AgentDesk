@@ -511,7 +511,17 @@ pub async fn materialize_candidate_card_pg(
             FROM kanban_cards
             WHERE pipeline_stage_id = $1
               AND metadata->'automation_candidate'->>'dedupe_key' = $2
-            ORDER BY updated_at DESC
+            ORDER BY
+                CASE status
+                    WHEN 'ready' THEN 0
+                    WHEN 'requested' THEN 1
+                    WHEN 'in_progress' THEN 2
+                    WHEN 'backlog' THEN 3
+                    ELSE 4
+                END ASC,
+                COALESCE((metadata->'program'->>'current_iteration')::int, -1) DESC,
+                updated_at DESC,
+                id DESC
             LIMIT 1
             "#,
         )
