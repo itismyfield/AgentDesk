@@ -114,10 +114,7 @@ async fn ensure_channel_is_role_mapped(
         }
     };
 
-    let url = format!(
-        "https://discord.com/api/v10/channels/{}",
-        channel_id.get()
-    );
+    let url = format!("https://discord.com/api/v10/channels/{}", channel_id.get());
     let channel_name = match reqwest::Client::new()
         .get(&url)
         .header("Authorization", format!("Bot {token}"))
@@ -248,10 +245,7 @@ pub async fn channel_info(
         }
     };
 
-    let url = format!(
-        "https://discord.com/api/v10/channels/{}",
-        channel_id.get()
-    );
+    let url = format!("https://discord.com/api/v10/channels/{}", channel_id.get());
     match reqwest::Client::new()
         .get(&url)
         .header("Authorization", format!("Bot {token}"))

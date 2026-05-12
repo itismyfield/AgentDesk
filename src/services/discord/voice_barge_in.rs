@@ -257,9 +257,7 @@ impl VoiceBargeInRuntime {
             enabled: false,
             barge_in_enabled: false,
             default_sensitivity: BargeInSensitivity::Normal,
-            sensitivity_atom: std::sync::atomic::AtomicU8::new(
-                BargeInSensitivity::Normal.as_u8(),
-            ),
+            sensitivity_atom: std::sync::atomic::AtomicU8::new(BargeInSensitivity::Normal.as_u8()),
             sensitivity_state: Arc::new(RwLock::new(BargeInSensitivityState::default())),
             acknowledgement_enabled: false,
             acknowledgement_text: String::new(),
@@ -368,10 +366,7 @@ impl VoiceBargeInRuntime {
         self.set_runtime_language(language).await;
     }
 
-    pub(in crate::services::discord) async fn set_runtime_tts_voice_external(
-        &self,
-        voice: String,
-    ) {
+    pub(in crate::services::discord) async fn set_runtime_tts_voice_external(&self, voice: String) {
         self.set_runtime_tts_voice(voice).await;
     }
 

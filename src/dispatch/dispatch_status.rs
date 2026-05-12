@@ -558,30 +558,25 @@ async fn set_dispatch_status_on_pg_with_sync(
     // does. Without this, the downstream
     // `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx` call observes a
     // verdict-less result and either parks the gate row or marks it failed.
-    let effective_result_owned: Option<serde_json::Value> = if to_status == "completed"
-        && result.is_some()
-    {
-        let ctx_text_for_verdict = current
+    let effective_result_owned: Option<serde_json::Value> =
+        if to_status == "completed" && result.is_some() {
+            let ctx_text_for_verdict = current
             .try_get::<Option<String>, _>("context_text")
             .map_err(|error| {
                 anyhow::anyhow!(
                     "decode postgres dispatch context for verdict inference {dispatch_id}: {error}"
                 )
             })?;
-        ctx_text_for_verdict
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|ctx| {
-                ctx.get("phase_gate")
-                    .and_then(|v| v.as_object())
-                    .cloned()
-            })
-            .and_then(|phase_gate_ctx| {
-                infer_phase_gate_verdict(dispatch_id, &phase_gate_ctx, result.unwrap())
-            })
-    } else {
-        None
-    };
+            ctx_text_for_verdict
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|ctx| ctx.get("phase_gate").and_then(|v| v.as_object()).cloned())
+                .and_then(|phase_gate_ctx| {
+                    infer_phase_gate_verdict(dispatch_id, &phase_gate_ctx, result.unwrap())
+                })
+        } else {
+            None
+        };
     let result: Option<&serde_json::Value> = effective_result_owned.as_ref().or(result);
 
     let result_json = result.map(|value| value.to_string());

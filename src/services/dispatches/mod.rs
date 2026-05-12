@@ -390,9 +390,10 @@ fn update_dispatch_result_pg(
             let current_status: Option<String> = current
                 .try_get("status")
                 .map_err(|error| format!("decode dispatch status for {dispatch_id}: {error}"))?;
-            let kanban_card_id: Option<String> = current.try_get("kanban_card_id").map_err(
-                |error| format!("decode dispatch kanban_card_id for {dispatch_id}: {error}"),
-            )?;
+            let kanban_card_id: Option<String> =
+                current.try_get("kanban_card_id").map_err(|error| {
+                    format!("decode dispatch kanban_card_id for {dispatch_id}: {error}")
+                })?;
             let dispatch_type: Option<String> = current
                 .try_get("dispatch_type")
                 .map_err(|error| format!("decode dispatch type for {dispatch_id}: {error}"))?;
@@ -410,9 +411,7 @@ fn update_dispatch_result_pg(
             .bind(&result_json)
             .execute(&mut *tx)
             .await
-            .map_err(|error| {
-                format!("update postgres dispatch result {dispatch_id}: {error}")
-            })?;
+            .map_err(|error| format!("update postgres dispatch result {dispatch_id}: {error}"))?;
 
             if updated.rows_affected() == 0 {
                 let _ = tx.rollback().await;
@@ -447,20 +446,17 @@ fn update_dispatch_result_pg(
                 current_status.as_deref(),
                 Some("completed" | "failed" | "cancelled")
             ) {
-                let _ =
-                    crate::db::auto_queue::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
-                        &mut tx,
-                        &dispatch_id,
-                        current_status.as_deref().unwrap_or("completed"),
-                        context_text.as_deref(),
-                        Some(&result_json),
-                    )
-                    .await
-                    .map_err(|error| {
-                        format!(
-                            "reconcile phase-gate after result PATCH {dispatch_id}: {error}"
-                        )
-                    })?;
+                let _ = crate::db::auto_queue::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+                    &mut tx,
+                    &dispatch_id,
+                    current_status.as_deref().unwrap_or("completed"),
+                    context_text.as_deref(),
+                    Some(&result_json),
+                )
+                .await
+                .map_err(|error| {
+                    format!("reconcile phase-gate after result PATCH {dispatch_id}: {error}")
+                })?;
             }
 
             tx.commit().await.map_err(|error| {

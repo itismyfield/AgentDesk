@@ -479,9 +479,7 @@ async fn list_dispatches_pg(
     limit: Option<i64>,
 ) -> Result<Vec<DispatchListItem>, String> {
     // #2050 P2 finding 4 — honor optional filter + bounded limit.
-    let bounded_limit = limit
-        .map(|value| value.max(1).min(1_000))
-        .unwrap_or(1_000);
+    let bounded_limit = limit.map(|value| value.max(1).min(1_000)).unwrap_or(1_000);
     let rows = sqlx::query(
         "SELECT
             id,

@@ -340,8 +340,7 @@ pub(super) async fn rate_limit_wait(shared: &Arc<SharedData>, channel_id: Channe
         // (effectively idle channels we will not rate-limit again any
         // time soon — when they do reappear `insert` re-creates them).
         {
-            static GC_COUNTER: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(0);
+            static GC_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let count = GC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if count % 256 == 0 {
                 let gc_cutoff = now - tokio::time::Duration::from_secs(600);
