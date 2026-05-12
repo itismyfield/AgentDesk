@@ -2267,6 +2267,16 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"path": {"card_id": "card-1"}, "body": {"iteration": 0}}),
             json!({"error": "iteration must be >= 1"}),
         )
+        .with_error_example(
+            409,
+            json!({"path": {"card_id": "card-1"}, "body": {"iteration": 3}}),
+            json!({"error": "iteration out of sequence: expected 2, got 3", "code": "ITERATION_OUT_OF_SEQUENCE", "expected": 2, "actual": 3}),
+        )
+        .with_error_example(
+            409,
+            json!({"path": {"card_id": "card-1"}, "body": {"iteration": 2}}),
+            json!({"error": "automation candidate is not executable in status 'review'", "code": "INACTIVE_AUTOMATION_CANDIDATE", "status": "review"}),
+        )
         .with_curl("curl -X POST http://localhost:8787/api/automation-candidates/card-1/prepare-worktree -H 'Content-Type: application/json' -d '{\"iteration\":1}'"),
         ep(
             "POST",
@@ -2300,6 +2310,11 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             409,
             json!({"path": {"card_id": "card-1"}, "body": {"iteration": 3, "branch": "automation/card-1/iter-3", "allowed_write_paths_used": ["src/services/discord/router.rs"]}}),
             json!({"error": "iteration out of sequence: expected 2, got 3", "code": "ITERATION_OUT_OF_SEQUENCE", "expected": 2, "actual": 3}),
+        )
+        .with_error_example(
+            409,
+            json!({"path": {"card_id": "card-1"}, "body": {"iteration": 2, "branch": "automation/card-1/iter-2", "allowed_write_paths_used": ["src/services/discord/router.rs"]}}),
+            json!({"error": "automation candidate is not executable in status 'review'", "code": "INACTIVE_AUTOMATION_CANDIDATE", "status": "review"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/automation-candidates/card-1/iteration-result -H 'Content-Type: application/json' -d '{\"iteration\":1,\"branch\":\"automation/card-1/iter-1\",\"metric_before\":0.4,\"metric_after\":0.2,\"status\":\"keep\",\"allowed_write_paths_used\":[\"src/services/discord/router.rs\"]}'"),
         ep(

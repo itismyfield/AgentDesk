@@ -73,6 +73,51 @@ async fn submit_iteration_result_rejects_cards_outside_active_loop_state() {
 }
 
 #[tokio::test]
+async fn prepare_worktree_rejects_cards_outside_active_loop_state() {
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let card_id = "review-worktree-card";
+    let metadata = serde_json::json!({
+        "automation_candidate": {"source": "test"},
+        "program": {
+            "repo_dir": "/repo-that-should-not-be-touched",
+            "allowed_write_paths": ["src"],
+            "metric_name": "failure_count",
+            "metric_target": 0.0,
+            "metric_direction": "lower_is_better",
+            "current_iteration": 0,
+            "iteration_budget": 3,
+            "final_gate": "manual_review"
+        }
+    });
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, pipeline_stage_id, metadata, created_at, updated_at
+         ) VALUES ($1, 'review candidate', 'review', $2, $3::jsonb, NOW(), NOW())",
+    )
+    .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
+    .bind(metadata.to_string())
+    .execute(&pool)
+    .await
+    .expect("seed review candidate");
+
+    let error = AutomationCandidateMaterializer::new(pool.clone())
+        .prepare_worktree(card_id, 1)
+        .await
+        .expect_err("inactive card must fail before worktree creation");
+
+    assert!(matches!(
+        error,
+        MaterializerError::InactiveLoopState { status } if status == "review"
+    ));
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn prepare_worktree_rejects_future_iterations_before_touching_git() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
