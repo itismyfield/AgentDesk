@@ -1000,8 +1000,7 @@ pub(in crate::services::discord) async fn handle_event(
                 }
 
                 // Check if this arrival is from a thread context
-                let thread_parent =
-                    resolve_thread_parent(&ctx.http, new_message.channel_id).await;
+                let thread_parent = resolve_thread_parent(&ctx.http, new_message.channel_id).await;
                 let is_thread_context = thread_parent.is_some();
 
                 // #2044 F6: when promoting a parent → thread arrival, verify
@@ -1032,8 +1031,7 @@ pub(in crate::services::discord) async fn handle_event(
                                 .as_ref()
                                 .map(|(parent_id, _)| *parent_id)
                                 .unwrap_or(new_message.channel_id);
-                            let snapshot =
-                                mailbox_snapshot(&data.shared, parent_channel).await;
+                            let snapshot = mailbox_snapshot(&data.shared, parent_channel).await;
                             let already_intake = snapshot.active_user_message_id
                                 == Some(new_message.id)
                                 || snapshot.intervention_queue.iter().any(|iv| {

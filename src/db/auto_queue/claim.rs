@@ -353,14 +353,12 @@ pub async fn allocate_slot_for_group_agent_pg(
         .map_err(|error| {
             format!("acquire slot allocation advisory lock for agent {agent_id}: {error}")
         })?;
-    let result =
-        allocate_slot_for_group_agent_pg_inner(pool, run_id, thread_group, agent_id).await;
-    if let Err(unlock_error) =
-        sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
-            .bind("aq_slot_alloc")
-            .bind(agent_id)
-            .execute(&mut *conn)
-            .await
+    let result = allocate_slot_for_group_agent_pg_inner(pool, run_id, thread_group, agent_id).await;
+    if let Err(unlock_error) = sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
+        .bind("aq_slot_alloc")
+        .bind(agent_id)
+        .execute(&mut *conn)
+        .await
     {
         tracing::warn!(
             agent_id,

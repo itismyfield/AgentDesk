@@ -259,9 +259,7 @@ pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Str
         .bind(run_id)
         .execute(&mut *tx)
         .await
-        .map_err(|error| {
-            format!("delete phase gates for completed run {run_id}: {error}")
-        })?;
+        .map_err(|error| format!("delete phase gates for completed run {run_id}: {error}"))?;
     let updated = sqlx::query(
         "UPDATE auto_queue_runs
          SET status = 'completed',

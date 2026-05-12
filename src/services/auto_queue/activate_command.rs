@@ -86,9 +86,7 @@ pub(crate) async fn activate_with_deps_pg(
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                json!({"error": format!("acquire activate advisory lock for {run_id}: {error}")}),
-            ),
+            Json(json!({"error": format!("acquire activate advisory lock for {run_id}: {error}")})),
         );
     }
     let _activate_lock_guard = ActivateLockReleaseGuard::new(activate_lock_conn, run_id.clone());
@@ -1213,4 +1211,3 @@ impl Drop for ActivateLockReleaseGuard {
         }
     }
 }
-

@@ -3287,13 +3287,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             // dispatch path consumed our mapping before this reaction
             // landed and proactively unstick the emoji.
             if !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id) {
-                super::super::formatting::remove_reaction_raw(
-                    http,
-                    channel_id,
-                    user_msg_id,
-                    emoji,
-                )
-                .await;
+                super::super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, emoji)
+                    .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] 🔁 RACE: queue-pending {emoji} reacted after dequeue promotion (channel {}, msg {}); removed stale reaction",

@@ -382,9 +382,7 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
                         let _ = msg
                             .reply(
                                 &ctx.http,
-                                format!(
-                                    "Voice clone request acknowledged (reference=`{detail}`)."
-                                ),
+                                format!("Voice clone request acknowledged (reference=`{detail}`)."),
                             )
                             .await;
                         return Ok(());

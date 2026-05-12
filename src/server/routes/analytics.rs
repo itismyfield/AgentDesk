@@ -131,8 +131,7 @@ fn canonicalize(value: &Value) -> Value {
 /// one queries Postgres while the rest await the shared async mutex and read
 /// the freshly-written entry. Prevents thundering-herd PG bursts (e.g.
 /// dashboard initial load with many widgets fetching the same endpoint).
-fn analytics_singleflight()
--> &'static Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+fn analytics_singleflight() -> &'static Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> {
     static GROUP: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     GROUP.get_or_init(|| Mutex::new(HashMap::new()))
 }

@@ -352,9 +352,7 @@ async fn create_activate_dispatch_pg_inner(
     .bind(card_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|error| {
-        format!("recheck paused run for {card_id} inside dispatch tx: {error}")
-    })?;
+    .map_err(|error| format!("recheck paused run for {card_id} inside dispatch tx: {error}"))?;
     if let Some(run_id) = paused_run_id_locked {
         tx.rollback().await.ok();
         return Err(format!(

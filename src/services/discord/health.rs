@@ -239,9 +239,7 @@ impl HealthRegistry {
                 }
             }
         } else if rotation {
-            tracing::warn!(
-                "reload_bot_tokens called before agentdesk runtime root is initialised"
-            );
+            tracing::warn!("reload_bot_tokens called before agentdesk runtime root is initialised");
         }
         (announce_loaded, notify_loaded)
     }
@@ -1500,11 +1498,8 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
                 let target_name = channel.clone().guild().map(|gc| gc.name.clone());
                 // First: byChannelName retry on the *target* channel itself.
                 if !authorized
-                    && super::settings::resolve_role_binding(
-                        channel_id,
-                        target_name.as_deref(),
-                    )
-                    .is_some()
+                    && super::settings::resolve_role_binding(channel_id, target_name.as_deref())
+                        .is_some()
                 {
                     authorized = true;
                 }
@@ -1665,7 +1660,7 @@ pub fn is_allowed_send_source_for(source: &str, caller: SendCallerClass) -> bool
 
 #[cfg(test)]
 mod send_source_tests {
-    use super::{is_allowed_send_source, is_allowed_send_source_for, SendCallerClass};
+    use super::{SendCallerClass, is_allowed_send_source, is_allowed_send_source_for};
 
     #[test]
     fn headless_turn_is_allowed_internal_send_source() {
@@ -1698,10 +1693,7 @@ mod send_source_tests {
 
     #[test]
     fn cli_cannot_impersonate_loopback_only_labels() {
-        assert!(!is_allowed_send_source_for(
-            "system",
-            SendCallerClass::Cli
-        ));
+        assert!(!is_allowed_send_source_for("system", SendCallerClass::Cli));
         assert!(!is_allowed_send_source_for(
             "kanban-rules",
             SendCallerClass::Cli
@@ -1710,10 +1702,7 @@ mod send_source_tests {
             "agentdesk-cli",
             SendCallerClass::Cli
         ));
-        assert!(is_allowed_send_source_for(
-            "operator",
-            SendCallerClass::Cli
-        ));
+        assert!(is_allowed_send_source_for("operator", SendCallerClass::Cli));
     }
 
     #[test]

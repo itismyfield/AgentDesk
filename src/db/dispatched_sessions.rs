@@ -200,9 +200,7 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
             )
             .await
             .map_err(|error| {
-                format!(
-                    "canonical fail postgres dispatch {dispatch_id} during force-kill: {error}"
-                )
+                format!("canonical fail postgres dispatch {dispatch_id} during force-kill: {error}")
             })?;
         }
 
@@ -599,10 +597,9 @@ pub(crate) async fn list_dispatched_sessions_pg(
         // are joined from the *currently linked* task_dispatches row, so the API
         // response can substitute a fresh `── <type> dispatch ──`-shaped label
         // instead of trusting the (possibly stale) sessions.session_info column.
-        let dispatch_type: Option<String> =
-            row.try_get("dispatch_type").map_err(|error| {
-                format!("decode postgres dispatch_type for session {id}: {error}")
-            })?;
+        let dispatch_type: Option<String> = row
+            .try_get("dispatch_type")
+            .map_err(|error| format!("decode postgres dispatch_type for session {id}: {error}"))?;
         let dispatch_row_status: Option<String> =
             row.try_get("dispatch_row_status").map_err(|error| {
                 format!("decode postgres dispatch_row_status for session {id}: {error}")
@@ -1119,14 +1116,10 @@ mod selector_cleanup_tests {
 
         // Caller asks for retry=true. Guard must reject both the failure
         // overwrite and the retry creation.
-        let retry_meta = disconnect_session_and_prepare_retry_pg(
-            &pool,
-            session_key,
-            Some(dispatch_id),
-            true,
-        )
-        .await
-        .unwrap();
+        let retry_meta =
+            disconnect_session_and_prepare_retry_pg(&pool, session_key, Some(dispatch_id), true)
+                .await
+                .unwrap();
         assert!(
             retry_meta.is_none(),
             "cancelled dispatch must not produce retry metadata"

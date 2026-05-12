@@ -1220,9 +1220,8 @@ fn env_retention_days(var: &str, default_days: i64) -> i64 {
 
 async fn prune_table_by_created_at(pool: &PgPool, table: &'static str, days: i64) {
     // `table` is sourced from a `&'static str` whitelist — never user input.
-    let sql = format!(
-        "DELETE FROM {table} WHERE created_at < NOW() - ($1::bigint || ' days')::interval"
-    );
+    let sql =
+        format!("DELETE FROM {table} WHERE created_at < NOW() - ($1::bigint || ' days')::interval");
     match sqlx::query(&sql).bind(days).execute(pool).await {
         Ok(result) => {
             let affected = result.rows_affected();
@@ -2609,7 +2608,7 @@ async fn quality_alert_target_pg(pool: &PgPool) -> Result<Option<String>> {
 }
 
 #[allow(dead_code)] // #2049 Finding 7: superseded by claim_quality_alert_slot_pg.
-                    // Kept for unit tests and operator-facing ad-hoc tooling.
+// Kept for unit tests and operator-facing ad-hoc tooling.
 async fn quality_alert_recently_sent_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<bool> {
     let last_ms =
         sqlx::query_scalar::<_, Option<String>>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
@@ -2983,10 +2982,7 @@ async fn insert_events_pg(pool: &PgPool, events: &[QueuedEvent]) -> Result<()> {
 /// re-attempt each row in its own short tx so good rows still land. Returns
 /// the rows that still failed (candidates for dead-letter JSONL or queue
 /// push-back).
-async fn insert_events_pg_row_isolated(
-    pool: &PgPool,
-    events: &[QueuedEvent],
-) -> Vec<QueuedEvent> {
+async fn insert_events_pg_row_isolated(pool: &PgPool, events: &[QueuedEvent]) -> Vec<QueuedEvent> {
     let mut failed = Vec::new();
     for event in events {
         let result = sqlx::query(
@@ -3155,9 +3151,7 @@ fn counter_snapshot_from_values(
     // which misled the dashboards. Using `successes + failures` as the
     // denominator keeps the rates self-consistent even when `turn_attempts`
     // is briefly skewed.
-    let total = values
-        .turn_successes
-        .saturating_add(values.turn_failures);
+    let total = values.turn_successes.saturating_add(values.turn_failures);
     let (success_rate, failure_rate) = if total == 0 {
         (None, None)
     } else {

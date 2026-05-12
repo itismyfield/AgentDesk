@@ -261,7 +261,10 @@ pub fn flush_dead_letter_jsonl<T: serde::Serialize>(
     let base = flush_target_path();
     let parent = base.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".adk").join("release").join("logs")
+        PathBuf::from(home)
+            .join(".adk")
+            .join("release")
+            .join("logs")
     });
     let _ = create_dir_all(&parent);
     let file_name = format!("observability-{suffix}-dlq.jsonl");

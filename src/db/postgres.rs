@@ -840,8 +840,7 @@ pub(crate) async fn connect_test_pool_with_max_connections_and_migrate(
     label: &str,
     max_connections: u32,
 ) -> Result<PgPool, String> {
-    let pool =
-        connect_test_pool_with_max_connections(database_url, label, max_connections).await?;
+    let pool = connect_test_pool_with_max_connections(database_url, label, max_connections).await?;
     tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, migrate(&pool))
         .await
         .map_err(|_| {
