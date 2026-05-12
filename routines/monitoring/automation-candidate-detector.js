@@ -18,7 +18,7 @@ function emptyCheckpoint() {
     seen_candidates: {},   // signature -> { first_seen_at, last_emitted_at, status }
     stats: {
       ticks: 0,
-      approved_emitted: 0,
+      materialized: 0,
       skipped_already_approved: 0,
       skipped_quality_gate: 0,
       stalled_candidates: 0,
@@ -103,30 +103,75 @@ function passesQualityGate(candidate, nowStr) {
   return { pass: true, reason: null };
 }
 
-// --- Build approval prompt ---
+// --- Build materialization prompt ---
+// After quality gate passes, instruct the LLM to:
+// 1. Create the Kanban card via POST /api/automation-candidates
+// 2. Write candidate_approved:* kv_meta with the resulting card_id
 
-function buildApprovalPrompt(signature, candidate) {
+function buildMaterializationPrompt(signature, candidate) {
+  const mr = candidate.materialize_request || {};
+  const mrBody = mr.body || {};
+  const program = mrBody.program || {};
+
+  const materializeBody = {
+    title: mrBody.title || `[automation-candidate] ${signature}`,
+    source: mrBody.source || "routine_recommender",
+    dedupe_key: mrBody.dedupe_key || signature,
+    start_ready: true,
+    program: {
+      repo_dir: program.repo_dir || "<determine from your workspace context>",
+      allowed_write_paths: program.allowed_write_paths || ["src"],
+      metric_name: program.metric_name || "automation_friction_count",
+      metric_target: program.metric_target ?? 0,
+      metric_direction: program.metric_direction || "lower_is_better",
+      final_gate: program.final_gate || "manual_review",
+      iteration_budget: program.iteration_budget || 3,
+    },
+  };
+
   const lines = [
-    "자동화 후보 검토 요청입니다. 아래 후보를 검토하고 승인 여부를 결정해주세요.",
+    "# 자동화 후보 카드 생성 요청",
     "",
-    `**후보 ID (signature)**: \`${signature}\``,
+    `**후보 ID**: \`${signature}\``,
     `**카테고리**: ${candidate.category || "routine-candidate"}`,
-    `**점수**: ${candidate.score}`,
+    `**점수**: ${candidate.score} / 100`,
     `**증거 수**: ${candidate.evidence_count || 0}`,
     `**제안된 자동화**: ${candidate.suggested_automation || "(없음)"}`,
     `**결과 요약**: ${candidate.outcome_summary || "(없음)"}`,
     "",
     "---",
-    "## 승인 지침",
+    "## 실행 지침",
     "",
-    "후보가 자동화 가치가 있다고 판단되면 다음 kv_meta를 기록해주세요:",
+    "이 후보는 품질 게이트를 통과했습니다. 아래 두 단계를 순서대로 실행하세요.",
+    "",
+    "### 1단계: Kanban 카드 생성",
+    "",
+    "아래 API를 호출하여 자동화 후보 카드를 생성합니다:",
+    "",
+    "```",
+    "POST /api/automation-candidates",
+    "Content-Type: application/json",
+    "",
+    JSON.stringify(materializeBody, null, 2),
+    "```",
+    "",
+    "**중요**: `program.repo_dir`가 `<determine from your workspace context>` 상태라면,",
+    "현재 워크스페이스의 agentdesk 리포지터리 절대 경로로 대체하세요.",
+    "예: `/Users/kunkun/kunkunGames/agentdesk`",
+    "",
+    "API 응답에서 `card_id`를 저장해두세요.",
+    "",
+    "### 2단계: 승인 마커 기록",
+    "",
+    "카드 생성에 성공한 경우, 아래 kv_meta를 기록합니다 (TTL: 72h):",
     "```",
     `routine_observation:candidate_approved:${signature}`,
     "```",
-    "값(JSON): `{\"signature\":\"" + signature + "\",\"score\":" + candidate.score + ",\"approved_at\":\"<현재시각ISO>\",\"category\":\"" + (candidate.category || "routine-candidate") + "\"}`",
-    "TTL: 72h",
+    `값(JSON): {\"signature\":\"${signature}\",\"score\":${candidate.score},\"card_id\":\"<생성된 card_id>\",\"approved_at\":\"<현재시각ISO>\",\"category\":\"${candidate.category || "routine-candidate"}\"}`,
     "",
-    "승인하지 않는다면 kv_meta를 기록하지 않아도 됩니다.",
+    "카드 생성에 실패하거나 후보가 자동화 가치가 없다고 판단되면 kv_meta를 기록하지 마세요.",
+    "",
+    "**주의**: 카드를 생성하지 않고 kv_meta만 기록하면 자동화 루프가 동작하지 않습니다.",
   ];
   return lines.join("\n");
 }
@@ -233,7 +278,7 @@ agentdesk.routines.register({
         action: "complete",
         result: {
           status: "ok",
-          summary: `검토 ${reviewObs.length}건 처리됨 (승인 요청 없음)`,
+          summary: `검토 ${reviewObs.length}건 처리됨 (카드 생성 요청 없음)`,
           review_count: reviewObs.length,
           skipped_approved: cp.stats.skipped_already_approved,
           skipped_quality_gate: cp.stats.skipped_quality_gate,
@@ -242,9 +287,9 @@ agentdesk.routines.register({
       };
     }
 
-    // Emit one approval prompt (first candidate, others handled on next ticks)
+    // Emit one materialization prompt (first candidate, others handled on next ticks)
     const { signature, candidate } = emitPrompts[0];
-    const prompt = buildApprovalPrompt(signature, candidate);
+    const prompt = buildMaterializationPrompt(signature, candidate);
     const previousSeen = cp.seen_candidates[signature];
     const emitCount = (previousSeen?.emit_count || 0) + 1;
     cp.seen_candidates[signature] = {
@@ -253,7 +298,7 @@ agentdesk.routines.register({
       emit_count: emitCount,
       status: "emitted",
     };
-    cp.stats.approved_emitted++;
+    cp.stats.materialized++;
 
     return {
       action: "agent",

@@ -11,6 +11,7 @@ const PROMPT_CAP_BYTES = 12288;
 const CHECKPOINT_CAP_BYTES = 65536;
 const CHECKPOINT_VERSION = 1;
 const CANDIDATE_TTL_DAYS = 30;
+const REPO_DIR_PLACEHOLDER = "<determine from your workspace context>";
 
 // seen_evidence dedup: prevents the same evidence from incrementing score/evidence_count
 // across multiple ticks.  TTL covers the 24h observation query window with margin.
@@ -733,6 +734,7 @@ function markRecommended(cp, escalation, nowStr) {
   candidate.expected_side_effects = assessment.expectedSideEffects;
   candidate.verification_method = assessment.verificationMethod;
   candidate.gated_handoff = assessment.gatedHandoff;
+  candidate.materialize_request = assessment.materializeRequest;
   candidate.decision_summary = decisionSummary;
   candidate.top_evidence = topEvidenceForCandidate(candidate, 3);
   candidate.top_evidence_summary = topEvidenceSummary;
@@ -748,6 +750,7 @@ function markRecommended(cp, escalation, nowStr) {
     outcome_summary: assessment.outcomeSummary,
     decision_summary: decisionSummary,
     top_evidence_summary: topEvidenceSummary,
+    materialize_request: assessment.materializeRequest,
   });
   // Keep recommendations list bounded
   if (cp.recommendations.length > 50) {
@@ -832,6 +835,7 @@ function candidateAssessment(patternId, candidate) {
     ? "rule"
     : "agent";
   const title = patternId.replace(/\s+/g, " ").slice(0, 96);
+  const allowedWritePaths = candidateProgramAllowedPaths(profile.files);
   return {
     suggestedAutomation: profile.suggestedAutomation,
     recommendedExecution,
@@ -860,7 +864,50 @@ function candidateAssessment(patternId, candidate) {
       },
       side_effects: "사람이 게이트된 핸드오프를 명시적으로 승인하기 전까지는 없음",
     },
+    materializeRequest: {
+      endpoint: "POST /api/automation-candidates",
+      body: {
+        title: `[automation-candidate] ${title}`,
+        source: "routine_recommender",
+        dedupe_key: patternId,
+        start_ready: false,
+        program: {
+          repo_dir: REPO_DIR_PLACEHOLDER,
+          allowed_write_paths: allowedWritePaths,
+          metric_name: candidateMetricName(category),
+          metric_target: 0,
+          metric_direction: "lower_is_better",
+          final_gate: "manual_review",
+          iteration_budget: 3,
+        },
+      },
+      needs_human_fields: ["program.repo_dir"],
+    },
   };
+}
+
+function candidateProgramAllowedPaths(files) {
+  const out = [];
+  for (const file of files || []) {
+    let path = String(file || "").trim();
+    if (!path || path.startsWith("/") || path.includes("..")) continue;
+    const star = path.indexOf("*");
+    if (star >= 0) path = path.slice(0, star);
+    path = path.replace(/\/+$/, "");
+    if (!path) continue;
+    if (!out.includes(path)) out.push(path);
+  }
+  return out.length ? out : ["src"];
+}
+
+function candidateMetricName(category) {
+  return {
+    "routine-candidate": "manual_routine_touch_count",
+    "release-freshness": "release_drift_count",
+    "outbox-delivery": "outbox_delivery_failure_count",
+    "memento-hygiene": "memento_hygiene_issue_count",
+    "api-friction": "api_friction_count",
+  }[category] || "automation_friction_count";
 }
 
 function candidateDecisionSummary(patternId, candidate, assessment) {
@@ -903,6 +950,7 @@ function buildPrompt(escalation) {
     verificationMethod,
     outcomeSummary,
     gatedHandoff,
+    materializeRequest,
   } = candidateAssessment(patternId, candidate);
   const decisionSummary = candidateDecisionSummary(patternId, candidate, {
     outcomeSummary,
@@ -976,6 +1024,11 @@ ${verificationMethod}
 - 핸드오프 부작용: ${gatedHandoff.side_effects}
 ${handoffAcceptance}
 
+## 자동화 후보 카드 생성 초안
+아래 JSON은 탐지기(detector)가 자동으로 카드를 생성할 때 사용합니다.
+\`program.repo_dir\`에 현재 워크스페이스의 실제 절대 경로를 채워 kv_meta를 기록해주세요.
+${JSON.stringify(materializeRequest, null, 2)}
+
 ## 지시사항
 에이전트가 도출한 내용은 반드시 한국어로 작성합니다. 이 자동화를 구현할 가치가 있는지 평가하고 다음을 제공합니다:
 1. 자동화 여부(예 / 아니오 / 보류), 신뢰도, 그리고 이유
@@ -985,8 +1038,29 @@ ${handoffAcceptance}
 5. 예상 부작용, 오탐/중복 억제 방법, 자동화 동작 검증 방법
 6. 이전 추천과 같은 결론이면 다른 탐색/진행 방식 또는 추가로 수집할 근거
 
-구현, 파일 수정, 서비스 재시작, memento 쓰기, PR/카드/이슈 생성은 금지합니다.
-이 요청은 제안 전용입니다.`;
+## kv_meta 기록 지침
+
+평가 완료 후 **자동화 가치가 있다(예 / 부분 예)** 고 판단한 경우에만 아래를 실행합니다.
+
+**key** (TTL: 48h):
+\`routine_observation:candidate_review:${patternId}\`
+
+**value** (JSON):
+\`\`\`json
+{
+  "score": ${candidate.score},
+  "evidence_count": ${candidate.evidence_count || 0},
+  "last_seen_at": "${candidate.last_seen_at || ""}",
+  "category": "${normalizeCategory(candidate.category)}",
+  "suggested_automation": "<평가에서 도출한 제안 자동화 내용>",
+  "outcome_summary": "<평가에서 도출한 한 줄 결과 요약>",
+  "materialize_request": <위 '자동화 후보 카드 생성 초안' JSON에서 program.repo_dir을 실제 절대 경로로 채운 버전>
+}
+\`\`\`
+
+\`program.repo_dir\`는 현재 워크스페이스에서 확인한 agentdesk 리포지터리 절대 경로로 채웁니다.
+자동화 가치가 없거나 보류라면 kv_meta를 기록하지 않습니다.
+구현, 파일 수정, 서비스 재시작, memento 쓰기, PR/카드/이슈 생성은 금지합니다.`;
 
   if (utf8ByteLength(raw) <= PROMPT_CAP_BYTES) {
     return raw;

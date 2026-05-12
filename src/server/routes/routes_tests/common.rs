@@ -9,6 +9,7 @@
 // In the original single-file module `use super::*` reached into the parent
 // `routes` module. After the split, this file lives at
 // `routes::routes_tests::common`, so the same glob requires `super::super`.
+use super::super::super::super::services::git::git_command;
 use super::super::*;
 use axum::body::{Body, HttpBody as _};
 use axum::http::{Request, StatusCode};
@@ -19,7 +20,6 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use tower::ServiceExt;
@@ -733,7 +733,7 @@ pub(super) fn install_mock_gh_issue_create(repo: &str, issue_number: i64) -> Moc
 }
 
 pub(super) fn run_git(repo_dir: &std::path::Path, args: &[&str]) {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .current_dir(repo_dir)
         .output()
@@ -747,7 +747,7 @@ pub(super) fn run_git(repo_dir: &std::path::Path, args: &[&str]) {
 }
 
 pub(super) fn run_git_output(repo_dir: &std::path::Path, args: &[&str]) -> String {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .current_dir(repo_dir)
         .output()
@@ -814,7 +814,7 @@ pub(super) fn git_commit(repo_dir: &std::path::Path, message: &str) -> String {
     std::fs::write(repo_dir.join(filename), format!("{message}\n")).unwrap();
     run_git(repo_dir, &["add", "."]);
     run_git(repo_dir, &["commit", "-m", message]);
-    let output = Command::new("git")
+    let output = git_command()
         .args(["rev-parse", "HEAD"])
         .current_dir(repo_dir)
         .output()

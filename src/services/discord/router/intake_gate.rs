@@ -557,17 +557,14 @@ async fn render_visible_queued_ack(
             // — surface a short text reply so the user knows their
             // message is in the queue even when the card path
             // failed. Reply is rate-limited and best-effort.
-            rate_limit_wait(&data.shared, channel_id).await;
-            let _ = channel_id
-                .send_message(
-                    &ctx.http,
-                    serenity::builder::CreateMessage::new()
-                        .reference_message((channel_id, user_msg_id))
-                        .content(
-                            "📬 큐에 추가됨 — 카드 표시는 실패했지만 메시지는 큐잉되었습니다.",
-                        ),
-                )
-                .await;
+            send_reaction_control_reply(
+                ctx,
+                &data.shared,
+                channel_id,
+                user_msg_id,
+                "📬 큐에 추가됨 — 카드 표시는 실패했지만 메시지는 큐잉되었습니다.",
+            )
+            .await;
             return false;
         }
     };

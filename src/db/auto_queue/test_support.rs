@@ -32,12 +32,21 @@ impl TestPostgresDb {
     }
 
     pub(crate) async fn connect_and_migrate(&self) -> PgPool {
-        crate::db::postgres::connect_test_pool_and_migrate(
+        // Slot allocation holds a dedicated advisory-lock connection while it
+        // probes and updates through the pool. The global PG test default is a
+        // single connection to limit CI pressure, but these serialized tests
+        // need a small local pool to avoid self-deadlocking on that lock holder.
+        let pool = crate::db::postgres::connect_test_pool_with_max_connections(
             &self.database_url,
             "db::auto_queue tests",
+            4,
         )
         .await
-        .expect("connect + migrate postgres auto_queue test db")
+        .expect("connect postgres auto_queue test db");
+        crate::db::postgres::migrate(&pool)
+            .await
+            .expect("migrate postgres auto_queue test db");
+        pool
     }
 
     // #2048 F3: allocate_slot_for_group_agent_pg acquires a dedicated advisory-lock

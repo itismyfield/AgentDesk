@@ -1122,13 +1122,14 @@ mod tests {
     fn bundled_sample_routines_load_and_validate() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routines");
         let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(loader.load_dir(&root).unwrap(), 7);
+        assert_eq!(loader.load_dir(&root).unwrap(), 8);
         assert_eq!(
             loader.script_refs().unwrap(),
             vec![
                 "agent-checkpoint-review.js".to_string(),
                 "monitoring/automation-candidate-detector.js".to_string(),
                 "monitoring/automation-candidate-recommender.js".to_string(),
+                "monitoring/automation-executor-v2.js".to_string(),
                 "monitoring/automation-executor.js".to_string(),
                 "monitoring/memento-digest-writer.js".to_string(),
                 "monitoring/working-watchdog.js".to_string(),

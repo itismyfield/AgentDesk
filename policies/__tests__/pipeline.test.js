@@ -112,6 +112,14 @@ test("pipeline phase 1: recommender accumulates evidence and escalates candidate
 
   assert.equal(r.action, "agent", "recommender should escalate when score >= 80 and evidence >= 5");
   assert.ok(r.prompt.includes(SIGNATURE), "prompt should reference the candidate signature");
+  assert.ok(
+    r.prompt.includes("<determine from your workspace context>"),
+    "materialize draft should use the detector-recognized repo_dir placeholder"
+  );
+  assert.ok(
+    !r.prompt.includes("<required: absolute repo path>"),
+    "materialize draft must not include stale repo_dir placeholder"
+  );
   assert.ok(r.checkpoint.candidates[SIGNATURE], "candidate should be in checkpoint");
   assert.ok(
     r.checkpoint.candidates[SIGNATURE].score >= 80,

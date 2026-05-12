@@ -19,8 +19,9 @@ pub use repo_resolver::{resolve_repo_dir, resolve_repo_dir_for_id, resolve_repo_
 #[allow(unused_imports)]
 pub use runner::{GitCommand, GitCommandError};
 pub use worktree_resolver::{
-    ManagedWorktreeCleanup, cleanup_managed_worktree, ensure_worktree_for_issue,
-    find_worktree_for_issue,
+    ManagedWorktreeCleanup, automation_branch_name, cleanup_managed_worktree,
+    ensure_automation_worktree, ensure_worktree_for_issue, find_automation_worktree,
+    find_worktree_for_issue, remove_automation_worktree,
 };
 
 pub(crate) fn git_command() -> std::process::Command {
