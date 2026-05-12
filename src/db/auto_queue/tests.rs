@@ -45,7 +45,9 @@ mod dispatch_terminal_sync_pg_tests {
     use sqlx::{Connection, PgConnection, PgPool, Row};
 
     async fn setup_pool(pg_db: &TestPostgresDb) -> PgPool {
-        let pool = pg_db.connect_and_migrate().await;
+        // #2048 F3 needs >=2 concurrent connections (advisory-lock conn +
+        // inner allocator); the lean default test pool of 1 deadlocked.
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
         sqlx::query(
             "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
              VALUES ('run-1', 'repo-1', 'agent-1', 'active')",

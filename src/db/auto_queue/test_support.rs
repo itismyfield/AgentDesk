@@ -40,6 +40,25 @@ impl TestPostgresDb {
         .expect("connect + migrate postgres auto_queue test db")
     }
 
+    // #2048 F3: allocate_slot_for_group_agent_pg acquires a dedicated advisory-lock
+    // connection *and* runs its inner allocation against the same pool. Tests that
+    // exercise that path (especially while a separate connection holds an
+    // auto_queue_slots row lock) need at least two concurrent connections, so the
+    // default lean test pool deadlocks. This helper keeps the lean default for
+    // other tests and only widens capacity for the dispatch-terminal-sync suite.
+    pub(crate) async fn connect_and_migrate_with_max_connections(
+        &self,
+        max_connections: u32,
+    ) -> PgPool {
+        crate::db::postgres::connect_test_pool_with_max_connections_and_migrate(
+            &self.database_url,
+            "db::auto_queue tests",
+            max_connections,
+        )
+        .await
+        .expect("connect + migrate postgres auto_queue test db")
+    }
+
     pub(crate) async fn drop(mut self) {
         let drop_result = crate::db::postgres::drop_test_database(
             &self.admin_url,

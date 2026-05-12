@@ -175,8 +175,8 @@
   - `src/server/routes/meetings.rs` (2158 lines).
   - `src/server/routes/review_verdict/decision_route.rs` (1865 lines).
   - `src/server/routes/{agents,agents_crud,agents_setup,analytics,v1,
-    settings,resume,pipeline,reviews,dispatches/thread_reuse}.rs` (all 1000+
-    lines).
+    settings,resume,pipeline,reviews,dispatches/thread_reuse,
+    dispatches/crud}.rs` (all 1000+ lines).
 - active_callsite_coverage: legacy_db helper coverage tracked separately —
   see `known-legacy.md` row `legacy_db_helper`.
 - invariants:
@@ -300,6 +300,10 @@ The remaining giant-file modules under `src/services/` not covered above:
   `src/services/auto_queue/activate_command.rs` (1012); auto-queue route
   behavior is split across `src/services/auto_queue/*` slices, with
   `activate_command.rs` now giant-file territory.
+  `src/services/auto_queue/cancel_run.rs` (~1032 lines after #2048
+  cancel/force-pause hardening — F5/F7/F13/F15 enlarged transition + safe
+  jsonb cast paths) is also giant-file territory; split before further
+  non-bugfix growth.
 - `src/services/onboarding.rs` (5279), `src/services/dispatched_sessions.rs`
   (2954), and `src/services/settings.rs` (1015) — service-layer route support
   surfaces split out of the large dashboard route modules.

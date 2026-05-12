@@ -1096,7 +1096,7 @@ mod selector_cleanup_tests {
 
         // Seed: card + cancelled dispatch + session pointing at it.
         sqlx::query(
-            "INSERT INTO kanban_cards (id, title, current_status, created_at, updated_at)
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
              VALUES ($1, 'guard card', 'backlog', NOW(), NOW())",
         )
         .bind(card_id)
