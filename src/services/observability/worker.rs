@@ -16,8 +16,8 @@ use super::pg_io::{
 use super::retention::run_retention_sweep;
 use super::{
     AnalyticsFilters, EVENT_BATCH_SIZE, EVENT_FLUSH_INTERVAL, ObservabilityRuntime, QueuedEvent,
-    QueuedQualityEvent, SNAPSHOT_FLUSH_INTERVAL, SnapshotRow, StorageHandles, WorkerMessage,
-    RETENTION_SWEEP_INTERVAL, runtime,
+    QueuedQualityEvent, RETENTION_SWEEP_INTERVAL, SNAPSHOT_FLUSH_INTERVAL, SnapshotRow,
+    StorageHandles, WorkerMessage, runtime,
 };
 
 pub(super) fn worker_sender() -> Option<mpsc::UnboundedSender<WorkerMessage>> {

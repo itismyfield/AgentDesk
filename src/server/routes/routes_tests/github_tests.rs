@@ -1322,4 +1322,3 @@ async fn github_repos_pg_sync_marks_in_progress_card_done_from_main_commit() {
     pg_pool.close().await;
     pg_db.drop().await;
 }
-

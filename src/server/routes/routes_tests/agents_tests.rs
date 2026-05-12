@@ -3857,4 +3857,3 @@ async fn smart_activate_pg_dispatches_multiple_groups() {
     pool.close().await;
     pg_db.drop().await;
 }
-
