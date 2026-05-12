@@ -8,6 +8,7 @@ pub(crate) mod receiver;
 pub(crate) mod sanitizer;
 pub(crate) mod stt;
 pub(crate) mod tts;
+pub(crate) mod utils;
 
 pub(crate) use config::VoiceConfig;
 pub(crate) use receiver::{CompletedUtterance, VoiceReceiveHook, VoiceReceiver};

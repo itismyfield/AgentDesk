@@ -8,6 +8,7 @@ use tokio::process::Command;
 use tracing::{debug, warn};
 
 use super::VoiceConfig;
+use super::utils::expand_tilde;
 
 const STT_TIMEOUT: Duration = Duration::from_secs(120);
 const EMPTY_RETRY_DELAY: Duration = Duration::from_millis(300);
@@ -552,19 +553,6 @@ fn preview_output(bytes: &[u8]) -> String {
         return "<empty>".to_string();
     }
     trimmed.chars().take(2048).collect()
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    path.to_path_buf()
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ pub(crate) mod edge;
 pub(crate) mod playback;
 
 use crate::voice::config::{VoiceConfig, VoiceTtsBackendKind};
+use crate::voice::utils::expand_tilde;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,20 +37,6 @@ async fn progress_cache_lock(cache_path: &Path) -> Arc<Mutex<()>> {
 }
 
 const PROGRESS_CACHE_LOCK_MAX_ENTRIES: usize = 1024;
-
-// F17 (#2046): STT/Receiver/EdgeTts 와 동일한 `~` 확장 로직.
-fn expand_tilde(path: &Path) -> PathBuf {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    path.to_path_buf()
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TtsSynthesisKind {
