@@ -1,3 +1,23 @@
+//! Onboarding service.
+//!
+//! Historically a single 5000+ LOC file, this module is in the process of
+//! being split into focused sub-modules. Today the bulk of the logic
+//! (`status`, `draft_*`, `complete`, conflict detection, channel mapping,
+//! persistence, tests) still lives here, with self-contained handlers
+//! extracted to siblings.
+//!
+//! All public exports are preserved at the `crate::services::onboarding`
+//! module path so existing callers (e.g. `src/server/routes/onboarding.rs`)
+//! keep working without import changes.
+
+mod channel;
+mod provider;
+
+pub use channel::{
+    ChannelsBody, ChannelsQuery, ValidateTokenBody, channels, channels_post, validate_token,
+};
+pub use provider::{CheckProviderBody, GeneratePromptBody, check_provider, generate_prompt};
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -10,11 +30,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::server::routes::AppState;
-use crate::services::provider::ProviderKind;
-use crate::services::provider_exec;
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn legacy_db(state: &AppState) -> &crate::db::Db {
+pub(super) fn legacy_db(state: &AppState) -> &crate::db::Db {
     state
         .engine
         .legacy_db()
@@ -429,7 +447,7 @@ pub async fn status(state: &AppState) -> (StatusCode, Json<serde_json::Value>) {
     }
 }
 
-async fn pg_kv_value(pool: &sqlx::PgPool, key: &str) -> Result<Option<String>, String> {
+pub(super) async fn pg_kv_value(pool: &sqlx::PgPool, key: &str) -> Result<Option<String>, String> {
     sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
         .bind(key)
         .fetch_optional(pool)
@@ -747,203 +765,7 @@ pub async fn draft_delete() -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ValidateTokenBody {
-    pub token: String,
-}
-
-/// POST /api/onboarding/validate-token
-/// Validates a Discord bot token and returns bot info.
-pub async fn validate_token(body: ValidateTokenBody) -> (StatusCode, Json<serde_json::Value>) {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("https://discord.com/api/v10/users/@me")
-        .header("Authorization", format!("Bot {}", body.token))
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) if r.status().is_success() => {
-            let user: serde_json::Value = r.json().await.unwrap_or(json!({}));
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "valid": true,
-                    "bot_id": user.get("id").and_then(|v| v.as_str()),
-                    "bot_name": user.get("username").and_then(|v| v.as_str()),
-                    "avatar": user.get("avatar").and_then(|v| v.as_str()),
-                })),
-            )
-        }
-        Ok(r) => {
-            let status = r.status();
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "valid": false,
-                    "error": format!("Discord API error: {status}"),
-                })),
-            )
-        }
-        Err(e) => (
-            StatusCode::OK,
-            Json(json!({
-                "valid": false,
-                "error": format!("Request failed: {e}"),
-            })),
-        ),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ChannelsQuery {
-    pub token: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ChannelsBody {
-    pub token: Option<String>,
-}
-
-async fn load_channels(
-    state: &AppState,
-    token: Option<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    // Use provided token or saved token
-    let token = match token {
-        Some(token) => Some(token),
-        None if state.pg_pool_ref().is_some() => {
-            match pg_kv_value(
-                state.pg_pool_ref().expect("checked pg_pool_ref"),
-                "onboarding_bot_token",
-            )
-            .await
-            {
-                Ok(token) => token,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
-                }
-            }
-        }
-        None => saved_onboarding_bot_token_without_pg(state),
-    };
-
-    let Some(token) = token else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "No token provided"})),
-        );
-    };
-
-    let client = reqwest::Client::new();
-
-    // Fetch guilds
-    let guilds: Vec<serde_json::Value> = match client
-        .get("https://discord.com/api/v10/users/@me/guilds")
-        .header("Authorization", format!("Bot {}", token))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-        _ => {
-            return (
-                StatusCode::OK,
-                Json(json!({"guilds": [], "error": "Failed to fetch guilds"})),
-            );
-        }
-    };
-
-    let mut result_guilds = Vec::new();
-    for guild in &guilds {
-        let guild_id = guild.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let guild_name = guild.get("name").and_then(|v| v.as_str()).unwrap_or("");
-
-        // Fetch channels for this guild
-        let channels: Vec<serde_json::Value> = match client
-            .get(format!(
-                "https://discord.com/api/v10/guilds/{guild_id}/channels"
-            ))
-            .header("Authorization", format!("Bot {}", token))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-            _ => Vec::new(),
-        };
-
-        // Filter text channels (type 0)
-        let text_channels: Vec<serde_json::Value> = channels
-            .into_iter()
-            .filter(|c| c.get("type").and_then(|v| v.as_i64()) == Some(0))
-            .map(|c| {
-                let parent = c
-                    .get("parent_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                json!({
-                    "id": c.get("id").and_then(|v| v.as_str()),
-                    "name": c.get("name").and_then(|v| v.as_str()),
-                    "category_id": parent,
-                })
-            })
-            .collect();
-
-        result_guilds.push(json!({
-            "id": guild_id,
-            "name": guild_name,
-            "channels": text_channels,
-        }));
-    }
-
-    (StatusCode::OK, Json(json!({"guilds": result_guilds})))
-}
-
-#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
-fn saved_onboarding_bot_token_without_pg(_state: &AppState) -> Option<String> {
-    crate::cli::agentdesk_runtime_root()
-        .as_ref()
-        .and_then(|root| load_onboarding_config(root).ok())
-        .and_then(|config| {
-            config
-                .discord
-                .bots
-                .get("command")
-                .and_then(|bot| bot.token.clone())
-        })
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn saved_onboarding_bot_token_without_pg(state: &AppState) -> Option<String> {
-    legacy_db(state).lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT value FROM kv_meta WHERE key = 'onboarding_bot_token'",
-            [],
-            |row| row.get(0),
-        )
-        .ok()
-    })
-}
-
-/// GET /api/onboarding/channels
-/// Fetches Discord guilds + text channels for the given bot token.
-pub async fn channels(
-    state: &AppState,
-    query: ChannelsQuery,
-) -> (StatusCode, Json<serde_json::Value>) {
-    load_channels(state, query.token).await
-}
-
-/// POST /api/onboarding/channels
-/// Fetches Discord guilds + text channels for the given bot token from request body.
-pub async fn channels_post(
-    state: &AppState,
-    body: ChannelsBody,
-) -> (StatusCode, Json<serde_json::Value>) {
-    load_channels(state, body.token).await
-}
+// Discord token / channel discovery handlers moved to `channel` submodule.
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CompleteBody {
@@ -1740,7 +1562,7 @@ fn push_channel_alias(config: &mut crate::config::AgentChannelConfig, alias: Str
     }
 }
 
-fn load_onboarding_config(runtime_root: &Path) -> Result<crate::config::Config, String> {
+pub(super) fn load_onboarding_config(runtime_root: &Path) -> Result<crate::config::Config, String> {
     let config_path = onboarding_config_path(runtime_root);
     if config_path.is_file() {
         crate::config::load_from_path(&config_path)
@@ -5118,170 +4940,4 @@ mod tests {
     }
 }
 
-// ── Provider Check ──────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct CheckProviderBody {
-    pub provider: String,
-}
-
-/// POST /api/onboarding/check-provider
-/// Checks if a CLI provider (claude/codex/gemini/opencode/qwen) is installed and authenticated.
-pub async fn check_provider(body: CheckProviderBody) -> (StatusCode, Json<serde_json::Value>) {
-    let cmd = match body.provider.as_str() {
-        "claude" => "claude",
-        "codex" => "codex",
-        "gemini" => "gemini",
-        "opencode" => "opencode",
-        "qwen" => "qwen",
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error": "provider must be 'claude', 'codex', 'gemini', 'opencode', or 'qwen'"}),
-                ),
-            );
-        }
-    };
-
-    // Resolve binary using the exact same provider-specific resolver as the runtime,
-    // including known-path fallbacks (~/bin, /opt/homebrew/bin, etc.).
-    // This ensures onboarding and actual launch always agree on availability.
-    let resolution = {
-        let provider = cmd.to_string();
-        tokio::task::spawn_blocking(move || {
-            crate::services::platform::resolve_provider_binary(&provider)
-        })
-        .await
-        .ok()
-    }
-    .unwrap_or_else(|| crate::services::platform::resolve_provider_binary(cmd));
-    let mut failure_kind = resolution.failure_kind.clone();
-
-    let Some(bin_path) = resolution.resolved_path.clone() else {
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "installed": false,
-                "logged_in": false,
-                "version": null,
-                "path": null,
-                "canonical_path": null,
-                "source": null,
-                "failure_kind": resolution.failure_kind,
-                "attempts": resolution.attempts,
-            })),
-        );
-    };
-
-    // Get version using the resolved binary path (not bare command name)
-    // so it works even when PATH doesn't contain the provider.
-    let (version, probe_failure_kind) = {
-        let resolution = resolution.clone();
-        let bin_path = bin_path.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::services::platform::probe_resolved_binary_version(&bin_path, &resolution)
-        })
-        .await
-        .ok()
-        .unwrap_or((None, Some("version_probe_spawn_failed".to_string())))
-    };
-    if failure_kind.is_none() {
-        failure_kind = probe_failure_kind.clone();
-    }
-
-    // Check login (heuristic: config directory exists with content)
-    let logged_in = if cmd == "opencode" {
-        true
-    } else {
-        dirs::home_dir()
-            .map(|home| {
-                let config_dir = if cmd == "claude" {
-                    home.join(".claude")
-                } else if cmd == "codex" {
-                    home.join(".codex")
-                } else if cmd == "qwen" {
-                    home.join(".qwen")
-                } else {
-                    home.join(".gemini")
-                };
-                config_dir.is_dir()
-            })
-            .unwrap_or(false)
-    };
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "installed": true,
-            "logged_in": logged_in,
-            "version": version,
-            "path": resolution.resolved_path,
-            "canonical_path": resolution.canonical_path,
-            "source": resolution.source,
-            "failure_kind": failure_kind,
-            "attempts": resolution.attempts,
-        })),
-    )
-}
-
-// ── AI Prompt Generation ────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct GeneratePromptBody {
-    pub name: String,
-    pub description: String,
-    pub provider: Option<String>,
-}
-
-/// POST /api/onboarding/generate-prompt
-/// Generates a system prompt for a custom agent using the local CLI.
-pub async fn generate_prompt(body: GeneratePromptBody) -> (StatusCode, Json<serde_json::Value>) {
-    let provider = body
-        .provider
-        .as_deref()
-        .and_then(ProviderKind::from_str)
-        .unwrap_or(ProviderKind::Claude);
-
-    let instruction = format!(
-        "다음 AI 에이전트의 시스템 프롬프트를 한국어로 작성해줘.\n\
-         이름: {}\n설명: {}\n\n\
-         에이전트의 역할, 핵심 능력, 소통 스타일을 포함해서 5-10줄로 작성해.\n\
-         시스템 프롬프트 텍스트만 출력하고 다른 설명은 붙이지 마.",
-        body.name, body.description
-    );
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        provider_exec::execute_simple(provider, instruction),
-    )
-    .await;
-
-    if let Ok(Ok(text)) = result {
-        if !text.trim().is_empty() {
-            return (
-                StatusCode::OK,
-                Json(json!({ "prompt": text.trim(), "source": "ai" })),
-            );
-        }
-    }
-
-    // Fallback to template
-    let fallback = format!(
-        "당신은 '{name}'입니다. {desc}\n\n\
-         ## 역할\n\
-         - 위 설명에 맞는 업무를 수행합니다\n\
-         - 사용자의 요청에 정확하고 친절하게 응답합니다\n\n\
-         ## 소통 원칙\n\
-         - 한국어로 소통합니다\n\
-         - 간결하고 명확하게 답변합니다\n\
-         - 필요시 확인 질문을 합니다",
-        name = body.name,
-        desc = body.description,
-    );
-
-    (
-        StatusCode::OK,
-        Json(json!({ "prompt": fallback, "source": "template" })),
-    )
-}
+// Provider check + AI prompt generation handlers moved to `provider` submodule.
