@@ -162,10 +162,14 @@
   idempotency-guard expansion) is the canonical activate/dispatch-next
   command surface; it is intentionally above the giant-file threshold and
   tracked here. Further growth requires a split issue.
+  `src/services/auto_queue/cancel_run.rs` (1032 lines) is the canonical
+  auto-queue cancellation and run-stop command surface; split before adding
+  non-bugfix behavior.
 - legacy_modules: none, but several routes still call `legacy_db()` against
   the SQLite compat handle (see `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file routes):
   - `src/server/routes/dispatches/discord_delivery.rs` (5564 lines).
+  - `src/server/routes/dispatches/crud.rs` (1009 lines).
   - `src/server/routes/kanban.rs` (4426 lines).
   - `src/server/routes/dispatched_sessions.rs` (4002 lines).
   - `src/server/routes/onboarding.rs` (5271 lines).
