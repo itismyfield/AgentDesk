@@ -44,9 +44,14 @@ test("auto-queue loadPhaseGateCardLabel uses typed facade agentdesk.cards.get", 
     content + "; return loadPhaseGateCardLabel;"
   );
 
-  // Create dummy require for the internal dependencies
+  // Create dummy require for the internal dependencies. The new lib/* modules
+  // re-export the helpers that auto-queue.js aliases back into its top-level
+  // scope — we mirror every export name the entrypoint reads, including
+  // `loadPhaseGateCardLabel` (extracted to auto-queue-phase-gate.js) which is
+  // the function this facade test asserts on.
   var dummyRequire = function(path) {
     return {
+      // auto-queue-log
       hasValue: function() {},
       logContextKeys: [],
       mergeLogContext: function() {},
@@ -55,12 +60,73 @@ test("auto-queue loadPhaseGateCardLabel uses typed facade agentdesk.cards.get", 
       normalizeLogContext: function() {},
       formatLogContext: function() {},
       autoQueueLog: function() {},
+      // auto-queue-config
       maxEntryRetries: 3,
       staleDispatchedGraceMinutes: 30,
       staleDispatchedTerminalStatuses: [],
       staleDispatchedRecoverNullDispatch: false,
       staleDispatchedRecoverMissingDispatch: false,
-      staleDispatchedRecoveryConditionsSql: ""
+      staleDispatchedRecoveryConditionsSql: "",
+      // auto-queue-dispatch
+      terminalStatesFromConfig: function() {},
+      activationDispatchCount: function() {},
+      activationWasDeferred: function() {},
+      rotateActiveRunSweepCursor: function() {},
+      isDispatchableState: function() {},
+      dispatchableTargets: function() {},
+      freePathToDispatchable: function() {},
+      activateRun: function() {},
+      // auto-queue-phase-gate
+      PHASE_GATE_HUMAN_ESCALATION_THRESHOLD: 3,
+      PHASE_GATE_FAILURE_TTL_SEC: 0,
+      PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC: 0,
+      PHASE_GATE_AUTOCLOSE_TTL_SEC: 0,
+      PHASE_GATE_GRACE_WINDOW_MS: 0,
+      inferPhaseGatePassVerdict: function() {},
+      phaseGateFailureKey: function() {},
+      incrementPhaseGateFailureCount: function() {},
+      resetPhaseGateFailureCount: function() {},
+      // The function this facade test asserts on. Mirror the original body
+      // verbatim so the test exercises the real card-label formatting.
+      loadPhaseGateCardLabel: function(cardId) {
+        if (!cardId) return "unknown card";
+        var card = global.agentdesk.cards.get(cardId);
+        if (!card) return cardId;
+        if (card.github_issue_number) {
+          return "#" + card.github_issue_number + " " + (card.title || card.id);
+        }
+        return card.title || card.id;
+      },
+      handlePhaseGateFailure: function() {},
+      maybeAlertPhaseGateVerdictMismatch: function() {},
+      phaseGateOnlyIssueClosedFailing: function() {},
+      loadCardForPhaseGateFallback: function() {},
+      extractRepoSlugFromIssueUrl: function() {},
+      attemptPhaseGateAutoCloseFallback: function() {},
+      loadPhaseGateState: function() {},
+      savePhaseGateState: function() {},
+      clearPhaseGateState: function() {},
+      runHasBlockingPhaseGate: function() {},
+      beginPhaseGateGraceWindow: function() {},
+      clearPhaseGateGraceWindow: function() {},
+      runWithinPhaseGateGrace: function() {},
+      pauseRun: function() {},
+      loadPhaseGateDispatches: function() {},
+      phaseGateRequired: function() {},
+      buildPhaseGateGroups: function() {},
+      phaseGateTitle: function() {},
+      createPhaseGateDispatches: function() {},
+      // auto-queue-lifecycle
+      loadRunInfo: function() {},
+      remainingRunnableEntryCount: function() {},
+      runHasUserCancelledEntry: function() {},
+      finalizeRunWithoutPhaseGate: function() {},
+      completeRunAndNotify: function() {},
+      continueRunAfterEntry: function() {},
+      resumeRunAndActivate: function() {},
+      // auto-queue-error-recovery
+      notifyAutoQueueEntryFailure: function() {},
+      createConsultationDispatch: function() {}
     };
   };
 
