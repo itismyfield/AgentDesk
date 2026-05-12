@@ -9,10 +9,24 @@ use tracing::{debug, warn};
 
 use super::VoiceConfig;
 
+// === Tunables (was scattered constants) ===
+// Pipeline timing
 const STT_TIMEOUT: Duration = Duration::from_secs(120);
 const EMPTY_RETRY_DELAY: Duration = Duration::from_millis(300);
+
+// Volume gating (ffmpeg `volumedetect` thresholds, in dBFS).
+// Utterances below BOTH thresholds are treated as silence/noise and skipped.
 const LOW_VOLUME_MEAN_DB: f32 = -35.0;
 const LOW_VOLUME_MAX_DB: f32 = -12.0;
+
+// whisper-cli decoding thresholds passed via CLI flags.
+// Kept as &str because whisper-cli consumes them as command-line args verbatim.
+/// `-nth` no-speech-threshold: token probability below which a chunk is considered silence.
+const WHISPER_NO_SPEECH_THRESHOLD: &str = "0.35";
+/// `-et` entropy threshold: decoder fallback trigger when output entropy exceeds this.
+const WHISPER_ENTROPY_THRESHOLD: &str = "2.2";
+/// `-lpt` log-probability threshold: decoder fallback trigger when avg logprob falls below this.
+const WHISPER_LOGPROB_THRESHOLD: &str = "-0.8";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SttConfig {
@@ -227,11 +241,11 @@ impl SttRuntime {
                 "-sns".to_string(),
                 "-nf".to_string(),
                 "-nth".to_string(),
-                "0.35".to_string(),
+                WHISPER_NO_SPEECH_THRESHOLD.to_string(),
                 "-et".to_string(),
-                "2.2".to_string(),
+                WHISPER_ENTROPY_THRESHOLD.to_string(),
                 "-lpt".to_string(),
-                "-0.8".to_string(),
+                WHISPER_LOGPROB_THRESHOLD.to_string(),
                 "-of".to_string(),
                 transcript_prefix.to_string_lossy().to_string(),
             ],
@@ -708,9 +722,24 @@ mod tests {
                 .any(|pair| pair == ["-m", "/models/ko.bin"])
         );
         assert!(whisper.args.windows(2).any(|pair| pair == ["-l", "ko"]));
-        assert!(whisper.args.windows(2).any(|pair| pair == ["-nth", "0.35"]));
-        assert!(whisper.args.windows(2).any(|pair| pair == ["-et", "2.2"]));
-        assert!(whisper.args.windows(2).any(|pair| pair == ["-lpt", "-0.8"]));
+        assert!(
+            whisper
+                .args
+                .windows(2)
+                .any(|pair| pair == ["-nth", WHISPER_NO_SPEECH_THRESHOLD])
+        );
+        assert!(
+            whisper
+                .args
+                .windows(2)
+                .any(|pair| pair == ["-et", WHISPER_ENTROPY_THRESHOLD])
+        );
+        assert!(
+            whisper
+                .args
+                .windows(2)
+                .any(|pair| pair == ["-lpt", WHISPER_LOGPROB_THRESHOLD])
+        );
         assert!(whisper.args.iter().any(|arg| arg == "-nt"));
         assert!(whisper.args.iter().any(|arg| arg == "-otxt"));
         assert!(whisper.args.iter().any(|arg| arg == "-sns"));

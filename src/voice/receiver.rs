@@ -14,9 +14,29 @@ use tokio::task::JoinHandle;
 
 use super::VoiceConfig;
 
+// === Tunables (was scattered constants) ===
+// Discord/Songbird PCM is decoded at fixed 48 kHz stereo s16le; these mirror that contract.
 const WAV_CHANNELS: u16 = 2;
 const WAV_SAMPLE_RATE: u32 = 48_000;
 const WAV_BITS_PER_SAMPLE: u16 = 16;
+
+// --- Test-only timing knobs ---
+// These are referenced from `#[cfg(test)]` and intentionally kept next to the production
+// tunables so wall-clock assumptions live in one place.
+#[cfg(test)]
+const TEST_SEGMENT_IDLE: Duration = Duration::from_millis(30);
+#[cfg(test)]
+const TEST_UTTERANCE_IDLE: Duration = Duration::from_millis(100);
+/// Tiny gap that must stay below `TEST_SEGMENT_IDLE` so two writes coalesce into one segment.
+#[cfg(test)]
+const TEST_INTRA_SEGMENT_GAP: Duration = Duration::from_millis(10);
+/// Gap between writes that exceeds `TEST_SEGMENT_IDLE` (30ms) but stays under
+/// `TEST_UTTERANCE_IDLE` (100ms), so the segment closes without splitting the utterance.
+#[cfg(test)]
+const TEST_SEGMENT_BOUNDARY_GAP: Duration = Duration::from_millis(50);
+/// Wait that exceeds `TEST_UTTERANCE_IDLE` (100ms) so the utterance flushes.
+#[cfg(test)]
+const TEST_UTTERANCE_FLUSH_WAIT: Duration = Duration::from_millis(130);
 
 type WavFileWriter = WavWriter<std::io::BufWriter<std::fs::File>>;
 
@@ -766,8 +786,8 @@ mod tests {
     fn test_config(dir: PathBuf) -> VoiceReceiverConfig {
         VoiceReceiverConfig {
             recordings_dir: dir,
-            segment_idle: Duration::from_millis(30),
-            utterance_idle: Duration::from_millis(100),
+            segment_idle: TEST_SEGMENT_IDLE,
+            utterance_idle: TEST_UTTERANCE_IDLE,
             allowed_user_ids: HashSet::new(),
         }
     }
@@ -804,9 +824,9 @@ mod tests {
         receiver.register_speaking(42, 7).await;
 
         receiver.queue_pcm(42, &[1; 960]).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(TEST_INTRA_SEGMENT_GAP).await;
         receiver.queue_pcm(42, &[2; 960]).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(130)).await;
+        tokio::time::sleep(TEST_UTTERANCE_FLUSH_WAIT).await;
 
         let pending = receiver.take_pending().await;
         assert_eq!(pending.len(), 1);
@@ -825,9 +845,9 @@ mod tests {
         receiver.register_speaking(42, 7).await;
 
         receiver.queue_pcm(42, &[1; 480]).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(TEST_SEGMENT_BOUNDARY_GAP).await;
         receiver.queue_pcm(42, &[2; 480]).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(130)).await;
+        tokio::time::sleep(TEST_UTTERANCE_FLUSH_WAIT).await;
 
         let pending = receiver.take_pending().await;
         assert_eq!(pending.len(), 1);
@@ -848,7 +868,7 @@ mod tests {
         receiver.register_speaking(42, 8).await;
 
         assert!(!receiver.queue_pcm(42, &[1; 480]).await.unwrap());
-        tokio::time::sleep(Duration::from_millis(130)).await;
+        tokio::time::sleep(TEST_UTTERANCE_FLUSH_WAIT).await;
 
         assert!(receiver.take_pending().await.is_empty());
     }
@@ -867,7 +887,7 @@ mod tests {
             .queue_pcm_for_control_channel(123, 42, &[1; 480])
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(130)).await;
+        tokio::time::sleep(TEST_UTTERANCE_FLUSH_WAIT).await;
 
         // F1 (#2046): hook 가 등록된 경로에서는 pending Vec 누적이 꺼져 있으므로
         // take_pending 은 비어 있어야 한다 (메모리 누수 방지). hook 콜백으로만
