@@ -338,6 +338,9 @@ src/
 │   │   ├── slot_routes.rs
 │   │   ├── view.rs
 │   │   └── view_admin_routes.rs
+│   ├── automation_candidate_materializer/
+│   │   ├── allowed_path_tests.rs
+│   │   └── iteration_result_tests.rs
 │   ├── cluster/
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs

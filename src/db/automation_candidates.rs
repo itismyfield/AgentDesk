@@ -687,6 +687,41 @@ pub async fn load_card_program_pg(
     Ok(program)
 }
 
+/// Load the card's status and program contract only when the candidate is still executable.
+pub async fn load_active_card_program_pg(
+    pool: &PgPool,
+    card_id: &str,
+) -> Result<Option<(String, serde_json::Value)>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT status, metadata::text AS metadata
+        FROM kanban_cards
+        WHERE id = $1
+          AND pipeline_stage_id = $2
+        "#,
+    )
+    .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load active card metadata: {error}"))?;
+
+    let Some(row) = row else { return Ok(None) };
+    let status: String = row
+        .try_get("status")
+        .map_err(|error| format!("decode card status: {error}"))?;
+    let metadata_raw: Option<String> = row.try_get("metadata").unwrap_or(None);
+    let program = metadata_raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|meta| meta.get("program").cloned());
+
+    let Some(program) = program else {
+        return Ok(None);
+    };
+    Ok(Some((status, program)))
+}
+
 /// Transition the card to a new status.
 pub async fn transition_card_status_pg(
     pool: &PgPool,

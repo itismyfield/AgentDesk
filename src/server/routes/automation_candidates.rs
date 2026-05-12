@@ -50,12 +50,29 @@ fn materializer_error_response(error: MaterializerError) -> (StatusCode, Json<se
                 "code": "DUPLICATE_ITERATION",
             })),
         ),
+        MaterializerError::InactiveLoopState { status } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("automation candidate is not executable in status '{status}'"),
+                "code": "INACTIVE_AUTOMATION_CANDIDATE",
+                "status": status,
+            })),
+        ),
         MaterializerError::IterationOutOfSequence { expected, actual } => (
             StatusCode::CONFLICT,
             Json(json!({
                 "error": format!("iteration out of sequence: expected {expected}, got {actual}"),
                 "code": "ITERATION_OUT_OF_SEQUENCE",
                 "expected": expected,
+                "actual": actual,
+            })),
+        ),
+        MaterializerError::IterationBudgetExceeded { max, actual } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("iteration exceeds budget: max iteration {max}, got {actual}"),
+                "code": "ITERATION_BUDGET_EXCEEDED",
+                "max": max,
                 "actual": actual,
             })),
         ),

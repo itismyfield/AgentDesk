@@ -83,7 +83,7 @@
 | `db::auto_queue::runs` | `src/db/auto_queue/runs.rs` | 291 |  |
 | `db::auto_queue::slots` | `src/db/auto_queue/slots.rs` | 208 |  |
 | `db::auto_queue::test_support` | `src/db/auto_queue/test_support.rs` | 178 |  |
-| `db::automation_candidates` | `src/db/automation_candidates.rs` | 863 |  |
+| `db::automation_candidates` | `src/db/automation_candidates.rs` | 898 |  |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
 | `db::dispatch_semaphores` | `src/db/dispatch_semaphores.rs` | 331 |  |
 | `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1910 | giant-file |
@@ -215,7 +215,7 @@
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 568 |  |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 257 |  |
 | `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 151 |  |
-| `server::routes::automation_candidates` | `src/server/routes/automation_candidates.rs` | 313 |  |
+| `server::routes::automation_candidates` | `src/server/routes/automation_candidates.rs` | 330 |  |
 | `server::routes::cluster` | `src/server/routes/cluster.rs` | 408 |  |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
@@ -329,7 +329,7 @@
 | `services::auto_queue::view` | `src/services/auto_queue/view.rs` | 330 |  |
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 725 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 |  |
-| `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 932 |  |
+| `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 835 |  |
 | `services::claude` | `src/services/claude.rs` | 2667 | giant-file |
 | `services::cluster` | `src/services/cluster/mod.rs` | 13 |  |
 | `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 798 |  |
