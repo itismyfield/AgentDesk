@@ -94,14 +94,18 @@ mod tests {
 
     #[test]
     fn test_read_bot_token_success() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("create TempDir for credential test");
         let _guard = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
 
         let root = temp.path();
         let _ = crate::runtime_layout::ensure_credential_layout(root);
         let path = crate::runtime_layout::credential_token_path(root, "my_bot");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, "  my_secret_token  ").unwrap();
+        fs::create_dir_all(
+            path.parent()
+                .expect("credential_token_path returns a child of credential dir"),
+        )
+        .expect("mkdir credential dir for my_bot");
+        fs::write(&path, "  my_secret_token  ").expect("write my_bot credential file");
 
         assert_eq!(
             read_bot_token("my_bot"),
@@ -111,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_read_bot_token_not_found() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("create TempDir for credential test");
         let _guard = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
 
         let root = temp.path();
@@ -147,7 +151,7 @@ mod tests {
 
     #[test]
     fn read_bot_token_rejects_traversal_without_touching_disk() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("create TempDir for credential test");
         let _guard = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
         // Even if the caller controls AGENTDESK_ROOT, an invalid name must be
         // refused before the path join happens.
@@ -158,14 +162,18 @@ mod tests {
 
     #[test]
     fn test_read_bot_token_empty_or_whitespace() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("create TempDir for credential test");
         let _guard = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
 
         let root = temp.path();
         let _ = crate::runtime_layout::ensure_credential_layout(root);
         let path = crate::runtime_layout::credential_token_path(root, "empty_bot");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, "   \n \t ").unwrap();
+        fs::create_dir_all(
+            path.parent()
+                .expect("credential_token_path returns a child of credential dir"),
+        )
+        .expect("mkdir credential dir for empty_bot");
+        fs::write(&path, "   \n \t ").expect("write empty_bot credential file");
 
         assert_eq!(read_bot_token("empty_bot"), None);
     }
