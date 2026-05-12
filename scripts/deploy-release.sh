@@ -1,12 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ENV (operator-overridable; defaults preserve current behavior):
+#   AGENTDESK_BUNDLE_ID         codesign --identifier value (default: com.itismyfield.agentdesk)
+#   AGENTDESK_DCSERVER_LABEL    release launchd plist Label / file basename.
+#                               Read by the Rust dcserver as well — use this to keep
+#                               launchd label and plist filename in sync across both sides.
+#                               (default: com.agentdesk.release)
+#   AGENTDESK_PLIST_REL         Deprecated alias for AGENTDESK_DCSERVER_LABEL; honored as
+#                               fallback when AGENTDESK_DCSERVER_LABEL is unset.
+#   OBSIDIAN_VAULT_ROOT         Obsidian vault root used for agent prompt staging
+#                               (default: $HOME/ObsidianVault; full source path is
+#                               $OBSIDIAN_VAULT_ROOT/RemoteVault/adk-config/agents)
+#   AGENTDESK_OBSIDIAN_AGENTS_SRC
+#                               Full override for the agent prompt source directory.
+#                               Takes precedence over OBSIDIAN_VAULT_ROOT when set.
+# Additional AGENTDESK_* env vars (codesign, lock, peers, freshness, …) are
+# defined inline below — search for "${AGENTDESK_" to enumerate them.
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
 
 ADK_REL="$HOME/.adk/release"
-PLIST_REL="com.agentdesk.release"
+# The Rust dcserver reads AGENTDESK_DCSERVER_LABEL for the plist Label; honor it first
+# so launchd Label and plist filename never diverge when the operator overrides one side.
+PLIST_REL="${AGENTDESK_DCSERVER_LABEL:-${AGENTDESK_PLIST_REL:-com.agentdesk.release}}"
+BUNDLE_ID="${AGENTDESK_BUNDLE_ID:-com.itismyfield.agentdesk}"
 REL_LAUNCHD_ENV_FILE="$ADK_REL/config/launchd.env"
 REPO="${AGENTDESK_REPO_DIR:-}"
 if [ -z "$REPO" ]; then
@@ -152,9 +172,14 @@ sign_binary_with_fallback() {
             echo "▸ Existing ad-hoc signature detected — re-signing with Developer ID"
         else
             current_authority=$(printf '%s\n' "$signature_details" | grep "^Authority=" | head -1 || true)
-            if printf '%s\n' "$current_authority" | grep -qF "$identity" 2>/dev/null; then
+            current_identifier=$(printf '%s\n' "$signature_details" | grep "^Identifier=" | head -1 || true)
+            identifier_matches=0
+            if [ -n "$current_identifier" ] && printf '%s\n' "$current_identifier" | grep -qF "=$BUNDLE_ID" 2>/dev/null; then
+                identifier_matches=1
+            fi
+            if printf '%s\n' "$current_authority" | grep -qF "$identity" 2>/dev/null && [ "$identifier_matches" = "1" ]; then
                 RESOLVED_RELEASE_SIGNING_MODE="developer-id"
-                echo "✓ Already signed with matching identity — skipping re-sign (TCC preserved)"
+                echo "✓ Already signed with matching identity and identifier — skipping re-sign (TCC preserved)"
                 return 0
             fi
         fi
@@ -162,10 +187,10 @@ sign_binary_with_fallback() {
 
     if [ "$identity" = "-" ]; then
         RESOLVED_RELEASE_SIGNING_MODE="adhoc"
-        codesign -f -s "$identity" --identifier "com.itismyfield.agentdesk" "$target"
+        codesign -f -s "$identity" --identifier "$BUNDLE_ID" "$target"
     else
         RESOLVED_RELEASE_SIGNING_MODE="developer-id"
-        codesign -f -s "$identity" --options runtime --identifier "com.itismyfield.agentdesk" "$target"
+        codesign -f -s "$identity" --options runtime --identifier "$BUNDLE_ID" "$target"
     fi
 
     if ! codesign -v "$target" 2>/dev/null; then
@@ -638,6 +663,11 @@ export AGENTDESK_DEPLOY_ALL_NODES=$(printf '%q' "${AGENTDESK_DEPLOY_ALL_NODES:-0
 export AGENTDESK_DEPLOY_PEERS=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS:-}")
 export AGENTDESK_DEPLOY_PEERS_FILE=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS_FILE:-}")
 export AGENTDESK_DEPLOY_PEER_INVOCATION=$(printf '%q' "${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}")
+export AGENTDESK_BUNDLE_ID=$(printf '%q' "$BUNDLE_ID")
+export AGENTDESK_DCSERVER_LABEL=$(printf '%q' "$PLIST_REL")
+export AGENTDESK_PLIST_REL=$(printf '%q' "${AGENTDESK_PLIST_REL:-}")
+export OBSIDIAN_VAULT_ROOT=$(printf '%q' "${OBSIDIAN_VAULT_ROOT:-}")
+export AGENTDESK_OBSIDIAN_AGENTS_SRC=$(printf '%q' "${AGENTDESK_OBSIDIAN_AGENTS_SRC:-}")
 unset AGENTDESK_DEPLOY_LOCK_HELD
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/deploy-release.sh")${quoted_args}
@@ -770,7 +800,7 @@ cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 # Stage agent prompt files atomically (source-of-truth: Obsidian vault, private).
 # Agent prompts contain operator-specific content and are NOT tracked in this repo.
 # See docs/source-of-truth.md.
-OBSIDIAN_AGENTS_SRC="$HOME/ObsidianVault/RemoteVault/adk-config/agents"
+OBSIDIAN_AGENTS_SRC="${AGENTDESK_OBSIDIAN_AGENTS_SRC:-${OBSIDIAN_VAULT_ROOT:-$HOME/ObsidianVault}/RemoteVault/adk-config/agents}"
 if [ -d "$OBSIDIAN_AGENTS_SRC" ]; then
     echo "▸ Staging agent prompts from Obsidian vault..."
     PROMPTS_STAGED="$ADK_REL/config/agents.new"
