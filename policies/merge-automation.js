@@ -1,4 +1,3 @@
-/* giant-file-exemption: reason=merge-automation-pending-split ticket=#1078 */
 // ── merge-automation.js ──────────────────────────────────────────────────
 // Automates PR merging and worktree cleanup after review passes.
 //
@@ -25,14 +24,64 @@
 
 (function() {
 
+// #1078: extracted helpers — text utilities, git/worktree primitives, gh CLI
+// adapters, and Discord notification dispatchers live under policies/lib/.
+// Top-level rebinding preserves every original call site without touching
+// policy semantics.
+var _mergeTextUtils = require("./lib/merge-text-utils");
+var _mergeConflictResolver = require("./lib/merge-conflict-resolver");
+var _githubPrAdapter = require("./lib/github-pr-adapter");
+var _mergeNotificationDispatcher = require("./lib/merge-notification-dispatcher");
+
+var sanitizeKvKeyPart = _mergeTextUtils.sanitizeKvKeyPart;
+var containsBlockingSeverity = _mergeTextUtils.containsBlockingSeverity;
+var compactWhitespace = _mergeTextUtils.compactWhitespace;
+var summarizeInlineText = _mergeTextUtils.summarizeInlineText;
+var extractIssueNumberFromText = _mergeTextUtils.extractIssueNumberFromText;
+var extractIssueNumberFromUrl = _mergeTextUtils.extractIssueNumberFromUrl;
+var normalizeGitHubUrlOutput = _mergeTextUtils.normalizeGitHubUrlOutput;
+var parsePrNumberFromOutput = _mergeTextUtils.parsePrNumberFromOutput;
+var isCherryPickConflict = _mergeTextUtils.isCherryPickConflict;
+var isPushRejected = _mergeTextUtils.isPushRejected;
+var firstPresent = _mergeTextUtils.firstPresent;
+var parseJsonObject = _mergeTextUtils.parseJsonObject;
+
+var execGitOrThrow = _mergeConflictResolver.execGitOrThrow;
+var execGitMaybe = _mergeConflictResolver.execGitMaybe;
+var parseWorktreeList = _mergeConflictResolver.parseWorktreeList;
+var maybeRestoreMergeStash = _mergeConflictResolver.maybeRestoreMergeStash;
+var maybeResetDirectMergeHead = _mergeConflictResolver.maybeResetDirectMergeHead;
+var retryDirectMergePush = _mergeConflictResolver.retryDirectMergePush;
+var tryFastForwardMain = _mergeConflictResolver.tryFastForwardMain;
+var resolveCanonicalRepoRoot = _mergeConflictResolver.resolveCanonicalRepoRoot;
+var resolveMainWorktree = _mergeConflictResolver.resolveMainWorktree;
+
+var isCodexReviewer = _githubPrAdapter.isCodexReviewer;
+var getPrAuthor = _githubPrAdapter.getPrAuthor;
+var getCurrentPrHeadSha = _githubPrAdapter.getCurrentPrHeadSha;
+var getLatestCiRunForTrackedPr = _githubPrAdapter.getLatestCiRunForTrackedPr;
+var listOpenPrs = _githubPrAdapter.listOpenPrs;
+var fetchCodexReviews = _githubPrAdapter.fetchCodexReviews;
+var fetchCodexReviewThreads = _githubPrAdapter.fetchCodexReviewThreads;
+var ensureGitHubLabel = _githubPrAdapter.ensureGitHubLabel;
+
+var CODEX_NOTIFICATION_TTL_SECONDS = _mergeNotificationDispatcher.CODEX_NOTIFICATION_TTL_SECONDS;
+var codexNotificationDedupKey = _mergeNotificationDispatcher.codexNotificationDedupKey;
+var mergeGuardDedupKey = _mergeNotificationDispatcher.mergeGuardDedupKey;
+var resolveCodexNotificationTarget = _mergeNotificationDispatcher.resolveCodexNotificationTarget;
+var buildCodexReviewMessage = _mergeNotificationDispatcher.buildCodexReviewMessage;
+var notifyCodexReview = _mergeNotificationDispatcher.notifyCodexReview;
+var notifyAgentMainChannel = _mergeNotificationDispatcher.notifyAgentMainChannel;
+
 var prTracking = agentdesk.prTracking;
 
-var CODEX_REVIEWERS = {
-  "chatgpt-codex-connector": true,
-  "chatgpt-codex-connector[bot]": true
-};
 var CODEX_REVIEW_TTL_SECONDS = 14 * 24 * 60 * 60;
-var CODEX_NOTIFICATION_TTL_SECONDS = 6 * 60 * 60;
+
+// notifyMergeFailure needs loadCardContext from this scope; thin wrapper
+// below forwards to the extracted dispatcher.
+function notifyMergeFailure(cardId, prNumber, repo, reason) {
+  return _mergeNotificationDispatcher.notifyMergeFailure(cardId, prNumber, repo, reason, loadCardContext);
+}
 
 var mergeAutomation = {
   name: "merge-automation",
@@ -209,34 +258,6 @@ function resolveTrackedMergeStrategyMode(cardId) {
   return loadTrackedMergeStrategyMode(cardId) || getConfiguredMergeStrategyMode();
 }
 
-function sanitizeKvKeyPart(value) {
-  return String(value || "").replace(/[^A-Za-z0-9._-]/g, "_");
-}
-
-function isCodexReviewer(login) {
-  if (!login) return false;
-  return !!CODEX_REVIEWERS[String(login).toLowerCase()];
-}
-
-function containsBlockingSeverity(text) {
-  return /\bP[12]\b/i.test(text || "");
-}
-
-function compactWhitespace(text) {
-  return String(text || "").replace(/\s+/g, " ").trim();
-}
-
-function summarizeInlineText(text) {
-  var compact = compactWhitespace(text);
-  if (compact.length <= 180) return compact;
-  return compact.substring(0, 177) + "...";
-}
-
-function extractIssueNumberFromText(text) {
-  var match = String(text || "").match(/#(\d+)/);
-  return match ? parseInt(match[1], 10) : null;
-}
-
 function loadCardContext(cardId) {
   var cards = agentdesk.db.query(
     "SELECT id, status, assigned_agent_id, title, github_issue_number, active_thread_id, repo_id " +
@@ -290,25 +311,6 @@ function listTrackedPrRows(whereClause, params) {
 
 function findOpenPrByTrackedBranch(repoId, branch) {
   return prTracking.findOpenPrByBranch(repoId, branch);
-}
-
-function parseJsonObject(raw) {
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) || {};
-  } catch (e) {
-    return {};
-  }
-}
-
-function firstPresent() {
-  for (var i = 0; i < arguments.length; i++) {
-    var value = arguments[i];
-    if (value === null || value === undefined) continue;
-    if (typeof value === "string" && value.trim() === "") continue;
-    return value;
-  }
-  return null;
 }
 
 function extractRepoFromIssueUrl(url) {
@@ -448,154 +450,9 @@ function loadLatestCompletedWorkTarget(cardId) {
   return inspectLatestCompletedWorkTarget(cardId).target;
 }
 
-function execGitOrThrow(args) {
-  var output = agentdesk.exec("git", args);
-  if (typeof output === "string" && output.indexOf("ERROR") === 0) {
-    throw new Error(output.replace(/^ERROR:\s*/, ""));
-  }
-  return typeof output === "string" ? output : "";
-}
-
-function execGitMaybe(args) {
-  var output = agentdesk.exec("git", args);
-  if (typeof output === "string" && output.indexOf("ERROR") === 0) {
-    return null;
-  }
-  return typeof output === "string" ? output : "";
-}
-
-function parseWorktreeList(text) {
-  var entries = [];
-  var current = { path: "", branch: null };
-  var lines = String(text || "").split(/\r?\n/);
-  for (var i = 0; i < lines.length; i++) {
-    var line = lines[i];
-    if (line.indexOf("worktree ") === 0) {
-      if (current.path) entries.push(current);
-      current = { path: line.substring("worktree ".length), branch: null };
-    } else if (line.indexOf("branch ") === 0) {
-      var branch = line.substring("branch ".length);
-      current.branch = branch.indexOf("refs/heads/") === 0
-        ? branch.substring("refs/heads/".length)
-        : branch;
-    } else if (!line.trim() && current.path) {
-      entries.push(current);
-      current = { path: "", branch: null };
-    }
-  }
-  if (current.path) entries.push(current);
-  return entries;
-}
-
-function maybeRestoreMergeStash(mainWorktreePath, stashCreated) {
-  if (!stashCreated) return null;
-  var output = agentdesk.exec("git", ["-C", mainWorktreePath, "stash", "pop"]);
-  if (typeof output === "string" && output.indexOf("ERROR") === 0) {
-    var err = output.replace(/^ERROR:\s*/, "").trim();
-    return err
-      ? "stash created but restore reported conflicts: " + err
-      : "stash created but restore needs manual check";
-  }
-  return "stash restored";
-}
-
-function maybeResetDirectMergeHead(mainWorktreePath, originalHead) {
-  if (!originalHead) return null;
-  var output = agentdesk.exec("git", ["-C", mainWorktreePath, "reset", "--hard", originalHead]);
-  if (typeof output === "string" && output.indexOf("ERROR") === 0) {
-    var err = output.replace(/^ERROR:\s*/, "").trim();
-    return err
-      ? "reset to original main HEAD failed: " + err
-      : "reset to original main HEAD failed";
-  }
-  return "main worktree reset to pre-merge HEAD";
-}
-
-function isCherryPickConflict(errorText) {
-  return /CONFLICT|could not apply|after resolving the conflicts|merge conflict/i.test(String(errorText || ""));
-}
-
-function isPushRejected(errorText) {
-  return /rejected|fetch first|non-fast-forward|failed to push some refs/i.test(String(errorText || ""));
-}
-
-function retryDirectMergePush(mainWorktreePath, mainBranch) {
-  var maxRetries = 3;
-  var attempts = 0;
-  var lastError = null;
-
-  while (attempts <= maxRetries) {
-    var pushOutput = agentdesk.exec("git", ["-C", mainWorktreePath, "push", "origin", mainBranch]);
-    if (!(typeof pushOutput === "string" && pushOutput.indexOf("ERROR") === 0)) {
-      return {
-        ok: true,
-        attempts: attempts + 1
-      };
-    }
-
-    lastError = pushOutput.replace(/^ERROR:\s*/, "");
-    if (!isPushRejected(lastError) || attempts === maxRetries) {
-      return {
-        ok: false,
-        conflict: false,
-        error: lastError,
-        attempts: attempts + 1
-      };
-    }
-
-    attempts += 1;
-
-    var fetchOutput = agentdesk.exec("git", ["-C", mainWorktreePath, "fetch", "origin", mainBranch]);
-    if (typeof fetchOutput === "string" && fetchOutput.indexOf("ERROR") === 0) {
-      return {
-        ok: false,
-        conflict: false,
-        error: fetchOutput.replace(/^ERROR:\s*/, ""),
-        attempts: attempts
-      };
-    }
-
-    var rebaseOutput = agentdesk.exec("git", ["-C", mainWorktreePath, "rebase", "origin/" + mainBranch]);
-    if (typeof rebaseOutput === "string" && rebaseOutput.indexOf("ERROR") === 0) {
-      return {
-        ok: false,
-        conflict: isCherryPickConflict(rebaseOutput),
-        error: rebaseOutput.replace(/^ERROR:\s*/, ""),
-        attempts: attempts,
-        rebase_failed: true
-      };
-    }
-  }
-
-  return {
-    ok: false,
-    conflict: false,
-    error: lastError || "direct merge push failed",
-    attempts: attempts
-  };
-}
-
-function tryFastForwardMain(mainWorktreePath, mainBranch, branch) {
-  var baseCheck = agentdesk.exec("git", [
-    "-C",
-    mainWorktreePath,
-    "merge-base",
-    "--is-ancestor",
-    mainBranch,
-    branch
-  ]);
-  if (typeof baseCheck === "string" && baseCheck.indexOf("ERROR") === 0) {
-    return false;
-  }
-
-  execGitOrThrow(["-C", mainWorktreePath, "merge", "--ff-only", branch]);
-  return true;
-}
-
-function parsePrNumberFromOutput(output) {
-  var match = String(output || "").match(/\/pull\/(\d+)/);
-  return match ? parseInt(match[1], 10) : null;
-}
+// git/worktree helpers extracted to ./lib/merge-conflict-resolver.js (#1078).
+// Text classifiers (isCherryPickConflict / isPushRejected) and PR-number parsing
+// live in ./lib/merge-text-utils.js.
 
 function resolveTerminalMergeCandidate(cardId, tracking, details) {
   var card = loadCardContext(cardId);
@@ -763,31 +620,6 @@ function resolveTerminalMergeCandidate(cardId, tracking, details) {
     );
   }
   return candidate;
-}
-
-function resolveCanonicalRepoRoot(worktreePath) {
-  var commonDir = execGitOrThrow([
-    "-C",
-    worktreePath,
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-common-dir"
-  ]).trim();
-  return commonDir.replace(/\/\.git\/?$/, "");
-}
-
-function resolveMainWorktree(repoDir) {
-  var worktreeOutput = execGitOrThrow(["-C", repoDir, "worktree", "list", "--porcelain"]);
-  var worktrees = parseWorktreeList(worktreeOutput);
-  if (!worktrees.length) {
-    throw new Error("could not locate main worktree");
-  }
-  for (var i = 0; i < worktrees.length; i++) {
-    if (worktrees[i].branch === "main" || worktrees[i].branch === "master") {
-      return worktrees[i];
-    }
-  }
-  return worktrees[0];
 }
 
 function resolveMainBranchForCandidate(candidate) {
@@ -1244,41 +1076,6 @@ function tryDirectMergeOrTrackPr(cardId, tracking) {
   }
 }
 
-function getCurrentPrHeadSha(prNumber, repo) {
-  var json = agentdesk.exec("gh", [
-    "pr", "view", String(prNumber),
-    "--json", "headRefOid",
-    "--jq", ".headRefOid",
-    "--repo", repo
-  ]);
-  if (json && json.indexOf("ERROR") !== 0) return json.trim();
-  return null;
-}
-
-function getLatestCiRunForTrackedPr(repo, branch, headSha) {
-  if (!repo || !branch) return null;
-  var runsJson = agentdesk.exec("gh", [
-    "run", "list",
-    "--branch", branch,
-    "--repo", repo,
-    "--json", "databaseId,status,conclusion,headSha,event",
-    "--limit", "5"
-  ]);
-  if (!runsJson || runsJson.indexOf("ERROR") === 0) return null;
-  try {
-    var runs = JSON.parse(runsJson);
-    if (!runs || runs.length === 0) return null;
-    if (headSha) {
-      for (var i = 0; i < runs.length; i++) {
-        if (runs[i].headSha === headSha) return runs[i];
-      }
-    }
-    return runs[0];
-  } catch (e) {
-    return null;
-  }
-}
-
 function loadRequiredPhaseKeysForCard(cardId) {
   if (!cardId) return [];
   var rows = agentdesk.db.query(
@@ -1382,103 +1179,6 @@ function getReviewTargets(cardId) {
   };
 }
 
-function listOpenPrs(repo) {
-  var prsJson = agentdesk.exec("gh", [
-    "pr", "list",
-    "--state", "open",
-    "--json", "number,headRefName,title,mergeable",
-    "--repo", repo
-  ]);
-  if (!prsJson || prsJson.indexOf("ERROR") === 0) return [];
-  try {
-    return JSON.parse(prsJson);
-  } catch (e) {
-    agentdesk.log.warn("[merge] Failed to parse open PR list for " + repo + ": " + e);
-    return [];
-  }
-}
-
-function fetchCodexReviews(repo, prNumber) {
-  var json = agentdesk.exec("gh", [
-    "api",
-    "repos/" + repo + "/pulls/" + prNumber + "/reviews"
-  ]);
-  if (!json || json.indexOf("ERROR") === 0) return [];
-
-  try {
-    var reviews = JSON.parse(json);
-    var filtered = [];
-    for (var i = 0; i < reviews.length; i++) {
-      var review = reviews[i] || {};
-      var login = review.user && review.user.login ? review.user.login : "";
-      if (!isCodexReviewer(login)) continue;
-      filtered.push({
-        id: String(review.id || ""),
-        state: review.state || "",
-        body: review.body || "",
-        submitted_at: review.submitted_at || "",
-        login: login
-      });
-    }
-    filtered.sort(function(a, b) {
-      if (a.submitted_at < b.submitted_at) return -1;
-      if (a.submitted_at > b.submitted_at) return 1;
-      if (a.id < b.id) return -1;
-      if (a.id > b.id) return 1;
-      return 0;
-    });
-    return filtered;
-  } catch (e) {
-    agentdesk.log.warn("[merge] Failed to parse Codex reviews for PR #" + prNumber + ": " + e);
-    return [];
-  }
-}
-
-function fetchCodexReviewThreads(repo, prNumber) {
-  var parts = String(repo || "").split("/");
-  if (parts.length !== 2) return [];
-
-  var query =
-    "query($owner:String!, $name:String!, $number:Int!) {" +
-    " repository(owner:$owner, name:$name) {" +
-    "  pullRequest(number:$number) {" +
-    "   reviewThreads(first:100) {" +
-    "    nodes {" +
-    "     id isResolved isOutdated " +
-    "     comments(first:100) {" +
-    "      nodes {" +
-    "       id body path line url " +
-    "       author { login } " +
-    "       pullRequestReview { id state author { login } }" +
-    "      }" +
-    "     }" +
-    "    }" +
-    "   }" +
-    "  }" +
-    " }" +
-    "}";
-
-  var json = agentdesk.exec("gh", [
-    "api", "graphql",
-    "-f", "query=" + query,
-    "-f", "owner=" + parts[0],
-    "-f", "name=" + parts[1],
-    "-F", "number=" + String(prNumber)
-  ]);
-  if (!json || json.indexOf("ERROR") === 0) return [];
-
-  try {
-    var parsed = JSON.parse(json);
-    var repository = ((parsed || {}).data || {}).repository || {};
-    var pullRequest = repository.pullRequest || {};
-    var reviewThreads = pullRequest.reviewThreads || {};
-    return reviewThreads.nodes || [];
-  } catch (e) {
-    agentdesk.log.warn("[merge] Failed to parse Codex review threads for PR #" + prNumber + ": " + e);
-    return [];
-  }
-}
-
 function buildCodexReviewSnapshot(repo, prNumber) {
   var reviews = fetchCodexReviews(repo, prNumber);
   if (!reviews.length) return null;
@@ -1553,136 +1253,9 @@ function codexReviewDedupKey(repo, prNumber, reviewId) {
     sanitizeKvKeyPart(reviewId);
 }
 
-function codexNotificationDedupKey(repo, prNumber, reviewId, kind) {
-  return "codex_review_notified:" +
-    sanitizeKvKeyPart(kind) + ":" +
-    sanitizeKvKeyPart(repo) + ":" +
-    sanitizeKvKeyPart(prNumber) + ":" +
-    sanitizeKvKeyPart(reviewId);
-}
-
-function mergeGuardDedupKey(repo, prNumber, reviewId) {
-  return "codex_merge_guard:" +
-    sanitizeKvKeyPart(repo) + ":" +
-    sanitizeKvKeyPart(prNumber) + ":" +
-    sanitizeKvKeyPart(reviewId);
-}
-
 function findCardForPr(repo, pr) {
   var tracking = loadTrackedPrForRepoPr(repo, pr.number);
   return tracking ? loadCardContext(tracking.card_id) : null;
-}
-
-function resolveCodexNotificationTarget(card) {
-  if (!card) return null;
-
-  try {
-    var unified = agentdesk.db.query(
-      "SELECT r.unified_thread_channel_id FROM auto_queue_entries e " +
-      "JOIN auto_queue_runs r ON r.id = e.run_id " +
-      "WHERE e.kanban_card_id = ? AND r.unified_thread_channel_id IS NOT NULL " +
-      "ORDER BY r.created_at DESC LIMIT 1",
-      [card.id]
-    );
-    if (unified.length > 0 && unified[0].unified_thread_channel_id) {
-      return unified[0].unified_thread_channel_id;
-    }
-  } catch (e) {}
-
-  if (card.active_thread_id) return card.active_thread_id;
-
-  if (card.assigned_agent_id) {
-    var sessions = agentdesk.db.query(
-      "SELECT thread_channel_id FROM sessions WHERE agent_id = ? AND thread_channel_id IS NOT NULL " +
-      "ORDER BY last_heartbeat DESC LIMIT 1",
-      [card.assigned_agent_id]
-    );
-    if (sessions.length > 0 && sessions[0].thread_channel_id) {
-      return sessions[0].thread_channel_id;
-    }
-
-    var primary = agentdesk.agents.resolvePrimaryChannel(card.assigned_agent_id);
-    if (primary) return primary;
-  }
-
-  return null;
-}
-
-function buildCodexReviewMessage(pr, snapshot, followUpIssue, mergeGuarded) {
-  var lines = [];
-  if (snapshot.hasBlocking) {
-    lines.push("⚠️ PR #" + pr.number + " Codex 리뷰: unresolved P1/P2 " + snapshot.blockingComments.length + "건");
-    if (snapshot.blockingFiles.length > 0) {
-      lines.push("파일: " + snapshot.blockingFiles.join(", "));
-    }
-    for (var i = 0; i < snapshot.blockingComments.length && i < 3; i++) {
-      var c = snapshot.blockingComments[i];
-      lines.push("- " + c.path + ":" + c.line + " " + c.body);
-    }
-    if (snapshot.blockingComments.length > 3) {
-      lines.push("- 외 " + (snapshot.blockingComments.length - 3) + "건");
-    }
-    if (followUpIssue) {
-      var ref = followUpIssue.number ? "#" + followUpIssue.number : "생성 완료";
-      lines.push("follow-up 이슈를 생성했습니다: " + ref);
-      if (followUpIssue.url) {
-        lines.push(followUpIssue.url);
-      }
-    } else if (mergeGuarded) {
-      lines.push("merge를 차단했습니다.");
-    }
-  } else {
-    lines.push("✅ PR #" + pr.number + " Codex 리뷰 통과");
-    lines.push("blocking inline comment 없음");
-  }
-  return lines.join("\n");
-}
-
-function notifyCodexReview(card, pr, snapshot, kind, followUpIssue, mergeGuarded) {
-  var target = resolveCodexNotificationTarget(card);
-  if (!target) return;
-
-  var dedupKey = codexNotificationDedupKey(pr.repo || "", pr.number, snapshot.triggerReviewId || snapshot.latestReviewId, kind);
-  if (agentdesk.kv.get(dedupKey)) return;
-
-  agentdesk.message.queue(
-    target,
-    buildCodexReviewMessage(pr, snapshot, followUpIssue, mergeGuarded),
-    "announce",
-    "merge-automation"
-  );
-  agentdesk.kv.set(dedupKey, "true", CODEX_NOTIFICATION_TTL_SECONDS);
-}
-
-function ensureGitHubLabel(repo, name, color, description) {
-  if (!repo || !name) return false;
-  var output = agentdesk.exec("gh", [
-    "label", "create", name,
-    "--repo", repo,
-    "--force",
-    "--color", color || "B60205",
-    "--description", description || name
-  ]);
-  if (output && output.indexOf("ERROR") === 0) {
-    agentdesk.log.warn("[merge] Failed to ensure label '" + name + "' in " + repo + ": " + output);
-    return false;
-  }
-  return true;
-}
-
-function normalizeGitHubUrlOutput(text) {
-  var lines = String(text || "").split(/\r?\n/);
-  for (var i = 0; i < lines.length; i++) {
-    var trimmed = lines[i].trim();
-    if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  }
-  var compact = compactWhitespace(text);
-  return /^https?:\/\//i.test(compact) ? compact : "";
-}
-
-function extractIssueNumberFromUrl(url) {
-  var match = String(url || "").match(/\/issues\/(\d+)(?:[/?#]|$)/);
-  return match ? parseInt(match[1], 10) : null;
 }
 
 function buildCodexFollowUpTitle(card, pr) {
@@ -2032,57 +1605,9 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
   return true;
 }
 
-function notifyMergeFailure(cardId, prNumber, repo, reason) {
-  if (!cardId) return;
-
-  var dedupKey = "merge_failure_notified:" + cardId + ":" + prNumber;
-  if (agentdesk.kv.get(dedupKey)) return;
-
-  var card = loadCardContext(cardId);
-  if (!card) return;
-
-  var target = card.active_thread_id;
-  if (!target && card.assigned_agent_id) {
-    target = agentdesk.agents.resolvePrimaryChannel(card.assigned_agent_id);
-  }
-  if (!target) {
-    var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
-    if (pmdChannel) {
-      target = "channel:" + pmdChannel;
-    }
-  }
-  if (!target) return;
-
-  var titleRef = card.github_issue_number
-    ? ("#" + card.github_issue_number + " " + (card.title || card.id))
-    : (card.title || card.id);
-  agentdesk.message.queue(
-    target,
-    "⚠️ " + titleRef + "\n" +
-      "PR #" + prNumber + " auto-merge failed in `" + repo + "`.\n" +
-      "Reason: " + summarizeInlineText(reason) + "\n" +
-      "수동 확인이 필요합니다.",
-    "announce",
-    "merge-automation"
-  );
-  agentdesk.kv.set(dedupKey, "true", 7200);
-}
-
-/**
- * Get PR author login via gh CLI.
- */
-function getPrAuthor(prNumber, repo) {
-  var json = agentdesk.exec("gh", [
-    "pr", "view", String(prNumber),
-    "--json", "author",
-    "--jq", ".author.login",
-    "--repo", repo
-  ]);
-  if (json && json.indexOf("ERROR") !== 0) {
-    return json.trim();
-  }
-  return "";
-}
+// notifyMergeFailure / getPrAuthor extracted to ./lib/* (#1078).
+// notifyMergeFailure thin wrapper defined at module head so it can capture
+// the local loadCardContext closure.
 
 /**
  * Check if author is in the allowed list for auto-merge.
@@ -2447,25 +1972,7 @@ function findCardForAgent(agentId) {
   return cards.length > 0 ? cards[0] : null;
 }
 
-/**
- * Fallback: notify agent's main Discord channel about conflicts.
- */
-function notifyAgentMainChannel(agentId, prNum, title) {
-  var kvKey = "conflict_notified:" + prNum;
-  if (agentdesk.kv.get(kvKey)) return;
-
-  // #304: resolve primary channel via centralized resolver
-  var mainCh = agentdesk.agents.resolvePrimaryChannel(agentId);
-  if (mainCh) {
-    agentdesk.message.queue(
-      mainCh,
-      "⚠️ PR #" + prNum + " (" + title + ") has merge conflicts with main. Please rebase.",
-      "announce",
-      "merge-automation"
-    );
-  }
-  agentdesk.kv.set(kvKey, "true", 7200); // 2h TTL
-}
+// notifyAgentMainChannel extracted to ./lib/merge-notification-dispatcher.js (#1078).
 
 agentdesk.mergeAutomation = agentdesk.mergeAutomation || {};
 agentdesk.mergeAutomation.diagnoseTerminalMergeCandidate = function(cardId) {
