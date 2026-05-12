@@ -1,8 +1,9 @@
 use super::{TtsBackend, TtsSynthesisKind};
 use crate::voice::config::VoiceConfig;
+use crate::voice::utils::expand_tilde;
 use anyhow::{Context, Result, bail};
 use futures::future::BoxFuture;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
@@ -33,19 +34,6 @@ impl EdgeTtsConfig {
             timeout: DEFAULT_EDGE_TTS_TIMEOUT,
         }
     }
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    path.to_path_buf()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -13,6 +13,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use super::VoiceConfig;
+use super::utils::expand_tilde;
 
 const WAV_CHANNELS: u16 = 2;
 const WAV_SAMPLE_RATE: u32 = 48_000;
@@ -742,19 +743,6 @@ fn wav_spec() -> WavSpec {
         bits_per_sample: WAV_BITS_PER_SAMPLE,
         sample_format: SampleFormat::Int,
     }
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    path.to_path_buf()
 }
 
 #[cfg(test)]
