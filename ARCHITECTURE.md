@@ -223,6 +223,17 @@ src/
 │   │   │   ├── tests.rs
 │   │   │   ├── tuning_aggregate.rs
 │   │   │   └── verdict_route.rs
+│   │   ├── routes_tests/
+│   │   │   ├── agents_tests.rs
+│   │   │   ├── api_docs_tests.rs
+│   │   │   ├── auto_queue_tests.rs
+│   │   │   ├── common.rs
+│   │   │   ├── dispatch_tests.rs
+│   │   │   ├── github_tests.rs
+│   │   │   ├── health_tests.rs
+│   │   │   ├── infra_tests.rs
+│   │   │   ├── kanban_tests.rs
+│   │   │   └── mod.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
@@ -261,7 +272,6 @@ src/
 │   │   ├── receipt.rs
 │   │   ├── resume.rs
 │   │   ├── reviews.rs
-│   │   ├── routes_tests.rs
 │   │   ├── routines.rs
 │   │   ├── session_activity.rs
 │   │   ├── settings.rs
@@ -540,13 +550,24 @@ src/
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs
 │   ├── observability/
+│   │   ├── emit.rs
 │   │   ├── events.rs
+│   │   ├── helpers.rs
 │   │   ├── metrics.rs
 │   │   ├── mod.rs
+│   │   ├── pg_io.rs
+│   │   ├── quality_alert.rs
+│   │   ├── queries.rs
 │   │   ├── recovery_audit.rs
+│   │   ├── retention.rs
 │   │   ├── session_inventory.rs
 │   │   ├── turn_lifecycle.rs
-│   │   └── watcher_latency.rs
+│   │   ├── watcher_latency.rs
+│   │   └── worker.rs
+│   ├── onboarding/
+│   │   ├── channel.rs
+│   │   ├── mod.rs
+│   │   └── provider.rs
 │   ├── platform/
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
@@ -600,7 +621,6 @@ src/
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── mod.rs
-│   ├── onboarding.rs
 │   ├── opencode.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs
@@ -655,7 +675,8 @@ src/
 │   ├── prompt.rs
 │   ├── receiver.rs
 │   ├── sanitizer.rs
-│   └── stt.rs
+│   ├── stt.rs
+│   └── utils.rs
 ├── bootstrap.rs
 ├── config.rs
 ├── credential.rs

@@ -6,7 +6,7 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-05-05 (against #1742 deployment-blocking migration checksum hotfix and current maintainability audit baseline).
+> Last refreshed: 2026-05-12 (against PR #2064 rebase onto current main and current maintainability audit baseline).
 
 ## Read This First
 
@@ -181,6 +181,8 @@
   - `src/server/routes/{agents,agents_crud,agents_setup,analytics,v1,
     settings,resume,pipeline,reviews,dispatches/thread_reuse,
     dispatches/crud}.rs` (all 1000+ lines).
+  - `src/server/routes/routes_tests/common.rs` (1418 lines; split test helper
+    surface, bugfix-only unless further decomposed).
 - active_callsite_coverage: legacy_db helper coverage tracked separately —
   see `known-legacy.md` row `legacy_db_helper`.
 - invariants:
@@ -308,7 +310,8 @@ The remaining giant-file modules under `src/services/` not covered above:
   cancel/force-pause hardening — F5/F7/F13/F15 enlarged transition + safe
   jsonb cast paths) is also giant-file territory; split before further
   non-bugfix growth.
-- `src/services/onboarding.rs` (5279), `src/services/dispatched_sessions.rs`
+- `src/services/onboarding.rs` (5279), `src/services/onboarding/mod.rs`
+  (4943), `src/services/dispatched_sessions.rs`
   (2954), and `src/services/settings.rs` (1015) — service-layer route support
   surfaces split out of the large dashboard route modules.
 - `src/services/dispatches/outbox_route.rs` (1074) — dispatch outbox route
@@ -319,7 +322,8 @@ The remaining giant-file modules under `src/services/` not covered above:
   `src/services/opencode.rs` (2133), `src/services/provider.rs` (2177) —
   provider adapters.
 - `src/services/memory/memento.rs` (2479).
-- `src/services/observability/mod.rs` (3647).
+- `src/services/observability/mod.rs` (1158) and
+  `src/services/observability/pg_io.rs` (1312).
 - `src/services/dispatched_sessions.rs` (2954) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
