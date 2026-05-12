@@ -188,6 +188,8 @@ pub async fn persist_iteration_outcome_pg(
         .await
         .map_err(|error| format!("begin iteration transaction: {error}"))?;
 
+    validate_active_candidate_iteration_in_tx(&mut tx, &params.card_id, params.iteration).await?;
+
     let row = sqlx::query(
         r#"
         INSERT INTO automation_candidate_iterations (
@@ -258,6 +260,35 @@ pub async fn persist_iteration_outcome_pg(
         record,
         child_card_id,
     })
+}
+
+async fn validate_active_candidate_iteration_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    card_id: &str,
+    iteration: i32,
+) -> Result<serde_json::Value, String> {
+    let Some((status, program)) = load_card_program_for_update_in_tx(tx, card_id).await? else {
+        return ensure_one_card_row_affected(0, "lock automation candidate card", card_id)
+            .map(|_| serde_json::Value::Null);
+    };
+    if !is_active_iteration_status(&status) {
+        return Err(format!(
+            "automation candidate card {card_id} is not active for iteration writes: {status}"
+        ));
+    }
+    let expected = program_current_iteration(&program).saturating_add(1);
+    if iteration != expected {
+        return Err(format!(
+            "automation candidate card {card_id} iteration out of sequence: expected {expected}, got {iteration}"
+        ));
+    }
+    let max = program_iteration_budget(&program);
+    if iteration > max {
+        return Err(format!(
+            "automation candidate card {card_id} iteration budget exceeded: max {max}, got {iteration}"
+        ));
+    }
+    Ok(program)
 }
 
 pub async fn list_iterations_for_card_pg(
@@ -720,6 +751,62 @@ pub async fn load_active_card_program_pg(
         return Ok(None);
     };
     Ok(Some((status, program)))
+}
+
+pub(crate) async fn load_card_program_for_update_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    card_id: &str,
+) -> Result<Option<(String, serde_json::Value)>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT status, metadata::text AS metadata
+        FROM kanban_cards
+        WHERE id = $1
+          AND pipeline_stage_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(card_id)
+    .bind(PIPELINE_STAGE_ID)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("lock active card metadata: {error}"))?;
+
+    let Some(row) = row else { return Ok(None) };
+    let status: String = row
+        .try_get("status")
+        .map_err(|error| format!("decode locked card status: {error}"))?;
+    let metadata_raw: Option<String> = row.try_get("metadata").unwrap_or(None);
+    let program = metadata_raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|meta| meta.get("program").cloned());
+
+    let Some(program) = program else {
+        return Ok(None);
+    };
+    Ok(Some((status, program)))
+}
+
+fn is_active_iteration_status(status: &str) -> bool {
+    matches!(status, "ready" | "requested" | "in_progress")
+}
+
+fn program_current_iteration(program: &serde_json::Value) -> i32 {
+    program
+        .get("current_iteration")
+        .and_then(|v| v.as_i64())
+        .filter(|value| *value >= 0)
+        .and_then(|value| i32::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+fn program_iteration_budget(program: &serde_json::Value) -> i32 {
+    program
+        .get("iteration_budget")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(MAX_ITERATIONS as i64)
+        .clamp(1, MAX_ITERATIONS as i64) as i32
 }
 
 /// Transition the card to a new status.

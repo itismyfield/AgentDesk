@@ -6,7 +6,8 @@ use crate::db::automation_candidates::{
     InsertIterationParams, IterationOutcomeAction, IterationRecord, MaterializeCandidateCardParams,
     MaterializedCandidateCard, MetricDirection, approve_candidate_card_pg, compute_verdict,
     is_final_iteration, list_iterations_for_card_pg, load_active_card_program_pg,
-    load_card_program_pg, materialize_candidate_card_pg, persist_iteration_outcome_pg,
+    load_card_program_for_update_in_tx, load_card_program_pg, materialize_candidate_card_pg,
+    persist_iteration_outcome_pg,
 };
 use crate::services::automation_candidate_contract::{
     AutomationCandidateDiscriminator, MARKER_METADATA_KEY, PIPELINE_STAGE_ID,
@@ -398,7 +399,11 @@ impl AutomationCandidateMaterializer {
             ));
         }
 
-        let (card_status, program) = load_active_card_program_pg(&self.pool, card_id)
+        let mut tx = self.pool.begin().await.map_err(|error| {
+            MaterializerError::Database(format!("begin worktree guard: {error}"))
+        })?;
+
+        let (card_status, program) = load_card_program_for_update_in_tx(&mut tx, card_id)
             .await
             .map_err(MaterializerError::Database)?
             .ok_or_else(|| {
@@ -428,6 +433,10 @@ impl AutomationCandidateMaterializer {
 
         let info = ensure_automation_worktree(&repo_dir, card_id, iteration)
             .map_err(MaterializerError::WorktreeError)?;
+
+        tx.commit().await.map_err(|error| {
+            MaterializerError::Database(format!("commit worktree guard: {error}"))
+        })?;
 
         Ok(PrepareWorktreeOutput {
             path: info.path,

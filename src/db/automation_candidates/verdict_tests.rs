@@ -226,3 +226,58 @@ async fn persist_iteration_outcome_pg_rolls_back_when_card_update_matches_zero_r
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[tokio::test]
+async fn persist_iteration_outcome_pg_rolls_back_when_card_is_inactive() {
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let card_id = "inactive-automation-candidate";
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+             id, title, status, metadata, pipeline_stage_id, created_at, updated_at
+         )
+         VALUES ($1, 'inactive candidate', 'review', $2::jsonb, $3, NOW(), NOW())",
+    )
+    .bind(card_id)
+    .bind(serde_json::json!({"program": {"current_iteration": 0}}).to_string())
+    .bind(crate::services::automation_candidate_contract::PIPELINE_STAGE_ID)
+    .execute(&pool)
+    .await
+    .expect("seed inactive automation candidate");
+
+    let err = persist_iteration_outcome_pg(
+        &pool,
+        InsertIterationParams {
+            card_id: card_id.to_string(),
+            iteration: 1,
+            branch: "automation-candidate/inactive/1".to_string(),
+            commit_hash: None,
+            metric_before: Some(10.0),
+            metric_after: Some(9.0),
+            is_simplification: false,
+            status: "keep".to_string(),
+            description: Some("should rollback".to_string()),
+            allowed_write_paths_used: vec!["src/example.rs".to_string()],
+            run_seconds: Some(1),
+            crash_trace: None,
+        },
+        IterationOutcomeAction::KeepContinue,
+    )
+    .await
+    .expect_err("inactive automation candidate must reject iteration writes");
+
+    assert!(err.contains("not active"), "unexpected error: {err}");
+
+    let persisted_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM automation_candidate_iterations WHERE card_id = $1",
+    )
+    .bind(card_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count candidate iterations");
+    assert_eq!(persisted_count, 0, "iteration insert must roll back");
+
+    pool.close().await;
+    pg_db.drop().await;
+}
