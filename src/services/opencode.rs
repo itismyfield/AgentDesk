@@ -586,6 +586,13 @@ fn abort_session(base_url: &str, auth: &str, session_id: &str) {
         .call();
 }
 
+fn send_sse_done(sender: &Sender<StreamMessage>, session_id: &str, result: String) {
+    let _ = sender.send(StreamMessage::Done {
+        result,
+        session_id: Some(session_id.to_string()),
+    });
+}
+
 // ---------------------------------------------------------------------------
 // SSE stream consumption
 // ---------------------------------------------------------------------------
@@ -600,7 +607,7 @@ fn consume_sse(
 ) -> Result<(), String> {
     let mut state = SseMessageState::default();
     let mut current_data = String::new();
-    let mut idle_seen = false;
+    let mut terminal_seen = false;
     let mut last_event = Instant::now();
 
     for line_result in reader.lines() {
@@ -620,7 +627,7 @@ fn consume_sse(
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
-                if idle_seen {
+                if terminal_seen {
                     break;
                 }
                 return Err(format!("OpenCode SSE stream read error: {e}"));
@@ -646,12 +653,13 @@ fn consume_sse(
 
             if let Some(should_stop) = process_sse_event(&data, session_id, sender, &mut state) {
                 if should_stop {
-                    idle_seen = true;
+                    terminal_seen = true;
                     if !state.terminal_error {
-                        let _ = sender.send(StreamMessage::Done {
-                            result: state.accumulated_text.trim().to_string(),
-                            session_id: Some(session_id.to_string()),
-                        });
+                        send_sse_done(
+                            sender,
+                            session_id,
+                            state.accumulated_text.trim().to_string(),
+                        );
                     }
                     break;
                 }
@@ -659,7 +667,27 @@ fn consume_sse(
         }
     }
 
-    if !idle_seen {
+    if !terminal_seen && !current_data.is_empty() {
+        let should_stop =
+            process_sse_event(&current_data, session_id, sender, &mut state).unwrap_or(false);
+        if should_stop {
+            terminal_seen = true;
+            if !state.terminal_error {
+                send_sse_done(
+                    sender,
+                    session_id,
+                    state.accumulated_text.trim().to_string(),
+                );
+            }
+        }
+    }
+
+    if !terminal_seen {
+        let result = state.accumulated_text.trim().to_string();
+        if !result.is_empty() {
+            send_sse_done(sender, session_id, result);
+            return Ok(());
+        }
         return Err("OpenCode stream ended without a terminal event".to_string());
     }
 
@@ -2061,7 +2089,7 @@ mod tests {
     }
 
     #[test]
-    fn test_text_without_terminal_event_fails() {
+    fn test_text_without_terminal_event_completes_on_eof() {
         let data =
             br#"data: {"type":"part","properties":{"sessionID":"s1","part":{"type":"text","text":"partial"}}}
 
@@ -2075,17 +2103,56 @@ mod tests {
         drop(tx);
         let msgs = rx.try_iter().collect::<Vec<_>>();
 
-        assert_eq!(
-            result.unwrap_err(),
-            "OpenCode stream ended without a terminal event"
-        );
+        assert!(result.is_ok());
         assert!(
             msgs.iter()
                 .any(|m| matches!(m, StreamMessage::Text { content } if content == "partial"))
         );
         assert!(
-            !msgs.iter().any(|m| matches!(m, StreamMessage::Done { .. })),
-            "partial OpenCode text without a terminal event must not emit Done"
+            msgs.iter().any(
+                |m| matches!(m, StreamMessage::Done { result, session_id } if result == "partial" && session_id.as_deref() == Some("s1"))
+            ),
+            "visible OpenCode text followed by EOF should be treated as a completed turn"
+        );
+    }
+
+    #[test]
+    fn test_terminal_event_without_trailing_blank_line_completes() {
+        let data = br#"data: {"type":"session.idle","properties":{"sessionID":"s1"}}"#.to_vec();
+        let reader: BufReader<Box<dyn std::io::Read + Send>> =
+            BufReader::new(Box::new(std::io::Cursor::new(data)));
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+
+        let result = consume_sse(reader, "s1", &tx, None, "http://127.0.0.1:9", "");
+        drop(tx);
+        let msgs = rx.try_iter().collect::<Vec<_>>();
+
+        assert!(result.is_ok());
+        assert!(
+            msgs.iter().any(
+                |m| matches!(m, StreamMessage::Done { result, session_id } if result.is_empty() && session_id.as_deref() == Some("s1"))
+            ),
+            "final SSE data frame should be processed even without a trailing blank line"
+        );
+    }
+
+    #[test]
+    fn test_empty_stream_without_terminal_event_still_fails() {
+        let reader: BufReader<Box<dyn std::io::Read + Send>> =
+            BufReader::new(Box::new(std::io::Cursor::new(Vec::<u8>::new())));
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+
+        let result = consume_sse(reader, "s1", &tx, None, "http://127.0.0.1:9", "");
+        drop(tx);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "OpenCode stream ended without a terminal event"
+        );
+        assert!(
+            rx.try_iter()
+                .all(|m| !matches!(m, StreamMessage::Done { .. })),
+            "empty OpenCode streams must not be converted into successful turns"
         );
     }
 
