@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ENV (operator-overridable; defaults preserve current behavior):
+#   AGENTDESK_BUNDLE_ID         codesign --identifier value (default: com.itismyfield.agentdesk)
+#   AGENTDESK_PLIST_REL         release launchd plist label (default: com.agentdesk.release)
+#   OBSIDIAN_VAULT_ROOT         Obsidian vault root used for agent prompt staging
+#                               (default: $HOME/ObsidianVault; full source path is
+#                               $OBSIDIAN_VAULT_ROOT/RemoteVault/adk-config/agents)
+#   AGENTDESK_OBSIDIAN_AGENTS_SRC
+#                               Full override for the agent prompt source directory.
+#                               Takes precedence over OBSIDIAN_VAULT_ROOT when set.
+# Additional AGENTDESK_* env vars (codesign, lock, peers, freshness, …) are
+# defined inline below — search for "${AGENTDESK_" to enumerate them.
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
 
 ADK_REL="$HOME/.adk/release"
-PLIST_REL="com.agentdesk.release"
+PLIST_REL="${AGENTDESK_PLIST_REL:-com.agentdesk.release}"
+BUNDLE_ID="${AGENTDESK_BUNDLE_ID:-com.itismyfield.agentdesk}"
 REL_LAUNCHD_ENV_FILE="$ADK_REL/config/launchd.env"
 REPO="${AGENTDESK_REPO_DIR:-}"
 if [ -z "$REPO" ]; then
@@ -162,10 +175,10 @@ sign_binary_with_fallback() {
 
     if [ "$identity" = "-" ]; then
         RESOLVED_RELEASE_SIGNING_MODE="adhoc"
-        codesign -f -s "$identity" --identifier "com.itismyfield.agentdesk" "$target"
+        codesign -f -s "$identity" --identifier "$BUNDLE_ID" "$target"
     else
         RESOLVED_RELEASE_SIGNING_MODE="developer-id"
-        codesign -f -s "$identity" --options runtime --identifier "com.itismyfield.agentdesk" "$target"
+        codesign -f -s "$identity" --options runtime --identifier "$BUNDLE_ID" "$target"
     fi
 
     if ! codesign -v "$target" 2>/dev/null; then
@@ -770,7 +783,7 @@ cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 # Stage agent prompt files atomically (source-of-truth: Obsidian vault, private).
 # Agent prompts contain operator-specific content and are NOT tracked in this repo.
 # See docs/source-of-truth.md.
-OBSIDIAN_AGENTS_SRC="$HOME/ObsidianVault/RemoteVault/adk-config/agents"
+OBSIDIAN_AGENTS_SRC="${AGENTDESK_OBSIDIAN_AGENTS_SRC:-${OBSIDIAN_VAULT_ROOT:-$HOME/ObsidianVault}/RemoteVault/adk-config/agents}"
 if [ -d "$OBSIDIAN_AGENTS_SRC" ]; then
     echo "▸ Staging agent prompts from Obsidian vault..."
     PROMPTS_STAGED="$ADK_REL/config/agents.new"
