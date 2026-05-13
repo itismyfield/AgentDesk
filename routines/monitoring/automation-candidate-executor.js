@@ -1,4 +1,4 @@
-// Automation Executor v2
+// Automation Candidate Executor
 //
 // Consumes kanban_ready observations (pipeline_stage_id='automation-candidate', status='ready')
 // and drives an autoresearch-style iteration loop per card:
@@ -133,7 +133,7 @@ function buildIterationPrompt(cardId, card, iteration, previousIterations) {
       ).join("\n");
 
   return [
-    "## 자동화 후보 반복 실행 요청 (Automation Executor v2)",
+    "## 자동화 후보 반복 실행 요청 (Automation Candidate Executor)",
     "",
     `**카드 ID**: \`${cardId}\``,
     `**제목**: ${card.title || "(no title)"}`,
@@ -192,7 +192,7 @@ function buildIterationPrompt(cardId, card, iteration, previousIterations) {
 // --- Main tick ---
 
 agentdesk.routines.register({
-  name: "Automation Executor v2",
+  name: "Automation Candidate Executor",
 
   tick(ctx) {
     const nowStr = nowIso(ctx.now);

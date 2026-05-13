@@ -24,6 +24,7 @@ require("./timeouts/orphan-dispatch")(timeouts, helpers);
 require("./timeouts/long-turn-monitor")(timeouts, helpers);
 require("./timeouts/workspace-branch-guard")(timeouts, helpers);
 require("./timeouts/idle-kill")(timeouts, helpers);
+require("./timeouts/idle-recap")(timeouts, helpers);
 
 // ── Tiered tick handlers (#127) ──────────────────────────────────
 // Sections are grouped by criticality and cadence.
@@ -90,6 +91,8 @@ timeouts.onTick5min = function(ev) {
   agentdesk.log.debug("[tick5min][M] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_O(); } catch(e) { agentdesk.log.warn("[tick5min] O error: " + e); }
   agentdesk.log.debug("[tick5min][O] " + (Date.now() - t) + "ms");
+  t = Date.now(); try { timeouts._section_R_idle_recap(); } catch(e) { agentdesk.log.warn("[tick5min] R_idle_recap error: " + e); }
+  agentdesk.log.debug("[tick5min][R_idle_recap] " + (Date.now() - t) + "ms");
   agentdesk.log.debug("[tick5min] total " + (Date.now() - start) + "ms");
 };
 

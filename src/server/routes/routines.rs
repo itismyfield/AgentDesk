@@ -257,7 +257,7 @@ pub async fn attach_routine(
         .await
         .map_err(store_error)?;
     let discord_log = routine_discord_logger(&state)?
-        .log_routine_event(&routine, RoutineLifecycleEvent::Attached)
+        .log_routine_event_with_store(&store, &routine, RoutineLifecycleEvent::Attached)
         .await;
     Ok((
         StatusCode::CREATED,

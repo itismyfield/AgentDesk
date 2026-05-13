@@ -9,12 +9,13 @@ const MAX_TOPICS_PER_TICK = 3;               // one agent prompt covers up to 3 
 const CHECKPOINT_VERSION = 1;
 
 const QUERY_TOPICS = [
-  { topic: "routine-failures",       query: "반복되는 루틴 실행 실패나 에러 패턴" },
-  { topic: "agent-errors",           query: "에이전트 반복 오류, 같은 실수 반복" },
-  { topic: "user-repeated-requests", query: "사용자가 반복적으로 요청하는 작업 패턴" },
-  { topic: "kanban-blockers",        query: "칸반 카드 정체나 반복 차단 패턴" },
-  { topic: "dispatch-failures",      query: "디스패치 반복 실패나 재시도 패턴" },
-  { topic: "automation-opportunities", query: "자동화 가치가 높은 반복 수동 작업" },
+  { topic: "routine-failures", category: "routine-candidate", query: "반복되는 루틴 실행 실패나 에러 패턴" },
+  { topic: "agent-errors", category: "session-pattern", query: "에이전트 반복 오류, 같은 실수 반복" },
+  { topic: "user-repeated-requests", category: "routine-candidate", query: "사용자가 반복적으로 요청하는 작업 패턴" },
+  { topic: "kanban-blockers", category: "kanban-flow", query: "칸반 카드 정체나 반복 차단 패턴" },
+  { topic: "dispatch-failures", category: "dispatch-retry", query: "디스패치 반복 실패나 재시도 패턴" },
+  { topic: "memory-hygiene", category: "memento-hygiene", query: "Memento 기억 품질, 중복, 잘못된 scope, 오래된 메모리 패턴" },
+  { topic: "automation-opportunities", category: "routine-candidate", query: "자동화 가치가 높은 반복 수동 작업" },
 ];
 
 function emptyCheckpoint() {
@@ -66,15 +67,16 @@ agentdesk.routines.register({
       };
     }
 
-    const topicLines = dueTopics.map(({ topic, query }) => {
+    const topicLines = dueTopics.map(({ topic, category, query }) => {
       const key = `routine_observation:memento_digest:${topic}`;
       return [
         `### 주제: ${topic}`,
+        `- 추천 카테고리: \`${category}\``,
         `- Memento recall 쿼리: "${query}"`,
         `- kv_meta 키: \`${key}\``,
         `- TTL: 6시간 (21600초)`,
         `- 값(JSON 형식):`,
-        `  \`{"topic":"${topic}","count":<패턴_발생횟수>,"category":"routine-candidate","source":"memento_digest","signature":"routine-candidate:${topic}","latest_examples":["<최근예시1>","<최근예시2>"]}\``,
+        `  \`{"topic":"${topic}","count":<패턴_발생횟수>,"category":"${category}","source":"memento_digest","signature":"${category}:${topic}","latest_examples":["<최근예시1>","<최근예시2>"]}\``,
         `- 패턴이 없거나 count < 2면 kv_meta를 쓰지 않습니다.`,
       ].join("\n");
     }).join("\n\n");
