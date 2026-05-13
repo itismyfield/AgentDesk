@@ -15,15 +15,29 @@
 //!   4. The next user message in that channel deletes the card — handled
 //!      by `message_handler::clear_idle_recap_for_channel`.
 
-use chrono::{DateTime, Utc};
-use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
-use sqlx::PgPool;
+use std::time::Duration;
 
-use crate::services::provider::ProviderKind;
+use chrono::{DateTime, Utc};
+use poise::serenity_prelude::{
+    self as serenity, ButtonStyle, ChannelId, CreateActionRow, CreateButton, MessageId,
+};
+use sqlx::PgPool;
+use tokio::task;
+
+use crate::services::provider::{CancelToken, ProviderKind};
 
 const CLAUDE_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const CODEX_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const FALLBACK_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
+
+const TMUX_SCROLLBACK_LINES: i64 = 500;
+const OPENCODE_SUMMARY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Custom-id prefix for the `[새 세션 시작]` button on a recap card. The
+/// numeric suffix is the Discord message id of the card; the interaction
+/// handler resolves it back to a `session_key` via the
+/// `sessions.idle_recap_message_id` index.
+pub(crate) const IDLE_RECAP_CLEAR_BUTTON_PREFIX: &str = "idle_recap:clear:";
 
 /// Snapshot of the data the recap renderer needs in a single SQL round-trip.
 ///
@@ -123,11 +137,23 @@ pub(crate) fn resolve_post_channel(snapshot: &RecapSnapshot) -> Option<u64> {
     candidate.trim().parse::<u64>().ok()
 }
 
-/// Compose the single-line recap card body.
-///
-/// PR #3b ships a header-only card: token-occupancy panel + idle duration.
-/// PR #3c will append the opencode/Haiku summary line below.
-pub(crate) fn compose_recap_text(snapshot: &RecapSnapshot) -> String {
+/// Compose the recap card body. PR #3b shipped a header-only card; PR #3c
+/// adds an optional `summary` line below the header (rendered as a Discord
+/// blockquote when present).
+pub(crate) fn compose_recap_text(snapshot: &RecapSnapshot, summary: Option<&str>) -> String {
+    let header = compose_recap_header(snapshot);
+    match summary.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => {
+            // Discord blockquote — single `>` on each line. Keep the
+            // summary on one line to avoid breaking the blockquote layout.
+            let single_line = s.replace('\n', " ");
+            format!("{header}\n> {single_line}")
+        }
+        None => header,
+    }
+}
+
+fn compose_recap_header(snapshot: &RecapSnapshot) -> String {
     let now = Utc::now();
     let idle_since = snapshot
         .last_heartbeat
@@ -142,6 +168,94 @@ pub(crate) fn compose_recap_text(snapshot: &RecapSnapshot) -> String {
             format!("📦 {used_label} / {window_label} tokens ({pct}%) · idle {idle_since}")
         }
         _ => format!("📦 idle {idle_since}"),
+    }
+}
+
+/// Best-effort tail capture of the live tmux pane via `tmux capture-pane`.
+/// Returns `None` if the session is gone or the binary is unavailable —
+/// the caller treats that as "no scrollback, post header-only".
+pub(crate) async fn capture_tmux_scrollback(session_name: &str) -> Option<String> {
+    let session = session_name.to_string();
+    task::spawn_blocking(move || {
+        std::process::Command::new("tmux")
+            .args([
+                "capture-pane",
+                "-p",
+                "-J",
+                "-S",
+                &format!("-{TMUX_SCROLLBACK_LINES}"),
+                "-t",
+                &session,
+            ])
+            .output()
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            })
+    })
+    .await
+    .ok()
+    .flatten()
+    .filter(|s| !s.is_empty())
+}
+
+/// Ask opencode for a 1-2 sentence Korean recap. Time-bounded; returns
+/// `None` on any failure so the caller can fall back to a header-only card.
+///
+/// The opencode call is wrapped in `spawn_blocking`. A `tokio::time::timeout`
+/// alone would only cancel the *await* on the JoinHandle and leave the
+/// blocking thread running with a live `opencode serve` subprocess — `Drop`
+/// on `OpenCodeServerProcess` would not fire until the closure returned
+/// naturally. So we also pass a `CancelToken` into opencode and *signal it*
+/// from the timeout watchdog. The opencode driver polls `cancel_requested`
+/// at each SSE read tick and exits as soon as it sees the flag, at which
+/// point `OpenCodeServerProcess::Drop` reaps the child.
+pub(crate) async fn summarize_with_opencode(scrollback: &str) -> Option<String> {
+    if scrollback.is_empty() {
+        return None;
+    }
+    let prompt = format!(
+        "다음은 AI 코딩 에이전트와 사용자의 마지막 대화 ~500줄입니다. \
+         사용자가 지금 다시 돌아왔을 때 \"어떤 작업을 하던 중이었는지\"를 \
+         즉시 기억할 수 있도록 1-2문장으로 한국어 요약을 만드세요. \
+         도구 호출 / 스크롤 / 진행 표시 같은 노이즈는 무시하고 \
+         실제 작업 내용(파일·결정·다음 단계)에 집중하세요. \
+         결과만 출력하고 다른 말은 붙이지 마세요.\n\n---\n\n{scrollback}",
+    );
+
+    let cancel = std::sync::Arc::new(CancelToken::new());
+    let cancel_for_blocking = cancel.clone();
+    let join = task::spawn_blocking(move || {
+        crate::services::opencode::execute_command_simple_cancellable(
+            &prompt,
+            Some(cancel_for_blocking.as_ref()),
+        )
+    });
+
+    let result = match tokio::time::timeout(OPENCODE_SUMMARY_TIMEOUT, join).await {
+        Ok(join_result) => match join_result {
+            Ok(Ok(text)) => text,
+            Ok(Err(_)) => return None,
+            Err(_) => return None,
+        },
+        Err(_) => {
+            // Timeout fired. Signal the cancel token so the blocking
+            // closure exits at the next opencode poll; Drop on
+            // `OpenCodeServerProcess` then reaps the spawned child.
+            cancel.cancel_with_tmux_cleanup();
+            return None;
+        }
+    };
+
+    let trimmed = result.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -175,18 +289,67 @@ fn format_korean_duration(dur: chrono::Duration) -> String {
 }
 
 /// Post the recap card via the configured notify bot. Routes through
-/// `super::http::send_channel_message` so the maintainability audit's
-/// `direct_discord_sends` rule (hard gate, #1282) stays happy — that
-/// helper lives in the allowlisted `discord/http.rs` module.
+/// `super::http::send_channel_message_with_components` so the
+/// maintainability audit's `direct_discord_sends` rule (hard gate, #1282)
+/// stays happy — that helper lives in the allowlisted `discord/http.rs`
+/// module.
+///
+/// The recap card carries a single `[새 세션 시작]` button with a
+/// `idle_recap:clear:<message_id>` custom id. The interaction handler
+/// (see `idle_recap_interaction.rs`) resolves the suffix back to the
+/// session_key via the `sessions.idle_recap_message_id` lookup and calls
+/// the existing `adk_session::clear_provider_session_id` to perform the
+/// explicit "start a fresh session" action the user opted into.
 pub(crate) async fn post_recap_card(
     http: &serenity::Http,
     channel_id: u64,
     content: &str,
 ) -> Result<u64, String> {
-    let msg = super::http::send_channel_message(http, ChannelId::new(channel_id), content)
-        .await
-        .map_err(|e| format!("send_message: {e}"))?;
-    Ok(msg.id.get())
+    // We need the post-then-edit dance because the custom_id has to embed
+    // the message id, but the message id is only known after Discord
+    // assigns it. Step 1: post the card with a placeholder button whose
+    // custom_id encodes a sentinel. Step 2: edit the card with the real
+    // button. The brief window with the sentinel is harmless — the
+    // interaction handler ignores unknown ids.
+    let placeholder = make_recap_components("0");
+    let msg = super::http::send_channel_message_with_components(
+        http,
+        ChannelId::new(channel_id),
+        content,
+        placeholder,
+    )
+    .await
+    .map_err(|e| format!("send_message: {e}"))?;
+    let id = msg.id.get();
+    let real = make_recap_components(&id.to_string());
+    if let Err(e) = super::http::edit_channel_message_with_components(
+        http,
+        ChannelId::new(channel_id),
+        msg.id,
+        content,
+        real,
+    )
+    .await
+    {
+        // Edit failure here is non-fatal — the placeholder button is
+        // harmless. Surface the error in logs for diagnostics.
+        tracing::warn!(
+            error = %e,
+            channel_id = channel_id,
+            message_id = id,
+            "idle_recap: button id rewrite edit failed (placeholder button left in place)"
+        );
+    }
+    Ok(id)
+}
+
+fn make_recap_components(message_id_suffix: &str) -> Vec<CreateActionRow> {
+    let custom_id = format!("{IDLE_RECAP_CLEAR_BUTTON_PREFIX}{message_id_suffix}");
+    vec![CreateActionRow::Buttons(vec![
+        CreateButton::new(custom_id)
+            .style(ButtonStyle::Secondary)
+            .label("새 세션 시작"),
+    ])]
 }
 
 /// Delete the previous recap card if one is recorded. Errors are swallowed
@@ -286,9 +449,6 @@ pub(crate) async fn lookup_active_recap_for_channel(
 
 /// Extract `tmux_session_name` from a session_key — the part after the last
 /// `:`. Mirrors `parseSessionTmuxName` from `policies/lib/timeouts-helpers.js`.
-/// Reserved for PR #3c (scrollback capture); kept here so the rebase is a
-/// no-op once that lands.
-#[allow(dead_code)]
 pub(crate) fn tmux_session_name_from_key(session_key: &str) -> Option<&str> {
     session_key
         .rsplit_once(':')

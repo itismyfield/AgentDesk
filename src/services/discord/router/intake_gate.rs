@@ -929,6 +929,14 @@ pub(in crate::services::discord) async fn handle_event(
                     }
                     return handle_model_picker_interaction(ctx, component, data).await;
                 }
+                if super::super::idle_recap_interaction::is_idle_recap_clear_custom_id(
+                    &component.data.custom_id,
+                ) {
+                    return super::super::idle_recap_interaction::handle_idle_recap_clear_interaction(
+                        ctx, component, data,
+                    )
+                    .await;
+                }
             }
         }
         serenity::FullEvent::ReactionRemove { removed_reaction } => {

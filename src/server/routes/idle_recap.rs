@@ -65,13 +65,19 @@ pub async fn post_idle_recap(
         return skip("notify bot not registered");
     };
 
-    // PR #3b: header-only card (token-occupancy panel + idle duration).
-    // The tmux scrollback capture + opencode/Haiku summary line is deferred
-    // to PR #3c because the opencode `spawn_blocking` + `tokio::time::timeout`
-    // combination leaks the blocking thread on timeout (no Drop on
-    // `OpenCodeServerProcess`), and the cancel-token plumbing to fix that
-    // cleanly is large enough to warrant its own PR.
-    let content = idle_recap::compose_recap_text(&snapshot);
+    // PR #3c: capture the live tmux scrollback (best-effort) and ask
+    // opencode for a 1-2 sentence Korean summary (also best-effort, 20s
+    // timeout). Both legs degrade gracefully to "no summary" — the card
+    // still ships its token / idle header in that case.
+    let scrollback = match idle_recap::tmux_session_name_from_key(&session_key) {
+        Some(name) => idle_recap::capture_tmux_scrollback(name).await,
+        None => None,
+    };
+    let summary = match scrollback.as_deref() {
+        Some(text) => idle_recap::summarize_with_opencode(text).await,
+        None => None,
+    };
+    let content = idle_recap::compose_recap_text(&snapshot, summary.as_deref());
 
     if let (Some(prev_msg), Some(prev_chan)) =
         (snapshot.previous_message_id, snapshot.previous_channel_id)
@@ -97,7 +103,7 @@ pub async fn post_idle_recap(
                     "posted": true,
                     "channel_id": channel_id.to_string(),
                     "message_id": message_id.to_string(),
-                    "summary_present": false,
+                    "summary_present": summary.is_some(),
                 })),
             )
         }

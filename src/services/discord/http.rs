@@ -1,5 +1,5 @@
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateMessage, EditMessage, Message, MessageId};
+use serenity::{ChannelId, CreateActionRow, CreateMessage, EditMessage, Message, MessageId};
 
 pub(in crate::services::discord) async fn send_channel_message(
     http: &serenity::Http,
@@ -8,6 +8,41 @@ pub(in crate::services::discord) async fn send_channel_message(
 ) -> serenity::Result<Message> {
     channel_id
         .send_message(http, CreateMessage::new().content(content))
+        .await
+}
+
+/// Send a channel message with attached interactive components (buttons,
+/// select menus). Lives here so the maintainability audit's
+/// `direct_discord_sends` allowlist (which covers `discord/http.rs`)
+/// continues to apply to interactive idle-recap cards.
+pub(in crate::services::discord) async fn send_channel_message_with_components(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    content: &str,
+    components: Vec<CreateActionRow>,
+) -> serenity::Result<Message> {
+    channel_id
+        .send_message(
+            http,
+            CreateMessage::new().content(content).components(components),
+        )
+        .await
+}
+
+/// Edit a channel message while replacing its interactive components.
+pub(in crate::services::discord) async fn edit_channel_message_with_components(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    content: &str,
+    components: Vec<CreateActionRow>,
+) -> serenity::Result<Message> {
+    channel_id
+        .edit_message(
+            http,
+            message_id,
+            EditMessage::new().content(content).components(components),
+        )
         .await
 }
 
