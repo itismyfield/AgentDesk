@@ -3132,13 +3132,14 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let (initial_tokens, initial_updated_at) = sqlx::query_as::<_, (i64, Option<chrono::DateTime<chrono::Utc>>)>(
-            "SELECT tokens, tokens_updated_at FROM sessions WHERE session_key = $1",
-        )
-        .bind(session_key)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let (initial_tokens, initial_updated_at) =
+            sqlx::query_as::<_, (i64, Option<chrono::DateTime<chrono::Utc>>)>(
+                "SELECT tokens, tokens_updated_at FROM sessions WHERE session_key = $1",
+            )
+            .bind(session_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(initial_tokens, 42_000);
         assert!(
             initial_updated_at.is_some(),
@@ -3170,13 +3171,14 @@ mod tests {
         .await;
         assert_eq!(status2, StatusCode::OK);
 
-        let (after_meta_tokens, after_meta_updated_at) = sqlx::query_as::<_, (i64, Option<chrono::DateTime<chrono::Utc>>)>(
-            "SELECT tokens, tokens_updated_at FROM sessions WHERE session_key = $1",
-        )
-        .bind(session_key)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let (after_meta_tokens, after_meta_updated_at) =
+            sqlx::query_as::<_, (i64, Option<chrono::DateTime<chrono::Utc>>)>(
+                "SELECT tokens, tokens_updated_at FROM sessions WHERE session_key = $1",
+            )
+            .bind(session_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(
             after_meta_tokens, 42_000,
             "metadata-only hook must preserve sessions.tokens (was 42000, found {after_meta_tokens})"
@@ -3210,13 +3212,14 @@ mod tests {
         .await;
         assert_eq!(status3, StatusCode::OK);
 
-        let (final_tokens, final_updated_at) = sqlx::query_as::<_, (i64, Option<chrono::DateTime<chrono::Utc>>)>(
-            "SELECT tokens, tokens_updated_at FROM sessions WHERE session_key = $1",
-        )
-        .bind(session_key)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let (final_tokens, final_updated_at) =
+            sqlx::query_as::<_, (i64, Option<chrono::DateTime<chrono::Utc>>)>(
+                "SELECT tokens, tokens_updated_at FROM sessions WHERE session_key = $1",
+            )
+            .bind(session_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(final_tokens, 84_000);
         assert!(
             final_updated_at > initial_updated_at,
