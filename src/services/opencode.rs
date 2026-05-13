@@ -382,7 +382,7 @@ fn run_session(
         .build();
 
     let sse_response = sse_agent
-        .get(&format!("{base_url}/event"))
+        .get(&format!("{base_url}/global/event"))
         .set("Authorization", auth)
         .set("Accept", "text/event-stream")
         .call()
@@ -1427,7 +1427,11 @@ fn process_sse_event(
     sender: &Sender<StreamMessage>,
     state: &mut SseMessageState,
 ) -> Option<bool> {
-    let event: Value = serde_json::from_str(data).ok()?;
+    let raw_event: Value = serde_json::from_str(data).ok()?;
+    let event = raw_event
+        .get("payload")
+        .filter(|payload| payload.get("type").is_some())
+        .unwrap_or(&raw_event);
     let event_type = event.get("type").and_then(|v| v.as_str())?;
     let props = event.get("properties");
 
@@ -1435,12 +1439,6 @@ fn process_sse_event(
     let event_session = props
         .and_then(|p| p.get("sessionID").and_then(|v| v.as_str()))
         .or_else(|| props.and_then(|p| p.get("sessionId").and_then(|v| v.as_str())))
-        .or_else(|| {
-            props
-                .and_then(|p| p.get("info"))
-                .and_then(|i| i.get("id"))
-                .and_then(|v| v.as_str())
-        })
         .or_else(|| {
             props.and_then(|p| p.get("part")).and_then(|part| {
                 part.get("sessionID")
@@ -2314,6 +2312,59 @@ mod tests {
                 |m| matches!(m, StreamMessage::Done { result, session_id } if result.is_empty() && session_id.as_deref() == Some("s1"))
             ),
             "final SSE data frame should be processed even without a trailing blank line"
+        );
+    }
+
+    #[test]
+    fn test_global_event_payload_streams_assistant_text() {
+        let data = br#"data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg-user","sessionID":"s1","role":"user"}}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"part-user","sessionID":"s1","messageID":"msg-user","type":"text","text":"Reply exactly: OK"}}}}
+
+data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg-assistant","sessionID":"s1","role":"assistant"}}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"reason-1","sessionID":"s1","messageID":"msg-assistant","type":"reasoning","text":""}}}}
+
+data: {"payload":{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-assistant","partID":"reason-1","field":"text","delta":"internal"}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"text-1","sessionID":"s1","messageID":"msg-assistant","type":"text","text":""}}}}
+
+data: {"payload":{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-assistant","partID":"text-1","field":"text","delta":"O"}}}
+
+data: {"payload":{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-assistant","partID":"text-1","field":"text","delta":"K"}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"text-1","sessionID":"s1","messageID":"msg-assistant","type":"text","text":"OK"}}}}
+
+data: {"payload":{"type":"sync","syncEvent":{"type":"message.part.updated.1","aggregateID":"s1","data":{"sessionID":"s1"}}}}
+
+data: {"payload":{"type":"session.idle","properties":{"sessionID":"s1"}}}
+
+"#
+        .to_vec();
+        let reader: BufReader<Box<dyn std::io::Read + Send>> =
+            BufReader::new(Box::new(std::io::Cursor::new(data)));
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+
+        let result = consume_sse(reader, "s1", &tx, None, "http://127.0.0.1:9", "");
+        drop(tx);
+        let msgs = rx.try_iter().collect::<Vec<_>>();
+
+        assert!(result.is_ok());
+        assert_eq!(
+            msgs.iter()
+                .filter_map(|m| match m {
+                    StreamMessage::Text { content } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            "OK"
+        );
+        assert!(
+            msgs.iter().any(
+                |m| matches!(m, StreamMessage::Done { result, session_id } if result == "OK" && session_id.as_deref() == Some("s1"))
+            ),
+            "global OpenCode events should be unwrapped and completed on session.idle"
         );
     }
 
