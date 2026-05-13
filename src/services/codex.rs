@@ -679,7 +679,8 @@ fn execute_streaming_local_tmux(
     let _ = std::fs::write(&gen_marker_path, current_gen.to_string());
 
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap() = Some(tmux_session_name.to_string());
+        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(tmux_session_name.to_string());
     }
 
     let read_result = read_output_file_until_result(
@@ -749,7 +750,8 @@ fn send_followup_to_tmux(
     }
 
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap() = Some(tmux_session_name.to_string());
+        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(tmux_session_name.to_string());
     }
 
     let read_result = match read_output_file_until_result_tracked(
@@ -986,7 +988,7 @@ fn execute_streaming_local_process_codex(
     let handle = backend.create_session(&config)?;
 
     if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(handle.pid());
+        *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.pid());
     }
 
     insert_process_session(session_name.to_string(), handle);

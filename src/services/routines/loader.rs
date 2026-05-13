@@ -139,7 +139,7 @@ impl RoutineScriptLoader {
         let script_ref = script.script_ref.clone();
         self.scripts
             .lock()
-            .map_err(|_| anyhow!("routine script store lock poisoned"))?
+            .unwrap_or_else(|e| e.into_inner())
             .insert(script_ref.clone(), script);
         Ok(script_ref)
     }
@@ -157,7 +157,7 @@ impl RoutineScriptLoader {
         let existing_scripts: HashMap<String, LoadedRoutineScript> = self
             .scripts
             .lock()
-            .map_err(|_| anyhow!("routine script store lock poisoned"))?
+            .unwrap_or_else(|e| e.into_inner())
             .clone();
 
         for (root_index, root) in roots.iter().enumerate() {
@@ -271,10 +271,7 @@ impl RoutineScriptLoader {
     }
 
     pub fn get_script(&self, script_ref: &str) -> Result<Option<LoadedRoutineScript>> {
-        let scripts = self
-            .scripts
-            .lock()
-            .map_err(|_| anyhow!("routine script store lock poisoned"))?;
+        let scripts = self.scripts.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(script) = scripts.get(script_ref).cloned() {
             return Ok(Some(script));
         }
@@ -303,7 +300,7 @@ impl RoutineScriptLoader {
         Ok(self
             .scripts
             .lock()
-            .map_err(|_| anyhow!("routine script store lock poisoned"))?
+            .unwrap_or_else(|e| e.into_inner())
             .contains_key(script_ref))
     }
 
@@ -311,7 +308,7 @@ impl RoutineScriptLoader {
         let mut refs: Vec<String> = self
             .scripts
             .lock()
-            .map_err(|_| anyhow!("routine script store lock poisoned"))?
+            .unwrap_or_else(|e| e.into_inner())
             .keys()
             .cloned()
             .collect();
@@ -324,10 +321,7 @@ impl RoutineScriptLoader {
         loaded_scripts: Vec<LoadedRoutineScript>,
         seen_refs: &HashSet<String>,
     ) -> Result<usize> {
-        let mut scripts = self
-            .scripts
-            .lock()
-            .map_err(|_| anyhow!("routine script store lock poisoned"))?;
+        let mut scripts = self.scripts.lock().unwrap_or_else(|e| e.into_inner());
         for script in loaded_scripts {
             scripts.insert(script.script_ref.clone(), script);
         }
@@ -339,9 +333,8 @@ impl RoutineScriptLoader {
 
 impl Drop for RoutineScriptLoader {
     fn drop(&mut self) {
-        if let Ok(mut scripts) = self.scripts.lock() {
-            scripts.clear();
-        }
+        let mut scripts = self.scripts.lock().unwrap_or_else(|e| e.into_inner());
+        scripts.clear();
     }
 }
 
