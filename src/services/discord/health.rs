@@ -95,6 +95,14 @@ impl HealthRegistry {
         }
     }
 
+    /// Snapshot the notify-bot HTTP client (for non-actionable side channels
+    /// like the idle-recap renderer). Returns `None` when the notify bot
+    /// hasn't been registered yet — caller treats that as "skip the post
+    /// this cycle".
+    pub(crate) async fn notify_http_clone(&self) -> Option<Arc<serenity::Http>> {
+        self.notify_http.lock().await.clone()
+    }
+
     pub(super) async fn register(&self, name: String, shared: Arc<SharedData>) {
         let mut providers = self.providers.lock().await;
         if providers.iter().any(|entry| entry.name == name) {
