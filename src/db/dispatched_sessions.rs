@@ -1593,7 +1593,12 @@ pub(crate) struct HookSessionUpsert<'a> {
     pub(crate) status: &'a str,
     pub(crate) session_info: Option<&'a str>,
     pub(crate) model: Option<&'a str>,
-    pub(crate) tokens: i64,
+    /// `None` means "metadata-only hook (e.g. provider session id save) —
+    /// do not touch `sessions.tokens` or `sessions.tokens_updated_at`".
+    /// `Some` means "authoritative turn-end snapshot — overwrite both".
+    /// Avoids the prior `i64` design where `0` meant both "no data" and
+    /// "really zero" and silently zeroed out real values.
+    pub(crate) tokens: Option<i64>,
     pub(crate) cwd: Option<&'a str>,
     pub(crate) active_dispatch_id: Option<&'a str>,
     pub(crate) thread_channel_id: Option<&'a str>,
@@ -1642,6 +1647,9 @@ pub(crate) async fn upsert_hook_session_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
 ) -> Result<bool, String> {
+    // `tokens` is now an `Option<i64>`. The UPSERT preserves the previous
+    // value when the caller didn't supply one (metadata-only hook), and only
+    // refreshes `tokens_updated_at` when an explicit snapshot arrives.
     let row = sqlx::query(
         "INSERT INTO sessions (
             session_key,
@@ -1652,6 +1660,7 @@ pub(crate) async fn upsert_hook_session_pg(
             session_info,
             model,
             tokens,
+            tokens_updated_at,
             cwd,
             active_dispatch_id,
             thread_channel_id,
@@ -1659,7 +1668,10 @@ pub(crate) async fn upsert_hook_session_pg(
             raw_provider_session_id,
             last_heartbeat
          ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW()
+            $1, $2, $3, $4, $5, $6, $7,
+            COALESCE($8, 0),
+            CASE WHEN $8 IS NOT NULL THEN NOW() ELSE NULL END,
+            $9, $10, $11, $12, $13, NOW()
          )
          ON CONFLICT(session_key) DO UPDATE SET
             status = EXCLUDED.status,
@@ -1667,7 +1679,8 @@ pub(crate) async fn upsert_hook_session_pg(
             provider = EXCLUDED.provider,
             session_info = COALESCE(EXCLUDED.session_info, sessions.session_info),
             model = COALESCE(EXCLUDED.model, sessions.model),
-            tokens = EXCLUDED.tokens,
+            tokens = CASE WHEN $8 IS NOT NULL THEN EXCLUDED.tokens ELSE sessions.tokens END,
+            tokens_updated_at = CASE WHEN $8 IS NOT NULL THEN NOW() ELSE sessions.tokens_updated_at END,
             cwd = COALESCE(EXCLUDED.cwd, sessions.cwd),
             active_dispatch_id = CASE
               WHEN lower(EXCLUDED.status) IN ('disconnected', 'aborted') THEN NULL

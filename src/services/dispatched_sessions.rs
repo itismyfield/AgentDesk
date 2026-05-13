@@ -51,7 +51,10 @@ async fn hook_session_pg(
 
     let status = normalize_incoming_session_status(body.status.as_deref());
     let provider = body.provider.as_deref().unwrap_or("claude");
-    let tokens = body.tokens.unwrap_or(0) as i64;
+    // `None` here means "metadata-only hook" — the upsert must preserve the
+    // existing `sessions.tokens` (#2045 follow-up: `save_provider_session_id`
+    // and similar callers used to zero this column on every metadata update).
+    let tokens = body.tokens.map(|t| t as i64);
     let active_dispatch_id = normalize_hook_active_dispatch_id(status, body.dispatch_id.as_deref());
     let instance_id = body
         .instance_id
@@ -353,7 +356,7 @@ async fn hook_session_sqlite_for_tests(
 
     let status = normalize_incoming_session_status(body.status.as_deref());
     let provider = body.provider.as_deref().unwrap_or("claude");
-    let tokens = body.tokens.unwrap_or(0) as i64;
+    let tokens = body.tokens.map(|t| t as i64);
     let active_dispatch_id = normalize_hook_active_dispatch_id(status, body.dispatch_id.as_deref());
     let instance_id = body
         .instance_id
@@ -3084,6 +3087,141 @@ mod tests {
         let body: Value = response_json(body);
         assert_eq!(body["session_id"], session_id);
         assert_eq!(body["session_key"], bad_session_key);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// PR #2: `sessions.tokens` must NOT be zeroed by a follow-up
+    /// metadata-only hook (e.g. `save_provider_session_id`, which carries
+    /// `tokens: None`). Before this fix the upsert ran `tokens = EXCLUDED.tokens`
+    /// unconditionally, so any post-turn metadata hook reset the just-saved
+    /// snapshot to 0 and made `/api/sessions` always report `tokens: 0` even
+    /// after a token-heavy turn. The follow-up also bumps `tokens_updated_at`
+    /// only on real snapshots so the recap UI can tell stale columns apart.
+    #[tokio::test]
+    async fn hook_session_metadata_only_preserves_tokens_and_updated_at() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
+
+        let session_key = "session-tokens-preserve";
+
+        // 1) Initial turn-end hook with a real token snapshot.
+        let (status, _) = hook_session(
+            State(state.clone()),
+            Json(HookSessionBody {
+                session_key: session_key.to_string(),
+                instance_id: None,
+                agent_id: None,
+                status: Some("idle".to_string()),
+                provider: Some("claude".to_string()),
+                session_info: Some("idle".to_string()),
+                name: None,
+                model: Some("claude".to_string()),
+                tokens: Some(42_000),
+                cwd: None,
+                dispatch_id: None,
+                claude_session_id: None,
+                thread_channel_id: None,
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (initial_tokens, initial_updated_at) = sqlx::query_as::<_, (i64, Option<chrono::DateTime<chrono::Utc>>)>(
+            "SELECT tokens, tokens_updated_at FROM sessions WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(initial_tokens, 42_000);
+        assert!(
+            initial_updated_at.is_some(),
+            "tokens_updated_at must be set on the first explicit token snapshot"
+        );
+
+        // 2) Follow-up metadata-only hook (typical: save_provider_session_id)
+        //    must not zero out the token column or refresh tokens_updated_at.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (status2, _) = hook_session(
+            State(state.clone()),
+            Json(HookSessionBody {
+                session_key: session_key.to_string(),
+                instance_id: None,
+                agent_id: None,
+                status: None,
+                provider: Some("claude".to_string()),
+                session_info: None,
+                name: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: None,
+                claude_session_id: Some("sess-abc".to_string()),
+                thread_channel_id: None,
+                session_id: Some("raw-xyz".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(status2, StatusCode::OK);
+
+        let (after_meta_tokens, after_meta_updated_at) = sqlx::query_as::<_, (i64, Option<chrono::DateTime<chrono::Utc>>)>(
+            "SELECT tokens, tokens_updated_at FROM sessions WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after_meta_tokens, 42_000,
+            "metadata-only hook must preserve sessions.tokens (was 42000, found {after_meta_tokens})"
+        );
+        assert_eq!(
+            after_meta_updated_at, initial_updated_at,
+            "metadata-only hook must not bump tokens_updated_at"
+        );
+
+        // 3) A new explicit snapshot updates both columns and bumps the stamp.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (status3, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: session_key.to_string(),
+                instance_id: None,
+                agent_id: None,
+                status: Some("idle".to_string()),
+                provider: Some("claude".to_string()),
+                session_info: None,
+                name: None,
+                model: None,
+                tokens: Some(84_000),
+                cwd: None,
+                dispatch_id: None,
+                claude_session_id: None,
+                thread_channel_id: None,
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status3, StatusCode::OK);
+
+        let (final_tokens, final_updated_at) = sqlx::query_as::<_, (i64, Option<chrono::DateTime<chrono::Utc>>)>(
+            "SELECT tokens, tokens_updated_at FROM sessions WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(final_tokens, 84_000);
+        assert!(
+            final_updated_at > initial_updated_at,
+            "explicit snapshot must bump tokens_updated_at forward",
+        );
 
         pool.close().await;
         pg_db.drop().await;
