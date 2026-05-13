@@ -48,6 +48,21 @@ impl OpenCodeServerProcess {
     }
 }
 
+/// Make sure the spawned `opencode serve` child is reaped even when the
+/// caller panics or drops the process mid-flight (e.g. the idle-recap
+/// `tokio::time::timeout(spawn_blocking)` aborts the outer future while
+/// the inner thread is still holding this struct).
+///
+/// Plain `terminate()` is still preferred — it's idempotent and `Drop`
+/// only fires on the unhappy path — but this guarantees we never leak
+/// a child process when the renderer times out.
+impl Drop for OpenCodeServerProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------

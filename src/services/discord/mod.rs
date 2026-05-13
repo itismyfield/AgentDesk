@@ -9,6 +9,7 @@ mod handoff;
 pub(crate) mod health;
 pub(crate) mod http;
 mod idle_detector;
+pub(crate) mod idle_recap;
 mod inflight;
 pub(crate) mod internal_api;
 mod mcp_credential_watcher;

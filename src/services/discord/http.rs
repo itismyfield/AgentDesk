@@ -21,3 +21,14 @@ pub(in crate::services::discord) async fn edit_channel_message(
         .edit_message(http, message_id, EditMessage::new().content(content))
         .await
 }
+
+/// Delete a single channel message by id. Errors are propagated; callers
+/// that don't care about Discord-side 404s (already deleted) should wrap
+/// the call in `let _ =`.
+pub(in crate::services::discord) async fn delete_channel_message(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) -> serenity::Result<()> {
+    channel_id.delete_message(http, message_id).await
+}
