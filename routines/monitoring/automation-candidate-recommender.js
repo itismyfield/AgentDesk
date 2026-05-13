@@ -36,7 +36,35 @@ const KNOWN_CATEGORIES = new Set([
   "outbox-delivery",
   "memento-hygiene",
   "api-friction",
+  "kanban-flow",
+  "dispatch-retry",
+  "session-pattern",
+  "log-signal",
+  "automation-candidate",
 ]);
+
+const CATEGORY_GATES = Object.freeze({
+  "routine-candidate": { minScore: SCORE_THRESHOLD, minEvidence: 5 },
+  "release-freshness": { minScore: SCORE_THRESHOLD, minEvidence: 5 },
+  "outbox-delivery": { minScore: 60, minEvidence: 3 },
+  "memento-hygiene": { minScore: 60, minEvidence: 3 },
+  "api-friction": { minScore: 60, minEvidence: 3 },
+  "kanban-flow": { minScore: 60, minEvidence: 3 },
+  "dispatch-retry": { minScore: 60, minEvidence: 3 },
+  "session-pattern": { minScore: 60, minEvidence: 3 },
+  "log-signal": { minScore: 60, minEvidence: 3 },
+  "automation-candidate": { minScore: SCORE_THRESHOLD, minEvidence: 5 },
+});
+
+const CATEGORY_SCORE_MULTIPLIERS = Object.freeze({
+  "outbox-delivery": 1.25,
+  "api-friction": 1.2,
+  "memento-hygiene": 1.1,
+  "kanban-flow": 1.15,
+  "dispatch-retry": 1.2,
+  "session-pattern": 1.15,
+  "log-signal": 1.15,
+});
 
 // --- Scoring weights ---
 const WEIGHT_BASE = 10;
@@ -261,6 +289,25 @@ function normalizeCategory(value) {
   return "routine-candidate";
 }
 
+function categoryGate(category) {
+  return CATEGORY_GATES[normalizeCategory(category)] || CATEGORY_GATES["routine-candidate"];
+}
+
+function categoryScoreMultiplier(category) {
+  const value = CATEGORY_SCORE_MULTIPLIERS[normalizeCategory(category)] || 1;
+  return Math.min(1.5, Math.max(1, value));
+}
+
+function candidateGate(candidate) {
+  return categoryGate(candidate && candidate.category);
+}
+
+function candidateMeetsGate(candidate) {
+  const gate = candidateGate(candidate);
+  return (candidate.score || 0) >= gate.minScore
+    && (candidate.evidence_count || 0) >= gate.minEvidence;
+}
+
 function observationOccurrences(obs) {
   const value = Number(obs.occurrences || obs.count || 1);
   if (!Number.isFinite(value) || value < 1) {
@@ -313,6 +360,21 @@ function topEvidenceSummaryForCandidate(candidate) {
     .join(" / ");
 }
 
+function topContributionSummary(map, limit) {
+  const entries = Object.entries(map || {})
+    .sort(([, a], [, b]) => Number(b || 0) - Number(a || 0))
+    .slice(0, limit)
+    .map(([key, count]) => `${key}=${count}`);
+  return entries.length ? entries.join(", ") : "none";
+}
+
+function candidateSourceSummary(candidate) {
+  return [
+    `sources(${topContributionSummary(candidate.sources, 3)})`,
+    `categories(${topContributionSummary(candidate.source_categories, 3)})`,
+  ].join(" ");
+}
+
 function topCandidateEvidence(cp, limit) {
   return Object.entries(cp.candidates || {})
     .filter(([, candidate]) => candidate.state === "observing" || candidate.state === "recommended")
@@ -323,6 +385,7 @@ function topCandidateEvidence(cp, limit) {
       score: candidate.score || 0,
       score_delta_last_tick: candidate.score_delta_last_tick || 0,
       evidence_count: candidate.evidence_count || 0,
+      gate: candidateGate(candidate),
       latest_evidence: topEvidenceSummaryForCandidate(candidate),
     }));
 }
@@ -358,11 +421,12 @@ function noEscalationReason(cp, nowStr) {
     return "보류 이유: 관찰된 후보가 없습니다.";
   }
   const candidate = cp.candidates[top.pattern_id] || {};
-  if ((candidate.evidence_count || 0) < 5) {
-    return `보류 이유: 최상위 후보 ${top.pattern_id}의 근거가 ${candidate.evidence_count || 0}회로 최소 5회 미만입니다.`;
+  const gate = candidateGate(candidate);
+  if ((candidate.evidence_count || 0) < gate.minEvidence) {
+    return `보류 이유: 최상위 후보 ${top.pattern_id}의 근거가 ${candidate.evidence_count || 0}회로 category=${normalizeCategory(candidate.category)} 최소 ${gate.minEvidence}회 미만입니다.`;
   }
-  if ((candidate.score || 0) < SCORE_THRESHOLD) {
-    return `보류 이유: 최상위 후보 ${top.pattern_id}의 점수 ${candidate.score || 0}가 기준 ${SCORE_THRESHOLD} 미만입니다.`;
+  if ((candidate.score || 0) < gate.minScore) {
+    return `보류 이유: 최상위 후보 ${top.pattern_id}의 점수 ${candidate.score || 0}가 category=${normalizeCategory(candidate.category)} 기준 ${gate.minScore} 미만입니다.`;
   }
   if (candidate.cooldown_until && candidate.cooldown_until > nowStr) {
     return `보류 이유: 최상위 후보 ${top.pattern_id}가 ${candidate.cooldown_until}까지 쿨다운 중입니다.`;
@@ -604,6 +668,8 @@ function scoreObservations(cp, observations, suppressedSet, nowStr, diversityMod
         first_seen_at: obs.timestamp || nowStr,
         last_seen_at: null,
         examples: [],
+        sources: {},
+        source_categories: {},
         last_recommended_at: null,
         last_recommendation_hash: null,
         cooldown_until: null,
@@ -630,6 +696,11 @@ function scoreObservations(cp, observations, suppressedSet, nowStr, diversityMod
 
     candidate.evidence_count += occurrences;
     candidate.last_seen_at = obs.timestamp || nowStr;
+    candidate.sources = candidate.sources || {};
+    candidate.source_categories = candidate.source_categories || {};
+    const source = String(obs.source || "unknown");
+    candidate.sources[source] = (candidate.sources[source] || 0) + occurrences;
+    candidate.source_categories[category] = (candidate.source_categories[category] || 0) + occurrences;
 
     // Score delta
     const weight = typeof obs.weight === "number" ? obs.weight : 1;
@@ -647,14 +718,15 @@ function scoreObservations(cp, observations, suppressedSet, nowStr, diversityMod
 
     // Diversity mode: 1.5× boost for underrepresented categories
     const diversityBoost = (underrepresentedCats && underrepresentedCats.has(category)) ? 1.5 : 1;
-    delta = delta * diversityBoost;
+    const categoryMultiplier = categoryScoreMultiplier(category);
+    delta = delta * diversityBoost * categoryMultiplier;
 
     candidate.score = Math.min(100, candidate.score + delta);
     candidate.score_delta_last_tick = (candidate.score_delta_last_tick || 0) + delta;
     candidate.scored_observations_last_tick =
       (candidate.scored_observations_last_tick || 0) + 1;
     candidate.last_score_reason =
-      `weight=${weight}, occurrences=${occurrences}, recency_bonus=${recencyBonus}${diversityBoost > 1 ? ", diversity_boost=1.5" : ""}`;
+      `weight=${weight}, occurrences=${occurrences}, recency_bonus=${recencyBonus}, category_multiplier=${categoryMultiplier}${diversityBoost > 1 ? ", diversity_boost=1.5" : ""}`;
     candidate.last_scored_at = nowStr;
     report.scored++;
 
@@ -669,6 +741,7 @@ function scoreObservations(cp, observations, suppressedSet, nowStr, diversityMod
         timestamp: obs.timestamp,
         evidence_ref: obs.evidence_ref,
         source: obs.source,
+        category,
         weight,
         occurrences,
       });
@@ -686,16 +759,16 @@ function findEscalationCandidate(cp, nowStr) {
   }
 
   let best = null;
-  let bestScore = SCORE_THRESHOLD - 1;
+  let bestScore = -1;
 
   for (const [patternId, candidate] of Object.entries(cp.candidates || {})) {
     if (candidate.state !== "observing" && candidate.state !== "recommended") {
       continue;
     }
-    if (candidate.score <= bestScore) {
+    if (!candidateMeetsGate(candidate)) {
       continue;
     }
-    if (candidate.evidence_count < 5) {
+    if (candidate.score <= bestScore) {
       continue;
     }
     if (candidate.cooldown_until && candidate.cooldown_until > nowStr) {
@@ -747,6 +820,8 @@ function markRecommended(cp, escalation, nowStr) {
     score: candidate.score,
     score_delta_last_tick: candidate.score_delta_last_tick || 0,
     evidence_count: candidate.evidence_count,
+    sources: candidate.sources || {},
+    source_categories: candidate.source_categories || {},
     outcome_summary: assessment.outcomeSummary,
     decision_summary: decisionSummary,
     top_evidence_summary: topEvidenceSummary,
@@ -772,6 +847,11 @@ function buildOutcomeSummary(patternId, candidate, isErrorPattern, category) {
     "outbox-delivery": "메시지 발송",
     "memento-hygiene": "메모리 위생",
     "api-friction": "API 마찰",
+    "kanban-flow": "칸반 흐름",
+    "dispatch-retry": "디스패치 재시도",
+    "session-pattern": "세션 오류",
+    "log-signal": "운영 로그",
+    "automation-candidate": "자동화 후보",
   }[category] || "루틴 후보";
   const prefix = isErrorPattern || category === "outbox-delivery" || category === "api-friction"
     ? "실패 요약"
@@ -828,6 +908,46 @@ function candidateAssessment(patternId, candidate) {
       files: ["src/services/api_friction.rs", "src/server/routes/*", "docs/*"],
       sideEffects: "문서 또는 API 라우팅이 바뀔 수 있으며 DB 직접 우회가 도입되지 않았는지 검증해야 합니다.",
       verification: "API 마찰 파싱 테스트와 대상 루틴 추천기 픽스처를 실행합니다.",
+    },
+    "kanban-flow": {
+      suggestedAutomation: "정체되거나 차단된 칸반 흐름을 감지하고 다음 조치 후보를 생성하는 칸반 흐름 모니터",
+      before: "오래 멈춘 카드와 차단 사유를 사람이 수동으로 훑어야 합니다.",
+      after: "정체/차단 패턴이 에이전트별·상태별로 묶여 자동화 후보 카드로 올라옵니다.",
+      files: ["src/server/routes/kanban.rs", "src/db/kanban_cards/*", "routines/monitoring/*.js"],
+      sideEffects: "카드 상태 전이는 직접 수행하지 않고, 후보 카드와 검증 지시만 생성해야 합니다.",
+      verification: "칸반 observation fixture와 executor ready-card 회귀 테스트를 실행합니다.",
+    },
+    "dispatch-retry": {
+      suggestedAutomation: "반복 재시도되는 디스패치 흐름을 감지하는 dispatch retry monitor",
+      before: "반복 재시도/실패 디스패치는 로그나 DB를 직접 확인해야 합니다.",
+      after: "from/to agent와 status별 반복 재시도 패턴이 후보로 묶입니다.",
+      files: ["src/server/routes/dispatches/*", "src/db/auto_queue/*", "policies/timeouts/*"],
+      sideEffects: "재시도 정책은 중복 디스패치와 알림 폭증을 만들 수 있으므로 dry-run 검증이 필요합니다.",
+      verification: "dispatch/outbox 관련 테스트와 retry fixture를 실행합니다.",
+    },
+    "session-pattern": {
+      suggestedAutomation: "반복 에러가 발생하는 agent/session 패턴을 감지하고 개선 후보를 만드는 세션 패턴 모니터",
+      before: "같은 agent 오류가 대화 로그에 흩어져 후속 개선으로 이어지기 어렵습니다.",
+      after: "agent별 반복 오류가 bounded observation으로 점수화되어 개선 후보가 됩니다.",
+      files: ["src/db/session_transcripts.rs", "src/services/discord/*", "routines/monitoring/*.js"],
+      sideEffects: "세션 본문 원문을 후보에 과도하게 싣지 않고 집계와 최신 예시만 사용해야 합니다.",
+      verification: "session_transcripts observation과 recommender ROI gate 테스트를 실행합니다.",
+    },
+    "log-signal": {
+      suggestedAutomation: "audit_logs와 kanban_audit_logs 반복 패턴을 감지하는 운영 로그 모니터",
+      before: "운영 로그의 반복 action/source 패턴은 analytics 화면에서만 보이고 자동화 후보로 이어지지 않습니다.",
+      after: "반복 로그 패턴이 category별 후보로 묶이고 ROI gate에 포함됩니다.",
+      files: ["src/services/analytics/*", "src/services/routines/store.rs", "src/kanban/audit.rs"],
+      sideEffects: "로그는 읽기 전용 근거로만 사용하고 audit log write path는 변경하지 않아야 합니다.",
+      verification: "store.rs observation 테스트와 recommender ROI gate 테스트를 실행합니다.",
+    },
+    "automation-candidate": {
+      suggestedAutomation: "이미 준비된 automation-candidate 카드의 반복 실행 상태를 관리하는 후보 루프 모니터",
+      before: "준비된 자동화 후보 카드가 executor까지 이어졌는지 사람이 확인해야 합니다.",
+      after: "ready/done 후보 카드가 observation으로 들어와 executor/suppression 경로를 안정화합니다.",
+      files: ["src/services/automation_candidate_materializer.rs", "src/services/routines/store.rs", "routines/monitoring/automation-candidate-executor.js"],
+      sideEffects: "후보 실행은 allowed_write_paths와 iteration result API 계약 안에서만 진행해야 합니다.",
+      verification: "automation-candidate executor tests와 materializer tests를 실행합니다.",
     },
   };
   const profile = categoryProfiles[category] || categoryProfiles["routine-candidate"];
@@ -907,6 +1027,11 @@ function candidateMetricName(category) {
     "outbox-delivery": "outbox_delivery_failure_count",
     "memento-hygiene": "memento_hygiene_issue_count",
     "api-friction": "api_friction_count",
+    "kanban-flow": "kanban_stuck_or_blocked_count",
+    "dispatch-retry": "dispatch_retry_count",
+    "session-pattern": "session_error_pattern_count",
+    "log-signal": "audit_log_pattern_count",
+    "automation-candidate": "automation_candidate_backlog_count",
   }[category] || "automation_friction_count";
 }
 
@@ -914,8 +1039,9 @@ function candidateDecisionSummary(patternId, candidate, assessment) {
   const score = candidate.score || 0;
   const delta = candidate.score_delta_last_tick || 0;
   const evidenceCount = candidate.evidence_count || 0;
+  const gate = candidateGate(candidate);
   const evidenceSummary = topEvidenceSummaryForCandidate(candidate);
-  return `선택 이유: ${patternId} 후보가 score=${score}, delta=${delta}, evidence=${evidenceCount}로 기준을 충족했습니다. ${assessment.outcomeSummary} 핵심 근거: ${evidenceSummary}`;
+  return `선택 이유: ${patternId} 후보가 category=${normalizeCategory(candidate.category)}, score=${score}, delta=${delta}, evidence=${evidenceCount}, gate=${gate.minScore}/${gate.minEvidence}로 ROI 기준을 충족했습니다. ${candidateSourceSummary(candidate)}. ${assessment.outcomeSummary} 핵심 근거: ${evidenceSummary}`;
 }
 
 function convergenceSummary(candidate) {

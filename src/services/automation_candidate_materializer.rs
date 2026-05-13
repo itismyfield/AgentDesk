@@ -82,7 +82,7 @@ pub struct MaterializeCandidateOutput {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterializerAction {
-    /// Iteration kept; executor-v2 will drive the next one.
+    /// Iteration kept; the automation candidate executor will drive the next one.
     KeepContinue,
     /// All iterations exhausted; card moved to review for final gate.
     KeepFinalGate,

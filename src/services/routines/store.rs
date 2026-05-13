@@ -143,7 +143,11 @@ fn default_observation_source(source_kind: &str) -> &'static str {
 fn include_automation_candidate_card_observations(current_script_ref: Option<&str>) -> bool {
     matches!(
         current_script_ref.map(str::trim),
-        Some("monitoring/automation-executor-v2.js" | "monitoring/automation-executor.js")
+        Some(
+            "monitoring/automation-candidate-executor.js"
+                | "monitoring/automation-executor.js"
+                | "monitoring/automation-executor-v2.js"
+        )
     )
 }
 
@@ -308,6 +312,8 @@ pub struct RoutineRunRecord {
     pub error: Option<String>,
     pub discord_log_status: Option<String>,
     pub discord_log_error: Option<String>,
+    pub discord_message_id: Option<String>,
+    pub discord_log_sections: Value,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -367,6 +373,12 @@ pub struct RecoveredRoutineRun {
     pub script_ref: String,
     pub name: String,
     pub discord_thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunDiscordLogState {
+    pub message_id: Option<String>,
+    pub sections: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -557,7 +569,8 @@ impl RoutineStore {
         sqlx::query_as(
             r#"
             SELECT id, routine_id, status, action, turn_id, lease_expires_at,
-                   result_json, error, discord_log_status, discord_log_error, started_at,
+                   result_json, error, discord_log_status, discord_log_error,
+                   discord_message_id, discord_log_sections, started_at,
                    finished_at, created_at, updated_at
             FROM routine_runs
             WHERE routine_id = $1
@@ -761,6 +774,7 @@ impl RoutineStore {
         const CAP_KANBAN: i64 = 10;
         const CAP_DISPATCHES: i64 = 10;
         const CAP_SESSION: i64 = 10;
+        const CAP_AUDIT_LOGS: i64 = 10;
 
         let now = Utc::now();
 
@@ -1101,7 +1115,7 @@ impl RoutineStore {
             kanban_obs.push(serde_json::json!({
                 "timestamp": last_seen_at.to_rfc3339(),
                 "source": "kanban_stale",
-                "category": "routine-candidate",
+                "category": "kanban-flow",
                 "signature": format!("kanban-stale:{sig_group}"),
                 "summary": truncate_chars(&summary, 240),
                 "weight": weight,
@@ -1156,7 +1170,7 @@ impl RoutineStore {
             dispatch_obs.push(serde_json::json!({
                 "timestamp": last_seen_at.to_rfc3339(),
                 "source": "dispatch_retry",
-                "category": "routine-candidate",
+                "category": "dispatch-retry",
                 "signature": format!("dispatch-retry:{from_agent}:{to_agent}:{status}"),
                 "summary": truncate_chars(&summary, 240),
                 "weight": 2,
@@ -1220,7 +1234,7 @@ impl RoutineStore {
             session_obs.push(serde_json::json!({
                 "timestamp": last_seen_at.to_rfc3339(),
                 "source": "session_pattern",
-                "category": "routine-candidate",
+                "category": "session-pattern",
                 "signature": format!("session-pattern:{agent_id}"),
                 "summary": truncate_chars(&summary, 240),
                 "weight": 2,
@@ -1229,7 +1243,87 @@ impl RoutineStore {
             }));
         }
 
-        // --- Source 8: kanban_ready – automation-candidate cards awaiting execution (cap 20) ---
+        // --- Source 8: audit/log signals grouped by action/source (cap 10) ---
+        let audit_rows = match sqlx::query(
+            r#"
+            WITH grouped_logs AS (
+                SELECT 'audit_logs' AS source_table,
+                       COALESCE(NULLIF(entity_type, ''), 'unknown') AS entity_type,
+                       COALESCE(NULLIF(action, ''), 'updated') AS action,
+                       COALESCE(NULLIF(actor, ''), 'system') AS actor,
+                       COUNT(*)::BIGINT AS occurrence_count,
+                       MAX(timestamp) AS last_seen_at
+                FROM audit_logs
+                WHERE timestamp > NOW() - INTERVAL '24 hours'
+                GROUP BY COALESCE(NULLIF(entity_type, ''), 'unknown'),
+                         COALESCE(NULLIF(action, ''), 'updated'),
+                         COALESCE(NULLIF(actor, ''), 'system')
+                HAVING COUNT(*) >= 3
+
+                UNION ALL
+
+                SELECT 'kanban_audit_logs' AS source_table,
+                       'kanban_card' AS entity_type,
+                       CONCAT(
+                           COALESCE(NULLIF(from_status, ''), 'unknown'),
+                           '->',
+                           COALESCE(NULLIF(to_status, ''), 'unknown')
+                       ) AS action,
+                       COALESCE(NULLIF(source, ''), 'system') AS actor,
+                       COUNT(*)::BIGINT AS occurrence_count,
+                       MAX(created_at) AS last_seen_at
+                FROM kanban_audit_logs
+                WHERE created_at > NOW() - INTERVAL '24 hours'
+                GROUP BY CONCAT(
+                             COALESCE(NULLIF(from_status, ''), 'unknown'),
+                             '->',
+                             COALESCE(NULLIF(to_status, ''), 'unknown')
+                         ),
+                         COALESCE(NULLIF(source, ''), 'system')
+                HAVING COUNT(*) >= 3
+            )
+            SELECT source_table, entity_type, action, actor, occurrence_count, last_seen_at
+            FROM grouped_logs
+            ORDER BY occurrence_count DESC, last_seen_at DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(CAP_AUDIT_LOGS)
+        .fetch_all(&*self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping audit/log observation source");
+                Vec::new()
+            }
+        };
+
+        let mut audit_obs: Vec<serde_json::Value> = Vec::new();
+        for row in &audit_rows {
+            let source_table: String = row.try_get("source_table").unwrap_or_default();
+            let entity_type: String = row.try_get("entity_type").unwrap_or_default();
+            let action: String = row.try_get("action").unwrap_or_default();
+            let actor: String = row.try_get("actor").unwrap_or_default();
+            let occurrence_count: i64 = row.try_get("occurrence_count").unwrap_or(1);
+            let last_seen_at: DateTime<Utc> =
+                row.try_get("last_seen_at").unwrap_or_else(|_| Utc::now());
+            let summary = format!(
+                "{source_table} repeated {entity_type}:{action} by {actor} ×{occurrence_count}"
+            );
+            audit_obs.push(serde_json::json!({
+                "timestamp": last_seen_at.to_rfc3339(),
+                "source": "audit_log",
+                "category": "log-signal",
+                "signature": format!("log-signal:{source_table}:{entity_type}:{action}:{actor}"),
+                "summary": truncate_chars(&summary, 240),
+                "weight": if occurrence_count >= 5 { 2 } else { 1 },
+                "occurrences": (occurrence_count as u32).clamp(1, 50),
+                "evidence_ref": format!("audit_logs:{source_table}:{entity_type}:{action}:{actor}"),
+            }));
+        }
+
+        // --- Source 9: kanban_ready – automation-candidate cards awaiting execution (cap 20) ---
         let kanban_ready_rows = match sqlx::query(
             r#"
             SELECT id,
@@ -1289,7 +1383,7 @@ impl RoutineStore {
             }));
         }
 
-        // --- Source 9: kanban_dispatched – recently completed automation-candidate cards (cap 20) ---
+        // --- Source 10: kanban_dispatched – recently completed automation-candidate cards (cap 20) ---
         let kanban_dispatched_rows = match sqlx::query(
             r#"
             SELECT id,
@@ -1351,6 +1445,7 @@ impl RoutineStore {
             kanban_obs.into(),
             dispatch_obs.into(),
             session_obs.into(),
+            audit_obs.into(),
         ];
         if include_automation_candidate_card_observations(current_script_ref) {
             sources.push(kanban_ready_obs.into());
@@ -1860,6 +1955,80 @@ impl RoutineStore {
         .execute(&*self.pool)
         .await
         .map_err(|e| anyhow!("record routine discord log result {run_id}: {e}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn record_run_discord_log_section(
+        &self,
+        run_id: &str,
+        section_key: &str,
+        section_text: &str,
+    ) -> Result<RunDiscordLogState> {
+        let mut tx = self.pool.begin().await?;
+        let row: Option<(Option<String>, Value)> = sqlx::query_as(
+            r#"
+            SELECT discord_message_id, discord_log_sections
+            FROM routine_runs
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("load routine run discord log state {run_id}: {e}"))?;
+
+        let Some((message_id, sections)) = row else {
+            return Err(anyhow!("routine run {run_id} not found for discord log"));
+        };
+
+        let mut object = sections.as_object().cloned().unwrap_or_default();
+        object.insert(
+            section_key.trim().to_string(),
+            Value::String(section_text.to_string()),
+        );
+        let sections = Value::Object(object);
+
+        sqlx::query(
+            r#"
+            UPDATE routine_runs
+            SET discord_log_sections = $2,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(run_id)
+        .bind(&sections)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("record routine run discord log section {run_id}: {e}"))?;
+
+        tx.commit().await?;
+        Ok(RunDiscordLogState {
+            message_id,
+            sections,
+        })
+    }
+
+    pub async fn record_run_discord_message_id(
+        &self,
+        run_id: &str,
+        message_id: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE routine_runs
+            SET discord_message_id = $2,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(run_id)
+        .bind(message_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("record routine run discord message id {run_id}: {e}"))?;
 
         Ok(result.rows_affected() == 1)
     }
@@ -2539,10 +2708,13 @@ mod tests {
     #[test]
     fn automation_candidate_card_observations_are_executor_only() {
         assert!(include_automation_candidate_card_observations(Some(
-            "monitoring/automation-executor-v2.js"
+            "monitoring/automation-candidate-executor.js"
         )));
         assert!(include_automation_candidate_card_observations(Some(
             " monitoring/automation-executor.js "
+        )));
+        assert!(include_automation_candidate_card_observations(Some(
+            "monitoring/automation-executor-v2.js"
         )));
         assert!(!include_automation_candidate_card_observations(Some(
             "monitoring/automation-candidate-recommender.js"
@@ -2683,6 +2855,42 @@ mod tests {
         assert!(summary.contains("api friction repeats"));
         assert!(summary.contains("GET /api/docs before retry"));
         assert!(!summary.contains("SECRET_RAW_MEMORY_BODY"));
+    }
+
+    #[test]
+    fn precomputed_memento_digest_observation_respects_category_override() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 13, 7, 0, 0).unwrap();
+        let raw = serde_json::json!({
+            "topic": "dispatch failures",
+            "count": 3,
+            "category": "dispatch-retry",
+            "source": "memento_digest",
+            "signature": "dispatch-retry:dispatch-failures",
+            "latest_examples": ["same dispatch failed repeatedly"],
+            "raw_memory_body": "MUST_NOT_LEAK"
+        })
+        .to_string();
+
+        let obs = precomputed_observation_from_kv(
+            "routine_observation:memento_digest:dispatch-failures",
+            Some(&raw),
+            now,
+        )
+        .expect("memento category digest observation");
+
+        assert_eq!(
+            obs.get("category").and_then(Value::as_str),
+            Some("dispatch-retry")
+        );
+        assert_eq!(
+            obs.get("signature").and_then(Value::as_str),
+            Some("dispatch-retry:dispatch-failures")
+        );
+        assert_eq!(
+            obs.pointer("/value/category").and_then(Value::as_str),
+            Some("dispatch-retry")
+        );
+        assert!(obs.pointer("/value/raw_memory_body").is_none());
     }
 
     #[test]

@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { loadRoutine } = require("./support/routine-harness");
 
-const ROUTINE_PATH = "routines/monitoring/automation-executor-v2.js";
+const ROUTINE_PATH = "routines/monitoring/automation-candidate-executor.js";
 
 const BASE_NOW = new Date("2026-05-12T10:00:00Z");
 

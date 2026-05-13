@@ -1742,7 +1742,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ("assigned_agent_id", body_param("string", false, "Agent that should run the loop")),
             ("source", body_param("string", false, "Origin such as user, routine_recommender, memento_digest, or api_friction").with_default("user")),
             ("dedupe_key", body_param("string", false, "Stable candidate identity for idempotent upsert")),
-            ("start_ready", body_param("boolean", false, "When true, mark the candidate ready for executor-v2 immediately").with_default(false)),
+            ("start_ready", body_param("boolean", false, "When true, mark the candidate ready for the automation candidate executor immediately").with_default(false)),
             ("program.repo_dir", body_param("string", true, "Absolute repository path used to create isolated worktrees")),
             ("program.allowed_write_paths", body_param("array<string>", true, "Non-empty clean relative path allowlist")),
             ("program.metric_name", body_param("string", true, "Metric name measured by the iteration")),

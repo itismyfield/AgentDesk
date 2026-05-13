@@ -18,7 +18,7 @@ function makeRunObs(signature, evidenceRef, opts = {}) {
   return {
     signature,
     evidence_ref: evidenceRef,
-    category: "routine-candidate",
+    category: opts.category || "routine-candidate",
     summary: `Repeated failure: ${signature}`,
     occurrences: opts.occurrences || 1,
     weight: opts.weight || 1,
@@ -125,6 +125,27 @@ test("pipeline phase 1: recommender accumulates evidence and escalates candidate
     r.checkpoint.candidates[SIGNATURE].score >= 80,
     `candidate score should be >= 80, got ${r.checkpoint.candidates[SIGNATURE].score}`
   );
+});
+
+test("pipeline phase 1b: ROI-aware high-impact category escalates with three evidence points", () => {
+  const { tick } = loadRoutine(RECOMMENDER_PATH);
+  const signature = "session-pattern:maker";
+  const obs = [
+    makeRunObs(signature, "session_transcripts:maker", {
+      category: "session-pattern",
+      occurrences: 3,
+      weight: 2,
+    }),
+  ];
+
+  const r = tick({ now: BASE_NOW, checkpoint: null, observations: obs, automationInventory: [] });
+
+  assert.equal(r.action, "agent", "session-pattern should use ROI-aware gate below the global evidence=5 threshold");
+  const candidate = r.checkpoint.candidates[signature];
+  assert.equal(candidate.evidence_count, 3);
+  assert.equal(candidate.category, "session-pattern");
+  assert.ok(candidate.score >= 60, `candidate score should satisfy ROI gate, got ${candidate.score}`);
+  assert.ok(r.prompt.includes("gate=60/3"), "prompt should explain the category-specific gate");
 });
 
 // --- Phase 2: Detector passes quality gate for a candidate_review observation ---
