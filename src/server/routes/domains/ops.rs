@@ -5,7 +5,7 @@ use axum::{
 
 use super::super::{
     ApiRouter, AppState, auto_queue, cluster, cron_api, dispatched_sessions, dispatches, docs,
-    health_api, hooks, maintenance, messages, pipeline, prompt_manifest_retention,
+    health_api, hooks, idle_recap, maintenance, messages, pipeline, prompt_manifest_retention,
     protected_api_domain, provider_cli_api, queue_api, routines, skills_api, termination_events,
 };
 
@@ -185,6 +185,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/sessions/{session_key}/force-kill",
                 post(dispatched_sessions::force_kill_session),
+            )
+            .route(
+                "/sessions/{session_key}/idle-recap",
+                post(idle_recap::post_idle_recap),
             )
             // #1067: watch-agent-turn skill promotion — capture the last N lines
             // of the tmux pane bound to a session id.
