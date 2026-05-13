@@ -120,6 +120,7 @@ async fn upsert_turn_owned_pg(pool: &PgPool, entry: &PersistTurnOwned) -> Result
         None,
         thread_id.as_deref(),
         dispatch_id.as_deref(),
+        Some(channel_id),
     )
     .await;
 

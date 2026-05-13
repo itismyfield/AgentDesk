@@ -1659,6 +1659,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     None,
                     None,
                     thread_channel_id,
+                    Some(ChannelId::new(dc.channel_id)),
                     agent_id.as_deref(),
                     api_port,
                 )

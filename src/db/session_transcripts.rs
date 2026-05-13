@@ -303,6 +303,7 @@ async fn prepare_persist_entry_pg(
         None,
         None,
         prepared.dispatch_id.as_deref(),
+        None,
     )
     .await;
 

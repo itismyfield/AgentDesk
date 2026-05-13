@@ -1547,6 +1547,7 @@ async fn start_reserved_headless_turn_with_owner(
         Some(&current_path),
         None,
         adk_thread_channel_id,
+        Some(channel_id),
         role_binding
             .as_ref()
             .map(|binding| binding.role_id.as_str()),
@@ -4063,6 +4064,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         Some(&current_path),
         dispatch_id.as_deref(),
         adk_thread_channel_id,
+        Some(channel_id),
         role_binding
             .as_ref()
             .map(|binding| binding.role_id.as_str()),
