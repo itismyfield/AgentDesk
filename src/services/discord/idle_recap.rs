@@ -231,10 +231,7 @@ pub(crate) async fn persist_recap_message_id(
 /// channel binding, notify bot offline, transient send_message 429, …).
 /// Without this, a flaky renderer would cause the policy to re-fire on
 /// every 5-min tick.
-pub(crate) async fn stamp_recap_cycle(
-    pool: &PgPool,
-    session_key: &str,
-) -> Result<(), sqlx::Error> {
+pub(crate) async fn stamp_recap_cycle(pool: &PgPool, session_key: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE sessions SET idle_recap_posted_at = NOW() WHERE session_key = $1")
         .bind(session_key)
         .execute(pool)
