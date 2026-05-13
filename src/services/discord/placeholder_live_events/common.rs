@@ -29,6 +29,19 @@ pub(super) fn first_json_bool(value: &Value, keys: &[&str]) -> Option<bool> {
         .find_map(|key| value.get(*key).and_then(Value::as_bool))
 }
 
+pub(super) fn first_json_usize(value: &Value, keys: &[&str]) -> Option<usize> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|raw| match raw {
+            Value::Number(num) => num
+                .as_u64()
+                .map(|value| value as usize)
+                .or_else(|| num.as_i64().filter(|value| *value >= 0).map(|v| v as usize)),
+            Value::String(text) => text.trim().parse::<usize>().ok(),
+            _ => None,
+        })
+    })
+}
+
 pub(super) fn normalize_tool_key(name: &str) -> String {
     name.chars()
         .filter(|ch| ch.is_ascii_alphanumeric())

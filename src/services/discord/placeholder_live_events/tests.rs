@@ -302,6 +302,51 @@ fn status_panel_renders_session_fresh_and_fallback_distinctly() {
 }
 
 #[test]
+fn status_panel_appends_recovery_message_count_line_when_present() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(1781);
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "session_fresh",
+        &json!({
+            "reason": "idle_timeout",
+            "recoveryMessageCount": 7,
+        }),
+    ));
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("🆕 새 세션 시작"));
+    assert!(rendered.contains("(최근 대화 7개를 읽어들였습니다)"));
+}
+
+#[test]
+fn status_panel_omits_recovery_line_when_count_is_zero_or_missing() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(1782);
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "session_fresh",
+        &json!({
+            "reason": "idle_timeout",
+            "recoveryMessageCount": 0,
+        }),
+    ));
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("🆕 새 세션 시작"));
+    assert!(!rendered.contains("최근 대화"));
+
+    let other_channel = ChannelId::new(1783);
+    assert!(events.set_session_panel_lifecycle_event(
+        other_channel,
+        "session_fresh",
+        &json!({ "reason": "first_turn" }),
+    ));
+    let rendered = events.render_status_panel(other_channel, &ProviderKind::Claude, 1_700_000_000);
+    assert!(!rendered.contains("최근 대화"));
+}
+
+#[test]
 fn status_panel_omits_session_line_when_lifecycle_details_are_absent() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(180);

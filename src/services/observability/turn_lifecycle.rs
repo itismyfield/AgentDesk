@@ -98,6 +98,8 @@ pub struct SessionStrategyDetails {
     pub reason: String,
     pub provider_session_id: Option<String>,
     pub fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_message_count: Option<usize>,
 }
 
 impl SessionStrategyDetails {
@@ -106,6 +108,16 @@ impl SessionStrategyDetails {
             reason: reason.into(),
             provider_session_id: None,
             fingerprint: None,
+            recovery_message_count: None,
+        }
+    }
+
+    pub fn fresh_with_recovery(reason: impl Into<String>, recovery_message_count: usize) -> Self {
+        Self {
+            reason: reason.into(),
+            provider_session_id: None,
+            fingerprint: None,
+            recovery_message_count: Some(recovery_message_count),
         }
     }
 
@@ -114,6 +126,7 @@ impl SessionStrategyDetails {
             reason: reason.into(),
             provider_session_id: Some(provider_session_id.to_string()),
             fingerprint: Some(provider_session_fingerprint(provider_session_id)),
+            recovery_message_count: None,
         }
     }
 }
@@ -594,6 +607,14 @@ mod tests {
         assert_eq!(fresh.notification_reason_code(), None);
         assert_eq!(fresh.notification_content(), None);
         assert_eq!(fresh.details_json()["reason"], "first_turn");
+        assert!(fresh.details_json().get("recoveryMessageCount").is_none());
+
+        let fresh_with_recovery = TurnEvent::SessionFresh(
+            SessionStrategyDetails::fresh_with_recovery("idle_timeout", 5),
+        );
+        let recovery_details = fresh_with_recovery.details_json();
+        assert_eq!(recovery_details["reason"], "idle_timeout");
+        assert_eq!(recovery_details["recoveryMessageCount"], 5);
 
         let resumed = TurnEvent::SessionResumed(SessionStrategyDetails::resumed(
             "db_provider_session_restored",

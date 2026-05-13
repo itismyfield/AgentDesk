@@ -159,6 +159,19 @@ pub(super) struct FormattedSessionRetryContext {
     pub(super) audit_record: Option<RecoveryAuditRecord>,
 }
 
+impl FormattedSessionRetryContext {
+    pub(super) fn recovery_message_count(&self) -> usize {
+        count_recovery_message_lines(&self.raw_context)
+    }
+}
+
+pub(super) fn count_recovery_message_lines(raw_context: &str) -> usize {
+    raw_context
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
 pub(super) fn take_session_retry_context(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -188,6 +201,7 @@ pub(super) async fn emit_session_strategy_lifecycle(
     provider_session_id: Option<&str>,
     reason: &'static str,
     cli_was_just_spawned: bool,
+    recovery_message_count: Option<usize>,
 ) {
     let Some(pool) = shared.pg_pool.as_ref() else {
         return;
@@ -199,7 +213,15 @@ pub(super) async fn emit_session_strategy_lifecycle(
     if resumed && !cli_was_just_spawned {
         return;
     }
-    let event = session_strategy_lifecycle_event(provider_session_id, reason);
+    let event = session_strategy_lifecycle_event(
+        provider_session_id,
+        reason,
+        if resumed {
+            None
+        } else {
+            recovery_message_count
+        },
+    );
     let summary = if resumed {
         format!("selected resumed provider session strategy: {reason}")
     } else {
@@ -228,11 +250,16 @@ pub(super) async fn emit_session_strategy_lifecycle(
 pub(super) fn session_strategy_lifecycle_event(
     provider_session_id: Option<&str>,
     reason: &'static str,
+    recovery_message_count: Option<usize>,
 ) -> TurnEvent {
     if let Some(provider_session_id) = provider_session_id {
         TurnEvent::SessionResumed(SessionStrategyDetails::resumed(reason, provider_session_id))
     } else {
-        TurnEvent::SessionFresh(SessionStrategyDetails::fresh(reason))
+        let details = match recovery_message_count.filter(|&count| count > 0) {
+            Some(count) => SessionStrategyDetails::fresh_with_recovery(reason, count),
+            None => SessionStrategyDetails::fresh(reason),
+        };
+        TurnEvent::SessionFresh(details)
     }
 }
 
