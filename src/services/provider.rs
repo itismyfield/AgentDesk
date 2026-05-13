@@ -556,7 +556,12 @@ impl CancelToken {
     /// Cancel and clean up any associated tmux session.
     pub fn cancel_with_tmux_cleanup(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
-        if let Some(name) = self.tmux_session.lock().unwrap().take() {
+        if let Some(name) = self
+            .tmux_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             #[cfg(unix)]
             {
                 crate::services::tmux_diagnostics::record_tmux_exit_reason(
@@ -590,11 +595,14 @@ impl CancelToken {
     }
 
     pub fn set_cancel_source(&self, source: impl Into<String>) {
-        *self.cancel_source.lock().unwrap() = Some(source.into());
+        *self.cancel_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(source.into());
     }
 
     pub fn cancel_source(&self) -> Option<String> {
-        self.cancel_source.lock().unwrap().clone()
+        self.cancel_source
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -604,7 +612,7 @@ pub fn cancel_requested(token: Option<&CancelToken>) -> bool {
 
 pub fn register_child_pid(token: Option<&CancelToken>, child_pid: u32) {
     if let Some(token) = token {
-        *token.child_pid.lock().unwrap() = Some(child_pid);
+        *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(child_pid);
     }
 }
 
@@ -1081,7 +1089,10 @@ mod cancel_token_tests {
         assert_eq!(token.cancel_source(), None);
 
         register_child_pid(Some(&token), 4242);
-        assert_eq!(*token.child_pid.lock().unwrap(), Some(4242));
+        assert_eq!(
+            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()),
+            Some(4242)
+        );
 
         token.set_cancel_source("watchdog_timeout");
         assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
@@ -1644,7 +1655,10 @@ mod tests {
         assert_eq!(token.cancel_source(), None);
 
         register_child_pid(Some(&token), 4242);
-        assert_eq!(*token.child_pid.lock().unwrap(), Some(4242));
+        assert_eq!(
+            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()),
+            Some(4242)
+        );
 
         token.set_cancel_source("watchdog_timeout");
         assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));

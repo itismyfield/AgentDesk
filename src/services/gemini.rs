@@ -2234,7 +2234,13 @@ Available sessions for this project (2):
 
         assert!(result.is_ok());
         assert!(rx.try_recv().is_err());
-        assert!(token.child_pid.lock().unwrap().is_none());
+        assert!(
+            token
+                .child_pid
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        );
     }
 
     #[test]

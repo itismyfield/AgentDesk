@@ -1621,7 +1621,8 @@ fn execute_streaming_local_tmux(
 
     // Store tmux session name in cancel token
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap() = Some(tmux_session_name.to_string());
+        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(tmux_session_name.to_string());
     }
 
     emit_fresh_session_watcher_handoff(&sender, output_path, input_fifo_path, tmux_session_name);
@@ -1698,7 +1699,8 @@ fn send_followup_to_tmux(
 
     // Store tmux session name in cancel token
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap() = Some(tmux_session_name.to_string());
+        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(tmux_session_name.to_string());
     }
 
     // Read output file from the offset
@@ -1849,7 +1851,7 @@ pub(crate) fn execute_streaming_local_process(
 
     // Store child PID in cancel token
     if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(handle.pid());
+        *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.pid());
     }
 
     // Store handle for follow-up messages
@@ -1927,7 +1929,7 @@ fn send_followup_to_process(
     // Store session in cancel token
     if let Some(ref token) = cancel_token {
         if let Some(pid) = process_session_pid(session_name) {
-            *token.child_pid.lock().unwrap() = Some(pid);
+            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
         }
     }
 
