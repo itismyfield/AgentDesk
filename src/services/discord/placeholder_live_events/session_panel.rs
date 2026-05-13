@@ -3,7 +3,8 @@ use serde_json::Value;
 use crate::services::provider::ProviderKind;
 
 use super::common::{
-    SESSION_PANEL_LINE_MAX_CHARS, first_json_bool, first_json_string, truncate_chars,
+    SESSION_PANEL_LINE_MAX_CHARS, first_json_bool, first_json_string, first_json_usize,
+    truncate_chars,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,7 @@ pub(super) struct SessionPanelSnapshot {
     kind: SessionPanelKind,
     provider_session_id: Option<String>,
     tmux: Option<TmuxPanelState>,
+    recovery_message_count: Option<usize>,
 }
 
 impl SessionPanelSnapshot {
@@ -67,11 +69,13 @@ impl SessionPanelSnapshot {
         )
         .map(str::to_string);
         let tmux = parse_tmux_panel_state(details);
+        let recovery_message_count = parse_recovery_message_count(details);
 
         Some(Self {
             kind,
             provider_session_id,
             tmux,
+            recovery_message_count,
         })
     }
 }
@@ -94,7 +98,12 @@ pub(super) fn render_session_panel_line(
     if let Some(tmux) = session.tmux {
         parts.push(format!("tmux {}", tmux.as_str()));
     }
-    truncate_chars(&parts.join(" · "), SESSION_PANEL_LINE_MAX_CHARS)
+    let head = truncate_chars(&parts.join(" · "), SESSION_PANEL_LINE_MAX_CHARS);
+    if let Some(count) = session.recovery_message_count.filter(|&count| count > 0) {
+        format!("{head}\n(최근 대화 {count}개를 읽어들였습니다)")
+    } else {
+        head
+    }
 }
 
 fn render_provider_session_label(provider: &ProviderKind, session_id: &str) -> String {
@@ -159,6 +168,11 @@ fn is_fallback_session_details(details: &Value) -> bool {
         let value = value.to_ascii_lowercase();
         value.contains("fallback") || value.contains("recovery") || value.contains("resume_failed")
     })
+}
+
+fn parse_recovery_message_count(details: &Value) -> Option<usize> {
+    first_json_usize(details, &["recovery_message_count", "recoveryMessageCount"])
+        .filter(|&count| count > 0)
 }
 
 fn parse_tmux_panel_state(details: &Value) -> Option<TmuxPanelState> {

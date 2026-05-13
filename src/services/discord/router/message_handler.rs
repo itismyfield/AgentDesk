@@ -1180,6 +1180,10 @@ async fn start_reserved_headless_turn_with_owner(
     )
     .await;
     let cli_was_just_spawned = cli_just_spawned_for_emit(tmux_session_name.as_deref());
+    let recovery_message_count = session_retry_context
+        .as_ref()
+        .map(|ctx| ctx.recovery_message_count())
+        .filter(|&count| count > 0);
     emit_session_strategy_lifecycle(
         shared,
         channel_id,
@@ -1189,6 +1193,7 @@ async fn start_reserved_headless_turn_with_owner(
         session_id.as_deref(),
         session_strategy_reason,
         cli_was_just_spawned,
+        recovery_message_count,
     )
     .await;
 
@@ -3595,6 +3600,10 @@ pub(in crate::services::discord) async fn handle_text_message(
     )
     .await;
     let cli_was_just_spawned = cli_just_spawned_for_emit(tmux_session_name.as_deref());
+    let recovery_message_count = session_retry_context
+        .as_ref()
+        .map(|ctx| ctx.recovery_message_count())
+        .filter(|&count| count > 0);
     emit_session_strategy_lifecycle(
         shared,
         channel_id,
@@ -3604,6 +3613,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         session_id.as_deref(),
         session_strategy_reason,
         cli_was_just_spawned,
+        recovery_message_count,
     )
     .await;
 
@@ -5844,12 +5854,21 @@ mod session_strategy_lifecycle_tests {
 
     #[test]
     fn session_strategy_lifecycle_event_records_fresh_and_resumed_details() {
-        let fresh = session_strategy_lifecycle_event(None, "no_cached_provider_session");
+        let fresh = session_strategy_lifecycle_event(None, "no_cached_provider_session", None);
         match fresh {
             TurnEvent::SessionFresh(details) => {
                 assert_eq!(details.reason, "no_cached_provider_session");
                 assert_eq!(details.provider_session_id, None);
                 assert_eq!(details.fingerprint, None);
+                assert_eq!(details.recovery_message_count, None);
+            }
+            other => panic!("expected session_fresh event, got {other:?}"),
+        }
+
+        let fresh_with_recovery = session_strategy_lifecycle_event(None, "idle_timeout", Some(9));
+        match fresh_with_recovery {
+            TurnEvent::SessionFresh(details) => {
+                assert_eq!(details.recovery_message_count, Some(9));
             }
             other => panic!("expected session_fresh event, got {other:?}"),
         }
@@ -5857,6 +5876,7 @@ mod session_strategy_lifecycle_tests {
         let resumed = session_strategy_lifecycle_event(
             Some("provider-session-123"),
             "db_provider_session_restored",
+            Some(9),
         );
         match resumed {
             TurnEvent::SessionResumed(details) => {
@@ -5874,6 +5894,7 @@ mod session_strategy_lifecycle_tests {
                         .as_str()
                     )
                 );
+                assert_eq!(details.recovery_message_count, None);
             }
             other => panic!("expected session_resumed event, got {other:?}"),
         }
