@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,7 +16,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::Value;
 
 use crate::services::agent_protocol::StreamMessage;
-use crate::services::process::configure_child_process_group;
+use crate::services::process::{configure_child_process_group, kill_pid_tree};
 use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
 use crate::services::remote::RemoteProfile;
 
@@ -596,8 +597,20 @@ fn compose_system_prompt(
     }
 }
 
+/// Cap on the abort-session POST so neither the in-loop branch nor the
+/// scoped cancel-watchdog (issue #2091) can block indefinitely if the
+/// opencode server's abort handler stalls. Short enough that a stuck
+/// server can't gate cancel observability for long; long enough that a
+/// healthy server has room to ack.
+const ABORT_SESSION_TIMEOUT: Duration = Duration::from_secs(3);
+
 fn abort_session(base_url: &str, auth: &str, session_id: &str) {
-    let _ = ureq::post(&format!("{base_url}/session/{session_id}/abort"))
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout(ABORT_SESSION_TIMEOUT)
+        .build();
+    let _ = agent
+        .post(&format!("{base_url}/session/{session_id}/abort"))
         .set("Authorization", auth)
         .call();
 }
@@ -770,7 +783,94 @@ fn emit_recovered_text_part(
 // SSE stream consumption
 // ---------------------------------------------------------------------------
 
+/// Poll interval for the cancel-watchdog thread spawned by [`consume_sse`].
+///
+/// `BufReader::lines()` blocks on `read_line` until the SSE peer emits a
+/// chunk or the OS read returns. The in-loop `is_cancelled` check only
+/// fires on the *next* line, so without a watchdog a cancel signal could
+/// take up to `SSE_READ_TIMEOUT` (120 s) to be observed — issue #2091.
+/// 250 ms is short enough to give snappy cancel UX while keeping the
+/// watchdog cost negligible (4 polls/sec, atomic load + sleep).
+const CANCEL_WATCHDOG_POLL: Duration = Duration::from_millis(250);
+
+/// Grace window between `abort_session` (graceful close) and the hard
+/// `kill_pid_tree` fallback. If the SSE socket doesn't EOF within this
+/// window, the watchdog kills the opencode server process so the TCP
+/// connection drops and `read_line` returns. Sized to cover a healthy
+/// server's abort RTT (~tens of ms) plus the main thread's tail
+/// processing without dragging the worst-case cancel latency too high.
+const WATCHDOG_KILL_GRACE: Duration = Duration::from_millis(500);
+
 fn consume_sse(
+    reader: BufReader<Box<dyn std::io::Read + Send>>,
+    session_id: &str,
+    sender: &Sender<StreamMessage>,
+    cancel_token: Option<&CancelToken>,
+    base_url: &str,
+    auth: &str,
+) -> Result<(), String> {
+    // Watchdog: when the caller's `CancelToken` fires while we're parked
+    // inside `reader.lines()`, the in-loop poll wouldn't notice until the
+    // peer emits the next chunk. The scoped watchdog thread fires
+    // `abort_session` the moment cancel is observed, which closes the
+    // upstream SSE connection and unblocks the blocking `read_line` —
+    // dropping observed latency from `≤ SSE_READ_TIMEOUT` to `≤
+    // CANCEL_WATCHDOG_POLL + abort_session RTT`.
+    //
+    // Hard fallback: if `abort_session` times out / 5xx's and the SSE
+    // socket still hasn't EOF'd within `WATCHDOG_KILL_GRACE`, the
+    // watchdog kills the registered opencode server PID tree. The local
+    // process exit forces the SSE TCP connection closed regardless of
+    // server-side abort behaviour, capping the worst-case cancel
+    // observation at `CANCEL_WATCHDOG_POLL + ABORT_SESSION_TIMEOUT +
+    // WATCHDOG_KILL_GRACE` instead of `SSE_READ_TIMEOUT`.
+    let watchdog_done = Arc::new(AtomicBool::new(false));
+    thread::scope(|scope| {
+        if let Some(cancel) = cancel_token {
+            let stop = watchdog_done.clone();
+            let watchdog_base_url = base_url.to_string();
+            let watchdog_auth = auth.to_string();
+            let watchdog_session_id = session_id.to_string();
+            scope.spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if cancel_requested(Some(cancel)) {
+                        // Graceful: ask opencode to close the SSE stream.
+                        // Bounded by `ABORT_SESSION_TIMEOUT` (3 s).
+                        abort_session(&watchdog_base_url, &watchdog_auth, &watchdog_session_id);
+                        // Give the main thread a brief moment to observe
+                        // the peer-closed connection and exit `read_line`.
+                        let kill_deadline = Instant::now() + WATCHDOG_KILL_GRACE;
+                        while Instant::now() < kill_deadline && !stop.load(Ordering::Relaxed) {
+                            thread::sleep(Duration::from_millis(50));
+                        }
+                        // Hard fallback: SSE loop still hasn't exited
+                        // (abort POST stalled, or server-side abort
+                        // didn't propagate). Kill the opencode server
+                        // process tree so the TCP socket drops and
+                        // `read_line` returns regardless of server
+                        // behaviour. PID is registered via
+                        // `register_child_pid` during server startup.
+                        if !stop.load(Ordering::Relaxed)
+                            && let Ok(guard) = cancel.child_pid.lock()
+                            && let Some(pid) = *guard
+                        {
+                            kill_pid_tree(pid);
+                        }
+                        return;
+                    }
+                    thread::sleep(CANCEL_WATCHDOG_POLL);
+                }
+            });
+        }
+        let result = consume_sse_inner(reader, session_id, sender, cancel_token, base_url, auth);
+        // Tell the watchdog to exit so `thread::scope` joins promptly even
+        // on the happy path. Done *before* the scope's implicit join.
+        watchdog_done.store(true, Ordering::Relaxed);
+        result
+    })
+}
+
+fn consume_sse_inner(
     reader: BufReader<Box<dyn std::io::Read + Send>>,
     session_id: &str,
     sender: &Sender<StreamMessage>,
@@ -802,6 +902,13 @@ fn consume_sse(
             Err(e) => {
                 if terminal_seen {
                     break;
+                }
+                // If the watchdog tripped abort_session, the upstream
+                // connection closes and `read_line` returns an error here.
+                // Surface the cancel-shaped error so callers (and tests)
+                // see the same shape as the in-loop cancel branch.
+                if is_cancelled(cancel_token) {
+                    return Err("OpenCode request cancelled".to_string());
                 }
                 return Err(format!("OpenCode SSE stream read error: {e}"));
             }
