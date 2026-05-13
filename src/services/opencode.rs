@@ -23,6 +23,7 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_POLL_MS: u64 = 250;
 const SSE_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const DISPOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const MESSAGE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_OUTPUT_LIMIT: usize = 8 * 1024;
 
 #[derive(Debug, Default)]
@@ -381,7 +382,7 @@ fn run_session(
         .build();
 
     let sse_response = sse_agent
-        .get(&format!("{base_url}/event"))
+        .get(&format!("{base_url}/global/event"))
         .set("Authorization", auth)
         .set("Accept", "text/event-stream")
         .call()
@@ -593,6 +594,163 @@ fn send_sse_done(sender: &Sender<StreamMessage>, session_id: &str, result: Strin
     });
 }
 
+fn recover_sse_eof_from_messages(
+    base_url: &str,
+    auth: &str,
+    session_id: &str,
+    sender: &Sender<StreamMessage>,
+    state: &mut SseMessageState,
+    cancel_token: Option<&CancelToken>,
+) -> Option<String> {
+    if is_cancelled(cancel_token) {
+        return None;
+    }
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout_read(MESSAGE_RECOVERY_TIMEOUT)
+        .build();
+    let payload: Value = agent
+        .get(&format!("{base_url}/session/{session_id}/message"))
+        .set("Authorization", auth)
+        .call()
+        .ok()?
+        .into_json()
+        .ok()?;
+
+    if is_cancelled(cancel_token) {
+        return None;
+    }
+
+    let result = recover_session_text_from_messages(&payload, sender, state, cancel_token);
+
+    if is_cancelled(cancel_token) {
+        return None;
+    }
+
+    result
+}
+
+fn recover_session_text_from_messages(
+    payload: &Value,
+    sender: &Sender<StreamMessage>,
+    state: &mut SseMessageState,
+    cancel_token: Option<&CancelToken>,
+) -> Option<String> {
+    let messages = payload
+        .as_array()
+        .or_else(|| payload.get("items").and_then(|items| items.as_array()))?;
+
+    if is_cancelled(cancel_token) {
+        return None;
+    }
+    let message = latest_recoverable_assistant_message(messages)?;
+    recover_session_text_from_message(message, sender, state, cancel_token)?;
+
+    let result = state.accumulated_text.trim().to_string();
+    (!result.is_empty()).then_some(result)
+}
+
+fn latest_recoverable_assistant_message(messages: &[Value]) -> Option<&Value> {
+    messages.iter().rev().find(|message| {
+        let info = message
+            .get("info")
+            .or_else(|| message.get("message"))
+            .unwrap_or(*message);
+        let message_role = role_field_from_value(info).or_else(|| role_field_from_value(message));
+        is_assistant_message_role(message_role) && message_has_recoverable_text_part(message, info)
+    })
+}
+
+fn message_has_recoverable_text_part(message: &Value, info: &Value) -> bool {
+    message
+        .get("parts")
+        .and_then(|parts| parts.as_array())
+        .or_else(|| info.get("parts").and_then(|parts| parts.as_array()))
+        .is_some_and(|parts| {
+            parts.iter().any(|part| {
+                part_type_from_value(part) == Some("text")
+                    && part
+                        .get("text")
+                        .and_then(|text| text.as_str())
+                        .is_some_and(|text| !text.is_empty())
+            })
+        })
+}
+
+fn recover_session_text_from_message(
+    message: &Value,
+    sender: &Sender<StreamMessage>,
+    state: &mut SseMessageState,
+    cancel_token: Option<&CancelToken>,
+) -> Option<()> {
+    let info = message
+        .get("info")
+        .or_else(|| message.get("message"))
+        .unwrap_or(message);
+    register_message_role(state, info);
+
+    let message_role = role_field_from_value(info).or_else(|| role_field_from_value(message));
+    if is_user_message_role(message_role) {
+        return Some(());
+    }
+
+    let event_message_id = message_record_id_from_value(info)
+        .or_else(|| message_record_id_from_value(message))
+        .or_else(|| message_id_from_value(message));
+
+    let Some(parts) = message
+        .get("parts")
+        .and_then(|parts| parts.as_array())
+        .or_else(|| info.get("parts").and_then(|parts| parts.as_array()))
+    else {
+        return Some(());
+    };
+
+    for part in parts {
+        if is_cancelled(cancel_token) {
+            return None;
+        }
+        emit_recovered_text_part(part, sender, state, event_message_id, message_role);
+    }
+
+    Some(())
+}
+
+fn emit_recovered_text_part(
+    part: &Value,
+    sender: &Sender<StreamMessage>,
+    state: &mut SseMessageState,
+    event_message_id: Option<&str>,
+    event_message_role: Option<&str>,
+) {
+    if part_type_from_value(part) != Some("text") {
+        return;
+    }
+
+    let message_role = message_role_from_part(part, event_message_role)
+        .map(str::to_string)
+        .or_else(|| {
+            message_id_from_value(part)
+                .or(event_message_id)
+                .and_then(|message_id| state.message_roles.get(message_id).cloned())
+        });
+    if is_user_message_role(message_role.as_deref()) {
+        if let Some(snapshot_key) = snapshot_key_from_part(part, event_message_id) {
+            suppress_text_part(state, &snapshot_key);
+        }
+        return;
+    }
+
+    emit_text_part(
+        part,
+        sender,
+        state,
+        event_message_id,
+        message_role.as_deref(),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // SSE stream consumption
 // ---------------------------------------------------------------------------
@@ -687,6 +845,29 @@ fn consume_sse(
         if !result.is_empty() {
             send_sse_done(sender, session_id, result);
             return Ok(());
+        }
+        if is_cancelled(cancel_token) {
+            abort_session(base_url, auth, session_id);
+            return Err("OpenCode request cancelled".to_string());
+        }
+        if let Some(result) = recover_sse_eof_from_messages(
+            base_url,
+            auth,
+            session_id,
+            sender,
+            &mut state,
+            cancel_token,
+        ) {
+            if is_cancelled(cancel_token) {
+                abort_session(base_url, auth, session_id);
+                return Err("OpenCode request cancelled".to_string());
+            }
+            send_sse_done(sender, session_id, result);
+            return Ok(());
+        }
+        if is_cancelled(cancel_token) {
+            abort_session(base_url, auth, session_id);
+            return Err("OpenCode request cancelled".to_string());
         }
         return Err("OpenCode stream ended without a terminal event".to_string());
     }
@@ -1246,7 +1427,11 @@ fn process_sse_event(
     sender: &Sender<StreamMessage>,
     state: &mut SseMessageState,
 ) -> Option<bool> {
-    let event: Value = serde_json::from_str(data).ok()?;
+    let raw_event: Value = serde_json::from_str(data).ok()?;
+    let event = raw_event
+        .get("payload")
+        .filter(|payload| payload.get("type").is_some())
+        .unwrap_or(&raw_event);
     let event_type = event.get("type").and_then(|v| v.as_str())?;
     let props = event.get("properties");
 
@@ -1254,12 +1439,6 @@ fn process_sse_event(
     let event_session = props
         .and_then(|p| p.get("sessionID").and_then(|v| v.as_str()))
         .or_else(|| props.and_then(|p| p.get("sessionId").and_then(|v| v.as_str())))
-        .or_else(|| {
-            props
-                .and_then(|p| p.get("info"))
-                .and_then(|i| i.get("id"))
-                .and_then(|v| v.as_str())
-        })
         .or_else(|| {
             props.and_then(|p| p.get("part")).and_then(|part| {
                 part.get("sessionID")
@@ -2137,6 +2316,59 @@ mod tests {
     }
 
     #[test]
+    fn test_global_event_payload_streams_assistant_text() {
+        let data = br#"data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg-user","sessionID":"s1","role":"user"}}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"part-user","sessionID":"s1","messageID":"msg-user","type":"text","text":"Reply exactly: OK"}}}}
+
+data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg-assistant","sessionID":"s1","role":"assistant"}}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"reason-1","sessionID":"s1","messageID":"msg-assistant","type":"reasoning","text":""}}}}
+
+data: {"payload":{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-assistant","partID":"reason-1","field":"text","delta":"internal"}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"text-1","sessionID":"s1","messageID":"msg-assistant","type":"text","text":""}}}}
+
+data: {"payload":{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-assistant","partID":"text-1","field":"text","delta":"O"}}}
+
+data: {"payload":{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-assistant","partID":"text-1","field":"text","delta":"K"}}}
+
+data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"text-1","sessionID":"s1","messageID":"msg-assistant","type":"text","text":"OK"}}}}
+
+data: {"payload":{"type":"sync","syncEvent":{"type":"message.part.updated.1","aggregateID":"s1","data":{"sessionID":"s1"}}}}
+
+data: {"payload":{"type":"session.idle","properties":{"sessionID":"s1"}}}
+
+"#
+        .to_vec();
+        let reader: BufReader<Box<dyn std::io::Read + Send>> =
+            BufReader::new(Box::new(std::io::Cursor::new(data)));
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+
+        let result = consume_sse(reader, "s1", &tx, None, "http://127.0.0.1:9", "");
+        drop(tx);
+        let msgs = rx.try_iter().collect::<Vec<_>>();
+
+        assert!(result.is_ok());
+        assert_eq!(
+            msgs.iter()
+                .filter_map(|m| match m {
+                    StreamMessage::Text { content } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            "OK"
+        );
+        assert!(
+            msgs.iter().any(
+                |m| matches!(m, StreamMessage::Done { result, session_id } if result == "OK" && session_id.as_deref() == Some("s1"))
+            ),
+            "global OpenCode events should be unwrapped and completed on session.idle"
+        );
+    }
+
+    #[test]
     fn test_empty_stream_without_terminal_event_still_fails() {
         let reader: BufReader<Box<dyn std::io::Read + Send>> =
             BufReader::new(Box::new(std::io::Cursor::new(Vec::<u8>::new())));
@@ -2154,6 +2386,180 @@ mod tests {
                 .all(|m| !matches!(m, StreamMessage::Done { .. })),
             "empty OpenCode streams must not be converted into successful turns"
         );
+    }
+
+    #[test]
+    fn test_empty_stream_cancelled_before_recovery_returns_cancelled() {
+        let reader: BufReader<Box<dyn std::io::Read + Send>> =
+            BufReader::new(Box::new(std::io::Cursor::new(Vec::<u8>::new())));
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+        let token = CancelToken::new();
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let result = consume_sse(reader, "s1", &tx, Some(&token), "http://127.0.0.1:9", "");
+        drop(tx);
+
+        assert_eq!(result.unwrap_err(), "OpenCode request cancelled");
+        assert!(
+            rx.try_iter()
+                .all(|m| !matches!(m, StreamMessage::Done { .. })),
+            "cancelled OpenCode streams must not be recovered into Done"
+        );
+    }
+
+    #[test]
+    fn test_recover_session_text_from_messages_recovers_assistant_text() {
+        let payload = serde_json::json!([
+            {
+                "info": {"role": "user"},
+                "parts": [{"type": "text", "text": "hello", "messageID": "m-user"}]
+            },
+            {
+                "info": {"role": "assistant"},
+                "parts": [
+                    {"type": "reasoning", "text": "thinking", "messageID": "m-assistant"},
+                    {"type": "text", "text": "recovered answer", "messageID": "m-assistant"}
+                ]
+            }
+        ]);
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+        let mut state = SseMessageState::default();
+
+        let result = recover_session_text_from_messages(&payload, &tx, &mut state, None);
+        drop(tx);
+        let msgs = rx.try_iter().collect::<Vec<_>>();
+
+        assert_eq!(result.as_deref(), Some("recovered answer"));
+        assert!(
+            msgs.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content == "recovered answer")
+            ),
+            "persisted assistant text should be replayed as visible output"
+        );
+        assert!(
+            !msgs
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "hello")),
+            "persisted user prompt text must not be replayed"
+        );
+    }
+
+    #[test]
+    fn test_recover_session_text_from_messages_skips_tool_parts() {
+        let payload = serde_json::json!([
+            {
+                "info": {"role": "assistant"},
+                "parts": [
+                    {"type": "tool-use", "name": "shell", "input": {"cmd": "date"}, "messageID": "m1"},
+                    {"type": "tool-result", "content": "Wed May 13", "messageID": "m1"},
+                    {"type": "tool", "tool": "read", "state": {"status": "completed", "output": "file"}, "messageID": "m1"},
+                    {"type": "text", "text": "final answer", "messageID": "m1"}
+                ]
+            }
+        ]);
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+        let mut state = SseMessageState::default();
+
+        let result = recover_session_text_from_messages(&payload, &tx, &mut state, None);
+        drop(tx);
+        let msgs = rx.try_iter().collect::<Vec<_>>();
+
+        assert_eq!(result.as_deref(), Some("final answer"));
+        assert_eq!(
+            msgs.iter()
+                .filter(|m| matches!(m, StreamMessage::Text { .. }))
+                .count(),
+            1,
+            "EOF recovery should only emit recovered text"
+        );
+        assert!(
+            msgs.iter().all(|m| !matches!(
+                m,
+                StreamMessage::ToolUse { .. } | StreamMessage::ToolResult { .. }
+            )),
+            "EOF recovery must not replay persisted tool activity"
+        );
+    }
+
+    #[test]
+    fn test_recover_session_text_from_messages_uses_latest_assistant_text() {
+        let payload = serde_json::json!([
+            {
+                "info": {"role": "assistant"},
+                "parts": [{"type": "text", "text": "old answer", "messageID": "m-old"}]
+            },
+            {
+                "info": {"role": "user"},
+                "parts": [{"type": "text", "text": "new prompt", "messageID": "m-user"}]
+            },
+            {
+                "info": {"role": "assistant"},
+                "parts": [{"type": "text", "text": "latest answer", "messageID": "m-new"}]
+            }
+        ]);
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+        let mut state = SseMessageState::default();
+
+        let result = recover_session_text_from_messages(&payload, &tx, &mut state, None);
+        drop(tx);
+        let msgs = rx.try_iter().collect::<Vec<_>>();
+
+        assert_eq!(result.as_deref(), Some("latest answer"));
+        assert!(
+            msgs.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content == "latest answer")
+            ),
+            "latest assistant text should be recovered"
+        );
+        assert!(
+            !msgs
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "old answer")),
+            "stale assistant text must not be replayed"
+        );
+    }
+
+    #[test]
+    fn test_recover_session_text_from_messages_stops_when_cancelled() {
+        let payload = serde_json::json!([
+            {
+                "info": {"role": "assistant"},
+                "parts": [{"type": "text", "text": "should not emit", "messageID": "m1"}]
+            }
+        ]);
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+        let mut state = SseMessageState::default();
+        let token = CancelToken::new();
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let result = recover_session_text_from_messages(&payload, &tx, &mut state, Some(&token));
+        drop(tx);
+
+        assert_eq!(result, None);
+        assert!(
+            rx.try_iter().next().is_none(),
+            "cancelled EOF recovery must not emit recovered text"
+        );
+    }
+
+    #[test]
+    fn test_recover_session_text_from_messages_accepts_api_items_shape() {
+        let payload = serde_json::json!({
+            "items": [{
+                "info": {"role": "assistant"},
+                "parts": [{"type": "text", "text": "from items", "messageID": "m1"}]
+            }]
+        });
+        let (tx, _rx) = mpsc::channel::<StreamMessage>();
+        let mut state = SseMessageState::default();
+
+        let result = recover_session_text_from_messages(&payload, &tx, &mut state, None);
+
+        assert_eq!(result.as_deref(), Some("from items"));
     }
 
     #[test]
