@@ -44,6 +44,9 @@ pub const MAX_OBSERVATIONS_PER_TICK: usize = 100;
 pub const MAX_OBSERVATION_PAYLOAD_BYTES: usize = 65536;
 pub const MAX_AUTOMATION_INVENTORY_ITEMS: usize = 100;
 pub const MAX_AUTOMATION_INVENTORY_PAYLOAD_BYTES: usize = 32768;
+const LEGACY_AUTOMATION_CANDIDATE_EXECUTOR_REF: &str = "monitoring/automation-executor-v2.js";
+const CANONICAL_AUTOMATION_CANDIDATE_EXECUTOR_REF: &str =
+    "monitoring/automation-candidate-executor.js";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -268,12 +271,19 @@ impl RoutineScriptLoader {
     }
 
     pub fn get_script(&self, script_ref: &str) -> Result<Option<LoadedRoutineScript>> {
-        Ok(self
+        let scripts = self
             .scripts
             .lock()
-            .map_err(|_| anyhow!("routine script store lock poisoned"))?
-            .get(script_ref)
-            .cloned())
+            .map_err(|_| anyhow!("routine script store lock poisoned"))?;
+        if let Some(script) = scripts.get(script_ref).cloned() {
+            return Ok(Some(script));
+        }
+        if script_ref == LEGACY_AUTOMATION_CANDIDATE_EXECUTOR_REF {
+            return Ok(scripts
+                .get(CANONICAL_AUTOMATION_CANDIDATE_EXECUTOR_REF)
+                .cloned());
+        }
+        Ok(None)
     }
 
     pub fn execute_tick(
@@ -972,6 +982,80 @@ mod tests {
     }
 
     #[test]
+    fn legacy_automation_executor_v2_ref_resolves_to_canonical_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let monitoring_dir = dir.path().join("monitoring");
+        std::fs::create_dir_all(&monitoring_dir).unwrap();
+        let path = monitoring_dir.join("automation-candidate-executor.js");
+        std::fs::write(
+            &path,
+            r#"
+            agentdesk.routines.register({
+              name: "Automation Candidate Executor",
+              tick(ctx) {
+                return {
+                  action: "complete",
+                  result: { scriptRef: ctx.routine.script_ref },
+                  lastResult: "legacy-compatible"
+                };
+              }
+            });
+            "#,
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
+        assert!(
+            loader
+                .get_script(LEGACY_AUTOMATION_CANDIDATE_EXECUTOR_REF)
+                .unwrap()
+                .is_some()
+        );
+
+        let action = loader
+            .execute_tick(
+                LEGACY_AUTOMATION_CANDIDATE_EXECUTOR_REF,
+                RoutineTickContext {
+                    routine: RoutineTickRoutine {
+                        id: "routine-legacy".to_string(),
+                        agent_id: None,
+                        script_ref: LEGACY_AUTOMATION_CANDIDATE_EXECUTOR_REF.to_string(),
+                        name: "Legacy Automation Executor".to_string(),
+                        execution_strategy: "fresh".to_string(),
+                        fresh_context_guaranteed: false,
+                    },
+                    run: RoutineTickRun {
+                        id: "run-legacy".to_string(),
+                        lease_expires_at: chrono::Utc::now(),
+                    },
+                    agent: None,
+                    checkpoint: None,
+                    now: chrono::Utc::now(),
+                    observations: None,
+                    automation_inventory: None,
+                    limits: ObservationLimits::default(),
+                },
+            )
+            .unwrap();
+
+        match action {
+            crate::services::routines::RoutineAction::Complete {
+                result_json,
+                last_result,
+                ..
+            } => {
+                assert_eq!(last_result.as_deref(), Some("legacy-compatible"));
+                assert_eq!(
+                    result_json.unwrap(),
+                    serde_json::json!({"scriptRef": LEGACY_AUTOMATION_CANDIDATE_EXECUTOR_REF})
+                );
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
     fn exposes_tick_agent_idle_state_to_js() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent-idle.js");
@@ -1128,8 +1212,8 @@ mod tests {
             vec![
                 "agent-checkpoint-review.js".to_string(),
                 "monitoring/automation-candidate-detector.js".to_string(),
+                "monitoring/automation-candidate-executor.js".to_string(),
                 "monitoring/automation-candidate-recommender.js".to_string(),
-                "monitoring/automation-executor-v2.js".to_string(),
                 "monitoring/automation-executor.js".to_string(),
                 "monitoring/memento-digest-writer.js".to_string(),
                 "monitoring/working-watchdog.js".to_string(),
