@@ -97,6 +97,128 @@ impl Default for PlaceholderEntry {
 const PLACEHOLDER_ENTRIES_MAX: usize = 4096;
 const PLACEHOLDER_LIVE_EVENTS_MIN_EDIT_INTERVAL: Duration = Duration::from_secs(3);
 
+/// PR #5 — bounded retry budget for placeholder edits. Discord routinely
+/// hands back rate-limit (429) and transient gateway (5xx) errors that the
+/// previous one-shot path treated as terminal `EditFailed`. Three attempts
+/// covers the realistic spike profile (5/5s edit bucket + occasional 502)
+/// without bloating the worst-case latency — the longest delay we ever sit
+/// through is `EDIT_RETRY_BASE_DELAY * 2^(MAX_ATTEMPTS-2)` ≈ 1 s.
+const EDIT_RETRY_MAX_ATTEMPTS: u32 = 3;
+const EDIT_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+const EDIT_RETRY_MAX_DELAY: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditErrorCategory {
+    /// 429 / "rate limit" body. Treated the same as `Transient` for sleep
+    /// purposes — serenity's internal ratelimiter already honoured the
+    /// `Retry-After` header before this surfaced, so we only need a small
+    /// bounded backoff to ride out the residual spike. Kept as a distinct
+    /// variant so future work can surface structured retry_after data and
+    /// upgrade the wait policy without changing call-site logic.
+    RateLimited,
+    /// 5xx / network-ish hiccup or any error string we don't recognise.
+    /// Exponential backoff is enough.
+    Transient,
+    /// Known-permanent Discord error (message gone, missing permissions,
+    /// body too long, …). Retrying changes nothing; surface immediately.
+    Permanent,
+}
+
+fn classify_edit_error(err: &str) -> EditErrorCategory {
+    let lower = err.to_ascii_lowercase();
+    // Serenity's `HttpError::UnsuccessfulRequest` Display only emits
+    // Discord's JSON `error.message` (no status code), and
+    // `HttpError::Request` flattens to "Error while sending HTTP request."
+    // — so we cannot rely on `500`/`502`/etc. substrings being present.
+    //
+    // Classification strategy:
+    //   1. Match the explicit rate-limit phrases Discord uses in the JSON
+    //      body so we can honour `retry_after` when serenity surfaces a
+    //      429 after its own internal retry budget ran out.
+    //   2. Match the small set of Discord error messages that are known
+    //      permanent (message gone, bad permissions, body too long, …)
+    //      and short-circuit those.
+    //   3. Default everything else (generic 5xx, "Error while sending HTTP
+    //      request.", parse errors, opaque transport blips) to Transient —
+    //      a few wasted retries on a 4xx we didn't list is cheap; failing
+    //      to retry a genuine 5xx leaves the placeholder card stuck on
+    //      "Processing…" until placeholder_sweeper expires it, which is
+    //      exactly the bug this PR exists to close.
+    if lower.contains("ratelimit")
+        || lower.contains("rate limit")
+        || lower.contains("rate-limit")
+        || lower.contains("rate limited")
+        || lower.contains("429")
+        || lower.contains("too many requests")
+    {
+        return EditErrorCategory::RateLimited;
+    }
+    const PERMANENT_PATTERNS: &[&str] = &[
+        "unknown message",
+        "unknown channel",
+        "missing permissions",
+        "missing access",
+        "cannot edit a message authored by another user",
+        "invalid form body",
+        "base_type_max_length",
+        "2000 or fewer in length",
+        "invalid webhook",
+        "you are not allowed",
+    ];
+    if PERMANENT_PATTERNS.iter().any(|p| lower.contains(p)) {
+        return EditErrorCategory::Permanent;
+    }
+    EditErrorCategory::Transient
+}
+
+fn backoff_delay(attempt: u32) -> Duration {
+    let factor = 1u32 << attempt.min(8);
+    let raw = EDIT_RETRY_BASE_DELAY.saturating_mul(factor);
+    raw.min(EDIT_RETRY_MAX_DELAY)
+}
+
+/// Retry wrapper around `gateway.edit_message` for placeholder cards.
+///
+/// Sleep policy: exponential backoff on every retried attempt regardless of
+/// category. We do **not** try to parse Discord's `retry_after` out of the
+/// surfaced error string — serenity's `HttpError::UnsuccessfulRequest`
+/// Display only emits Discord's JSON `error.message` (no status, no
+/// retry_after), so any structured field is lost by the time we see a
+/// `String`. Serenity's own ratelimiter already honours `Retry-After` and
+/// sleeps before letting a 429 leak out to this layer, so the bounded
+/// backoff here is the right shape for the residual 429 surface.
+///
+/// Returns the underlying error string on terminal failure so the caller's
+/// `tracing::warn!` payload remains accurate.
+async fn edit_message_with_retry<G: TurnGateway + ?Sized>(
+    gateway: &G,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    content: &str,
+) -> Result<(), String> {
+    let mut last_err = String::new();
+    for attempt in 0..EDIT_RETRY_MAX_ATTEMPTS {
+        match gateway.edit_message(channel_id, message_id, content).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                let category = classify_edit_error(&err);
+                last_err = err;
+                if matches!(category, EditErrorCategory::Permanent) {
+                    return Err(last_err);
+                }
+                // No sleep after the final attempt — burning the backoff on
+                // the exit path serves no purpose and just delays the
+                // `EditFailed` outcome the caller already handles.
+                if attempt + 1 == EDIT_RETRY_MAX_ATTEMPTS {
+                    return Err(last_err);
+                }
+                tokio::time::sleep(backoff_delay(attempt)).await;
+            }
+        }
+    }
+    Err(last_err)
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PlaceholderController {
     entries: dashmap::DashMap<PlaceholderKey, Arc<Mutex<PlaceholderEntry>>>,
@@ -237,9 +359,8 @@ impl PlaceholderController {
             return PlaceholderControllerOutcome::Coalesced;
         }
 
-        let edit_result = gateway
-            .edit_message(key.channel_id, key.message_id, &rendered)
-            .await;
+        let edit_result =
+            edit_message_with_retry(gateway, key.channel_id, key.message_id, &rendered).await;
 
         match edit_result {
             Ok(_) => {
@@ -315,9 +436,8 @@ impl PlaceholderController {
             return PlaceholderControllerOutcome::Coalesced;
         }
 
-        let edit_result = gateway
-            .edit_message(key.channel_id, key.message_id, &rendered)
-            .await;
+        let edit_result =
+            edit_message_with_retry(gateway, key.channel_id, key.message_id, &rendered).await;
 
         match edit_result {
             Ok(_) => {
@@ -401,9 +521,8 @@ impl PlaceholderController {
             snapshot.progress_line.as_deref(),
         );
 
-        let edit_result = gateway
-            .edit_message(key.channel_id, key.message_id, &rendered)
-            .await;
+        let edit_result =
+            edit_message_with_retry(gateway, key.channel_id, key.message_id, &rendered).await;
 
         match edit_result {
             Ok(_) => {
@@ -453,6 +572,245 @@ impl PlaceholderController {
     pub(super) fn detach_by_message(&self, channel_id: ChannelId, message_id: MessageId) {
         self.entries
             .retain(|key, _| !(key.channel_id == channel_id && key.message_id == message_id));
+    }
+}
+
+#[cfg(test)]
+mod edit_retry_tests {
+    use super::*;
+    use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+    use poise::serenity_prelude::{ChannelId, MessageId};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Programmable gateway: replays a fixed `responses` queue, one per call,
+    /// so we can rehearse the retry helper's behaviour against the exact error
+    /// strings serenity surfaces (429 with retry_after / 5xx / 4xx).
+    struct ScriptedGateway {
+        responses: tokio::sync::Mutex<Vec<Result<(), String>>>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedGateway {
+        fn new(responses: Vec<Result<(), String>>) -> Self {
+            Self {
+                responses: tokio::sync::Mutex::new(responses),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl TurnGateway for ScriptedGateway {
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async { Ok(MessageId::new(1)) })
+        }
+
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let mut queue = self.responses.lock().await;
+                if queue.is_empty() {
+                    Err("scripted gateway exhausted".to_string())
+                } else {
+                    queue.remove(0)
+                }
+            })
+        }
+
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<
+            'a,
+            Result<crate::services::discord::formatting::ReplaceLongMessageOutcome, String>,
+        > {
+            Box::pin(async {
+                Ok(crate::services::discord::formatting::ReplaceLongMessageOutcome::EditedOriginal)
+            })
+        }
+
+        fn add_reaction<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _emoji: char,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn remove_reaction<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _emoji: char,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_message_id: MessageId,
+            _user_text: &'a str,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a crate::services::discord::Intervention,
+            _request_owner_name: &'a str,
+            _has_more_queued_turns: bool,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+
+        fn can_chain_locally(&self) -> bool {
+            false
+        }
+
+        fn bot_owner_provider(&self) -> Option<crate::services::provider::ProviderKind> {
+            Some(crate::services::provider::ProviderKind::Codex)
+        }
+    }
+
+    #[test]
+    fn classify_edit_error_categorises_known_signatures() {
+        // Discord's 429 body — what `e.error.message` looks like after
+        // serenity exhausts its internal retry budget.
+        assert_eq!(
+            classify_edit_error("You are being rate limited."),
+            EditErrorCategory::RateLimited
+        );
+        assert_eq!(
+            classify_edit_error("RateLimit { retry_after: 1.5 }"),
+            EditErrorCategory::RateLimited
+        );
+
+        // Known-permanent Discord error bodies.
+        assert_eq!(
+            classify_edit_error("Unknown Message"),
+            EditErrorCategory::Permanent
+        );
+        assert_eq!(
+            classify_edit_error("Missing Permissions"),
+            EditErrorCategory::Permanent
+        );
+        assert_eq!(
+            classify_edit_error(
+                "Invalid Form Body (content: BASE_TYPE_MAX_LENGTH Must be 2000 or fewer in length)"
+            ),
+            EditErrorCategory::Permanent
+        );
+
+        // serenity::HttpError::Request — generic transport failure, no
+        // status code in the string. Must NOT fall through to Permanent.
+        assert_eq!(
+            classify_edit_error("Error while sending HTTP request."),
+            EditErrorCategory::Transient
+        );
+        // serenity::HttpError::UnsuccessfulRequest for a 5xx — `error.message`
+        // tends to be empty or whatever Discord's HTML/error page exposes,
+        // but the status code itself is absent from Display.
+        assert_eq!(
+            classify_edit_error(""),
+            EditErrorCategory::Transient,
+            "empty error string (5xx with no parsed body) must retry"
+        );
+    }
+
+    /// Rate-limited then success: helper must retry once and surface Ok.
+    /// Uses `start_paused` so the backoff sleep is fast-forwarded by tokio.
+    #[tokio::test(start_paused = true)]
+    async fn retry_recovers_from_rate_limit_then_succeeds() {
+        let gateway = Arc::new(ScriptedGateway::new(vec![
+            Err("You are being rate limited.".to_string()),
+            Ok(()),
+        ]));
+        let result =
+            edit_message_with_retry(gateway.as_ref(), ChannelId::new(1), MessageId::new(2), "x")
+                .await;
+        assert!(result.is_ok());
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Permanent errors short-circuit: the helper must surface immediately
+    /// without exhausting the retry budget.
+    #[tokio::test(start_paused = true)]
+    async fn retry_surfaces_permanent_errors_without_extra_attempts() {
+        let gateway = Arc::new(ScriptedGateway::new(vec![Err(
+            "Unknown Message".to_string()
+        )]));
+        let result =
+            edit_message_with_retry(gateway.as_ref(), ChannelId::new(1), MessageId::new(2), "x")
+                .await;
+        assert!(result.is_err());
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Generic transient errors (e.g. `serenity::HttpError::Request` whose
+    /// Display is "Error while sending HTTP request.") must retry — they're
+    /// the everyday 5xx / transport blip case. `start_paused` fast-forwards
+    /// the backoff sleeps via the tokio scheduler, so the elapsed-time guard
+    /// against a regression that adds a sleep after the final attempt is
+    /// deterministic instead of wall-clock-flaky on slow CI.
+    #[tokio::test(start_paused = true)]
+    async fn retry_exhausts_budget_on_persistent_transient_errors() {
+        let started = tokio::time::Instant::now();
+        let gateway = Arc::new(ScriptedGateway::new(vec![
+            Err("Error while sending HTTP request.".to_string()),
+            Err("Error while sending HTTP request.".to_string()),
+            Err("Error while sending HTTP request.".to_string()),
+        ]));
+        let result =
+            edit_message_with_retry(gateway.as_ref(), ChannelId::new(1), MessageId::new(2), "x")
+                .await;
+        assert!(result.is_err());
+        assert_eq!(
+            gateway.calls.load(Ordering::SeqCst),
+            EDIT_RETRY_MAX_ATTEMPTS as usize
+        );
+        // With `start_paused` the elapsed time is tokio's virtual clock — it
+        // only advances when something awaits a timer. Two backoff sleeps
+        // fire on a 3-attempt budget (after attempt 0 and after attempt 1):
+        // `base + 2*base = 3*base`. If a regression adds a sleep after the
+        // final attempt we'd see at least `base + 2*base + 4*base = 7*base`.
+        let elapsed = started.elapsed();
+        let expected_two_sleeps = backoff_delay(0).saturating_add(backoff_delay(1));
+        let no_final_sleep_ceiling = expected_two_sleeps.saturating_add(backoff_delay(2));
+        assert_eq!(
+            elapsed, expected_two_sleeps,
+            "expected exactly two backoff sleeps with virtual clock"
+        );
+        assert!(
+            elapsed < no_final_sleep_ceiling,
+            "retry helper must not sleep after the final attempt (elapsed={:?}, ceiling={:?})",
+            elapsed,
+            no_final_sleep_ceiling
+        );
     }
 }
 

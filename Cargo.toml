@@ -93,6 +93,7 @@ sqlite_test = { package = "rusqlite", version = "0.32", features = ["bundled"], 
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
