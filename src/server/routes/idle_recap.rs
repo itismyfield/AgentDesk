@@ -41,13 +41,10 @@ pub async fn post_idle_recap(
     // Always stamp `idle_recap_posted_at` first so the policy dedupes this
     // cycle even if the renderer below decides to skip (no channel binding,
     // notify bot offline, …). Without this, a transient renderer failure
-    // would cause the policy to retry on every tick.
-    if let Err(e) =
-        sqlx::query("UPDATE sessions SET idle_recap_posted_at = NOW() WHERE session_key = $1")
-            .bind(&session_key)
-            .execute(&pool)
-            .await
-    {
+    // would cause the policy to retry on every tick. SQL lives in the
+    // service module to keep this route handler SRP-clean (no raw `sqlx::query`
+    // alongside the `json!` response shaping).
+    if let Err(e) = idle_recap::stamp_recap_cycle(&pool, &session_key).await {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("stamp: {e}"));
     }
 

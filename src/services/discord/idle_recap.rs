@@ -174,15 +174,16 @@ fn format_korean_duration(dur: chrono::Duration) -> String {
     }
 }
 
-/// Post the recap card via the configured notify bot.
+/// Post the recap card via the configured notify bot. Routes through
+/// `super::http::send_channel_message` so the maintainability audit's
+/// `direct_discord_sends` rule (hard gate, #1282) stays happy — that
+/// helper lives in the allowlisted `discord/http.rs` module.
 pub(crate) async fn post_recap_card(
     http: &serenity::Http,
     channel_id: u64,
     content: &str,
 ) -> Result<u64, String> {
-    let channel = ChannelId::new(channel_id);
-    let msg = channel
-        .send_message(http, serenity::CreateMessage::new().content(content))
+    let msg = super::http::send_channel_message(http, ChannelId::new(channel_id), content)
         .await
         .map_err(|e| format!("send_message: {e}"))?;
     Ok(msg.id.get())
@@ -190,12 +191,14 @@ pub(crate) async fn post_recap_card(
 
 /// Delete the previous recap card if one is recorded. Errors are swallowed
 /// so the renderer never fails the cycle just because Discord has GC'd the
-/// old message itself.
+/// old message itself. Same allowlist rationale as `post_recap_card`.
 pub(crate) async fn delete_previous_card(http: &serenity::Http, channel_id: u64, message_id: u64) {
-    let channel = ChannelId::new(channel_id);
-    let _ = channel
-        .delete_message(http, MessageId::new(message_id))
-        .await;
+    let _ = super::http::delete_channel_message(
+        http,
+        ChannelId::new(channel_id),
+        MessageId::new(message_id),
+    )
+    .await;
 }
 
 /// Persist the freshly-posted message id (and the channel it lives in) so
@@ -220,6 +223,23 @@ pub(crate) async fn persist_recap_message_id(
     .execute(pool)
     .await
     .map(|_| ())
+}
+
+/// Stamp `idle_recap_posted_at = NOW()` for this cycle's dedupe window.
+/// Called *before* the renderer runs so the policy treats this cycle as
+/// "handled" even if the post / persist legs below fall through (no
+/// channel binding, notify bot offline, transient send_message 429, …).
+/// Without this, a flaky renderer would cause the policy to re-fire on
+/// every 5-min tick.
+pub(crate) async fn stamp_recap_cycle(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE sessions SET idle_recap_posted_at = NOW() WHERE session_key = $1")
+        .bind(session_key)
+        .execute(pool)
+        .await
+        .map(|_| ())
 }
 
 /// Compare-and-clear the stored recap pointer: only clears the columns
