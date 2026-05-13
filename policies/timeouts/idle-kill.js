@@ -35,6 +35,22 @@ module.exports = function attachIdleKill(timeouts, helpers) {
       var agents = loadAgentDirectory();
       backfillMissingSessionAgentIds(agents);
 
+      // Sessions table is PostgreSQL (SQLite path retired in #1239 series).
+      // Threshold raised from 60min → 6h: shorter values churn through
+      // user-active sessions during natural away periods (lunch / meeting),
+      // and the provider session ID is preserved on tmux cleanup so resume
+      // is still possible after the kill.
+      //
+      // Scope: main channels only. Thread-suffixed sessions are filtered both
+      // server-side (`thread_channel_id IS NULL` + session_key regex guard)
+      // and client-side (parseSessionThreadId) so the JS LIMIT-50 window is
+      // not starved by thread-heavy backlogs. Thread sessions are managed
+      // by the auto-queue lifecycle (slot release clears claude_session_id
+      // on task completion, src/db/auto_queue/slots.rs:63-75) and the
+      // stuck-dispatch watchdog (#1546).
+      var mainChannelSqlGuard =
+        "AND thread_channel_id IS NULL " +
+        "AND session_key !~ '-t[0-9]{15,}(-dev)?$' ";
       var idleSessions = agentdesk.db.query(
         "SELECT session_key, agent_id, provider, active_dispatch_id, thread_channel_id, " +
         "COALESCE(last_heartbeat, created_at) AS last_seen_at " +
@@ -42,8 +58,9 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         "WHERE status = 'idle' " +
         "AND provider IN ('claude', 'codex', 'qwen') " +
         "AND active_dispatch_id IS NULL " +
-        "AND COALESCE(last_heartbeat, created_at) < datetime('now', '-60 minutes') " +
-        "ORDER BY COALESCE(last_heartbeat, created_at) ASC LIMIT 10"
+        mainChannelSqlGuard +
+        "AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '6 hours' " +
+        "ORDER BY COALESCE(last_heartbeat, created_at) ASC LIMIT 50"
       );
       var safetySessions = agentdesk.db.query(
         "SELECT session_key, agent_id, provider, active_dispatch_id, thread_channel_id, " +
@@ -52,9 +69,29 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         "WHERE status = 'idle' " +
         "AND provider IN ('claude', 'codex', 'qwen') " +
         "AND active_dispatch_id IS NOT NULL " +
-        "AND COALESCE(last_heartbeat, created_at) < datetime('now', '-180 minutes') " +
-        "ORDER BY COALESCE(last_heartbeat, created_at) ASC LIMIT 10"
+        mainChannelSqlGuard +
+        "AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '24 hours' " +
+        "ORDER BY COALESCE(last_heartbeat, created_at) ASC LIMIT 50"
       );
+
+      // Defense-in-depth: client-side filter catches anything the SQL guard
+      // missed (e.g. helper logic evolves with new session_key shapes).
+      function isMainChannelSession(s) {
+        return !s.thread_channel_id
+          && !parseSessionThreadId(s.session_key, s.provider);
+      }
+      idleSessions = idleSessions.filter(isMainChannelSession);
+      safetySessions = safetySessions.filter(isMainChannelSession);
+
+      function formatIdleDuration(idleMin) {
+        if (idleMin >= 60 * 24) {
+          return Math.round(idleMin / (60 * 24)) + "일";
+        }
+        if (idleMin >= 60) {
+          return Math.round(idleMin / 60) + "시간";
+        }
+        return idleMin + "분";
+      }
 
       var now = Date.now();
       var processed = {};
@@ -80,7 +117,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           try {
             var forceKillUrl = "http://127.0.0.1:" + apiPort +
               "/api/sessions/" + encodeURIComponent(s.session_key) + "/force-kill";
-            forceKillResp = agentdesk.http.post(forceKillUrl, { retry: false, reason: "idle " + idleMin + "분 초과 — 자동 정리" });
+            forceKillResp = agentdesk.http.post(forceKillUrl, { retry: false, reason: "idle " + formatIdleDuration(idleMin) + " 초과 — 자동 정리" });
           } catch (e) {
             agentdesk.log.error("[idle-kill] force-kill API exception for " + s.session_key + ": " + e);
             continue;
@@ -107,7 +144,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         }
       }
 
-      forceKillIdleSessions(safetySessions, 180, "idle 180분 경과 (safety TTL)", 2);
-      forceKillIdleSessions(idleSessions, 60, "idle 60분 경과 (active_dispatch_id 없음)", 3);
+      forceKillIdleSessions(safetySessions, 1440, "idle 24시간 경과 (safety TTL)", 2);
+      forceKillIdleSessions(idleSessions, 360, "idle 6시간 경과 (active_dispatch_id 없음)", 3);
     };
 };
