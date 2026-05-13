@@ -730,10 +730,51 @@ fn startup_doctor_barrier_arrive(
     }
 }
 
+/// Maximum time the startup_doctor will wait for the local HTTP server to
+/// finish binding before it begins running self-probe checks. Without this
+/// gate, every fresh boot races the doctor against axum's `bind` call and
+/// latches a permanent `unhealthy` artifact via cascading Connection-refused
+/// failures (see issue #2096).
+const STARTUP_DOCTOR_HTTP_BIND_TIMEOUT: Duration = Duration::from_secs(30);
+const STARTUP_DOCTOR_HTTP_BIND_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const STARTUP_DOCTOR_HTTP_BIND_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Poll the loopback HTTP server until it accepts a TCP connection or the
+/// deadline expires. We deliberately probe the raw TCP bind rather than an
+/// HTTP route so this gate is independent of which routes are mounted by the
+/// time the doctor wants to run.
+async fn wait_for_local_http_bind(api_port: u16) {
+    let start = tokio::time::Instant::now();
+    let addr = format!("127.0.0.1:{api_port}");
+    loop {
+        if let Ok(Ok(_stream)) = tokio::time::timeout(
+            STARTUP_DOCTOR_HTTP_BIND_PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let elapsed_ms = start.elapsed().as_millis();
+            tracing::info!("  [{ts}] ✓ startup_doctor http bind ready ({addr}, {elapsed_ms}ms)");
+            return;
+        }
+        if start.elapsed() >= STARTUP_DOCTOR_HTTP_BIND_TIMEOUT {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ startup_doctor http bind not observed within {:?} ({addr}) — running anyway",
+                STARTUP_DOCTOR_HTTP_BIND_TIMEOUT
+            );
+            return;
+        }
+        tokio::time::sleep(STARTUP_DOCTOR_HTTP_BIND_POLL_INTERVAL).await;
+    }
+}
+
 async fn run_startup_diagnostic_after_reconcile_barrier(
     remaining: Arc<std::sync::atomic::AtomicUsize>,
     started: Arc<std::sync::atomic::AtomicBool>,
     health_registry: Arc<health::HealthRegistry>,
+    api_port: u16,
 ) {
     match startup_doctor_barrier_arrive(&remaining, &started) {
         StartupDoctorBarrier::Waiting(waiting) => {
@@ -752,6 +793,12 @@ async fn run_startup_diagnostic_after_reconcile_barrier(
         tracing::info!("  [{ts}] ⏭ startup_doctor skipped — no provider runtimes registered");
         return;
     }
+
+    // #2096: the doctor's `server` / `discord_bot` / `health_*` checks all
+    // hit the loopback HTTP server. If we run before axum binds the port we
+    // latch six cascading Connection-refused failures into the artifact and
+    // every subsequent `/api/health` call returns 503 until the next boot.
+    wait_for_local_http_bind(api_port).await;
 
     let startup_doctor =
         tokio::task::spawn_blocking(crate::cli::doctor::startup::run_startup_diagnostic_once).await;
@@ -796,6 +843,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             startup_reconcile_remaining,
             startup_doctor_started,
             health_registry,
+            api_port,
         )
         .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1093,6 +1141,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     startup_reconcile_remaining,
                     startup_doctor_started,
                     health_registry,
+                    api_port,
                 )
                 .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1108,6 +1157,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     startup_reconcile_remaining,
                     startup_doctor_started,
                     health_registry,
+                    api_port,
                 )
                 .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1706,6 +1756,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         startup_reconcile_remaining_for_restore,
                         startup_doctor_started_for_restore,
                         health_registry_for_startup_doctor,
+                        api_port,
                     )
                     .await;
 
@@ -2069,6 +2120,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             startup_reconcile_remaining_for_client_start,
             startup_doctor_started_for_client_start,
             health_registry_for_client_start,
+            api_port,
         )
         .await;
     }
@@ -2116,6 +2168,23 @@ async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
 #[cfg(test)]
 mod bootstrap_tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread", start_paused = false)]
+    async fn wait_for_local_http_bind_returns_quickly_when_port_is_bound() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        let started = std::time::Instant::now();
+        wait_for_local_http_bind(port).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "bound port should resolve well under the {:?} bind timeout (elapsed {:?})",
+            STARTUP_DOCTOR_HTTP_BIND_TIMEOUT,
+            started.elapsed()
+        );
+        drop(listener);
+    }
 
     #[test]
     fn bootstrap_session_reset_pending_excludes_restored_model_overrides() {
