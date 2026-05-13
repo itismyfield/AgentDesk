@@ -6,22 +6,24 @@
 //! this helper; consolidating it here removes the drift risk noted by the
 //! voice module audit (#2046 follow-up).
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Expand a leading `~` or `~/` in `path` to the current user's home
 /// directory. Returns the input untouched when the path doesn't start with
 /// `~` or when the home directory cannot be resolved.
 pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::Normal(first)) if first == "~") {
+        return path.to_path_buf();
     }
-    if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
+
+    let Some(mut expanded) = crate::runtime_layout::expand_user_path("~") else {
+        return path.to_path_buf();
+    };
+    for component in components {
+        expanded.push(component.as_os_str());
     }
-    path.to_path_buf()
+    expanded
 }
 
 #[cfg(test)]
@@ -37,6 +39,12 @@ mod tests {
     #[test]
     fn passes_through_relative_paths_without_tilde() {
         let input = PathBuf::from("relative/path");
+        assert_eq!(expand_tilde(&input), input);
+    }
+
+    #[test]
+    fn preserves_non_tilde_path_text_exactly() {
+        let input = PathBuf::from(" relative/path ");
         assert_eq!(expand_tilde(&input), input);
     }
 
@@ -57,5 +65,13 @@ mod tests {
             expand_tilde(Path::new("~/.adk/voice/tmp")),
             home.join(".adk/voice/tmp"),
         );
+    }
+
+    #[test]
+    fn preserves_tilde_path_component_trailing_space() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        assert_eq!(expand_tilde(Path::new("~/voice ")), home.join("voice "));
     }
 }
