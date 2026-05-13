@@ -12,12 +12,18 @@ use std::path::{Component, Path, PathBuf};
 /// directory. Returns the input untouched when the path doesn't start with
 /// `~` or when the home directory cannot be resolved.
 pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
-    if !matches!(path.components().next(), Some(Component::Normal(first)) if first == "~") {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::Normal(first)) if first == "~") {
         return path.to_path_buf();
     }
 
-    let raw = path.to_string_lossy();
-    crate::runtime_layout::expand_user_path(&raw).unwrap_or_else(|| path.to_path_buf())
+    let Some(mut expanded) = crate::runtime_layout::expand_user_path("~") else {
+        return path.to_path_buf();
+    };
+    for component in components {
+        expanded.push(component.as_os_str());
+    }
+    expanded
 }
 
 #[cfg(test)]
@@ -59,5 +65,13 @@ mod tests {
             expand_tilde(Path::new("~/.adk/voice/tmp")),
             home.join(".adk/voice/tmp"),
         );
+    }
+
+    #[test]
+    fn preserves_tilde_path_component_trailing_space() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        assert_eq!(expand_tilde(Path::new("~/voice ")), home.join("voice "));
     }
 }
