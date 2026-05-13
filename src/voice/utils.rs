@@ -6,22 +6,18 @@
 //! this helper; consolidating it here removes the drift risk noted by the
 //! voice module audit (#2046 follow-up).
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Expand a leading `~` or `~/` in `path` to the current user's home
 /// directory. Returns the input untouched when the path doesn't start with
 /// `~` or when the home directory cannot be resolved.
 pub(crate) fn expand_tilde(path: &Path) -> PathBuf {
+    if !matches!(path.components().next(), Some(Component::Normal(first)) if first == "~") {
+        return path.to_path_buf();
+    }
+
     let raw = path.to_string_lossy();
-    if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    path.to_path_buf()
+    crate::runtime_layout::expand_user_path(&raw).unwrap_or_else(|| path.to_path_buf())
 }
 
 #[cfg(test)]
@@ -37,6 +33,12 @@ mod tests {
     #[test]
     fn passes_through_relative_paths_without_tilde() {
         let input = PathBuf::from("relative/path");
+        assert_eq!(expand_tilde(&input), input);
+    }
+
+    #[test]
+    fn preserves_non_tilde_path_text_exactly() {
+        let input = PathBuf::from(" relative/path ");
         assert_eq!(expand_tilde(&input), input);
     }
 
