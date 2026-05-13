@@ -42,12 +42,11 @@ pub async fn post_idle_recap(
     // cycle even if the renderer below decides to skip (no channel binding,
     // notify bot offline, …). Without this, a transient renderer failure
     // would cause the policy to retry on every tick.
-    if let Err(e) = sqlx::query(
-        "UPDATE sessions SET idle_recap_posted_at = NOW() WHERE session_key = $1",
-    )
-    .bind(&session_key)
-    .execute(&pool)
-    .await
+    if let Err(e) =
+        sqlx::query("UPDATE sessions SET idle_recap_posted_at = NOW() WHERE session_key = $1")
+            .bind(&session_key)
+            .execute(&pool)
+            .await
     {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("stamp: {e}"));
     }
@@ -77,10 +76,9 @@ pub async fn post_idle_recap(
     // cleanly is large enough to warrant its own PR.
     let content = idle_recap::compose_recap_text(&snapshot);
 
-    if let (Some(prev_msg), Some(prev_chan)) = (
-        snapshot.previous_message_id,
-        snapshot.previous_channel_id,
-    ) {
+    if let (Some(prev_msg), Some(prev_chan)) =
+        (snapshot.previous_message_id, snapshot.previous_channel_id)
+    {
         idle_recap::delete_previous_card(&http, prev_chan as u64, prev_msg as u64).await;
     }
 
@@ -93,10 +91,7 @@ pub async fn post_idle_recap(
                 // Best-effort: clear the now-orphan card and report. The
                 // stamp at the top still dedupes this cycle.
                 idle_recap::delete_previous_card(&http, channel_id, message_id).await;
-                return error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("persist: {e}"),
-                );
+                return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("persist: {e}"));
             }
             (
                 StatusCode::OK,

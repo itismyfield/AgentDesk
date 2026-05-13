@@ -191,11 +191,7 @@ pub(crate) async fn post_recap_card(
 /// Delete the previous recap card if one is recorded. Errors are swallowed
 /// so the renderer never fails the cycle just because Discord has GC'd the
 /// old message itself.
-pub(crate) async fn delete_previous_card(
-    http: &serenity::Http,
-    channel_id: u64,
-    message_id: u64,
-) {
+pub(crate) async fn delete_previous_card(http: &serenity::Http, channel_id: u64, message_id: u64) {
     let channel = ChannelId::new(channel_id);
     let _ = channel
         .delete_message(http, MessageId::new(message_id))
