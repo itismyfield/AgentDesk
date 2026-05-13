@@ -252,7 +252,13 @@ impl PlaceholderController {
                 guarded.last_live_events_block = live_events_block;
                 PlaceholderControllerOutcome::Edited
             }
-            Err(_) => {
+            Err(err) => {
+                tracing::warn!(
+                    key = ?key,
+                    error = %err,
+                    site = "ensure_active",
+                    "placeholder edit failed",
+                );
                 // codex round-9 P2 on PR #1308: leave the `NotCreated` row
                 // in the map. Concurrent `ensure_active` callers may already
                 // hold a clone of the same `Arc` and could commit on a
@@ -320,7 +326,15 @@ impl PlaceholderController {
                 guarded.active_snapshot = Some(input);
                 PlaceholderControllerOutcome::Edited
             }
-            Err(_) => PlaceholderControllerOutcome::EditFailed,
+            Err(err) => {
+                tracing::warn!(
+                    key = ?key,
+                    error = %err,
+                    site = "ensure_queued",
+                    "placeholder edit failed",
+                );
+                PlaceholderControllerOutcome::EditFailed
+            }
         }
     }
 
@@ -397,7 +411,16 @@ impl PlaceholderController {
                 guarded.last_rendered = Some(rendered);
                 PlaceholderControllerOutcome::Edited
             }
-            Err(_) => PlaceholderControllerOutcome::EditFailed,
+            Err(err) => {
+                tracing::warn!(
+                    key = ?key,
+                    error = %err,
+                    target = ?target,
+                    site = "transition",
+                    "placeholder edit failed",
+                );
+                PlaceholderControllerOutcome::EditFailed
+            }
         }
     }
 
