@@ -1126,12 +1126,16 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_params([
             ("channel_id", body_param("integer", true, "Discord channel snowflake")),
             (
+                "provider",
+                body_param("string", false, "Optional provider filter such as claude or codex"),
+            ),
+            (
                 "expected_has_cancel_token",
                 body_param("boolean", false, "Optional guard for the observed mailbox token state"),
             ),
         ])
         .with_example(
-            json!({"body": {"channel_id": "1486017489027469493", "expected_has_cancel_token": true}}),
+            json!({"body": {"channel_id": "1486017489027469493", "provider": "claude", "expected_has_cancel_token": true}}),
             json!({"ok": true, "applied": true}),
         )
         .with_error_example(

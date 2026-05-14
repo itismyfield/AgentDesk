@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use poise::serenity_prelude::ChannelId;
+use serde::Serialize;
 
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
@@ -15,6 +16,22 @@ pub struct RuntimeTurnStopResult {
     pub queue_depth: usize,
     pub persistent_inflight_cleared: bool,
     pub termination_recorded: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IdleTmuxStaleTurnRepairResult {
+    pub had_active_turn: bool,
+    pub has_pending_queue: bool,
+    pub persistent_inflight_cleared: bool,
+    pub runtime_session_cleared: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ProviderMailboxState {
+    pub channel_id: u64,
+    pub has_cancel_token: bool,
+    pub queue_depth: usize,
+    pub recovery_started: bool,
 }
 
 fn decrement_counter(counter: &AtomicUsize) {
@@ -526,6 +543,50 @@ pub async fn hard_stop_runtime_turn(
     .await
 }
 
+pub async fn clear_idle_tmux_stale_turn(
+    registry: &HealthRegistry,
+    provider_name: &str,
+    channel_id: u64,
+    tmux_session: &str,
+    stop_source: &'static str,
+) -> Option<IdleTmuxStaleTurnRepairResult> {
+    if !crate::services::provider::tmux_session_ready_for_input(tmux_session) {
+        return None;
+    }
+
+    let provider = ProviderKind::from_str(provider_name)?;
+    let shared = shared_for_provider(registry, &provider).await?;
+    let channel_id = ChannelId::new(channel_id);
+    let finish = discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
+    let runtime_session_cleared =
+        apply_runtime_hard_stop_cleanup(&shared, &provider, channel_id, &finish, stop_source, true)
+            .await;
+    let persistent_inflight_cleared = discord::clear_inflight_state(&provider, channel_id.get());
+
+    Some(IdleTmuxStaleTurnRepairResult {
+        had_active_turn: finish.removed_token.is_some(),
+        has_pending_queue: finish.has_pending,
+        persistent_inflight_cleared,
+        runtime_session_cleared,
+    })
+}
+
+pub async fn provider_channel_mailbox_state(
+    registry: &HealthRegistry,
+    provider_name: &str,
+    channel_id: u64,
+) -> Option<ProviderMailboxState> {
+    let provider = ProviderKind::from_str(provider_name)?;
+    let shared = shared_for_provider(registry, &provider).await?;
+    let snapshot = shared.mailbox(ChannelId::new(channel_id)).snapshot().await;
+    Some(ProviderMailboxState {
+        channel_id,
+        has_cancel_token: snapshot.cancel_token.is_some(),
+        queue_depth: snapshot.intervention_queue.len(),
+        recovery_started: snapshot.recovery_started_at.is_some(),
+    })
+}
+
 pub async fn stop_runtime_turn_preserving_watcher(
     registry: Option<&HealthRegistry>,
     provider_name: Option<&str>,
@@ -558,24 +619,9 @@ async fn runtime_turn_cleanup_by_lookup(
         && let Some(runtime) =
             find_runtime_channel_match(registry, provider_name, channel_id, tmux_name).await
     {
-        let finish = if let Some(handle) =
-            discord::ChannelMailboxRegistry::global_handle(runtime.channel_id)
-        {
-            handle
-                .finish_turn(discord::queue_persistence_context(
-                    &runtime.shared,
-                    &runtime.provider,
-                    runtime.channel_id,
-                ))
-                .await
-        } else {
-            discord::FinishTurnResult {
-                removed_token: None,
-                has_pending: false,
-                mailbox_online: false,
-                queue_exit_events: Vec::new(),
-            }
-        };
+        let finish =
+            discord::mailbox_finish_turn(&runtime.shared, &runtime.provider, runtime.channel_id)
+                .await;
         let runtime_session_cleared = apply_runtime_hard_stop_cleanup(
             &runtime.shared,
             &runtime.provider,

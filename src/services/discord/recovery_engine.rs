@@ -1393,6 +1393,13 @@ pub(super) async fn restore_inflight_turns(
                 // Preserving state on failure allows the next recovery pass to retry.
                 if dispatch_completed {
                     super::restart_report::clear_restart_report(provider, state.channel_id);
+                    finish_recovered_turn_mailbox(
+                        shared,
+                        provider,
+                        channel_id,
+                        "recovery_completed_during_downtime",
+                    )
+                    .await;
                     clear_inflight_state(provider, state.channel_id);
                 } else if let Some(ref did) = recovered_dispatch_id {
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2190,6 +2197,13 @@ pub(super) async fn restore_inflight_turns(
             // #225 P1-1: Only clear inflight if both dispatch completed AND relay succeeded.
             // If relay failed, preserve inflight for retry on next startup.
             if dispatch_completed {
+                finish_recovered_turn_mailbox(
+                    shared,
+                    provider,
+                    channel_id,
+                    "recovery_output_completed",
+                )
+                .await;
                 clear_inflight_state(provider, state.channel_id);
             }
             continue;
@@ -2217,6 +2231,13 @@ pub(super) async fn restore_inflight_turns(
                 super::formatting::format_for_discord_with_provider(&state.full_response, provider)
             };
             if relay_recovery_terminal_notice(http, shared, &state, &final_text).await {
+                finish_recovered_turn_mailbox(
+                    shared,
+                    provider,
+                    channel_id,
+                    "recovery_ready_without_output",
+                )
+                .await;
                 clear_inflight_state(provider, state.channel_id);
             } else {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2282,6 +2303,13 @@ pub(super) async fn restore_inflight_turns(
             }
             save_missing_session_handoff(provider, &state, &best_response);
             if relay_ok {
+                finish_recovered_turn_mailbox(
+                    shared,
+                    provider,
+                    channel_id,
+                    "recovery_missing_tmux",
+                )
+                .await;
                 clear_inflight_state(provider, state.channel_id);
             } else {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2300,6 +2328,13 @@ pub(super) async fn restore_inflight_turns(
             );
             let text = stale_inflight_message("tmux session name missing during recovery");
             if relay_recovery_terminal_notice(http, shared, &state, &text).await {
+                finish_recovered_turn_mailbox(
+                    shared,
+                    provider,
+                    channel_id,
+                    "recovery_missing_tmux_name",
+                )
+                .await;
                 clear_inflight_state(provider, state.channel_id);
             } else {
                 tracing::warn!(
@@ -2316,6 +2351,13 @@ pub(super) async fn restore_inflight_turns(
             );
             let text = stale_inflight_message("output path missing during recovery");
             if relay_recovery_terminal_notice(http, shared, &state, &text).await {
+                finish_recovered_turn_mailbox(
+                    shared,
+                    provider,
+                    channel_id,
+                    "recovery_missing_output_path",
+                )
+                .await;
                 clear_inflight_state(provider, state.channel_id);
             } else {
                 tracing::warn!(
@@ -2332,6 +2374,13 @@ pub(super) async fn restore_inflight_turns(
             );
             let text = stale_inflight_message("input fifo path missing during recovery");
             if relay_recovery_terminal_notice(http, shared, &state, &text).await {
+                finish_recovered_turn_mailbox(
+                    shared,
+                    provider,
+                    channel_id,
+                    "recovery_missing_input_fifo",
+                )
+                .await;
                 clear_inflight_state(provider, state.channel_id);
             } else {
                 tracing::warn!(

@@ -5,6 +5,7 @@
 //! idempotent cleanup when the evidence is strong enough.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use poise::serenity_prelude::ChannelId;
@@ -12,7 +13,10 @@ use serde::Serialize;
 
 use super::health::HealthRegistry;
 use super::relay_health::{RelayActiveTurn, RelayHealthSnapshot, RelayStallState};
-use super::{SharedData, mailbox_clear_channel, mailbox_clear_recovery_marker, mailbox_snapshot};
+use super::{
+    SharedData, mailbox_clear_channel, mailbox_clear_recovery_marker, mailbox_finish_turn,
+    mailbox_snapshot,
+};
 use crate::services::provider::ProviderKind;
 
 const AUTO_HEAL_WINDOW_SECS: i64 = 600;
@@ -455,7 +459,10 @@ pub(in crate::services::discord) async fn run_relay_recovery(
     }
 
     let apply_result = apply_relay_recovery_decision(registry, &shared, &provider, &decision).await;
-    let applied = matches!(apply_result.status, "applied" | "reattached_watcher");
+    let applied = matches!(
+        apply_result.status,
+        "applied" | "reattached_watcher" | "cleared_idle_tmux_stale_turn"
+    );
     tracing::info!(
         target: "agentdesk::discord::relay_recovery",
         provider = decision.provider.as_str(),
@@ -525,6 +532,52 @@ async fn apply_relay_recovery_decision(
             }
         }
         RelayRecoveryActionKind::ReattachWatcher => {
+            if let Some(tmux_session) = decision.affected.tmux_session.as_deref()
+                && crate::services::provider::tmux_session_ready_for_input(tmux_session)
+                && super::inflight::inflight_state_allows_idle_tmux_repair(
+                    provider,
+                    decision.channel_id,
+                )
+                .unwrap_or(false)
+            {
+                let channel = ChannelId::new(decision.channel_id);
+                let finish = mailbox_finish_turn(shared, provider, channel).await;
+                if let Some(token) = finish.removed_token.as_ref() {
+                    token.cancelled.store(true, Ordering::Relaxed);
+                    let _ = shared.global_active.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |current| current.checked_sub(1),
+                    );
+                }
+                super::clear_watchdog_deadline_override(channel.get()).await;
+                shared
+                    .dispatch_thread_parents
+                    .retain(|_, thread| *thread != channel);
+                shared.recovering_channels.remove(&channel);
+                shared.turn_start_times.remove(&channel);
+                if !finish.has_pending {
+                    shared.dispatch_role_overrides.remove(&channel);
+                }
+                if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel) {
+                    watcher.cancel.store(true, Ordering::Relaxed);
+                }
+                let inflight_cleared =
+                    super::inflight::clear_inflight_state(provider, decision.channel_id);
+                mailbox_clear_recovery_marker(shared, channel).await;
+                let after = mailbox_snapshot(shared, channel).await;
+                return RelayRecoveryApplyResult {
+                    status: "cleared_idle_tmux_stale_turn",
+                    removed_thread_proofs: 0,
+                    removed_mailbox_token: finish.removed_token.is_some(),
+                    post_mailbox_has_cancel_token: Some(after.cancel_token.is_some()),
+                    post_mailbox_queue_depth: Some(after.intervention_queue.len()),
+                    reattach_watcher_spawned: Some(false),
+                    reattach_watcher_replaced: Some(inflight_cleared),
+                    reattach_initial_offset: None,
+                    reattach_error: None,
+                };
+            }
             match registry
                 .rebind_inflight(
                     provider,

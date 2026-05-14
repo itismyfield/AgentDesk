@@ -718,13 +718,56 @@ fn tmux_session_alive(tmux_session_name: &str) -> bool {
 }
 
 #[cfg(unix)]
+fn tmux_line_is_claude_tui_ready_prompt(line: &str) -> bool {
+    let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+    trimmed == "❯"
+}
+
+#[cfg(unix)]
 pub(crate) fn tmux_capture_indicates_ready_for_input(capture: &str) -> bool {
     capture
         .lines()
         .rev()
         .filter(|l| !l.trim().is_empty())
-        .take(3)
-        .any(|l| l.contains("Ready for input (type message + Enter)"))
+        .take(12)
+        .any(|l| {
+            l.contains("Ready for input (type message + Enter)")
+                || tmux_line_is_claude_tui_ready_prompt(l)
+        })
+}
+
+#[cfg(all(test, unix))]
+mod ready_input_prompt_tests {
+    #[test]
+    fn detects_ready_banner() {
+        let capture = "\
+build logs\n\
+Ready for input (type message + Enter)\n\
+> ";
+        assert!(super::tmux_capture_indicates_ready_for_input(capture));
+    }
+
+    #[test]
+    fn detects_claude_tui_prompt_above_footer() {
+        let capture = "\
+output recap\n\
+─────────────────────────────────────────────────────────────────────────────\n\
+❯\u{00a0}\n\
+─────────────────────────────────────────────────────────────────────────────\n\
+  🤖 Opus(H) │ ██░░░░░░░░ │ 24%\n\
+  📁 agentdesk (main*) │ Todos: -\n\
+  ⏵⏵ bypass permissions on";
+        assert!(super::tmux_capture_indicates_ready_for_input(capture));
+    }
+
+    #[test]
+    fn rejects_non_ready_capture() {
+        let capture = "\
+build logs\n\
+waiting for tool output\n\
+still running";
+        assert!(!super::tmux_capture_indicates_ready_for_input(capture));
+    }
 }
 
 #[cfg(unix)]
@@ -2202,6 +2245,20 @@ mod tests {
 build logs\n\
 Ready for input (type message + Enter)\n\
 > ";
+        assert!(super::tmux_capture_indicates_ready_for_input(capture));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_tmux_capture_indicates_ready_for_input_detects_claude_tui_prompt() {
+        let capture = "\
+output recap\n\
+─────────────────────────────────────────────────────────────────────────────\n\
+❯\u{00a0}\n\
+─────────────────────────────────────────────────────────────────────────────\n\
+  🤖 Opus(H) │ ██░░░░░░░░ │ 24%\n\
+  📁 agentdesk (main*) │ Todos: -\n\
+  ⏵⏵ bypass permissions on";
         assert!(super::tmux_capture_indicates_ready_for_input(capture));
     }
 

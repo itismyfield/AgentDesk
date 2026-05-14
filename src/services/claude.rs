@@ -2937,6 +2937,20 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn test_tmux_capture_detects_claude_tui_ready_prompt() {
+        let capture = "\
+previous output\n\
+─────────────────────────────────────────────────────────────────────────────\n\
+❯\u{00a0}\n\
+─────────────────────────────────────────────────────────────────────────────\n\
+  🤖 Opus(H) │ ██░░░░░░░░ │ 24%\n\
+  📁 agentdesk (main*) │ Todos: -\n\
+  ⏵⏵ bypass permissions on";
+        assert!(crate::services::provider::tmux_capture_indicates_ready_for_input(capture));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_tmux_capture_ignores_non_ready_prompt() {
         let capture = "Claude is still working...\n";
         assert!(!crate::services::provider::tmux_capture_indicates_ready_for_input(capture));

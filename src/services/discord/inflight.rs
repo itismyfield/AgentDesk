@@ -617,6 +617,24 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
     fs::remove_file(path).is_ok()
 }
 
+fn inflight_state_allows_idle_tmux_repair_state(state: &InflightTurnState) -> bool {
+    state.full_response.trim().is_empty()
+        && state.response_sent_offset == 0
+        && state.last_watcher_relayed_offset.is_none()
+        && state.dispatch_id.as_deref().is_none_or(str::is_empty)
+        && state.current_tool_line.is_none()
+        && state.last_tool_name.is_none()
+        && !state.long_running_placeholder_active
+}
+
+pub(crate) fn inflight_state_allows_idle_tmux_repair(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<bool> {
+    load_inflight_state(provider, channel_id)
+        .map(|state| inflight_state_allows_idle_tmux_repair_state(&state))
+}
+
 pub(super) fn inflight_state_file_exists(provider: &ProviderKind, channel_id: u64) -> bool {
     let Some(root) = inflight_runtime_root() else {
         return false;
@@ -838,7 +856,8 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
 #[cfg(test)]
 mod stall_recovery_tests {
     use super::{
-        INFLIGHT_STALENESS_THRESHOLD_SECS, InflightTurnState, inflight_state_is_stale,
+        INFLIGHT_STALENESS_THRESHOLD_SECS, InflightTurnState,
+        inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale,
         load_inflight_states_from_root, save_inflight_state_in_root,
     };
     use crate::services::provider::ProviderKind;
@@ -898,6 +917,40 @@ mod stall_recovery_tests {
             !inflight_state_is_stale(&state, now_unix, INFLIGHT_STALENESS_THRESHOLD_SECS),
             "unparseable updated_at must NOT be treated as stale"
         );
+    }
+
+    #[test]
+    fn idle_tmux_repair_only_allows_empty_unclaimed_inflight() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            888,
+            Some("adk-cc".to_string()),
+            1,
+            2,
+            3,
+            "user prompt".to_string(),
+            None,
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+
+        assert!(inflight_state_allows_idle_tmux_repair_state(&state));
+
+        state.current_msg_len = "⠋ Processing...".len();
+        assert!(inflight_state_allows_idle_tmux_repair_state(&state));
+
+        state.full_response = "partial".to_string();
+        assert!(!inflight_state_allows_idle_tmux_repair_state(&state));
+        state.full_response.clear();
+
+        state.last_watcher_relayed_offset = Some(10);
+        assert!(!inflight_state_allows_idle_tmux_repair_state(&state));
+        state.last_watcher_relayed_offset = None;
+
+        state.dispatch_id = Some("dispatch-1".to_string());
+        assert!(!inflight_state_allows_idle_tmux_repair_state(&state));
     }
 
     #[test]

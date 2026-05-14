@@ -48,6 +48,8 @@ struct ChannelSessionState {
 #[derive(Debug, Deserialize)]
 struct StaleMailboxRepairRequest {
     channel_id: u64,
+    #[serde(default)]
+    provider: Option<String>,
     expected_has_cancel_token: Option<bool>,
 }
 
@@ -731,29 +733,100 @@ pub async fn stale_mailbox_repair_handler(
         }
     };
 
-    let channel_id = ChannelId::new(request.channel_id);
-    let Some(handle) =
-        crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel_id)
-    else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "ok": false,
-                "applied": false,
-                "skipped": true,
-                "fix_safety": "safe_local_repair",
-                "safety_gate": "mailbox_not_found",
-                "skipped_reason": "no mailbox handle exists for channel",
-                "post_repair_mailbox": null,
-                "post_repair_watcher_inflight": null
-            })),
-        )
-            .into_response();
+    let provider_filter = match request
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+    {
+        Some(provider) => match ProviderKind::from_str(provider) {
+            Some(provider) => Some(provider),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": "invalid provider",
+                        "provider": provider
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
     };
 
-    let before = handle.snapshot().await;
+    let channel_id = ChannelId::new(request.channel_id);
+    let global_handle = if provider_filter.is_none() {
+        crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel_id)
+    } else {
+        None
+    };
+    let before = if let Some(provider) = provider_filter.as_ref() {
+        let Some(registry) = state.health_registry.as_ref() else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "applied": false,
+                    "skipped": true,
+                    "fix_safety": "safe_local_repair",
+                    "safety_gate": "mailbox_not_found",
+                    "skipped_reason": "provider-scoped mailbox registry unavailable",
+                    "post_repair_mailbox": null,
+                    "post_repair_watcher_inflight": null
+                })),
+            )
+                .into_response();
+        };
+        let Some(state) =
+            health::provider_channel_mailbox_state(registry, provider.as_str(), request.channel_id)
+                .await
+        else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "applied": false,
+                    "skipped": true,
+                    "fix_safety": "safe_local_repair",
+                    "safety_gate": "mailbox_not_found",
+                    "skipped_reason": "no provider-scoped mailbox exists for channel",
+                    "provider": provider.as_str(),
+                    "post_repair_mailbox": null,
+                    "post_repair_watcher_inflight": null
+                })),
+            )
+                .into_response();
+        };
+        state
+    } else {
+        let Some(handle) = global_handle.as_ref() else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "applied": false,
+                    "skipped": true,
+                    "fix_safety": "safe_local_repair",
+                    "safety_gate": "mailbox_not_found",
+                    "skipped_reason": "no mailbox handle exists for channel",
+                    "post_repair_mailbox": null,
+                    "post_repair_watcher_inflight": null
+                })),
+            )
+                .into_response();
+        };
+        let snapshot = handle.snapshot().await;
+        health::ProviderMailboxState {
+            channel_id: request.channel_id,
+            has_cancel_token: snapshot.cancel_token.is_some(),
+            queue_depth: snapshot.intervention_queue.len(),
+            recovery_started: snapshot.recovery_started_at.is_some(),
+        }
+    };
     if request.expected_has_cancel_token.is_some()
-        && request.expected_has_cancel_token != Some(before.cancel_token.is_some())
+        && request.expected_has_cancel_token != Some(before.has_cancel_token)
     {
         return (
             StatusCode::CONFLICT,
@@ -764,18 +837,13 @@ pub async fn stale_mailbox_repair_handler(
                 "fix_safety": "safe_local_repair",
                 "safety_gate": "expected_evidence_mismatch",
                 "skipped_reason": "mailbox evidence changed before repair",
-                "post_repair_mailbox": {
-                    "channel_id": request.channel_id,
-                    "has_cancel_token": before.cancel_token.is_some(),
-                    "queue_depth": before.intervention_queue.len(),
-                    "recovery_started": before.recovery_started_at.is_some()
-                },
+                "post_repair_mailbox": before,
                 "post_repair_watcher_inflight": null
             })),
         )
             .into_response();
     }
-    if !before.intervention_queue.is_empty() {
+    if before.queue_depth > 0 {
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -785,12 +853,7 @@ pub async fn stale_mailbox_repair_handler(
                 "fix_safety": "safe_local_repair",
                 "safety_gate": "queue_not_empty",
                 "skipped_reason": "live queue evidence exists",
-                "post_repair_mailbox": {
-                    "channel_id": request.channel_id,
-                    "has_cancel_token": before.cancel_token.is_some(),
-                    "queue_depth": before.intervention_queue.len(),
-                    "recovery_started": before.recovery_started_at.is_some()
-                },
+                "post_repair_mailbox": before,
                 "post_repair_watcher_inflight": null
             })),
         )
@@ -798,7 +861,13 @@ pub async fn stale_mailbox_repair_handler(
     }
 
     let before_watcher_inflight = if let Some(registry) = state.health_registry.as_ref() {
-        registry.snapshot_watcher_state(request.channel_id).await
+        if let Some(provider) = provider_filter.as_ref() {
+            registry
+                .snapshot_watcher_state_for_provider(provider, request.channel_id)
+                .await
+        } else {
+            registry.snapshot_watcher_state(request.channel_id).await
+        }
     } else {
         None
     };
@@ -819,12 +888,7 @@ pub async fn stale_mailbox_repair_handler(
                 "safety_gate": "active_dispatch_present",
                 "skipped_reason": "session record still has active dispatch evidence",
                 "pre_repair_session": before_session_state,
-                "post_repair_mailbox": {
-                    "channel_id": request.channel_id,
-                    "has_cancel_token": before.cancel_token.is_some(),
-                    "queue_depth": before.intervention_queue.len(),
-                    "recovery_started": before.recovery_started_at.is_some()
-                },
+                "post_repair_mailbox": before,
                 "post_repair_watcher_inflight": before_watcher_inflight
             })),
         )
@@ -835,6 +899,122 @@ pub async fn stale_mailbox_repair_handler(
         .and_then(|snapshot| snapshot.tmux_session.as_deref())
         .is_some_and(crate::services::platform::tmux::has_session);
     if tmux_present {
+        let idle_tmux_repair = match (
+            state.health_registry.as_ref(),
+            before_watcher_inflight.as_ref(),
+        ) {
+            (Some(registry), Some(snapshot)) => {
+                let snapshot_provider = ProviderKind::from_str(&snapshot.provider);
+                let tmux_session = snapshot.tmux_session.as_deref();
+                if let (Some(provider), Some(tmux_session)) = (snapshot_provider, tmux_session) {
+                    let inflight_safe = if snapshot.inflight_state_present {
+                        crate::services::discord::inflight_state_allows_idle_tmux_repair_for_channel(
+                            &provider,
+                            request.channel_id,
+                        )
+                        .unwrap_or(false)
+                    } else {
+                        true
+                    };
+                    let tmux_ready =
+                        crate::services::provider::tmux_session_ready_for_input(tmux_session);
+                    if inflight_safe && tmux_ready {
+                        health::clear_idle_tmux_stale_turn(
+                            registry,
+                            provider.as_str(),
+                            request.channel_id,
+                            tmux_session,
+                            "stale_mailbox_idle_tmux_repair",
+                        )
+                        .await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(idle_repair) = idle_tmux_repair {
+            let after = if let Some(provider) = provider_filter.as_ref() {
+                match state.health_registry.as_ref() {
+                    Some(registry) => health::provider_channel_mailbox_state(
+                        registry,
+                        provider.as_str(),
+                        request.channel_id,
+                    )
+                    .await
+                    .unwrap_or(health::ProviderMailboxState {
+                        channel_id: request.channel_id,
+                        has_cancel_token: false,
+                        queue_depth: 0,
+                        recovery_started: false,
+                    }),
+                    None => health::ProviderMailboxState {
+                        channel_id: request.channel_id,
+                        has_cancel_token: false,
+                        queue_depth: 0,
+                        recovery_started: false,
+                    },
+                }
+            } else if let Some(handle) = global_handle.as_ref() {
+                let snapshot = handle.snapshot().await;
+                health::ProviderMailboxState {
+                    channel_id: request.channel_id,
+                    has_cancel_token: snapshot.cancel_token.is_some(),
+                    queue_depth: snapshot.intervention_queue.len(),
+                    recovery_started: snapshot.recovery_started_at.is_some(),
+                }
+            } else {
+                health::ProviderMailboxState {
+                    channel_id: request.channel_id,
+                    has_cancel_token: false,
+                    queue_depth: 0,
+                    recovery_started: false,
+                }
+            };
+            let after_watcher_inflight = if let Some(registry) = state.health_registry.as_ref() {
+                if let Some(provider) = provider_filter.as_ref() {
+                    registry
+                        .snapshot_watcher_state_for_provider(provider, request.channel_id)
+                        .await
+                } else {
+                    registry.snapshot_watcher_state(request.channel_id).await
+                }
+            } else {
+                None
+            };
+            let residual_inflight = after_watcher_inflight
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.inflight_state_present || snapshot.attached);
+            let status =
+                if after.has_cancel_token || residual_inflight || idle_repair.has_pending_queue {
+                    "partial_repair"
+                } else {
+                    "applied"
+                };
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": status == "applied",
+                    "status": status,
+                    "applied": idle_repair.had_active_turn
+                        || idle_repair.persistent_inflight_cleared
+                        || idle_repair.runtime_session_cleared,
+                    "skipped": false,
+                    "fix_safety": "safe_idle_tmux_repair",
+                    "safety_gate": "tmux_ready_for_input_no_unsent_output",
+                    "inflight_cleared": idle_repair.persistent_inflight_cleared,
+                    "runtime_session_cleared": idle_repair.runtime_session_cleared,
+                    "pre_repair_session": before_session_state,
+                    "delivery_completed": false,
+                    "post_repair_mailbox": after,
+                    "post_repair_watcher_inflight": after_watcher_inflight
+                })),
+            )
+                .into_response();
+        }
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -844,19 +1024,28 @@ pub async fn stale_mailbox_repair_handler(
                 "fix_safety": "explicit_restart_required",
                 "safety_gate": "tmux_present",
                 "skipped_reason": "live tmux evidence exists",
-                "post_repair_mailbox": {
-                    "channel_id": request.channel_id,
-                    "has_cancel_token": before.cancel_token.is_some(),
-                    "queue_depth": before.intervention_queue.len(),
-                    "recovery_started": before.recovery_started_at.is_some()
-                },
+                "post_repair_mailbox": before,
                 "post_repair_watcher_inflight": before_watcher_inflight
             })),
         )
             .into_response();
     }
 
-    let repair = handle.hard_stop().await;
+    let repair_had_active_turn = if let Some(provider) = provider_filter.as_ref() {
+        health::stop_runtime_turn_preserving_watcher(
+            state.health_registry.as_deref(),
+            Some(provider.as_str()),
+            Some(request.channel_id),
+            None,
+            "stale_mailbox_repair",
+        )
+        .await
+        .had_active_turn
+    } else if let Some(handle) = global_handle.as_ref() {
+        handle.hard_stop().await.removed_token.is_some()
+    } else {
+        false
+    };
     let session_disconnect_result =
         mark_channel_sessions_disconnected(state.pg_pool_ref(), request.channel_id).await;
     let (session_disconnected_count, session_disconnect_error) = match session_disconnect_result {
@@ -872,11 +1061,53 @@ pub async fn stale_mailbox_repair_handler(
         crate::services::discord::clear_inflight_state_for_channel(&provider, request.channel_id);
         inflight_cleared = true;
     }
-    let after = handle.snapshot().await;
     let after_watcher_inflight = if let Some(registry) = state.health_registry.as_ref() {
-        registry.snapshot_watcher_state(request.channel_id).await
+        if let Some(provider) = provider_filter.as_ref() {
+            registry
+                .snapshot_watcher_state_for_provider(provider, request.channel_id)
+                .await
+        } else {
+            registry.snapshot_watcher_state(request.channel_id).await
+        }
     } else {
         None
+    };
+    let after = if let Some(provider) = provider_filter.as_ref() {
+        match state.health_registry.as_ref() {
+            Some(registry) => health::provider_channel_mailbox_state(
+                registry,
+                provider.as_str(),
+                request.channel_id,
+            )
+            .await
+            .unwrap_or(health::ProviderMailboxState {
+                channel_id: request.channel_id,
+                has_cancel_token: false,
+                queue_depth: 0,
+                recovery_started: false,
+            }),
+            None => health::ProviderMailboxState {
+                channel_id: request.channel_id,
+                has_cancel_token: false,
+                queue_depth: 0,
+                recovery_started: false,
+            },
+        }
+    } else if let Some(handle) = global_handle.as_ref() {
+        let snapshot = handle.snapshot().await;
+        health::ProviderMailboxState {
+            channel_id: request.channel_id,
+            has_cancel_token: snapshot.cancel_token.is_some(),
+            queue_depth: snapshot.intervention_queue.len(),
+            recovery_started: snapshot.recovery_started_at.is_some(),
+        }
+    } else {
+        health::ProviderMailboxState {
+            channel_id: request.channel_id,
+            has_cancel_token: false,
+            queue_depth: 0,
+            recovery_started: false,
+        }
     };
     let after_session_state =
         load_channel_session_state(state.pg_pool_ref(), request.channel_id).await;
@@ -899,7 +1130,7 @@ pub async fn stale_mailbox_repair_handler(
             "ok": status == "applied",
             "status": status,
             "applied": stale_mailbox_repair_applied(
-                repair.removed_token.is_some(),
+                repair_had_active_turn,
                 inflight_cleared,
                 session_disconnected_count
             ),
@@ -912,12 +1143,7 @@ pub async fn stale_mailbox_repair_handler(
             "pre_repair_session": before_session_state,
             "post_repair_session": after_session_state,
             "delivery_completed": false,
-            "post_repair_mailbox": {
-                "channel_id": request.channel_id,
-                "has_cancel_token": after.cancel_token.is_some(),
-                "queue_depth": after.intervention_queue.len(),
-                "recovery_started": after.recovery_started_at.is_some()
-            },
+            "post_repair_mailbox": after,
             "post_repair_watcher_inflight": after_watcher_inflight
         })),
     )

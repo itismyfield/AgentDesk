@@ -460,6 +460,13 @@ pub(crate) fn clear_inflight_state_for_channel(provider: &ProviderKind, channel_
     inflight::clear_inflight_state(provider, channel_id);
 }
 
+pub(crate) fn inflight_state_allows_idle_tmux_repair_for_channel(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<bool> {
+    inflight::inflight_state_allows_idle_tmux_repair(provider, channel_id)
+}
+
 pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
     let now_unix_secs = chrono::Local::now().timestamp();
     [
