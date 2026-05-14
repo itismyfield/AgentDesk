@@ -203,4 +203,56 @@ mod tests {
         assert!(matches!(&messages[1], StreamMessage::Text { content } if content == "hello"));
         assert!(matches!(messages[2], StreamMessage::Done { .. }));
     }
+
+    #[test]
+    fn replay_transcript_file_tolerates_current_claude_tui_history_envelopes() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            concat!(
+                r#"{"type":"last-prompt","sessionId":"sess-tui"}"#,
+                "\n",
+                r#"{"type":"attachment","attachment":{"type":"hook_success"},"sessionId":"sess-tui"}"#,
+                "\n",
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Respond briefly."}]},"sessionId":"sess-tui"}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"model":"claude-opus-4-7","content":[{"type":"text","text":"ADK_TUI_SMOKE_OK"}],"usage":{"input_tokens":6,"cache_creation_input_tokens":21795,"cache_read_input_tokens":17347,"output_tokens":20}},"sessionId":"sess-tui"}"#,
+                "\n",
+                r#"{"type":"system","subtype":"stop_hook_summary","sessionId":"sess-tui","hookCount":1,"hasOutput":true}"#,
+                "\n",
+                r#"{"type":"system","subtype":"turn_duration","durationMs":3606,"messageCount":8,"sessionId":"sess-tui"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        let outcome = replay_transcript_file(file.path(), &tx).unwrap();
+        drop(tx);
+        let messages: Vec<_> = rx.iter().collect();
+
+        assert_eq!(outcome.lines_read, 6);
+        assert_eq!(messages.len(), 3);
+        assert!(
+            matches!(&messages[0], StreamMessage::Text { content } if content == "ADK_TUI_SMOKE_OK")
+        );
+        assert!(matches!(
+            &messages[1],
+            StreamMessage::Done { session_id, .. }
+                if session_id.as_deref() == Some("sess-tui")
+        ));
+        assert!(matches!(
+            &messages[2],
+            StreamMessage::StatusUpdate {
+                model,
+                duration_ms: Some(3606),
+                num_turns: Some(8),
+                input_tokens: Some(6),
+                cache_create_tokens: Some(21795),
+                cache_read_tokens: Some(17347),
+                output_tokens: Some(20),
+                ..
+            } if model.as_deref() == Some("claude-opus-4-7")
+        ));
+    }
 }
