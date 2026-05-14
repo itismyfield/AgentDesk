@@ -165,6 +165,16 @@ mod tests {
     }
 
     #[test]
+    fn tui_args_omit_model_when_provider_default_is_requested() {
+        let mut config = sample_config();
+        config.model = None;
+
+        let args = build_claude_tui_args(&config, Path::new("/tmp/settings.json"));
+
+        assert!(!args.iter().any(|arg| arg == "--model"));
+    }
+
+    #[test]
     fn prepare_launch_writes_settings_and_script() {
         let dir = tempfile::tempdir().unwrap();
         let config = sample_config();

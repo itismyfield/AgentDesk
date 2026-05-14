@@ -1257,10 +1257,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_turn_model_uses_claude_default_alias_after_clear() {
+    fn runtime_turn_model_omits_provider_default_for_claude() {
         assert_eq!(
             runtime_model_for_turn(&ProviderKind::Claude, "default", PROVIDER_DEFAULT_SOURCE),
-            Some("default".to_string())
+            None
         );
     }
 

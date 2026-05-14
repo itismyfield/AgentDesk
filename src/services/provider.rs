@@ -81,8 +81,8 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         },
         default_behavior: ProviderDefaultBehavior {
             resume_without_reset: true,
-            runtime_model: Some("default"),
-            source_label: "Claude default alias",
+            runtime_model: None,
+            source_label: "Claude provider default",
         },
         default_context_window: 1_000_000,
         managed_tmux_backend: true,
