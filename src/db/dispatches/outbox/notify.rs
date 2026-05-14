@@ -42,69 +42,24 @@ pub(crate) async fn requeue_dispatch_notify_pg(
         .map_err(|error| format!("read postgres dispatch title for {dispatch_id}: {error}"))?
         .ok_or_else(|| format!("postgres dispatch {dispatch_id} missing title"))?;
 
-    let updated = sqlx::query(
-        "UPDATE dispatch_outbox
-            SET agent_id = $2,
-                card_id = $3,
-                title = $4,
-                status = 'pending',
-                retry_count = 0,
-                next_attempt_at = NULL,
-                processed_at = NULL,
-                error = NULL,
-                delivery_status = NULL,
-                delivery_result = NULL,
-                claimed_at = NULL,
-                claim_owner = NULL
-          WHERE dispatch_id = $1
-            AND action = 'notify'",
-    )
-    .bind(dispatch_id)
-    .bind(&agent_id)
-    .bind(&card_id)
-    .bind(&title)
-    .execute(pool)
-    .await
-    .map_err(|error| format!("reset postgres notify outbox for {dispatch_id}: {error}"))?
-    .rows_affected();
-    if updated > 0 {
-        return Ok(true);
-    }
-
-    let inserted = sqlx::query(
+    let rearmed = sqlx::query(
         "INSERT INTO dispatch_outbox (
             dispatch_id, action, agent_id, card_id, title, status, retry_count
          ) VALUES ($1, 'notify', $2, $3, $4, 'pending', 0)
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(dispatch_id)
-    .bind(&agent_id)
-    .bind(&card_id)
-    .bind(&title)
-    .execute(pool)
-    .await
-    .map_err(|error| format!("insert postgres notify outbox for {dispatch_id}: {error}"))?
-    .rows_affected();
-    if inserted > 0 {
-        return Ok(true);
-    }
-
-    let rearmed = sqlx::query(
-        "UPDATE dispatch_outbox
-            SET agent_id = $2,
-                card_id = $3,
-                title = $4,
-                status = 'pending',
-                retry_count = 0,
-                next_attempt_at = NULL,
-                processed_at = NULL,
-                error = NULL,
-                delivery_status = NULL,
-                delivery_result = NULL,
-                claimed_at = NULL,
-                claim_owner = NULL
-          WHERE dispatch_id = $1
-            AND action = 'notify'",
+         ON CONFLICT (dispatch_id, action) WHERE action IN ('notify', 'followup')
+         DO UPDATE SET
+            agent_id = EXCLUDED.agent_id,
+            card_id = EXCLUDED.card_id,
+            title = EXCLUDED.title,
+            status = 'pending',
+            retry_count = 0,
+            next_attempt_at = NULL,
+            processed_at = NULL,
+            error = NULL,
+            delivery_status = NULL,
+            delivery_result = NULL,
+            claimed_at = NULL,
+            claim_owner = NULL",
     )
     .bind(dispatch_id)
     .bind(&agent_id)
