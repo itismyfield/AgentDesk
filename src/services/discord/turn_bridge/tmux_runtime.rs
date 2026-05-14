@@ -362,16 +362,17 @@ async fn hard_stop_unresponsive_provider_cli_turn(
     let provider_for_probe = provider.clone();
     let session_for_probe = tmux_session_name.clone();
     let probe = tokio::task::spawn_blocking(move || {
-        let session_alive = crate::services::platform::tmux::pane_pid(&session_for_probe).is_some();
+        let pane_pid = crate::services::platform::tmux::pane_pid(&session_for_probe);
+        let session_alive = pane_pid.is_some();
         let ready_for_input =
             crate::services::provider::tmux_session_ready_for_input(&session_for_probe);
         let current_provider_pid =
             provider_cli_pid_in_tmux(&session_for_probe, &provider_for_probe, tracked_child_pid);
-        (session_alive, ready_for_input, current_provider_pid)
+        (session_alive, ready_for_input, current_provider_pid, pane_pid)
     })
     .await;
 
-    let (session_alive, ready_for_input, current_provider_pid) = match probe {
+    let (session_alive, ready_for_input, current_provider_pid, pane_pid) = match probe {
         Ok(values) => values,
         Err(error) => {
             tracing::warn!(
@@ -381,7 +382,7 @@ async fn hard_stop_unresponsive_provider_cli_turn(
                 reason,
                 error
             );
-            (false, false, None)
+            (false, false, None, None)
         }
     };
 
@@ -391,6 +392,7 @@ async fn hard_stop_unresponsive_provider_cli_turn(
         ready_for_input,
         current_provider_pid,
         interrupt_outcome.fallback_sigint_pid,
+        pane_pid,
     ) else {
         return;
     };
@@ -411,11 +413,26 @@ fn hard_stop_pid_for_unresponsive_provider(
     ready_for_input: bool,
     current_provider_pid: Option<u32>,
     previous_provider_pid: Option<u32>,
+    pane_pid: Option<u32>,
 ) -> Option<u32> {
     if cleanup_policy.should_cleanup_tmux() || !session_alive || ready_for_input {
         return None;
     }
-    current_provider_pid.or(previous_provider_pid)
+    let candidate = current_provider_pid.or(previous_provider_pid)?;
+
+    // TUI mode regression guard: when the provider CLI is the tmux pane
+    // foreground itself, hard-killing it tears down the pane — same blast
+    // radius as `CleanupSession`, which `PreserveSession*` policies forbid.
+    // After a successful SIGINT, claude TUI returns to its prompt `❯` but
+    // `tmux_session_ready_for_input` only matches the legacy wrapper text
+    // `"Ready for input (type message + Enter)"`, so it would report
+    // `ready_for_input=false` and reach this point. Skip the kill instead;
+    // the SIGINT already returned the TUI to its idle prompt.
+    if Some(candidate) == pane_pid {
+        return None;
+    }
+
+    Some(candidate)
 }
 
 pub(in crate::services::discord) fn cancel_active_token(
@@ -866,6 +883,8 @@ mod tests {
 
     #[test]
     fn hard_stop_targets_only_unresponsive_preserved_provider() {
+        // pane_pid distinct from candidate => not TUI mode, kill allowed.
+        let wrapper_pane = Some(9999u32);
         assert_eq!(
             super::hard_stop_pid_for_unresponsive_provider(
                 TmuxCleanupPolicy::PreserveSession,
@@ -873,6 +892,7 @@ mod tests {
                 false,
                 Some(42),
                 Some(41),
+                wrapper_pane,
             ),
             Some(42),
             "current provider PID wins when the tmux session is still busy"
@@ -884,6 +904,7 @@ mod tests {
                 false,
                 None,
                 Some(41),
+                wrapper_pane,
             ),
             Some(41),
             "the SIGINT fallback PID is retained as a last known provider target"
@@ -895,6 +916,7 @@ mod tests {
                 true,
                 Some(42),
                 Some(41),
+                wrapper_pane,
             ),
             None,
             "ready_for_input means the provider accepted the interrupt"
@@ -908,6 +930,7 @@ mod tests {
                 false,
                 Some(42),
                 Some(41),
+                wrapper_pane,
             ),
             None,
             "cleanup-session paths already tear down tmux and must not double-kill"
@@ -919,9 +942,61 @@ mod tests {
                 false,
                 None,
                 Some(41),
+                None,
             ),
             None,
             "a missing tmux session must not kill a stale last-known PID"
+        );
+    }
+
+    // TUI mode regression: when the provider CLI is the tmux pane foreground
+    // itself, hard-killing it tears down the pane — same blast radius as
+    // CleanupSession, which PreserveSession* forbids. Without this guard,
+    // exposing pane_pid via select_provider_pid_in_pane lets the post-SIGINT
+    // hard-stop kill the claude TUI 1.5s after a successful stop because
+    // tmux_session_ready_for_input only recognizes the legacy wrapper prompt.
+    #[test]
+    fn hard_stop_skips_kill_when_candidate_pid_is_pane_foreground() {
+        let pane_pid = Some(96964u32);
+        assert_eq!(
+            super::hard_stop_pid_for_unresponsive_provider(
+                TmuxCleanupPolicy::PreserveSession,
+                true,
+                false,
+                Some(96964),
+                Some(96964),
+                pane_pid,
+            ),
+            None,
+            "TUI mode: pane_pid == provider PID; killing it tears down the pane (PreserveSession violation)"
+        );
+        assert_eq!(
+            super::hard_stop_pid_for_unresponsive_provider(
+                TmuxCleanupPolicy::PreserveSessionAndInflight {
+                    restart_mode: InflightRestartMode::HotSwapHandoff,
+                },
+                true,
+                false,
+                Some(96964),
+                None,
+                pane_pid,
+            ),
+            None,
+            "PreserveSessionAndInflight also forbids tearing down the pane via TUI PID kill"
+        );
+        // Wrapper-mode sanity: pane_pid is the wrapper, candidate is a child;
+        // the kill remains permitted.
+        assert_eq!(
+            super::hard_stop_pid_for_unresponsive_provider(
+                TmuxCleanupPolicy::PreserveSession,
+                true,
+                false,
+                Some(97458),
+                None,
+                Some(97437),
+            ),
+            Some(97458),
+            "wrapper mode: candidate child PID kept; wrapper pane PID is not the target"
         );
     }
 
