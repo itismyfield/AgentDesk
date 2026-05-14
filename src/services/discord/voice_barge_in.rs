@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, GuildId, MessageId, UserId};
+use serenity::{ChannelId, GuildId, MessageId};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
@@ -30,11 +30,6 @@ use crate::voice::tts::{
 use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 
 use super::SharedData;
-use super::voice_background_driver::{
-    VoiceBackgroundStartRequest, VoiceBackgroundTurnDriver, candidate_driver_kinds_for_provider,
-    select_voice_background_driver,
-};
-
 pub(in crate::services::discord) const INTERNAL_VOICE_MESSAGE_ID_START: u64 =
     9_000_000_000_000_000_000;
 
@@ -167,6 +162,34 @@ fn agent_voice_matches_channel(agent: &crate::config::AgentDef, channel_id: Chan
         .filter(|value| !value.is_empty())
         .and_then(|value| value.parse::<u64>().ok())
         == Some(channel_id.get())
+}
+
+fn agent_voice_background_channel(agent: &crate::config::AgentDef) -> Option<ChannelId> {
+    let preferred_provider = agent.provider.trim();
+    if !preferred_provider.is_empty()
+        && let Some((_, Some(channel))) = agent
+            .channels
+            .iter()
+            .into_iter()
+            .find(|(provider, channel)| *provider == preferred_provider && channel.is_some())
+        && let Some(channel_id) = channel
+            .channel_id()
+            .and_then(|value| value.parse::<u64>().ok())
+    {
+        return Some(ChannelId::new(channel_id));
+    }
+
+    agent
+        .channels
+        .iter()
+        .into_iter()
+        .filter_map(|(_, channel)| channel)
+        .find_map(|channel| {
+            channel
+                .channel_id()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(ChannelId::new)
+        })
 }
 
 fn agent_text_channel_matches(agent: &crate::config::AgentDef, channel_id: ChannelId) -> bool {
@@ -1229,28 +1252,11 @@ impl VoiceBargeInRuntime {
     async fn start_voice_turn(
         self: &Arc<Self>,
         shared: &Arc<SharedData>,
-        provider: &ProviderKind,
         source_channel_id: ChannelId,
         target_channel_id: ChannelId,
         utterance: &CompletedUtterance,
         transcript: &str,
     ) -> VoiceBargeInTranscriptOutcome {
-        let Some(ctx) = shared.cached_serenity_ctx.get() else {
-            return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(
-                "serenity context unavailable".to_string(),
-            );
-        };
-        let Some(token) = shared.cached_bot_token.get() else {
-            return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(
-                "bot token unavailable".to_string(),
-            );
-        };
-        let channel_name_hint = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .get(&target_channel_id)
-                .and_then(|session| session.channel_name.clone())
-        };
         let verbose_progress = self.verbose_progress_enabled();
         let language = self.spoken_result_language().await;
         let foreground = self
@@ -1298,88 +1304,11 @@ impl VoiceBargeInRuntime {
                     target_channel_id = target_channel_id.get(),
                     user_id = utterance.user_id,
                     utterance_id = %utterance.utterance_id,
-                    "voice transcript announcement failed; falling back to direct voice turn"
+                    "voice transcript announcement failed; refusing direct voice turn fallback"
                 );
-            }
-        }
-        let prompt = crate::voice::prompt::voice_bridge_prompt(
-            transcript,
-            &language,
-            verbose_progress,
-            None,
-        );
-        let metadata = serde_json::json!({
-            "source": crate::dispatch::Source::Voice.as_str(),
-            "voice": {
-                "user_id": utterance.user_id.to_string(),
-                "utterance_id": utterance.utterance_id,
-                "language": language,
-                "verbose_progress": verbose_progress,
-                "started_at": utterance.started_at,
-                "completed_at": utterance.completed_at,
-                "samples_written": utterance.samples_written,
-            }
-        });
-        let driver = select_voice_background_driver(provider);
-        let driver_kind = driver.kind();
-        let candidate_drivers = candidate_driver_kinds_for_provider(provider)
-            .into_iter()
-            .map(|kind| kind.as_str())
-            .collect::<Vec<_>>();
-        tracing::debug!(
-            source_channel_id = source_channel_id.get(),
-            target_channel_id = target_channel_id.get(),
-            provider = ?provider,
-            selected_driver = driver_kind.as_str(),
-            candidate_drivers = ?candidate_drivers,
-            "voice background driver selected"
-        );
-        let request_owner_name = format!("voice-user-{}", utterance.user_id);
-        match driver
-            .start(VoiceBackgroundStartRequest {
-                ctx,
-                channel_id: target_channel_id,
-                prompt: &prompt,
-                request_owner_name: &request_owner_name,
-                request_owner: UserId::new(utterance.user_id),
-                shared,
-                token,
-                metadata: Some(metadata),
-                channel_name_hint,
-            })
-            .await
-        {
-            Ok(outcome) => {
-                crate::voice::metrics::mark_agent_start(target_channel_id.get());
-                tracing::info!(
-                    source_channel_id = source_channel_id.get(),
-                    target_channel_id = target_channel_id.get(),
-                    user_id = utterance.user_id,
-                    utterance_id = %utterance.utterance_id,
-                    turn_id = %outcome.turn_id,
-                    driver = outcome.driver_kind.as_str(),
-                    "voice utterance started agent turn"
-                );
-                self.publish_progress(target_channel_id, "agent:start");
-                VoiceBargeInTranscriptOutcome::VoiceTurnStarted {
-                    turn_id: outcome.turn_id,
-                }
-            }
-            Err(error) => {
-                // Drop the partially-built record + the agent-start instant so
-                // the next turn isn't polluted by the failed start.
-                crate::voice::metrics::discard(target_channel_id.get());
-                crate::voice::metrics::discard_agent_start(target_channel_id.get());
-                tracing::warn!(
-                    error = %error,
-                    driver = driver_kind.as_str(),
-                    source_channel_id = source_channel_id.get(),
-                    target_channel_id = target_channel_id.get(),
-                    user_id = utterance.user_id,
-                    utterance_id = %utterance.utterance_id,
-                    "voice utterance failed to start agent turn"
-                );
-                VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(error.to_string())
+                return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(format!(
+                    "voice transcript announcement failed: {error}"
+                ));
             }
         }
     }
@@ -1578,6 +1507,30 @@ impl VoiceBargeInRuntime {
         source_channel_id: ChannelId,
         transcript: &str,
     ) -> VoiceTurnTargetResolution {
+        let config = self.cached_config().await;
+        if let Some((agent_id, target_channel_id)) = config.agents.iter().find_map(|agent| {
+            if agent_voice_matches_channel(agent, source_channel_id) {
+                agent_voice_background_channel(agent)
+                    .map(|channel_id| (agent.id.clone(), channel_id))
+            } else {
+                None
+            }
+        }) {
+            self.bind_routed_voice_context(source_channel_id, target_channel_id);
+            self.active_voice_routes.insert(
+                source_channel_id.get(),
+                ActiveVoiceRoute {
+                    agent_id,
+                    channel_id: target_channel_id,
+                    updated_at: Instant::now(),
+                },
+            );
+            return VoiceTurnTargetResolution::Target {
+                channel_id: target_channel_id,
+                transcript: transcript.trim().to_string(),
+            };
+        }
+
         if super::settings::resolve_role_binding(source_channel_id, None).is_some() {
             return VoiceTurnTargetResolution::Target {
                 channel_id: source_channel_id,
@@ -1585,7 +1538,6 @@ impl VoiceBargeInRuntime {
             };
         }
 
-        let config = self.cached_config().await;
         if !voice_lobby_accepts_source_channel(&config.voice, source_channel_id) {
             tracing::debug!(
                 source_channel_id = source_channel_id.get(),
@@ -1782,7 +1734,6 @@ impl VoiceBargeInRuntime {
 
         self.start_voice_turn(
             shared,
-            provider,
             channel_id,
             target_channel_id,
             utterance,
@@ -2377,6 +2328,52 @@ mod tests {
         assert_eq!(
             foreground_ack_text("what time is it?", "en-US"),
             "Got it. I am checking that now."
+        );
+    }
+
+    fn test_agent(provider: &str) -> crate::config::AgentDef {
+        crate::config::AgentDef {
+            id: "project-agentdesk".to_string(),
+            name: "AgentDesk".to_string(),
+            name_ko: None,
+            aliases: Vec::new(),
+            wake_word: None,
+            voice_enabled: true,
+            sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig {
+                channel_id: Some("300".to_string()),
+                foreground: crate::config::AgentVoiceForegroundConfig::default(),
+            },
+            provider: provider.to_string(),
+            channels: crate::config::AgentChannels {
+                claude: Some(crate::config::AgentChannel::from("100")),
+                codex: Some(crate::config::AgentChannel::from("200")),
+                gemini: None,
+                opencode: None,
+                qwen: None,
+            },
+            keywords: Vec::new(),
+            department: None,
+            avatar_emoji: None,
+        }
+    }
+
+    #[test]
+    fn agent_voice_channel_routes_to_provider_main_channel() {
+        let agent = test_agent("codex");
+        assert!(agent_voice_matches_channel(&agent, ChannelId::new(300)));
+        assert_eq!(
+            agent_voice_background_channel(&agent),
+            Some(ChannelId::new(200))
+        );
+    }
+
+    #[test]
+    fn agent_voice_channel_route_falls_back_to_first_text_channel() {
+        let agent = test_agent("missing-provider");
+        assert_eq!(
+            agent_voice_background_channel(&agent),
+            Some(ChannelId::new(100))
         );
     }
 
