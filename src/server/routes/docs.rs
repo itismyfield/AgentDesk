@@ -4441,7 +4441,11 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
             (
                 "force",
-                body_param("boolean", false, "Reserved; echoed back to caller for confirmation"),
+                body_param(
+                    "boolean",
+                    false,
+                    "Reserved for future force-cancel semantics; accepted but currently has no effect and is not echoed in the response",
+                ),
             ),
         ])
         .with_example(

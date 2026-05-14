@@ -20,8 +20,10 @@ pub struct RequestGenerateBody {
     /// when building entries. When omitted, every kind in
     /// `/api/queue/phase-gates/catalog` is implicitly allowed.
     pub allowed_gate_kinds: Option<Vec<String>>,
-    /// Reserved for future force-cancel semantics; currently echoed back to
-    /// the caller so the dashboard can confirm the value was understood.
+    /// Reserved for future force-cancel semantics. Accepted from callers
+    /// for forward compatibility but currently has no effect and is not
+    /// echoed in the response — do not depend on it round-tripping.
+    #[serde(default)]
     pub force: Option<bool>,
 }
 
@@ -179,6 +181,12 @@ pub(super) struct RequestGenerateInput<'a> {
 /// Build the self-contained instruction the agent receives in its Discord
 /// channel. Self-contained on purpose: a freshly-started agent with no prior
 /// turn context must still be able to act on this message alone (#2126).
+///
+/// When `allowed_gate_kinds` is set, the call-schema example and the guide
+/// reference the restricted vocabulary so a literal-minded agent doesn't
+/// echo the catalog default (`pr-confirm`) into a queue that was meant to be
+/// deploy-only. `/api/queue/generate` doesn't re-check the restriction
+/// today, so the prompt is the only place where the constraint is conveyed.
 pub(super) fn build_request_generate_instruction(input: &RequestGenerateInput<'_>) -> String {
     let issues = input
         .issue_numbers
@@ -186,16 +194,31 @@ pub(super) fn build_request_generate_instruction(input: &RequestGenerateInput<'_
         .map(|n| format!("#{n}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let allowed_kinds_line = match input.allowed_gate_kinds {
+    let (allowed_kinds_line, example_kind, kind_guide_line) = match input.allowed_gate_kinds {
         Some(kinds) if !kinds.is_empty() => {
             let formatted = kinds
                 .iter()
                 .map(|kind| format!("\"{kind}\""))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("allowed_gate_kinds: [{formatted}]\n")
+            let example = kinds[0].clone();
+            let guide = format!(
+                "- phase_gate_kind: 반드시 allowed_gate_kinds([{formatted}]) 중에서만 선택 (이 목록 밖의 id는 사용 금지)"
+            );
+            (
+                format!("allowed_gate_kinds: [{formatted}]\n"),
+                example,
+                guide,
+            )
         }
-        _ => String::new(),
+        _ => (
+            String::new(),
+            super::phase_gate_catalog::DEFAULT_PHASE_GATE_KIND.to_string(),
+            format!(
+                "- phase_gate_kind: GET /api/queue/phase-gates/catalog의 id 중 하나, 미지정 시 default_kind ({})",
+                super::phase_gate_catalog::DEFAULT_PHASE_GATE_KIND
+            ),
+        ),
     };
     format!(
         "[자동큐 생성 의뢰] (request_id: {request_id})\n\
@@ -212,7 +235,7 @@ pub(super) fn build_request_generate_instruction(input: &RequestGenerateInput<'_
          \u{20}\u{20}\"repo\": \"{repo}\",\n\
          \u{20}\u{20}\"agent_id\": \"{agent_id}\",\n\
          \u{20}\u{20}\"entries\": [\n\
-         \u{20}\u{20}\u{20}\u{20}{{ \"issue_number\": N, \"batch_phase\": 0, \"thread_group\": 1, \"phase_gate_kind\": \"pr-confirm\" }},\n\
+         \u{20}\u{20}\u{20}\u{20}{{ \"issue_number\": N, \"batch_phase\": 0, \"thread_group\": 1, \"phase_gate_kind\": \"{example_kind}\" }},\n\
          \u{20}\u{20}\u{20}\u{20}...\n\
          \u{20}\u{20}],\n\
          \u{20}\u{20}\"max_concurrent_threads\": <옵션>,\n\
@@ -222,13 +245,15 @@ pub(super) fn build_request_generate_instruction(input: &RequestGenerateInput<'_
          - entries는 실행 순서대로 정렬\n\
          - thread_group: 동시 실행 가능한 카드는 같은 group, 직렬은 다른 group\n\
          - batch_phase: 페이즈 게이트 사이에 있는 카드는 같은 phase\n\
-         - phase_gate_kind: GET /api/queue/phase-gates/catalog의 id 중 하나, 미지정 시 default_kind\n\
+         {kind_guide_line}\n\
          - 자체 판단 후 즉시 호출, 완료 시 run_id를 본 채널에 보고",
         request_id = input.request_id,
         repo = input.repo,
         issues = issues,
         agent_id = input.agent_id,
         allowed_kinds_line = allowed_kinds_line,
+        example_kind = example_kind,
+        kind_guide_line = kind_guide_line,
     )
 }
 
@@ -280,6 +305,35 @@ mod tests {
             request_id: "r1",
         });
         assert!(!text.contains("allowed_gate_kinds:"));
+    }
+
+    /// Regression for codex review P1 on #2126: when allowed_gate_kinds
+    /// excludes the catalog default (`pr-confirm`), the synthesised call
+    /// example must not bleed the default back into the prompt and the
+    /// guide must explicitly forbid kinds outside the restriction.
+    #[test]
+    fn instruction_example_kind_respects_allowed_restriction() {
+        let issues = vec![42i64];
+        let allowed = vec!["deploy-gate".to_string()];
+        let text = build_request_generate_instruction(&RequestGenerateInput {
+            repo: "r",
+            agent_id: "a",
+            issue_numbers: &issues,
+            allowed_gate_kinds: Some(&allowed),
+            request_id: "r1",
+        });
+        assert!(
+            text.contains("\"phase_gate_kind\": \"deploy-gate\""),
+            "call example should use the first allowed kind: {text}"
+        );
+        assert!(
+            !text.contains("\"phase_gate_kind\": \"pr-confirm\""),
+            "pr-confirm must not appear when restricted to deploy-gate: {text}"
+        );
+        assert!(
+            text.contains("반드시 allowed_gate_kinds"),
+            "guide must explicitly require the restriction: {text}"
+        );
     }
 
     #[test]
