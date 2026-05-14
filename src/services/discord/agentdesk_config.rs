@@ -125,6 +125,7 @@ pub(crate) fn ensure_agent_setup_config(
         wake_word: None,
         voice_enabled: true,
         sensitivity_mode: None,
+        voice: crate::config::AgentVoiceConfig::default(),
         provider: input.provider.clone(),
         channels,
         keywords: Vec::new(),

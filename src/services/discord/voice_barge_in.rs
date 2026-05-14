@@ -21,7 +21,7 @@ use crate::voice::commands::{
 };
 use crate::voice::config::DEFAULT_STT_LANGUAGE;
 use crate::voice::progress;
-use crate::voice::sanitizer::spoken_result_only;
+use crate::voice::sanitizer::{foreground_spoken_only_with_limit, spoken_result_only_with_limit};
 use crate::voice::stt::SttRuntime;
 use crate::voice::tts::{
     TtsRuntime, TtsSynthesisKind,
@@ -117,6 +117,14 @@ struct ActiveVoiceRoute {
     updated_at: Instant,
 }
 
+#[derive(Clone, Debug)]
+struct EffectiveVoiceForegroundConfig {
+    provider: String,
+    model: String,
+    max_chars: usize,
+    timeout_ms: u64,
+}
+
 enum VoiceTurnTargetResolution {
     Target {
         channel_id: ChannelId,
@@ -131,6 +139,168 @@ fn voice_lobby_accepts_source_channel(config: &VoiceConfig, channel_id: ChannelI
         Some(lobby_channel_id) => lobby_channel_id == channel_id.get(),
         None => true,
     }
+}
+
+fn normalized_foreground_max_chars(value: usize) -> usize {
+    if value == 0 {
+        crate::voice::config::DEFAULT_FOREGROUND_MAX_CHARS
+    } else {
+        value
+    }
+}
+
+fn normalized_foreground_timeout_ms(value: u64) -> u64 {
+    if value == 0 {
+        crate::voice::config::DEFAULT_FOREGROUND_TIMEOUT_MS
+    } else {
+        value
+    }
+}
+
+fn agent_voice_matches_channel(agent: &crate::config::AgentDef, channel_id: ChannelId) -> bool {
+    agent
+        .voice
+        .channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        == Some(channel_id.get())
+}
+
+fn agent_text_channel_matches(agent: &crate::config::AgentDef, channel_id: ChannelId) -> bool {
+    let channel_id = channel_id.get().to_string();
+    agent
+        .channels
+        .iter()
+        // AgentChannels::iter returns a fixed array, so into_iter is required.
+        .into_iter()
+        .filter_map(|(_, channel)| channel)
+        .any(|channel| channel.channel_id().as_deref() == Some(channel_id.as_str()))
+}
+
+fn foreground_ack_text(transcript: &str, language: &str) -> String {
+    let english = language.trim().to_ascii_lowercase().starts_with("en");
+    let looks_like_work = looks_like_background_work_request(transcript);
+    match (english, looks_like_work) {
+        (true, true) => {
+            "Got it. I will start that in the channel and come back briefly.".to_string()
+        }
+        (true, false) => "Got it. I am checking that now.".to_string(),
+        (false, true) => "알겠어요. 채널에서 바로 진행하고 짧게 다시 알려드릴게요.".to_string(),
+        (false, false) => "알겠어요. 바로 확인할게요.".to_string(),
+    }
+}
+
+async fn generate_foreground_ack_text(
+    transcript: &str,
+    language: &str,
+    foreground: &EffectiveVoiceForegroundConfig,
+) -> String {
+    let fallback = foreground_ack_text(transcript, language);
+    let prompt =
+        crate::voice::prompt::voice_foreground_prompt(transcript, language, foreground.max_chars);
+    let provider = foreground.provider.clone();
+    let model = foreground.model.clone();
+    let max_chars = foreground.max_chars;
+    let timeout = Duration::from_millis(foreground.timeout_ms);
+    let result = tokio::time::timeout(
+        timeout + Duration::from_millis(250),
+        tokio::task::spawn_blocking(move || {
+            let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
+            match provider_kind {
+                ProviderKind::Claude => crate::services::claude::execute_command_simple_with_model(
+                    &prompt,
+                    Some(&model),
+                ),
+                ProviderKind::Codex => {
+                    crate::services::codex::execute_command_simple_with_model(&prompt, Some(&model))
+                }
+                ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
+                    "foreground provider {} does not support model-scoped instant call yet",
+                    provider_kind.as_str()
+                )),
+                ProviderKind::Unsupported(value) => {
+                    Err(format!("unsupported foreground provider: {value}"))
+                }
+            }
+        }),
+    )
+    .await;
+
+    let text = match result {
+        Ok(Ok(Ok(text))) => text,
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(
+                error = %error,
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice foreground model call failed; using deterministic acknowledgement"
+            );
+            return fallback;
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %error,
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice foreground model task failed; using deterministic acknowledgement"
+            );
+            return fallback;
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = foreground.timeout_ms,
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice foreground model timed out; using deterministic acknowledgement"
+            );
+            return fallback;
+        }
+    };
+
+    let spoken = foreground_spoken_only_with_limit(&text, language, max_chars);
+    if spoken.trim().is_empty() {
+        fallback
+    } else {
+        spoken
+    }
+}
+
+fn looks_like_background_work_request(transcript: &str) -> bool {
+    let text = transcript.to_ascii_lowercase();
+    [
+        "구현",
+        "수정",
+        "확인",
+        "검토",
+        "테스트",
+        "배포",
+        "이슈",
+        "로그",
+        "파일",
+        "검색",
+        "만들",
+        "고쳐",
+        "implement",
+        "fix",
+        "test",
+        "deploy",
+        "issue",
+        "log",
+        "file",
+        "search",
+        "review",
+    ]
+    .iter()
+    .any(|needle| {
+        if needle.is_ascii() {
+            text.split(|ch: char| !ch.is_ascii_alphanumeric())
+                .any(|word| word == *needle)
+        } else {
+            text.contains(needle)
+        }
+    })
 }
 
 struct DeferredBargeInDrain {
@@ -984,10 +1154,11 @@ impl VoiceBargeInRuntime {
     }
 
     async fn start_voice_turn(
-        &self,
+        self: &Arc<Self>,
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
-        channel_id: ChannelId,
+        source_channel_id: ChannelId,
+        target_channel_id: ChannelId,
         utterance: &CompletedUtterance,
         transcript: &str,
     ) -> VoiceBargeInTranscriptOutcome {
@@ -1004,11 +1175,60 @@ impl VoiceBargeInRuntime {
         let channel_name_hint = {
             let data = shared.core.lock().await;
             data.sessions
-                .get(&channel_id)
+                .get(&target_channel_id)
                 .and_then(|session| session.channel_name.clone())
         };
         let verbose_progress = self.verbose_progress_enabled();
         let language = self.spoken_result_language().await;
+        let foreground = self
+            .resolve_effective_foreground_config(source_channel_id, target_channel_id)
+            .await;
+        match self
+            .post_voice_transcript_announcement(
+                shared,
+                target_channel_id,
+                utterance,
+                transcript,
+                &language,
+                verbose_progress,
+            )
+            .await
+        {
+            Ok(message_id) => {
+                self.spawn_foreground_acknowledgement(
+                    shared.clone(),
+                    source_channel_id,
+                    target_channel_id,
+                    transcript.to_string(),
+                    language.clone(),
+                    foreground.clone(),
+                );
+                tracing::info!(
+                    source_channel_id = source_channel_id.get(),
+                    target_channel_id = target_channel_id.get(),
+                    user_id = utterance.user_id,
+                    utterance_id = %utterance.utterance_id,
+                    transcript_message_id = %message_id,
+                    foreground_provider = %foreground.provider,
+                    foreground_model = %foreground.model,
+                    foreground_max_chars = foreground.max_chars,
+                    "voice transcript announcement posted as canonical turn trigger"
+                );
+                return VoiceBargeInTranscriptOutcome::VoiceTurnStarted {
+                    turn_id: format!("voice-announce:{message_id}"),
+                };
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    source_channel_id = source_channel_id.get(),
+                    target_channel_id = target_channel_id.get(),
+                    user_id = utterance.user_id,
+                    utterance_id = %utterance.utterance_id,
+                    "voice transcript announcement failed; falling back to direct voice turn"
+                );
+            }
+        }
         let prompt = crate::voice::prompt::voice_bridge_prompt(
             transcript,
             &language,
@@ -1027,7 +1247,6 @@ impl VoiceBargeInRuntime {
                 "samples_written": utterance.samples_written,
             }
         });
-        crate::voice::metrics::mark_agent_start(channel_id.get());
         let driver = select_voice_background_driver(provider);
         let driver_kind = driver.kind();
         let candidate_drivers = candidate_driver_kinds_for_provider(provider)
@@ -1035,7 +1254,8 @@ impl VoiceBargeInRuntime {
             .map(|kind| kind.as_str())
             .collect::<Vec<_>>();
         tracing::debug!(
-            channel_id = channel_id.get(),
+            source_channel_id = source_channel_id.get(),
+            target_channel_id = target_channel_id.get(),
             provider = ?provider,
             selected_driver = driver_kind.as_str(),
             candidate_drivers = ?candidate_drivers,
@@ -1045,7 +1265,7 @@ impl VoiceBargeInRuntime {
         match driver
             .start(VoiceBackgroundStartRequest {
                 ctx,
-                channel_id,
+                channel_id: target_channel_id,
                 prompt: &prompt,
                 request_owner_name: &request_owner_name,
                 request_owner: UserId::new(utterance.user_id),
@@ -1057,15 +1277,17 @@ impl VoiceBargeInRuntime {
             .await
         {
             Ok(outcome) => {
+                crate::voice::metrics::mark_agent_start(target_channel_id.get());
                 tracing::info!(
-                    channel_id = channel_id.get(),
+                    source_channel_id = source_channel_id.get(),
+                    target_channel_id = target_channel_id.get(),
                     user_id = utterance.user_id,
                     utterance_id = %utterance.utterance_id,
                     turn_id = %outcome.turn_id,
                     driver = outcome.driver_kind.as_str(),
                     "voice utterance started agent turn"
                 );
-                self.publish_progress(channel_id, "agent:start");
+                self.publish_progress(target_channel_id, "agent:start");
                 VoiceBargeInTranscriptOutcome::VoiceTurnStarted {
                     turn_id: outcome.turn_id,
                 }
@@ -1073,12 +1295,13 @@ impl VoiceBargeInRuntime {
             Err(error) => {
                 // Drop the partially-built record + the agent-start instant so
                 // the next turn isn't polluted by the failed start.
-                crate::voice::metrics::discard(channel_id.get());
-                crate::voice::metrics::discard_agent_start(channel_id.get());
+                crate::voice::metrics::discard(target_channel_id.get());
+                crate::voice::metrics::discard_agent_start(target_channel_id.get());
                 tracing::warn!(
                     error = %error,
                     driver = driver_kind.as_str(),
-                    channel_id = channel_id.get(),
+                    source_channel_id = source_channel_id.get(),
+                    target_channel_id = target_channel_id.get(),
                     user_id = utterance.user_id,
                     utterance_id = %utterance.utterance_id,
                     "voice utterance failed to start agent turn"
@@ -1086,6 +1309,100 @@ impl VoiceBargeInRuntime {
                 VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(error.to_string())
             }
         }
+    }
+
+    fn spawn_foreground_acknowledgement(
+        self: &Arc<Self>,
+        shared: Arc<SharedData>,
+        source_channel_id: ChannelId,
+        target_channel_id: ChannelId,
+        transcript: String,
+        language: String,
+        foreground: EffectiveVoiceForegroundConfig,
+    ) {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let prompt = crate::voice::prompt::voice_foreground_prompt(
+                &transcript,
+                &language,
+                foreground.max_chars,
+            );
+            tracing::debug!(
+                source_channel_id = source_channel_id.get(),
+                target_channel_id = target_channel_id.get(),
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                timeout_ms = foreground.timeout_ms,
+                prompt_chars = prompt.chars().count(),
+                "voice foreground prompt prepared for instant response"
+            );
+            let ack = generate_foreground_ack_text(&transcript, &language, &foreground).await;
+            let Some(path) = runtime
+                .synthesize_acknowledgement(&ack, source_channel_id)
+                .await
+            else {
+                return;
+            };
+            runtime
+                .play_acknowledgement(&shared, source_channel_id, path)
+                .await;
+            tracing::info!(
+                source_channel_id = source_channel_id.get(),
+                target_channel_id = target_channel_id.get(),
+                elapsed_ms = started.elapsed().as_millis(),
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice foreground first audio queued"
+            );
+        });
+    }
+
+    async fn post_voice_transcript_announcement(
+        &self,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        utterance: &CompletedUtterance,
+        transcript: &str,
+        language: &str,
+        verbose_progress: bool,
+    ) -> Result<String, String> {
+        let registry = shared
+            .health_registry()
+            .ok_or_else(|| "health registry unavailable".to_string())?;
+        let content = crate::voice::prompt::build_voice_transcript_announcement(
+            transcript,
+            utterance.user_id,
+            &utterance.utterance_id,
+            language,
+            verbose_progress,
+            &utterance.started_at,
+            &utterance.completed_at,
+            utterance.samples_written,
+        );
+        let target = format!("channel:{}", channel_id.get());
+        let (status, body) = super::health::send_message_with_backends(
+            &registry,
+            None::<&crate::db::Db>,
+            shared.pg_pool.as_ref(),
+            &target,
+            &content,
+            "voice",
+            "announce",
+            Some("voice transcript"),
+        )
+        .await;
+        if !status.starts_with("200") {
+            return Err(format!("announce send returned {status}: {body}"));
+        }
+        let value = serde_json::from_str::<serde_json::Value>(&body)
+            .map_err(|error| format!("parse announce send response: {error}"))?;
+        value
+            .get("message_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "announce send response missing message_id".to_string())
     }
 
     /// F6 (#2046): `Config` 핫캐시. TTL 안이면 캐시된 `Arc<Config>` 반환,
@@ -1108,6 +1425,64 @@ impl VoiceBargeInRuntime {
             *guard = Some((Instant::now(), arc.clone()));
         }
         arc
+    }
+
+    async fn resolve_effective_foreground_config(
+        &self,
+        source_channel_id: ChannelId,
+        target_channel_id: ChannelId,
+    ) -> EffectiveVoiceForegroundConfig {
+        let config = self.cached_config().await;
+        let mut provider = config.voice.foreground.provider.trim().to_string();
+        if provider.is_empty() {
+            provider = crate::voice::config::DEFAULT_FOREGROUND_PROVIDER.to_string();
+        }
+        let mut model = config.voice.foreground.model.trim().to_string();
+        if model.is_empty() {
+            model = crate::voice::config::DEFAULT_FOREGROUND_MODEL.to_string();
+        }
+        let mut max_chars = normalized_foreground_max_chars(config.voice.foreground.max_chars);
+        let mut timeout_ms = normalized_foreground_timeout_ms(config.voice.foreground.timeout_ms);
+
+        if let Some(agent) = config.agents.iter().find(|agent| {
+            agent_voice_matches_channel(agent, source_channel_id)
+                || agent_text_channel_matches(agent, target_channel_id)
+                || agent_text_channel_matches(agent, source_channel_id)
+        }) {
+            if let Some(value) = agent
+                .voice
+                .foreground
+                .provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                provider = value.to_string();
+            }
+            if let Some(value) = agent
+                .voice
+                .foreground
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                model = value.to_string();
+            }
+            if let Some(value) = agent.voice.foreground.max_chars {
+                max_chars = normalized_foreground_max_chars(value);
+            }
+            if let Some(value) = agent.voice.foreground.timeout_ms {
+                timeout_ms = normalized_foreground_timeout_ms(value);
+            }
+        }
+
+        EffectiveVoiceForegroundConfig {
+            provider,
+            model,
+            max_chars,
+            timeout_ms,
+        }
     }
 
     async fn resolve_voice_turn_target(
@@ -1249,7 +1624,7 @@ impl VoiceBargeInRuntime {
     }
 
     pub(in crate::services::discord) async fn process_completed_utterance(
-        &self,
+        self: &Arc<Self>,
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel_id: ChannelId,
@@ -1318,8 +1693,15 @@ impl VoiceBargeInRuntime {
             }
         };
 
-        self.start_voice_turn(shared, provider, target_channel_id, utterance, &transcript)
-            .await
+        self.start_voice_turn(
+            shared,
+            provider,
+            channel_id,
+            target_channel_id,
+            utterance,
+            &transcript,
+        )
+        .await
     }
 
     pub(in crate::services::discord) async fn drain_deferred_after_turn(
@@ -1528,7 +1910,13 @@ impl VoiceBargeInRuntime {
             return;
         };
         let language = self.spoken_result_language().await;
-        let spoken = spoken_result_only(answer, &language);
+        let spoken_result_max_chars = self.cached_config().await.voice.spoken_result.max_chars;
+        let spoken_result_max_chars = if spoken_result_max_chars == 0 {
+            crate::voice::sanitizer::DEFAULT_SPOKEN_RESULT_CHAR_LIMIT
+        } else {
+            spoken_result_max_chars
+        };
+        let spoken = spoken_result_only_with_limit(answer, &language, spoken_result_max_chars);
         if spoken.trim().is_empty() {
             crate::voice::metrics::discard(channel_id.get());
             return;
@@ -1891,6 +2279,18 @@ mod tests {
         config.enabled = true;
         config.barge_in.acknowledgement_enabled = false;
         VoiceBargeInRuntime::from_voice_config(&config)
+    }
+
+    #[test]
+    fn foreground_ack_text_stays_short_and_routes_work_to_background() {
+        assert_eq!(
+            foreground_ack_text("이슈 구현하고 테스트해줘", "ko"),
+            "알겠어요. 채널에서 바로 진행하고 짧게 다시 알려드릴게요."
+        );
+        assert_eq!(
+            foreground_ack_text("what time is it?", "en-US"),
+            "Got it. I am checking that now."
+        );
     }
 
     #[tokio::test]

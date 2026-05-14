@@ -124,6 +124,20 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     execute_command_simple_cancellable(prompt, None)
 }
 
+pub fn execute_command_simple_with_model(
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<String, String> {
+    execute_command_simple_cancellable_with_options(
+        prompt,
+        model,
+        true,
+        Some(true),
+        Some(false),
+        None,
+    )
+}
+
 pub fn execute_command_simple_with_timeout(
     prompt: &str,
     timeout: Duration,
@@ -144,6 +158,17 @@ pub fn execute_command_simple_cancellable(
     prompt: &str,
     cancel_token: Option<&CancelToken>,
 ) -> Result<String, String> {
+    execute_command_simple_cancellable_with_options(prompt, None, false, None, None, cancel_token)
+}
+
+fn execute_command_simple_cancellable_with_options(
+    prompt: &str,
+    model: Option<&str>,
+    readonly_mode: bool,
+    fast_mode_enabled: Option<bool>,
+    goals_enabled: Option<bool>,
+    cancel_token: Option<&CancelToken>,
+) -> Result<String, String> {
     let session_selection =
         crate::services::provider_hosting::resolve_provider_session_selection(&ProviderKind::Codex);
     session_selection.log_start("codex.execute_command_simple");
@@ -153,7 +178,14 @@ pub fn execute_command_simple_cancellable(
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let args = base_exec_args(None, prompt, None, false, None, None);
+    let args = base_exec_args(
+        None,
+        prompt,
+        model,
+        readonly_mode,
+        fast_mode_enabled,
+        goals_enabled,
+    );
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let mut command = Command::new(&codex_bin);

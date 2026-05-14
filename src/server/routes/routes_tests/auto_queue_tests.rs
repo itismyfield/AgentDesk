@@ -11786,7 +11786,9 @@ async fn generate_rejects_unknown_phase_gate_kind() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let error = json["error"].as_str().expect("error message must be a string");
+    let error = json["error"]
+        .as_str()
+        .expect("error message must be a string");
     assert!(
         error.contains("phase_gate_kind") && error.contains("ship-it"),
         "error must name the offending field/value, got: {error}"

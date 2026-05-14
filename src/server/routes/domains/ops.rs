@@ -245,6 +245,14 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(routines::kill_routine_session),
             )
             .route("/queue/generate", post(auto_queue::generate))
+            .route(
+                "/queue/request-generate",
+                post(auto_queue::request_generate),
+            )
+            .route(
+                "/queue/phase-gates/catalog",
+                get(auto_queue::phase_gate_catalog),
+            )
             .route("/queue/dispatch-next", post(auto_queue::activate))
             .route("/queue/status", get(auto_queue::status))
             .route("/queue/history", get(auto_queue::history))
@@ -268,14 +276,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/queue/resume", post(auto_queue::resume_run))
             .route("/queue/cancel", post(auto_queue::cancel))
             .route("/queue/runs/{id}/order", post(auto_queue::submit_order))
-            .route(
-                "/queue/phase-gates/catalog",
-                get(auto_queue::phase_gate_catalog),
-            )
-            .route(
-                "/queue/request-generate",
-                post(auto_queue::request_generate),
-            )
             .route("/channels/{id}/queue", get(queue_api::list_channel_queue))
             .route(
                 "/channels/{id}/watcher-state",

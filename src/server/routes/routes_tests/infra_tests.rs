@@ -474,6 +474,7 @@ async fn round_table_meeting_channels_endpoint_returns_configured_experts_and_fa
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels {
                 codex: Some(crate::config::AgentChannel::Detailed(
@@ -498,6 +499,7 @@ async fn round_table_meeting_channels_endpoint_returns_configured_experts_and_fa
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "qwen".to_string(),
             channels: crate::config::AgentChannels::default(),
             keywords: vec!["planning".to_string()],
@@ -512,6 +514,7 @@ async fn round_table_meeting_channels_endpoint_returns_configured_experts_and_fa
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "gemini".to_string(),
             channels: crate::config::AgentChannels::default(),
             keywords: vec!["analysis".to_string()],

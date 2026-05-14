@@ -1070,6 +1070,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels {
                 codex: Some(crate::config::AgentChannel::from("pg-agent-cdx")),
@@ -1323,6 +1324,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels {
                 codex: Some(crate::config::AgentChannel::from("maker-cdx")),
@@ -1460,6 +1462,7 @@ mod tests {
                 wake_word: None,
                 voice_enabled: true,
                 sensitivity_mode: None,
+                voice: crate::config::AgentVoiceConfig::default(),
                 provider: "codex".to_string(),
                 channels: crate::config::AgentChannels {
                     codex: Some(crate::config::AgentChannel::from("maker-cdx")),
@@ -1477,6 +1480,7 @@ mod tests {
                 wake_word: None,
                 voice_enabled: true,
                 sensitivity_mode: None,
+                voice: crate::config::AgentVoiceConfig::default(),
                 provider: "codex".to_string(),
                 channels: crate::config::AgentChannels {
                     codex: Some(crate::config::AgentChannel::from("legacy-cdx")),

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildRequestGenerateGroups,
   generateAutoQueueForSelection,
   resetAutoQueueForSelection,
 } from "./auto-queue-actions";
@@ -40,5 +41,36 @@ describe("auto-queue-actions", () => {
       agentId: "agent-selected",
       runId: "run-123",
     });
+  });
+
+  it("groups request-generate candidates by repo and agent", () => {
+    expect(
+      buildRequestGenerateGroups(
+        [
+          { repo: "repo-a", agentId: "agent-a", issueNumber: 3 },
+          { repo: "repo-a", agentId: "agent-a", issueNumber: 1 },
+          { repo: "repo-a", agentId: "agent-b", issueNumber: 2 },
+          { repo: "repo-b", agentId: "agent-a", issueNumber: 5 },
+          { repo: null, agentId: "agent-a", issueNumber: 8 },
+        ],
+        "fallback",
+      ),
+    ).toEqual([
+      { repo: "fallback", agentId: "agent-a", issueNumbers: [8] },
+      { repo: "repo-a", agentId: "agent-a", issueNumbers: [1, 3] },
+      { repo: "repo-a", agentId: "agent-b", issueNumbers: [2] },
+      { repo: "repo-b", agentId: "agent-a", issueNumbers: [5] },
+    ]);
+  });
+
+  it("uses the selected repo when a ready entry has an empty repo", () => {
+    expect(
+      buildRequestGenerateGroups(
+        [{ repo: "", agentId: "agent-a", issueNumber: 9 }],
+        "fallback",
+      ),
+    ).toEqual([
+      { repo: "fallback", agentId: "agent-a", issueNumbers: [9] },
+    ]);
   });
 });

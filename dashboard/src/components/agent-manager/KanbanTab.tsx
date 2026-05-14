@@ -2128,6 +2128,7 @@ export default function KanbanTab({
         const readyEntries = readyCards
           .filter((card) => Boolean(card.assignee_agent_id) && Boolean(card.github_issue_number))
           .map((card) => ({
+            repo: card.github_repo || selectedRepo,
             agentId: card.assignee_agent_id as string,
             issueNumber: card.github_issue_number as number,
           }));

@@ -1,8 +1,10 @@
 use std::{
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use poise::serenity_prelude::ChannelId;
 use serde_json::{Map, Value, json};
 
 use super::{
@@ -66,6 +68,9 @@ pub(crate) struct MementoRememberRequest {
     pub keywords: Vec<String>,
     pub source: Option<String>,
     pub workspace: Option<String>,
+    pub global: bool,
+    pub channel_id: Option<u64>,
+    pub channel_name: Option<String>,
     pub agent_id: Option<String>,
     pub case_id: Option<String>,
     pub goal: Option<String>,
@@ -149,9 +154,15 @@ impl MementoBackend {
         &self,
         role_id: &str,
         channel_id: u64,
+        channel_name: Option<&str>,
         config: &MementoRuntimeConfig,
     ) -> String {
-        resolve_memento_workspace(role_id, channel_id, config.workspace_override.as_deref())
+        resolve_memento_workspace_for_channel(
+            role_id,
+            channel_id,
+            channel_name,
+            config.workspace_override.as_deref(),
+        )
     }
 
     fn resolve_agent_id(&self, role_id: &str, channel_id: u64) -> String {
@@ -422,6 +433,9 @@ impl MementoBackend {
             keywords,
             source,
             workspace,
+            global,
+            channel_id,
+            channel_name,
             agent_id,
             case_id,
             goal,
@@ -434,7 +448,40 @@ impl MementoBackend {
         let normalized_content = normalize_whitespace(&content);
         let normalized_topic = normalize_whitespace(&topic);
         let normalized_kind = normalize_whitespace(&kind);
-        let resolved_workspace = workspace.or_else(|| config.workspace_override.clone());
+        if global && workspace.is_some() {
+            return Err("memento remember cannot combine global=true with workspace".to_string());
+        }
+        if matches!(channel_id, Some(0)) {
+            return Err(
+                "memento remember channel_id must be a non-zero Discord snowflake".to_string(),
+            );
+        }
+        if !global
+            && workspace.is_none()
+            && channel_id.is_none()
+            && config.workspace_override.is_none()
+        {
+            return Err(
+                "memento remember requires workspace, channel_id, global=true, or MEMENTO_WORKSPACE"
+                    .to_string(),
+            );
+        }
+        let resolved_workspace = if global {
+            None
+        } else {
+            workspace.or_else(|| {
+                channel_id
+                    .map(|channel_id| {
+                        resolve_memento_workspace_for_channel(
+                            UNBOUND_MEMORY_ROLE_ID,
+                            channel_id,
+                            channel_name.as_deref(),
+                            config.workspace_override.as_deref(),
+                        )
+                    })
+                    .or_else(|| config.workspace_override.clone())
+            })
+        };
         let dedup_key = build_remember_dedup_key(
             &normalized_content,
             &normalized_topic,
@@ -703,6 +750,15 @@ pub(crate) fn resolve_memento_workspace(
     channel_id: u64,
     workspace_override: Option<&str>,
 ) -> String {
+    resolve_memento_workspace_for_channel(role_id, channel_id, None, workspace_override)
+}
+
+pub(crate) fn resolve_memento_workspace_for_channel(
+    role_id: &str,
+    channel_id: u64,
+    channel_name: Option<&str>,
+    workspace_override: Option<&str>,
+) -> String {
     if let Some(workspace) = workspace_override
         .map(str::trim)
         .filter(|workspace| !workspace.is_empty())
@@ -710,12 +766,51 @@ pub(crate) fn resolve_memento_workspace(
         return workspace.to_string();
     }
 
+    if channel_id != 0 {
+        if let Some(workspace) = crate::services::discord::settings::resolve_workspace(
+            ChannelId::new(channel_id),
+            channel_name,
+        )
+        .and_then(|workspace| memento_workspace_from_channel_workspace(&workspace))
+        {
+            return workspace;
+        }
+    }
+
     let role_id = role_id.trim();
     if role_id.is_empty() || role_id == UNBOUND_MEMORY_ROLE_ID {
-        return format!("agentdesk-channel-{channel_id}");
+        tracing::warn!(
+            channel_id,
+            "memento workspace fallback used for unregistered channel"
+        );
+        return format!("channel-{channel_id}");
     }
 
     format!("agentdesk-{}", sanitize_memento_workspace_segment(role_id))
+}
+
+fn memento_workspace_from_channel_workspace(workspace: &str) -> Option<String> {
+    let trimmed = workspace.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let candidate = if trimmed.contains('/') || trimmed.contains('\\') {
+        Path::new(trimmed)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(trimmed)
+    } else {
+        trimmed
+    };
+    let sanitized = sanitize_memento_workspace_segment(candidate);
+    if sanitized == "default" {
+        return None;
+    }
+    if sanitized == "agentdesk" || sanitized.starts_with("agentdesk-") {
+        Some(sanitized)
+    } else {
+        Some(format!("agentdesk-{sanitized}"))
+    }
 }
 
 pub(crate) fn resolve_memento_agent_id(role_id: &str, channel_id: u64) -> String {
@@ -760,6 +855,35 @@ fn insert_optional_arg(args: &mut Map<String, Value>, key: &str, value: Option<S
         return;
     };
     args.insert(key.to_string(), json!(value));
+}
+
+#[cfg(test)]
+mod workspace_scope_tests {
+    use super::*;
+
+    #[test]
+    fn memento_workspace_from_channel_workspace_uses_path_basename() {
+        assert_eq!(
+            memento_workspace_from_channel_workspace("~/.adk/release/workspaces/agentdesk"),
+            Some("agentdesk".to_string())
+        );
+        assert_eq!(
+            memento_workspace_from_channel_workspace("~/.adk/release/workspaces/project-agentdesk"),
+            Some("agentdesk-project-agentdesk".to_string())
+        );
+        assert_eq!(
+            memento_workspace_from_channel_workspace("Project AgentDesk"),
+            Some("agentdesk-project-agentdesk".to_string())
+        );
+    }
+
+    #[test]
+    fn unbound_memento_workspace_falls_back_to_channel_scope() {
+        assert_eq!(
+            resolve_memento_workspace_for_channel(UNBOUND_MEMORY_ROLE_ID, 4242, None, None),
+            "channel-4242"
+        );
+    }
 }
 
 fn truncate_text(value: &str, max_chars: usize) -> String {
@@ -1342,7 +1466,12 @@ impl MemoryBackend for MementoBackend {
                     return fallback;
                 }
             };
-            let workspace = self.resolve_workspace(&request.role_id, request.channel_id, &config);
+            let workspace = self.resolve_workspace(
+                &request.role_id,
+                request.channel_id,
+                request.channel_name.as_deref(),
+                &config,
+            );
             let agent_id = self.resolve_agent_id(&request.role_id, request.channel_id);
             let dedup_key = build_recall_dedup_key(
                 &workspace,
@@ -1426,7 +1555,12 @@ impl MemoryBackend for MementoBackend {
                     };
                 }
             };
-            let workspace = self.resolve_workspace(&request.role_id, request.channel_id, &config);
+            let workspace = self.resolve_workspace(
+                &request.role_id,
+                request.channel_id,
+                request.channel_name.as_deref(),
+                &config,
+            );
 
             match tokio::time::timeout(
                 Duration::from_millis(self.settings.capture_timeout_ms),
@@ -1773,6 +1907,7 @@ mod tests {
                 provider: ProviderKind::Codex,
                 role_id: "project-agentdesk".to_string(),
                 channel_id: 42,
+                channel_name: None,
                 session_id: "session-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "What do we know about #344?".to_string(),
@@ -1878,6 +2013,7 @@ mod tests {
             provider: ProviderKind::Codex,
             role_id: "project-agentdesk".to_string(),
             channel_id: 42,
+            channel_name: None,
             session_id: "session-1".to_string(),
             dispatch_profile: DispatchProfile::Full,
             user_text: "What do we know about #344?".to_string(),
@@ -1996,6 +2132,7 @@ mod tests {
                 provider: ProviderKind::Codex,
                 role_id: "project-agentdesk".to_string(),
                 channel_id: 42,
+                channel_name: None,
                 session_id: "session-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "Need previous context".to_string(),
@@ -2025,6 +2162,7 @@ mod tests {
                 provider: ProviderKind::Codex,
                 role_id: "project-agentdesk".to_string(),
                 channel_id: 42,
+                channel_name: None,
                 session_id: "session-1".to_string(),
                 dispatch_profile: DispatchProfile::ReviewLite,
                 user_text: "Review this quickly".to_string(),
@@ -2147,6 +2285,7 @@ mod tests {
                 provider: ProviderKind::Codex,
                 role_id: "project-agentdesk".to_string(),
                 channel_id: 42,
+                channel_name: None,
                 session_id: "session-1".to_string(),
                 reason: super::super::SessionEndReason::IdleExpiry,
                 transcript: "[User]: hi\n[Assistant]: hello".to_string(),
@@ -2239,6 +2378,9 @@ mod tests {
                 keywords: vec!["issue-418".to_string(), "success".to_string()],
                 source: Some("card:card-418/dispatch:dispatch-418".to_string()),
                 workspace: Some("agentdesk".to_string()),
+                global: false,
+                channel_id: None,
+                channel_name: None,
                 agent_id: Some("default".to_string()),
                 case_id: Some("issue-418".to_string()),
                 goal: Some("Record terminal card retrospective".to_string()),
@@ -2339,6 +2481,9 @@ mod tests {
             keywords: vec!["agentdesk".to_string(), "port".to_string()],
             source: Some("config".to_string()),
             workspace: Some("agentdesk".to_string()),
+            global: false,
+            channel_id: None,
+            channel_name: None,
             agent_id: Some("default".to_string()),
             case_id: Some("issue-927".to_string()),
             goal: None,

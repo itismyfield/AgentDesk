@@ -1220,6 +1220,7 @@ async fn start_reserved_headless_turn_with_owner(
                 provider: provider.clone(),
                 role_id: resolve_memory_role_id(role_binding.as_ref()),
                 channel_id: channel_id.get(),
+                channel_name: channel_name.clone(),
                 session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
                 dispatch_profile,
                 user_text: prompt.to_string(),
@@ -2060,6 +2061,65 @@ pub(in crate::services::discord) async fn handle_text_message(
         token,
     } = *deps;
     let original_channel_id = channel_id;
+    let parsed_voice_announcement =
+        if crate::voice::prompt::is_voice_transcript_announcement_candidate(user_text) {
+            crate::voice::prompt::parse_voice_transcript_announcement(user_text)
+        } else {
+            None
+        };
+    let announce_bot_id = if parsed_voice_announcement.is_some() {
+        super::super::resolve_announce_bot_user_id(shared).await
+    } else {
+        None
+    };
+    let voice_announcement = crate::voice::prompt::parse_authorized_voice_transcript_announcement(
+        user_text,
+        request_owner.get(),
+        announce_bot_id,
+    );
+    if parsed_voice_announcement.is_some() && voice_announcement.is_none() {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            author_id = request_owner.get(),
+            announce_bot_id = ?announce_bot_id,
+            "ignoring spoofed voice transcript announcement from non-announce author"
+        );
+    }
+    let is_voice_announcement = voice_announcement.is_some();
+    let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
+        let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
+        if let Some(started_at) = announcement.started_at.as_deref() {
+            context.push_str(&format!("\nvoice_started_at: {started_at}"));
+        }
+        if let Some(completed_at) = announcement.completed_at.as_deref() {
+            context.push_str(&format!("\nvoice_completed_at: {completed_at}"));
+        }
+        if let Some(samples_written) = announcement.samples_written {
+            context.push_str(&format!("\nvoice_samples_written: {samples_written}"));
+        }
+        crate::voice::prompt::voice_bridge_prompt(
+            &announcement.transcript,
+            &announcement.language,
+            announcement.verbose_progress,
+            Some(&context),
+        )
+    });
+    let voice_request_owner_name;
+    let request_owner = voice_announcement
+        .as_ref()
+        .and_then(|announcement| announcement.user_id.parse::<u64>().ok())
+        .map(UserId::new)
+        .unwrap_or(request_owner);
+    let request_owner_name = if let Some(announcement) = voice_announcement.as_ref() {
+        voice_request_owner_name = format!("voice-user-{}", announcement.user_id);
+        voice_request_owner_name.as_str()
+    } else {
+        request_owner_name
+    };
+    let user_text = voice_announcement
+        .as_ref()
+        .map(|announcement| announcement.transcript.as_str())
+        .unwrap_or(user_text);
     let mut session_reset_reason = None;
     let mut reset_session_id_to_clear = None;
     // Get session info, allowed tools, and pending uploads
@@ -2675,7 +2735,8 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     }
     // Sanitize input
-    let sanitized_input = ai_screen::sanitize_user_input(user_text);
+    let sanitized_input =
+        ai_screen::sanitize_user_input(voice_prompt_text.as_deref().unwrap_or(user_text));
 
     let role_binding = {
         // For cross-channel dispatch reuse (e.g. review in implementation thread),
@@ -3650,6 +3711,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 provider: provider.clone(),
                 role_id: resolve_memory_role_id(role_binding.as_ref()),
                 channel_id: channel_id.get(),
+                channel_name: channel_name.clone(),
                 session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
                 dispatch_profile,
                 user_text: user_text.to_string(),
@@ -4165,6 +4227,9 @@ pub(in crate::services::discord) async fn handle_text_message(
     inflight_state.logical_channel_id = Some(logical_channel_id);
     inflight_state.thread_id = thread_id;
     inflight_state.thread_title = thread_title;
+    if is_voice_announcement {
+        inflight_state.source = crate::dispatch::Source::Voice;
+    }
     // Persist identifiers for long-turn diagnostics (#130)
     inflight_state.session_key = adk_session_key.clone();
     inflight_state.dispatch_id = dispatch_id.clone();
@@ -4270,6 +4335,9 @@ pub(in crate::services::discord) async fn handle_text_message(
     let dispatch_type_for_mcp = dispatch_type_str.clone();
 
     // Run the provider in a blocking thread
+    if is_voice_announcement {
+        crate::voice::metrics::mark_agent_start(channel_id.get());
+    }
     let provider_for_blocking = provider.clone();
     tokio::task::spawn_blocking(move || {
         let result = crate::services::platform::with_provider_execution_context(

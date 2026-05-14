@@ -56,11 +56,11 @@ pub(crate) use validation::list_registered_channel_bindings;
 // proxy lookups for channels that are not registered with this AgentDesk
 // instance. All other validation helpers remain super-scoped.
 pub(crate) use validation::resolve_role_binding;
+pub(crate) use validation::resolve_workspace;
 pub(super) use validation::{
     BotChannelRoutingGuardFailure, bot_settings_allow_channel, channel_supports_provider,
     has_configured_channel_binding, resolve_cache_ttl_minutes, resolve_dispatch_profile,
-    resolve_workspace, validate_bot_channel_routing,
-    validate_bot_channel_routing_with_provider_channel,
+    validate_bot_channel_routing, validate_bot_channel_routing_with_provider_channel,
 };
 pub(super) use write::save_bot_settings;
 

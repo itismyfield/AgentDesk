@@ -3918,6 +3918,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels::default(),
             keywords: Vec::new(),
@@ -4336,6 +4337,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: AgentChannels {
                 codex: Some(AgentChannel::from("12345")),
@@ -4353,6 +4355,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "qwen".to_string(),
             channels: AgentChannels::default(),
             keywords: Vec::new(),

@@ -103,14 +103,14 @@ pub async fn request_generate(
 
     let send_json: serde_json::Value = serde_json::from_str(&response_body)
         .unwrap_or_else(|_| json!({"ok": false, "error": "internal"}));
+    let code = status_str
+        .split_whitespace()
+        .next()
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .and_then(|raw| StatusCode::from_u16(raw).ok())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-    if !status_str.starts_with("200") {
-        let code = status_str
-            .split_whitespace()
-            .next()
-            .and_then(|raw| raw.parse::<u16>().ok())
-            .and_then(|raw| StatusCode::from_u16(raw).ok())
-            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    if !code.is_success() {
         return (code, Json(send_json));
     }
 
@@ -163,7 +163,10 @@ fn validate_allowed_gate_kinds(kinds: Option<&[String]>) -> Result<Option<Vec<St
                 "unknown phase_gate_kind '{trimmed}' (see GET /api/queue/phase-gates/catalog)"
             ));
         }
-        if !normalized.iter().any(|existing: &String| existing == trimmed) {
+        if !normalized
+            .iter()
+            .any(|existing: &String| existing == trimmed)
+        {
             normalized.push(trimmed.to_string());
         }
     }

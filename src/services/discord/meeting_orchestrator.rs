@@ -2345,6 +2345,7 @@ async fn participant_memory_recall(
             provider,
             role_id: participant.role_id.clone(),
             channel_id,
+            channel_name: None,
             session_id: format!("meeting:{meeting_id}:round:{round}:{}", participant.role_id),
             dispatch_profile: DispatchProfile::Full,
             user_text: format!("{agenda}\n\n{transcript}"),

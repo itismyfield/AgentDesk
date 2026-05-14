@@ -1,3 +1,19 @@
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VoiceTranscriptAnnouncement {
+    pub(crate) transcript: String,
+    pub(crate) user_id: String,
+    pub(crate) utterance_id: String,
+    pub(crate) language: String,
+    pub(crate) verbose_progress: bool,
+    pub(crate) started_at: Option<String>,
+    pub(crate) completed_at: Option<String>,
+    pub(crate) samples_written: Option<usize>,
+}
+
+const VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX: &str = "ADK_VOICE_TRANSCRIPT v1";
+const TRANSCRIPT_OPEN: &str = "<user_transcript>";
+const TRANSCRIPT_CLOSE: &str = "</user_transcript>";
+
 pub(crate) fn voice_bridge_prompt(
     text: &str,
     language: &str,
@@ -83,6 +99,158 @@ pub(crate) fn voice_bridge_prompt(
     lines.join("\n")
 }
 
+pub(crate) fn voice_foreground_prompt(text: &str, language: &str, max_chars: usize) -> String {
+    let english = language.trim().to_ascii_lowercase().starts_with("en");
+    let limit = max_chars.max(80);
+    let mut lines = if english {
+        vec![
+            "You are the foreground voice interaction layer for AgentDesk.",
+            "Reply only with a short spoken response. Do not run tools, edit files, deploy, delete, send external messages, or make irreversible decisions.",
+            "If the user asks for real work, acknowledge briefly and hand it to the background turn.",
+            "Do not guess when uncertain. Ask one short clarification or say that the background turn will check.",
+        ]
+    } else {
+        vec![
+            "너는 AgentDesk 보이스 foreground interaction layer다.",
+            "음성으로 말할 짧은 응답만 작성해라. 도구 실행, 파일 수정, 배포, 삭제, 외부 전송, 되돌릴 수 없는 결정은 하지 마라.",
+            "사용자가 실제 작업을 요청하면 짧게 접수만 말하고 background turn으로 넘겨라.",
+            "불확실하면 추측하지 말고 짧게 되묻거나 background turn에서 확인한다고 말해라.",
+        ]
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+
+    lines.push(if english {
+        format!("Hard limit: {limit} characters, at most 2 short sentences.")
+    } else {
+        format!("하드 제한: {limit}자 이내, 짧은 문장 최대 2개.")
+    });
+    lines.push(String::new());
+    lines.push(TRANSCRIPT_OPEN.to_string());
+    lines.push(text.trim().to_string());
+    lines.push(TRANSCRIPT_CLOSE.to_string());
+    lines.join("\n")
+}
+
+pub(crate) fn build_voice_transcript_announcement(
+    transcript: &str,
+    user_id: u64,
+    utterance_id: &str,
+    language: &str,
+    verbose_progress: bool,
+    started_at: &str,
+    completed_at: &str,
+    samples_written: usize,
+) -> String {
+    let transcript = escape_discord_mentions(transcript.trim());
+    format!(
+        "{VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX} user_id={} utterance_id={} language={} verbose_progress={} started_at={} completed_at={} samples_written={}\n{}\n{}\n{}",
+        user_id,
+        shell_escape_value(utterance_id),
+        shell_escape_value(language),
+        verbose_progress,
+        shell_escape_value(started_at),
+        shell_escape_value(completed_at),
+        samples_written,
+        TRANSCRIPT_OPEN,
+        transcript,
+        TRANSCRIPT_CLOSE
+    )
+}
+
+pub(crate) fn parse_voice_transcript_announcement(
+    text: &str,
+) -> Option<VoiceTranscriptAnnouncement> {
+    if !is_voice_transcript_announcement_candidate(text) {
+        return None;
+    }
+    let mut lines = text.lines();
+    let header = lines.next()?.trim();
+    let rest = header.strip_prefix(VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX)?;
+    let mut user_id = None;
+    let mut utterance_id = None;
+    let mut language = None;
+    let mut verbose_progress = false;
+    let mut started_at = None;
+    let mut completed_at = None;
+    let mut samples_written = None;
+    for token in rest.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        let value = parse_header_value(value);
+        match key {
+            "user_id" => user_id = Some(value),
+            "utterance_id" => utterance_id = Some(value),
+            "language" => language = Some(value),
+            "verbose_progress" => verbose_progress = matches!(value.as_str(), "true" | "1"),
+            "started_at" => started_at = Some(value),
+            "completed_at" => completed_at = Some(value),
+            "samples_written" => samples_written = value.parse::<usize>().ok(),
+            _ => {}
+        }
+    }
+
+    let body = lines.collect::<Vec<_>>().join("\n");
+    let transcript = body
+        .split_once(TRANSCRIPT_OPEN)?
+        .1
+        .split_once(TRANSCRIPT_CLOSE)?
+        .0
+        .trim();
+    if transcript.is_empty() {
+        return None;
+    }
+
+    Some(VoiceTranscriptAnnouncement {
+        transcript: unescape_discord_mentions(transcript),
+        user_id: user_id?,
+        utterance_id: utterance_id?,
+        language: language.unwrap_or_else(|| "ko".to_string()),
+        verbose_progress,
+        started_at,
+        completed_at,
+        samples_written,
+    })
+}
+
+pub(crate) fn is_voice_transcript_announcement_candidate(text: &str) -> bool {
+    text.trim_start()
+        .starts_with(VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX)
+}
+
+pub(crate) fn parse_authorized_voice_transcript_announcement(
+    text: &str,
+    author_id: u64,
+    announce_bot_user_id: Option<u64>,
+) -> Option<VoiceTranscriptAnnouncement> {
+    let announcement = parse_voice_transcript_announcement(text)?;
+    if announce_bot_user_id == Some(author_id) {
+        Some(announcement)
+    } else {
+        None
+    }
+}
+
+fn escape_discord_mentions(text: &str) -> String {
+    text.replace('@', "@\u{200B}")
+}
+
+fn unescape_discord_mentions(text: &str) -> String {
+    text.replace("@\u{200B}", "@")
+}
+
+fn shell_escape_value(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '+'))
+        .collect::<String>()
+}
+
+fn parse_header_value(text: &str) -> String {
+    text.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +291,69 @@ mod tests {
             prompt.contains(&fence),
             "transcript must be fenced:\n{prompt}"
         );
+    }
+
+    #[test]
+    fn voice_transcript_announcement_round_trips_and_escapes_mentions() {
+        let announcement = build_voice_transcript_announcement(
+            "@everyone 배포해줘",
+            42,
+            "utt-1",
+            "ko-KR",
+            true,
+            "2026-05-14T18:00:00+09:00",
+            "2026-05-14T18:00:01+09:00",
+            48_000,
+        );
+
+        assert!(announcement.contains("@\u{200B}everyone"));
+        assert!(!announcement.contains("@everyone"));
+
+        let parsed = parse_voice_transcript_announcement(&announcement).unwrap();
+        assert_eq!(parsed.transcript, "@everyone 배포해줘");
+        assert_eq!(parsed.user_id, "42");
+        assert_eq!(parsed.utterance_id, "utt-1");
+        assert_eq!(parsed.language, "ko-KR");
+        assert!(parsed.verbose_progress);
+        assert_eq!(
+            parsed.started_at.as_deref(),
+            Some("2026-05-14T18:00:00+09:00")
+        );
+        assert_eq!(
+            parsed.completed_at.as_deref(),
+            Some("2026-05-14T18:00:01+09:00")
+        );
+        assert_eq!(parsed.samples_written, Some(48_000));
+    }
+
+    #[test]
+    fn voice_transcript_announcement_requires_announce_bot_author() {
+        let announcement = build_voice_transcript_announcement(
+            "상태 알려줘",
+            42,
+            "utt-2",
+            "ko-KR",
+            false,
+            "2026-05-14T18:00:00+09:00",
+            "2026-05-14T18:00:01+09:00",
+            12_000,
+        );
+
+        assert!(
+            parse_authorized_voice_transcript_announcement(&announcement, 99, Some(100)).is_none()
+        );
+        assert!(
+            parse_authorized_voice_transcript_announcement(&announcement, 100, Some(100)).is_some()
+        );
+    }
+
+    #[test]
+    fn voice_foreground_prompt_enforces_short_guardrails() {
+        let prompt = voice_foreground_prompt("긴 작업 해줘", "ko", 180);
+
+        assert!(prompt.contains("보이스 foreground"));
+        assert!(prompt.contains("하드 제한: 180자"));
+        assert!(prompt.contains("도구 실행"));
+        assert!(prompt.contains("<user_transcript>\n긴 작업 해줘\n</user_transcript>"));
     }
 }

@@ -309,6 +309,7 @@ fn ensure_config_agent(
         wake_word: None,
         voice_enabled: true,
         sensitivity_mode: None,
+        voice: crate::config::AgentVoiceConfig::default(),
         provider: provider_key.to_string(),
         channels: crate::config::AgentChannels::default(),
         keywords: Vec::new(),

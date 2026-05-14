@@ -368,7 +368,12 @@ async fn hard_stop_unresponsive_provider_cli_turn(
             crate::services::provider::tmux_session_ready_for_input(&session_for_probe);
         let current_provider_pid =
             provider_cli_pid_in_tmux(&session_for_probe, &provider_for_probe, tracked_child_pid);
-        (session_alive, ready_for_input, current_provider_pid, pane_pid)
+        (
+            session_alive,
+            ready_for_input,
+            current_provider_pid,
+            pane_pid,
+        )
     })
     .await;
 
@@ -1098,7 +1103,9 @@ mod tests {
             super::ProcessRow {
                 pid: 96964,
                 ppid: 10240,
-                command: "/Users/me/.local/bin/claude --session-id abc --dangerously-skip-permissions".into(),
+                command:
+                    "/Users/me/.local/bin/claude --session-id abc --dangerously-skip-permissions"
+                        .into(),
             },
             super::ProcessRow {
                 pid: 26622,
@@ -1112,12 +1119,8 @@ mod tests {
             },
         ];
 
-        let resolved = super::select_provider_pid_in_pane(
-            96964,
-            &rows,
-            &ProviderKind::Claude,
-            None,
-        );
+        let resolved =
+            super::select_provider_pid_in_pane(96964, &rows, &ProviderKind::Claude, None);
 
         assert_eq!(
             resolved,
@@ -1146,12 +1149,7 @@ mod tests {
             },
         ];
 
-        let resolved = super::select_provider_pid_in_pane(
-            97437,
-            &rows,
-            &ProviderKind::Codex,
-            None,
-        );
+        let resolved = super::select_provider_pid_in_pane(97437, &rows, &ProviderKind::Codex, None);
 
         assert_eq!(
             resolved,
@@ -1176,12 +1174,7 @@ mod tests {
             },
         ];
 
-        let resolved = super::select_provider_pid_in_pane(
-            5000,
-            &rows,
-            &ProviderKind::Claude,
-            None,
-        );
+        let resolved = super::select_provider_pid_in_pane(5000, &rows, &ProviderKind::Claude, None);
 
         assert!(
             resolved.is_none(),

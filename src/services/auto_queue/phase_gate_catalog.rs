@@ -66,9 +66,7 @@ pub fn phase_gate_catalog_value() -> serde_json::Value {
 }
 
 /// GET /api/queue/phase-gates/catalog
-pub async fn catalog(
-    State(_state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn catalog(State(_state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(phase_gate_catalog_value()))
 }
 

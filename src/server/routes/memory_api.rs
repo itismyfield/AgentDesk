@@ -92,6 +92,9 @@ pub struct RememberBody {
     pub kind: String,
     pub importance: Option<f64>,
     pub workspace: Option<String>,
+    pub global: Option<bool>,
+    pub channel_id: Option<u64>,
+    pub channel_name: Option<String>,
     pub keywords: Option<Vec<String>>,
 }
 
@@ -170,6 +173,9 @@ pub async fn memory_remember(
     let backend = detect_memory_backend();
 
     if backend == MemoryBackend::Memento {
+        if let Some(error) = validate_memento_remember_scope(&body) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
         match memento_remember(&body).await {
             Ok(()) => {
                 // Memento does not surface a public fragment ID via its
@@ -207,6 +213,32 @@ pub async fn memory_remember(
             Json(json!({"error": format!("local remember failed: {error}")})),
         ),
     }
+}
+
+fn validate_memento_remember_scope(body: &RememberBody) -> Option<String> {
+    let global = body.global.unwrap_or(false);
+    let workspace = body
+        .workspace
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if global && workspace.is_some() {
+        return Some("global=true cannot be combined with workspace".to_string());
+    }
+    if matches!(body.channel_id, Some(0)) {
+        return Some("channel_id must be a non-zero Discord snowflake".to_string());
+    }
+    let has_workspace_override = std::env::var("MEMENTO_WORKSPACE")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if !global && workspace.is_none() && body.channel_id.is_none() && !has_workspace_override {
+        return Some(
+            "Memento remember requires workspace, channel_id, global=true, or MEMENTO_WORKSPACE"
+                .to_string(),
+        );
+    }
+    None
 }
 
 /// POST /api/memory/forget
@@ -461,6 +493,13 @@ async fn memento_remember(body: &RememberBody) -> Result<(), String> {
             .as_ref()
             .map(|w| w.trim().to_string())
             .filter(|w| !w.is_empty()),
+        global: body.global.unwrap_or(false),
+        channel_id: body.channel_id,
+        channel_name: body
+            .channel_name
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         ..MementoRememberRequest::default()
     };
 
@@ -468,6 +507,52 @@ async fn memento_remember(body: &RememberBody) -> Result<(), String> {
 }
 
 // ── Tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod request_body_tests {
+    use super::*;
+
+    #[test]
+    fn remember_body_deserializes_channel_scope_fields() {
+        let body: RememberBody = serde_json::from_str(
+            r#"{
+                "content": "fact",
+                "topic": "scope",
+                "type": "fact",
+                "global": true,
+                "channel_id": 1479671301387059200,
+                "channel_name": "adk-cdx"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(body.global, Some(true));
+        assert_eq!(body.channel_id, Some(1_479_671_301_387_059_200));
+        assert_eq!(body.channel_name.as_deref(), Some("adk-cdx"));
+    }
+
+    #[test]
+    fn memento_remember_scope_validation_rejects_conflicts() {
+        let conflict = RememberBody {
+            content: "fact".to_string(),
+            topic: "scope".to_string(),
+            kind: "fact".to_string(),
+            workspace: Some("ops".to_string()),
+            global: Some(true),
+            ..RememberBody::default()
+        };
+        assert!(validate_memento_remember_scope(&conflict).is_some());
+
+        let zero_channel = RememberBody {
+            content: "fact".to_string(),
+            topic: "scope".to_string(),
+            kind: "fact".to_string(),
+            channel_id: Some(0),
+            ..RememberBody::default()
+        };
+        assert!(validate_memento_remember_scope(&zero_channel).is_some());
+    }
+}
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
@@ -640,6 +725,7 @@ mod tests {
                 importance: Some(0.8),
                 workspace: Some("ops".to_string()),
                 keywords: Some(vec!["postgres".to_string(), "cutover".to_string()]),
+                ..RememberBody::default()
             }),
         )
         .await;

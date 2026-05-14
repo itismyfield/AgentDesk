@@ -1,16 +1,42 @@
 //! Sanitizers for spoken voice output.
 
-const SPOKEN_RESULT_CHAR_LIMIT: usize = 900;
+pub(crate) const DEFAULT_SPOKEN_RESULT_CHAR_LIMIT: usize = 900;
 
 pub(crate) fn spoken_result_only(answer: &str, language: &str) -> String {
+    spoken_result_only_with_limit(answer, language, DEFAULT_SPOKEN_RESULT_CHAR_LIMIT)
+}
+
+pub(crate) fn spoken_result_only_with_limit(
+    answer: &str,
+    language: &str,
+    max_chars: usize,
+) -> String {
+    spoken_result_only_with_limit_and_notice(answer, language, max_chars, true)
+}
+
+pub(crate) fn foreground_spoken_only_with_limit(
+    answer: &str,
+    language: &str,
+    max_chars: usize,
+) -> String {
+    spoken_result_only_with_limit_and_notice(answer, language, max_chars, false)
+}
+
+fn spoken_result_only_with_limit_and_notice(
+    answer: &str,
+    language: &str,
+    max_chars: usize,
+    include_mirror_notice: bool,
+) -> String {
     let cleaned = clean_spoken_lines(answer);
     let cleaned = collapse_spoken_whitespace(&cleaned);
     if cleaned.is_empty() {
         return String::new();
     }
 
-    let (mut spoken, truncated) = truncate_at_sentence_boundary(&cleaned, SPOKEN_RESULT_CHAR_LIMIT);
-    if truncated {
+    let max_chars = max_chars.max(80);
+    let (mut spoken, truncated) = truncate_at_sentence_boundary(&cleaned, max_chars);
+    if truncated && include_mirror_notice {
         let notice = mirror_notice(language);
         if !spoken.ends_with(['.', '!', '?', '。', '！', '？', '…']) {
             spoken.push('.');
@@ -268,8 +294,26 @@ mod tests {
         let long = "문장입니다. ".repeat(200);
         let spoken = spoken_result_only(&long, "ko-KR");
 
-        assert!(spoken.chars().count() <= SPOKEN_RESULT_CHAR_LIMIT + 30);
+        assert!(spoken.chars().count() <= DEFAULT_SPOKEN_RESULT_CHAR_LIMIT + 30);
         assert!(spoken.ends_with("나머지는 텍스트 채널에 남겼어."));
+    }
+
+    #[test]
+    fn custom_limit_shortens_voice_result() {
+        let long = "짧은 문장입니다. ".repeat(40);
+        let spoken = spoken_result_only_with_limit(&long, "ko-KR", 120);
+
+        assert!(spoken.chars().count() <= 160);
+        assert!(spoken.ends_with("나머지는 텍스트 채널에 남겼어."));
+    }
+
+    #[test]
+    fn foreground_limit_does_not_claim_text_channel_mirror() {
+        let long = "짧은 문장입니다. ".repeat(40);
+        let spoken = foreground_spoken_only_with_limit(&long, "ko-KR", 120);
+
+        assert!(spoken.chars().count() <= 120);
+        assert!(!spoken.contains("텍스트 채널"));
     }
 
     #[test]

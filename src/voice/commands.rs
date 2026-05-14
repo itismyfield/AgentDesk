@@ -550,6 +550,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: AgentChannels {
                 codex: Some(AgentChannel::Detailed(AgentChannelConfig {

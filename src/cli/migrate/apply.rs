@@ -2629,6 +2629,7 @@ fn merge_imported_agents(
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider,
             channels: AgentChannels::default(),
             keywords: Vec::new(),

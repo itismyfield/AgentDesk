@@ -428,6 +428,8 @@ fn execute_command_simple_with_model_and_cancel(
 
     let mut args = vec![
         "-p".to_string(),
+        "--tools".to_string(),
+        "".to_string(),
         "--output-format".to_string(),
         "text".to_string(),
     ];

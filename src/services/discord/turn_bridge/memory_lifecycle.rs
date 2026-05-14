@@ -107,6 +107,7 @@ pub(super) fn take_memento_reflect_request(
         provider: provider.clone(),
         role_id: resolve_memory_role_id(role_binding),
         channel_id,
+        channel_name: session.channel_name.clone(),
         session_id,
         reason,
         transcript,

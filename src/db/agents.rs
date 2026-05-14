@@ -539,6 +539,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "claude".into(),
             channels: AgentChannels {
                 claude: Some("111".into()),
@@ -611,6 +612,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "opencode".into(),
             channels: AgentChannels {
                 claude: Some("claude-review".into()),
@@ -648,6 +650,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "claude".into(),
             channels: AgentChannels::default(),
             keywords: Vec::new(),
@@ -664,6 +667,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".into(),
             channels: AgentChannels {
                 claude: Some("333".into()),
@@ -782,6 +786,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".into(),
             channels: AgentChannels {
                 codex: Some("maker-cdx".into()),
@@ -913,6 +918,7 @@ mod tests {
                 wake_word: None,
                 voice_enabled: true,
                 sensitivity_mode: None,
+                voice: crate::config::AgentVoiceConfig::default(),
                 provider: "codex".into(),
                 channels: AgentChannels {
                     codex: Some("maker-cdx".into()),
@@ -930,6 +936,7 @@ mod tests {
                 wake_word: None,
                 voice_enabled: true,
                 sensitivity_mode: None,
+                voice: crate::config::AgentVoiceConfig::default(),
                 provider: "codex".into(),
                 channels: AgentChannels {
                     codex: Some("legacy-cdx".into()),

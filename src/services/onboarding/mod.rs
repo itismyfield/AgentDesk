@@ -2193,6 +2193,7 @@ fn write_agentdesk_channel_bindings(
                 wake_word: None,
                 voice_enabled: true,
                 sensitivity_mode: None,
+                voice: crate::config::AgentVoiceConfig::default(),
                 provider: provider.to_string(),
                 channels: crate::config::AgentChannels::default(),
                 keywords: Vec::new(),
@@ -4652,6 +4653,7 @@ mod tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "claude".to_string(),
             channels: crate::config::AgentChannels {
                 codex: Some(crate::config::AgentChannel::Detailed(

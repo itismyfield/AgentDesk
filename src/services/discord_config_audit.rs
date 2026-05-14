@@ -1278,6 +1278,7 @@ mod voice_alias_precheck_tests {
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels,
             keywords: Vec::new(),

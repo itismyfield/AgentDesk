@@ -300,6 +300,8 @@ pub struct AgentDef {
     pub voice_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitivity_mode: Option<BargeInSensitivity>,
+    #[serde(default, skip_serializing_if = "AgentVoiceConfig::is_default")]
+    pub voice: AgentVoiceConfig,
     #[serde(default = "default_provider")]
     pub provider: String,
     #[serde(default, skip_serializing_if = "AgentChannels::is_empty")]
@@ -310,6 +312,46 @@ pub struct AgentDef {
     pub department: Option<String>,
     #[serde(default)]
     pub avatar_emoji: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AgentVoiceConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentVoiceForegroundConfig::is_default"
+    )]
+    pub foreground: AgentVoiceForegroundConfig,
+}
+
+impl AgentVoiceConfig {
+    pub fn is_default(&self) -> bool {
+        self.channel_id.as_deref().unwrap_or("").trim().is_empty() && self.foreground.is_default()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AgentVoiceForegroundConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chars: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+impl AgentVoiceForegroundConfig {
+    pub fn is_default(&self) -> bool {
+        self.provider.as_deref().unwrap_or("").trim().is_empty()
+            && self.model.as_deref().unwrap_or("").trim().is_empty()
+            && self.max_chars.is_none()
+            && self.timeout_ms.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -2413,6 +2455,7 @@ routines:
             wake_word: None,
             voice_enabled: true,
             sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: AgentChannels {
                 claude: Some("123456789012345678".into()),

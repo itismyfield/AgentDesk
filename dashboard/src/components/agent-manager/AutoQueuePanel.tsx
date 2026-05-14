@@ -19,6 +19,8 @@ import {
   normalizeAutoQueueStatus,
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
+import { buildRequestGenerateGroups } from "./auto-queue-actions";
+import type { ReadyAutoQueueEntry } from "./auto-queue-actions";
 import { buildDiscordThreadLinks } from "./discord-routing";
 import { buildGitHubIssueUrl } from "./kanban-utils";
 
@@ -32,21 +34,30 @@ interface Props {
    * #2128: ready 카드(requested 컬럼) 중 assignee와 GH 이슈 번호가 있는 항목들.
    * "큐 생성" 버튼이 이 목록을 (agentId)로 group by 해서 agent별 별도 요청을 보냄.
    */
-  readyEntries?: { agentId: string; issueNumber: number }[];
+  readyEntries?: ReadyAutoQueueEntry[];
 }
 
 interface RequestProgress {
   startedAt: number;
   baselineEntryIds: Set<string>;
-  pendingAgents: Set<string>;
-  satisfiedAgents: Set<string>;
-  errors: { agentId: string; message: string }[];
+  pendingGroups: Set<string>;
+  satisfiedGroups: Set<string>;
+  errors: { groupKey: string; message: string }[];
 }
 
 const REQUEST_GENERATE_TIMEOUT_MS = 5 * 60 * 1000;
 const REQUEST_GENERATE_POLL_MS = 30 * 1000;
+const REQUEST_GROUP_KEY_SEPARATOR = "\u0000";
 
 type ViewMode = "all" | "agent" | "thread";
+
+function requestGroupKey(repo: string, agentId: string): string {
+  return `${repo}${REQUEST_GROUP_KEY_SEPARATOR}${agentId}`;
+}
+
+function formatRequestGroupKey(key: string): string {
+  return key.split(REQUEST_GROUP_KEY_SEPARATOR).join("/");
+}
 
 function formatTs(
   value: number | null | undefined,
@@ -712,20 +723,6 @@ export default function AutoQueuePanel({
   // #2128: 결정론 smart-planner 대신 ready 카드를 (repo × agent)로 그룹핑해서 각
   // agent에게 /api/queue/request-generate로 위임. agent가 자체 판단으로 /generate
   // 호출하면 dashboard는 5분 polling으로 새 entries 감지.
-  const groupReadyEntriesByAgent = (): { agentId: string; issueNumbers: number[] }[] => {
-    const byAgent = new Map<string, Set<number>>();
-    for (const entry of readyEntries) {
-      if (!entry.agentId || !entry.issueNumber) continue;
-      const bucket = byAgent.get(entry.agentId) ?? new Set<number>();
-      bucket.add(entry.issueNumber);
-      byAgent.set(entry.agentId, bucket);
-    }
-    return [...byAgent.entries()].map(([agentId, set]) => ({
-      agentId,
-      issueNumbers: [...set].sort((a, b) => a - b),
-    }));
-  };
-
   const stopRequestPolling = () => {
     if (requestTimerRef.current) {
       clearInterval(requestTimerRef.current);
@@ -738,7 +735,7 @@ export default function AutoQueuePanel({
   const handleGenerate = async () => {
     if (!selectedRepo) return;
     if (generating || requestProgress) return;
-    const groups = groupReadyEntriesByAgent();
+    const groups = buildRequestGenerateGroups(readyEntries, selectedRepo);
     if (groups.length === 0) {
       setError(
         tr(
@@ -755,32 +752,25 @@ export default function AutoQueuePanel({
     setNoReadyCards(false);
     suppressedRunIdRef.current = null;
 
-    let catalog: Awaited<ReturnType<typeof api.getPhaseGateCatalog>> | null = null;
-    try {
-      catalog = await api.getPhaseGateCatalog();
-    } catch {
-      catalog = null;
-    }
-    const allowedGateKinds = catalog?.kinds.map((kind) => kind.id);
     const baselineEntryIds = new Set(
       (status?.entries ?? []).map((entry) => entry.id),
     );
 
-    const pendingAgents = new Set<string>();
-    const errors: { agentId: string; message: string }[] = [];
+    const pendingGroups = new Set<string>();
+    const errors: { groupKey: string; message: string }[] = [];
     await Promise.all(
-      groups.map(async ({ agentId, issueNumbers }) => {
+      groups.map(async ({ repo, agentId, issueNumbers }) => {
+        const groupKey = requestGroupKey(repo, agentId);
         try {
           await api.requestGenerateAutoQueue({
-            repo: selectedRepo,
+            repo,
             agentId,
             issueNumbers,
-            allowedGateKinds,
           });
-          pendingAgents.add(agentId);
+          pendingGroups.add(groupKey);
         } catch (e) {
           errors.push({
-            agentId,
+            groupKey,
             message: e instanceof Error ? e.message : String(e),
           });
         }
@@ -789,7 +779,7 @@ export default function AutoQueuePanel({
 
     setGenerating(false);
 
-    if (pendingAgents.size === 0) {
+    if (pendingGroups.size === 0) {
       setError(
         tr(
           `큐 생성 요청이 모두 거부됐습니다 (${errors.length}건).`,
@@ -798,12 +788,23 @@ export default function AutoQueuePanel({
       );
       return;
     }
+    if (errors.length > 0) {
+      const failed = errors
+        .map((error) => `${formatRequestGroupKey(error.groupKey)}: ${error.message}`)
+        .join(", ");
+      setError(
+        tr(
+          `일부 큐 생성 요청이 실패했습니다: ${failed}`,
+          `Some queue requests failed: ${failed}`,
+        ),
+      );
+    }
 
     setRequestProgress({
       startedAt: Date.now(),
       baselineEntryIds,
-      pendingAgents,
-      satisfiedAgents: new Set<string>(),
+      pendingGroups,
+      satisfiedGroups: new Set<string>(),
       errors,
     });
   };
@@ -822,19 +823,21 @@ export default function AutoQueuePanel({
 
   useEffect(() => {
     if (!requestProgress) return;
-    const newlyAppearedAgents = new Set<string>();
+    const newlyAppearedGroups = new Set<string>();
     for (const entry of status?.entries ?? []) {
       if (requestProgress.baselineEntryIds.has(entry.id)) continue;
-      if (entry.agent_id) newlyAppearedAgents.add(entry.agent_id);
+      if (!entry.agent_id) continue;
+      const repo = entry.github_repo || selectedRepo || "";
+      newlyAppearedGroups.add(requestGroupKey(repo, entry.agent_id));
     }
 
     let changed = false;
-    const nextPending = new Set(requestProgress.pendingAgents);
-    const nextSatisfied = new Set(requestProgress.satisfiedAgents);
-    for (const agentId of requestProgress.pendingAgents) {
-      if (newlyAppearedAgents.has(agentId)) {
-        nextPending.delete(agentId);
-        nextSatisfied.add(agentId);
+    const nextPending = new Set(requestProgress.pendingGroups);
+    const nextSatisfied = new Set(requestProgress.satisfiedGroups);
+    for (const groupKey of requestProgress.pendingGroups) {
+      if (newlyAppearedGroups.has(groupKey)) {
+        nextPending.delete(groupKey);
+        nextSatisfied.add(groupKey);
         changed = true;
       }
     }
@@ -845,7 +848,7 @@ export default function AutoQueuePanel({
     if (nextPending.size === 0 || timedOut) {
       stopRequestPolling();
       if (timedOut && nextPending.size > 0) {
-        const missing = [...nextPending].join(", ");
+        const missing = [...nextPending].map(formatRequestGroupKey).join(", ");
         setError(
           tr(
             `5분 안에 응답하지 않은 에이전트: ${missing}`,
@@ -858,9 +861,9 @@ export default function AutoQueuePanel({
     }
 
     if (changed) {
-      setRequestProgress({ ...requestProgress, pendingAgents: nextPending, satisfiedAgents: nextSatisfied });
+      setRequestProgress({ ...requestProgress, pendingGroups: nextPending, satisfiedGroups: nextSatisfied });
     }
-  }, [status, requestProgress, tr]);
+  }, [selectedRepo, status, requestProgress, tr]);
 
   const handleReset = async () => {
     setError(null);
@@ -1368,10 +1371,10 @@ export default function AutoQueuePanel({
             </>
           )}
           {primaryAction === "generate" && (() => {
-            const eligibleAgentCount = new Set(readyEntries.map((e) => e.agentId)).size;
-            const disabledByReady = eligibleAgentCount === 0;
+            const eligibleGroupCount = buildRequestGenerateGroups(readyEntries, selectedRepo).length;
+            const disabledByReady = eligibleGroupCount === 0;
             const disabled = generating || disabledByReady || Boolean(requestProgress);
-            const pendingCountDisplay = requestProgress?.pendingAgents.size ?? 0;
+            const pendingCountDisplay = requestProgress?.pendingGroups.size ?? 0;
             return (
               <button
                 onClick={() => void handleGenerate()}
@@ -1395,12 +1398,12 @@ export default function AutoQueuePanel({
                       )
                     : requestProgress
                       ? tr(
-                          `${pendingCountDisplay}개 에이전트 응답 대기 중`,
-                          `Waiting on ${pendingCountDisplay} agent(s)`,
+                          `${pendingCountDisplay}개 큐 그룹 응답 대기 중`,
+                          `Waiting on ${pendingCountDisplay} queue group(s)`,
                         )
                       : tr(
-                          `${eligibleAgentCount}개 에이전트에게 큐 생성 요청`,
-                          `Request queue from ${eligibleAgentCount} agent(s)`,
+                          `${eligibleGroupCount}개 큐 생성 요청`,
+                          `Request ${eligibleGroupCount} queue group(s)`,
                         )
                 }
               >

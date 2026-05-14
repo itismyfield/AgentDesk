@@ -155,9 +155,7 @@ pub async fn submit_order(
 /// Returns the user-facing phase-gate kind catalog so dashboard and agents
 /// share a single vocabulary for `phase_gate_kind` values used in
 /// `/api/queue/generate` entries.
-pub async fn phase_gate_catalog(
-    state: State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn phase_gate_catalog(state: State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     route::phase_gate_catalog(state).await
 }
 

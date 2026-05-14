@@ -1639,6 +1639,7 @@ impl SendCallerClass {
             "slo_alerter",
             "auto-queue-monitor",
             "inventory",
+            "voice",
         ];
         const CLI_ALLOWED: &[&str] = &["agentdesk-cli", "operator"];
         const DASHBOARD_ALLOWED: &[&str] = &["dashboard"];
@@ -1680,6 +1681,7 @@ mod send_source_tests {
         assert!(is_allowed_send_source("slo_alerter"));
         assert!(is_allowed_send_source("auto-queue-monitor"));
         assert!(is_allowed_send_source("inventory"));
+        assert!(is_allowed_send_source("voice"));
         assert!(!is_allowed_send_source("not-a-real-source"));
     }
 
