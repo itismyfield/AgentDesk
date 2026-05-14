@@ -718,6 +718,108 @@ async fn live_tmux_watcher_owner_suppresses_bridge_assistant_delivery() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_tmux_ready_after_done_still_claims_watcher_relay() {
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(1504255405898076281);
+    let channel_name = format!("adk-cdx-t{}", channel_id.get());
+    let tmux_name = provider.build_tmux_session_name(&channel_name);
+    let user_msg_id = MessageId::new(1504255405898076290);
+    let current_msg_id = MessageId::new(1504255405898076291);
+
+    assert!(super::super::tmux::try_claim_watcher(
+        &shared.tmux_watchers,
+        channel_id,
+        test_watcher_handle(&tmux_name, true),
+    ));
+
+    let gateway = Arc::new(CountingGateway::default());
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let inflight_state = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some(channel_name.clone()),
+        343742347365974026,
+        user_msg_id.get(),
+        current_msg_id.get(),
+        "warm followup".to_string(),
+        None,
+        Some(tmux_name.clone()),
+        Some("/tmp/agentdesk-2113-output.jsonl".to_string()),
+        Some("/tmp/agentdesk-2113-input.fifo".to_string()),
+        0,
+    );
+
+    super::spawn_turn_bridge(
+        shared.clone(),
+        Arc::new(CancelToken::new()),
+        stream_rx,
+        super::TurnBridgeContext {
+            provider: provider.clone(),
+            gateway: gateway.clone(),
+            channel_id,
+            user_msg_id,
+            user_text_owned: "warm followup".to_string(),
+            request_owner_name: "tester".to_string(),
+            role_binding: None,
+            adk_session_key: None,
+            adk_session_name: Some(channel_name),
+            adk_session_info: None,
+            adk_cwd: None,
+            dispatch_id: None,
+            dispatch_kind: None,
+            memory_recall_usage: TokenUsage::default(),
+            context_window_tokens: provider.default_context_window(),
+            context_compact_percent: 100,
+            current_msg_id,
+            response_sent_offset: 0,
+            full_response: String::new(),
+            tmux_last_offset: Some(0),
+            new_session_id: None,
+            defer_watcher_resume: false,
+            reuse_status_panel_message: false,
+            completion_tx: Some(completion_tx),
+            inflight_state,
+        },
+    );
+
+    stream_tx
+        .send(StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        })
+        .expect("send terminal done");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    stream_tx
+        .send(StreamMessage::TmuxReady {
+            output_path: "/tmp/agentdesk-2113-output.jsonl".to_string(),
+            input_fifo_path: "/tmp/agentdesk-2113-input.fifo".to_string(),
+            tmux_session_name: tmux_name.clone(),
+            last_offset: 0,
+        })
+        .expect("send late tmux ready");
+    drop(stream_tx);
+
+    tokio::time::timeout(Duration::from_secs(5), completion_rx)
+        .await
+        .expect("turn bridge should finish")
+        .expect("completion sender should complete");
+
+    assert_eq!(gateway.edit_count.load(Ordering::Relaxed), 0);
+    assert_eq!(gateway.replace_count.load(Ordering::Relaxed), 0);
+    assert_eq!(gateway.remove_reaction_count.load(Ordering::Relaxed), 0);
+
+    let saved = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+        .expect("late TmuxReady should preserve inflight for watcher-owned relay");
+    assert!(saved.watcher_owns_live_relay);
+    assert_eq!(saved.current_msg_id, current_msg_id.get());
+
+    crate::services::discord::clear_inflight_state(&provider, channel_id.get());
+    shared.tmux_watchers.remove(&channel_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_watcher_without_cached_context_falls_back_to_bridge_delivery() {
     let shared = make_shared_data_for_tests();
     let provider = ProviderKind::Codex;

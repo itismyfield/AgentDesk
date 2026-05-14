@@ -1270,6 +1270,7 @@ pub(super) fn spawn_turn_bridge(
         const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration =
             std::time::Duration::from_secs(30);
         let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
+        let mut terminal_control_drain_until: Option<std::time::Instant> = None;
         let mut current_msg_id = bridge.current_msg_id;
         let mut response_sent_offset = bridge.response_sent_offset;
         let mut tmux_last_offset = bridge.tmux_last_offset;
@@ -1397,7 +1398,10 @@ pub(super) fn spawn_turn_bridge(
             }),
         );
 
-        while !done {
+        while !done
+            || terminal_control_drain_until
+                .is_some_and(|deadline| std::time::Instant::now() < deadline)
+        {
             let mut state_dirty = false;
 
             if cancel_requested(Some(cancel_token.as_ref())) {
@@ -1418,7 +1422,12 @@ pub(super) fn spawn_turn_bridge(
                 break;
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            let loop_sleep = if done {
+                tokio::time::Duration::from_millis(50)
+            } else {
+                tokio::time::Duration::from_millis(1000)
+            };
+            tokio::time::sleep(loop_sleep).await;
 
             if cancel_requested(Some(cancel_token.as_ref())) {
                 if sync_inflight_restart_mode_from_cancel(
@@ -2133,6 +2142,15 @@ pub(super) fn spawn_turn_bridge(
                             }
                             state_dirty = true;
                             done = true;
+                            // Some warm-followup providers emit terminal Done
+                            // before the immediately-following TmuxReady /
+                            // ProcessReady control message. Keep draining
+                            // briefly so ownership handoff is not decided from
+                            // a partial terminal frame.
+                            terminal_control_drain_until = Some(
+                                std::time::Instant::now()
+                                    + std::time::Duration::from_millis(250),
+                            );
                         }
                         StreamMessage::Error {
                             message, stderr, ..
@@ -2216,6 +2234,7 @@ pub(super) fn spawn_turn_bridge(
                             .await;
                             state_dirty = true;
                             done = true;
+                            terminal_control_drain_until = None;
                         }
                         StreamMessage::StatusUpdate {
                             input_tokens,
@@ -2524,6 +2543,9 @@ pub(super) fn spawn_turn_bridge(
                                 }
                             }
                             state_dirty = true;
+                            if done {
+                                terminal_control_drain_until = None;
+                            }
                         }
                         StreamMessage::ProcessReady {
                             output_path,
@@ -2541,6 +2563,9 @@ pub(super) fn spawn_turn_bridge(
                             inflight_state.output_path = Some(output_path);
                             inflight_state.last_offset = last_offset;
                             state_dirty = true;
+                            if done {
+                                terminal_control_drain_until = None;
+                            }
                         }
                         StreamMessage::OutputOffset { offset } => {
                             tmux_last_offset = Some(offset);
@@ -2559,6 +2584,7 @@ pub(super) fn spawn_turn_bridge(
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         rx_disconnected = true;
                         done = true;
+                        terminal_control_drain_until = None;
                         break;
                     }
                 }
@@ -2969,6 +2995,39 @@ pub(super) fn spawn_turn_bridge(
                 && !recovery_retry,
             bridge_relay_delegated_to_watcher,
         );
+        if bridge_output_owner.is_none()
+            && !cancelled
+            && !is_prompt_too_long
+            && !transport_error
+            && !recovery_retry
+            && current_msg_id.get() != 0
+            && response_portion_after_offset(&full_response, response_sent_offset)
+                .trim()
+                .is_empty()
+        {
+            crate::services::observability::emit_inflight_lifecycle_event(
+                provider.as_str(),
+                channel_id.get(),
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                Some(turn_id.as_str()),
+                "bridge_output_owner_none_empty_response",
+                serde_json::json!({
+                    "current_msg_id": current_msg_id.get(),
+                    "watcher_owns_assistant_relay": watcher_owns_assistant_relay,
+                    "watcher_relay_available_for_turn": watcher_relay_available_for_turn,
+                    "live_watcher_registered": live_watcher_registered_for_relay(
+                        shared_owned.as_ref(),
+                        watcher_owner_channel_id,
+                    ),
+                    "standby_relay_owns_output": standby_relay_owns_output,
+                    "rx_disconnected": rx_disconnected,
+                    "tmux_handed_off": tmux_handed_off,
+                    "response_sent_offset": response_sent_offset,
+                    "full_response_len": full_response.len(),
+                }),
+            );
+        }
 
         // Explicitly complete implementation/rework dispatches only after the
         // terminal Discord delivery commits. Completing here used to let

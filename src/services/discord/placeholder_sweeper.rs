@@ -49,6 +49,10 @@ pub(crate) const ABANDON_THRESHOLD_SECS: u64 = 300;
 /// high enough that we do not spam Discord edits on idle startups.
 pub(crate) const SWEEP_INTERVAL_SECS: u64 = 30;
 
+/// Emit a low-volume liveness log even when no placeholder transitions were
+/// found. This keeps ops from confusing "healthy but idle" with "sweeper died".
+pub(crate) const SWEEP_HEARTBEAT_INTERVAL_SWEEPS: u64 = 120;
+
 /// Initial delay before the first sweep runs after dcserver bootstrap. Skips
 /// the boot-up window where active turns from the previous generation are
 /// still being recovered and may legitimately appear stalled while
@@ -130,6 +134,7 @@ async fn run_placeholder_sweep_pass(
 ) -> SweepPassReport {
     let mut report = SweepPassReport::default();
     let states = load_inflight_states_for_sweep(provider);
+    report.scanned = states.len();
     stalled_tracker.retain_live(provider, &states);
     for (state, age_secs) in states {
         if state.rebind_origin {
@@ -395,8 +400,15 @@ fn observed_age_still_stale(
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct SweepPassReport {
+    pub scanned: usize,
     pub stalled: usize,
     pub abandoned: usize,
+}
+
+fn should_log_sweep_report(report: SweepPassReport, sweeps_since_heartbeat: u64) -> bool {
+    report.stalled > 0
+        || report.abandoned > 0
+        || sweeps_since_heartbeat >= SWEEP_HEARTBEAT_INTERVAL_SWEEPS
 }
 
 /// Spawn the long-lived background task that runs the stall sweeper at the
@@ -409,18 +421,22 @@ pub(super) fn spawn_placeholder_sweeper(
 ) {
     tokio::spawn(async move {
         let mut stalled_tracker = StalledEditTracker::default();
+        let mut sweeps_since_heartbeat = 0u64;
         tokio::time::sleep(tokio::time::Duration::from_secs(INITIAL_DELAY_SECS)).await;
         loop {
             let report =
                 run_placeholder_sweep_pass(&http, &shared, &provider, &mut stalled_tracker).await;
-            if report.stalled > 0 || report.abandoned > 0 {
+            sweeps_since_heartbeat = sweeps_since_heartbeat.saturating_add(1);
+            if should_log_sweep_report(report, sweeps_since_heartbeat) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 🧹 placeholder sweeper ({}): stalled={} abandoned={}",
+                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={}",
                     provider.as_str(),
+                    report.scanned,
                     report.stalled,
                     report.abandoned
                 );
+                sweeps_since_heartbeat = 0;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(SWEEP_INTERVAL_SECS)).await;
         }
@@ -459,6 +475,34 @@ mod tests {
             classify_age(ABANDON_THRESHOLD_SECS + 600),
             SweepDecision::Abandoned
         );
+    }
+
+    #[test]
+    fn sweep_report_heartbeat_logs_without_transitions() {
+        assert!(!should_log_sweep_report(
+            SweepPassReport {
+                scanned: 0,
+                stalled: 0,
+                abandoned: 0,
+            },
+            SWEEP_HEARTBEAT_INTERVAL_SWEEPS - 1,
+        ));
+        assert!(should_log_sweep_report(
+            SweepPassReport {
+                scanned: 0,
+                stalled: 0,
+                abandoned: 0,
+            },
+            SWEEP_HEARTBEAT_INTERVAL_SWEEPS,
+        ));
+        assert!(should_log_sweep_report(
+            SweepPassReport {
+                scanned: 1,
+                stalled: 1,
+                abandoned: 0,
+            },
+            0,
+        ));
     }
 
     fn make_state(channel_id: u64, current_msg_id: u64) -> InflightTurnState {
