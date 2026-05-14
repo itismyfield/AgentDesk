@@ -81,6 +81,13 @@ pub fn install_provider_hosting_config(config: &Config) {
 }
 
 pub fn resolve_provider_session_selection(provider: &ProviderKind) -> ProviderSessionSelection {
+    resolve_provider_session_selection_with_capability(provider, true)
+}
+
+pub fn resolve_provider_session_selection_with_capability(
+    provider: &ProviderKind,
+    entrypoint_supports_tui_hosting: bool,
+) -> ProviderSessionSelection {
     let provider_id = provider.as_str().to_ascii_lowercase();
     let requested_tui_hosting = PROVIDER_TUI_HOSTING
         .read()
@@ -98,7 +105,16 @@ pub fn resolve_provider_session_selection(provider: &ProviderKind) -> ProviderSe
         };
     }
 
-    if provider_tui_hosting_driver_available(provider) {
+    if !provider_tui_hosting_driver_available(provider) {
+        return ProviderSessionSelection {
+            provider_id,
+            requested_tui_hosting,
+            driver: ProviderSessionDriver::LegacyPrompt,
+            fallback_reason: Some("tui_hosting_driver_unavailable"),
+        };
+    }
+
+    if entrypoint_supports_tui_hosting {
         ProviderSessionSelection {
             provider_id,
             requested_tui_hosting,
@@ -110,7 +126,7 @@ pub fn resolve_provider_session_selection(provider: &ProviderKind) -> ProviderSe
             provider_id,
             requested_tui_hosting,
             driver: ProviderSessionDriver::LegacyPrompt,
-            fallback_reason: Some("tui_hosting_driver_unavailable"),
+            fallback_reason: Some("entrypoint_not_tui_hosted"),
         }
     }
 }
@@ -176,6 +192,19 @@ mod tests {
         assert!(selection.requested_tui_hosting);
         assert_eq!(selection.driver, ProviderSessionDriver::TuiHosting);
         assert_eq!(selection.fallback_reason, None);
+    }
+
+    #[test]
+    fn unsupported_entrypoint_falls_back_even_when_claude_driver_exists() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        install_provider_hosting_config(&Config::default());
+
+        let selection =
+            resolve_provider_session_selection_with_capability(&ProviderKind::Claude, false);
+
+        assert!(selection.requested_tui_hosting);
+        assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
+        assert_eq!(selection.fallback_reason, Some("entrypoint_not_tui_hosted"));
     }
 
     #[test]

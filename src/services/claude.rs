@@ -204,9 +204,11 @@ pub fn execute_command(
     working_dir: &str,
     _allowed_tools: Option<&[String]>,
 ) -> ClaudeResponse {
-    let session_selection = crate::services::provider_hosting::resolve_provider_session_selection(
-        &ProviderKind::Claude,
-    );
+    let session_selection =
+        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+            &ProviderKind::Claude,
+            false,
+        );
     session_selection.log_start("claude.execute_command");
 
     // Tool whitelist policy deprecated (#794): Claude CLI is invoked without
@@ -411,9 +413,11 @@ fn execute_command_simple_with_model_and_cancel(
     model_override: Option<&str>,
     cancel_token: Option<&CancelToken>,
 ) -> Result<String, String> {
-    let session_selection = crate::services::provider_hosting::resolve_provider_session_selection(
-        &ProviderKind::Claude,
-    );
+    let session_selection =
+        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+            &ProviderKind::Claude,
+            false,
+        );
     session_selection.log_start("claude.execute_command_simple");
 
     let resolution = resolve_claude_binary();
@@ -524,9 +528,16 @@ pub fn execute_command_streaming(
     debug_log(&format!("session_id: {:?}", session_id));
     debug_log(&format!("working_dir: {}", working_dir));
     debug_log(&format!("timestamp: {:?}", std::time::SystemTime::now()));
-    let session_selection = crate::services::provider_hosting::resolve_provider_session_selection(
-        &ProviderKind::Claude,
-    );
+    #[cfg(unix)]
+    let entrypoint_supports_tui_hosting =
+        remote_profile.is_none() && tmux_session_name.is_some() && is_tmux_available();
+    #[cfg(not(unix))]
+    let entrypoint_supports_tui_hosting = false;
+    let session_selection =
+        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+            &ProviderKind::Claude,
+            entrypoint_supports_tui_hosting,
+        );
     session_selection.log_start("claude.execute_command_streaming");
 
     let default_system_prompt = r#"You are a terminal file manager assistant. Be concise. Focus on file operations. Respond in the same language as the user.
