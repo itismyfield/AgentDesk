@@ -144,8 +144,8 @@ pub(crate) fn build_voice_transcript_announcement(
     samples_written: usize,
 ) -> String {
     let transcript = escape_discord_mentions(transcript.trim());
-    format!(
-        "{VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX} user_id={} utterance_id={} language={} verbose_progress={} started_at={} completed_at={} samples_written={}\n{}\n{}\n{}",
+    let header = format!(
+        "{VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX} user_id={} utterance_id={} language={} verbose_progress={} started_at={} completed_at={} samples_written={}",
         user_id,
         shell_escape_value(utterance_id),
         shell_escape_value(language),
@@ -153,9 +153,10 @@ pub(crate) fn build_voice_transcript_announcement(
         shell_escape_value(started_at),
         shell_escape_value(completed_at),
         samples_written,
-        TRANSCRIPT_OPEN,
-        transcript,
-        TRANSCRIPT_CLOSE
+    );
+    format!(
+        "🎙️ 음성 전사\n{}\n{}\n{}\n||{}||",
+        TRANSCRIPT_OPEN, transcript, TRANSCRIPT_CLOSE, header,
     )
 }
 
@@ -165,8 +166,7 @@ pub(crate) fn parse_voice_transcript_announcement(
     if !is_voice_transcript_announcement_candidate(text) {
         return None;
     }
-    let mut lines = text.lines();
-    let header = lines.next()?.trim();
+    let header = text.lines().find_map(voice_transcript_header_line)?;
     let rest = header.strip_prefix(VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX)?;
     let mut user_id = None;
     let mut utterance_id = None;
@@ -192,8 +192,7 @@ pub(crate) fn parse_voice_transcript_announcement(
         }
     }
 
-    let body = lines.collect::<Vec<_>>().join("\n");
-    let transcript = body
+    let transcript = text
         .split_once(TRANSCRIPT_OPEN)?
         .1
         .split_once(TRANSCRIPT_CLOSE)?
@@ -216,8 +215,20 @@ pub(crate) fn parse_voice_transcript_announcement(
 }
 
 pub(crate) fn is_voice_transcript_announcement_candidate(text: &str) -> bool {
-    text.trim_start()
+    text.lines()
+        .any(|line| voice_transcript_header_line(line).is_some())
+}
+
+fn voice_transcript_header_line(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let unspoiled = trimmed
+        .strip_prefix("||")
+        .and_then(|value| value.strip_suffix("||"))
+        .unwrap_or(trimmed)
+        .trim();
+    unspoiled
         .starts_with(VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX)
+        .then_some(unspoiled)
 }
 
 pub(crate) fn parse_authorized_voice_transcript_announcement(
@@ -308,6 +319,8 @@ mod tests {
 
         assert!(announcement.contains("@\u{200B}everyone"));
         assert!(!announcement.contains("@everyone"));
+        assert!(announcement.starts_with("🎙️ 음성 전사"));
+        assert!(announcement.contains("||ADK_VOICE_TRANSCRIPT v1"));
 
         let parsed = parse_voice_transcript_announcement(&announcement).unwrap();
         assert_eq!(parsed.transcript, "@everyone 배포해줘");
