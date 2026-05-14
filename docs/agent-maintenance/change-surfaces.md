@@ -204,6 +204,7 @@
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/cli/migrate.rs` (348 lines, retired postgres-cutover facade).
+  - `src/cli/args.rs` (1002 lines).
   - `src/cli/doctor/orchestrator.rs` (4324 lines).
   - `src/cli/migrate/apply.rs` (3142 lines).
   - `src/cli/migrate/{plan.rs (1513), source.rs (1612)}`.
