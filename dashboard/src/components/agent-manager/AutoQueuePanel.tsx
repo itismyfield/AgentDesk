@@ -695,14 +695,14 @@ export default function AutoQueuePanel({
     setError(null);
     try {
       suppressedRunIdRef.current = null;
-      if (!resetAgentId) {
-        throw new Error("agent_id is required for reset");
+      const targets = resolveResetAgentTargets();
+      for (const agentId of targets) {
+        await api.resetAutoQueue({
+          runId: status?.run?.id ?? null,
+          repo: selectedRepo || null,
+          agentId,
+        });
       }
-      await api.resetAutoQueue({
-        runId: status?.run?.id ?? null,
-        repo: selectedRepo || null,
-        agentId: resetAgentId,
-      });
       const result = await api.generateAutoQueue(
         selectedRepo || null,
         selectedAgentId,
@@ -739,14 +739,22 @@ export default function AutoQueuePanel({
     setNoReadyCards(false);
     suppressedRunIdRef.current = status?.run?.id ?? null;
     try {
-      if (!resetAgentId) {
-        throw new Error("agent_id is required for reset");
+      const targets = resolveResetAgentTargets();
+      if (targets.length === 0) {
+        throw new Error(
+          tr(
+            "초기화할 에이전트를 찾지 못했습니다. 상단 필터에서 에이전트를 선택하세요.",
+            "No agent to reset. Select an agent from the filter above.",
+          ),
+        );
       }
-      await api.resetAutoQueue({
-        runId: status?.run?.id ?? null,
-        repo: selectedRepo || null,
-        agentId: resetAgentId,
-      });
+      for (const agentId of targets) {
+        await api.resetAutoQueue({
+          runId: status?.run?.id ?? null,
+          repo: selectedRepo || null,
+          agentId,
+        });
+      }
       resetPanelState();
     } catch (e) {
       suppressedRunIdRef.current = null;
@@ -841,6 +849,15 @@ export default function AutoQueuePanel({
   const phaseGates = status?.phase_gates ?? [];
   const deployPhases = new Set(run?.deploy_phases ?? []);
   const resetAgentId = selectedAgentId ?? run?.agent_id ?? null;
+  const resolveResetAgentTargets = (): string[] => {
+    if (resetAgentId) return [resetAgentId];
+    const fromEntries = Array.from(
+      new Set(entries.map((e) => e.agent_id).filter((id): id is string => Boolean(id))),
+    );
+    if (fromEntries.length > 0) return fromEntries;
+    const fromStats = Object.keys(status?.agents ?? {});
+    return fromStats;
+  };
   const gatesByPhase = new Map<number, PhaseGateInfo[]>();
   for (const gate of phaseGates) {
     const list = gatesByPhase.get(gate.phase) ?? [];

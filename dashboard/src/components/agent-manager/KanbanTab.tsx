@@ -2142,6 +2142,91 @@ export default function KanbanTab({
             </SurfaceEmptyState>
           ) : (
             <div className="space-y-3">
+              {recentDoneCards.length > 0 && (() => {
+                const PAGE_SIZE = 10;
+                const totalPages = Math.ceil(recentDoneCards.length / PAGE_SIZE);
+                const page = Math.min(recentDonePage, totalPages - 1);
+                const pageCards = recentDoneCards.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+                return (
+                  <SurfaceCard
+                    className="rounded-[24px] px-4 py-3"
+                    style={{
+                      borderColor: "color-mix(in srgb, var(--th-accent-primary) 16%, var(--th-border) 84%)",
+                      background: "color-mix(in srgb, var(--th-badge-emerald-bg) 56%, var(--th-card-bg) 44%)",
+                    }}
+                  >
+                    <button
+                      onClick={() => setRecentDoneOpen((v) => !v)}
+                      className="flex w-full items-center gap-2 text-left"
+                    >
+                      <span className="text-xs font-semibold uppercase" style={{ color: "var(--th-text-muted)" }}>
+                        {tr("최근 완료", "Recent Completions")}
+                      </span>
+                      <span className="rounded-full px-1.5 py-0.5 text-[10px] font-bold" style={{ background: "rgba(34,197,94,0.18)", color: "#4ade80" }}>
+                        {recentDoneCards.length}
+                      </span>
+                      <span className="ml-auto text-xs" style={{ color: "var(--th-text-muted)" }}>
+                        {recentDoneOpen ? "▲" : "▼"}
+                      </span>
+                    </button>
+                    {recentDoneOpen && (
+                      <div className="mt-2 space-y-1.5">
+                        {pageCards.map((card) => {
+                          const statusDef = COLUMN_DEFS.find((c) => c.status === card.status);
+                          const agentName = getAgentLabel(card.assignee_agent_id);
+                          const completedDate = card.completed_at
+                            ? new Date(card.completed_at).toLocaleDateString(locale === "ko" ? "ko-KR" : "en-US", { month: "short", day: "numeric" })
+                            : "";
+                          return (
+                            <button
+                              key={card.id}
+                              onClick={() => setSelectedCardId(card.id)}
+                              className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition-colors hover:brightness-125"
+                              style={{ background: "rgba(148,163,184,0.06)" }}
+                            >
+                              <span
+                                className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+                                style={{ background: `${statusDef?.accent ?? "#22c55e"}22`, color: statusDef?.accent ?? "#22c55e" }}
+                              >
+                                {card.status === "done" ? tr("완료", "Done") : tr("취소", "Cancelled")}
+                              </span>
+                              {card.github_issue_number && (
+                                <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>#{card.github_issue_number}</span>
+                              )}
+                              <span className="min-w-0 flex-1 truncate" style={{ color: "var(--th-text-primary)" }}>{card.title}</span>
+                              <span className="shrink-0 text-[11px]" style={{ color: "var(--th-text-muted)" }}>{agentName}</span>
+                              <span className="shrink-0 text-[11px]" style={{ color: "var(--th-text-muted)" }}>{completedDate}</span>
+                            </button>
+                          );
+                        })}
+                        {totalPages > 1 && (
+                          <div className="flex items-center justify-center gap-3 pt-1">
+                            <button
+                              disabled={page === 0}
+                              onClick={() => setRecentDonePage((p) => Math.max(0, p - 1))}
+                              className="rounded px-2 py-0.5 text-xs disabled:opacity-30"
+                              style={{ color: "var(--th-text-muted)" }}
+                            >
+                              ← {tr("이전", "Prev")}
+                            </button>
+                            <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                              {page + 1} / {totalPages}
+                            </span>
+                            <button
+                              disabled={page >= totalPages - 1}
+                              onClick={() => setRecentDonePage((p) => Math.min(totalPages - 1, p + 1))}
+                              className="rounded px-2 py-0.5 text-xs disabled:opacity-30"
+                              style={{ color: "var(--th-text-muted)" }}
+                            >
+                              {tr("다음", "Next")} →
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </SurfaceCard>
+                );
+              })()}
               {/* #1253: at the mobile breakpoint we go back to single-column
                   minimap mode — the pills at the top are the only navigator,
                   and the board renders just the focused column at full width.
@@ -2238,14 +2323,19 @@ export default function KanbanTab({
                 <div
                   className="pb-2"
                   data-testid="kanban-board-scroll"
-                  style={{ overflowX: "auto", overflowY: "visible" }}
+                  style={{ overflowX: "hidden", overflowY: "visible" }}
                 >
-                  <div className="flex items-start gap-4 min-w-max">
+                  <div
+                    className="grid items-start gap-3"
+                    style={{
+                      gridTemplateColumns: `repeat(${visibleColumns.length}, minmax(0, 1fr))`,
+                    }}
+                  >
                     {visibleColumns.map((column) => {
                       const columnCards = cardsByStatus.get(column.status) ?? [];
                       const backlogCount = column.status === "backlog" ? columnCards.length + backlogIssues.length : columnCards.length;
                       return (
-                        <div key={column.status} id={`kanban-mobile-${column.status}`}>
+                        <div key={column.status} id={`kanban-mobile-${column.status}`} className="min-w-0">
                           <KanbanColumn
                             column={column as KanbanColumnProps["column"]}
                             columnCards={columnCards}
@@ -3488,115 +3578,9 @@ export default function KanbanTab({
         </SurfaceCard>
       )}
 
-      {/* #1253: AutoQueuePanel and PipelineVisualEditor are no longer rendered
-          here. AutoQueuePanel was promoted to a collapsible card right above
-          the board (see "kanban-autoqueue-card") so dispatch state is the
-          first signal users see, and PipelineVisualEditor was moved to the
-          Settings page in #1257. Only "최근 완료" stays below the board. */}
-      {selectedRepo && recentDoneCards.length > 0 && (
-        <SurfaceSection
-          eyebrow={tr("Recent", "Recent")}
-          title={tr("최근 완료", "Recent Completions")}
-          description={tr(
-            "최근 마무리된 카드를 보드 아래에서 빠르게 훑어봅니다.",
-            "Skim recently finished cards just under the board.",
-          )}
-          className="rounded-[28px] p-4 sm:p-5"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-border) 74%, transparent)",
-            background:
-              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
-          }}
-        >
-          <div className="space-y-4">
-            {recentDoneCards.length > 0 && (() => {
-              const PAGE_SIZE = 10;
-              const totalPages = Math.ceil(recentDoneCards.length / PAGE_SIZE);
-              const page = Math.min(recentDonePage, totalPages - 1);
-              const pageCards = recentDoneCards.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-              return (
-                <SurfaceCard
-                  className="rounded-[24px] px-4 py-3"
-                  style={{
-                    borderColor: "color-mix(in srgb, var(--th-accent-primary) 16%, var(--th-border) 84%)",
-                    background: "color-mix(in srgb, var(--th-badge-emerald-bg) 56%, var(--th-card-bg) 44%)",
-                  }}
-                >
-                  <button
-                    onClick={() => setRecentDoneOpen((v) => !v)}
-                    className="flex w-full items-center gap-2 text-left"
-                  >
-                    <span className="text-xs font-semibold uppercase" style={{ color: "var(--th-text-muted)" }}>
-                      {tr("최근 완료", "Recent Completions")}
-                    </span>
-                    <span className="rounded-full px-1.5 py-0.5 text-[10px] font-bold" style={{ background: "rgba(34,197,94,0.18)", color: "#4ade80" }}>
-                      {recentDoneCards.length}
-                    </span>
-                    <span className="ml-auto text-xs" style={{ color: "var(--th-text-muted)" }}>
-                      {recentDoneOpen ? "▲" : "▼"}
-                    </span>
-                  </button>
-                  {recentDoneOpen && (
-                    <div className="mt-2 space-y-1.5">
-                      {pageCards.map((card) => {
-                        const statusDef = COLUMN_DEFS.find((c) => c.status === card.status);
-                        const agentName = getAgentLabel(card.assignee_agent_id);
-                        const completedDate = card.completed_at
-                          ? new Date(card.completed_at).toLocaleDateString(locale === "ko" ? "ko-KR" : "en-US", { month: "short", day: "numeric" })
-                          : "";
-                        return (
-                          <button
-                            key={card.id}
-                            onClick={() => setSelectedCardId(card.id)}
-                            className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition-colors hover:brightness-125"
-                            style={{ background: "rgba(148,163,184,0.06)" }}
-                          >
-                            <span
-                              className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
-                              style={{ background: `${statusDef?.accent ?? "#22c55e"}22`, color: statusDef?.accent ?? "#22c55e" }}
-                            >
-                              {card.status === "done" ? tr("완료", "Done") : tr("취소", "Cancelled")}
-                            </span>
-                            {card.github_issue_number && (
-                              <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>#{card.github_issue_number}</span>
-                            )}
-                            <span className="min-w-0 flex-1 truncate" style={{ color: "var(--th-text-primary)" }}>{card.title}</span>
-                            <span className="shrink-0 text-[11px]" style={{ color: "var(--th-text-muted)" }}>{agentName}</span>
-                            <span className="shrink-0 text-[11px]" style={{ color: "var(--th-text-muted)" }}>{completedDate}</span>
-                          </button>
-                        );
-                      })}
-                      {totalPages > 1 && (
-                        <div className="flex items-center justify-center gap-3 pt-1">
-                          <button
-                            disabled={page === 0}
-                            onClick={() => setRecentDonePage((p) => Math.max(0, p - 1))}
-                            className="rounded px-2 py-0.5 text-xs disabled:opacity-30"
-                            style={{ color: "var(--th-text-muted)" }}
-                          >
-                            ← {tr("이전", "Prev")}
-                          </button>
-                          <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                            {page + 1} / {totalPages}
-                          </span>
-                          <button
-                            disabled={page >= totalPages - 1}
-                            onClick={() => setRecentDonePage((p) => Math.min(totalPages - 1, p + 1))}
-                            className="rounded px-2 py-0.5 text-xs disabled:opacity-30"
-                            style={{ color: "var(--th-text-muted)" }}
-                          >
-                            {tr("다음", "Next")} →
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </SurfaceCard>
-              );
-            })()}
-          </div>
-        </SurfaceSection>
-      )}
+      {/* #1253 (revised): "최근 완료" is now rendered right above the kanban
+          columns inside the board container, so completion history sits
+          next to the active board rather than below it. */}
 
       {assignIssue && (
         <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-0 sm:p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }}>

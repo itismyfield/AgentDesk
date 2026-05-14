@@ -74,7 +74,7 @@ export default function KanbanColumn({
   return (
     <section
       data-testid={`kanban-column-${column.status}`}
-      className={`${compactBoard ? "w-full" : "w-[320px] shrink-0"} space-y-3 rounded-2xl border p-3`}
+      className={`${compactBoard ? "w-full" : "w-full min-w-0"} space-y-3 rounded-2xl border p-3`}
       style={{
         borderColor: "rgba(148,163,184,0.24)",
         backgroundColor: "var(--th-bg-surface)",
