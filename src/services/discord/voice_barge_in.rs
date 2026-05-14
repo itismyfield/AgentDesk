@@ -30,6 +30,9 @@ use crate::voice::tts::{
 use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 
 use super::SharedData;
+use super::voice_background_driver::{
+    VoiceBackgroundStartRequest, VoiceBackgroundTurnDriver, select_voice_background_driver,
+};
 pub(in crate::services::discord) const INTERNAL_VOICE_MESSAGE_ID_START: u64 =
     9_000_000_000_000_000_000;
 
@@ -283,6 +286,9 @@ async fn generate_foreground_ack_text(
         }
     };
 
+    if text.trim().eq_ignore_ascii_case("ADK_VOICE_SILENCE") {
+        return None;
+    }
     let spoken = foreground_spoken_only_with_limit(&text, language, max_chars);
     if spoken.trim().is_empty() {
         None
@@ -1262,18 +1268,29 @@ impl VoiceBargeInRuntime {
         let foreground = self
             .resolve_effective_foreground_config(source_channel_id, target_channel_id)
             .await;
-        match self
-            .post_voice_transcript_announcement(
+        let background_provider = self
+            .resolve_background_provider_for_target(target_channel_id)
+            .await;
+        let driver = select_voice_background_driver(&background_provider);
+        let announcement = crate::voice::prompt::build_voice_transcript_announcement(
+            transcript,
+            utterance.user_id,
+            &utterance.utterance_id,
+            &language,
+            verbose_progress,
+            &utterance.started_at,
+            &utterance.completed_at,
+            utterance.samples_written,
+        );
+        match driver
+            .start(VoiceBackgroundStartRequest {
+                channel_id: target_channel_id,
                 shared,
-                target_channel_id,
-                utterance,
-                transcript,
-                &language,
-                verbose_progress,
-            )
+                message_content: &announcement,
+            })
             .await
         {
-            Ok(message_id) => {
+            Ok(outcome) => {
                 self.spawn_foreground_acknowledgement(
                     shared.clone(),
                     source_channel_id,
@@ -1287,14 +1304,16 @@ impl VoiceBargeInRuntime {
                     target_channel_id = target_channel_id.get(),
                     user_id = utterance.user_id,
                     utterance_id = %utterance.utterance_id,
-                    transcript_message_id = %message_id,
+                    turn_id = %outcome.turn_id,
+                    background_provider = %background_provider.as_str(),
+                    background_driver = %outcome.driver_kind.as_str(),
                     foreground_provider = %foreground.provider,
                     foreground_model = %foreground.model,
                     foreground_max_chars = foreground.max_chars,
                     "voice transcript announcement posted as canonical turn trigger"
                 );
                 return VoiceBargeInTranscriptOutcome::VoiceTurnStarted {
-                    turn_id: format!("voice-announce:{message_id}"),
+                    turn_id: outcome.turn_id,
                 };
             }
             Err(error) => {
@@ -1372,53 +1391,6 @@ impl VoiceBargeInRuntime {
                 "voice foreground first audio queued"
             );
         });
-    }
-
-    async fn post_voice_transcript_announcement(
-        &self,
-        shared: &Arc<SharedData>,
-        channel_id: ChannelId,
-        utterance: &CompletedUtterance,
-        transcript: &str,
-        language: &str,
-        verbose_progress: bool,
-    ) -> Result<String, String> {
-        let registry = shared
-            .health_registry()
-            .ok_or_else(|| "health registry unavailable".to_string())?;
-        let content = crate::voice::prompt::build_voice_transcript_announcement(
-            transcript,
-            utterance.user_id,
-            &utterance.utterance_id,
-            language,
-            verbose_progress,
-            &utterance.started_at,
-            &utterance.completed_at,
-            utterance.samples_written,
-        );
-        let target = format!("channel:{}", channel_id.get());
-        let (status, body) = super::health::send_message_with_backends(
-            &registry,
-            None::<&crate::db::Db>,
-            shared.pg_pool.as_ref(),
-            &target,
-            &content,
-            "voice",
-            "announce",
-            Some("voice transcript"),
-        )
-        .await;
-        if !status.starts_with("200") {
-            return Err(format!("announce send returned {status}: {body}"));
-        }
-        let value = serde_json::from_str::<serde_json::Value>(&body)
-            .map_err(|error| format!("parse announce send response: {error}"))?;
-        value
-            .get("message_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| "announce send response missing message_id".to_string())
     }
 
     /// F6 (#2046): `Config` 핫캐시. TTL 안이면 캐시된 `Arc<Config>` 반환,
@@ -1499,6 +1471,19 @@ impl VoiceBargeInRuntime {
             max_chars,
             timeout_ms,
         }
+    }
+
+    async fn resolve_background_provider_for_target(
+        &self,
+        target_channel_id: ChannelId,
+    ) -> ProviderKind {
+        let config = self.cached_config().await;
+        config
+            .agents
+            .iter()
+            .find(|agent| agent_text_channel_matches(agent, target_channel_id))
+            .map(|agent| ProviderKind::from_str_or_unsupported(&agent.provider))
+            .unwrap_or_else(|| ProviderKind::Unsupported("unknown".to_string()))
     }
 
     async fn resolve_voice_turn_target(
