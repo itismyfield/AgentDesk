@@ -979,13 +979,14 @@ async fn start_reserved_headless_turn_with_owner(
         "no_runtime_provider_session"
     };
 
-    let pending_uploads = {
+    let (pending_uploads, session_was_cleared) = {
         let mut data = shared.core.lock().await;
         data.sessions
             .get_mut(&channel_id)
             .map(|session| {
+                let was_cleared = session.cleared;
                 session.cleared = false;
-                std::mem::take(&mut session.pending_uploads)
+                (std::mem::take(&mut session.pending_uploads), was_cleared)
             })
             .unwrap_or_default()
     };
@@ -1103,6 +1104,13 @@ async fn start_reserved_headless_turn_with_owner(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ↻ Skipping DB provider session restore for headless channel {} due to /goal fresh session request",
+                channel_id.get()
+            );
+        } else if session_was_cleared {
+            session_strategy_reason = "session_cleared_by_user";
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ Skipping DB provider session restore for headless channel {} due to prior /clear",
                 channel_id.get()
             );
         } else if let Some(reason) = session_reset_reason {
@@ -2055,7 +2063,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     let mut session_reset_reason = None;
     let mut reset_session_id_to_clear = None;
     // Get session info, allowed tools, and pending uploads
-    let (session_info, provider, allowed_tools, pending_uploads) = {
+    let (session_info, provider, allowed_tools, pending_uploads, session_was_cleared) = {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id)
             && let Some(reason) =
@@ -2077,12 +2085,13 @@ pub(in crate::services::discord) async fn handle_text_message(
             session.history.clear();
         }
         let info = load_session_runtime_state(&mut data.sessions, channel_id);
-        let uploads = data
+        let (uploads, was_cleared) = data
             .sessions
             .get_mut(&channel_id)
             .map(|s| {
+                let was_cleared = s.cleared;
                 s.cleared = false;
-                std::mem::take(&mut s.pending_uploads)
+                (std::mem::take(&mut s.pending_uploads), was_cleared)
             })
             .unwrap_or_default();
         drop(data);
@@ -2092,6 +2101,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             settings.provider.clone(),
             settings.allowed_tools.clone(),
             uploads,
+            was_cleared,
         )
     };
     let is_dm_channel = matches!(
@@ -2847,6 +2857,13 @@ pub(in crate::services::discord) async fn handle_text_message(
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to /goal fresh session request",
+                channel_id.get()
+            );
+        } else if session_was_cleared {
+            session_strategy_reason = "session_cleared_by_user";
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to prior /clear",
                 channel_id.get()
             );
         } else if dispatch_reset_provider_state || dispatch_recreate_tmux {
