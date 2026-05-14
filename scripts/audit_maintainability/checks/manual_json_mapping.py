@@ -34,7 +34,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             findings.append(
                 Finding(
                     rule="manual_json_row_mapping",
-                    severity="info",
+                    severity="warn",
                     file=rel,
                     line=line_of(text, match.start()),
                     message="manual row.try_get JSON mapping (use db::row helpers)",
@@ -51,6 +51,6 @@ CHECK = CheckSpec(
         "row.try_get::<serde_json::Value|Json<...>>(...) callsites that should "
         "use db::row typed helpers."
     ),
-    hard_gate=False,
+    hard_gate=True,
     runner=_run,
 )
