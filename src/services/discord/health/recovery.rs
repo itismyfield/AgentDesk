@@ -485,7 +485,7 @@ async fn apply_runtime_hard_stop_cleanup(
 ) -> bool {
     if let Some(token) = finish.removed_token.as_ref() {
         token.cancelled.store(true, Ordering::Relaxed);
-        shared.global_active.fetch_sub(1, Ordering::Relaxed);
+        decrement_counter(shared.global_active.as_ref());
     }
 
     discord::clear_watchdog_deadline_override(channel_id.get()).await;

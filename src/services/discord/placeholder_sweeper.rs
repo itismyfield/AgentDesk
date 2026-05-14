@@ -348,7 +348,12 @@ async fn finalize_abandoned_mailbox(
             },
             "placeholder_sweeper abandoned",
         );
-        shared.global_active.fetch_sub(1, Ordering::Relaxed);
+        let _ =
+            shared
+                .global_active
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current.checked_sub(1)
+                });
     }
     if finish.has_pending {
         super::schedule_deferred_idle_queue_kickoff(
