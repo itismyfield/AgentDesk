@@ -521,7 +521,32 @@ fn provider_cli_pid_in_tmux(
 ) -> Option<u32> {
     let pane_pid = crate::services::platform::tmux::pane_pid(tmux_session_name)?;
     let rows = process_table();
-    let descendants = descendant_processes(pane_pid, &rows);
+    select_provider_pid_in_pane(pane_pid, &rows, provider, tracked_child_pid)
+}
+
+// TUI mode regression: when the provider CLI itself is the tmux pane
+// foreground (no wrapper in front — e.g. `claude --session-id …` running
+// directly), `descendant_processes` excludes `pane_pid` and the search
+// falls through to None. The interrupt path then silently no-ops: stop
+// emoji marks the turn [Stopped] in the mailbox but no SIGINT ever
+// reaches the claude TUI, so it keeps generating and the watcher keeps
+// posting the response to Discord. Check `pane_pid` itself before walking
+// descendants.
+#[cfg(unix)]
+fn select_provider_pid_in_pane(
+    pane_pid: u32,
+    rows: &[ProcessRow],
+    provider: &ProviderKind,
+    tracked_child_pid: Option<u32>,
+) -> Option<u32> {
+    if let Some(pane_row) = rows.iter().find(|row| row.pid == pane_pid)
+        && !command_is_agentdesk_provider_wrapper(&pane_row.command)
+        && command_matches_provider(&pane_row.command, provider)
+    {
+        return Some(pane_pid);
+    }
+
+    let descendants = descendant_processes(pane_pid, rows);
 
     if let Some(pid) = tracked_child_pid
         && descendants.iter().any(|row| {
@@ -985,6 +1010,108 @@ mod tests {
         );
         assert!(!outcome.sent_keys);
         assert!(outcome.fallback_sigint_pid.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn select_provider_pid_returns_pane_pid_when_pane_is_claude_tui() {
+        // Regression: TUI mode runs `claude` directly as the tmux pane
+        // foreground (no wrapper). `descendant_processes` excludes pane_pid,
+        // so without the pane self-check the search returned None and stop
+        // emoji silently no-op'd the claude TUI.
+        let rows = vec![
+            super::ProcessRow {
+                pid: 96964,
+                ppid: 10240,
+                command: "/Users/me/.local/bin/claude --session-id abc --dangerously-skip-permissions".into(),
+            },
+            super::ProcessRow {
+                pid: 26622,
+                ppid: 96964,
+                command: "/bin/zsh -c some-tool-call".into(),
+            },
+            super::ProcessRow {
+                pid: 97010,
+                ppid: 96964,
+                command: "npm exec @modelcontextprotocol/server-brave-search".into(),
+            },
+        ];
+
+        let resolved = super::select_provider_pid_in_pane(
+            96964,
+            &rows,
+            &ProviderKind::Claude,
+            None,
+        );
+
+        assert_eq!(
+            resolved,
+            Some(96964),
+            "TUI mode: pane_pid is the claude CLI itself; stop must SIGINT it directly"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn select_provider_pid_still_finds_wrapped_provider_descendant() {
+        // Wrapper mode (codex-tmux-wrapper, legacy claude wrapper): the
+        // pane foreground is the wrapper and the provider CLI is a child.
+        // The pane self-check must NOT short-circuit on the wrapper, and
+        // the descendant search must still pick the provider PID.
+        let rows = vec![
+            super::ProcessRow {
+                pid: 97437,
+                ppid: 10240,
+                command: "/path/to/agentdesk codex-tmux-wrapper --codex-bin /opt/bin/codex".into(),
+            },
+            super::ProcessRow {
+                pid: 97458,
+                ppid: 97437,
+                command: "node /opt/homebrew/bin/codex exec resume abc --json".into(),
+            },
+        ];
+
+        let resolved = super::select_provider_pid_in_pane(
+            97437,
+            &rows,
+            &ProviderKind::Codex,
+            None,
+        );
+
+        assert_eq!(
+            resolved,
+            Some(97458),
+            "wrapper mode: skip the wrapper pane_pid, return the codex child"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn select_provider_pid_returns_none_when_no_provider_in_tree() {
+        let rows = vec![
+            super::ProcessRow {
+                pid: 5000,
+                ppid: 1,
+                command: "/bin/bash".into(),
+            },
+            super::ProcessRow {
+                pid: 5001,
+                ppid: 5000,
+                command: "vim".into(),
+            },
+        ];
+
+        let resolved = super::select_provider_pid_in_pane(
+            5000,
+            &rows,
+            &ProviderKind::Claude,
+            None,
+        );
+
+        assert!(
+            resolved.is_none(),
+            "no claude in pane or descendants => no SIGINT target"
+        );
     }
 
     #[cfg(unix)]
