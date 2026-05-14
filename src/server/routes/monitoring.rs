@@ -1,14 +1,13 @@
 use axum::{
-    Json, Router,
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    routing::{delete, post},
 };
 use poise::serenity_prelude::ChannelId;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{ApiRouter, AppState, protected_api_domain, state};
+use super::{AppState, state};
 
 // Category: ops
 
@@ -16,21 +15,6 @@ use super::{ApiRouter, AppState, protected_api_domain, state};
 pub(crate) struct UpsertMonitoringBody {
     key: String,
     description: String,
-}
-
-pub(crate) fn router(state: AppState) -> ApiRouter {
-    protected_api_domain(
-        Router::new()
-            .route(
-                "/channels/{channel_id}/monitoring",
-                post(upsert_monitoring).get(list_monitoring),
-            )
-            .route(
-                "/channels/{channel_id}/monitoring/{key}",
-                delete(remove_monitoring),
-            ),
-        state,
-    )
 }
 
 pub async fn upsert_monitoring(
