@@ -2,7 +2,7 @@
 // scan main-channel sessions that have been ready-for-input for ≥5 minutes
 // and trigger a recap card on each. The dcserver-side handler
 // (POST /api/sessions/{key}/idle-recap) does the actual posting: it deletes
-// the previous notification (if any), captures the last ~500 lines of the
+// the previous notification (if any), captures the last ~100 lines of the
 // tmux scrollback, asks opencode/Haiku for a short summary, and posts the
 // new card with the token usage panel. The message is auto-deleted the
 // next time the user sends a turn in that channel (see
@@ -88,6 +88,10 @@ module.exports = function attachIdleRecap(timeouts, helpers) {
             if (resp.posted) {
               agentdesk.log.info(
                 "[idle-recap] Posted recap for " + s.session_key
+              );
+            } else if (resp.accepted) {
+              agentdesk.log.info(
+                "[idle-recap] Accepted recap job for " + s.session_key
               );
             } else if (resp.skipped) {
               agentdesk.log.info(

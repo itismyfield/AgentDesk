@@ -227,7 +227,7 @@ pub(crate) async fn summarize_with_opencode(scrollback: &str) -> Option<String> 
         return None;
     }
     let prompt = format!(
-        "다음은 AI 코딩 에이전트와 사용자의 마지막 대화 ~500줄입니다. \
+        "다음은 AI 코딩 에이전트와 사용자의 마지막 대화 ~100줄입니다. \
          사용자가 지금 다시 돌아왔을 때 \"어떤 작업을 하던 중이었는지\"를 \
          즉시 기억할 수 있도록 1-2문장으로 한국어 요약을 만드세요. \
          도구 호출 / 스크롤 / 진행 표시 같은 노이즈는 무시하고 \

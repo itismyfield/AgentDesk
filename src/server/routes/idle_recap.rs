@@ -8,7 +8,7 @@
 //!   2. Resolve the Discord channel id for this provider via the
 //!      agent's bindings (claude → `discord_channel_cc`,
 //!      codex → `discord_channel_cdx`, fallback → `discord_channel_id`).
-//!   3. Capture the last ~500 lines of the tmux scrollback (best effort).
+//!   3. Capture the last ~100 lines of the tmux scrollback (best effort).
 //!   4. Ask opencode for a 1-2 sentence Korean summary (best effort,
 //!      20 s timeout; fall back to a header-only card if it fails).
 //!   5. Delete the previous recap card for this channel (best effort), post
@@ -24,10 +24,14 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use poise::serenity_prelude as serenity;
 use serde_json::{Value, json};
+use sqlx::PgPool;
+use std::sync::Arc;
 
 use super::AppState;
 use crate::services::discord::idle_recap;
+use crate::services::discord::idle_recap::RecapSnapshot;
 
 /// POST /api/sessions/{session_key}/idle-recap
 pub async fn post_idle_recap(
@@ -65,6 +69,44 @@ pub async fn post_idle_recap(
         return skip("notify bot not registered");
     };
 
+    let session_key_for_job = session_key.clone();
+    tokio::spawn(async move {
+        if let Err(error) = run_idle_recap_post_job(
+            pool,
+            session_key_for_job.clone(),
+            snapshot,
+            channel_id,
+            http,
+        )
+        .await
+        {
+            tracing::warn!(
+                session_key = %session_key_for_job,
+                channel_id = channel_id,
+                error = %error,
+                "idle_recap detached post job failed"
+            );
+        }
+    });
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "accepted": true,
+            "posted": false,
+            "channel_id": channel_id.to_string(),
+        })),
+    )
+}
+
+async fn run_idle_recap_post_job(
+    pool: PgPool,
+    session_key: String,
+    snapshot: RecapSnapshot,
+    channel_id: u64,
+    http: Arc<serenity::Http>,
+) -> Result<(), String> {
     // PR #3c: capture the live tmux scrollback (best-effort) and ask
     // opencode for a 1-2 sentence Korean summary (also best-effort, 20s
     // timeout). Both legs degrade gracefully to "no summary" — the card
@@ -82,10 +124,10 @@ pub async fn post_idle_recap(
     if let (Some(prev_msg), Some(prev_chan)) =
         (snapshot.previous_message_id, snapshot.previous_channel_id)
     {
-        idle_recap::delete_previous_card(&http, prev_chan as u64, prev_msg as u64).await;
+        idle_recap::delete_previous_card(http.as_ref(), prev_chan as u64, prev_msg as u64).await;
     }
 
-    match idle_recap::post_recap_card(&http, channel_id, &content).await {
+    match idle_recap::post_recap_card(http.as_ref(), channel_id, &content).await {
         Ok(message_id) => {
             if let Err(e) =
                 idle_recap::persist_recap_message_id(&pool, &session_key, channel_id, message_id)
@@ -93,21 +135,19 @@ pub async fn post_idle_recap(
             {
                 // Best-effort: clear the now-orphan card and report. The
                 // stamp at the top still dedupes this cycle.
-                idle_recap::delete_previous_card(&http, channel_id, message_id).await;
-                return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("persist: {e}"));
+                idle_recap::delete_previous_card(http.as_ref(), channel_id, message_id).await;
+                return Err(format!("persist: {e}"));
             }
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "ok": true,
-                    "posted": true,
-                    "channel_id": channel_id.to_string(),
-                    "message_id": message_id.to_string(),
-                    "summary_present": summary.is_some(),
-                })),
-            )
+            tracing::info!(
+                session_key = %session_key,
+                channel_id = channel_id,
+                message_id = message_id,
+                summary_present = summary.is_some(),
+                "idle_recap detached post job completed"
+            );
+            Ok(())
         }
-        Err(e) => error(StatusCode::BAD_GATEWAY, &format!("post: {e}")),
+        Err(e) => Err(format!("post: {e}")),
     }
 }
 
