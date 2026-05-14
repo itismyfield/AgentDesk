@@ -547,6 +547,49 @@ fn status_panel_tracks_one_level_subagents() {
 }
 
 #[test]
+fn status_panel_keeps_taskcreate_open_after_ack() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(81);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "TaskCreate",
+            &json!({"subject": "Stream parser extraction layer"}).to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result(Some("TaskCreate"), false),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("Subagents"));
+    assert!(rendered.contains("TaskCreate Stream parser extraction layer"));
+    assert!(!rendered.contains("TaskCreate Stream parser extraction layer ✓"));
+}
+
+#[test]
+fn status_panel_does_not_close_subagent_on_unrelated_tool_end() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(82);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "TaskCreate",
+            &json!({"subject": "Turn bridge integration"}).to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result(Some("Read"), false),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("TaskCreate Turn bridge integration"));
+    assert!(!rendered.contains("TaskCreate Turn bridge integration ✓"));
+}
+
+#[test]
 fn status_panel_hides_plan_and_subagents_for_codex() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(80);
@@ -592,6 +635,10 @@ fn status_events_from_json_keeps_tool_result_visibility() {
 fn status_tool_result_closes_subagent_only_for_task_tools() {
     assert_eq!(
         status_events_from_tool_result(Some("Read"), false),
+        vec![StatusEvent::ToolEnd { success: true }]
+    );
+    assert_eq!(
+        status_events_from_tool_result(Some("TaskCreate"), false),
         vec![StatusEvent::ToolEnd { success: true }]
     );
     assert_eq!(

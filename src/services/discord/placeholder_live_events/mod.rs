@@ -329,15 +329,7 @@ impl StatusPanelState {
                     };
                 }
             }
-            StatusEvent::ToolEnd { success } => {
-                if let Some(slot) = self
-                    .subagents
-                    .iter_mut()
-                    .rev()
-                    .find(|slot| slot.finished.is_none())
-                {
-                    slot.finished = Some(success);
-                }
+            StatusEvent::ToolEnd { success: _ } => {
                 self.status = DerivedStatus::Running;
             }
             StatusEvent::SubagentStart {

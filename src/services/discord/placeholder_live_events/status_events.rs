@@ -58,7 +58,7 @@ pub(in crate::services::discord) fn status_events_from_tool_result(
     is_error: bool,
 ) -> Vec<StatusEvent> {
     let mut events = vec![StatusEvent::ToolEnd { success: !is_error }];
-    if tool_name.is_some_and(is_task_tool) {
+    if tool_name.is_some_and(tool_result_completes_subagent) {
         events.push(StatusEvent::SubagentEnd { success: !is_error });
     }
     events
@@ -109,6 +109,13 @@ pub(super) fn is_task_tool(name: &str) -> bool {
     matches!(
         normalize_tool_key(name).as_str(),
         "task" | "taskcreate" | "agent" | "spawnagent"
+    )
+}
+
+fn tool_result_completes_subagent(name: &str) -> bool {
+    matches!(
+        normalize_tool_key(name).as_str(),
+        "task" | "agent" | "spawnagent"
     )
 }
 
