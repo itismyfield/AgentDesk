@@ -161,6 +161,16 @@ impl Config {
             .and_then(|config| config.tui_hosting)
             .unwrap_or_else(|| default_provider_tui_hosting(&key))
     }
+
+    pub fn any_provider_tui_hosting_requested(&self) -> bool {
+        crate::services::provider::supported_provider_ids()
+            .iter()
+            .any(|provider| self.provider_tui_hosting_enabled(provider))
+            || self
+                .providers
+                .values()
+                .any(|provider| provider.tui_hosting == Some(true))
+    }
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]

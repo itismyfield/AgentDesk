@@ -191,6 +191,20 @@ pub(crate) async fn run(
         crate::db::cancel_tombstones::set_global_pool(pool.clone());
     }
     crate::services::observability::init_observability(pg_pool.clone());
+    let _claude_tui_hook_server =
+        if crate::services::provider_hosting::any_requested_tui_hosting_driver_available(&config) {
+            match crate::services::claude_tui::hook_server::spawn_hook_server().await {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    tracing::warn!(
+                        "claude_tui hook server unavailable; continuing on legacy paths: {error}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
     let cluster_runtime = cluster::bootstrap(&config, pg_pool.clone()).await;
     let cluster_instance_id = cluster_runtime.instance_id().to_string();
     if let Some(pool) = pg_pool.clone() {

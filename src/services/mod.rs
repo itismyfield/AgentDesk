@@ -7,6 +7,7 @@ pub mod auto_queue;
 pub mod automation_candidate_contract;
 pub mod automation_candidate_materializer;
 pub mod claude;
+pub mod claude_tui;
 pub mod cluster;
 pub mod codex;
 #[cfg(unix)]

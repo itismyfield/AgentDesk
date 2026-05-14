@@ -115,7 +115,15 @@ pub fn resolve_provider_session_selection(provider: &ProviderKind) -> ProviderSe
     }
 }
 
-fn provider_tui_hosting_driver_available(_provider: &ProviderKind) -> bool {
+pub fn any_requested_tui_hosting_driver_available(config: &Config) -> bool {
+    crate::services::provider::supported_provider_ids()
+        .iter()
+        .filter(|provider_id| config.provider_tui_hosting_enabled(provider_id))
+        .filter_map(|provider_id| ProviderKind::from_str(provider_id))
+        .any(|provider| provider_tui_hosting_driver_available(&provider))
+}
+
+pub fn provider_tui_hosting_driver_available(_provider: &ProviderKind) -> bool {
     // #2110: the config and selection seam lands before the production TUI
     // hosting driver. Until the driver is wired, requested providers stay on
     // the legacy `-p` path with an explicit fallback reason.
@@ -170,5 +178,12 @@ mod tests {
             selection.fallback_reason,
             Some("tui_hosting_driver_unavailable")
         );
+    }
+
+    #[test]
+    fn no_requested_provider_has_available_driver_yet() {
+        let config = Config::default();
+
+        assert!(!any_requested_tui_hosting_driver_available(&config));
     }
 }
