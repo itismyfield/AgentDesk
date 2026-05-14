@@ -11,6 +11,8 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub discord: DiscordConfig,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default, skip_serializing_if = "VoiceConfig::is_default")]
     pub voice: VoiceConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +137,30 @@ pub struct DiscordConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub owner_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProviderConfig {
+    #[serde(default, alias = "tuiHosting", skip_serializing_if = "Option::is_none")]
+    pub tui_hosting: Option<bool>,
+}
+
+pub fn default_provider_tui_hosting(provider: &str) -> bool {
+    matches!(
+        provider.trim().to_ascii_lowercase().as_str(),
+        "claude" | "codex"
+    )
+}
+
+impl Config {
+    pub fn provider_tui_hosting_enabled(&self, provider: &str) -> bool {
+        let key = provider.trim().to_ascii_lowercase();
+        self.providers
+            .get(&key)
+            .and_then(|config| config.tui_hosting)
+            .unwrap_or_else(|| default_provider_tui_hosting(&key))
+    }
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -1758,6 +1784,7 @@ impl Default for Config {
         Self {
             server: ServerConfig::default(),
             discord: DiscordConfig::default(),
+            providers: std::collections::BTreeMap::new(),
             voice: VoiceConfig::default(),
             shared_prompt: None,
             mcp_servers: std::collections::BTreeMap::new(),

@@ -144,6 +144,10 @@ pub fn execute_command_simple_cancellable(
     prompt: &str,
     cancel_token: Option<&CancelToken>,
 ) -> Result<String, String> {
+    let session_selection =
+        crate::services::provider_hosting::resolve_provider_session_selection(&ProviderKind::Codex);
+    session_selection.log_start("codex.execute_command_simple");
+
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path
@@ -239,6 +243,10 @@ pub fn execute_command_streaming(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
+    let session_selection =
+        crate::services::provider_hosting::resolve_provider_session_selection(&ProviderKind::Codex);
+    session_selection.log_start("codex.execute_command_streaming");
+
     let readonly_mode = is_readonly_tool_policy(allowed_tools);
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
 

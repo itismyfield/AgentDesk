@@ -63,6 +63,7 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     // the operator-chosen `agentdesk.yaml` policy. Set-once; restart required
     // to change retention bounds.
     crate::db::prompt_manifests::install_retention_config(config.prompt_manifest_retention.clone());
+    crate::services::provider_hosting::install_provider_hosting_config(&config);
 
     Ok(BootstrapState { config })
 }

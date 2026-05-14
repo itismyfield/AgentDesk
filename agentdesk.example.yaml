@@ -37,6 +37,20 @@ discord:
     notify:
       token: "YOUR_NOTIFY_BOT_TOKEN"
 
+providers:
+  claude:
+    # Requested TUI hosting path for #2110. Until the production driver lands,
+    # runtime falls back to the legacy -p path with an explicit log reason.
+    tui_hosting: true
+  codex:
+    tui_hosting: true
+  qwen:
+    tui_hosting: false
+  gemini:
+    tui_hosting: false
+  opencode:
+    tui_hosting: false
+
 voice:
   # Enables Discord voice capture, transcription, and TTS paths.
   enabled: false
