@@ -642,11 +642,11 @@ fn check_qwen_auth_hints(configured: bool) -> Check {
         .with_expected_actual("cached auth or API-key hint visible", hints.join(", "))
         .with_next_steps(vec![
             "qwen auth status".to_string(),
-            "Open a Qwen CLI session and run /stats".to_string(),
+            "Check DashScope web console for usage limits".to_string(),
         ]);
     }
 
-    let guidance = "API key 경로는 project .qwen/.env 우선, 그다음 .env를 확인하세요. Qwen CLI는 env-file을 merge하지 않습니다. 사용량/제한은 숫자를 doctor에 고정하지 말고 Qwen CLI 세션의 /stats 또는 공식 문서를 확인하세요.";
+    let guidance = "API key 경로는 project .qwen/.env 우선, 그다음 .env를 확인하세요. Qwen CLI는 env-file을 merge하지 않습니다. 사용량/제한은 숫자를 doctor에 고정하지 말고 DashScope 웹 콘솔 또는 공식 문서를 확인하세요.";
     if configured {
         Check::warn(
             "provider_qwen_auth",
