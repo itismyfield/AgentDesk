@@ -397,10 +397,25 @@ pub(super) fn normalize_generate_entries(
                 entry.issue_number
             ));
         }
+        let phase_gate_kind = match entry
+            .phase_gate_kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(kind) if !super::phase_gate_catalog::is_valid_phase_gate_kind(kind) => {
+                return Err(format!(
+                    "unknown phase_gate_kind '{kind}' (see GET /api/queue/phase-gates/catalog)"
+                ));
+            }
+            Some(kind) => Some(kind.to_string()),
+            None => None,
+        };
         normalized.push(RequestedGenerateEntry {
             issue_number: entry.issue_number,
             batch_phase,
             thread_group: entry.thread_group,
+            phase_gate_kind,
         });
     }
 

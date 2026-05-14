@@ -273,6 +273,7 @@ pub(crate) const TOP_40_PAIRED_PATHS: &[(&str, &str)] = &[
     ("POST", "/api/queue/resume"),
     ("POST", "/api/queue/cancel"),
     ("PATCH", "/api/queue/reorder"),
+    ("GET", "/api/queue/phase-gates/catalog"),
     ("POST", "/api/github/issues/create"),
     ("GET", "/api/pipeline/cards/{card_id}"),
     ("GET", "/api/analytics/observability"),
@@ -4379,6 +4380,33 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"path": {"id": "run-1"}, "body": {"order": [423, 405], "rationale": "dependency-first"}}),
             json!({"ok": true, "created": 2, "run_id": "run-1", "message": "Queue active. Call POST /api/queue/dispatch-next to start dispatching."}),
         ),
+        ep(
+            "GET",
+            "/api/queue/phase-gates/catalog",
+            "auto-queue",
+            "User-facing phase-gate kind catalog (#2125). Dashboard and agents share a single vocabulary for `phase_gate_kind` values passed to /api/queue/generate entries. Each kind exposes id, label (ko/en), description, and the underlying internal checks it implies. `default_kind` is applied when an entry omits phase_gate_kind.",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "kinds": [
+                    {
+                        "id": "pr-confirm",
+                        "label": {"ko": "PR 확인", "en": "PR Verify"},
+                        "description": "PR 머지 및 이슈 종료 확인 후 다음 페이즈 진행",
+                        "checks": ["merge_verified", "issue_closed"],
+                    },
+                    {
+                        "id": "deploy-gate",
+                        "label": {"ko": "배포 게이트", "en": "Deploy Gate"},
+                        "description": "스테이지 빌드/배포 통과 후 다음 페이즈 진행",
+                        "checks": ["build_passed", "deploy_verified"],
+                    },
+                ],
+                "default_kind": "pr-confirm",
+            }),
+        )
+        .with_curl("curl http://localhost:8787/api/queue/phase-gates/catalog"),
         ep(
             "GET",
             "/api/channels/{id}/queue",

@@ -456,6 +456,7 @@ CREATE TABLE IF NOT EXISTS auto_queue_entries (
     slot_index     INTEGER,
     thread_group   INTEGER DEFAULT 0,
     batch_phase    INTEGER DEFAULT 0,
+    phase_gate_kind TEXT,
     created_at     TIMESTAMPTZ DEFAULT NOW(),
     dispatched_at  TIMESTAMPTZ,
     completed_at   TIMESTAMPTZ

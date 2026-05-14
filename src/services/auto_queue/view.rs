@@ -47,11 +47,14 @@ pub(super) enum GroupKind {
     Mixed,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct RequestedGenerateEntry {
     pub(super) issue_number: i64,
     pub(super) batch_phase: i64,
     pub(super) thread_group: Option<i64>,
+    /// Validated phase-gate kind id (#2125). `None` falls back to catalog
+    /// `default_kind` at status-response time.
+    pub(super) phase_gate_kind: Option<String>,
 }
 
 #[derive(Debug, Clone)]
