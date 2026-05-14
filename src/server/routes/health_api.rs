@@ -1548,7 +1548,7 @@ fn dispatch_outbox_failure_row_json(row: PgRow) -> Result<serde_json::Value, sql
         "agent_id": row.try_get::<Option<String>, _>("agent_id")?,
         "card_id": row.try_get::<Option<String>, _>("card_id")?,
         "title": row.try_get::<Option<String>, _>("title")?,
-        "retry_count": row.try_get::<i32, _>("retry_count")?,
+        "retry_count": row.try_get::<i64, _>("retry_count")?,
         "error": row.try_get::<Option<String>, _>("error")?,
         "delivery_status": row.try_get::<Option<String>, _>("delivery_status")?,
         "delivery_result": row.try_get::<Option<serde_json::Value>, _>("delivery_result")?,
