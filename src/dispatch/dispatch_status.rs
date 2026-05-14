@@ -538,16 +538,13 @@ async fn set_dispatch_status_on_pg_with_sync(
         })?
         .unwrap_or_default();
 
-    if let Some(allowed_from) = allowed_from {
-        if !allowed_from
-            .iter()
-            .any(|status| *status == current_status.as_str())
-        {
-            tx.rollback().await.map_err(|error| {
-                anyhow::anyhow!("rollback postgres dispatch status tx: {error}")
-            })?;
-            return Ok(0);
-        }
+    if let Some(allowed_from) = allowed_from
+        && !allowed_from.contains(&current_status.as_str())
+    {
+        tx.rollback()
+            .await
+            .map_err(|error| anyhow::anyhow!("rollback postgres dispatch status tx: {error}"))?;
+        return Ok(0);
     }
 
     // #2045 Finding 14 (P1): when a caller pushes a phase-gate dispatch into
@@ -1273,13 +1270,10 @@ fn set_dispatch_status_on_conn_with_sync(
         return Ok(0);
     };
 
-    if let Some(allowed_from) = allowed_from {
-        if !allowed_from
-            .iter()
-            .any(|status| *status == current_status.as_str())
-        {
-            return Ok(0);
-        }
+    if let Some(allowed_from) = allowed_from
+        && !allowed_from.contains(&current_status.as_str())
+    {
+        return Ok(0);
     }
 
     conn.execute_batch("SAVEPOINT dispatch_status_transition")?;
@@ -1682,9 +1676,7 @@ fn set_dispatch_status_sqlite_for_tests(
         return Ok(0);
     };
     if let Some(allowed_from) = allowed_from
-        && !allowed_from
-            .iter()
-            .any(|allowed| *allowed == current_status.as_str())
+        && !allowed_from.contains(&current_status.as_str())
     {
         return Ok(0);
     }
