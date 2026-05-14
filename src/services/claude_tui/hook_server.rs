@@ -13,6 +13,7 @@ use tokio::sync::{broadcast, oneshot};
 const EVENT_BUFFER_CAPACITY: usize = 256;
 
 static HOOK_ENDPOINT: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
+static HOOK_SERVER_STATE: LazyLock<HookServerState> = LazyLock::new(HookServerState::new);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -123,8 +124,12 @@ pub fn current_hook_endpoint() -> Option<String> {
         .clone()
 }
 
+pub fn subscribe_hook_events() -> broadcast::Receiver<HookEvent> {
+    HOOK_SERVER_STATE.subscribe()
+}
+
 pub async fn spawn_hook_server() -> Result<HookServerHandle, String> {
-    spawn_hook_server_with_state(HookServerState::new()).await
+    spawn_hook_server_with_state(HOOK_SERVER_STATE.clone()).await
 }
 
 pub async fn spawn_hook_server_with_state(

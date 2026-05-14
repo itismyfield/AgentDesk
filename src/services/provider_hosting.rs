@@ -123,17 +123,17 @@ pub fn any_requested_tui_hosting_driver_available(config: &Config) -> bool {
         .any(|provider| provider_tui_hosting_driver_available(&provider))
 }
 
-pub fn provider_tui_hosting_driver_available(_provider: &ProviderKind) -> bool {
-    // #2110: the config and selection seam lands before the production TUI
-    // hosting driver. Until the driver is wired, requested providers stay on
-    // the legacy `-p` path with an explicit fallback reason.
-    false
+pub fn provider_tui_hosting_driver_available(provider: &ProviderKind) -> bool {
+    matches!(provider, ProviderKind::Claude)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Config, ProviderConfig};
+    use std::sync::{LazyLock, Mutex};
+
+    static TEST_CONFIG_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn defaults_request_tui_for_claude_and_codex_only() {
@@ -167,10 +167,43 @@ mod tests {
     }
 
     #[test]
-    fn requested_tui_falls_back_until_driver_exists() {
+    fn requested_tui_selects_claude_driver_when_available() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         install_provider_hosting_config(&Config::default());
 
         let selection = resolve_provider_session_selection(&ProviderKind::Claude);
+
+        assert!(selection.requested_tui_hosting);
+        assert_eq!(selection.driver, ProviderSessionDriver::TuiHosting);
+        assert_eq!(selection.fallback_reason, None);
+    }
+
+    #[test]
+    fn requested_provider_has_available_claude_driver() {
+        let config = Config::default();
+
+        assert!(any_requested_tui_hosting_driver_available(&config));
+    }
+
+    #[test]
+    fn requested_non_claude_tui_still_falls_back_until_driver_exists() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(false),
+            },
+        );
+        config.providers.insert(
+            "qwen".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+            },
+        );
+        install_provider_hosting_config(&config);
+
+        let selection = resolve_provider_session_selection(&ProviderKind::Qwen);
 
         assert!(selection.requested_tui_hosting);
         assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
@@ -178,12 +211,5 @@ mod tests {
             selection.fallback_reason,
             Some("tui_hosting_driver_unavailable")
         );
-    }
-
-    #[test]
-    fn no_requested_provider_has_available_driver_yet() {
-        let config = Config::default();
-
-        assert!(!any_requested_tui_hosting_driver_available(&config));
     }
 }
