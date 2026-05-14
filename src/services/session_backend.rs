@@ -530,6 +530,32 @@ pub(crate) fn parse_stream_message_with_state(
                         .to_string(),
                     kind: classify_task_notification_kind(json, state),
                 }),
+                "stop_hook_summary" => Some(StreamMessage::Done {
+                    result: String::new(),
+                    session_id: claude_session_id(json),
+                }),
+                "turn_duration" => Some(StreamMessage::StatusUpdate {
+                    model: state.last_model.clone(),
+                    cost_usd: None,
+                    total_cost_usd: None,
+                    duration_ms: json
+                        .get("durationMs")
+                        .or_else(|| json.get("duration_ms"))
+                        .and_then(|value| value.as_u64()),
+                    num_turns: json
+                        .get("messageCount")
+                        .or_else(|| json.get("num_turns"))
+                        .and_then(|value| value.as_u64())
+                        .map(|value| value as u32),
+                    input_tokens: (state.accum_input_tokens > 0)
+                        .then_some(state.accum_input_tokens),
+                    cache_create_tokens: (state.accum_cache_create_tokens > 0)
+                        .then_some(state.accum_cache_create_tokens),
+                    cache_read_tokens: (state.accum_cache_read_tokens > 0)
+                        .then_some(state.accum_cache_read_tokens),
+                    output_tokens: (state.accum_output_tokens > 0)
+                        .then_some(state.accum_output_tokens),
+                }),
                 _ => None,
             }
         }
@@ -651,14 +677,18 @@ pub(crate) fn parse_stream_message_with_state(
                     .and_then(|value| value.as_str())
                     .unwrap_or("")
                     .to_string(),
-                session_id: json
-                    .get("session_id")
-                    .and_then(|value| value.as_str())
-                    .map(String::from),
+                session_id: claude_session_id(json),
             })
         }
         _ => None,
     }
+}
+
+fn claude_session_id(json: &Value) -> Option<String> {
+    json.get("session_id")
+        .or_else(|| json.get("sessionId"))
+        .and_then(|value| value.as_str())
+        .map(String::from)
 }
 
 pub(crate) fn observe_stream_context(json: &Value, state: &mut StreamLineState) {
@@ -1117,6 +1147,78 @@ mod tests {
             drain_status_update(&receiver),
             Some((Some(100), Some(20), Some(30), Some(40)))
         );
+    }
+
+    #[test]
+    fn process_stream_line_turn_duration_emits_status_update() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = StreamLineState::new();
+
+        assert!(process_stream_line(
+            r#"{"type":"assistant","message":{"model":"claude-sonnet","usage":{"input_tokens":50,"cache_creation_input_tokens":7,"cache_read_input_tokens":80,"output_tokens":5},"content":[{"type":"text","text":"partial"}]}}"#,
+            &sender,
+            &mut state,
+        ));
+        assert!(process_stream_line(
+            r#"{"type":"system","subtype":"turn_duration","durationMs":1234,"messageCount":3,"sessionId":"session-tui"}"#,
+            &sender,
+            &mut state,
+        ));
+
+        let status = receiver.try_iter().find_map(|message| match message {
+            StreamMessage::StatusUpdate {
+                model,
+                duration_ms,
+                num_turns,
+                input_tokens,
+                cache_create_tokens,
+                cache_read_tokens,
+                output_tokens,
+                ..
+            } => Some((
+                model,
+                duration_ms,
+                num_turns,
+                input_tokens,
+                cache_create_tokens,
+                cache_read_tokens,
+                output_tokens,
+            )),
+            _ => None,
+        });
+
+        assert_eq!(
+            status,
+            Some((
+                Some("claude-sonnet".to_string()),
+                Some(1234),
+                Some(3),
+                Some(50),
+                Some(7),
+                Some(80),
+                Some(5)
+            ))
+        );
+    }
+
+    #[test]
+    fn process_stream_line_stop_hook_summary_synthesizes_done() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = StreamLineState::new();
+
+        assert!(process_stream_line(
+            r#"{"type":"system","subtype":"stop_hook_summary","sessionId":"session-tui","hookCount":1,"preventedContinuation":false,"stopReason":"stop","hasOutput":true}"#,
+            &sender,
+            &mut state,
+        ));
+
+        assert_eq!(state.final_result, Some(String::new()));
+        assert_eq!(state.last_session_id, Some("session-tui".to_string()));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            StreamMessage::Done { result, session_id }
+                if result.is_empty() && session_id.as_deref() == Some("session-tui")
+        ));
     }
 
     #[test]

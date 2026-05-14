@@ -1960,6 +1960,7 @@ mod tests {
                     claude_session_id: None,
                     thread_channel_id: None,
                     session_id: None,
+                    channel_id: None,
                 },
             ),
         )

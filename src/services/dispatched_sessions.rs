@@ -1790,6 +1790,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -1812,6 +1813,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -1904,6 +1906,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -1926,6 +1929,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2015,6 +2019,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2037,6 +2042,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2115,6 +2121,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: Some("1485506232256168011".to_string()),
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2137,6 +2144,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: Some("1485506232256168011".to_string()),
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2158,6 +2166,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: Some("1485506232256168011".to_string()),
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2180,6 +2189,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: Some("1485506232256168011".to_string()),
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2237,6 +2247,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: Some("1485506232256168011".to_string()),
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2292,6 +2303,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: Some("1485506232256168011".to_string()),
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2430,6 +2442,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2483,6 +2496,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2554,6 +2568,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2616,6 +2631,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2670,6 +2686,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2743,6 +2760,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2796,6 +2814,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: Some("1485506232256168011".to_string()),
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -2849,6 +2868,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -3134,6 +3154,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
@@ -3173,6 +3194,7 @@ mod tests {
                 claude_session_id: Some("sess-abc".to_string()),
                 thread_channel_id: None,
                 session_id: Some("raw-xyz".to_string()),
+                channel_id: None,
             }),
         )
         .await;
@@ -3214,6 +3236,7 @@ mod tests {
                 claude_session_id: None,
                 thread_channel_id: None,
                 session_id: None,
+                channel_id: None,
             }),
         )
         .await;
