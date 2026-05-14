@@ -261,7 +261,6 @@ fn compose_api_router(state: AppState) -> ApiRouter {
         .merge(domains::reviews::router(state.clone()))
         .merge(domains::ops::router(state.clone()))
         .merge(domains::integrations::router(state.clone()))
-        .merge(monitoring::router(state.clone()))
         .merge(v1::router(state.clone()))
         .merge(domains::admin::router(state))
 }

@@ -286,6 +286,15 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(health_api::relay_recovery_handler),
             )
             .route(
+                "/channels/{channel_id}/monitoring",
+                post(super::super::monitoring::upsert_monitoring)
+                    .get(super::super::monitoring::list_monitoring),
+            )
+            .route(
+                "/channels/{channel_id}/monitoring/{key}",
+                delete(super::super::monitoring::remove_monitoring),
+            )
+            .route(
                 "/dispatches/pending",
                 get(queue_api::list_pending_dispatches),
             )
