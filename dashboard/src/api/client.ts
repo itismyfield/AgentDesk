@@ -2489,6 +2489,62 @@ export async function resetGlobalAutoQueue(
   });
 }
 
+// ── Phase-gate catalog (#2125) ──
+
+export interface PhaseGateKind {
+  id: string;
+  label: { ko: string; en: string };
+  description: string;
+  checks: string[];
+}
+
+export interface PhaseGateCatalog {
+  kinds: PhaseGateKind[];
+  default_kind: string;
+}
+
+export async function getPhaseGateCatalog(): Promise<PhaseGateCatalog> {
+  return request("/api/queue/phase-gates/catalog");
+}
+
+// ── Auto-queue request-generate (#2126) ──
+
+export interface RequestGenerateAutoQueueBody {
+  repo: string;
+  agentId: string;
+  issueNumbers: number[];
+  allowedGateKinds?: string[];
+  force?: boolean;
+}
+
+export interface RequestGenerateAutoQueueResponse {
+  request_id: string;
+  target: string;
+  channel_id?: string | null;
+  dispatched_at: string;
+  instruction_preview?: string;
+}
+
+export async function requestGenerateAutoQueue(
+  input: RequestGenerateAutoQueueBody,
+): Promise<RequestGenerateAutoQueueResponse> {
+  const body: Record<string, unknown> = {
+    repo: input.repo,
+    agent_id: input.agentId,
+    issue_numbers: input.issueNumbers,
+  };
+  if (input.allowedGateKinds && input.allowedGateKinds.length > 0) {
+    body.allowed_gate_kinds = input.allowedGateKinds;
+  }
+  if (typeof input.force === "boolean") {
+    body.force = input.force;
+  }
+  return request("/api/queue/request-generate", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 // ── Pipeline Config Hierarchy (#135) ──
 
 export interface PipelineConfigResponse {

@@ -1489,6 +1489,12 @@ fn execute_streaming_local_tui_tmux(
             "claude tui session died during follow-up output reading",
         ) {
             ClaudeFollowupResult::Delivered => {
+                emit_claude_tui_watcher_handoff(
+                    &sender,
+                    &transcript_path_string,
+                    tmux_session_name,
+                    &transcript_path,
+                );
                 log_producer_exit(
                     "tui_warm_followup_delivered",
                     Some(&resolved_session_id),
@@ -1647,7 +1653,7 @@ fn execute_streaming_local_tui_tmux(
         read_claude_tui_transcript_until_done(
             &transcript_path_string,
             fresh_turn_start_offset,
-            sender,
+            sender.clone(),
             cancel_token,
             tmux_session_name,
             &resolved_session_id,
@@ -1697,6 +1703,12 @@ fn execute_streaming_local_tui_tmux(
         let _ = std::fs::remove_file(&owner_path);
         return Err("claude tui session died before turn completion".to_string());
     }
+    emit_claude_tui_watcher_handoff(
+        &sender,
+        &transcript_path_string,
+        tmux_session_name,
+        &transcript_path,
+    );
     log_producer_exit(
         "tui_turn_delivered",
         Some(&resolved_session_id),
@@ -1708,6 +1720,24 @@ fn execute_streaming_local_tui_tmux(
         }),
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn emit_claude_tui_watcher_handoff(
+    sender: &Sender<StreamMessage>,
+    transcript_path_string: &str,
+    tmux_session_name: &str,
+    transcript_path: &std::path::Path,
+) {
+    let last_offset = std::fs::metadata(transcript_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let _ = sender.send(StreamMessage::TmuxReady {
+        output_path: transcript_path_string.to_string(),
+        input_fifo_path: String::new(),
+        tmux_session_name: tmux_session_name.to_string(),
+        last_offset,
+    });
 }
 
 #[cfg(unix)]

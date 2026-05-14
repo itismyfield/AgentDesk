@@ -432,8 +432,10 @@ pub(in crate::services::discord) fn process_watcher_lines(
                 }
                 "system" => {
                     if val.get("subtype").and_then(|s| s.as_str()) == Some("init")
-                        && let Some(session_id) =
-                            val.get("session_id").and_then(|value| value.as_str())
+                        && let Some(session_id) = val
+                            .get("session_id")
+                            .or_else(|| val.get("sessionId"))
+                            .and_then(|value| value.as_str())
                     {
                         state.last_session_id = Some(session_id.to_string());
                     }
@@ -463,6 +465,27 @@ pub(in crate::services::discord) fn process_watcher_lines(
                                 outcome.task_notification_kind,
                                 classify_task_notification_kind(&val, state),
                             );
+                        }
+                        // #2110: Claude TUI transcript signals end-of-turn
+                        // via `stop_hook_summary` instead of `type=result`.
+                        // Treat it as the turn terminator so the watcher
+                        // flushes accumulated `assistant.content[].text` to
+                        // Discord for monitor auto-restart turns and direct
+                        // tmux-typed user turns under the TUI driver.
+                        if subtype == "stop_hook_summary" {
+                            if let Some(session_id) = val
+                                .get("session_id")
+                                .or_else(|| val.get("sessionId"))
+                                .and_then(|value| value.as_str())
+                            {
+                                state.last_session_id = Some(session_id.to_string());
+                            }
+                            state.final_result = Some(String::new());
+                            outcome.found_result = true;
+                            // #1216: stop after the first turn-terminating
+                            // event so a buffer with multiple completed turns
+                            // does not merge them into a single `full_response`.
+                            break;
                         }
                     }
                 }

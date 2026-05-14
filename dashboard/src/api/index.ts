@@ -124,6 +124,8 @@ export {
   discardAllRoundTableIssues,
   resetGlobalAutoQueue,
   getHomeKpiTrends,
+  getPhaseGateCatalog,
+  requestGenerateAutoQueue,
 } from "./client";
 
 export type {
@@ -131,6 +133,10 @@ export type {
   AutoQueueRun,
   AutoQueueStatus,
   AutoQueueHistoryRun,
+  PhaseGateKind,
+  PhaseGateCatalog,
+  RequestGenerateAutoQueueBody,
+  RequestGenerateAutoQueueResponse,
   AutoQueueHistorySummary,
   AutoQueueHistoryResponse,
   DispatchQueueEntry,
