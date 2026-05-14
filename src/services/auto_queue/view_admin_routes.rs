@@ -516,6 +516,7 @@ pub(super) async fn add_run_entry_with_pg(
             issue_number: body.issue_number,
             batch_phase: Some(batch_phase),
             thread_group: body.thread_group,
+            phase_gate_kind: None,
         }],
         &cards_by_issue,
     )

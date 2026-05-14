@@ -346,6 +346,9 @@ pub struct AutoQueueStatusEntryView {
     pub thread_group: i64,
     pub slot_index: Option<i64>,
     pub batch_phase: i64,
+    /// Resolved phase-gate kind id from the catalog (#2125). Falls back to
+    /// the catalog's `default_kind` when no explicit value was persisted.
+    pub phase_gate_kind: String,
     pub dispatch_history: Vec<String>,
     pub thread_links: Vec<ThreadLinkView>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -837,6 +840,9 @@ impl AutoQueueStatusEntryView {
             thread_group: record.thread_group,
             slot_index: record.slot_index,
             batch_phase: record.batch_phase,
+            phase_gate_kind: record.phase_gate_kind.unwrap_or_else(|| {
+                crate::services::auto_queue::route::DEFAULT_PHASE_GATE_KIND.to_string()
+            }),
             dispatch_history,
             thread_links,
             card_status: record.card_status,
@@ -1670,6 +1676,8 @@ mod tests {
             thread_group: 0,
             slot_index,
             batch_phase: 0,
+            phase_gate_kind: crate::services::auto_queue::route::DEFAULT_PHASE_GATE_KIND
+                .to_string(),
             dispatch_history: dispatch_history.into_iter().map(str::to_string).collect(),
             thread_links: Vec::new(),
             card_status: None,
@@ -1705,6 +1713,7 @@ mod tests {
                 thread_group: 0,
                 slot_index: None,
                 batch_phase: 0,
+                phase_gate_kind: None,
                 channel_thread_map: None,
                 active_thread_id: None,
                 card_status: None,

@@ -268,6 +268,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/queue/resume", post(auto_queue::resume_run))
             .route("/queue/cancel", post(auto_queue::cancel))
             .route("/queue/runs/{id}/order", post(auto_queue::submit_order))
+            .route(
+                "/queue/phase-gates/catalog",
+                get(auto_queue::phase_gate_catalog),
+            )
             .route("/channels/{id}/queue", get(queue_api::list_channel_queue))
             .route(
                 "/channels/{id}/watcher-state",

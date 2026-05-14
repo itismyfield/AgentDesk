@@ -24,14 +24,17 @@ pub async fn generate(
         Ok(mode) => mode,
         Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))),
     };
-    let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
-    };
+    // Validate the request body BEFORE the PG availability check so callers
+    // get a 400 with the actual error (e.g. unknown phase_gate_kind) instead
+    // of a 503 that hides the underlying input mistake (#2125).
     let requested_entries = match normalize_generate_entries(&body) {
         Ok(entries) => entries,
         Err(err) => {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
         }
+    };
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable_response();
     };
     let requested_issue_numbers = requested_entries
         .as_ref()
@@ -61,22 +64,28 @@ pub async fn generate(
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": error })));
         }
     }
-    // (index, batch_phase, thread_group)
-    let requested_entry_meta: HashMap<i64, (usize, i64, Option<i64>)> = requested_entries
-        .as_ref()
-        .map(|entries| {
-            entries
-                .iter()
-                .enumerate()
-                .map(|(index, entry)| {
-                    (
-                        entry.issue_number,
-                        (index, entry.batch_phase, entry.thread_group),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // (index, batch_phase, thread_group, phase_gate_kind)
+    let requested_entry_meta: HashMap<i64, (usize, i64, Option<i64>, Option<String>)> =
+        requested_entries
+            .as_ref()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        (
+                            entry.issue_number,
+                            (
+                                index,
+                                entry.batch_phase,
+                                entry.thread_group,
+                                entry.phase_gate_kind.clone(),
+                            ),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
     let mut cards: Vec<GenerateCandidate> = {
         let conflicting_live_runs = match find_matching_active_run_id_pg(
             pool,
@@ -146,8 +155,11 @@ pub async fn generate(
     if !requested_entry_meta.is_empty() {
         cards.sort_by_key(|card| {
             card.github_issue_number
-                .and_then(|issue_number| requested_entry_meta.get(&issue_number).copied())
-                .map(|(index, _, _)| index)
+                .and_then(|issue_number| {
+                    requested_entry_meta
+                        .get(&issue_number)
+                        .map(|(index, _, _, _)| *index)
+                })
                 .unwrap_or(usize::MAX)
         });
     }
@@ -416,12 +428,12 @@ pub async fn generate(
         for planned in &mut grouped_entries {
             let card = &filtered_cards[planned.card_idx];
             if let Some(issue_number) = card.github_issue_number {
-                if let Some(&(_, batch_phase, thread_group)) =
+                if let Some((_, batch_phase, thread_group, _)) =
                     requested_entry_meta.get(&issue_number)
                 {
-                    planned.batch_phase = batch_phase;
+                    planned.batch_phase = *batch_phase;
                     if let Some(tg) = thread_group {
-                        planned.thread_group = tg;
+                        planned.thread_group = *tg;
                         has_explicit_groups = true;
                     }
                 }
@@ -528,11 +540,15 @@ pub async fn generate(
         } else {
             card.agent_id.as_str()
         };
+        let phase_gate_kind = card
+            .github_issue_number
+            .and_then(|issue_number| requested_entry_meta.get(&issue_number))
+            .and_then(|(_, _, _, kind)| kind.clone());
         if let Err(error) = sqlx::query(
             "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, reason, batch_phase
+                id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, reason, batch_phase, phase_gate_kind
              ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8
+                $1, $2, $3, $4, $5, $6, $7, $8, $9
              )",
         )
         .bind(&entry_id)
@@ -543,6 +559,7 @@ pub async fn generate(
         .bind(planned.thread_group)
         .bind(&planned.reason)
         .bind(planned.batch_phase)
+        .bind(phase_gate_kind.as_deref())
         .execute(&mut *tx)
         .await
         {

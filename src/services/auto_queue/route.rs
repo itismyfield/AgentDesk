@@ -37,6 +37,8 @@ mod fsm;
 mod order_routes;
 #[path = "phase_gate.rs"]
 mod phase_gate;
+#[path = "phase_gate_catalog.rs"]
+mod phase_gate_catalog;
 #[path = "planning.rs"]
 mod planning;
 #[path = "query.rs"]
@@ -57,6 +59,7 @@ pub use control_routes::{
     cancel, pause, reorder, reset, reset_global, reset_slot_thread, resume_run, update_run,
 };
 pub use order_routes::{OrderBody, submit_order};
+pub use phase_gate_catalog::{DEFAULT_PHASE_GATE_KIND, catalog as phase_gate_catalog};
 pub use route_generate::generate;
 pub use route_types::{
     ActivateBody, AddRunEntryBody, CancelQuery, GenerateBody, GenerateEntryBody, HistoryQuery,

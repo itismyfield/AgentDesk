@@ -11584,3 +11584,94 @@ async fn auto_queue_reset_requires_agent_id_and_reset_global_requires_confirmati
     assert_eq!(active_entries, 1);
     assert_eq!(remaining_entries, 1);
 }
+
+#[tokio::test]
+async fn phase_gate_catalog_endpoint_returns_kinds_and_default() {
+    // #2125 — dashboard + agents both pull from this endpoint, so its shape is
+    // a contract. Lock down the exact field set so silent changes break here
+    // rather than at the dashboard runtime.
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/queue/phase-gates/catalog")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["default_kind"], "pr-confirm");
+
+    let kinds = json["kinds"]
+        .as_array()
+        .expect("catalog response must include kinds array");
+    assert!(
+        kinds.len() >= 2,
+        "catalog should start with at least pr-confirm and deploy-gate"
+    );
+
+    let ids: Vec<&str> = kinds
+        .iter()
+        .filter_map(|kind| kind["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"pr-confirm"));
+    assert!(ids.contains(&"deploy-gate"));
+
+    let first = &kinds[0];
+    assert!(first["label"]["ko"].is_string());
+    assert!(first["label"]["en"].is_string());
+    assert!(first["description"].is_string());
+    assert!(first["checks"].is_array());
+}
+
+#[tokio::test]
+async fn generate_rejects_unknown_phase_gate_kind() {
+    // #2125 — entries with a phase_gate_kind not in the catalog must fail
+    // with 400 so callers fix the value rather than silently fall back.
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "project-agentdesk",
+                        "entries": [
+                            {"issue_number": 4242, "phase_gate_kind": "ship-it"}
+                        ],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().expect("error message must be a string");
+    assert!(
+        error.contains("phase_gate_kind") && error.contains("ship-it"),
+        "error must name the offending field/value, got: {error}"
+    );
+}
