@@ -3503,8 +3503,24 @@ pub(super) fn spawn_turn_bridge(
                 });
                 full_response = String::new(); // Suppress error message to user
             } else if full_response.is_empty() {
+                let quick_exit = turn_start.elapsed().as_secs() < 10;
+                let quick_empty_resume = if quick_exit && rx_disconnected {
+                    let data = shared_owned.core.lock().await;
+                    data.sessions
+                        .get(&channel_id)
+                        .and_then(|s| s.session_id.as_ref())
+                        .is_some()
+                } else {
+                    false
+                };
                 // Fallback: try to extract response from tmux output file
-                if let Some(ref path) = inflight_state.output_path {
+                if quick_empty_resume {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⏭ Skipping output file recovery after quick empty resume exit (channel {})",
+                        channel_id
+                    );
+                } else if let Some(ref path) = inflight_state.output_path {
                     let recovered = super::recovery::extract_response_from_output_pub(
                         path,
                         inflight_state.last_offset,
@@ -3560,7 +3576,6 @@ pub(super) fn spawn_turn_bridge(
                 } else {
                     // Check for resume failure via other methods
                     let mut resume_failed = false;
-                    let quick_exit = turn_start.elapsed().as_secs() < 10;
                     // Method 1: check tmux output file
                     if let Some(ref path) = inflight_state.output_path
                         && output_file_has_stale_resume_error_after_offset(

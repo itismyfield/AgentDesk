@@ -1319,6 +1319,54 @@ fn emit_followup_restart_suppressed_notice(sender: &Sender<StreamMessage>, notic
     });
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct ClaudeTuiSessionResolution {
+    session_id: String,
+    transcript_path: std::path::PathBuf,
+    resume: bool,
+}
+
+#[cfg(unix)]
+fn resolve_claude_tui_session_for_launch(
+    working_dir: &std::path::Path,
+    requested_session_id: Option<&str>,
+    claude_home: Option<&std::path::Path>,
+) -> Result<ClaudeTuiSessionResolution, String> {
+    let mut session_id = match requested_session_id {
+        Some(sid) if is_valid_session_id(sid) => sid.to_string(),
+        Some(_) => return Err("Invalid session ID format".to_string()),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    let mut resume = requested_session_id.is_some();
+    let mut transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        working_dir,
+        &session_id,
+        claude_home,
+    )?;
+
+    if resume && !transcript_path.exists() {
+        debug_log(&format!(
+            "Claude TUI resume transcript missing for session {}; forcing fresh session (expected {})",
+            session_id,
+            transcript_path.display()
+        ));
+        session_id = uuid::Uuid::new_v4().to_string();
+        transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            working_dir,
+            &session_id,
+            claude_home,
+        )?;
+        resume = false;
+    }
+
+    Ok(ClaudeTuiSessionResolution {
+        session_id,
+        transcript_path,
+        resume,
+    })
+}
+
 /// Execute claude command on a remote host via SSH, streaming stdout lines
 /// back through the sender channel.
 /// NOTE: Remote SSH execution is not available in AgentDesk — always returns Err.
@@ -1404,22 +1452,16 @@ fn execute_streaming_local_tui_tmux(
         tmux_session_name
     ));
 
-    let resolved_session_id = match session_id {
-        Some(sid) if is_valid_session_id(sid) => sid.to_string(),
-        Some(_) => return Err("Invalid session ID format".to_string()),
-        None => uuid::Uuid::new_v4().to_string(),
-    };
     let working_dir_path = std::path::Path::new(working_dir);
-    let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-        working_dir_path,
-        &resolved_session_id,
-        None,
-    )?;
+    let session_resolution =
+        resolve_claude_tui_session_for_launch(working_dir_path, session_id, None)?;
+    let resolved_session_id = session_resolution.session_id;
+    let transcript_path = session_resolution.transcript_path;
     let transcript_path_string = transcript_path.display().to_string();
+    let resume = session_resolution.resume;
 
     let session_exists = tmux_session_exists(tmux_session_name);
     let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
-    let resume = session_id.is_some();
 
     if session_exists && has_live_pane && resume {
         debug_log("Existing Claude TUI tmux session found — sending follow-up");
@@ -2447,6 +2489,63 @@ mod local_tmux_lifecycle_tests {
             }
             other => panic!("expected TmuxReady, got {other:?}"),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod claude_tui_session_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_existing_resume_transcript() {
+        let cwd = tempfile::tempdir().unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &session_id,
+            Some(claude_home.path()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(transcript_path.parent().unwrap()).unwrap();
+        std::fs::write(&transcript_path, "").unwrap();
+
+        let resolution = resolve_claude_tui_session_for_launch(
+            cwd.path(),
+            Some(&session_id),
+            Some(claude_home.path()),
+        )
+        .unwrap();
+
+        assert!(resolution.resume);
+        assert_eq!(resolution.session_id, session_id);
+        assert_eq!(resolution.transcript_path, transcript_path);
+    }
+
+    #[test]
+    fn forces_fresh_when_resume_transcript_missing() {
+        let cwd = tempfile::tempdir().unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        let stale_session_id = uuid::Uuid::new_v4().to_string();
+
+        let resolution = resolve_claude_tui_session_for_launch(
+            cwd.path(),
+            Some(&stale_session_id),
+            Some(claude_home.path()),
+        )
+        .unwrap();
+
+        assert!(!resolution.resume);
+        assert_ne!(resolution.session_id, stale_session_id);
+        assert!(uuid::Uuid::parse_str(&resolution.session_id).is_ok());
+        let expected_filename = format!("{}.jsonl", resolution.session_id);
+        assert_eq!(
+            resolution
+                .transcript_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(expected_filename.as_str())
+        );
     }
 }
 
