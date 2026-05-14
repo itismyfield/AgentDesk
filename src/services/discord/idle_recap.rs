@@ -30,7 +30,15 @@ const CLAUDE_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const CODEX_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const FALLBACK_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
 
-const TMUX_SCROLLBACK_LINES: i64 = 500;
+/// Lines of tmux scrollback captured for the opencode recap summary. Earlier
+/// 500-line snapshots routinely overran the 20s OPENCODE_SUMMARY_TIMEOUT when
+/// the configured opencode model is the local Gemma 27B build. Empirical
+/// timing on that model (2026-05-14): 500 → ~20s+ (timeout fires),
+/// 200 → ~29s (still over), 100 → ~8s, 50 → ~5s. 100 is the smallest cap
+/// that still covers a turn pair (user + assistant) plus the surrounding
+/// chrome, so it is the chosen balance between context coverage and headroom
+/// under the 20s timeout for the slowest-supported local model.
+const TMUX_SCROLLBACK_LINES: i64 = 100;
 const OPENCODE_SUMMARY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Custom-id prefix for the `[새 세션 시작]` button on a recap card. The
