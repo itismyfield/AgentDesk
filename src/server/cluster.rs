@@ -98,6 +98,18 @@ impl ClusterRuntime {
         }
     }
 
+    pub(crate) async fn wait_until_leader(&self) {
+        if !self.enabled {
+            return;
+        }
+        loop {
+            if self.is_leader() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
     pub(crate) fn describe_for_log(&self) -> serde_json::Value {
         serde_json::json!({
             "enabled": self.enabled,
@@ -932,12 +944,14 @@ fn parse_last_heartbeat(node: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClusterRole, explain_capability_match, resolve_instance_id, select_capability_route,
-        should_wake_wait_queue_after_node_join,
+        ClusterRole, ClusterRuntime, explain_capability_match, resolve_instance_id,
+        select_capability_route, should_wake_wait_queue_after_node_join,
     };
     use crate::config::ClusterConfig;
     use serde_json::json;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn cluster_role_parses_known_values_and_defaults_to_auto() {
@@ -962,6 +976,30 @@ mod tests {
 
         leader.store(false, Ordering::Release);
         assert!(!should_wake_wait_queue_after_node_join(&leader));
+    }
+
+    #[tokio::test]
+    async fn wait_until_leader_follows_late_leadership_transition() {
+        let leader_active = Arc::new(AtomicBool::new(false));
+        let runtime = ClusterRuntime {
+            enabled: true,
+            instance_id: "test-node".to_string(),
+            configured_role: ClusterRole::Auto,
+            effective_role: ClusterRole::Worker,
+            leader_active: leader_active.clone(),
+        };
+        let wait = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.wait_until_leader().await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!wait.is_finished());
+        leader_active.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .expect("wait_until_leader should observe leadership")
+            .expect("wait task should not panic");
     }
 
     #[test]

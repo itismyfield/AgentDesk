@@ -61,6 +61,7 @@ pub async fn list_nodes(state: State<AppState>) -> (StatusCode, Json<serde_json:
                         "configured_role": state.config.cluster.role,
                         "lease_ttl_secs": lease_ttl_secs,
                         "heartbeat_interval_secs": state.config.cluster.heartbeat_interval_secs.max(1),
+                        "local_worker_runtime": crate::server::worker_registry::leader_only_worker_status_json(),
                     },
                     "nodes": nodes,
                     "session_owners": session_owners,

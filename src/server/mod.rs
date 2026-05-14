@@ -303,6 +303,7 @@ async fn policy_tick_loop(
     engine: PolicyEngine,
     pg_pool: Option<Arc<PgPool>>,
     cluster_runtime: Option<cluster::ClusterRuntime>,
+    shutdown: Option<Arc<AtomicBool>>,
 ) {
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
 
@@ -315,6 +316,14 @@ async fn policy_tick_loop(
     loop {
         interval_30s.tick().await;
         count += 1;
+
+        if shutdown
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            tracing::info!("[policy-tick] shutdown requested");
+            break;
+        }
 
         if let Some(runtime) = cluster_runtime.as_ref()
             && !runtime.is_leader()

@@ -2,6 +2,7 @@ use std::future::Future;
 
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
 use crate::config::Config;
 use crate::engine::PolicyEngine;
@@ -11,6 +12,86 @@ use sqlx::PgPool;
 
 use super::cluster::ClusterRuntime;
 use super::ws::{BatchBuffer, BroadcastTx};
+
+static LEADER_ONLY_WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
+static LEADER_ONLY_WORKER_ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS: AtomicI64 = AtomicI64::new(0);
+
+pub(crate) fn leader_only_worker_status_json() -> serde_json::Value {
+    let last_spawn_unix_ms = LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS.load(Ordering::Acquire);
+    serde_json::json!({
+        "leader_only_workers_started": LEADER_ONLY_WORKERS_STARTED.load(Ordering::Acquire),
+        "leader_only_workers_active_count": LEADER_ONLY_WORKER_ACTIVE_COUNT.load(Ordering::Acquire),
+        "last_leader_only_worker_spawn_at": if last_spawn_unix_ms > 0 {
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(last_spawn_unix_ms)
+        } else {
+            None
+        },
+    })
+}
+
+fn record_leader_only_worker_started(spec: WorkerSpec) {
+    LEADER_ONLY_WORKERS_STARTED.store(true, Ordering::Release);
+    LEADER_ONLY_WORKER_ACTIVE_COUNT.fetch_add(1, Ordering::AcqRel);
+    LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS
+        .store(chrono::Utc::now().timestamp_millis(), Ordering::Release);
+    tracing::info!(
+        worker = spec.name,
+        execution_scope = spec.execution_scope.as_doc_str(),
+        "leader-only worker epoch started"
+    );
+}
+
+fn record_leader_only_worker_stopped(spec: WorkerSpec, reason: &str) {
+    let _ = LEADER_ONLY_WORKER_ACTIVE_COUNT.fetch_update(
+        Ordering::AcqRel,
+        Ordering::Acquire,
+        |count| Some(count.saturating_sub(1)),
+    );
+    tracing::warn!(
+        worker = spec.name,
+        reason,
+        "leader-only worker epoch stopped"
+    );
+}
+
+struct LeaderOnlyWorkerEpoch {
+    spec: WorkerSpec,
+}
+
+impl LeaderOnlyWorkerEpoch {
+    fn start(spec: WorkerSpec) -> Self {
+        record_leader_only_worker_started(spec);
+        Self { spec }
+    }
+}
+
+impl Drop for LeaderOnlyWorkerEpoch {
+    fn drop(&mut self) {
+        record_leader_only_worker_stopped(self.spec, "leader worker epoch ended");
+    }
+}
+
+async fn wait_until_shutdown(shutdown: Arc<AtomicBool>) {
+    while !shutdown.load(Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+async fn wait_until_leader_or_shutdown(
+    cluster_runtime: &ClusterRuntime,
+    shutdown: Arc<AtomicBool>,
+) -> bool {
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            return false;
+        }
+        if cluster_runtime.is_leader() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BootStepId {
@@ -310,6 +391,7 @@ pub(crate) struct SupervisedWorkerRegistry {
     health_registry: Option<Arc<HealthRegistry>>,
     pg_pool: Option<Arc<PgPool>>,
     cluster_runtime: ClusterRuntime,
+    shutdown: Arc<AtomicBool>,
     running: Vec<RunningWorker>,
 }
 
@@ -327,6 +409,7 @@ impl SupervisedWorkerRegistry {
             health_registry,
             pg_pool,
             cluster_runtime,
+            shutdown: Arc::new(AtomicBool::new(false)),
             running: Vec::new(),
         }
     }
@@ -377,12 +460,6 @@ impl SupervisedWorkerRegistry {
             if spec.start_stage != stage || self.is_started(spec.id) {
                 continue;
             }
-            if spec.execution_scope == WorkerExecutionScope::LeaderOnly
-                && !self.cluster_runtime.is_leader()
-            {
-                self.log_skip(spec, "cluster node does not hold leader lease");
-                continue;
-            }
             self.log_start(spec);
             batch_buffer = self
                 .start_worker(spec, broadcast_tx.clone())?
@@ -416,8 +493,11 @@ impl SupervisedWorkerRegistry {
                     self.log_skip(spec, "postgres pool unavailable");
                     return Ok(None);
                 };
-                self.register_tokio(spec, async move {
-                    super::github_sync_loop(sync_pg_pool, sync_interval).await;
+                self.register_leader_tokio(spec, move || {
+                    let sync_pg_pool = sync_pg_pool.clone();
+                    async move {
+                        super::github_sync_loop(sync_pg_pool, sync_interval).await;
+                    }
                 });
                 Ok(None)
             }
@@ -426,17 +506,9 @@ impl SupervisedWorkerRegistry {
                     self.log_skip(spec, "postgres pool unavailable");
                     return Ok(None);
                 };
-                // #747: build a dedicated tick engine so a stuck tick hook
-                // cannot back up the main engine's actor queue and starve
-                // HTTP/Discord hook paths. The two engines share the same
-                // policies directory (each with its own hot-reload watcher)
-                // and the same PostgreSQL backend.
-                let tick_engine =
-                    PolicyEngine::new_for_tick(&self.config, Some(tick_pg_pool.as_ref().clone()))
-                        .map_err(|e| {
-                        anyhow!("failed to initialize dedicated policy tick engine: {e}")
-                    })?;
+                let tick_config = self.config.clone();
                 let tick_cluster_runtime = self.cluster_runtime.clone();
+                let shutdown = self.shutdown.clone();
                 self.register_thread(spec, "policy-tick", move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -445,11 +517,42 @@ impl SupervisedWorkerRegistry {
                             tracing::warn!("Fatal: failed to create policy-tick runtime: {e}");
                             std::process::exit(1);
                         });
-                    rt.block_on(super::policy_tick_loop(
-                        tick_engine,
-                        Some(tick_pg_pool),
-                        Some(tick_cluster_runtime),
-                    ));
+                    loop {
+                        if !rt.block_on(wait_until_leader_or_shutdown(
+                            &tick_cluster_runtime,
+                            shutdown.clone(),
+                        )) {
+                            break;
+                        }
+                        // #747: build a dedicated tick engine so a stuck tick hook
+                        // cannot back up the main engine's actor queue and starve
+                        // HTTP/Discord hook paths. Recreate it per leader epoch
+                        // because `policy_tick_loop` owns and consumes the engine.
+                        let _epoch = LeaderOnlyWorkerEpoch::start(spec);
+                        match PolicyEngine::new_for_tick(
+                            &tick_config,
+                            Some(tick_pg_pool.as_ref().clone()),
+                        ) {
+                            Ok(tick_engine) => {
+                                rt.block_on(super::policy_tick_loop(
+                                    tick_engine,
+                                    Some(tick_pg_pool.clone()),
+                                    Some(tick_cluster_runtime.clone()),
+                                    Some(shutdown.clone()),
+                                ));
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    "failed to initialize dedicated policy tick engine: {error}"
+                                );
+                            }
+                        }
+                        drop(_epoch);
+                        if shutdown.load(Ordering::Acquire) {
+                            break;
+                        }
+                        rt.block_on(tokio::time::sleep(std::time::Duration::from_secs(5)));
+                    }
                 })?;
                 Ok(None)
             }
@@ -458,8 +561,11 @@ impl SupervisedWorkerRegistry {
                     self.log_skip(spec, "postgres pool unavailable");
                     return Ok(None);
                 };
-                self.register_tokio(spec, async move {
-                    super::rate_limit_sync_loop(rate_limit_pg_pool).await;
+                self.register_leader_tokio(spec, move || {
+                    let rate_limit_pg_pool = rate_limit_pg_pool.clone();
+                    async move {
+                        super::rate_limit_sync_loop(rate_limit_pg_pool).await;
+                    }
                 });
                 Ok(None)
             }
@@ -469,12 +575,16 @@ impl SupervisedWorkerRegistry {
                     return Ok(None);
                 };
                 let prompt_manifest_retention = self.config.prompt_manifest_retention.clone();
-                self.register_tokio(spec, async move {
-                    super::maintenance::scheduler_loop(
-                        maintenance_pg_pool,
-                        prompt_manifest_retention,
-                    )
-                    .await;
+                self.register_leader_tokio(spec, move || {
+                    let maintenance_pg_pool = maintenance_pg_pool.clone();
+                    let prompt_manifest_retention = prompt_manifest_retention.clone();
+                    async move {
+                        super::maintenance::scheduler_loop(
+                            maintenance_pg_pool,
+                            prompt_manifest_retention,
+                        )
+                        .await;
+                    }
                 });
                 Ok(None)
             }
@@ -484,8 +594,12 @@ impl SupervisedWorkerRegistry {
                     return Ok(None);
                 };
                 let outbox_health_registry = self.health_registry.clone();
-                self.register_tokio(spec, async move {
-                    super::message_outbox_loop(outbox_pg_pool, outbox_health_registry).await;
+                self.register_leader_tokio(spec, move || {
+                    let outbox_pg_pool = outbox_pg_pool.clone();
+                    let outbox_health_registry = outbox_health_registry.clone();
+                    async move {
+                        super::message_outbox_loop(outbox_pg_pool, outbox_health_registry).await;
+                    }
                 });
                 Ok(None)
             }
@@ -513,8 +627,11 @@ impl SupervisedWorkerRegistry {
                     self.log_skip(spec, "postgres pool unavailable");
                     return Ok(None);
                 };
-                self.register_tokio(spec, async move {
-                    super::dm_reply_retry_loop(dm_retry_pg_pool).await;
+                self.register_leader_tokio(spec, move || {
+                    let dm_retry_pg_pool = dm_retry_pg_pool.clone();
+                    async move {
+                        super::dm_reply_retry_loop(dm_retry_pg_pool).await;
+                    }
                 });
                 Ok(None)
             }
@@ -561,15 +678,21 @@ impl SupervisedWorkerRegistry {
                     .filter(|value| !value.is_empty())
                     .map(|value| format!("channel:{value}"));
                 let routine_health_registry = self.health_registry.clone();
-                self.register_tokio(spec, async move {
-                    super::routine_runtime_loop(
-                        routine_pg_pool,
-                        routine_health_registry,
-                        routines_config,
-                        routine_health_target,
-                        tick_secs,
-                    )
-                    .await;
+                self.register_leader_tokio(spec, move || {
+                    let routine_pg_pool = routine_pg_pool.clone();
+                    let routine_health_registry = routine_health_registry.clone();
+                    let routines_config = routines_config.clone();
+                    let routine_health_target = routine_health_target.clone();
+                    async move {
+                        super::routine_runtime_loop(
+                            routine_pg_pool,
+                            routine_health_registry,
+                            routines_config,
+                            routine_health_target,
+                            tick_secs,
+                        )
+                        .await;
+                    }
                 });
                 Ok(None)
             }
@@ -580,7 +703,6 @@ impl SupervisedWorkerRegistry {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let future = Self::fence_leader_tokio_worker(spec, self.cluster_runtime.clone(), future);
         self.running.push(RunningWorker {
             spec,
             _handle: WorkerHandle::Tokio {
@@ -589,27 +711,62 @@ impl SupervisedWorkerRegistry {
         });
     }
 
-    async fn fence_leader_tokio_worker<F>(
+    fn register_leader_tokio<MakeFuture, Fut>(&mut self, spec: WorkerSpec, make_future: MakeFuture)
+    where
+        MakeFuture: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let future = Self::supervise_leader_tokio_worker(
+            spec,
+            self.cluster_runtime.clone(),
+            self.shutdown.clone(),
+            make_future,
+        );
+        self.running.push(RunningWorker {
+            spec,
+            _handle: WorkerHandle::Tokio {
+                _handle: tokio::spawn(future),
+            },
+        });
+    }
+
+    async fn supervise_leader_tokio_worker<MakeFuture, Fut>(
         spec: WorkerSpec,
         cluster_runtime: ClusterRuntime,
-        future: F,
+        shutdown: Arc<AtomicBool>,
+        make_future: MakeFuture,
     ) where
-        F: Future<Output = ()> + Send + 'static,
+        MakeFuture: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
-        if spec.execution_scope != WorkerExecutionScope::LeaderOnly {
-            future.await;
-            return;
-        }
-        tokio::pin!(future);
-        tokio::select! {
-            _ = &mut future => {}
-            _ = cluster_runtime.wait_until_not_leader() => {
-                tracing::warn!(
-                    worker = spec.name,
-                    instance_id = cluster_runtime.instance_id(),
-                    "leader-only worker self-fenced after cluster leadership was lost"
-                );
+        loop {
+            if !wait_until_leader_or_shutdown(&cluster_runtime, shutdown.clone()).await {
+                break;
             }
+            let _epoch = LeaderOnlyWorkerEpoch::start(spec);
+            let future = make_future();
+            tokio::pin!(future);
+            tokio::select! {
+                _ = &mut future => {
+                    tracing::warn!(worker = spec.name, "leader-only worker future exited");
+                }
+                _ = cluster_runtime.wait_until_not_leader() => {
+                    tracing::warn!(
+                        worker = spec.name,
+                        instance_id = cluster_runtime.instance_id(),
+                        "leader-only worker self-fenced after cluster leadership was lost"
+                    );
+                }
+                _ = wait_until_shutdown(shutdown.clone()) => {
+                    tracing::info!(worker = spec.name, "leader-only worker supervisor shutting down");
+                    break;
+                }
+            }
+            drop(_epoch);
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }
 
@@ -657,6 +814,12 @@ impl SupervisedWorkerRegistry {
             reason,
             "skipping supervised worker"
         );
+    }
+}
+
+impl Drop for SupervisedWorkerRegistry {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
     }
 }
 
