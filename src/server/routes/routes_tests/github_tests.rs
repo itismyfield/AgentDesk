@@ -51,7 +51,7 @@ async fn create_issue_route_pg_builds_pmd_body_and_agent_label() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/issues")
+                .uri("/github/issues/create")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -175,7 +175,7 @@ async fn create_issue_route_dry_run_renders_without_side_effects() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/issues")
+                .uri("/github/issues/create")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -257,7 +257,7 @@ async fn create_issue_route_dry_run_validation_errors_include_warnings() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/issues")
+                .uri("/github/issues/create")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -315,7 +315,7 @@ async fn create_issue_route_dry_run_warns_for_unknown_agent() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/issues")
+                .uri("/github/issues/create")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -377,7 +377,7 @@ async fn create_issue_route_pg_returns_kanban_card_id() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/issues")
+                .uri("/github/issues/create")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -657,7 +657,7 @@ async fn create_issue_route_rejects_more_than_ten_dod_items() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/issues")
+                .uri("/github/issues/create")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
