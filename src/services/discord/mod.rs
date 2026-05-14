@@ -74,6 +74,7 @@ mod tmux_reaper;
 #[cfg(unix)]
 mod tmux_restart_handoff;
 mod turn_bridge;
+mod voice_background_driver;
 mod voice_barge_in;
 mod voice_routing;
 #[path = "watchers/lifecycle_decision.rs"]

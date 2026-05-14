@@ -30,6 +30,10 @@ use crate::voice::tts::{
 use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 
 use super::SharedData;
+use super::voice_background_driver::{
+    VoiceBackgroundStartRequest, VoiceBackgroundTurnDriver, candidate_driver_kinds_for_provider,
+    select_voice_background_driver,
+};
 
 pub(in crate::services::discord) const INTERNAL_VOICE_MESSAGE_ID_START: u64 =
     9_000_000_000_000_000_000;
@@ -982,6 +986,7 @@ impl VoiceBargeInRuntime {
     async fn start_voice_turn(
         &self,
         shared: &Arc<SharedData>,
+        provider: &ProviderKind,
         channel_id: ChannelId,
         utterance: &CompletedUtterance,
         transcript: &str,
@@ -1023,18 +1028,33 @@ impl VoiceBargeInRuntime {
             }
         });
         crate::voice::metrics::mark_agent_start(channel_id.get());
-        match super::router::start_voice_headless_turn(
-            ctx,
-            channel_id,
-            &prompt,
-            &format!("voice-user-{}", utterance.user_id),
-            UserId::new(utterance.user_id),
-            shared,
-            token,
-            Some(metadata),
-            channel_name_hint,
-        )
-        .await
+        let driver = select_voice_background_driver(provider);
+        let driver_kind = driver.kind();
+        let candidate_drivers = candidate_driver_kinds_for_provider(provider)
+            .into_iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>();
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            provider = ?provider,
+            selected_driver = driver_kind.as_str(),
+            candidate_drivers = ?candidate_drivers,
+            "voice background driver selected"
+        );
+        let request_owner_name = format!("voice-user-{}", utterance.user_id);
+        match driver
+            .start(VoiceBackgroundStartRequest {
+                ctx,
+                channel_id,
+                prompt: &prompt,
+                request_owner_name: &request_owner_name,
+                request_owner: UserId::new(utterance.user_id),
+                shared,
+                token,
+                metadata: Some(metadata),
+                channel_name_hint,
+            })
+            .await
         {
             Ok(outcome) => {
                 tracing::info!(
@@ -1042,6 +1062,7 @@ impl VoiceBargeInRuntime {
                     user_id = utterance.user_id,
                     utterance_id = %utterance.utterance_id,
                     turn_id = %outcome.turn_id,
+                    driver = outcome.driver_kind.as_str(),
                     "voice utterance started agent turn"
                 );
                 self.publish_progress(channel_id, "agent:start");
@@ -1056,6 +1077,7 @@ impl VoiceBargeInRuntime {
                 crate::voice::metrics::discard_agent_start(channel_id.get());
                 tracing::warn!(
                     error = %error,
+                    driver = driver_kind.as_str(),
                     channel_id = channel_id.get(),
                     user_id = utterance.user_id,
                     utterance_id = %utterance.utterance_id,
@@ -1296,7 +1318,7 @@ impl VoiceBargeInRuntime {
             }
         };
 
-        self.start_voice_turn(shared, target_channel_id, utterance, &transcript)
+        self.start_voice_turn(shared, provider, target_channel_id, utterance, &transcript)
             .await
     }
 
