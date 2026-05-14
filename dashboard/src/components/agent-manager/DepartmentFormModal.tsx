@@ -280,6 +280,8 @@ export default function DepartmentFormModal({
                     <button
                       key={c}
                       type="button"
+                      aria-label={`Color ${c}`}
+                      aria-pressed={form.color === c}
                       onClick={() => setForm({ ...form, color: c })}
                       className="w-11 h-11 rounded-full transition-all hover:scale-110"
                       style={{
