@@ -14,8 +14,15 @@ pub enum TuiInputAction {
 }
 
 pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
+    let normalized_prompt;
+    let prompt = if prompt.contains('\r') {
+        normalized_prompt = prompt.replace("\r\n", "\n").replace('\r', "\n");
+        normalized_prompt.as_str()
+    } else {
+        prompt
+    };
     validate_prompt_text(prompt)?;
-    let mut actions = if prompt.contains('\n') || prompt.contains('\r') {
+    let mut actions = if prompt.contains('\n') {
         vec![TuiInputAction::PasteBuffer(prompt.to_string())]
     } else {
         split_literal_chunks(prompt, DEFAULT_LITERAL_CHUNK_CHARS)
@@ -197,6 +204,19 @@ mod tests {
             actions,
             vec![
                 TuiInputAction::PasteBuffer("line1\nline2".to_string()),
+                TuiInputAction::Enter
+            ]
+        );
+    }
+
+    #[test]
+    fn multiline_prompt_normalizes_carriage_returns_before_paste() {
+        let actions = plan_prompt_submit("line1\r\nline2\rline3").unwrap();
+
+        assert_eq!(
+            actions,
+            vec![
+                TuiInputAction::PasteBuffer("line1\nline2\nline3".to_string()),
                 TuiInputAction::Enter
             ]
         );

@@ -219,15 +219,22 @@ pub fn load_buffer(buffer_name: &str, text: &str) -> Result<Output, String> {
 /// Paste a named tmux buffer to the active pane.
 pub fn paste_buffer(session_name: &str, buffer_name: &str, delete: bool) -> Result<Output, String> {
     let target = exact_target(session_name);
-    let mut args = vec!["paste-buffer"];
-    if delete {
-        args.push("-d");
-    }
-    args.extend(["-b", buffer_name, "-t", &target]);
+    let args = paste_buffer_args(buffer_name, &target, delete);
     tmux_command()
         .args(&args)
         .output()
         .map_err(|e| format!("tmux paste-buffer failed: {e}"))
+}
+
+fn paste_buffer_args<'a>(buffer_name: &'a str, target: &'a str, delete: bool) -> Vec<&'a str> {
+    // `-p` requests bracketed paste and `-r` keeps LF as LF instead of tmux's
+    // default LF -> CR replacement, which can look like Enter in TUIs.
+    let mut args = vec!["paste-buffer", "-p", "-r"];
+    if delete {
+        args.push("-d");
+    }
+    args.extend(["-b", buffer_name, "-t", target]);
+    args
 }
 
 /// Return the PID of the active pane process for a tmux session.
@@ -342,6 +349,28 @@ mod tests {
         assert_eq!(
             exact_target("AgentDesk-claude-adk-cc"),
             "=AgentDesk-claude-adk-cc:"
+        );
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    #[test]
+    fn paste_buffer_args_request_bracketed_lf_preserving_paste() {
+        assert_eq!(
+            paste_buffer_args("agentdesk-buffer", "=AgentDesk-claude-adk-cc:", true),
+            vec![
+                "paste-buffer",
+                "-p",
+                "-r",
+                "-d",
+                "-b",
+                "agentdesk-buffer",
+                "-t",
+                "=AgentDesk-claude-adk-cc:"
+            ]
         );
     }
 }
