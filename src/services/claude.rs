@@ -1629,12 +1629,24 @@ fn execute_streaming_local_tui_tmux(
         session_id: resolved_session_id.clone(),
         raw_session_id: Some(resolved_session_id.clone()),
     });
+    // When resuming into a fresh tmux session, skip already-recorded
+    // transcript lines so the prior turn's output is not replayed back to
+    // Discord. PR #2110 covered the transcript-missing path; this covers
+    // the transcript-exists + tmux-dead path that still replayed stale
+    // lines before the new turn's response.
+    let fresh_turn_start_offset = if resume {
+        std::fs::metadata(&transcript_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
     let fresh_turn_result = (|| -> Result<ReadOutputResult, String> {
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
         crate::services::claude_tui::input::send_prompt(tmux_session_name, prompt)?;
         read_claude_tui_transcript_until_done(
             &transcript_path_string,
-            0,
+            fresh_turn_start_offset,
             sender,
             cancel_token,
             tmux_session_name,
