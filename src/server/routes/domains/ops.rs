@@ -272,6 +272,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/queue/phase-gates/catalog",
                 get(auto_queue::phase_gate_catalog),
             )
+            .route(
+                "/queue/request-generate",
+                post(auto_queue::request_generate),
+            )
             .route("/channels/{id}/queue", get(queue_api::list_channel_queue))
             .route(
                 "/channels/{id}/watcher-state",

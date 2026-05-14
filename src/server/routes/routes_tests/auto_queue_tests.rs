@@ -11635,6 +11635,123 @@ async fn phase_gate_catalog_endpoint_returns_kinds_and_default() {
 }
 
 #[tokio::test]
+async fn request_generate_rejects_empty_issue_numbers() {
+    // #2126 — input validation must happen before reaching the Discord send
+    // path so callers get a clean 400 even in standalone test mode.
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/queue/request-generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "itismyfield/AgentDesk",
+                        "agent_id": "project-agentdesk",
+                        "issue_numbers": [],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("issue_numbers"),
+        "error must point at the offending field, got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn request_generate_rejects_unknown_allowed_gate_kind() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/queue/request-generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "itismyfield/AgentDesk",
+                        "agent_id": "project-agentdesk",
+                        "issue_numbers": [42],
+                        "allowed_gate_kinds": ["ship-it"],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("ship-it") && error.contains("phase_gate_kind"),
+        "error must name the offending kind, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn request_generate_returns_503_without_discord() {
+    // Without a HealthRegistry attached we expect a clean 503 explaining
+    // Discord is unavailable, not a panic or a misleading 500 (#2126).
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/queue/request-generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "itismyfield/AgentDesk",
+                        "agent_id": "project-agentdesk",
+                        "issue_numbers": [2120, 2121],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("discord")
+    );
+}
+
+#[tokio::test]
 async fn generate_rejects_unknown_phase_gate_kind() {
     // #2125 — entries with a phase_gate_kind not in the catalog must fail
     // with 400 so callers fix the value rather than silently fall back.
