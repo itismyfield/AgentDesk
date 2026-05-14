@@ -14,7 +14,10 @@ pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<GenerateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let guild_id = state.config.discord.guild_id.as_deref();
+    let guild_id = state
+        .config
+        .onboarding
+        .effective_guild_id(&state.config.discord);
     let _ignored_unified_thread = body.unified_thread.is_some();
     let force = body.force.unwrap_or(false);
     let review_mode = match normalize_auto_queue_review_mode(body.review_mode.as_deref()) {

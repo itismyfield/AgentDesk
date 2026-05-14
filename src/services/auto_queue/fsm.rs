@@ -457,7 +457,11 @@ impl AutoQueueActivateDeps {
             engine: state.engine.clone(),
             config: state.config.clone(),
             health_registry: state.health_registry.clone(),
-            guild_id: state.config.discord.guild_id.clone(),
+            guild_id: state
+                .config
+                .onboarding
+                .effective_guild_id(&state.config.discord)
+                .map(|s| s.to_string()),
         }
     }
 

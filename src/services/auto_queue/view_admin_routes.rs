@@ -11,7 +11,11 @@ pub async fn status(
     let input = crate::services::auto_queue::StatusInput {
         repo: query.repo,
         agent_id: query.agent_id,
-        guild_id: state.config.discord.guild_id.clone(),
+        guild_id: state
+            .config
+            .onboarding
+            .effective_guild_id(&state.config.discord)
+            .map(|s| s.to_string()),
     };
 
     let result = state.auto_queue_service().status_with_pg(pool, input).await;
