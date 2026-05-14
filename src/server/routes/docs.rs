@@ -274,6 +274,7 @@ pub(crate) const TOP_40_PAIRED_PATHS: &[(&str, &str)] = &[
     ("POST", "/api/queue/cancel"),
     ("PATCH", "/api/queue/reorder"),
     ("GET", "/api/queue/phase-gates/catalog"),
+    ("POST", "/api/queue/request-generate"),
     ("POST", "/api/github/issues/create"),
     ("GET", "/api/pipeline/cards/{card_id}"),
     ("GET", "/api/analytics/observability"),
@@ -4403,6 +4404,58 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             }),
         )
         .with_curl("curl http://localhost:8787/api/queue/phase-gates/catalog"),
+        ep(
+            "POST",
+            "/api/queue/request-generate",
+            "auto-queue",
+            "Dashboard-facing: send a standardized self-contained instruction to the agent's Discord channel asking it to call /api/queue/generate for the given issues (#2126). Backend owns both the instruction text and channel routing so the dashboard stays decoupled from prompt evolution. Returns 202 with request_id, target, channel_id, dispatched_at, and instruction_preview.",
+        )
+        .with_params([
+            (
+                "repo",
+                body_param("string", true, "GitHub repository (owner/name)"),
+            ),
+            (
+                "agent_id",
+                body_param("string", true, "Target agent role_id (Discord channel target is `agent:<id>`)"),
+            ),
+            (
+                "issue_numbers",
+                body_param(
+                    "number[]",
+                    true,
+                    "GitHub issue numbers the agent should consider for the queue",
+                ),
+            ),
+            (
+                "allowed_gate_kinds",
+                body_param(
+                    "string[]",
+                    false,
+                    "Restrict phase_gate_kind choices to this subset of GET /api/queue/phase-gates/catalog ids",
+                ),
+            ),
+            (
+                "force",
+                body_param("boolean", false, "Reserved; echoed back to caller for confirmation"),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"repo": "itismyfield/AgentDesk", "agent_id": "project-agentdesk", "issue_numbers": [2120, 2121, 2122], "allowed_gate_kinds": ["pr-confirm", "deploy-gate"]}}),
+            json!({
+                "request_id": "req-uuid",
+                "target": "agent:project-agentdesk",
+                "channel_id": "1490141485167808532",
+                "dispatched_at": "2026-05-14T12:30:00+00:00",
+                "instruction_preview": "[자동큐 생성 의뢰] (request_id: req-uuid)…"
+            }),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"repo": "x", "agent_id": "a", "issue_numbers": [1], "allowed_gate_kinds": ["ship-it"]}}),
+            json!({"error": "unknown phase_gate_kind 'ship-it' (see GET /api/queue/phase-gates/catalog)"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/queue/request-generate -H 'Content-Type: application/json' -d '{\"repo\":\"itismyfield/AgentDesk\",\"agent_id\":\"project-agentdesk\",\"issue_numbers\":[2120]}'"),
         ep(
             "GET",
             "/api/channels/{id}/queue",
