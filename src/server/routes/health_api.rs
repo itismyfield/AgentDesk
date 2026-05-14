@@ -7,7 +7,7 @@ use axum::{
 };
 use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Row, postgres::PgRow};
 use std::net::SocketAddr;
 
 use crate::db::session_status::is_active_status;
@@ -24,6 +24,16 @@ struct DispatchOutboxStats {
     retrying: i64,
     permanent_failures: i64,
     oldest_pending_age: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AckDispatchOutboxFailuresRequest {
+    #[serde(default)]
+    pub ids: Option<Vec<i64>>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -570,6 +580,111 @@ pub async fn health_detail_handler(
             .into_response();
     }
     health_response(&state, true).await
+}
+
+pub async fn list_dispatch_outbox_failures_handler(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ok": false, "error": "pg pool unavailable"})),
+        );
+    };
+    match load_failed_dispatch_outbox_rows(pool, None).await {
+        Ok(rows) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "count": rows.len(),
+                "rows": rows,
+            })),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"ok": false, "error": error.to_string()})),
+        ),
+    }
+}
+
+pub async fn ack_dispatch_outbox_failures_handler(
+    State(state): State<AppState>,
+    Json(request): Json<AckDispatchOutboxFailuresRequest>,
+) -> impl IntoResponse {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ok": false, "error": "pg pool unavailable"})),
+        );
+    };
+    let ids = request.ids.as_deref();
+    if ids.is_none() && !request.dry_run.unwrap_or(false) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "ids required unless dry_run is true",
+            })),
+        );
+    }
+    let rows = match load_failed_dispatch_outbox_rows(pool, ids).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"ok": false, "error": error.to_string()})),
+            );
+        }
+    };
+    if rows.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "acknowledged": 0,
+                "dry_run": request.dry_run.unwrap_or(false),
+                "rows": [],
+            })),
+        );
+    }
+    if request.dry_run.unwrap_or(false) {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "acknowledged": 0,
+                "dry_run": true,
+                "would_acknowledge": rows.len(),
+                "rows": rows,
+            })),
+        );
+    }
+
+    let row_ids = rows
+        .iter()
+        .filter_map(|row| row.get("id").and_then(serde_json::Value::as_i64))
+        .collect::<Vec<_>>();
+    let reason = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("operator acknowledged failed dispatch_outbox rows");
+    match acknowledge_failed_dispatch_outbox_rows(pool, &row_ids, reason).await {
+        Ok(acknowledged_ids) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "acknowledged": acknowledged_ids.len(),
+                "dry_run": false,
+                "acknowledged_ids": acknowledged_ids,
+            })),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"ok": false, "error": error.to_string()})),
+        ),
+    }
 }
 
 /// GET /api/doctor/startup/latest — protected/local latest startup doctor artifact.
@@ -1361,4 +1476,114 @@ async fn load_dispatch_outbox_stats_pg(pool: &PgPool) -> Option<DispatchOutboxSt
         permanent_failures: failed,
         oldest_pending_age,
     })
+}
+
+async fn load_failed_dispatch_outbox_rows(
+    pool: &PgPool,
+    ids: Option<&[i64]>,
+) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows = if let Some(ids) = ids {
+        if ids.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query(
+                "SELECT o.id,
+                        o.dispatch_id,
+                        o.action,
+                        o.agent_id,
+                        o.card_id,
+                        o.title,
+                        o.retry_count,
+                        o.error,
+                        o.delivery_status,
+                        o.delivery_result,
+                        o.created_at,
+                        o.processed_at,
+                        td.status AS dispatch_status
+                   FROM dispatch_outbox o
+              LEFT JOIN task_dispatches td ON td.id = o.dispatch_id
+                  WHERE o.status = 'failed'
+                    AND o.id = ANY($1)
+               ORDER BY o.processed_at DESC NULLS LAST, o.id DESC",
+            )
+            .bind(ids)
+            .fetch_all(pool)
+            .await?
+        }
+    } else {
+        sqlx::query(
+            "SELECT o.id,
+                    o.dispatch_id,
+                    o.action,
+                    o.agent_id,
+                    o.card_id,
+                    o.title,
+                    o.retry_count,
+                    o.error,
+                    o.delivery_status,
+                    o.delivery_result,
+                    o.created_at,
+                    o.processed_at,
+                    td.status AS dispatch_status
+               FROM dispatch_outbox o
+          LEFT JOIN task_dispatches td ON td.id = o.dispatch_id
+              WHERE o.status = 'failed'
+           ORDER BY o.processed_at DESC NULLS LAST, o.id DESC
+              LIMIT 100",
+        )
+        .fetch_all(pool)
+        .await?
+    };
+
+    rows.into_iter()
+        .map(dispatch_outbox_failure_row_json)
+        .collect()
+}
+
+fn dispatch_outbox_failure_row_json(row: PgRow) -> Result<serde_json::Value, sqlx::Error> {
+    Ok(serde_json::json!({
+        "id": row.try_get::<i64, _>("id")?,
+        "dispatch_id": row.try_get::<Option<String>, _>("dispatch_id")?,
+        "action": row.try_get::<String, _>("action")?,
+        "agent_id": row.try_get::<Option<String>, _>("agent_id")?,
+        "card_id": row.try_get::<Option<String>, _>("card_id")?,
+        "title": row.try_get::<Option<String>, _>("title")?,
+        "retry_count": row.try_get::<i32, _>("retry_count")?,
+        "error": row.try_get::<Option<String>, _>("error")?,
+        "delivery_status": row.try_get::<Option<String>, _>("delivery_status")?,
+        "delivery_result": row.try_get::<Option<serde_json::Value>, _>("delivery_result")?,
+        "created_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("created_at")?,
+        "processed_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("processed_at")?,
+        "dispatch_status": row.try_get::<Option<String>, _>("dispatch_status")?,
+    }))
+}
+
+async fn acknowledge_failed_dispatch_outbox_rows(
+    pool: &PgPool,
+    ids: &[i64],
+    reason: &str,
+) -> Result<Vec<i64>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_scalar(
+        "UPDATE dispatch_outbox
+            SET status = 'acknowledged',
+                delivery_status = 'acknowledged',
+                delivery_result = jsonb_build_object(
+                    'acknowledged_at', NOW(),
+                    'reason', $2::TEXT,
+                    'previous_delivery_status', delivery_status,
+                    'previous_delivery_result', delivery_result
+                ),
+                claimed_at = NULL,
+                claim_owner = NULL
+          WHERE status = 'failed'
+            AND id = ANY($1)
+      RETURNING id",
+    )
+    .bind(ids)
+    .bind(reason)
+    .fetch_all(pool)
+    .await
 }

@@ -91,6 +91,127 @@ async fn health_detail_and_stale_mailbox_repair_pg_require_bearer_when_auth_enab
 }
 
 #[tokio::test]
+async fn dispatch_outbox_failed_acknowledge_endpoint_marks_rows_non_permanent() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, status, title, created_at, updated_at)
+         VALUES ($1, 'completed', 'ack test dispatch', NOW(), NOW())",
+    )
+    .bind("dispatch-ack-test")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (dispatch_id, action, status, retry_count, error, created_at)
+         VALUES ($1, 'notify', 'failed', 5, 'delivery exhausted', NOW())
+         RETURNING id",
+    )
+    .bind("dispatch-ack-test")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let list_response = app
+        .clone()
+        .oneshot(local_get_request("/dispatch-outbox/failed"))
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    assert_eq!(list_json["count"], 1);
+    let row_id = list_json["rows"][0]["id"].as_i64().unwrap();
+    assert_eq!(list_json["rows"][0]["dispatch_status"], "completed");
+    assert_eq!(list_json["rows"][0]["retry_count"], 5);
+
+    let dry_run_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dispatch-outbox/failed")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"ids": [row_id], "dry_run": true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dry_run_response.status(), StatusCode::OK);
+    let still_failed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'failed'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(still_failed, 1, "dry_run must not mutate failed rows");
+
+    let missing_ids_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dispatch-outbox/failed")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_ids_response.status(), StatusCode::BAD_REQUEST);
+
+    let ack_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dispatch-outbox/failed")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"ids": [row_id], "reason": "obsolete notification"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ack_response.status(), StatusCode::OK);
+    let ack_body = axum::body::to_bytes(ack_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let ack_json: serde_json::Value = serde_json::from_slice(&ack_body).unwrap();
+    assert_eq!(ack_json["acknowledged"], 1);
+    assert_eq!(ack_json["acknowledged_ids"][0], row_id);
+
+    let status: String = sqlx::query_scalar("SELECT status FROM dispatch_outbox WHERE id = $1")
+        .bind(row_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "acknowledged");
+    let remaining_failed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'failed'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining_failed, 0);
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn health_surfaces_latest_startup_doctor_summary_without_raw_checks() {
     let _lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();

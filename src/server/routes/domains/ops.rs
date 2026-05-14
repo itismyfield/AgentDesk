@@ -20,6 +20,11 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/health/detail", get(health_api::health_detail_handler))
             .route(
+                "/dispatch-outbox/failed",
+                get(health_api::list_dispatch_outbox_failures_handler)
+                    .post(health_api::ack_dispatch_outbox_failures_handler),
+            )
+            .route(
                 "/doctor/startup/latest",
                 get(health_api::startup_doctor_latest_handler),
             )

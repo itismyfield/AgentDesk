@@ -585,6 +585,79 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl http://localhost:8787/api/health/detail"),
         ep(
             "GET",
+            "/api/dispatch-outbox/failed",
+            "health",
+            "List up to 100 failed dispatch_outbox rows that make the startup doctor dispatch_outbox check fail.",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "ok": true,
+                "count": 1,
+                "rows": [{
+                    "id": 42,
+                    "dispatch_id": "dispatch-123",
+                    "action": "notify",
+                    "agent_id": "project-agentdesk",
+                    "retry_count": 5,
+                    "error": "delivery failed",
+                    "dispatch_status": "completed"
+                }]
+            }),
+        )
+        .with_error_example(
+            503,
+            json!({}),
+            json!({"ok": false, "error": "pg pool unavailable"}),
+        )
+        .with_error_example(
+            401,
+            json!({}),
+            json!({"ok": false, "error": "auth_token required for non-loopback host"}),
+        )
+        .with_curl("curl http://localhost:8787/api/dispatch-outbox/failed"),
+        ep(
+            "POST",
+            "/api/dispatch-outbox/failed",
+            "health",
+            "Acknowledge failed dispatch_outbox rows without deleting them. Acknowledged rows no longer count as permanent failures.",
+        )
+        .with_params([
+            (
+                "ids",
+                body_param("array<integer>", true, "Failed dispatch_outbox row ids to acknowledge. Required unless dry_run is true."),
+            ),
+            (
+                "reason",
+                body_param("string", false, "Operator-visible acknowledgement reason"),
+            ),
+            (
+                "dry_run",
+                body_param("boolean", false, "When true, return matching rows without mutating them"),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"ids": [42], "reason": "obsolete completed dispatch notification", "dry_run": false}}),
+            json!({"ok": true, "acknowledged": 1, "dry_run": false, "acknowledged_ids": [42]}),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {}}),
+            json!({"ok": false, "error": "ids required unless dry_run is true"}),
+        )
+        .with_error_example(
+            503,
+            json!({"body": {"dry_run": true}}),
+            json!({"ok": false, "error": "pg pool unavailable"}),
+        )
+        .with_error_example(
+            401,
+            json!({"body": {"ids": [42]}}),
+            json!({"ok": false, "error": "auth_token required for non-loopback host"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/dispatch-outbox/failed -H 'Content-Type: application/json' -d '{\"dry_run\":true}'"),
+        ep(
+            "GET",
             "/api/prompt-manifest/retention",
             "monitoring",
             "Prompt-manifest storage stats and the boot-time retention config snapshot; retention config changes require process restart and are not hot-reloaded.",
