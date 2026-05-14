@@ -4,6 +4,7 @@
 //! Callers in async contexts should use `tokio::task::spawn_blocking`.
 
 use super::binary_resolver;
+use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 /// Format session name as an exact-match target (prefix with `=`, suffix with
@@ -185,6 +186,48 @@ pub fn send_keys(session_name: &str, keys: &[&str]) -> Result<Output, String> {
         .args(&args)
         .output()
         .map_err(|e| format!("tmux send-keys failed: {e}"))
+}
+
+/// Send literal text to a tmux session without interpreting tmux key names.
+pub fn send_literal(session_name: &str, text: &str) -> Result<Output, String> {
+    let target = exact_target(session_name);
+    tmux_command()
+        .args(["send-keys", "-t", &target, "-l", "--", text])
+        .output()
+        .map_err(|e| format!("tmux send-keys -l failed: {e}"))
+}
+
+/// Load literal text into a named tmux buffer via stdin.
+pub fn load_buffer(buffer_name: &str, text: &str) -> Result<Output, String> {
+    let mut child = tmux_command()
+        .args(["load-buffer", "-b", buffer_name, "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("tmux load-buffer failed: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("tmux load-buffer stdin failed: {e}"))?;
+    }
+    child
+        .wait_with_output()
+        .map_err(|e| format!("tmux load-buffer wait failed: {e}"))
+}
+
+/// Paste a named tmux buffer to the active pane.
+pub fn paste_buffer(session_name: &str, buffer_name: &str, delete: bool) -> Result<Output, String> {
+    let target = exact_target(session_name);
+    let mut args = vec!["paste-buffer"];
+    if delete {
+        args.push("-d");
+    }
+    args.extend(["-b", buffer_name, "-t", &target]);
+    tmux_command()
+        .args(&args)
+        .output()
+        .map_err(|e| format!("tmux paste-buffer failed: {e}"))
 }
 
 /// Return the PID of the active pane process for a tmux session.
