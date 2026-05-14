@@ -150,6 +150,206 @@ async fn create_issue_route_pg_builds_pmd_body_and_agent_label() {
 }
 
 #[tokio::test]
+async fn create_issue_route_dry_run_renders_without_side_effects() {
+    let _env_lock = env_lock();
+    let gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 821);
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+    sqlx::query("INSERT INTO agents (id, name) VALUES ($1, $2)")
+        .bind("adk-backend")
+        .bind("ADK Backend")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/issues")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "repo": "ADK",
+                        "title": "dry-run preview",
+                        "background": "Preview the issue body without writing external systems.",
+                        "content": ["render the body"],
+                        "dod": ["no side effects"],
+                        "agent_id": "adk-backend",
+                        "announcement_channel_id": "1490000000000000001",
+                        "dry_run": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["dry_run"], true);
+    assert!(json["issue"]["number"].is_null());
+    assert!(json["issue"]["url"].is_null());
+    assert_eq!(json["issue"]["repo"], "itismyfield/AgentDesk");
+    assert!(json["kanban_card_id"].is_null());
+    assert_eq!(json["announcement_channel_id"], "1490000000000000001");
+    assert!(json["announcement_message_id"].is_null());
+    assert!(json["announcement_sync_error"].is_null());
+    assert!(json["kanban_card_sync_error"].is_null());
+    assert_eq!(json["applied_labels"], json!(["agent:adk-backend"]));
+    assert_eq!(json["validation_warnings"], json!([]));
+    assert!(json["rendered_body"].as_str().unwrap().contains("## 배경"));
+    assert!(
+        json["rendered_body"]
+            .as_str()
+            .unwrap()
+            .contains("## 내용\n- render the body")
+    );
+    assert!(
+        json["rendered_body"]
+            .as_str()
+            .unwrap()
+            .contains("## DoD\n- [ ] no side effects")
+    );
+
+    assert!(
+        !gh.path().join("issue-create-args.txt").exists(),
+        "dry_run must not call gh issue create"
+    );
+    let card_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM kanban_cards")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(card_count, 0, "dry_run must not create a kanban card");
+    let announcement_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue_announcements")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        announcement_count, 0,
+        "dry_run must not create an announcement record"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn create_issue_route_dry_run_validation_errors_include_warnings() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/issues")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "repo": "ADK",
+                        "title": "",
+                        "background": "",
+                        "content": [],
+                        "dod": ["dod"],
+                        "dry_run": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["dry_run"], true);
+    assert_eq!(json["error"], "title is required");
+    let warnings = json["validation_warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 3);
+    assert_eq!(warnings.first().unwrap(), "title is required");
+    for expected in [
+        "title is required",
+        "background is required",
+        "content must contain at least one item",
+    ] {
+        assert!(
+            warnings.iter().any(|warning| warning == expected),
+            "missing validation warning {expected}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_issue_route_dry_run_warns_for_unknown_agent() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/issues")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "repo": "ADK",
+                        "title": "dry-run unknown agent",
+                        "background": "background",
+                        "content": ["content"],
+                        "dod": ["dod"],
+                        "agent_id": "missing-agent",
+                        "dry_run": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["applied_labels"], json!(["agent:missing-agent"]));
+    assert_eq!(
+        json["validation_warnings"],
+        json!(["unknown agent_id: missing-agent"])
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn create_issue_route_pg_returns_kanban_card_id() {
     let _env_lock = env_lock();
     let _gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 820);
@@ -584,6 +784,9 @@ async fn github_docs_include_issue_creation_endpoint() {
     assert_eq!(create_issue["params"]["repo"]["required"], true);
     assert_eq!(create_issue["params"]["dod"]["type"], "array[string]");
     assert_eq!(create_issue["params"]["agent_id"]["required"], false);
+    assert_eq!(create_issue["params"]["dry_run"]["type"], "boolean");
+    assert_eq!(create_issue["params"]["dry_run"]["default"], false);
+    assert_eq!(create_issue["dry_run_example"]["response"]["dry_run"], true);
 }
 
 #[tokio::test]

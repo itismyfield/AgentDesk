@@ -43,6 +43,7 @@ pub struct CreateIssueBody {
     pub auto_dispatch: Option<bool>,
     pub block_on: Option<Vec<i64>>,
     pub announcement_channel_id: Option<String>,
+    pub dry_run: Option<bool>,
 }
 
 const ISSUE_FORMAT_VERSION: u32 = 1;
@@ -206,6 +207,42 @@ fn build_pmd_issue_body(body: &CreateIssueBody) -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
+fn collect_issue_body_validation_errors(body: &CreateIssueBody) -> Vec<String> {
+    let mut errors = Vec::new();
+    if trim_non_empty(&body.background).is_none() {
+        errors.push("background is required".to_string());
+    }
+    if normalize_string_list(&body.content).is_empty() {
+        errors.push("content must contain at least one item".to_string());
+    }
+    let dod = normalize_string_list(&body.dod);
+    if dod.is_empty() {
+        errors.push("dod must contain at least one item".to_string());
+    } else if dod.len() > 10 {
+        errors.push("dod items must be 10 or fewer".to_string());
+    }
+    errors
+}
+
+fn issue_validation_error(error: String, dry_run: bool) -> (StatusCode, Json<serde_json::Value>) {
+    if dry_run {
+        let warning = error.clone();
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "dry_run": true,
+                "error": error,
+                "validation_warnings": [warning],
+            })),
+        )
+    } else {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": error})),
+        )
+    }
+}
+
 // ── Handlers ───────────────────────────────────────────────────
 
 /// POST /api/github/issues/create
@@ -213,7 +250,17 @@ pub async fn create_issue(
     State(state): State<AppState>,
     Json(body): Json<CreateIssueBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let dry_run = body.dry_run.unwrap_or(false);
     if body.auto_dispatch.unwrap_or(false) {
+        if dry_run {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({
+                    "dry_run": true,
+                    "error": "auto_dispatch is not implemented yet",
+                })),
+            );
+        }
         return (
             StatusCode::NOT_IMPLEMENTED,
             Json(json!({"error": "auto_dispatch is not implemented yet"})),
@@ -224,46 +271,113 @@ pub async fn create_issue(
         .as_ref()
         .is_some_and(|items| !items.is_empty())
     {
+        if dry_run {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({
+                    "dry_run": true,
+                    "error": "block_on is not implemented yet",
+                })),
+            );
+        }
         return (
             StatusCode::NOT_IMPLEMENTED,
             Json(json!({"error": "block_on is not implemented yet"})),
         );
     }
 
-    let repo = match resolve_issue_repo(&body.repo) {
-        Ok(repo) => repo,
-        Err(error) => {
+    if dry_run {
+        let mut validation_warnings = Vec::new();
+        let repo = match resolve_issue_repo(&body.repo) {
+            Ok(repo) => Some(repo),
+            Err(error) => {
+                validation_warnings.push(error);
+                None
+            }
+        };
+        if trim_non_empty(&body.title).is_none() {
+            validation_warnings.push("title is required".to_string());
+        }
+        validation_warnings.extend(collect_issue_body_validation_errors(&body));
+
+        if !validation_warnings.is_empty() {
+            let error = validation_warnings
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "validation failed".to_string());
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({"error": error})),
+                Json(json!({
+                    "dry_run": true,
+                    "error": error,
+                    "validation_warnings": validation_warnings,
+                })),
             );
         }
+
+        let repo = repo.expect("validated repo must exist");
+        let issue_body = build_pmd_issue_body(&body).expect("validated issue body must render");
+        let applied_labels = body
+            .agent_id
+            .as_deref()
+            .and_then(trim_non_empty)
+            .map(|agent_id| vec![format!("agent:{agent_id}")])
+            .unwrap_or_default();
+        if let (Some(pool), Some(agent_id)) = (
+            state.pg_pool_ref(),
+            body.agent_id.as_deref().and_then(trim_non_empty),
+        ) {
+            match resolve_known_agent_id_pg(pool, Some(&agent_id)).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    validation_warnings.push(format!("unknown agent_id: {agent_id}"));
+                }
+                Err(error) => {
+                    validation_warnings.push(format!("agent_id validation failed: {error}"));
+                }
+            }
+        }
+        let announcement_channel_id = body
+            .announcement_channel_id
+            .as_deref()
+            .and_then(trim_non_empty);
+
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "dry_run": true,
+                "issue": {
+                    "number": null,
+                    "url": null,
+                    "repo": repo,
+                },
+                "kanban_card_id": null,
+                "kanban_card_sync_error": null,
+                "announcement_channel_id": announcement_channel_id,
+                "announcement_message_id": null,
+                "announcement_sync_error": null,
+                "applied_labels": applied_labels,
+                "rendered_body": issue_body,
+                "validation_warnings": validation_warnings,
+                "issue_format_version": ISSUE_FORMAT_VERSION,
+                // deprecated alias kept for transition; remove after clients migrate
+                "pmd_format_version": ISSUE_FORMAT_VERSION,
+            })),
+        );
+    }
+
+    let repo = match resolve_issue_repo(&body.repo) {
+        Ok(repo) => repo,
+        Err(error) => return issue_validation_error(error, dry_run),
     };
     let title = match trim_non_empty(&body.title) {
         Some(title) => title,
-        None => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({"error": "title is required"})),
-            );
-        }
+        None => return issue_validation_error("title is required".to_string(), dry_run),
     };
     let issue_body = match build_pmd_issue_body(&body) {
         Ok(issue_body) => issue_body,
-        Err(error) => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({"error": error})),
-            );
-        }
+        Err(error) => return issue_validation_error(error, dry_run),
     };
-
-    if !github::gh_available() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "gh CLI is not available on this system"})),
-        );
-    }
 
     let applied_labels = body
         .agent_id
@@ -271,6 +385,13 @@ pub async fn create_issue(
         .and_then(trim_non_empty)
         .map(|agent_id| vec![format!("agent:{agent_id}")])
         .unwrap_or_default();
+
+    if !github::gh_available() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "gh CLI is not available on this system"})),
+        );
+    }
 
     match github::create_issue_with_labels(&repo, &title, &issue_body, &applied_labels).await {
         Ok(created) => {

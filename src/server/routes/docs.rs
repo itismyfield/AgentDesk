@@ -68,6 +68,10 @@ struct EndpointDoc {
     /// see both the success shape and the most common error shape at once.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_example: Option<ExampleDoc>,
+    /// Successful preview-only scenario that validates and renders the response
+    /// contract without performing the endpoint's external side effects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run_example: Option<ExampleDoc>,
     /// Nested operation-level failure that can still be returned with a
     /// successful HTTP status. Used for partial-success contracts where callers
     /// must inspect nested result fields instead of trusting the status code.
@@ -111,6 +115,16 @@ impl EndpointDoc {
             response,
             status: Some(status),
             scenario: Some("error"),
+        });
+        self
+    }
+
+    fn with_dry_run_example(mut self, request: Value, response: Value) -> Self {
+        self.dry_run_example = Some(ExampleDoc {
+            request,
+            response,
+            status: Some(200),
+            scenario: Some("dry_run"),
         });
         self
     }
@@ -164,6 +178,7 @@ fn ep(
         params: BTreeMap::new(),
         example: None,
         error_example: None,
+        dry_run_example: None,
         partial_success_example: None,
         curl_example: None,
         deprecated: false,
@@ -2803,7 +2818,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 body_param(
                     "string",
                     false,
-                    "Optional agent id converted into the `agent:<id>` GitHub label",
+                    "Optional agent id converted into the `agent:<id>` GitHub label; dry_run also warns when the agent is unknown but still previews the label",
                 ),
             ),
             (
@@ -2846,6 +2861,15 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "Reserved for dependency blocking; currently returns 501 when non-empty",
                 ),
             ),
+            (
+                "dry_run",
+                body_param(
+                    "boolean",
+                    false,
+                    "Preview validation, rendered markdown, and labels without creating GitHub issue, kanban card, or announcement; does not check gh CLI availability",
+                )
+                .with_default(false),
+            ),
         ])
         .with_example(
             json!({
@@ -2873,10 +2897,39 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "pmd_format_version": 1
             }),
         )
+        .with_dry_run_example(
+            json!({
+                "repo": "ADK",
+                "title": "Preview issue",
+                "background": "Check the generated markdown before creating anything.",
+                "content": ["render issue body"],
+                "dod": ["response includes rendered_body"],
+                "agent_id": "project-agentdesk",
+                "dry_run": true
+            }),
+            json!({
+                "dry_run": true,
+                "issue": {
+                    "number": null,
+                    "url": null,
+                    "repo": "itismyfield/AgentDesk"
+                },
+                "kanban_card_id": null,
+                "kanban_card_sync_error": null,
+                "announcement_channel_id": null,
+                "announcement_message_id": null,
+                "announcement_sync_error": null,
+                "applied_labels": ["agent:project-agentdesk"],
+                "rendered_body": "## 배경\nCheck the generated markdown before creating anything.\n\n## 내용\n- render issue body\n\n## DoD\n- [ ] response includes rendered_body",
+                "validation_warnings": [],
+                "issue_format_version": 1,
+                "pmd_format_version": 1
+            }),
+        )
         .with_error_example(
-            400,
-            json!({"body": {"repo": "ADK", "title": "no DoD"}}),
-            json!({"error": "dod is required and must contain 1-10 entries"}),
+            422,
+            json!({"body": {"repo": "ADK", "title": "no DoD", "background": "bg", "content": ["item"], "dod": []}}),
+            json!({"error": "dod must contain at least one item"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/github/issues/create -H 'Content-Type: application/json' -d '{\"repo\":\"ADK\",\"title\":\"Example\",\"background\":\"bg\",\"content\":[\"do thing\"],\"dod\":[\"it works\"]}'"),
         ep("POST", "/api/github/repos", "github", "Register GitHub repo // TODO: example"),
