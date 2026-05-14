@@ -285,11 +285,17 @@ pub(super) fn wrap_user_prompt_with_author(
     sanitized_prompt: String,
 ) -> String {
     let author = normalize_turn_author_name(request_owner_name, request_owner);
-    format!(
-        "[User: {author} (ID: {})]\n{}",
-        request_owner.get(),
-        sanitized_prompt
-    )
+    let prefix = format!("[User: {author} (ID: {})]", request_owner.get());
+    let normalized_prompt = sanitized_prompt.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized_prompt.is_empty() {
+        prefix
+    } else if normalized_prompt.contains('\n') {
+        format!("{prefix}\n{normalized_prompt}")
+    } else {
+        // Keep ordinary Discord messages on one terminal line so TUI input can
+        // use literal send-keys instead of multiline paste-buffer submission.
+        format!("{prefix} {normalized_prompt}")
+    }
 }
 
 pub(super) fn build_race_requeued_intervention(
@@ -310,5 +316,30 @@ pub(super) fn build_race_requeued_intervention(
         reply_context,
         has_reply_boundary,
         merge_consecutive,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use poise::serenity_prelude::UserId;
+
+    #[test]
+    fn wrap_user_prompt_with_author_keeps_single_line_body_inline() {
+        let prompt = wrap_user_prompt_with_author(
+            "  Alice [ops]\nteam  ",
+            UserId::new(77),
+            "deploy it".to_string(),
+        );
+
+        assert_eq!(prompt, "[User: Alice (ops) team (ID: 77)] deploy it");
+    }
+
+    #[test]
+    fn wrap_user_prompt_with_author_preserves_multiline_body() {
+        let prompt =
+            wrap_user_prompt_with_author("Alice", UserId::new(77), "line 1\r\nline 2".to_string());
+
+        assert_eq!(prompt, "[User: Alice (ID: 77)]\nline 1\nline 2");
     }
 }

@@ -7151,7 +7151,15 @@ mod tests {
             "deploy it".to_string(),
         );
 
-        assert_eq!(prompt, "[User: Alice (ops) team (ID: 77)]\ndeploy it");
+        assert_eq!(prompt, "[User: Alice (ops) team (ID: 77)] deploy it");
+    }
+
+    #[test]
+    fn wrap_user_prompt_with_author_preserves_multiline_body() {
+        let prompt =
+            wrap_user_prompt_with_author("Alice", UserId::new(77), "line 1\r\nline 2".to_string());
+
+        assert_eq!(prompt, "[User: Alice (ID: 77)]\nline 1\nline 2");
     }
 
     #[test]
