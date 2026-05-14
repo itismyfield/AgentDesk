@@ -406,6 +406,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
             None,
             None,
             None,
+            Some(channel_id),
             None,
             shared.api_port,
         )

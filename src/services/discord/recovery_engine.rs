@@ -2709,6 +2709,7 @@ pub(super) async fn restore_inflight_turns(
                 .or(lookup_pending_dispatch_for_thread(shared.api_port, channel_id.get()).await)
                 .as_deref(),
             adk_thread_channel_id,
+            Some(channel_id),
             role_binding
                 .as_ref()
                 .map(|binding| binding.role_id.as_str()),

@@ -30,6 +30,7 @@ async fn persist_watcher_provider_session_id(
         session_id,
         Some(session_id),
         provider,
+        channel_id,
         shared.api_port,
     )
     .await;
@@ -2952,6 +2953,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 None,
                 None,
                 thread_channel_id,
+                Some(channel_id),
                 agent_id.as_deref(),
                 shared.api_port,
             )
@@ -3219,6 +3221,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             None, // cwd
             None, // dispatch_id
             thread_channel_id,
+            Some(channel_id),
             agent_id.as_deref(),
             api_port,
         )

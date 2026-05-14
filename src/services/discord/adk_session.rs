@@ -167,6 +167,7 @@ pub(super) async fn post_adk_session_status(
     cwd: Option<&str>,
     dispatch_id: Option<&str>,
     thread_channel_id: Option<u64>,
+    channel_id: Option<serenity::ChannelId>,
     agent_id: Option<&str>,
     _api_port: u16,
 ) {
@@ -190,6 +191,7 @@ pub(super) async fn post_adk_session_status(
         thread_channel_id: thread_channel_id.map(|id| id.to_string()),
         claude_session_id: None,
         session_id: None,
+        channel_id: channel_id.map(|id| id.get().to_string()),
     };
 
     if let Err(err) = super::internal_api::hook_session(body).await {
@@ -233,6 +235,7 @@ pub(super) async fn save_provider_session_id(
     session_id: &str,
     raw_provider_session_id: Option<&str>,
     provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
     _api_port: u16,
 ) {
     let body = crate::server::routes::dispatched_sessions::HookSessionBody {
@@ -250,6 +253,7 @@ pub(super) async fn save_provider_session_id(
         thread_channel_id: None,
         claude_session_id: Some(session_id.to_string()),
         session_id: raw_provider_session_id.map(str::to_string),
+        channel_id: Some(channel_id.get().to_string()),
     };
     if let Err(err) = super::internal_api::hook_session(body).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
