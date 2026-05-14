@@ -1,6 +1,9 @@
 use std::process::Output;
+use std::time::{Duration, Instant};
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
+const PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
+const CLAUDE_TUI_PROMPT_MARKER: &str = "\u{276f}";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TuiInputAction {
@@ -29,6 +32,7 @@ pub fn plan_cancel() -> Vec<TuiInputAction> {
 }
 
 pub fn send_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
+    wait_for_prompt_ready(session_name, PROMPT_READY_TIMEOUT)?;
     run_actions(session_name, &plan_prompt_submit(prompt)?)
 }
 
@@ -76,6 +80,31 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
     } else {
         Err(format!("tmux send {action_name} failed: {stderr}"))
     }
+}
+
+fn wait_for_prompt_ready(session_name: &str, timeout: Duration) -> Result<(), String> {
+    let start = Instant::now();
+    let mut wait_interval = Duration::from_millis(100);
+    loop {
+        if let Some(pane) = crate::services::platform::tmux::capture_pane(session_name, -80)
+            && pane_looks_ready_for_prompt(&pane)
+        {
+            return Ok(());
+        }
+        if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(session_name) {
+            return Err("claude tui session died before prompt input was ready".to_string());
+        }
+        if start.elapsed() >= timeout {
+            return Err("timeout waiting for claude tui prompt input readiness".to_string());
+        }
+        std::thread::sleep(wait_interval);
+        wait_interval = std::cmp::min(wait_interval * 2, Duration::from_millis(1000));
+    }
+}
+
+fn pane_looks_ready_for_prompt(pane: &str) -> bool {
+    pane.lines()
+        .any(|line| line.trim_start().starts_with(CLAUDE_TUI_PROMPT_MARKER))
 }
 
 fn validate_prompt_text(input: &str) -> Result<(), String> {
@@ -144,6 +173,20 @@ mod tests {
     #[test]
     fn cancel_uses_escape() {
         assert_eq!(plan_cancel(), vec![TuiInputAction::Escape]);
+    }
+
+    #[test]
+    fn pane_ready_detection_matches_claude_prompt_marker() {
+        let pane = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
+
+        assert!(pane_looks_ready_for_prompt(pane));
+    }
+
+    #[test]
+    fn pane_ready_detection_ignores_non_prompt_status_text() {
+        let pane = "Claude Code v2.1.141\nloading plugins\nbypass permissions on";
+
+        assert!(!pane_looks_ready_for_prompt(pane));
     }
 
     #[test]
