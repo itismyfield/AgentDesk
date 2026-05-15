@@ -2251,7 +2251,11 @@ pub(in crate::services::discord) async fn handle_text_message(
             if workspace.is_none()
                 && let Some(role_channel_id) = voice_role_channel_id
             {
-                workspace = settings::resolve_workspace(role_channel_id, None);
+                workspace = shared
+                    .voice_barge_in
+                    .agent_voice_workspace_for(channel_id)
+                    .await
+                    .or_else(|| settings::resolve_workspace(role_channel_id, None));
                 if workspace.is_some() {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(

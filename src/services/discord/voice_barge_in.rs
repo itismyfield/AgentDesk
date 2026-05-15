@@ -174,7 +174,9 @@ fn agent_voice_matches_channel(agent: &crate::config::AgentDef, channel_id: Chan
         == Some(channel_id.get())
 }
 
-fn agent_voice_background_channel(agent: &crate::config::AgentDef) -> Option<ChannelId> {
+fn agent_voice_background_agent_channel(
+    agent: &crate::config::AgentDef,
+) -> Option<&crate::config::AgentChannel> {
     let preferred_provider = agent.provider.trim();
     if !preferred_provider.is_empty()
         && let Some((_, Some(channel))) = agent
@@ -182,11 +184,8 @@ fn agent_voice_background_channel(agent: &crate::config::AgentDef) -> Option<Cha
             .iter()
             .into_iter()
             .find(|(provider, channel)| *provider == preferred_provider && channel.is_some())
-        && let Some(channel_id) = channel
-            .channel_id()
-            .and_then(|value| value.parse::<u64>().ok())
     {
-        return Some(ChannelId::new(channel_id));
+        return Some(channel);
     }
 
     agent
@@ -194,12 +193,28 @@ fn agent_voice_background_channel(agent: &crate::config::AgentDef) -> Option<Cha
         .iter()
         .into_iter()
         .filter_map(|(_, channel)| channel)
-        .find_map(|channel| {
-            channel
-                .channel_id()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(ChannelId::new)
-        })
+        .next()
+}
+
+fn agent_voice_background_channel(agent: &crate::config::AgentDef) -> Option<ChannelId> {
+    agent_voice_background_agent_channel(agent).and_then(|channel| {
+        channel
+            .channel_id()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(ChannelId::new)
+    })
+}
+
+fn expand_workspace_path(path: &str) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if path == "~" {
+            return home.display().to_string();
+        }
+        if let Some(rest) = path.strip_prefix("~/") {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
 }
 
 fn agent_text_channel_matches(agent: &crate::config::AgentDef, channel_id: ChannelId) -> bool {
@@ -1590,6 +1605,20 @@ impl VoiceBargeInRuntime {
             .iter()
             .find(|agent| agent_voice_matches_channel(agent, channel_id))
             .and_then(agent_voice_background_channel)
+    }
+
+    pub(in crate::services::discord) async fn agent_voice_workspace_for(
+        &self,
+        channel_id: ChannelId,
+    ) -> Option<String> {
+        self.cached_config()
+            .await
+            .agents
+            .iter()
+            .find(|agent| agent_voice_matches_channel(agent, channel_id))
+            .and_then(agent_voice_background_agent_channel)
+            .and_then(crate::config::AgentChannel::workspace)
+            .map(|workspace| expand_workspace_path(&workspace))
     }
 
     async fn resolve_effective_foreground_config(
