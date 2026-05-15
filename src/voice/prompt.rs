@@ -133,6 +133,42 @@ pub(crate) fn voice_foreground_prompt(text: &str, language: &str, max_chars: usi
     lines.join("\n")
 }
 
+pub(crate) fn voice_channel_text_prompt(text: &str, language: &str, max_chars: usize) -> String {
+    let english = language.trim().to_ascii_lowercase().starts_with("en");
+    let limit = max_chars.max(80);
+    let mut lines = if english {
+        vec![
+            "You are the text reply layer for an AgentDesk Discord voice channel.",
+            "Use the agent's voice-mode quick model. Reply directly in this voice channel chat.",
+            "Do not run tools, edit files, deploy, delete, send external messages, or start background work.",
+            "For real work requests, briefly say that this voice-channel chat can answer quick questions only and that work should be requested in the main agent channel.",
+            "Do not mention routing metadata, channel IDs, CLI metadata, or session IDs.",
+        ]
+    } else {
+        vec![
+            "너는 AgentDesk Discord 보이스채널의 텍스트 답변 레이어다.",
+            "에이전트의 voice-mode 빠른 모델로 이 보이스채널 채팅에 바로 답해라.",
+            "도구 실행, 파일 수정, 배포, 삭제, 외부 전송, 백그라운드 작업 시작은 하지 마라.",
+            "실제 작업 요청이면 이 보이스채널 채팅은 짧은 답변만 처리하며 작업은 본 에이전트 채널에서 요청하라고 짧게 말해라.",
+            "라우팅 메타정보, 채널 ID, CLI 메타정보, session_id는 말하지 마라.",
+        ]
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+
+    lines.push(if english {
+        format!("Hard limit: {limit} characters, at most 2 short sentences.")
+    } else {
+        format!("하드 제한: {limit}자 이내, 짧은 문장 최대 2개.")
+    });
+    lines.push(String::new());
+    lines.push(TRANSCRIPT_OPEN.to_string());
+    lines.push(text.trim().to_string());
+    lines.push(TRANSCRIPT_CLOSE.to_string());
+    lines.join("\n")
+}
+
 pub(crate) fn build_voice_transcript_announcement(
     transcript: &str,
     user_id: u64,
@@ -368,5 +404,16 @@ mod tests {
         assert!(prompt.contains("하드 제한: 180자"));
         assert!(prompt.contains("도구 실행"));
         assert!(prompt.contains("<user_transcript>\n긴 작업 해줘\n</user_transcript>"));
+    }
+
+    #[test]
+    fn voice_channel_text_prompt_stays_fast_and_local() {
+        let prompt = voice_channel_text_prompt("배포해줘", "ko", 120);
+
+        assert!(prompt.contains("보이스채널의 텍스트 답변"));
+        assert!(prompt.contains("하드 제한: 120자"));
+        assert!(prompt.contains("백그라운드 작업 시작은 하지 마라"));
+        assert!(prompt.contains("본 에이전트 채널"));
+        assert!(prompt.contains("<user_transcript>\n배포해줘\n</user_transcript>"));
     }
 }

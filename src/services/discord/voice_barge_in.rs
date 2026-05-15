@@ -297,6 +297,80 @@ async fn generate_foreground_ack_text(
     }
 }
 
+async fn generate_voice_channel_text_reply(
+    text: &str,
+    language: &str,
+    foreground: &EffectiveVoiceForegroundConfig,
+) -> Option<String> {
+    let prompt =
+        crate::voice::prompt::voice_channel_text_prompt(text, language, foreground.max_chars);
+    let provider = foreground.provider.clone();
+    let model = foreground.model.clone();
+    let max_chars = foreground.max_chars;
+    let timeout = Duration::from_millis(foreground.timeout_ms);
+    let result = tokio::time::timeout(
+        timeout + Duration::from_millis(250),
+        tokio::task::spawn_blocking(move || {
+            let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
+            match provider_kind {
+                ProviderKind::Claude => crate::services::claude::execute_command_simple_with_model(
+                    &prompt,
+                    Some(&model),
+                ),
+                ProviderKind::Codex => {
+                    crate::services::codex::execute_command_simple_with_model(&prompt, Some(&model))
+                }
+                ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
+                    "voice channel text provider {} does not support model-scoped instant call yet",
+                    provider_kind.as_str()
+                )),
+                ProviderKind::Unsupported(value) => {
+                    Err(format!("unsupported voice channel text provider: {value}"))
+                }
+            }
+        }),
+    )
+    .await;
+
+    let text = match result {
+        Ok(Ok(Ok(text))) => text,
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(
+                error = %error,
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice channel text model call failed"
+            );
+            return None;
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %error,
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice channel text model task failed"
+            );
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = foreground.timeout_ms,
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice channel text model timed out"
+            );
+            return None;
+        }
+    };
+
+    let reply = foreground_spoken_only_with_limit(&text, language, max_chars);
+    if reply.trim().is_empty() {
+        None
+    } else {
+        Some(reply)
+    }
+}
+
 fn ensure_processing_chime_file(path: &Path) -> Result<(), String> {
     if path.metadata().map(|meta| meta.len() > 0).unwrap_or(false) {
         return Ok(());
@@ -538,6 +612,46 @@ impl VoiceBargeInRuntime {
 
     async fn spoken_result_language(&self) -> String {
         self.spoken_result_language.read().await.clone()
+    }
+
+    pub(in crate::services::discord) async fn try_handle_voice_channel_text_reply(
+        &self,
+        http: &Arc<serenity::http::Http>,
+        channel_id: ChannelId,
+        text: &str,
+    ) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+
+        let config = self.cached_config().await;
+        let Some(target_channel_id) = config.agents.iter().find_map(|agent| {
+            agent_voice_matches_channel(agent, channel_id)
+                .then(|| agent_voice_background_channel(agent).unwrap_or(channel_id))
+        }) else {
+            return false;
+        };
+        drop(config);
+
+        let language = self.spoken_result_language().await;
+        let foreground = self
+            .resolve_effective_foreground_config(channel_id, target_channel_id)
+            .await;
+        let reply = generate_voice_channel_text_reply(text, &language, &foreground)
+            .await
+            .unwrap_or_else(|| "지금 보이스 빠른 답변 모델 응답을 만들지 못했어요.".to_string());
+
+        if let Err(error) = channel_id.say(http.as_ref(), reply).await {
+            tracing::warn!(
+                error = %error,
+                channel_id = channel_id.get(),
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "failed to send voice channel text reply"
+            );
+        }
+        true
     }
 
     async fn runtime_wake_word_decision(&self, transcript: &str) -> WakeWordDecision {

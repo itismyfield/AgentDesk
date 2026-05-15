@@ -2120,6 +2120,14 @@ pub(in crate::services::discord) async fn handle_text_message(
         .as_ref()
         .map(|announcement| announcement.transcript.as_str())
         .unwrap_or(user_text);
+    if !is_voice_announcement
+        && shared
+            .voice_barge_in
+            .try_handle_voice_channel_text_reply(http, channel_id, user_text)
+            .await
+    {
+        return Ok(());
+    }
     let mut session_reset_reason = None;
     let mut reset_session_id_to_clear = None;
     // Get session info, allowed tools, and pending uploads
