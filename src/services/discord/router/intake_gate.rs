@@ -1189,6 +1189,30 @@ pub(in crate::services::discord) async fn handle_event(
                 .map(|(parent_id, _)| parent_id)
                 .unwrap_or(channel_id);
             let settings_snapshot = { data.shared.settings.read().await.clone() };
+            let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
+            let is_voice_transcript_announcement = announce_bot_id == Some(user_id.get())
+                && crate::voice::prompt::parse_voice_transcript_announcement(&new_message.content)
+                    .is_some();
+            if !is_voice_transcript_announcement {
+                match data
+                    .shared
+                    .voice_barge_in
+                    .try_handle_voice_channel_text_reply(
+                        &ctx.http,
+                        Some(&data.provider),
+                        channel_id,
+                        &new_message.content,
+                    )
+                    .await
+                {
+                    super::super::voice_barge_in::VoiceChannelTextReplyOutcome::Handled
+                    | super::super::voice_barge_in::VoiceChannelTextReplyOutcome::WrongProvider => {
+                        return Ok(());
+                    }
+                    super::super::voice_barge_in::VoiceChannelTextReplyOutcome::NotVoiceChannel => {
+                    }
+                }
+            }
             if validate_live_channel_routing_with_dm_hint(
                 ctx,
                 &data.provider,
@@ -1201,10 +1225,6 @@ pub(in crate::services::discord) async fn handle_event(
             {
                 return Ok(());
             }
-            let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
-            let is_voice_transcript_announcement = announce_bot_id == Some(user_id.get())
-                && crate::voice::prompt::parse_voice_transcript_announcement(&new_message.content)
-                    .is_some();
             if !is_voice_transcript_announcement
                 && should_skip_for_missing_required_mention(
                     &settings_snapshot,
@@ -1221,20 +1241,6 @@ pub(in crate::services::discord) async fn handle_event(
                     channel_id,
                     effective_channel_id,
                 );
-                return Ok(());
-            }
-            if !is_voice_transcript_announcement
-                && data
-                    .shared
-                    .voice_barge_in
-                    .try_handle_voice_channel_text_reply(
-                        &ctx.http,
-                        Some(&data.provider),
-                        channel_id,
-                        &new_message.content,
-                    )
-                    .await
-            {
                 return Ok(());
             }
             if !is_dm {

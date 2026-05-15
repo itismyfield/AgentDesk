@@ -2124,13 +2124,18 @@ pub(in crate::services::discord) async fn handle_text_message(
         .as_ref()
         .map(|announcement| announcement.transcript.as_str())
         .unwrap_or(user_text);
-    if !is_voice_announcement
-        && shared
+    if !is_voice_announcement {
+        match shared
             .voice_barge_in
             .try_handle_voice_channel_text_reply(http, current_provider, channel_id, user_text)
             .await
-    {
-        return Ok(());
+        {
+            super::super::voice_barge_in::VoiceChannelTextReplyOutcome::Handled
+            | super::super::voice_barge_in::VoiceChannelTextReplyOutcome::WrongProvider => {
+                return Ok(());
+            }
+            super::super::voice_barge_in::VoiceChannelTextReplyOutcome::NotVoiceChannel => {}
+        }
     }
     let mut session_reset_reason = None;
     let mut reset_session_id_to_clear = None;

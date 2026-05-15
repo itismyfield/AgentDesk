@@ -91,6 +91,13 @@ pub(in crate::services::discord) enum VoiceBargeInTranscriptOutcome {
     VoiceTurnStartFailed(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum VoiceChannelTextReplyOutcome {
+    NotVoiceChannel,
+    WrongProvider,
+    Handled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) struct VoiceProgressEvent {
     pub channel_id: u64,
@@ -620,10 +627,10 @@ impl VoiceBargeInRuntime {
         current_provider: Option<&ProviderKind>,
         channel_id: ChannelId,
         text: &str,
-    ) -> bool {
+    ) -> VoiceChannelTextReplyOutcome {
         let text = text.trim();
         if text.is_empty() {
-            return false;
+            return VoiceChannelTextReplyOutcome::NotVoiceChannel;
         }
 
         let config = self.cached_config().await;
@@ -631,7 +638,7 @@ impl VoiceBargeInRuntime {
             agent_voice_matches_channel(agent, channel_id)
                 .then(|| agent_voice_background_channel(agent).unwrap_or(channel_id))
         }) else {
-            return false;
+            return VoiceChannelTextReplyOutcome::NotVoiceChannel;
         };
         drop(config);
 
@@ -649,7 +656,7 @@ impl VoiceBargeInRuntime {
                 foreground_model = %foreground.model,
                 "voice channel text reply skipped: foreground provider is owned by another bot"
             );
-            return false;
+            return VoiceChannelTextReplyOutcome::WrongProvider;
         }
         let reply = generate_voice_channel_text_reply(text, &language, &foreground)
             .await
@@ -664,7 +671,7 @@ impl VoiceBargeInRuntime {
                 "failed to send voice channel text reply"
             );
         }
-        true
+        VoiceChannelTextReplyOutcome::Handled
     }
 
     async fn runtime_wake_word_decision(&self, transcript: &str) -> WakeWordDecision {
