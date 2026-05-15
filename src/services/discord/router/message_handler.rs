@@ -2116,6 +2116,14 @@ pub(in crate::services::discord) async fn handle_text_message(
         .as_ref()
         .map(|announcement| announcement.transcript.as_str())
         .unwrap_or(user_text);
+    let voice_role_channel_id = if is_voice_announcement {
+        shared
+            .voice_barge_in
+            .agent_voice_background_channel_for(channel_id)
+            .await
+    } else {
+        None
+    };
     if !is_voice_announcement {
         match shared
             .voice_barge_in
@@ -2216,6 +2224,18 @@ pub(in crate::services::discord) async fn handle_text_message(
                             parent_id
                         );
                     }
+                }
+            }
+            if workspace.is_none()
+                && let Some(role_channel_id) = voice_role_channel_id
+            {
+                workspace = settings::resolve_workspace(role_channel_id, None);
+                if workspace.is_some() {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 🎙 Voice auto-start: resolved workspace from agent channel {}",
+                        role_channel_id
+                    );
                 }
             }
             if workspace.is_none()
@@ -2753,6 +2773,8 @@ pub(in crate::services::discord) async fn handle_text_message(
         if let Some(override_ch) = shared.dispatch_role_overrides.get(&channel_id) {
             let alt_ch = *override_ch;
             resolve_role_binding(alt_ch, None)
+        } else if let Some(role_channel_id) = voice_role_channel_id {
+            resolve_role_binding(role_channel_id, None)
         } else {
             let data = shared.core.lock().await;
             let ch_name = data

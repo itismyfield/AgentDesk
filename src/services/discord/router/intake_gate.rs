@@ -1193,12 +1193,20 @@ pub(in crate::services::discord) async fn handle_event(
             let is_voice_transcript_announcement = announce_bot_id == Some(user_id.get())
                 && crate::voice::prompt::parse_voice_transcript_announcement(&new_message.content)
                     .is_some();
-            let is_direct_agent_voice_transcript = is_voice_transcript_announcement
-                && data
-                    .shared
+            let direct_agent_voice_provider = if is_voice_transcript_announcement {
+                data.shared
                     .voice_barge_in
-                    .is_agent_voice_channel(effective_channel_id)
-                    .await;
+                    .agent_voice_provider(effective_channel_id)
+                    .await
+            } else {
+                None
+            };
+            if let Some(owner_provider) = direct_agent_voice_provider.as_ref()
+                && owner_provider != &data.provider
+            {
+                return Ok(());
+            }
+            let is_direct_agent_voice_transcript = direct_agent_voice_provider.is_some();
             if !is_voice_transcript_announcement {
                 match data
                     .shared

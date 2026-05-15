@@ -1568,6 +1568,30 @@ impl VoiceBargeInRuntime {
             .any(|agent| agent_voice_matches_channel(agent, channel_id))
     }
 
+    pub(in crate::services::discord) async fn agent_voice_provider(
+        &self,
+        channel_id: ChannelId,
+    ) -> Option<ProviderKind> {
+        self.cached_config()
+            .await
+            .agents
+            .iter()
+            .find(|agent| agent_voice_matches_channel(agent, channel_id))
+            .map(|agent| ProviderKind::from_str_or_unsupported(&agent.provider))
+    }
+
+    pub(in crate::services::discord) async fn agent_voice_background_channel_for(
+        &self,
+        channel_id: ChannelId,
+    ) -> Option<ChannelId> {
+        self.cached_config()
+            .await
+            .agents
+            .iter()
+            .find(|agent| agent_voice_matches_channel(agent, channel_id))
+            .and_then(agent_voice_background_channel)
+    }
+
     async fn resolve_effective_foreground_config(
         &self,
         source_channel_id: ChannelId,
@@ -2558,6 +2582,16 @@ mod tests {
 
         assert!(runtime.is_agent_voice_channel(ChannelId::new(300)).await);
         assert!(!runtime.is_agent_voice_channel(ChannelId::new(200)).await);
+        assert_eq!(
+            runtime.agent_voice_provider(ChannelId::new(300)).await,
+            Some(ProviderKind::Codex)
+        );
+        assert_eq!(
+            runtime
+                .agent_voice_background_channel_for(ChannelId::new(300))
+                .await,
+            Some(ChannelId::new(200))
+        );
     }
 
     #[test]
