@@ -1193,6 +1193,12 @@ pub(in crate::services::discord) async fn handle_event(
             let is_voice_transcript_announcement = announce_bot_id == Some(user_id.get())
                 && crate::voice::prompt::parse_voice_transcript_announcement(&new_message.content)
                     .is_some();
+            let is_direct_agent_voice_transcript = is_voice_transcript_announcement
+                && data
+                    .shared
+                    .voice_barge_in
+                    .is_agent_voice_channel(effective_channel_id)
+                    .await;
             if !is_voice_transcript_announcement {
                 match data
                     .shared
@@ -1213,15 +1219,16 @@ pub(in crate::services::discord) async fn handle_event(
                     }
                 }
             }
-            if validate_live_channel_routing_with_dm_hint(
-                ctx,
-                &data.provider,
-                &settings_snapshot,
-                channel_id,
-                Some(is_dm),
-            )
-            .await
-            .is_err()
+            if !is_direct_agent_voice_transcript
+                && validate_live_channel_routing_with_dm_hint(
+                    ctx,
+                    &data.provider,
+                    &settings_snapshot,
+                    channel_id,
+                    Some(is_dm),
+                )
+                .await
+                .is_err()
             {
                 return Ok(());
             }
@@ -1243,12 +1250,6 @@ pub(in crate::services::discord) async fn handle_event(
                 );
                 return Ok(());
             }
-            let is_direct_agent_voice_transcript = is_voice_transcript_announcement
-                && data
-                    .shared
-                    .voice_barge_in
-                    .is_agent_voice_channel(effective_channel_id)
-                    .await;
             if !is_dm {
                 match resolve_runtime_channel_binding_status(&ctx.http, effective_channel_id).await
                 {
