@@ -2146,7 +2146,19 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         None
     };
-    if !is_voice_announcement {
+    if is_voice_announcement {
+        match shared
+            .voice_barge_in
+            .try_handle_voice_channel_text_reply(http, current_provider, channel_id, user_text)
+            .await
+        {
+            super::super::voice_barge_in::VoiceChannelTextReplyOutcome::Handled
+            | super::super::voice_barge_in::VoiceChannelTextReplyOutcome::WrongProvider => {
+                return Ok(());
+            }
+            super::super::voice_barge_in::VoiceChannelTextReplyOutcome::NotVoiceChannel => {}
+        }
+    } else {
         match shared
             .voice_barge_in
             .try_handle_voice_channel_text_reply(http, current_provider, channel_id, user_text)
