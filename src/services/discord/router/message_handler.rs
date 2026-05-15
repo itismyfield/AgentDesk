@@ -2146,19 +2146,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         None
     };
-    if is_voice_announcement {
-        match shared
-            .voice_barge_in
-            .try_handle_voice_channel_text_reply(http, current_provider, channel_id, user_text)
-            .await
-        {
-            super::super::voice_barge_in::VoiceChannelTextReplyOutcome::Handled
-            | super::super::voice_barge_in::VoiceChannelTextReplyOutcome::WrongProvider => {
-                return Ok(());
-            }
-            super::super::voice_barge_in::VoiceChannelTextReplyOutcome::NotVoiceChannel => {}
-        }
-    } else {
+    if !is_voice_announcement {
         match shared
             .voice_barge_in
             .try_handle_voice_channel_text_reply(http, current_provider, channel_id, user_text)
@@ -2273,6 +2261,12 @@ pub(in crate::services::discord) async fn handle_text_message(
                     tracing::info!(
                         "  [{ts}] 🎙 Voice auto-start: resolved workspace from agent channel {}",
                         role_channel_id
+                    );
+                } else {
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        role_channel_id = role_channel_id.get(),
+                        "voice auto-start could not resolve workspace from agent voice channel"
                     );
                 }
             }
