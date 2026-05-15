@@ -3520,6 +3520,7 @@ pub(super) async fn kickoff_idle_queues(
             ctx_for_chained_dispatch: Some(ctx),
             shared,
             token,
+            provider: Some(provider),
         };
         if let Err(e) = router::handle_text_message(
             &deps,

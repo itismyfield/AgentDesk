@@ -1229,6 +1229,7 @@ pub(in crate::services::discord) async fn handle_event(
                     .voice_barge_in
                     .try_handle_voice_channel_text_reply(
                         &ctx.http,
+                        Some(&data.provider),
                         channel_id,
                         &new_message.content,
                     )
@@ -2004,6 +2005,7 @@ pub(in crate::services::discord) async fn handle_event(
                 ctx_for_chained_dispatch: Some(ctx),
                 shared: &data.shared,
                 token: &data.token,
+                provider: Some(&data.provider),
             };
             super::message_handler::handle_text_message(
                 &deps,

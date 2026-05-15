@@ -617,6 +617,7 @@ impl VoiceBargeInRuntime {
     pub(in crate::services::discord) async fn try_handle_voice_channel_text_reply(
         &self,
         http: &Arc<serenity::http::Http>,
+        current_provider: Option<&ProviderKind>,
         channel_id: ChannelId,
         text: &str,
     ) -> bool {
@@ -638,6 +639,18 @@ impl VoiceBargeInRuntime {
         let foreground = self
             .resolve_effective_foreground_config(channel_id, target_channel_id)
             .await;
+        if !voice_foreground_owned_by_current_provider(current_provider, &foreground.provider) {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                current_provider = current_provider
+                    .map(ProviderKind::as_str)
+                    .unwrap_or("<unknown>"),
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice channel text reply skipped: foreground provider is owned by another bot"
+            );
+            return false;
+        }
         let reply = generate_voice_channel_text_reply(text, &language, &foreground)
             .await
             .unwrap_or_else(|| "지금 보이스 빠른 답변 모델 응답을 만들지 못했어요.".to_string());
@@ -2386,6 +2399,18 @@ fn expand_tilde(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+fn voice_foreground_owned_by_current_provider(
+    current_provider: Option<&ProviderKind>,
+    foreground_provider: &str,
+) -> bool {
+    let Some(current_provider) = current_provider else {
+        return true;
+    };
+    current_provider
+        .as_str()
+        .eq_ignore_ascii_case(foreground_provider.trim())
+}
+
 fn lock_monitor(
     monitor: &std::sync::Mutex<LiveBargeInMonitor>,
 ) -> std::sync::MutexGuard<'_, LiveBargeInMonitor> {
@@ -2474,6 +2499,23 @@ mod tests {
             agent_voice_background_channel(&agent),
             Some(ChannelId::new(100))
         );
+    }
+
+    #[test]
+    fn voice_channel_text_reply_is_owned_by_foreground_provider() {
+        assert!(voice_foreground_owned_by_current_provider(
+            Some(&ProviderKind::Codex),
+            "codex"
+        ));
+        assert!(voice_foreground_owned_by_current_provider(
+            Some(&ProviderKind::Codex),
+            "CoDeX"
+        ));
+        assert!(!voice_foreground_owned_by_current_provider(
+            Some(&ProviderKind::Claude),
+            "codex"
+        ));
+        assert!(voice_foreground_owned_by_current_provider(None, "codex"));
     }
 
     #[tokio::test]

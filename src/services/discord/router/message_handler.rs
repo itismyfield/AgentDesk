@@ -1966,6 +1966,7 @@ pub(in crate::services::discord) struct IntakeDeps<'a> {
     pub ctx_for_chained_dispatch: Option<&'a serenity::Context>,
     pub shared: &'a Arc<SharedData>,
     pub token: &'a str,
+    pub provider: Option<&'a ProviderKind>,
 }
 
 /// Per-message inputs of `handle_text_message` bundled into a single
@@ -2009,6 +2010,7 @@ pub(crate) async fn execute_intake_turn_core(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
     token: &str,
+    provider: &ProviderKind,
     request: IntakeRequest,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let deps = IntakeDeps {
@@ -2017,6 +2019,7 @@ pub(crate) async fn execute_intake_turn_core(
         ctx_for_chained_dispatch: None,
         shared,
         token,
+        provider: Some(provider),
     };
     handle_text_message(
         &deps,
@@ -2059,6 +2062,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         ctx_for_chained_dispatch,
         shared,
         token,
+        provider: current_provider,
     } = *deps;
     let original_channel_id = channel_id;
     let parsed_voice_announcement =
@@ -2123,7 +2127,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     if !is_voice_announcement
         && shared
             .voice_barge_in
-            .try_handle_voice_channel_text_reply(http, channel_id, user_text)
+            .try_handle_voice_channel_text_reply(http, current_provider, channel_id, user_text)
             .await
     {
         return Ok(());

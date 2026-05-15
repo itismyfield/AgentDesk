@@ -541,6 +541,7 @@ impl TurnGateway for DiscordGateway {
                 ctx_for_chained_dispatch: Some(&live_turn.ctx),
                 shared: &self.shared,
                 token: &live_turn.token,
+                provider: Some(&self.provider),
             };
             handle_text_message(
                 &deps,

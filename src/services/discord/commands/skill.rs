@@ -283,6 +283,7 @@ pub(in crate::services::discord) async fn cmd_cc(
             ctx_for_chained_dispatch: Some(serenity_ctx),
             shared: &data.shared,
             token: &data.token,
+            provider: Some(&data.provider),
         };
         handle_text_message(
             &deps,
@@ -354,6 +355,7 @@ pub(in crate::services::discord) async fn cmd_cc(
         ctx_for_chained_dispatch: Some(serenity_ctx),
         shared: &data.shared,
         token: &data.token,
+        provider: Some(&data.provider),
     };
     handle_text_message(
         &deps,

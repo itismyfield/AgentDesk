@@ -1323,6 +1323,7 @@ Any other message is sent to {p}.
                 ctx_for_chained_dispatch: Some(ctx),
                 shared: &data.shared,
                 token: &data.token,
+                provider: Some(&data.provider),
             };
             handle_text_message(
                 &deps,

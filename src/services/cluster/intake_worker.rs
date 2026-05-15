@@ -25,6 +25,7 @@ use crate::db::intake_outbox::{
     mark_failed_pre_accept, mark_spawned,
 };
 use crate::services::discord::{IntakeRequest, SharedData, TurnKind, execute_intake_turn_core};
+use crate::services::provider::ProviderKind;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 use sqlx::PgPool;
@@ -131,7 +132,8 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Processed);
     }
 
-    let result = execute_intake_turn_core(http, shared, token, request).await;
+    let provider_kind = ProviderKind::from_str_or_unsupported(provider);
+    let result = execute_intake_turn_core(http, shared, token, &provider_kind, request).await;
 
     match result {
         Ok(()) => {
