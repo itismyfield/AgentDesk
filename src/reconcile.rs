@@ -1166,9 +1166,19 @@ async fn completed_queue_review_drift_candidates_base_pg(
         "SELECT DISTINCT c.id
          FROM kanban_cards c
          JOIN auto_queue_entries e ON e.kanban_card_id = c.id
+         JOIN task_dispatches completed_td ON completed_td.id = e.dispatch_id
          WHERE c.status = 'in_progress'
-           AND e.status = 'done'
-           AND e.completed_at <= NOW() - ($1::BIGINT * INTERVAL '1 second')
+           AND e.status IN ('done', 'dispatched')
+           AND completed_td.status = 'completed'
+           AND completed_td.dispatch_type IN ('implementation', 'rework')
+           AND (
+             (e.status = 'done'
+              AND e.completed_at <= NOW() - ($1::BIGINT * INTERVAL '1 second'))
+             OR
+             (e.status = 'dispatched'
+              AND COALESCE(completed_td.completed_at, completed_td.updated_at)
+                  <= NOW() - ($1::BIGINT * INTERVAL '1 second'))
+           )
            AND ($2::TEXT IS NULL OR c.id = $2)
            AND NOT EXISTS (
              SELECT 1
@@ -1180,6 +1190,7 @@ async fn completed_queue_review_drift_candidates_base_pg(
              SELECT 1
              FROM auto_queue_entries active_e
              WHERE active_e.kanban_card_id = c.id
+               AND active_e.id <> e.id
                AND active_e.status IN ('pending', 'dispatched')
            )
          ORDER BY c.id

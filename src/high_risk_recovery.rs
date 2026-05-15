@@ -963,6 +963,7 @@ async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries
 
     seed_agent_pg(&pool).await;
     seed_card_pg(&pool, "card-pg-drift-old", "in_progress").await;
+    seed_card_pg(&pool, "card-pg-drift-dispatched-completed", "in_progress").await;
     seed_card_pg(&pool, "card-pg-drift-fresh", "in_progress").await;
     seed_card_pg(&pool, "card-pg-drift-null-completed", "in_progress").await;
     seed_card_pg(&pool, "card-pg-drift-review-state", "review").await;
@@ -984,6 +985,7 @@ async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries
 
     for card_id in [
         "card-pg-drift-old",
+        "card-pg-drift-dispatched-completed",
         "card-pg-drift-fresh",
         "card-pg-drift-null-completed",
         "card-pg-drift-review-state",
@@ -1045,6 +1047,16 @@ async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries
              'done',
              'dispatch-card-pg-drift-old',
              NOW() - INTERVAL '6 minutes',
+             NOW() - INTERVAL '10 minutes'
+           ),
+           (
+             'entry-pg-drift-dispatched-completed',
+             'run-pg-review-drift',
+             'card-pg-drift-dispatched-completed',
+             'agent-1',
+             'dispatched',
+             'dispatch-card-pg-drift-dispatched-completed',
+             NULL,
              NOW() - INTERVAL '10 minutes'
            ),
            (
@@ -1140,7 +1152,7 @@ async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries
         crate::reconcile::reconcile_completed_queue_review_drift_pg(&pool, None, &engine)
             .await
             .expect("review drift reconcile succeeds");
-    assert_eq!(recovered, 1);
+    assert_eq!(recovered, 2);
 
     let statuses: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, status
@@ -1161,6 +1173,10 @@ async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries
             (
                 "card-pg-drift-active-entry".to_string(),
                 "in_progress".to_string()
+            ),
+            (
+                "card-pg-drift-dispatched-completed".to_string(),
+                "review".to_string()
             ),
             ("card-pg-drift-fresh".to_string(), "in_progress".to_string()),
             (

@@ -385,24 +385,14 @@ fn runtime_postgres_reconcile_key(dispatch_id: &str) -> String {
     format!("reconcile_dispatch:{dispatch_id}")
 }
 
-fn is_noop_runtime_completion_result(result: &serde_json::Value) -> bool {
-    result.get("work_outcome").and_then(|entry| entry.as_str()) == Some("noop")
-        || result
-            .get("completed_without_changes")
-            .and_then(|entry| entry.as_bool())
-            == Some(true)
-}
-
 fn should_sync_runtime_auto_queue_terminal_entry(
     dispatch_type: Option<&str>,
-    result: &serde_json::Value,
+    _result: &serde_json::Value,
     auto_queue_review_disabled: bool,
 ) -> bool {
     match dispatch_type {
         Some("consultation") => false,
-        Some("implementation" | "rework") => {
-            !is_noop_runtime_completion_result(result) || auto_queue_review_disabled
-        }
+        Some("implementation" | "rework") => auto_queue_review_disabled,
         _ => true,
     }
 }
@@ -1834,7 +1824,7 @@ mod runtime_completion_policy_tests {
             "completed_without_changes": true
         });
 
-        assert!(should_sync_runtime_auto_queue_terminal_entry(
+        assert!(!should_sync_runtime_auto_queue_terminal_entry(
             Some("implementation"),
             &normal_result,
             false

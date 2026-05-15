@@ -2654,6 +2654,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 crate::services::discord::streaming_finalizer::finalize_watcher_streaming_dispatch(
                     crate::services::discord::streaming_finalizer::WatcherStreamingFinalRequest {
                         pg_pool: shared.pg_pool.as_ref(),
+                        engine: shared.engine.as_ref(),
                         dispatch_id: did,
                         adk_cwd: current_worktree_path.as_deref(),
                         full_response: &full_response,

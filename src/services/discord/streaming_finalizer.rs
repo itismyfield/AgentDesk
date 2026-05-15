@@ -45,6 +45,7 @@ impl StreamingFinalResult {
 
 pub(in crate::services::discord) struct WatcherStreamingFinalRequest<'a> {
     pub pg_pool: Option<&'a sqlx::PgPool>,
+    pub engine: Option<&'a crate::engine::PolicyEngine>,
     pub dispatch_id: &'a str,
     pub adk_cwd: Option<&'a str>,
     pub full_response: &'a str,
@@ -110,6 +111,45 @@ async fn finalize_work_dispatch_from_stream(
         request.dispatch_id,
         "watcher_streaming_final",
         false,
+        request.adk_cwd,
+        request.full_response,
+    );
+    if let Some(engine) = request.engine {
+        match crate::dispatch::finalize_dispatch_with_backends(
+            None::<&crate::db::Db>,
+            engine,
+            request.dispatch_id,
+            "watcher_streaming_final",
+            Some(&completion_result),
+        ) {
+            Ok(_) => {
+                let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
+                    None::<&crate::db::Db>,
+                    request.pg_pool,
+                    request.dispatch_id,
+                    followup_source,
+                )
+                .await;
+                return StreamingFinalResult::completed(
+                    StreamingFinalDisposition::Finalized,
+                    None,
+                    None,
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    dispatch_id = %request.dispatch_id,
+                    "watcher streaming canonical finalizer failed, falling back to runtime DB completion: {error}"
+                );
+            }
+        }
+    }
+
+    let completion_result = watcher_completion_context(
+        request.pg_pool,
+        request.dispatch_id,
+        "watcher_streaming_final",
+        true,
         request.adk_cwd,
         request.full_response,
     );

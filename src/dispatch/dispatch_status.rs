@@ -71,16 +71,6 @@ fn emit_dispatch_quality_event(
     );
 }
 
-fn is_noop_completion_result(result: Option<&serde_json::Value>) -> bool {
-    result.is_some_and(|value| {
-        value.get("work_outcome").and_then(|entry| entry.as_str()) == Some("noop")
-            || value
-                .get("completed_without_changes")
-                .and_then(|entry| entry.as_bool())
-                == Some(true)
-    })
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 fn auto_queue_review_disabled_for_dispatch_on_conn(
     conn: &sqlite_test::Connection,
@@ -291,7 +281,7 @@ async fn restore_auto_queue_mainline_after_review_skip_on_pg(
 fn should_skip_auto_queue_terminal_sync(
     dispatch_type: Option<&str>,
     to_status: &str,
-    result: Option<&serde_json::Value>,
+    _result: Option<&serde_json::Value>,
     sync_auto_queue_terminal_entries: bool,
     auto_queue_review_disabled: bool,
 ) -> bool {
@@ -305,9 +295,7 @@ fn should_skip_auto_queue_terminal_sync(
 
     match dispatch_type {
         Some("consultation") => true,
-        Some("implementation" | "rework") => {
-            is_noop_completion_result(result) && !auto_queue_review_disabled
-        }
+        Some("implementation" | "rework") => !auto_queue_review_disabled,
         _ => false,
     }
 }
@@ -1834,85 +1822,78 @@ fn complete_dispatch_inner_with_backends(
     let db_owned = db.cloned();
     let dispatch_id_owned = dispatch_id.to_string();
     let input_result = result.clone();
-    let (
-        dispatch,
-        kanban_card_id,
-        needs_review_dispatch,
-        effective_result,
-        skip_dispatch_completed_hooks,
-    ) = block_on_dispatch_pg(pool, move |pool| async move {
-        validate_dispatch_completion_evidence_on_pg(
-            &pool,
-            db_owned.as_ref(),
-            &dispatch_id_owned,
-            &input_result,
-        )
-        .await?;
+    let (dispatch, kanban_card_id, effective_result, skip_dispatch_completed_hooks) =
+        block_on_dispatch_pg(pool, move |pool| async move {
+            validate_dispatch_completion_evidence_on_pg(
+                &pool,
+                db_owned.as_ref(),
+                &dispatch_id_owned,
+                &input_result,
+            )
+            .await?;
 
-        let result_owned =
-            maybe_inject_phase_gate_verdict_pg(&pool, &dispatch_id_owned, &input_result).await;
-        let effective_result = result_owned.unwrap_or(input_result);
+            let result_owned =
+                maybe_inject_phase_gate_verdict_pg(&pool, &dispatch_id_owned, &input_result).await;
+            let effective_result = result_owned.unwrap_or(input_result);
 
-        // #1980: complete_dispatch fires the OnDispatchCompleted JS hook
-        // immediately after this returns; that hook owns the phase-gate row
-        // lifecycle plus run finalize/activate. Use the external-phase-gate
-        // variant so the durable reconciler does not clear the gate row
-        // out from under the hook.
-        let changed = set_dispatch_status_on_pg_with_external_phase_gate(
-            &pool,
-            &dispatch_id_owned,
-            "completed",
-            Some(&effective_result),
-            effective_result
-                .get("completion_source")
-                .and_then(|value| value.as_str())
-                .unwrap_or("complete_dispatch"),
-            Some(&["pending", "dispatched"]),
-            true,
-        )
-        .await?;
+            // #1980: complete_dispatch fires the OnDispatchCompleted JS hook
+            // immediately after this returns; that hook owns the phase-gate row
+            // lifecycle plus run finalize/activate. Use the external-phase-gate
+            // variant so the durable reconciler does not clear the gate row
+            // out from under the hook.
+            let changed = set_dispatch_status_on_pg_with_external_phase_gate(
+                &pool,
+                &dispatch_id_owned,
+                "completed",
+                Some(&effective_result),
+                effective_result
+                    .get("completion_source")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("complete_dispatch"),
+                Some(&["pending", "dispatched"]),
+                true,
+            )
+            .await?;
 
-        if changed == 0 {
-            if dispatch_exists_pg(&pool, &dispatch_id_owned).await? {
-                tracing::info!("skipping completion hooks because dispatch is already finalized");
-                let dispatch = query_dispatch_row_pg(&pool, &dispatch_id_owned).await?;
-                return Ok((dispatch, None, false, effective_result, true));
+            if changed == 0 {
+                if dispatch_exists_pg(&pool, &dispatch_id_owned).await? {
+                    tracing::info!(
+                        "skipping completion hooks because dispatch is already finalized"
+                    );
+                    let dispatch = query_dispatch_row_pg(&pool, &dispatch_id_owned).await?;
+                    return Ok((dispatch, None, effective_result, true));
+                }
+                return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id_owned}"));
             }
-            return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id_owned}"));
-        }
 
-        let dispatch = query_dispatch_row_pg(&pool, &dispatch_id_owned).await?;
-        let kanban_card_id = dispatch
-            .get("kanban_card_id")
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string());
-        let dispatch_type = dispatch
-            .get("dispatch_type")
-            .and_then(|value| value.as_str());
-        let skip_dispatch_completed_hooks =
-            matches!(dispatch_type, Some("implementation" | "rework"))
-                && auto_queue_review_disabled_for_dispatch_pg(&pool, &dispatch_id_owned).await?;
-        let needs_review_dispatch = if skip_dispatch_completed_hooks {
-            false
-        } else if let Some(card_id) = kanban_card_id.as_deref() {
-            card_needs_review_dispatch_pg(&pool, card_id).await?
-        } else {
-            false
-        };
-
-        if skip_dispatch_completed_hooks && let Some(card_id) = kanban_card_id.as_deref() {
-            restore_auto_queue_mainline_after_review_skip_on_pg(&pool, card_id, &dispatch_id_owned)
+            let dispatch = query_dispatch_row_pg(&pool, &dispatch_id_owned).await?;
+            let kanban_card_id = dispatch
+                .get("kanban_card_id")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string());
+            let dispatch_type = dispatch
+                .get("dispatch_type")
+                .and_then(|value| value.as_str());
+            let skip_dispatch_completed_hooks =
+                matches!(dispatch_type, Some("implementation" | "rework"))
+                    && auto_queue_review_disabled_for_dispatch_pg(&pool, &dispatch_id_owned)
+                        .await?;
+            if skip_dispatch_completed_hooks && let Some(card_id) = kanban_card_id.as_deref() {
+                restore_auto_queue_mainline_after_review_skip_on_pg(
+                    &pool,
+                    card_id,
+                    &dispatch_id_owned,
+                )
                 .await?;
-        }
+            }
 
-        Ok((
-            dispatch,
-            kanban_card_id,
-            needs_review_dispatch,
-            effective_result,
-            skip_dispatch_completed_hooks,
-        ))
-    })?;
+            Ok((
+                dispatch,
+                kanban_card_id,
+                effective_result,
+                skip_dispatch_completed_hooks,
+            ))
+        })?;
 
     // Auto-queue review_mode=disabled keeps implementation/rework completions on
     // the mainline path. The generic OnDispatchCompleted policy always routes
@@ -1935,8 +1916,16 @@ fn complete_dispatch_inner_with_backends(
 
     crate::kanban::drain_hook_side_effects_with_backends(db, engine);
 
-    if needs_review_dispatch {
-        let cid = kanban_card_id.as_deref().unwrap_or("unknown");
+    let needs_review_dispatch = if let Some(card_id) = kanban_card_id.clone() {
+        block_on_dispatch_pg(pool, move |pool| async move {
+            card_needs_review_dispatch_pg(&pool, &card_id).await
+        })?
+    } else {
+        false
+    };
+    if let Some(cid) = kanban_card_id.as_deref()
+        && needs_review_dispatch
+    {
         tracing::warn!(
             "[dispatch] Card {} in review-like state but no review dispatch — re-firing OnReviewEnter with blocking lock (#220)",
             cid
@@ -2003,14 +1992,6 @@ fn complete_dispatch_inner_sqlite(
     let skip_dispatch_completed_hooks = matches!(dispatch_type, Some("implementation" | "rework"))
         && auto_queue_review_disabled_for_dispatch_on_conn(&conn, dispatch_id);
 
-    let needs_review_dispatch = if skip_dispatch_completed_hooks {
-        false
-    } else if let Some(card_id) = kanban_card_id.as_deref() {
-        card_needs_review_dispatch_on_conn(&conn, card_id)?
-    } else {
-        false
-    };
-
     if skip_dispatch_completed_hooks && let Some(card_id) = kanban_card_id.as_deref() {
         restore_auto_queue_mainline_after_review_skip_on_conn(&conn, card_id, dispatch_id)?;
     }
@@ -2035,8 +2016,17 @@ fn complete_dispatch_inner_sqlite(
 
     crate::kanban::drain_hook_side_effects_with_backends(Some(db), engine);
 
-    if needs_review_dispatch {
-        let cid = kanban_card_id.as_deref().unwrap_or("unknown");
+    let needs_review_dispatch = if let Some(card_id) = kanban_card_id.as_deref() {
+        let conn = db
+            .separate_conn()
+            .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
+        card_needs_review_dispatch_on_conn(&conn, card_id)?
+    } else {
+        false
+    };
+    if let Some(cid) = kanban_card_id.as_deref()
+        && needs_review_dispatch
+    {
         tracing::warn!(
             "[dispatch] Card {} in review-like state but no review dispatch — re-firing OnReviewEnter with blocking lock (#220)",
             cid
@@ -2046,6 +2036,40 @@ fn complete_dispatch_inner_sqlite(
     }
 
     Ok(dispatch)
+}
+
+#[cfg(test)]
+mod terminal_sync_policy_tests {
+    use super::should_skip_auto_queue_terminal_sync;
+
+    #[test]
+    fn review_enabled_work_completion_waits_for_card_terminal_sync() {
+        assert!(should_skip_auto_queue_terminal_sync(
+            Some("implementation"),
+            "completed",
+            Some(&serde_json::json!({"completion_source": "test"})),
+            true,
+            false,
+        ));
+        assert!(should_skip_auto_queue_terminal_sync(
+            Some("rework"),
+            "completed",
+            Some(&serde_json::json!({"completed_without_changes": true})),
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn review_disabled_work_completion_closes_queue_entry_immediately() {
+        assert!(!should_skip_auto_queue_terminal_sync(
+            Some("implementation"),
+            "completed",
+            Some(&serde_json::json!({"completion_source": "test"})),
+            true,
+            true,
+        ));
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
