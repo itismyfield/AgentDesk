@@ -641,6 +641,7 @@ impl VoiceBargeInRuntime {
         http: &Arc<serenity::http::Http>,
         current_provider: Option<&ProviderKind>,
         channel_id: ChannelId,
+        message_id: MessageId,
         text: &str,
     ) -> VoiceChannelTextReplyOutcome {
         let text = text.trim();
@@ -674,11 +675,13 @@ impl VoiceBargeInRuntime {
             );
             return VoiceChannelTextReplyOutcome::WrongProvider;
         }
+        super::mark_message_turn_pending(http, channel_id, message_id).await;
         let reply = generate_voice_channel_text_reply(text, &language, &foreground)
             .await
             .unwrap_or_else(|| "지금 보이스 빠른 답변 모델 응답을 만들지 못했어요.".to_string());
 
         if let Err(error) = channel_id.say(http.as_ref(), reply).await {
+            super::mark_message_turn_failed(http, channel_id, message_id).await;
             tracing::warn!(
                 error = %error,
                 channel_id = channel_id.get(),
@@ -687,6 +690,7 @@ impl VoiceBargeInRuntime {
                 "failed to send voice channel text reply"
             );
         } else {
+            super::mark_message_turn_complete(http, channel_id, message_id).await;
             tracing::info!(
                 channel_id = channel_id.get(),
                 foreground_provider = %foreground.provider,

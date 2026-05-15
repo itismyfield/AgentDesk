@@ -2160,7 +2160,13 @@ pub(in crate::services::discord) async fn handle_text_message(
     if !is_voice_announcement {
         match shared
             .voice_barge_in
-            .try_handle_voice_channel_text_reply(http, current_provider, channel_id, user_text)
+            .try_handle_voice_channel_text_reply(
+                http,
+                current_provider,
+                channel_id,
+                user_msg_id,
+                user_text,
+            )
             .await
         {
             super::super::voice_barge_in::VoiceChannelTextReplyOutcome::Handled
@@ -2424,7 +2430,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         // not correspond to a real Discord message, so add_reaction would
         // return "Unknown Message". TTS already plays an acknowledgement
         // for the user — the ⏳ reaction is text-intake only.
-        add_reaction(http, channel_id, user_msg_id, '⏳').await;
+        mark_message_turn_pending(http, channel_id, user_msg_id).await;
     }
 
     // ── Dispatch thread auto-creation ──────────────────────────────

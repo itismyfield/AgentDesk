@@ -1218,6 +1218,7 @@ pub(in crate::services::discord) async fn handle_event(
                         &ctx.http,
                         Some(&data.provider),
                         channel_id,
+                        new_message.id,
                         &new_message.content,
                     )
                     .await

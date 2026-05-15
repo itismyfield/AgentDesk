@@ -371,6 +371,32 @@ pub(super) async fn add_reaction(
     }
 }
 
+pub(super) async fn mark_message_turn_pending(
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) {
+    add_reaction(http, channel_id, message_id, '⏳').await;
+}
+
+pub(super) async fn mark_message_turn_complete(
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) {
+    super::formatting::remove_reaction_raw(http, channel_id, message_id, '⏳').await;
+    add_reaction(http, channel_id, message_id, '✅').await;
+}
+
+pub(super) async fn mark_message_turn_failed(
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) {
+    super::formatting::remove_reaction_raw(http, channel_id, message_id, '⏳').await;
+    add_reaction(http, channel_id, message_id, '⚠').await;
+}
+
 /// Send a file to a Discord channel (called from CLI --discord-sendfile)
 pub async fn send_file_to_channel(
     token: &str,

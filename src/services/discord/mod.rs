@@ -3826,7 +3826,8 @@ fn resolve_codex_skill_file(path: &Path) -> Option<std::path::PathBuf> {
 }
 
 use discord_io::{
-    add_reaction, check_auth, check_owner, rate_limit_wait, try_handle_pending_dm_reply,
+    add_reaction, check_auth, check_owner, mark_message_turn_complete, mark_message_turn_failed,
+    mark_message_turn_pending, rate_limit_wait, try_handle_pending_dm_reply,
 };
 
 // ─── Event handler ───────────────────────────────────────────────────────────
