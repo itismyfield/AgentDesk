@@ -35,6 +35,8 @@ pub fn tmux_exact_target(session_name: &str) -> String {
 
 /// Subdirectory under the runtime root where session temp files live.
 const SESSIONS_SUBDIR: &str = "runtime/sessions";
+pub(crate) const CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT: &str = "claude-tui-settings.json";
+pub(crate) const CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT: &str = "claude-tui.sh";
 
 /// Returns the persistent AgentDesk sessions directory, if a runtime root
 /// is configured. This is the new canonical location for session temp files
@@ -175,6 +177,8 @@ pub fn cleanup_session_temp_files(session_name: &str) {
         "sh",
         "generation",
         "exit_reason",
+        CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
+        CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
     ];
     for ext in EXTS {
         let _ = std::fs::remove_file(session_temp_path(session_name, ext));
@@ -674,10 +678,9 @@ mod tests {
     // `cleanup_session_temp_files` MUST NOT delete this snapshot — otherwise
     // it would be erased microseconds after being written.
     //
-    // The deletable EXTS list (`jsonl`, `input`, `prompt`, `owner`, `sh`,
-    // `generation`, `exit_reason`) is the cleanup contract; pin its shape
-    // here so a future "let's also nuke death_pane_log" tweak fails this
-    // test instead of silently re-breaking post-mortem.
+    // The deletable EXTS list is the cleanup contract; pin its shape here so
+    // a future "let's also nuke death_pane_log" tweak fails this test instead
+    // of silently re-breaking post-mortem.
     #[test]
     fn cleanup_session_temp_files_preserves_death_pane_log_snapshot() {
         let _lock = crate::services::discord::runtime_store::lock_test_env();
@@ -705,6 +708,8 @@ mod tests {
             "sh",
             "generation",
             "exit_reason",
+            CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
+            CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
         ];
         let mut cleaned_paths = Vec::new();
         for ext in &cleaned_exts {

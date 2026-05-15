@@ -9,6 +9,13 @@ pub struct ClaudeTuiSessionFiles {
     pub launch_script_path: PathBuf,
 }
 
+impl ClaudeTuiSessionFiles {
+    pub fn cleanup_best_effort(&self) {
+        let _ = std::fs::remove_file(&self.hook_settings_path);
+        let _ = std::fs::remove_file(&self.launch_script_path);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeTuiLaunchConfig {
     pub tmux_session_name: String,
@@ -27,11 +34,11 @@ impl ClaudeTuiLaunchConfig {
         ClaudeTuiSessionFiles {
             hook_settings_path: PathBuf::from(crate::services::tmux_common::session_temp_path(
                 &self.tmux_session_name,
-                "claude-tui-settings.json",
+                crate::services::tmux_common::CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
             )),
             launch_script_path: PathBuf::from(crate::services::tmux_common::session_temp_path(
                 &self.tmux_session_name,
-                "claude-tui.sh",
+                crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
             )),
         }
     }
@@ -41,16 +48,22 @@ pub fn prepare_claude_tui_launch(
     config: &ClaudeTuiLaunchConfig,
 ) -> Result<ClaudeTuiSessionFiles, String> {
     let files = config.session_files();
-    write_claude_hook_settings(
-        &files.hook_settings_path,
-        &HookBundleConfig {
-            endpoint: config.hook_endpoint.clone(),
-            provider: "claude".to_string(),
-            session_id: config.session_id.clone(),
-            agentdesk_exe: config.agentdesk_exe.display().to_string(),
-        },
-    )?;
-    write_launch_script(&files.launch_script_path, config, &files.hook_settings_path)?;
+    let result = (|| {
+        write_claude_hook_settings(
+            &files.hook_settings_path,
+            &HookBundleConfig {
+                endpoint: config.hook_endpoint.clone(),
+                provider: "claude".to_string(),
+                session_id: config.session_id.clone(),
+                agentdesk_exe: config.agentdesk_exe.display().to_string(),
+            },
+        )?;
+        write_launch_script(&files.launch_script_path, config, &files.hook_settings_path)
+    })();
+    if let Err(error) = result {
+        files.cleanup_best_effort();
+        return Err(error);
+    }
     Ok(files)
 }
 
@@ -198,5 +211,60 @@ mod tests {
         assert!(settings.contains("claude-hook-relay"));
         assert!(script.contains("exec '/usr/local/bin/claude'"));
         assert!(!script.contains(" -p "));
+    }
+
+    #[test]
+    fn session_files_cleanup_best_effort_removes_settings_and_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = ClaudeTuiSessionFiles {
+            hook_settings_path: dir.path().join("settings.json"),
+            launch_script_path: dir.path().join("launch.sh"),
+        };
+        std::fs::write(&files.hook_settings_path, "{}").unwrap();
+        std::fs::write(&files.launch_script_path, "#!/bin/bash\n").unwrap();
+
+        files.cleanup_best_effort();
+        files.cleanup_best_effort();
+
+        assert!(!files.hook_settings_path.exists());
+        assert!(!files.launch_script_path.exists());
+    }
+
+    #[test]
+    fn prepare_launch_cleans_settings_when_script_write_fails() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let previous_host = std::env::var_os("HOSTNAME");
+        let root = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", root.path());
+            std::env::set_var("HOSTNAME", "issue-2143-host");
+        }
+
+        let mut config = sample_config();
+        config.tmux_session_name = format!("issue-2143-{}", uuid::Uuid::new_v4());
+        let files = config.session_files();
+        std::fs::create_dir_all(files.launch_script_path.parent().unwrap()).unwrap();
+        std::fs::create_dir(&files.launch_script_path).unwrap();
+
+        let error = prepare_claude_tui_launch(&config).unwrap_err();
+
+        assert!(error.contains("write TUI launch script"));
+        assert!(
+            !files.hook_settings_path.exists(),
+            "prepare failure must not leave hook settings behind"
+        );
+
+        let _ = std::fs::remove_dir_all(&files.launch_script_path);
+        match previous_root {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+        match previous_host {
+            Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
+            None => unsafe { std::env::remove_var("HOSTNAME") },
+        }
     }
 }

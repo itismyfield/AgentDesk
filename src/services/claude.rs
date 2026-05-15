@@ -1625,6 +1625,7 @@ fn execute_streaming_local_tui_tmux(
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
     let owner_path = tmux_owner_path(tmux_session_name);
+    let mut prepared_session_files = None;
     let launch_result = (|| -> Result<std::process::Output, String> {
         let exe =
             std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
@@ -1646,24 +1647,32 @@ fn execute_streaming_local_tui_tmux(
         };
         let session_files =
             crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
+        let launch_script_path = session_files.launch_script_path.clone();
+        prepared_session_files = Some(session_files);
         crate::services::platform::tmux::create_session(
             tmux_session_name,
             Some(working_dir),
             &format!(
                 "bash {}",
-                shell_escape(&session_files.launch_script_path.display().to_string())
+                shell_escape(&launch_script_path.display().to_string())
             ),
         )
     })();
     let tmux_result = match launch_result {
         Ok(result) => result,
         Err(error) => {
+            if let Some(files) = prepared_session_files.as_ref() {
+                files.cleanup_best_effort();
+            }
             let _ = std::fs::remove_file(&owner_path);
             return Err(error);
         }
     };
     if !tmux_result.status.success() {
         let stderr = String::from_utf8_lossy(&tmux_result.stderr);
+        if let Some(files) = prepared_session_files.as_ref() {
+            files.cleanup_best_effort();
+        }
         let _ = std::fs::remove_file(&owner_path);
         return Err(format!("tmux error: {}", stderr));
     }
