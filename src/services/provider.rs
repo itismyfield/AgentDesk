@@ -717,23 +717,8 @@ fn tmux_session_alive(tmux_session_name: &str) -> bool {
     crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
 }
 
-#[cfg(unix)]
-fn tmux_line_is_claude_tui_ready_prompt(line: &str) -> bool {
-    let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
-    trimmed == "❯"
-}
-
-#[cfg(unix)]
 pub(crate) fn tmux_capture_indicates_ready_for_input(capture: &str) -> bool {
-    capture
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(12)
-        .any(|l| {
-            l.contains("Ready for input (type message + Enter)")
-                || tmux_line_is_claude_tui_ready_prompt(l)
-        })
+    crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(capture)
 }
 
 #[cfg(all(test, unix))]

@@ -5,6 +5,24 @@ use std::path::{Path, PathBuf};
 
 use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
 
+const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
+const CLAUDE_TUI_READY_BANNER: &str = "Ready for input (type message + Enter)";
+const CLAUDE_TUI_PROMPT_MARKER: &str = "\u{276f}";
+
+pub(crate) fn tmux_line_is_claude_tui_ready_prompt(line: &str) -> bool {
+    let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+    trimmed == CLAUDE_TUI_PROMPT_MARKER
+}
+
+pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -> bool {
+    capture
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(CLAUDE_TUI_READY_SCAN_LINES)
+        .any(|l| l.contains(CLAUDE_TUI_READY_BANNER) || tmux_line_is_claude_tui_ready_prompt(l))
+}
+
 /// Format a tmux session name as an exact-match target.
 ///
 /// tmux `-t` flags perform prefix matching by default: `-t foo` matches

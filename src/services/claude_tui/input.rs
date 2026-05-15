@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 const PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
-const CLAUDE_TUI_PROMPT_MARKER: &str = "\u{276f}";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TuiInputAction {
@@ -110,8 +109,7 @@ fn wait_for_prompt_ready(session_name: &str, timeout: Duration) -> Result<(), St
 }
 
 fn pane_looks_ready_for_prompt(pane: &str) -> bool {
-    pane.lines()
-        .any(|line| line.trim_start().starts_with(CLAUDE_TUI_PROMPT_MARKER))
+    crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(pane)
 }
 
 fn validate_prompt_text(input: &str) -> Result<(), String> {
@@ -192,6 +190,35 @@ mod tests {
     #[test]
     fn pane_ready_detection_ignores_non_prompt_status_text() {
         let pane = "Claude Code v2.1.141\nloading plugins\nbypass permissions on";
+
+        assert!(!pane_looks_ready_for_prompt(pane));
+    }
+
+    #[test]
+    fn pane_ready_detection_ignores_prompt_marker_with_command_text() {
+        let pane = "Claude Code v2.1.141\nexample:\n\u{276f} npm run build\nstatus";
+
+        assert!(!pane_looks_ready_for_prompt(pane));
+    }
+
+    #[test]
+    fn pane_ready_detection_ignores_stale_prompt_marker_outside_recent_tail() {
+        let pane = "\
+Claude Code v2.1.141
+\u{276f}
+line 1
+line 2
+line 3
+line 4
+line 5
+line 6
+line 7
+line 8
+line 9
+line 10
+line 11
+line 12
+line 13";
 
         assert!(!pane_looks_ready_for_prompt(pane));
     }
