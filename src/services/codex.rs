@@ -182,6 +182,7 @@ fn execute_command_simple_cancellable_with_options(
         None,
         prompt,
         model,
+        Some("low"),
         readonly_mode,
         fast_mode_enabled,
         goals_enabled,
@@ -404,6 +405,7 @@ fn execute_streaming_direct(
         session_id,
         prompt,
         model,
+        Some("high"),
         readonly_mode,
         fast_mode_enabled,
         goals_enabled,
@@ -1066,14 +1068,20 @@ fn base_exec_args(
     session_id: Option<&str>,
     prompt: &str,
     model: Option<&str>,
+    model_reasoning_effort: Option<&str>,
     readonly_mode: bool,
     fast_mode_enabled: Option<bool>,
     goals_enabled: Option<bool>,
 ) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
-        args.push("-c".to_string());
-        args.push(r#"model_reasoning_effort="high""#.to_string());
+        if let Some(effort) = model_reasoning_effort
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            args.push("-c".to_string());
+            args.push(format!("model_reasoning_effort={effort:?}"));
+        }
         args.push("-m".to_string());
         args.push(model.to_string());
     }
@@ -1661,13 +1669,14 @@ mod tests {
             None,
             "- starts like option",
             Some("gpt-5-codex"),
+            Some("low"),
             false,
             Some(true),
             None,
         );
         assert!(args.starts_with(&[
             "-c".to_string(),
-            r#"model_reasoning_effort="high""#.to_string(),
+            r#"model_reasoning_effort="low""#.to_string(),
             "-m".to_string(),
             "gpt-5-codex".to_string(),
             "--enable".to_string(),
@@ -1692,7 +1701,15 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_includes_resume_before_flags() {
-        let args = base_exec_args(Some("thread-123"), "hello", None, false, Some(false), None);
+        let args = base_exec_args(
+            Some("thread-123"),
+            "hello",
+            None,
+            None,
+            false,
+            Some(false),
+            None,
+        );
         assert_eq!(
             args,
             vec![
@@ -1712,7 +1729,7 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_uses_readonly_sandbox_when_requested() {
-        let args = base_exec_args(None, "readonly", None, true, Some(false), None);
+        let args = base_exec_args(None, "readonly", None, None, true, Some(false), None);
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["--sandbox", "read-only"])
@@ -1727,7 +1744,7 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_leaves_fast_mode_unset_when_not_overridden() {
-        let args = base_exec_args(None, "hello", None, false, None, None);
+        let args = base_exec_args(None, "hello", None, None, false, None, None);
         assert!(
             !args
                 .iter()
@@ -1739,7 +1756,7 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_includes_goals_feature_override() {
-        let args = base_exec_args(None, "hello", None, false, None, Some(true));
+        let args = base_exec_args(None, "hello", None, None, false, None, Some(true));
         assert!(args.starts_with(&[
             "--enable".to_string(),
             "goals".to_string(),

@@ -1223,6 +1223,19 @@ pub(in crate::services::discord) async fn handle_event(
                 );
                 return Ok(());
             }
+            if !is_voice_transcript_announcement
+                && data
+                    .shared
+                    .voice_barge_in
+                    .try_handle_voice_channel_text_reply(
+                        &ctx.http,
+                        channel_id,
+                        &new_message.content,
+                    )
+                    .await
+            {
+                return Ok(());
+            }
             if !is_dm {
                 match resolve_runtime_channel_binding_status(&ctx.http, effective_channel_id).await
                 {
