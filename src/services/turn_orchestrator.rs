@@ -1105,9 +1105,14 @@ impl ChannelMailboxHandle {
     pub(crate) async fn restart_drain(
         &self,
         persistence: QueuePersistenceContext,
+        freeze_after: bool,
     ) -> RestartDrainResult {
         self.request(
-            |reply| ChannelMailboxMsg::RestartDrain { persistence, reply },
+            |reply| ChannelMailboxMsg::RestartDrain {
+                persistence,
+                freeze_after,
+                reply,
+            },
             RestartDrainResult { queued_count: 0 },
         )
         .await
@@ -1212,6 +1217,7 @@ impl ChannelMailboxRegistry {
         provider: &ProviderKind,
         token_hash: &str,
         dispatch_role_overrides: &dashmap::DashMap<ChannelId, ChannelId>,
+        freeze_after: bool,
     ) -> usize {
         let handles: Vec<_> = self
             .handles
@@ -1227,7 +1233,10 @@ impl ChannelMailboxRegistry {
                     .get(&channel_id)
                     .map(|override_id| override_id.value().get()),
             );
-            queued_total += handle.restart_drain(persistence).await.queued_count;
+            queued_total += handle
+                .restart_drain(persistence, freeze_after)
+                .await
+                .queued_count;
         }
         queued_total
     }
@@ -1316,6 +1325,7 @@ enum ChannelMailboxMsg {
     },
     RestartDrain {
         persistence: QueuePersistenceContext,
+        freeze_after: bool,
         reply: oneshot::Sender<RestartDrainResult>,
     },
     ExtendTimeout {
@@ -1337,6 +1347,7 @@ struct ChannelMailboxState {
     active_user_message_id: Option<MessageId>,
     intervention_queue: Vec<Intervention>,
     last_persistence: Option<QueuePersistenceContext>,
+    restart_queue_frozen: bool,
     recovery_started_at: Option<Instant>,
     /// #1031: see `ChannelMailboxSnapshot::turn_started_at`. Mirrors the
     /// `cancel_token.is_some()` lifetime so the idle-detector freshness
@@ -1361,6 +1372,17 @@ fn persist_queue(
     );
 }
 
+fn persist_mailbox_queue(
+    state: &ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) {
+    if state.restart_queue_frozen && state.intervention_queue.is_empty() {
+        return;
+    }
+    persist_queue(channel_id, &state.intervention_queue, persistence);
+}
+
 fn hydrate_pending_queue_into_state(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -1368,6 +1390,7 @@ fn hydrate_pending_queue_into_state(
     persistence: QueuePersistenceContext,
     restored_override: Option<ChannelId>,
 ) -> HydratePendingQueueResult {
+    state.restart_queue_frozen = false;
     state.last_persistence = Some(persistence.clone());
     let mut existing_ids: HashSet<MessageId> = state
         .intervention_queue
@@ -1409,7 +1432,7 @@ fn finalize_turn_state(
     let pending_result = has_soft_intervention(&mut state.intervention_queue);
     if let Some(persistence) = persistence {
         if state.intervention_queue.len() != previous_len || !state.intervention_queue.is_empty() {
-            persist_queue(channel_id, &state.intervention_queue, persistence);
+            persist_mailbox_queue(state, channel_id, persistence);
         }
     }
     FinishTurnResult {
@@ -1611,6 +1634,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    state.restart_queue_frozen = false;
                     let enqueue_result =
                         enqueue_intervention(&mut state.intervention_queue, intervention);
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
@@ -1621,7 +1645,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let previous_len = state.intervention_queue.len();
                     let pending_result = has_soft_intervention(&mut state.intervention_queue);
                     if state.intervention_queue.len() != previous_len {
-                        persist_queue(channel_id, &state.intervention_queue, &persistence);
+                        persist_mailbox_queue(&state, channel_id, &persistence);
                     }
                     let _ = reply.send(pending_result);
                 }
@@ -1629,7 +1653,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.last_persistence = Some(persistence.clone());
                     let next_result = dequeue_next_soft_intervention(&mut state.intervention_queue);
                     let queue_len_after = state.intervention_queue.len();
-                    persist_queue(channel_id, &state.intervention_queue, &persistence);
+                    persist_mailbox_queue(&state, channel_id, &persistence);
                     let _ = reply.send(TakeNextSoftResult {
                         intervention: next_result.intervention,
                         has_more: next_result.has_more,
@@ -1643,6 +1667,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    state.restart_queue_frozen = false;
                     let requeue_result =
                         requeue_intervention_front(&mut state.intervention_queue, intervention);
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
@@ -1663,7 +1688,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if cancel_result.removed.is_some()
                         || !cancel_result.queue_exit_events.is_empty()
                     {
-                        persist_queue(channel_id, &state.intervention_queue, &persistence);
+                        persist_mailbox_queue(&state, channel_id, &persistence);
                     }
                     let _ = reply.send(cancel_result);
                 }
@@ -1698,7 +1723,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             QueueExitEvent::new(intervention, QueueExitKind::Superseded)
                         })
                         .collect();
-                    persist_queue(channel_id, &state.intervention_queue, &persistence);
+                    persist_mailbox_queue(&state, channel_id, &persistence);
                     let _ = reply.send(ClearChannelResult {
                         removed_token,
                         queue_exit_events,
@@ -1710,6 +1735,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    state.restart_queue_frozen = false;
                     state.intervention_queue = queue;
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
                     let _ = reply.send(());
@@ -1738,9 +1764,15 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     );
                     let _ = reply.send(result);
                 }
-                ChannelMailboxMsg::RestartDrain { persistence, reply } => {
+                ChannelMailboxMsg::RestartDrain {
+                    persistence,
+                    freeze_after,
+                    reply,
+                } => {
                     state.last_persistence = Some(persistence.clone());
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
+                    state.restart_queue_frozen =
+                        freeze_after && !state.intervention_queue.is_empty();
                     let _ = reply.send(RestartDrainResult {
                         queued_count: state.intervention_queue.len(),
                     });
@@ -1856,6 +1888,55 @@ mod actor_hydrate_regression_tests {
         );
         assert_eq!(hydrate.queue_len_after, 0);
         assert!(handle.snapshot().await.intervention_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_final_drain_freezes_disk_queue_against_late_empty_persist() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "mailbox-restart-final-freeze";
+        let channel_id = ChannelId::new(143);
+        let handle = ChannelMailboxRegistry::default().handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+
+        handle
+            .replace_queue(
+                vec![make_intervention(
+                    1,
+                    "queued before restart",
+                    Instant::now(),
+                )],
+                persistence.clone(),
+            )
+            .await;
+
+        let drain = handle.restart_drain(persistence.clone(), true).await;
+        assert_eq!(drain.queued_count, 1);
+
+        let taken = handle.take_next_soft(persistence.clone()).await;
+        assert_eq!(
+            taken.intervention.as_ref().map(|item| item.message_id),
+            Some(MessageId::new(1))
+        );
+        assert_eq!(taken.queue_len_after, 0);
+
+        let (items, _) = load_channel_pending_queue(&provider, token_hash, channel_id);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "queued before restart");
+
+        handle
+            .enqueue(
+                make_intervention(2, "queued after freeze", Instant::now()),
+                persistence,
+            )
+            .await;
+        let (items, _) = load_channel_pending_queue(&provider, token_hash, channel_id);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "queued after freeze");
     }
 
     #[tokio::test]
@@ -2214,7 +2295,7 @@ mod tests {
         dispatch_role_overrides.insert(channel_b, ChannelId::new(9_999));
 
         let queued_total = registry
-            .restart_drain_all(&provider, token_hash, &dispatch_role_overrides)
+            .restart_drain_all(&provider, token_hash, &dispatch_role_overrides, false)
             .await;
 
         assert_eq!(queued_total, 3);

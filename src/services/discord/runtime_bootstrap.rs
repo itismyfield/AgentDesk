@@ -1380,6 +1380,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             let queue_count = mailbox_restart_drain_all(
                                 &shared_for_deferred,
                                 &provider_for_deferred,
+                                false,
                             )
                             .await;
                             if queue_count > 0 {
@@ -1980,7 +1981,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     }
 
                     let queue_count =
-                        mailbox_restart_drain_all(&shared_for_lease, &provider_for_lease).await;
+                        mailbox_restart_drain_all(&shared_for_lease, &provider_for_lease, false)
+                            .await;
                     if queue_count > 0 {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(
@@ -2043,7 +2045,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // network calls that might block/timeout and prevent saving.
 
                 let queue_count =
-                    mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown).await;
+                    mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown, false)
+                        .await;
                 if queue_count > 0 {
                     let ts3 = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
@@ -2089,7 +2092,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // any changes that occurred after the initial save.
                 {
                     let queue_count =
-                        mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown).await;
+                        mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown, true)
+                            .await;
                     if queue_count > 0 {
                         let ts4 = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(

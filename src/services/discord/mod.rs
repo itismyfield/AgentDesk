@@ -2785,13 +2785,18 @@ async fn mailbox_hydrate_pending_queue_from_disk(
         .await
 }
 
-async fn mailbox_restart_drain_all(shared: &SharedData, provider: &ProviderKind) -> usize {
+async fn mailbox_restart_drain_all(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    freeze_after: bool,
+) -> usize {
     shared
         .mailboxes
         .restart_drain_all(
             provider,
             &shared.token_hash,
             &shared.dispatch_role_overrides,
+            freeze_after,
         )
         .await
 }
