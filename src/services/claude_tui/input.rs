@@ -2,7 +2,34 @@ use std::process::Output;
 use std::time::{Duration, Instant};
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
-const PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
+const PROMPT_READY_CAPTURE_SCROLLBACK: i32 = -80;
+const PROMPT_READY_DEBUG_TAIL_LINES: usize = 24;
+const PROMPT_READY_DEBUG_TAIL_BYTES: usize = 4096;
+pub const FRESH_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(120);
+pub const FOLLOWUP_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
+const PROMPT_READY_TIMEOUT_ERROR_PREFIX: &str = "timeout waiting for claude tui";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptReadinessKind {
+    FreshTurn,
+    Followup,
+}
+
+impl PromptReadinessKind {
+    fn timeout(self) -> Duration {
+        match self {
+            Self::FreshTurn => FRESH_PROMPT_READY_TIMEOUT,
+            Self::Followup => FOLLOWUP_PROMPT_READY_TIMEOUT,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::FreshTurn => "fresh",
+            Self::Followup => "follow-up",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TuiInputAction {
@@ -37,8 +64,28 @@ pub fn plan_cancel() -> Vec<TuiInputAction> {
     vec![TuiInputAction::Escape]
 }
 
+pub fn send_fresh_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
+    send_prompt_with_readiness(session_name, prompt, PromptReadinessKind::FreshTurn)
+}
+
+pub fn send_followup_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
+    send_prompt_with_readiness(session_name, prompt, PromptReadinessKind::Followup)
+}
+
 pub fn send_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
-    wait_for_prompt_ready(session_name, PROMPT_READY_TIMEOUT)?;
+    send_followup_prompt(session_name, prompt)
+}
+
+pub fn is_prompt_ready_timeout_error(error: &str) -> bool {
+    error.starts_with(PROMPT_READY_TIMEOUT_ERROR_PREFIX)
+}
+
+fn send_prompt_with_readiness(
+    session_name: &str,
+    prompt: &str,
+    readiness: PromptReadinessKind,
+) -> Result<(), String> {
+    wait_for_prompt_ready(session_name, readiness)?;
     run_actions(session_name, &plan_prompt_submit(prompt)?)
 }
 
@@ -88,12 +135,15 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
     }
 }
 
-fn wait_for_prompt_ready(session_name: &str, timeout: Duration) -> Result<(), String> {
+fn wait_for_prompt_ready(session_name: &str, readiness: PromptReadinessKind) -> Result<(), String> {
+    let timeout = readiness.timeout();
     let start = Instant::now();
     let mut wait_interval = Duration::from_millis(100);
     loop {
-        if let Some(pane) = crate::services::platform::tmux::capture_pane(session_name, -80)
-            && pane_looks_ready_for_prompt(&pane)
+        if let Some(pane) = crate::services::platform::tmux::capture_pane(
+            session_name,
+            PROMPT_READY_CAPTURE_SCROLLBACK,
+        ) && pane_looks_ready_for_prompt(&pane)
         {
             return Ok(());
         }
@@ -101,7 +151,12 @@ fn wait_for_prompt_ready(session_name: &str, timeout: Duration) -> Result<(), St
             return Err("claude tui session died before prompt input was ready".to_string());
         }
         if start.elapsed() >= timeout {
-            return Err("timeout waiting for claude tui prompt input readiness".to_string());
+            log_prompt_ready_timeout(session_name, readiness, timeout);
+            return Err(format!(
+                "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s",
+                readiness.label(),
+                timeout.as_secs()
+            ));
         }
         std::thread::sleep(wait_interval);
         wait_interval = std::cmp::min(wait_interval * 2, Duration::from_millis(1000));
@@ -110,6 +165,44 @@ fn wait_for_prompt_ready(session_name: &str, timeout: Duration) -> Result<(), St
 
 fn pane_looks_ready_for_prompt(pane: &str) -> bool {
     crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(pane)
+}
+
+fn log_prompt_ready_timeout(session_name: &str, readiness: PromptReadinessKind, timeout: Duration) {
+    let pane_tail = crate::services::platform::tmux::capture_pane(
+        session_name,
+        PROMPT_READY_CAPTURE_SCROLLBACK,
+    )
+    .map(|pane| prompt_ready_debug_tail(&pane))
+    .unwrap_or_else(|| "<capture unavailable>".to_string());
+    tracing::debug!(
+        tmux_session_name = session_name,
+        readiness = readiness.label(),
+        timeout_secs = timeout.as_secs(),
+        pane_tail = %pane_tail,
+        "claude_tui prompt readiness timed out"
+    );
+    crate::services::claude::debug_log_to(
+        "claude_tui.log",
+        &format!(
+            "prompt readiness timeout session={} readiness={} timeout={}s pane_tail:\n{}",
+            session_name,
+            readiness.label(),
+            timeout.as_secs(),
+            pane_tail
+        ),
+    );
+}
+
+fn prompt_ready_debug_tail(pane: &str) -> String {
+    let mut lines = pane
+        .lines()
+        .rev()
+        .take(PROMPT_READY_DEBUG_TAIL_LINES)
+        .map(|line| line.trim_end_matches('\r'))
+        .collect::<Vec<_>>();
+    lines.reverse();
+    let tail = lines.join("\n");
+    crate::utils::format::safe_suffix(tail.trim(), PROMPT_READY_DEBUG_TAIL_BYTES).to_string()
 }
 
 fn validate_prompt_text(input: &str) -> Result<(), String> {
@@ -221,6 +314,36 @@ line 12
 line 13";
 
         assert!(!pane_looks_ready_for_prompt(pane));
+    }
+
+    #[test]
+    fn prompt_ready_timeouts_are_split_for_fresh_and_followup_turns() {
+        assert_eq!(PromptReadinessKind::FreshTurn.timeout().as_secs(), 120);
+        assert_eq!(PromptReadinessKind::Followup.timeout().as_secs(), 45);
+    }
+
+    #[test]
+    fn prompt_ready_timeout_error_is_classified() {
+        assert!(is_prompt_ready_timeout_error(
+            "timeout waiting for claude tui fresh prompt input readiness after 120s"
+        ));
+        assert!(!is_prompt_ready_timeout_error(
+            "claude tui session died before prompt input was ready"
+        ));
+    }
+
+    #[test]
+    fn prompt_ready_debug_tail_keeps_recent_lines_and_utf8_boundaries() {
+        let pane = (0..40)
+            .map(|index| format!("라인 {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let tail = prompt_ready_debug_tail(&pane);
+
+        assert!(!tail.contains("라인 0"));
+        assert!(tail.contains("라인 39"));
+        assert!(std::str::from_utf8(tail.as_bytes()).is_ok());
     }
 
     #[test]

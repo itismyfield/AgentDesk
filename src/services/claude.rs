@@ -3,6 +3,8 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
+#[cfg(unix)]
+use std::time::Duration;
 
 use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
 use crate::services::discord::restart_report::{
@@ -28,6 +30,11 @@ use crate::services::tmux_diagnostics::{
     record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
     tmux_session_exists, tmux_session_has_live_pane,
 };
+
+#[cfg(unix)]
+const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
+#[cfg(unix)]
+const CLAUDE_TUI_FRESH_PROMPT_READY_BACKOFF_BASE: Duration = Duration::from_secs(5);
 
 /// Resolve the path to the claude binary.
 pub fn resolve_claude_path() -> Option<String> {
@@ -1475,7 +1482,7 @@ fn execute_streaming_local_tui_tmux(
                 Some(tmux_session_name.to_string());
         }
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
-        crate::services::claude_tui::input::send_prompt(tmux_session_name, prompt)?;
+        crate::services::claude_tui::input::send_followup_prompt(tmux_session_name, prompt)?;
         let read_result = read_claude_tui_transcript_until_done(
             &transcript_path_string,
             start_offset,
@@ -1649,19 +1656,15 @@ fn execute_streaming_local_tui_tmux(
     } else {
         0
     };
-    let fresh_turn_result = (|| -> Result<ReadOutputResult, String> {
-        let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
-        crate::services::claude_tui::input::send_prompt(tmux_session_name, prompt)?;
-        read_claude_tui_transcript_until_done(
-            &transcript_path_string,
-            fresh_turn_start_offset,
-            sender.clone(),
-            cancel_token,
-            tmux_session_name,
-            &resolved_session_id,
-            hook_rx,
-        )
-    })();
+    let fresh_turn_result = run_claude_tui_fresh_turn_with_ready_retry(
+        &transcript_path_string,
+        fresh_turn_start_offset,
+        sender.clone(),
+        cancel_token,
+        tmux_session_name,
+        &resolved_session_id,
+        prompt,
+    );
     let read_result = match fresh_turn_result {
         Ok(result) => result,
         Err(error) => {
@@ -1722,6 +1725,78 @@ fn execute_streaming_local_tui_tmux(
         }),
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn run_claude_tui_fresh_turn_with_ready_retry(
+    transcript_path_string: &str,
+    fresh_turn_start_offset: u64,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    tmux_session_name: &str,
+    resolved_session_id: &str,
+    prompt: &str,
+) -> Result<ReadOutputResult, String> {
+    for attempt in 1..=CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS {
+        let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
+        match crate::services::claude_tui::input::send_fresh_prompt(tmux_session_name, prompt) {
+            Ok(()) => {
+                return read_claude_tui_transcript_until_done(
+                    transcript_path_string,
+                    fresh_turn_start_offset,
+                    sender.clone(),
+                    cancel_token.clone(),
+                    tmux_session_name,
+                    resolved_session_id,
+                    hook_rx,
+                );
+            }
+            Err(error) if should_retry_claude_tui_fresh_prompt_ready(&error, attempt) => {
+                let backoff = claude_tui_fresh_prompt_ready_backoff(attempt);
+                debug_log(&format!(
+                    "Claude TUI fresh prompt readiness timed out on attempt {}/{}; retrying after {}s",
+                    attempt,
+                    CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS,
+                    backoff.as_secs()
+                ));
+                tracing::warn!(
+                    tmux_session_name = %tmux_session_name,
+                    attempt = attempt,
+                    max_attempts = CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS,
+                    backoff_secs = backoff.as_secs(),
+                    error = %error,
+                    "claude_tui fresh prompt readiness retry scheduled"
+                );
+                std::thread::sleep(backoff);
+            }
+            Err(error) => {
+                if crate::services::claude_tui::input::is_prompt_ready_timeout_error(&error) {
+                    return Err(format!(
+                        "{}; fresh prompt readiness attempts exhausted ({} attempts)",
+                        error, CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
+                    ));
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    Err(format!(
+        "claude tui fresh prompt readiness attempts exhausted ({} attempts)",
+        CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
+    ))
+}
+
+#[cfg(unix)]
+fn should_retry_claude_tui_fresh_prompt_ready(error: &str, attempt: usize) -> bool {
+    crate::services::claude_tui::input::is_prompt_ready_timeout_error(error)
+        && attempt < CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
+}
+
+#[cfg(unix)]
+fn claude_tui_fresh_prompt_ready_backoff(completed_attempts: usize) -> Duration {
+    let multiplier = completed_attempts.max(1).min(u32::MAX as usize) as u32;
+    CLAUDE_TUI_FRESH_PROMPT_READY_BACKOFF_BASE * multiplier
 }
 
 #[cfg(unix)]
@@ -2628,6 +2703,34 @@ mod local_tmux_lifecycle_tests {
             }
             other => panic!("expected TmuxReady, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fresh_tui_prompt_retry_is_limited_to_readiness_timeouts() {
+        assert!(should_retry_claude_tui_fresh_prompt_ready(
+            "timeout waiting for claude tui fresh prompt input readiness after 120s",
+            1
+        ));
+        assert!(!should_retry_claude_tui_fresh_prompt_ready(
+            "timeout waiting for claude tui fresh prompt input readiness after 120s",
+            CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
+        ));
+        assert!(!should_retry_claude_tui_fresh_prompt_ready(
+            "claude tui session died before prompt input was ready",
+            1
+        ));
+    }
+
+    #[test]
+    fn fresh_tui_prompt_retry_backoff_scales_by_completed_attempts() {
+        assert_eq!(
+            claude_tui_fresh_prompt_ready_backoff(1),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            claude_tui_fresh_prompt_ready_backoff(2),
+            Duration::from_secs(10)
+        );
     }
 }
 
