@@ -14,11 +14,13 @@ BEGIN
 
     BEGIN
         -- Use Postgres jsonpath to evaluate SQLite json path syntax.
+        -- Use strict mode so structurally mismatched paths return NULL
+        -- instead of PostgreSQL lax-mode auto-unwrapping arrays.
         -- Using jsonb_path_query_first gets the first matching element.
         -- Using #>> '{}' converts scalars to text (unquoted strings, etc.)
         -- while preserving objects and arrays as JSON text representations,
         -- which matches SQLite json_extract() behavior.
-        RETURN jsonb_path_query_first(input, path::jsonpath) #>> '{}';
+        RETURN jsonb_path_query_first(input, ('strict ' || path)::jsonpath) #>> '{}';
     EXCEPTION
         WHEN OTHERS THEN
             RETURN NULL;

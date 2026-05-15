@@ -1604,6 +1604,22 @@ mod tests {
         assert_eq!(typed_rows[0]["float_value"], 3.5);
         assert_eq!(typed_rows[0]["null_value"], true);
 
+        let strict_path_rows = db_query_raw_pg(
+            &pool,
+            "SELECT
+                    json_extract(?1::jsonb, '$.phase_gate.run_id') AS object_run_id,
+                    json_extract(?2::jsonb, '$.phase_gate.run_id') AS array_run_id",
+            &[
+                json!({"phase_gate": {"run_id": "run-object"}}),
+                json!({"phase_gate": [{"run_id": "run-array"}]}),
+            ],
+            std::time::Instant::now(),
+        );
+        let strict_path_json: serde_json::Value =
+            serde_json::from_str(&strict_path_rows).expect("parse strict json path rows");
+        assert_eq!(strict_path_json[0]["object_run_id"], "run-object");
+        assert_eq!(strict_path_json[0]["array_run_id"], serde_json::Value::Null);
+
         sqlx::query(
             "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
              VALUES ('card-json-param', 'JSON Param', 'review', NOW(), NOW())",
