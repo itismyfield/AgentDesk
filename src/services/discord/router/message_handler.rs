@@ -2146,6 +2146,17 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         None
     };
+    let voice_origin_channel_id = is_voice_announcement.then_some(channel_id);
+    let channel_id = if let Some(role_channel_id) = voice_role_channel_id {
+        tracing::info!(
+            voice_channel_id = channel_id.get(),
+            background_channel_id = role_channel_id.get(),
+            "routing direct voice transcript to background channel"
+        );
+        role_channel_id
+    } else {
+        channel_id
+    };
     if !is_voice_announcement {
         match shared
             .voice_barge_in
@@ -2253,7 +2264,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             {
                 workspace = shared
                     .voice_barge_in
-                    .agent_voice_workspace_for(channel_id)
+                    .agent_voice_workspace_for(voice_origin_channel_id.unwrap_or(channel_id))
                     .await
                     .or_else(|| settings::resolve_workspace(role_channel_id, None));
                 if workspace.is_some() {
@@ -2406,6 +2417,7 @@ pub(in crate::services::discord) async fn handle_text_message(
 
     let dispatch_id_for_thread = super::super::adk_session::parse_dispatch_id(user_text);
     if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
+        && !is_voice_announcement
         && !super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
     {
         // Voice-originated turns use a synthetic msg id (>= 9e18) that does
