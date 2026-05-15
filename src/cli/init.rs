@@ -396,9 +396,6 @@ fn default_launchd_root_dir(home: &Path, flavor: LaunchdPlistFlavorArg) -> PathB
 const LAUNCHD_NOFILE_SOFT_LIMIT: u32 = 16_384;
 
 #[cfg(target_os = "macos")]
-const LAUNCHD_NOFILE_HARD_LIMIT: u32 = 61_440;
-
-#[cfg(target_os = "macos")]
 fn generate_launchd_plist(home: &Path, agentdesk_bin: &Path) -> String {
     let root_dir = default_launchd_root_dir(home, LaunchdPlistFlavorArg::Release);
     generate_launchd_plist_for_flavor_with_root(
@@ -448,11 +445,6 @@ fn generate_launchd_plist_for_flavor_with_root(
     <key>NumberOfFiles</key>
     <integer>{nofile_soft}</integer>
   </dict>
-  <key>HardResourceLimits</key>
-  <dict>
-    <key>NumberOfFiles</key>
-    <integer>{nofile_hard}</integer>
-  </dict>
   <key>WorkingDirectory</key>
   <string>{root_str}</string>
   <key>EnvironmentVariables</key>
@@ -472,7 +464,6 @@ fn generate_launchd_plist_for_flavor_with_root(
 </dict>
 </plist>"#,
         nofile_soft = LAUNCHD_NOFILE_SOFT_LIMIT,
-        nofile_hard = LAUNCHD_NOFILE_HARD_LIMIT,
     )
 }
 
@@ -1399,7 +1390,7 @@ mod launchd_plist_tests {
     }
 
     #[test]
-    fn generate_launchd_plist_release_sets_number_of_files_limits() {
+    fn generate_launchd_plist_release_sets_soft_number_of_files_limit() {
         let temp_dir = tempfile::tempdir().unwrap();
         let home = temp_dir.path().join("home");
         let root_dir = home.join(".adk").join("release");
@@ -1411,10 +1402,9 @@ mod launchd_plist_tests {
         );
 
         assert!(plist.contains("<key>SoftResourceLimits</key>"));
-        assert!(plist.contains("<key>HardResourceLimits</key>"));
-        assert_eq!(plist.matches("<key>NumberOfFiles</key>").count(), 2);
+        assert!(!plist.contains("<key>HardResourceLimits</key>"));
+        assert_eq!(plist.matches("<key>NumberOfFiles</key>").count(), 1);
         assert!(plist.contains(&format!("<integer>{}</integer>", LAUNCHD_NOFILE_SOFT_LIMIT)));
-        assert!(plist.contains(&format!("<integer>{}</integer>", LAUNCHD_NOFILE_HARD_LIMIT)));
         assert_plist_xml_valid(&plist);
     }
 }
