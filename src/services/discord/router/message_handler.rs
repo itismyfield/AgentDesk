@@ -2076,11 +2076,33 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         None
     };
+    let request_owner_is_allowed_bot = if parsed_voice_announcement.is_some() {
+        shared
+            .settings
+            .read()
+            .await
+            .allowed_bot_ids
+            .contains(&request_owner.get())
+    } else {
+        false
+    };
+    let direct_agent_voice_announcement = if request_owner_is_allowed_bot
+        && parsed_voice_announcement.is_some()
+        && shared
+            .voice_barge_in
+            .is_agent_voice_channel(channel_id)
+            .await
+    {
+        parsed_voice_announcement.clone()
+    } else {
+        None
+    };
     let voice_announcement = crate::voice::prompt::parse_authorized_voice_transcript_announcement(
         user_text,
         request_owner.get(),
         announce_bot_id,
-    );
+    )
+    .or(direct_agent_voice_announcement);
     if parsed_voice_announcement.is_some() && voice_announcement.is_none() {
         tracing::warn!(
             channel_id = channel_id.get(),

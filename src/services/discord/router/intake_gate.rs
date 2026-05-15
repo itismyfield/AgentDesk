@@ -1190,9 +1190,12 @@ pub(in crate::services::discord) async fn handle_event(
                 .unwrap_or(channel_id);
             let settings_snapshot = { data.shared.settings.read().await.clone() };
             let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
-            let is_voice_transcript_announcement = announce_bot_id == Some(user_id.get())
-                && crate::voice::prompt::parse_voice_transcript_announcement(&new_message.content)
+            let is_voice_transcript_candidate =
+                crate::voice::prompt::parse_voice_transcript_announcement(&new_message.content)
                     .is_some();
+            let is_voice_transcript_announcement = is_voice_transcript_candidate
+                && (announce_bot_id == Some(user_id.get())
+                    || settings_snapshot.allowed_bot_ids.contains(&user_id.get()));
             let direct_agent_voice_provider = if is_voice_transcript_announcement {
                 data.shared
                     .voice_barge_in
