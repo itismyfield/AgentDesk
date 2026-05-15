@@ -94,9 +94,9 @@ pub(crate) use turn_bridge::TmuxCleanupPolicy;
 pub(crate) use turn_bridge::build_work_dispatch_completion_result;
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
@@ -349,6 +349,121 @@ fn catch_up_checkpoint_for_scan(
             .map(|checkpoint| disk_checkpoint.max(checkpoint))
             .unwrap_or(disk_checkpoint)
     })
+}
+
+#[derive(Debug, Clone)]
+struct CatchUpChannelCandidate {
+    channel_id: ChannelId,
+    fallback_name: Option<String>,
+    checkpoint_path: Option<PathBuf>,
+    disk_checkpoint: Option<u64>,
+}
+
+fn insert_configured_catch_up_candidate(
+    candidates: &mut BTreeMap<u64, CatchUpChannelCandidate>,
+    provider: &ProviderKind,
+    owner_provider: &ProviderKind,
+    channel_id: u64,
+    fallback_name: Option<String>,
+) -> bool {
+    if owner_provider != provider {
+        return false;
+    }
+
+    use std::collections::btree_map::Entry;
+    match candidates.entry(channel_id) {
+        Entry::Occupied(mut entry) => {
+            if entry.get().fallback_name.is_none() {
+                entry.get_mut().fallback_name = fallback_name;
+            }
+            false
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(CatchUpChannelCandidate {
+                channel_id: ChannelId::new(channel_id),
+                fallback_name,
+                checkpoint_path: None,
+                disk_checkpoint: None,
+            });
+            true
+        }
+    }
+}
+
+fn catch_up_candidate_allowed_for_bot(
+    settings: &DiscordBotSettings,
+    provider: &ProviderKind,
+    candidate: &CatchUpChannelCandidate,
+) -> bool {
+    if candidate.disk_checkpoint.is_some() {
+        return settings::bot_settings_allow_channel(settings, candidate.channel_id, false);
+    }
+
+    settings::validate_bot_channel_routing(
+        settings,
+        provider,
+        candidate.channel_id,
+        candidate.fallback_name.as_deref(),
+        false,
+    )
+    .is_ok()
+}
+
+fn collect_catch_up_channel_candidates(
+    dir: &Path,
+    provider: &ProviderKind,
+) -> BTreeMap<u64, CatchUpChannelCandidate> {
+    let mut candidates = BTreeMap::new();
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(channel_id_raw) = stem.parse::<u64>() else {
+                continue;
+            };
+            let Ok(last_id_str) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(disk_checkpoint) = last_id_str.trim().parse::<u64>() else {
+                continue;
+            };
+
+            candidates.insert(
+                channel_id_raw,
+                CatchUpChannelCandidate {
+                    channel_id: ChannelId::new(channel_id_raw),
+                    fallback_name: None,
+                    checkpoint_path: Some(path),
+                    disk_checkpoint: Some(disk_checkpoint),
+                },
+            );
+        }
+    }
+
+    let mut configured_added = 0usize;
+    for binding in settings::list_registered_channel_bindings() {
+        if insert_configured_catch_up_candidate(
+            &mut candidates,
+            provider,
+            &binding.owner_provider,
+            binding.channel_id,
+            binding.fallback_name,
+        ) {
+            configured_added += 1;
+        }
+    }
+
+    if configured_added > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 🔍 catch-up: added {configured_added} configured channel(s) without checkpoint for recent-message scan"
+        );
+    }
+
+    candidates
 }
 
 pub(in crate::services::discord) fn queued_message_ids(
@@ -2968,13 +3083,18 @@ async fn catch_up_missed_messages_inner(
         return;
     };
     let dir = root.join(provider.as_str());
-    if !dir.is_dir() {
-        return;
-    }
 
     let mut total_recovered = 0usize;
     let now = Instant::now();
     let max_age = std::time::Duration::from_secs(300); // Only catch up messages within 5 minutes
+    let current_bot_user_id = match http.get_current_user().await {
+        Ok(user) => Some(user.id.get()),
+        Err(err) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!("  [{ts}] ⚠ catch-up: failed to resolve current bot user id: {err}");
+            None
+        }
+    };
 
     // #429: prune stale checkpoints before iterating — files older than
     // max_checkpoint_age were written by sessions that ended long before this
@@ -2999,26 +3119,16 @@ async fn catch_up_missed_messages_inner(
         tracing::warn!("  [{ts}] 🧹 catch-up: pruned {pruned} stale checkpoint(s) (>10min old)");
     }
 
-    let Ok(entries) = fs::read_dir(&dir) else {
+    let candidates = collect_catch_up_channel_candidates(&dir, provider);
+    if candidates.is_empty() {
         return;
-    };
+    }
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+    for candidate in candidates.values() {
+        let Some(disk_last_id) = candidate.disk_checkpoint else {
             continue;
         };
-        let Ok(channel_id_raw) = stem.parse::<u64>() else {
-            continue;
-        };
-        let Ok(last_id_str) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(disk_last_id) = last_id_str.trim().parse::<u64>() else {
-            continue;
-        };
-
-        let channel_id = ChannelId::new(channel_id_raw);
+        let channel_id = candidate.channel_id;
         let retry_checkpoint = retry_checkpoints.get(&channel_id).copied();
         let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|entry| *entry);
         let last_id = catch_up_checkpoint_for_scan(disk_last_id, live_checkpoint, retry_checkpoint);
@@ -3029,7 +3139,7 @@ async fn catch_up_missed_messages_inner(
         // have no channel read permissions → every API call fails slowly.
         {
             let settings = shared.settings.read().await;
-            if !settings::bot_settings_allow_channel(&settings, channel_id, false) {
+            if !catch_up_candidate_allowed_for_bot(&settings, provider, candidate) {
                 continue;
             }
         }
@@ -3041,9 +3151,15 @@ async fn catch_up_missed_messages_inner(
                 tracing::warn!(
                     "  [{ts}] ⏭ catch-up: dropping stale checkpoint for unowned channel {} ({})",
                     channel_id,
-                    path.display()
+                    candidate
+                        .checkpoint_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "no checkpoint".to_string())
                 );
-                let _ = fs::remove_file(&path);
+                if let Some(path) = candidate.checkpoint_path.as_ref() {
+                    let _ = fs::remove_file(path);
+                }
                 continue;
             }
             RuntimeChannelBindingStatus::Unknown => continue,
@@ -3076,7 +3192,9 @@ async fn catch_up_missed_messages_inner(
                 );
                 // #429: permanent errors — remove checkpoint to avoid retrying every restart
                 if msg.contains("Missing Access") || msg.contains("Unknown Channel") {
-                    let _ = fs::remove_file(&path);
+                    if let Some(path) = candidate.checkpoint_path.as_ref() {
+                        let _ = fs::remove_file(path);
+                    }
                 }
                 continue;
             }
@@ -3087,11 +3205,6 @@ async fn catch_up_missed_messages_inner(
         }
 
         // Get bot's own user ID to filter out self-messages
-        let bot_user_id = {
-            let settings = shared.settings.read().await;
-            settings.owner_user_id
-        };
-
         // Collect existing message IDs in queue for dedup
         let existing_ids = recovery_known_message_ids(&mailbox_snapshot(shared, channel_id).await);
 
@@ -3136,7 +3249,7 @@ async fn catch_up_missed_messages_inner(
             };
             let outcome = classify_catch_up_message(
                 &view,
-                bot_user_id,
+                current_bot_user_id,
                 &existing_ids,
                 max_age.as_secs() as i64,
                 &allowed_bot_ids,
@@ -3251,34 +3364,23 @@ async fn catch_up_missed_messages_inner(
     }
 
     // Phase 2: Scan for unanswered messages since last bot response.
-    // Catches messages that were queued in-memory but lost on restart.
-    let Ok(entries2) = fs::read_dir(&dir) else {
-        return;
-    };
+    // Catches messages that were queued in-memory but lost on restart. This
+    // intentionally also scans configured channels that currently have no
+    // checkpoint file, because `/clear` or stale-checkpoint pruning can leave
+    // an otherwise valid channel without a disk cursor during a restart gap.
     let mut phase2_recovered = 0usize;
-    let bot_user_id_phase2 = {
-        let settings = shared.settings.read().await;
-        settings.owner_user_id
-    };
     let allowed_bot_ids_phase2: Vec<u64> = {
         let settings = shared.settings.read().await;
         settings.allowed_bot_ids.clone()
     };
     let announce_bot_id_phase2 = resolve_announce_bot_user_id(shared).await;
 
-    for entry in entries2.flatten() {
-        let path = entry.path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Ok(channel_id_raw) = stem.parse::<u64>() else {
-            continue;
-        };
-        let channel_id = ChannelId::new(channel_id_raw);
+    for candidate in candidates.values() {
+        let channel_id = candidate.channel_id;
 
         {
             let settings = shared.settings.read().await;
-            if !settings::bot_settings_allow_channel(&settings, channel_id, false) {
+            if !catch_up_candidate_allowed_for_bot(&settings, provider, candidate) {
                 continue;
             }
         }
@@ -3301,7 +3403,9 @@ async fn catch_up_missed_messages_inner(
                     "  [{ts}] ⚠ catch-up phase2: failed to fetch recent messages for channel {channel_id}: {e}"
                 );
                 if msg.contains("Missing Access") || msg.contains("Unknown Channel") {
-                    let _ = fs::remove_file(&path);
+                    if let Some(path) = candidate.checkpoint_path.as_ref() {
+                        let _ = fs::remove_file(path);
+                    }
                 }
                 continue;
             }
@@ -3313,7 +3417,7 @@ async fn catch_up_missed_messages_inner(
 
         // Find the newest bot response (first bot message in newest-first order)
         let last_bot_idx = recent.iter().position(|m| {
-            Some(m.author.id.get()) == bot_user_id_phase2 && !m.content.trim().is_empty()
+            Some(m.author.id.get()) == current_bot_user_id && !m.content.trim().is_empty()
         });
 
         // Messages at indices 0..last_bot_idx are newer than the last bot response
@@ -3335,7 +3439,7 @@ async fn catch_up_missed_messages_inner(
             if !router::should_process_turn_message(msg.kind) {
                 continue;
             }
-            if Some(msg.author.id.get()) == bot_user_id_phase2 {
+            if Some(msg.author.id.get()) == current_bot_user_id {
                 continue;
             }
             let text = msg.content.trim();
@@ -4239,6 +4343,87 @@ fn enrich_role_map_with_channel_ids() {
         if let Ok(pretty) = serde_json::to_string_pretty(&json) {
             let _ = runtime_store::atomic_write(&path, &pretty);
         }
+    }
+}
+
+#[cfg(test)]
+mod catch_up_recovery_tests {
+    use super::{
+        CatchUpClassification, CatchUpMessageView, ChannelId, ProviderKind,
+        classify_catch_up_message, insert_configured_catch_up_candidate,
+    };
+    use std::collections::{BTreeMap, HashSet};
+
+    #[test]
+    fn configured_channel_is_scanned_without_checkpoint_file() {
+        let mut candidates = BTreeMap::new();
+
+        assert!(insert_configured_catch_up_candidate(
+            &mut candidates,
+            &ProviderKind::Claude,
+            &ProviderKind::Claude,
+            1479671298497183835,
+            Some("adk-cc".to_string()),
+        ));
+
+        let candidate = candidates.get(&1479671298497183835).unwrap();
+        assert_eq!(candidate.channel_id, ChannelId::new(1479671298497183835));
+        assert_eq!(candidate.fallback_name.as_deref(), Some("adk-cc"));
+        assert!(candidate.checkpoint_path.is_none());
+        assert!(candidate.disk_checkpoint.is_none());
+    }
+
+    #[test]
+    fn configured_channel_metadata_does_not_replace_checkpoint_file() {
+        let mut candidates = BTreeMap::new();
+        candidates.insert(
+            1479671298497183835,
+            super::CatchUpChannelCandidate {
+                channel_id: ChannelId::new(1479671298497183835),
+                fallback_name: None,
+                checkpoint_path: Some(std::path::PathBuf::from(
+                    "runtime/last_message/claude/1479671298497183835.txt",
+                )),
+                disk_checkpoint: Some(1504812094456070174),
+            },
+        );
+
+        assert!(!insert_configured_catch_up_candidate(
+            &mut candidates,
+            &ProviderKind::Claude,
+            &ProviderKind::Claude,
+            1479671298497183835,
+            Some("adk-cc".to_string()),
+        ));
+
+        let candidate = candidates.get(&1479671298497183835).unwrap();
+        assert_eq!(candidate.disk_checkpoint, Some(1504812094456070174));
+        assert!(candidate.checkpoint_path.is_some());
+        assert_eq!(candidate.fallback_name.as_deref(), Some("adk-cc"));
+    }
+
+    #[test]
+    fn owner_message_is_not_self_authored_when_bot_identity_is_used() {
+        let owner_user_id = 343742347365974026;
+        let current_bot_id = 9001;
+        let view = CatchUpMessageView {
+            message_id: 1504813049431724053,
+            author_id: owner_user_id,
+            author_is_bot: false,
+            is_processable_kind: true,
+            age_secs: 60,
+            trimmed_text: "야~~~".to_string(),
+        };
+        let existing = HashSet::new();
+
+        assert_eq!(
+            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None),
+            CatchUpClassification::Recover
+        );
+        assert_eq!(
+            classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[], None),
+            CatchUpClassification::SelfAuthored
+        );
     }
 }
 
