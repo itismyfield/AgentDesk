@@ -1743,6 +1743,20 @@ fn emit_claude_tui_watcher_handoff(
 }
 
 #[cfg(unix)]
+const CLAUDE_TUI_STOP_HOOK_TRANSCRIPT_FLUSH_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(15);
+
+#[cfg(unix)]
+fn claude_tui_stop_hook_transcript_flush_elapsed(
+    stop_seen_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    stop_seen_at.is_some_and(|seen_at| {
+        now.saturating_duration_since(seen_at) >= CLAUDE_TUI_STOP_HOOK_TRANSCRIPT_FLUSH_GRACE
+    })
+}
+
+#[cfg(unix)]
 fn read_claude_tui_transcript_until_done(
     transcript_path: &str,
     start_offset: u64,
@@ -1752,8 +1766,8 @@ fn read_claude_tui_transcript_until_done(
     session_id: &str,
     hook_rx: tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
 ) -> Result<ReadOutputResult, String> {
-    let stop_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stop_seen_for_probe = stop_seen.clone();
+    let stop_seen_at = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+    let stop_seen_at_for_probe = stop_seen_at.clone();
     let hook_rx = std::sync::Arc::new(std::sync::Mutex::new(hook_rx));
     let hook_rx_for_probe = hook_rx.clone();
     let expected_session_id = session_id.to_string();
@@ -1761,8 +1775,15 @@ fn read_claude_tui_transcript_until_done(
     let probe = SessionProbe::new(
         move || tmux_session_has_live_pane(&tmux_name_alive),
         move || {
-            if stop_seen_for_probe.load(std::sync::atomic::Ordering::Relaxed) {
-                return true;
+            if let Ok(stop_seen_at) = stop_seen_at_for_probe.lock() {
+                if claude_tui_stop_hook_transcript_flush_elapsed(
+                    *stop_seen_at,
+                    std::time::Instant::now(),
+                ) {
+                    return true;
+                }
+            } else {
+                return false;
             }
             let Ok(mut rx) = hook_rx_for_probe.lock() else {
                 return false;
@@ -1775,8 +1796,17 @@ fn read_claude_tui_transcript_until_done(
                             && event.kind
                                 == crate::services::claude_tui::hook_server::HookEventKind::Stop =>
                     {
-                        stop_seen_for_probe.store(true, std::sync::atomic::Ordering::Relaxed);
-                        return true;
+                        if let Ok(mut stop_seen_at) = stop_seen_at_for_probe.lock()
+                            && stop_seen_at.is_none()
+                        {
+                            *stop_seen_at = Some(std::time::Instant::now());
+                            tracing::debug!(
+                                session_id = %expected_session_id,
+                                grace_ms = CLAUDE_TUI_STOP_HOOK_TRANSCRIPT_FLUSH_GRACE.as_millis(),
+                                "claude tui stop hook observed; delaying synthetic done for transcript flush"
+                            );
+                        }
+                        return false;
                     }
                     Ok(_) => continue,
                     Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
@@ -2533,6 +2563,28 @@ mod local_tmux_lifecycle_tests {
             }
             other => panic!("expected TmuxReady, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stop_hook_does_not_end_tui_read_before_transcript_flush_grace() {
+        let seen_at = std::time::Instant::now();
+
+        assert!(!claude_tui_stop_hook_transcript_flush_elapsed(
+            None, seen_at
+        ));
+        assert!(!claude_tui_stop_hook_transcript_flush_elapsed(
+            Some(seen_at),
+            seen_at
+        ));
+        assert!(!claude_tui_stop_hook_transcript_flush_elapsed(
+            Some(seen_at),
+            seen_at + CLAUDE_TUI_STOP_HOOK_TRANSCRIPT_FLUSH_GRACE
+                - std::time::Duration::from_millis(1)
+        ));
+        assert!(claude_tui_stop_hook_transcript_flush_elapsed(
+            Some(seen_at),
+            seen_at + CLAUDE_TUI_STOP_HOOK_TRANSCRIPT_FLUSH_GRACE
+        ));
     }
 }
 
