@@ -853,6 +853,25 @@ fn highest_reason_severity(reasons: &[health::ClassifiedReason]) -> Severity {
     result
 }
 
+fn highest_reason_fix_safety(reasons: &[health::ClassifiedReason]) -> FixSafety {
+    let mut result = FixSafety::ReadOnly;
+    for reason in reasons {
+        result =
+            match (result, reason.fix_safety) {
+                (FixSafety::NotFixable, _) | (_, FixSafety::NotFixable) => FixSafety::NotFixable,
+                (FixSafety::ExplicitDbRepairRequired, _)
+                | (_, FixSafety::ExplicitDbRepairRequired) => FixSafety::ExplicitDbRepairRequired,
+                (FixSafety::ExplicitRestartRequired, _)
+                | (_, FixSafety::ExplicitRestartRequired) => FixSafety::ExplicitRestartRequired,
+                (FixSafety::SafeLocalRepair, _) | (_, FixSafety::SafeLocalRepair) => {
+                    FixSafety::SafeLocalRepair
+                }
+                _ => FixSafety::ReadOnly,
+            };
+    }
+    result
+}
+
 fn stale_zero_byte_db_candidates(
     runtime_root: &std::path::Path,
     canonical_db_path: &std::path::Path,
@@ -2324,7 +2343,7 @@ fn discord_bot_check_from_health(base: &str, body: &Value) -> Check {
             )
             .with_subsystem("provider_runtime")
             .with_severity(highest_reason_severity(&provider_reasons))
-            .with_fix_safety(FixSafety::ReadOnly)
+            .with_fix_safety(highest_reason_fix_safety(&provider_reasons))
             .with_security_exposure(SecurityExposure::OperationalMetadata)
             .with_evidence(health::reasons_evidence(&provider_reasons))
             .with_path(health_detail_endpoint(base))
@@ -2729,7 +2748,7 @@ fn check_server_running(snapshot: &HealthSnapshot) -> Check {
                 )
                 .with_subsystem("health")
                 .with_severity(highest_reason_severity(&reasons))
-                .with_fix_safety(FixSafety::ReadOnly)
+                .with_fix_safety(highest_reason_fix_safety(&reasons))
                 .with_security_exposure(SecurityExposure::OperationalMetadata)
                 .with_evidence(health::reasons_evidence(&reasons))
                 .with_path(health_endpoint(&snapshot.base))
@@ -2898,7 +2917,7 @@ fn check_degraded_reasons(snapshot: &HealthSnapshot) -> Check {
         .with_severity(highest_reason_severity(&reasons))
         .with_evidence(health::reasons_evidence(&reasons))
         .with_security_exposure(SecurityExposure::OperationalMetadata)
-        .with_fix_safety(FixSafety::ReadOnly)
+        .with_fix_safety(highest_reason_fix_safety(&reasons))
         .with_expected_actual("no degraded reasons", detail)
         .with_next_steps(next_steps);
     check
@@ -3957,7 +3976,7 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Fail);
         assert_eq!(check.severity, Severity::Error);
         assert_eq!(check.subsystem, "provider_runtime");
-        assert_eq!(check.fix_safety, FixSafety::ReadOnly);
+        assert_eq!(check.fix_safety, FixSafety::ExplicitRestartRequired);
         assert!(check.detail.contains("provider codex is disconnected"));
         assert!(
             check
