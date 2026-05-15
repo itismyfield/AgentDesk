@@ -4,6 +4,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 #[cfg(unix)]
+use std::sync::{Arc, LazyLock, Mutex};
+#[cfg(unix)]
 use std::time::Duration;
 
 use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
@@ -35,6 +37,21 @@ use crate::services::tmux_diagnostics::{
 const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
 #[cfg(unix)]
 const CLAUDE_TUI_FRESH_PROMPT_READY_BACKOFF_BASE: Duration = Duration::from_secs(5);
+
+#[cfg(unix)]
+type ClaudeTuiSessionTurnLock = Arc<Mutex<()>>;
+
+#[cfg(unix)]
+static CLAUDE_TUI_SESSION_TURN_LOCKS: LazyLock<dashmap::DashMap<String, ClaudeTuiSessionTurnLock>> =
+    LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(unix)]
+fn claude_tui_session_turn_lock(tmux_session_name: &str) -> ClaudeTuiSessionTurnLock {
+    CLAUDE_TUI_SESSION_TURN_LOCKS
+        .entry(tmux_session_name.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 /// Resolve the path to the claude binary.
 pub fn resolve_claude_path() -> Option<String> {
@@ -1468,6 +1485,13 @@ fn execute_streaming_local_tui_tmux(
         tmux_session_name
     ));
 
+    let turn_lock = claude_tui_session_turn_lock(tmux_session_name);
+    let _turn_guard = turn_lock.lock().unwrap_or_else(|error| error.into_inner());
+    debug_log(&format!(
+        "Claude TUI session turn lock acquired: {}",
+        tmux_session_name
+    ));
+
     let working_dir_path = std::path::Path::new(working_dir);
     let session_resolution =
         resolve_claude_tui_session_for_launch(working_dir_path, session_id, None)?;
@@ -2830,6 +2854,51 @@ mod local_tmux_lifecycle_tests {
         assert_eq!(
             claude_tui_fresh_prompt_ready_backoff(2),
             Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn claude_tui_turn_lock_serializes_same_tmux_session() {
+        let session_name = format!("claude-tui-lock-{}", uuid::Uuid::new_v4());
+        let first_lock = claude_tui_session_turn_lock(&session_name);
+        let second_lock = claude_tui_session_turn_lock(&session_name);
+        assert!(
+            Arc::ptr_eq(&first_lock, &second_lock),
+            "same tmux session must share one turn lock"
+        );
+
+        let _guard = first_lock.lock().unwrap_or_else(|error| error.into_inner());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let session_name_for_thread = session_name.clone();
+        let handle = std::thread::spawn(move || {
+            let lock = claude_tui_session_turn_lock(&session_name_for_thread);
+            let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+            sender.send(()).unwrap();
+        });
+
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "concurrent same-session turn entered before the first guard dropped"
+        );
+        drop(_guard);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("same-session turn should enter after the first guard drops");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn claude_tui_turn_lock_is_per_tmux_session() {
+        let first =
+            claude_tui_session_turn_lock(&format!("claude-tui-lock-a-{}", uuid::Uuid::new_v4()));
+        let second =
+            claude_tui_session_turn_lock(&format!("claude-tui-lock-b-{}", uuid::Uuid::new_v4()));
+
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "different tmux sessions must not share one turn lock"
         );
     }
 }
