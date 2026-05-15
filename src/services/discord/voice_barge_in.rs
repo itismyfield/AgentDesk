@@ -634,10 +634,11 @@ impl VoiceBargeInRuntime {
         }
 
         let config = self.cached_config().await;
-        let Some(target_channel_id) = config.agents.iter().find_map(|agent| {
-            agent_voice_matches_channel(agent, channel_id)
-                .then(|| agent_voice_background_channel(agent).unwrap_or(channel_id))
-        }) else {
+        let Some(target_channel_id) = config
+            .agents
+            .iter()
+            .find_map(|agent| agent_voice_matches_channel(agent, channel_id).then_some(channel_id))
+        else {
             return VoiceChannelTextReplyOutcome::NotVoiceChannel;
         };
         drop(config);
@@ -1410,7 +1411,7 @@ impl VoiceBargeInRuntime {
             .resolve_effective_foreground_config(source_channel_id, target_channel_id)
             .await;
         let background_provider = self
-            .resolve_background_provider_for_target(target_channel_id)
+            .resolve_background_provider_for_route(source_channel_id, target_channel_id)
             .await;
         let driver = select_voice_background_driver(&background_provider);
         let announcement = crate::voice::prompt::build_voice_transcript_announcement(
@@ -1614,15 +1615,19 @@ impl VoiceBargeInRuntime {
         }
     }
 
-    async fn resolve_background_provider_for_target(
+    async fn resolve_background_provider_for_route(
         &self,
+        source_channel_id: ChannelId,
         target_channel_id: ChannelId,
     ) -> ProviderKind {
         let config = self.cached_config().await;
         config
             .agents
             .iter()
-            .find(|agent| agent_text_channel_matches(agent, target_channel_id))
+            .find(|agent| {
+                agent_voice_matches_channel(agent, source_channel_id)
+                    || agent_text_channel_matches(agent, target_channel_id)
+            })
             .map(|agent| ProviderKind::from_str_or_unsupported(&agent.provider))
             .unwrap_or_else(|| ProviderKind::Unsupported("unknown".to_string()))
     }
@@ -1634,14 +1639,14 @@ impl VoiceBargeInRuntime {
         transcript: &str,
     ) -> VoiceTurnTargetResolution {
         let config = self.cached_config().await;
-        if let Some((agent_id, target_channel_id)) = config.agents.iter().find_map(|agent| {
+        if let Some(agent_id) = config.agents.iter().find_map(|agent| {
             if agent_voice_matches_channel(agent, source_channel_id) {
-                agent_voice_background_channel(agent)
-                    .map(|channel_id| (agent.id.clone(), channel_id))
+                Some(agent.id.clone())
             } else {
                 None
             }
         }) {
+            let target_channel_id = source_channel_id;
             self.bind_routed_voice_context(source_channel_id, target_channel_id);
             self.active_voice_routes.insert(
                 source_channel_id.get(),
@@ -2457,6 +2462,16 @@ mod tests {
         VoiceBargeInRuntime::from_voice_config(&config)
     }
 
+    fn runtime_with_agents(agents: Vec<crate::config::AgentDef>) -> VoiceBargeInRuntime {
+        let runtime = enabled_runtime();
+        let mut config = crate::config::Config::default();
+        config.agents = agents;
+        if let Ok(mut guard) = runtime.config_cache.lock() {
+            *guard = Some((Instant::now(), Arc::new(config)));
+        }
+        runtime
+    }
+
     #[test]
     fn foreground_ack_text_stays_short_and_routes_work_to_background() {
         assert_eq!(
@@ -2513,6 +2528,17 @@ mod tests {
             agent_voice_background_channel(&agent),
             Some(ChannelId::new(100))
         );
+    }
+
+    #[tokio::test]
+    async fn background_provider_resolves_from_direct_voice_channel() {
+        let runtime = runtime_with_agents(vec![test_agent("codex")]);
+
+        let provider = runtime
+            .resolve_background_provider_for_route(ChannelId::new(300), ChannelId::new(300))
+            .await;
+
+        assert_eq!(provider, ProviderKind::Codex);
     }
 
     #[test]
