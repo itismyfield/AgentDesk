@@ -555,6 +555,13 @@ struct DetectedRebindOutputPath {
 
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeTuiTranscriptRecoveryPath {
+    path: String,
+    start_offset: u64,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct LsofOutputCandidate {
     fd: String,
     raw_path: String,
@@ -618,6 +625,86 @@ fn candidate_matches_fallback(fallback_path: &str, candidate_path: &str) -> bool
         .unwrap_or(fallback_name);
     candidate_name == fallback_name
         || (candidate_name.starts_with(fallback_stem) && candidate_name.contains(".jsonl"))
+}
+
+#[cfg(unix)]
+fn claude_tui_user_content_text(value: &serde_json::Value) -> Option<String> {
+    if value.get("type").and_then(|v| v.as_str()) != Some("user") {
+        return None;
+    }
+    let content = value.get("message")?.get("content")?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let mut combined = String::new();
+    for block in content.as_array()? {
+        if block.get("type").and_then(|v| v.as_str()) == Some("text")
+            && let Some(text) = block.get("text").and_then(|v| v.as_str())
+        {
+            combined.push_str(text);
+        }
+    }
+    Some(combined)
+}
+
+#[cfg(unix)]
+fn claude_tui_transcript_offset_after_user_text(
+    transcript_path: &Path,
+    user_text: &str,
+) -> Option<u64> {
+    let needle = user_text.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    let bytes = std::fs::read(transcript_path).ok()?;
+    let mut offset = 0u64;
+    let mut matched_offset = None;
+    for segment in bytes.split_inclusive(|byte| *byte == b'\n') {
+        offset = offset.saturating_add(segment.len() as u64);
+        let line = String::from_utf8_lossy(segment);
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let Some(content) = claude_tui_user_content_text(&value) else {
+            continue;
+        };
+        if content.contains(needle) {
+            matched_offset = Some(offset);
+        }
+    }
+    matched_offset
+}
+
+#[cfg(unix)]
+fn claude_tui_transcript_recovery_path(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    candidate_output_path: Option<&str>,
+    cwd: Option<&str>,
+) -> Option<ClaudeTuiTranscriptRecoveryPath> {
+    if provider.as_str() != "claude" {
+        return None;
+    }
+    if candidate_output_path.is_some_and(|path| std::fs::metadata(path).is_ok()) {
+        return None;
+    }
+    let session_id = state.session_id.as_deref()?;
+    let cwd = cwd?;
+    let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        Path::new(cwd),
+        session_id,
+        None,
+    )
+    .ok()?;
+    if std::fs::metadata(&transcript_path).is_err() {
+        return None;
+    }
+    let start_offset =
+        claude_tui_transcript_offset_after_user_text(&transcript_path, &state.user_text)?;
+    Some(ClaudeTuiTranscriptRecoveryPath {
+        path: transcript_path.display().to_string(),
+        start_offset,
+    })
 }
 
 #[cfg(unix)]
@@ -1047,7 +1134,7 @@ pub(super) async fn restore_inflight_turns(
 
     let settings_snapshot = shared.settings.read().await.clone();
 
-    for state in states {
+    for mut state in states {
         // #897 round-4 High: rebind_origin inflights are synthetic
         // placeholders owned by `/api/inflight/rebind` and do NOT carry
         // a real user message, dispatch context, or placeholder Discord
@@ -1694,6 +1781,64 @@ pub(super) async fn restore_inflight_turns(
                     None
                 }
             });
+        let output_path = {
+            #[cfg(unix)]
+            {
+                let transcript_cwd = if provider.as_str() == "claude" {
+                    state.worktree_path.clone().or_else(|| {
+                        shared
+                            .core
+                            .try_lock()
+                            .ok()
+                            .and_then(|data| {
+                                data.sessions
+                                    .get(&channel_id)
+                                    .and_then(|s| s.current_path.clone())
+                            })
+                            .or_else(|| {
+                                let sqlite_settings_db = if shared.pg_pool.is_some() {
+                                    None
+                                } else {
+                                    None::<&crate::db::Db>
+                                };
+                                load_last_session_path(
+                                    sqlite_settings_db,
+                                    shared.pg_pool.as_ref(),
+                                    &shared.token_hash,
+                                    channel_id.get(),
+                                )
+                            })
+                    })
+                } else {
+                    None
+                };
+                if let Some(recovered) = claude_tui_transcript_recovery_path(
+                    provider,
+                    &state,
+                    output_path.as_deref(),
+                    transcript_cwd.as_deref(),
+                ) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ♻ recovery adopted Claude TUI transcript for channel {}: {} (offset {})",
+                        state.channel_id,
+                        recovered.path,
+                        recovered.start_offset
+                    );
+                    state.output_path = Some(recovered.path.clone());
+                    state.last_offset = recovered.start_offset;
+                    state.turn_start_offset = Some(recovered.start_offset);
+                    let _ = save_inflight_state(&state);
+                    Some(recovered.path)
+                } else {
+                    output_path
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                output_path
+            }
+        };
         let input_fifo_path = state
             .input_fifo_path
             .clone()
@@ -3348,6 +3493,83 @@ mod post_work_evidence_tests {
         state.any_tool_used = false;
         state.last_tool_summary = Some("Bash completed".to_string());
         assert!(recovery_has_post_work_ready_evidence(&state));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod claude_tui_recovery_tests {
+    use super::*;
+    use crate::services::provider::ProviderKind;
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn claude_tui_transcript_recovery_starts_after_matching_user_prompt() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        let previous_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", claude_home.path()) };
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &session_id,
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(transcript_path.parent().unwrap()).unwrap();
+        let prompt = "Authoritative wrapper\n\nCreate the story agent workspace.";
+        std::fs::write(
+            &transcript_path,
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"old"}]}}"#,
+                serde_json::json!({
+                    "type": "user",
+                    "message": { "content": [{ "type": "text", "text": prompt }] }
+                }),
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"new answer"}]}}"#,
+                r#"{"type":"result","subtype":"success","result":"new answer"}"#
+            ),
+        )
+        .unwrap();
+        let expected_offset =
+            claude_tui_transcript_offset_after_user_text(&transcript_path, prompt)
+                .expect("prompt offset");
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            42,
+            Some("agent-manager".to_string()),
+            123,
+            456,
+            789,
+            prompt.to_string(),
+            Some(session_id),
+            Some("AgentDesk-claude-agent-manager".to_string()),
+            Some(cwd.path().join("missing.jsonl").display().to_string()),
+            Some("/tmp/input".to_string()),
+            0,
+        );
+        state.worktree_path = Some(cwd.path().display().to_string());
+
+        let recovered = claude_tui_transcript_recovery_path(
+            &ProviderKind::Claude,
+            &state,
+            state.output_path.as_deref(),
+            state.worktree_path.as_deref(),
+        )
+        .expect("transcript recovery path");
+
+        assert_eq!(recovered.path, transcript_path.display().to_string());
+        assert_eq!(recovered.start_offset, expected_offset);
+        assert_eq!(
+            extract_response_from_output(&recovered.path, recovered.start_offset),
+            "new answer"
+        );
+        if let Some(previous) = previous_claude_config_dir {
+            unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", previous) };
+        } else {
+            unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+        }
     }
 }
 
