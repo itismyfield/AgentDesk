@@ -1443,6 +1443,13 @@ fn emit_fresh_session_watcher_handoff(
 }
 
 #[cfg(unix)]
+fn claude_tui_fresh_turn_start_offset(transcript_path: &std::path::Path) -> u64 {
+    std::fs::metadata(transcript_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
 fn execute_streaming_local_tui_tmux(
     prompt: &str,
     session_id: Option<&str>,
@@ -1646,18 +1653,10 @@ fn execute_streaming_local_tui_tmux(
         session_id: resolved_session_id.clone(),
         raw_session_id: Some(resolved_session_id.clone()),
     });
-    // When resuming into a fresh tmux session, skip already-recorded
-    // transcript lines so the prior turn's output is not replayed back to
-    // Discord. PR #2110 covered the transcript-missing path; this covers
-    // the transcript-exists + tmux-dead path that still replayed stale
-    // lines before the new turn's response.
-    let fresh_turn_start_offset = if resume {
-        std::fs::metadata(&transcript_path)
-            .map(|meta| meta.len())
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    // Skip any transcript bytes that predate this launch. Resume and fresh
+    // turns both need this guard because a reused/colliding session_id can
+    // leave stale JSONL on disk even when the launch is intentionally fresh.
+    let fresh_turn_start_offset = claude_tui_fresh_turn_start_offset(&transcript_path);
     let fresh_turn_result = run_claude_tui_fresh_turn_with_ready_retry(
         &transcript_path_string,
         fresh_turn_start_offset,
@@ -2742,6 +2741,71 @@ mod local_tmux_lifecycle_tests {
     }
 
     #[test]
+    fn fresh_tui_start_offset_skips_existing_transcript_for_fresh_launch() {
+        use std::io::Write;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let transcript_path = temp_dir.path().join("session.jsonl");
+        let stale_transcript = concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"stale-hidden"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","result":"stale done","session_id":"stale-session"}"#,
+            "\n"
+        );
+        std::fs::write(&transcript_path, stale_transcript).unwrap();
+
+        let start_offset = claude_tui_fresh_turn_start_offset(&transcript_path);
+        assert_eq!(start_offset, stale_transcript.len() as u64);
+
+        let mut transcript = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript_path)
+            .unwrap();
+        writeln!(
+            transcript,
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"fresh-visible"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            transcript,
+            r#"{{"type":"result","subtype":"success","result":"fresh done","session_id":"fresh-session"}}"#
+        )
+        .unwrap();
+        drop(transcript);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let result = read_output_file_until_result(
+            transcript_path.to_str().unwrap(),
+            start_offset,
+            sender,
+            None,
+            SessionProbe::new(|| true, || false),
+        )
+        .unwrap();
+
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert!(
+            !messages.iter().any(
+                |message| matches!(message, StreamMessage::Text { content } if content.contains("stale-hidden"))
+            ),
+            "stale transcript content must not be replayed: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(
+                |message| matches!(message, StreamMessage::Text { content } if content == "fresh-visible")
+            ),
+            "new turn text should still be delivered: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(
+                |message| matches!(message, StreamMessage::Done { result, session_id } if result == "fresh done" && session_id.as_deref() == Some("fresh-session"))
+            ),
+            "new turn result should complete the read: {messages:?}"
+        );
+    }
+
+    #[test]
     fn fresh_tui_prompt_retry_is_limited_to_readiness_timeouts() {
         assert!(should_retry_claude_tui_fresh_prompt_ready(
             "timeout waiting for claude tui fresh prompt input readiness after 120s",
@@ -2823,6 +2887,33 @@ mod claude_tui_session_resolution_tests {
                 .file_name()
                 .and_then(|name| name.to_str()),
             Some(expected_filename.as_str())
+        );
+    }
+
+    #[test]
+    fn forced_fresh_resolution_still_skips_existing_transcript_bytes() {
+        let cwd = tempfile::tempdir().unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        let missing_resume_session_id = uuid::Uuid::new_v4().to_string();
+
+        let resolution = resolve_claude_tui_session_for_launch(
+            cwd.path(),
+            Some(&missing_resume_session_id),
+            Some(claude_home.path()),
+        )
+        .unwrap();
+        assert!(!resolution.resume);
+
+        let stale_transcript = concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"forced-fresh-stale"}]}}"#,
+            "\n"
+        );
+        std::fs::create_dir_all(resolution.transcript_path.parent().unwrap()).unwrap();
+        std::fs::write(&resolution.transcript_path, stale_transcript).unwrap();
+
+        assert_eq!(
+            claude_tui_fresh_turn_start_offset(&resolution.transcript_path),
+            stale_transcript.len() as u64
         );
     }
 }
