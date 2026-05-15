@@ -48,6 +48,7 @@ pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
         prompt
     };
     validate_prompt_text(prompt)?;
+    validate_prompt_not_empty(prompt)?;
     let mut actions = if prompt.contains('\n') {
         vec![TuiInputAction::PasteBuffer(prompt.to_string())]
     } else {
@@ -85,8 +86,9 @@ fn send_prompt_with_readiness(
     prompt: &str,
     readiness: PromptReadinessKind,
 ) -> Result<(), String> {
+    let actions = plan_prompt_submit(prompt)?;
     wait_for_prompt_ready(session_name, readiness)?;
-    run_actions(session_name, &plan_prompt_submit(prompt)?)
+    run_actions(session_name, &actions)
 }
 
 pub fn send_cancel(session_name: &str) -> Result<(), String> {
@@ -215,6 +217,13 @@ fn validate_prompt_text(input: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_prompt_not_empty(input: &str) -> Result<(), String> {
+    if input.trim().is_empty() {
+        return Err("prompt must contain non-whitespace text".to_string());
+    }
+    Ok(())
+}
+
 fn split_literal_chunks(input: &str, max_chars: usize) -> Vec<String> {
     if input.is_empty() {
         return Vec::new();
@@ -255,10 +264,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_prompt_still_submits_enter() {
-        let actions = plan_prompt_submit("");
+    fn empty_prompt_is_rejected() {
+        let error = plan_prompt_submit("").unwrap_err();
 
-        assert_eq!(actions.unwrap(), vec![TuiInputAction::Enter]);
+        assert_eq!(error, "prompt must contain non-whitespace text");
+    }
+
+    #[test]
+    fn whitespace_only_prompt_is_rejected_after_normalization() {
+        let error = plan_prompt_submit(" \r\n\t ").unwrap_err();
+
+        assert_eq!(error, "prompt must contain non-whitespace text");
     }
 
     #[test]
