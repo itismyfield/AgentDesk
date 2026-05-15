@@ -208,6 +208,9 @@ fn prompt_ready_debug_tail(pane: &str) -> String {
 }
 
 fn validate_prompt_text(input: &str) -> Result<(), String> {
+    // Block terminal control channels such as ESC bracketed-paste markers,
+    // DEL, and C1 controls before either literal send or tmux paste-buffer
+    // delivery can relay them into the hosted TUI.
     if input
         .chars()
         .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
@@ -390,11 +393,17 @@ line 13";
 
     #[test]
     fn prompt_rejects_terminal_control_characters() {
-        let error = plan_prompt_submit("hello\u{1b}[201~").unwrap_err();
+        for prompt in [
+            "hello\u{1b}[201~", // ESC bracketed-paste end marker
+            "hello\u{7f}",      // DEL
+            "hello\u{85}",      // C1 control NEXT LINE
+        ] {
+            let error = plan_prompt_submit(prompt).unwrap_err();
 
-        assert_eq!(
-            error,
-            "prompt contains unsupported terminal control characters"
-        );
+            assert_eq!(
+                error,
+                "prompt contains unsupported terminal control characters"
+            );
+        }
     }
 }

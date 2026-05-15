@@ -127,6 +127,11 @@ After entering and validating each bot token, the wizard generates OAuth2 invite
 ### Step 2: Provider Verification
 The wizard checks whether Claude Code or Codex CLI is installed and authenticated on your machine. If not, it provides installation and login instructions. Provider setup is **not required** to complete onboarding — you can configure it later.
 
+#### Claude TUI Hosting Security Note
+When AgentDesk hosts Claude Code through the Claude TUI session path, it starts the CLI with `--dangerously-skip-permissions` so the Discord relay can drive the interactive TUI without repeated local permission prompts. Treat the configured working directory as the security boundary for that hosted process: use a dedicated worktree or workspace for each task, and do not point hosted sessions at broad home, credential, or operator directories.
+
+Prompt submission also rejects terminal control characters before it writes to the TUI. Newline, carriage return, and tab are allowed for normal prompt text, but escape sequences such as bracketed paste markers (`\x1b[200~` / `\x1b[201~`), DEL, and C1 controls are blocked before literal send or tmux paste-buffer paths can relay them.
+
 ### Step 3: Agent Selection
 Choose from three built-in role presets or compose a custom team:
 
