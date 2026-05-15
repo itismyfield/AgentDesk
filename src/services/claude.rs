@@ -1881,7 +1881,7 @@ fn read_claude_tui_transcript_until_done(
                 &hook_rx_for_probe,
                 &expected_session_id,
                 hook_events_after,
-                || claude_tui_tmux_capture_indicates_ready_for_input(&tmux_name_ready),
+                || crate::services::provider::tmux_session_ready_for_input(&tmux_name_ready),
             )
         },
     );
@@ -1923,7 +1923,9 @@ fn claude_tui_stop_hook_seen_or_ready_with_probe(
         return true;
     }
     let Ok(mut rx) = hook_rx.lock() else {
-        return ready_for_input();
+        // Preserve the original conservative behavior: a poisoned hook
+        // receiver should not let a tmux prompt alone become a Stop signal.
+        return false;
     };
     loop {
         match rx.try_recv() {
@@ -1945,13 +1947,6 @@ fn claude_tui_stop_hook_seen_or_ready_with_probe(
     }
     drop(rx);
     ready_for_input()
-}
-
-#[cfg(unix)]
-fn claude_tui_tmux_capture_indicates_ready_for_input(tmux_session_name: &str) -> bool {
-    crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
-        .map(|capture| crate::services::provider::tmux_capture_indicates_ready_for_input(&capture))
-        .unwrap_or(false)
 }
 
 #[cfg(all(test, unix))]
@@ -2022,6 +2017,26 @@ mod claude_tui_ready_probe_tests {
             "session-1",
             hook_events_after,
             || false
+        ));
+        assert!(!stop_seen.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn ready_probe_keeps_poisoned_hook_receiver_conservative() {
+        let (_tx, rx) = tokio::sync::broadcast::channel(4);
+        let hook_rx = Mutex::new(rx);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = hook_rx.lock().unwrap();
+            panic!("poison hook receiver");
+        }));
+        let stop_seen = AtomicBool::new(false);
+
+        assert!(!claude_tui_stop_hook_seen_or_ready_with_probe(
+            &stop_seen,
+            &hook_rx,
+            "session-1",
+            chrono::Utc::now(),
+            || true
         ));
         assert!(!stop_seen.load(Ordering::Relaxed));
     }

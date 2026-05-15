@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -9,6 +9,7 @@ use url::Url;
 
 const RELAY_TIMEOUT: Duration = Duration::from_secs(2);
 const FAILURE_MARKER_SUBDIR: &str = "runtime/claude_tui_hook_relay_failures";
+const FAILURE_MARKER_TTL_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct HookRelayFailureMarker {
@@ -140,19 +141,37 @@ fn record_hook_relay_failure(
         uuid::Uuid::new_v4().simple()
     );
     let marker_path = marker_dir.join(filename);
+    let temp_path =
+        marker_path.with_extension(format!("json.tmp.{}", uuid::Uuid::new_v4().simple()));
     let rendered = serde_json::to_vec(&marker)
         .map_err(|err| format!("serialize hook relay failure marker: {err}"))?;
-    std::fs::write(&marker_path, rendered).map_err(|err| {
+    std::fs::write(&temp_path, rendered).map_err(|err| {
         format!(
-            "write hook relay failure marker {}: {err}",
+            "write hook relay failure marker temp {}: {err}",
+            temp_path.display()
+        )
+    })?;
+    std::fs::rename(&temp_path, &marker_path).map_err(|err| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!(
+            "publish hook relay failure marker {}: {err}",
             marker_path.display()
         )
-    })
+    })?;
+    Ok(())
 }
 
 pub(crate) fn drain_hook_relay_failure_markers(
     provider: &str,
     session_id: &str,
+) -> Vec<HookRelayFailureMarker> {
+    drain_hook_relay_failure_markers_at(provider, session_id, Utc::now())
+}
+
+fn drain_hook_relay_failure_markers_at(
+    provider: &str,
+    session_id: &str,
+    now: DateTime<Utc>,
 ) -> Vec<HookRelayFailureMarker> {
     let Some(marker_dir) = failure_marker_dir() else {
         return Vec::new();
@@ -163,15 +182,21 @@ pub(crate) fn drain_hook_relay_failure_markers(
 
     let expected_provider = provider.trim().to_ascii_lowercase();
     let mut markers = Vec::new();
-    for entry in entries.flatten().take(512) {
+    for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
+            continue;
+        }
+        if !is_failure_marker_path(&path) {
             continue;
         }
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };
         match serde_json::from_str::<HookRelayFailureMarker>(&contents) {
+            Ok(marker) if marker_is_stale(&marker, now) => {
+                let _ = std::fs::remove_file(&path);
+            }
             Ok(marker)
                 if marker.provider == expected_provider && marker.session_id == session_id =>
             {
@@ -192,12 +217,46 @@ pub(crate) fn drain_hook_relay_failure_markers(
     markers
 }
 
+fn is_failure_marker_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension == "json")
+}
+
+fn marker_is_stale(marker: &HookRelayFailureMarker, now: DateTime<Utc>) -> bool {
+    now.signed_duration_since(marker.recorded_at)
+        > chrono::Duration::seconds(FAILURE_MARKER_TTL_SECS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::sync::{LazyLock, Mutex};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     #[test]
     fn hook_url_routes_to_provider_event_with_session_query() {
@@ -228,9 +287,8 @@ mod tests {
     #[test]
     fn relay_failure_marker_round_trips_for_session() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         let temp_dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp_dir.path()) };
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp_dir.path());
 
         record_hook_relay_failure(
             "http://127.0.0.1:49152",
@@ -251,10 +309,56 @@ mod tests {
             "post hook event: connection refused".to_string()
         );
         assert!(drain_hook_relay_failure_markers("claude", "session-1").is_empty());
+    }
 
-        match previous_root {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
+    #[test]
+    fn relay_failure_marker_write_publishes_only_complete_json_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp_dir.path());
+
+        record_hook_relay_failure(
+            "http://127.0.0.1:49152",
+            "claude",
+            "Stop",
+            "session-1",
+            "post hook event: connection refused",
+        )
+        .unwrap();
+
+        let marker_dir = failure_marker_dir().unwrap();
+        let entries = std::fs::read_dir(marker_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert!(is_failure_marker_path(&entries[0]));
+        let marker = serde_json::from_str::<HookRelayFailureMarker>(
+            &std::fs::read_to_string(&entries[0]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker.session_id, "session-1");
+    }
+
+    #[test]
+    fn drain_prunes_stale_unmatched_markers() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp_dir.path());
+        let marker_dir = failure_marker_dir().unwrap();
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        let stale_marker = HookRelayFailureMarker {
+            provider: "claude".to_string(),
+            event: "Stop".to_string(),
+            session_id: "stale-session".to_string(),
+            endpoint: "http://127.0.0.1:49152".to_string(),
+            error: "post hook event: connection refused".to_string(),
+            recorded_at: Utc::now() - chrono::Duration::seconds(FAILURE_MARKER_TTL_SECS + 1),
+        };
+        let stale_path = marker_dir.join("stale.json");
+        std::fs::write(&stale_path, serde_json::to_vec(&stale_marker).unwrap()).unwrap();
+
+        assert!(drain_hook_relay_failure_markers_at("claude", "session-1", Utc::now()).is_empty());
+        assert!(!stale_path.exists());
     }
 }
