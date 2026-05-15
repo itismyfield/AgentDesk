@@ -1483,6 +1483,7 @@ fn execute_streaming_local_tui_tmux(
         }
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
         crate::services::claude_tui::input::send_followup_prompt(tmux_session_name, prompt)?;
+        let hook_events_after = chrono::Utc::now();
         let read_result = read_claude_tui_transcript_until_done(
             &transcript_path_string,
             start_offset,
@@ -1491,6 +1492,7 @@ fn execute_streaming_local_tui_tmux(
             tmux_session_name,
             &resolved_session_id,
             hook_rx,
+            hook_events_after,
         )?;
         match classify_followup_result(
             read_result,
@@ -1741,6 +1743,7 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
         match crate::services::claude_tui::input::send_fresh_prompt(tmux_session_name, prompt) {
             Ok(()) => {
+                let hook_events_after = chrono::Utc::now();
                 return read_claude_tui_transcript_until_done(
                     transcript_path_string,
                     fresh_turn_start_offset,
@@ -1749,6 +1752,7 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
                     tmux_session_name,
                     resolved_session_id,
                     hook_rx,
+                    hook_events_after,
                 );
             }
             Err(error) if should_retry_claude_tui_fresh_prompt_ready(&error, attempt) => {
@@ -1826,6 +1830,7 @@ fn read_claude_tui_transcript_until_done(
     tmux_session_name: &str,
     session_id: &str,
     hook_rx: tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
+    hook_events_after: chrono::DateTime<chrono::Utc>,
 ) -> Result<ReadOutputResult, String> {
     let stop_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_seen_for_probe = stop_seen.clone();
@@ -1843,6 +1848,7 @@ fn read_claude_tui_transcript_until_done(
                 &stop_seen_for_probe,
                 &hook_rx_for_probe,
                 &expected_session_id,
+                hook_events_after,
                 || claude_tui_tmux_capture_indicates_ready_for_input(&tmux_name_ready),
             )
         },
@@ -1878,6 +1884,7 @@ fn claude_tui_stop_hook_seen_or_ready_with_probe(
         tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
     >,
     expected_session_id: &str,
+    hook_events_after: chrono::DateTime<chrono::Utc>,
     mut ready_for_input: impl FnMut() -> bool,
 ) -> bool {
     if stop_seen.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1891,6 +1898,7 @@ fn claude_tui_stop_hook_seen_or_ready_with_probe(
             Ok(event)
                 if event.provider == "claude"
                     && event.session_id == expected_session_id
+                    && event.received_at >= hook_events_after
                     && event.kind
                         == crate::services::claude_tui::hook_server::HookEventKind::Stop =>
             {
@@ -1930,6 +1938,7 @@ mod claude_tui_ready_probe_tests {
             &stop_seen,
             &hook_rx,
             "session-1",
+            chrono::Utc::now(),
             || true
         ));
         assert!(!stop_seen.load(Ordering::Relaxed));
@@ -1940,6 +1949,7 @@ mod claude_tui_ready_probe_tests {
         let (tx, rx) = tokio::sync::broadcast::channel(4);
         let hook_rx = Mutex::new(rx);
         let stop_seen = AtomicBool::new(false);
+        let hook_events_after = chrono::Utc::now() - chrono::Duration::milliseconds(1);
         tx.send(crate::services::claude_tui::hook_server::HookEvent {
             provider: "claude".to_string(),
             session_id: "session-1".to_string(),
@@ -1953,9 +1963,35 @@ mod claude_tui_ready_probe_tests {
             &stop_seen,
             &hook_rx,
             "session-1",
+            hook_events_after,
             || false
         ));
         assert!(stop_seen.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn ready_probe_ignores_stop_hook_buffered_before_prompt_submit() {
+        let (tx, rx) = tokio::sync::broadcast::channel(4);
+        let hook_rx = Mutex::new(rx);
+        let stop_seen = AtomicBool::new(false);
+        let hook_events_after = chrono::Utc::now();
+        tx.send(crate::services::claude_tui::hook_server::HookEvent {
+            provider: "claude".to_string(),
+            session_id: "session-1".to_string(),
+            kind: crate::services::claude_tui::hook_server::HookEventKind::Stop,
+            received_at: hook_events_after - chrono::Duration::milliseconds(1),
+            payload: serde_json::json!({}),
+        })
+        .unwrap();
+
+        assert!(!claude_tui_stop_hook_seen_or_ready_with_probe(
+            &stop_seen,
+            &hook_rx,
+            "session-1",
+            hook_events_after,
+            || false
+        ));
+        assert!(!stop_seen.load(Ordering::Relaxed));
     }
 }
 
