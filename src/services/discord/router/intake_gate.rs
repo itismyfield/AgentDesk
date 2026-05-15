@@ -1243,12 +1243,25 @@ pub(in crate::services::discord) async fn handle_event(
                 );
                 return Ok(());
             }
+            let is_direct_agent_voice_transcript = is_voice_transcript_announcement
+                && data
+                    .shared
+                    .voice_barge_in
+                    .is_agent_voice_channel(effective_channel_id)
+                    .await;
             if !is_dm {
                 match resolve_runtime_channel_binding_status(&ctx.http, effective_channel_id).await
                 {
                     RuntimeChannelBindingStatus::Owned => {}
                     RuntimeChannelBindingStatus::Unowned => {
-                        if can_route_unbound_direct_session(
+                        if is_direct_agent_voice_transcript {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] ↪ BINDING-GUARD: allowing voice transcript {} in agent voice channel {}",
+                                new_message.id,
+                                effective_channel_id
+                            );
+                        } else if can_route_unbound_direct_session(
                             data,
                             ctx,
                             channel_id,

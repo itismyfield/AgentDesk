@@ -1557,6 +1557,17 @@ impl VoiceBargeInRuntime {
         arc
     }
 
+    pub(in crate::services::discord) async fn is_agent_voice_channel(
+        &self,
+        channel_id: ChannelId,
+    ) -> bool {
+        self.cached_config()
+            .await
+            .agents
+            .iter()
+            .any(|agent| agent_voice_matches_channel(agent, channel_id))
+    }
+
     async fn resolve_effective_foreground_config(
         &self,
         source_channel_id: ChannelId,
@@ -2539,6 +2550,14 @@ mod tests {
             .await;
 
         assert_eq!(provider, ProviderKind::Codex);
+    }
+
+    #[tokio::test]
+    async fn configured_agent_voice_channel_is_detected() {
+        let runtime = runtime_with_agents(vec![test_agent("codex")]);
+
+        assert!(runtime.is_agent_voice_channel(ChannelId::new(300)).await);
+        assert!(!runtime.is_agent_voice_channel(ChannelId::new(200)).await);
     }
 
     #[test]
