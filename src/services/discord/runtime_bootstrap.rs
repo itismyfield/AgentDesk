@@ -239,8 +239,8 @@ pub(in crate::services::discord) struct FilteredQueuedPlaceholders {
 ///
 /// A mapping is "stale" when startup skipped or superseded its source
 /// message before placeholder restoration ran — for instance, the channel
-/// is no longer owned, the sender is no longer allowed, the item was
-/// pruned as a duplicate, or it overflowed the queue cap. Without this
+/// is no longer owned, the item was pruned as a duplicate, or it
+/// overflowed the queue cap. Without this
 /// filter, the `📬 메시지 대기 중` card and its sidecar row would never
 /// reach a dispatch or queue-exit event, leaving them stale forever.
 pub(in crate::services::discord) fn filter_restored_queued_placeholders(
@@ -1516,12 +1516,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         // persisted queue item look "already known" and incorrectly drop it.
                         let (restored_queues, restored_overrides) =
                             load_pending_queues(&provider_for_restore, &shared_for_tmux2.token_hash);
-                        let allowed_bot_ids_for_restore: Vec<u64> = {
-                            let settings = shared_for_tmux2.settings.read().await;
-                            settings.allowed_bot_ids.clone()
-                        };
-                        let announce_bot_id_for_restore =
-                            super::resolve_announce_bot_user_id(&shared_for_tmux2).await;
                         // P1-1: Restore dispatch_role_overrides from queue snapshots
                         for (thread_channel_id, alt_channel_id) in &restored_overrides {
                             if !matches!(
@@ -1549,10 +1543,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             let mut added = 0usize;
                             let mut skipped = 0usize;
                             for (channel_id, items) in restored_queues {
-                                if !matches!(
-                                    resolve_runtime_channel_binding_status(&http_for_tmux, channel_id)
-                                        .await,
-                                    RuntimeChannelBindingStatus::Owned
+                                if matches!(
+                                    resolve_runtime_channel_binding_status(
+                                        &http_for_tmux,
+                                        channel_id,
+                                    )
+                                    .await,
+                                    RuntimeChannelBindingStatus::Unowned
                                 ) {
                                     skipped += items.len();
                                     continue;
@@ -1561,16 +1558,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                 let mut existing_ids = queued_message_ids(&snapshot);
                                 let mut queue = snapshot.intervention_queue;
                                 for item in items {
-                                    if !super::is_allowed_turn_sender(
-                                        &allowed_bot_ids_for_restore,
-                                        announce_bot_id_for_restore,
-                                        item.author_id.get(),
-                                        true,
-                                        &item.text,
-                                    ) {
-                                        skipped += 1;
-                                        continue;
-                                    }
                                     if enqueue_restored_intervention(
                                         &mut existing_ids,
                                         &mut queue,
@@ -1591,7 +1578,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             }
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
-                                "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped} duplicates)"
+                                "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped} already-present/unowned item(s))"
                             );
                         }
 
@@ -1628,8 +1615,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             // codex review round-6 P2 (#1332): when startup
                             // skips/supersedes a restored or catch-up queue
                             // item before this point (channel no longer
-                            // owned, sender no longer allowed, duplicate or
-                            // cap pruning, …), its persisted queued-
+                            // owned, duplicate or cap pruning, …), its
+                            // persisted queued-
                             // placeholder mapping has no live queue entry to
                             // attach to. Inserting it unconditionally would
                             // strand the `📬` card + sidecar row forever:
@@ -2331,8 +2318,8 @@ mod tests {
     /// must reject any persisted mapping whose `(channel_id, user_msg_id)`
     /// has no corresponding live queue entry by the time `kickoff_idle_queues`
     /// runs. Otherwise a startup that skipped/superseded the user message
-    /// (channel no longer owned, sender no longer allowed, duplicate/cap
-    /// pruning, …) would strand the `📬 메시지 대기 중` Discord card AND its
+    /// (channel no longer owned, duplicate/cap pruning, …) would strand
+    /// the `📬 메시지 대기 중` Discord card AND its
     /// sidecar row forever — no future dispatch or queue-exit event would
     /// reach that user message id.
     ///
@@ -2392,8 +2379,8 @@ mod tests {
 
         // 3) Build the live-queue map: only `live_user_msg` is in the
         //    mailbox queue. The other mapping is stale because startup
-        //    skipped its source message (sender no longer allowed,
-        //    duplicate pruning, channel ownership lost, etc.).
+        //    skipped its source message (duplicate pruning, channel
+        //    ownership lost, etc.).
         let mut live_queue_ids: HashMap<ChannelId, HashSet<u64>> = HashMap::new();
         live_queue_ids
             .entry(channel_id)
