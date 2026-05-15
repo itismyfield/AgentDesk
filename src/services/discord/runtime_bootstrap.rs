@@ -18,6 +18,42 @@ pub(crate) struct RunBotContext {
 const DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const DISCORD_GATEWAY_LOCK_PREFIX: u64 = 0x0443_0000_0000_0000;
 
+fn voice_auto_join_provider_map(
+    cfg: &crate::config::Config,
+) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for agent in &cfg.agents {
+        for (slot_provider, channel) in agent.channels.iter() {
+            let Some(channel) = channel else { continue };
+            let Some(channel_id) = channel.channel_id() else {
+                continue;
+            };
+            let provider = channel
+                .provider()
+                .unwrap_or_else(|| slot_provider.to_string());
+            map.insert(channel_id.to_string(), provider);
+        }
+        if let Some(voice_channel_id) = agent
+            .voice
+            .channel_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let provider = agent
+                .voice
+                .foreground
+                .provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(agent.provider.as_str());
+            map.insert(voice_channel_id.to_string(), provider.to_string());
+        }
+    }
+    map
+}
+
 fn restored_fast_mode_enabled_channels_for_provider(
     bot_settings: &DiscordBotSettings,
     _provider: &ProviderKind,
@@ -1866,23 +1902,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     // 매핑을 build 해서 voice auto-join 가 매핑된 provider
                     // bot 만 입장하도록. 같은 voice 채널에 양 bot 이 들어가
                     // STT/TTS 가 이중으로 트리거되던 회귀 차단.
-                    let channel_provider_map: std::collections::HashMap<String, String> = {
-                        let cfg = crate::config::load_graceful();
-                        let mut map = std::collections::HashMap::new();
-                        for agent in &cfg.agents {
-                            for (slot_provider, channel) in agent.channels.iter() {
-                                let Some(channel) = channel else { continue };
-                                let Some(channel_id) = channel.channel_id() else {
-                                    continue;
-                                };
-                                let provider = channel
-                                    .provider()
-                                    .unwrap_or_else(|| slot_provider.to_string());
-                                map.insert(channel_id.to_string(), provider);
-                            }
-                        }
-                        map
-                    };
+                    let cfg = crate::config::load_graceful();
+                    let channel_provider_map = voice_auto_join_provider_map(&cfg);
                     tokio::spawn(async move {
                         commands::auto_join_voice_channels(
                             ctx_for_voice,
@@ -2205,6 +2226,35 @@ mod bootstrap_tests {
         );
         assert!(pending.contains(&fast_mode_reset_channel));
         assert!(pending.contains(&goals_reset_channel));
+    }
+
+    #[test]
+    fn voice_auto_join_provider_map_includes_agent_voice_channel() {
+        let cfg: crate::config::Config = serde_yaml::from_str(
+            r#"
+server:
+  port: 8791
+agents:
+- id: project-agentdesk
+  name: AgentDesk
+  provider: claude
+  voice:
+    channel_id: '999'
+    foreground:
+      provider: codex
+  channels:
+    codex:
+      id: '123'
+      name: adk-cdx
+      provider: codex
+"#,
+        )
+        .expect("config parses");
+
+        let map = voice_auto_join_provider_map(&cfg);
+
+        assert_eq!(map.get("123").map(String::as_str), Some("codex"));
+        assert_eq!(map.get("999").map(String::as_str), Some("codex"));
     }
 }
 
