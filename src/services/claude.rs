@@ -1757,36 +1757,131 @@ fn read_claude_tui_transcript_until_done(
     let hook_rx = std::sync::Arc::new(std::sync::Mutex::new(hook_rx));
     let hook_rx_for_probe = hook_rx.clone();
     let expected_session_id = session_id.to_string();
+    let expected_session_id_for_result = expected_session_id.clone();
     let tmux_name_alive = tmux_session_name.to_string();
+    let tmux_name_ready = tmux_session_name.to_string();
     let probe = SessionProbe::new(
         move || tmux_session_has_live_pane(&tmux_name_alive),
         move || {
-            if stop_seen_for_probe.load(std::sync::atomic::Ordering::Relaxed) {
-                return true;
-            }
-            let Ok(mut rx) = hook_rx_for_probe.lock() else {
-                return false;
-            };
-            loop {
-                match rx.try_recv() {
-                    Ok(event)
-                        if event.provider == "claude"
-                            && event.session_id == expected_session_id
-                            && event.kind
-                                == crate::services::claude_tui::hook_server::HookEventKind::Stop =>
-                    {
-                        stop_seen_for_probe.store(true, std::sync::atomic::Ordering::Relaxed);
-                        return true;
-                    }
-                    Ok(_) => continue,
-                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => return false,
-                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return false,
-                }
-            }
+            log_claude_tui_hook_relay_failures(&expected_session_id);
+            claude_tui_stop_hook_seen_or_ready_with_probe(
+                &stop_seen_for_probe,
+                &hook_rx_for_probe,
+                &expected_session_id,
+                || claude_tui_tmux_capture_indicates_ready_for_input(&tmux_name_ready),
+            )
         },
     );
-    read_output_file_until_result(transcript_path, start_offset, sender, cancel_token, probe)
+    let result =
+        read_output_file_until_result(transcript_path, start_offset, sender, cancel_token, probe);
+    log_claude_tui_hook_relay_failures(&expected_session_id_for_result);
+    result
+}
+
+#[cfg(unix)]
+fn log_claude_tui_hook_relay_failures(expected_session_id: &str) {
+    for marker in crate::services::claude_tui::hook_relay::drain_hook_relay_failure_markers(
+        "claude",
+        expected_session_id,
+    ) {
+        tracing::warn!(
+            provider = %marker.provider,
+            event = %marker.event,
+            session_id = %marker.session_id,
+            endpoint = %marker.endpoint,
+            error = %marker.error,
+            recorded_at = %marker.recorded_at,
+            "claude_tui hook relay failure observed by dcserver"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn claude_tui_stop_hook_seen_or_ready_with_probe(
+    stop_seen: &std::sync::atomic::AtomicBool,
+    hook_rx: &std::sync::Mutex<
+        tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
+    >,
+    expected_session_id: &str,
+    mut ready_for_input: impl FnMut() -> bool,
+) -> bool {
+    if stop_seen.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    let Ok(mut rx) = hook_rx.lock() else {
+        return ready_for_input();
+    };
+    loop {
+        match rx.try_recv() {
+            Ok(event)
+                if event.provider == "claude"
+                    && event.session_id == expected_session_id
+                    && event.kind
+                        == crate::services::claude_tui::hook_server::HookEventKind::Stop =>
+            {
+                stop_seen.store(true, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
+            Ok(_) => continue,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+        }
+    }
+    drop(rx);
+    ready_for_input()
+}
+
+#[cfg(unix)]
+fn claude_tui_tmux_capture_indicates_ready_for_input(tmux_session_name: &str) -> bool {
+    crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
+        .map(|capture| crate::services::provider::tmux_capture_indicates_ready_for_input(&capture))
+        .unwrap_or(false)
+}
+
+#[cfg(all(test, unix))]
+mod claude_tui_ready_probe_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn ready_probe_uses_tmux_fallback_when_stop_hook_is_missing() {
+        let (_tx, rx) = tokio::sync::broadcast::channel(4);
+        let hook_rx = Mutex::new(rx);
+        let stop_seen = AtomicBool::new(false);
+
+        assert!(claude_tui_stop_hook_seen_or_ready_with_probe(
+            &stop_seen,
+            &hook_rx,
+            "session-1",
+            || true
+        ));
+        assert!(!stop_seen.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn ready_probe_still_completes_on_matching_stop_hook() {
+        let (tx, rx) = tokio::sync::broadcast::channel(4);
+        let hook_rx = Mutex::new(rx);
+        let stop_seen = AtomicBool::new(false);
+        tx.send(crate::services::claude_tui::hook_server::HookEvent {
+            provider: "claude".to_string(),
+            session_id: "session-1".to_string(),
+            kind: crate::services::claude_tui::hook_server::HookEventKind::Stop,
+            received_at: chrono::Utc::now(),
+            payload: serde_json::json!({}),
+        })
+        .unwrap();
+
+        assert!(claude_tui_stop_hook_seen_or_ready_with_probe(
+            &stop_seen,
+            &hook_rx,
+            "session-1",
+            || false
+        ));
+        assert!(stop_seen.load(Ordering::Relaxed));
+    }
 }
 
 /// Execute Claude inside a local tmux session with bidirectional input.
