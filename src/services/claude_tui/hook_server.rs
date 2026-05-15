@@ -93,6 +93,10 @@ pub struct HookServerHandle {
     task: tokio::task::JoinHandle<()>,
 }
 
+pub struct HookEndpointGuard {
+    endpoint: String,
+}
+
 impl HookServerHandle {
     pub fn addr(&self) -> SocketAddr {
         self.addr
@@ -108,12 +112,29 @@ impl Drop for HookServerHandle {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        let mut endpoint = HOOK_ENDPOINT
-            .write()
-            .unwrap_or_else(|error| error.into_inner());
-        if endpoint.as_deref() == Some(self.base_url().as_str()) {
-            *endpoint = None;
-        }
+        clear_hook_endpoint_if_current(&self.base_url());
+    }
+}
+
+impl Drop for HookEndpointGuard {
+    fn drop(&mut self) {
+        clear_hook_endpoint_if_current(&self.endpoint);
+    }
+}
+
+pub fn publish_hook_endpoint(endpoint: String) -> HookEndpointGuard {
+    *HOOK_ENDPOINT
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = Some(endpoint.clone());
+    HookEndpointGuard { endpoint }
+}
+
+fn clear_hook_endpoint_if_current(expected: &str) {
+    let mut endpoint = HOOK_ENDPOINT
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    if endpoint.as_deref() == Some(expected) {
+        *endpoint = None;
     }
 }
 
@@ -135,7 +156,7 @@ pub async fn spawn_hook_server() -> Result<HookServerHandle, String> {
 pub async fn spawn_hook_server_with_state(
     state: HookServerState,
 ) -> Result<HookServerHandle, String> {
-    let app = hook_router(state);
+    let app = hook_standalone_router(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .map_err(|error| format!("bind hook server: {error}"))?;
@@ -169,9 +190,20 @@ pub async fn spawn_hook_server_with_state(
     Ok(handle)
 }
 
-fn hook_router(state: HookServerState) -> Router {
+pub fn hook_receiver_router() -> Router {
+    hook_receiver_router_with_state(HOOK_SERVER_STATE.clone())
+}
+
+fn hook_standalone_router(state: HookServerState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/hooks/{provider}/{event}", post(receive_hook))
+        .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
+        .with_state(state)
+}
+
+fn hook_receiver_router_with_state(state: HookServerState) -> Router {
+    Router::new()
         .route("/hooks/{provider}/{event}", post(receive_hook))
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
         .with_state(state)
@@ -289,6 +321,9 @@ mod tests {
     use axum::http::{Method, Request};
     use tower::ServiceExt;
 
+    static ENDPOINT_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
+        LazyLock::new(|| std::sync::Mutex::new(()));
+
     #[test]
     fn hook_event_kind_normalizes_claude_names() {
         assert_eq!(HookEventKind::from_path("Stop"), HookEventKind::Stop);
@@ -306,7 +341,7 @@ mod tests {
     async fn receiver_accepts_query_session_id_and_broadcasts_event() {
         let state = HookServerState::new();
         let mut rx = state.subscribe();
-        let app = hook_router(state);
+        let app = hook_receiver_router_with_state(state);
 
         let response = app
             .oneshot(
@@ -329,7 +364,7 @@ mod tests {
 
     #[tokio::test]
     async fn receiver_rejects_missing_session_id() {
-        let app = hook_router(HookServerState::new());
+        let app = hook_receiver_router_with_state(HookServerState::new());
 
         let response = app
             .oneshot(
@@ -344,5 +379,29 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn published_endpoint_remains_stable_until_replaced_guard_drops() {
+        let _guard = ENDPOINT_TEST_LOCK.lock().unwrap();
+        *HOOK_ENDPOINT
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+
+        let first = publish_hook_endpoint("http://127.0.0.1:8791".to_string());
+        assert_eq!(
+            current_hook_endpoint().as_deref(),
+            Some("http://127.0.0.1:8791")
+        );
+
+        let second = publish_hook_endpoint("http://127.0.0.1:8799".to_string());
+        drop(first);
+        assert_eq!(
+            current_hook_endpoint().as_deref(),
+            Some("http://127.0.0.1:8799")
+        );
+
+        drop(second);
+        assert_eq!(current_hook_endpoint(), None);
     }
 }

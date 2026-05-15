@@ -191,17 +191,14 @@ pub(crate) async fn run(
         crate::db::cancel_tombstones::set_global_pool(pool.clone());
     }
     crate::services::observability::init_observability(pg_pool.clone());
-    let _claude_tui_hook_server =
+    let _claude_tui_hook_endpoint =
         if crate::services::provider_hosting::any_requested_tui_hosting_driver_available(&config) {
-            match crate::services::claude_tui::hook_server::spawn_hook_server().await {
-                Ok(handle) => Some(handle),
-                Err(error) => {
-                    tracing::warn!(
-                        "claude_tui hook server unavailable; continuing on legacy paths: {error}"
-                    );
-                    None
-                }
-            }
+            let endpoint = config.server.local_base_url();
+            tracing::info!(
+                endpoint,
+                "claude_tui hook receiver published on dcserver HTTP port"
+            );
+            Some(crate::services::claude_tui::hook_server::publish_hook_endpoint(endpoint))
         } else {
             None
         };
@@ -279,7 +276,7 @@ pub(crate) async fn run(
         .append_index_html_on_directories(true)
         .fallback(ServeFile::new(dashboard_dir.join("index.html")));
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/ws", get(ws::ws_handler).with_state(broadcast_tx.clone()))
         .nest(
             "/api",
@@ -292,8 +289,11 @@ pub(crate) async fn run(
                 pg_pool,
                 Some(cluster_instance_id),
             ),
-        )
-        .fallback_service(dashboard_service);
+        );
+    if _claude_tui_hook_endpoint.is_some() {
+        app = app.merge(crate::services::claude_tui::hook_server::hook_receiver_router());
+    }
+    let app = app.fallback_service(dashboard_service);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
