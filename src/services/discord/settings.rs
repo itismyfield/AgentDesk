@@ -2190,6 +2190,46 @@ agents:
     }
 
     #[test]
+    fn test_has_configured_channel_binding_includes_agent_voice_channel_id() {
+        with_temp_home(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home,
+                r#"
+server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: codex
+    voice:
+      channel_id: "1504612455916245163"
+      foreground:
+        provider: codex
+        model: gpt-5.5
+    channels:
+      codex:
+        id: "1479671301387059200"
+        name: "adk-cdx"
+        prompt_file: ~/.adk/release/config/agents/project-agentdesk.prompt.md
+        workspace: ~/.adk/release/workspaces/agentdesk
+        provider: codex
+"#,
+            );
+
+            assert!(super::has_configured_channel_binding(
+                ChannelId::new(1504612455916245163),
+                Some("adk-voice"),
+            ));
+            let binding =
+                super::resolve_role_binding(ChannelId::new(1504612455916245163), Some("adk-voice"))
+                    .expect("voice channel role binding");
+            assert_eq!(binding.role_id, "project-agentdesk");
+            assert_eq!(binding.provider, Some(ProviderKind::Codex));
+            assert_eq!(binding.model.as_deref(), Some("gpt-5.5"));
+        });
+    }
+
+    #[test]
     fn test_has_configured_channel_binding_ignores_org_by_name_fallback_for_ownership() {
         with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".adk").join("config");

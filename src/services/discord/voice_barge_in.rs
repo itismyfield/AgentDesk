@@ -670,6 +670,13 @@ impl VoiceBargeInRuntime {
                 foreground_model = %foreground.model,
                 "failed to send voice channel text reply"
             );
+        } else {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice channel text reply sent"
+            );
         }
         VoiceChannelTextReplyOutcome::Handled
     }

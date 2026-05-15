@@ -316,6 +316,26 @@ fn find_channel_binding<'a>(
     best.map(|(agent, provider_key, channel, _)| (agent, provider_key, channel))
 }
 
+fn agent_voice_channel_id(agent: &crate::config::AgentDef) -> Option<u64> {
+    agent
+        .voice
+        .channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn find_voice_channel_agent(
+    config: &Config,
+    channel_id: ChannelId,
+) -> Option<&crate::config::AgentDef> {
+    config
+        .agents
+        .iter()
+        .find(|agent| agent_voice_channel_id(agent) == Some(channel_id.get()))
+}
+
 fn binding_provider(
     agent: &crate::config::AgentDef,
     provider_key: &str,
@@ -326,6 +346,18 @@ fn binding_provider(
         .or_else(|| Some(agent.provider.clone()))
         .or_else(|| Some(provider_key.to_string()))
         .and_then(|raw| ProviderKind::from_str(&raw))
+}
+
+fn voice_foreground_provider(agent: &crate::config::AgentDef) -> Option<ProviderKind> {
+    let raw = agent
+        .voice
+        .foreground
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(agent.provider.as_str());
+    ProviderKind::from_str(raw)
 }
 
 fn role_binding_from_channel(
@@ -345,6 +377,19 @@ fn role_binding_from_channel(
         reasoning_effort: channel.reasoning_effort(),
         peer_agents_enabled: channel.peer_agents().unwrap_or(true),
         quality_feedback_injection_enabled: channel.quality_feedback_injection().unwrap_or(true),
+        memory: resolve_memory_settings(None, None),
+    }
+}
+
+fn role_binding_from_voice_agent(agent: &crate::config::AgentDef) -> RoleBinding {
+    RoleBinding {
+        role_id: agent.id.clone(),
+        prompt_file: default_prompt_path(&agent.id).unwrap_or_default(),
+        provider: voice_foreground_provider(agent),
+        model: agent.voice.foreground.model.clone(),
+        reasoning_effort: None,
+        peer_agents_enabled: true,
+        quality_feedback_injection_enabled: true,
         memory: resolve_memory_settings(None, None),
     }
 }
@@ -519,8 +564,12 @@ pub(super) fn resolve_role_binding(
     channel_name: Option<&str>,
 ) -> Option<RoleBinding> {
     let config = load_agentdesk_config()?;
-    let (agent, provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
-    Some(role_binding_from_channel(agent, provider_key, channel))
+    if let Some((agent, provider_key, channel)) =
+        find_channel_binding(&config, channel_id, channel_name)
+    {
+        return Some(role_binding_from_channel(agent, provider_key, channel));
+    }
+    find_voice_channel_agent(&config, channel_id).map(role_binding_from_voice_agent)
 }
 
 /// Resolve the prompt-cache TTL bucket (#1088) for a Discord channel based on
@@ -553,11 +602,15 @@ pub(super) fn resolve_workspace(
     channel_name: Option<&str>,
 ) -> Option<String> {
     let config = load_agentdesk_config()?;
-    let (agent, _provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
-    channel
-        .workspace()
-        .map(|value| expand_tilde(&value))
-        .or_else(|| default_workspace(&agent.id))
+    if let Some((agent, _provider_key, channel)) =
+        find_channel_binding(&config, channel_id, channel_name)
+    {
+        return channel
+            .workspace()
+            .map(|value| expand_tilde(&value))
+            .or_else(|| default_workspace(&agent.id));
+    }
+    find_voice_channel_agent(&config, channel_id).and_then(|agent| default_workspace(&agent.id))
 }
 
 pub(super) fn load_shared_prompt_path() -> Option<String> {
@@ -811,6 +864,19 @@ pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding
                     channel_id,
                     owner_provider,
                     fallback_name,
+                },
+            );
+        }
+        if let Some(channel_id) = agent_voice_channel_id(agent)
+            && let Some(owner_provider) =
+                voice_foreground_provider(agent).filter(ProviderKind::is_supported)
+        {
+            bindings.insert(
+                channel_id,
+                RegisteredChannelBinding {
+                    channel_id,
+                    owner_provider,
+                    fallback_name: None,
                 },
             );
         }
