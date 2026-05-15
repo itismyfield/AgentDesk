@@ -2091,22 +2091,14 @@ pub(in crate::services::discord) async fn handle_text_message(
     }
     let is_voice_announcement = voice_announcement.is_some();
     let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
-        let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
-        if let Some(started_at) = announcement.started_at.as_deref() {
-            context.push_str(&format!("\nvoice_started_at: {started_at}"));
-        }
-        if let Some(completed_at) = announcement.completed_at.as_deref() {
-            context.push_str(&format!("\nvoice_completed_at: {completed_at}"));
-        }
-        if let Some(samples_written) = announcement.samples_written {
-            context.push_str(&format!("\nvoice_samples_written: {samples_written}"));
-        }
-        crate::voice::prompt::voice_bridge_prompt(
-            &announcement.transcript,
-            &announcement.language,
-            announcement.verbose_progress,
-            Some(&context),
-        )
+        tracing::debug!(
+            voice_utterance_id = %announcement.utterance_id,
+            voice_started_at = ?announcement.started_at,
+            voice_completed_at = ?announcement.completed_at,
+            voice_samples_written = ?announcement.samples_written,
+            "building voice prompt without transport metadata"
+        );
+        crate::voice::prompt::voice_bridge_prompt_for_announcement(announcement)
     });
     let voice_request_owner_name;
     let request_owner = voice_announcement

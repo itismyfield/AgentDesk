@@ -99,6 +99,17 @@ pub(crate) fn voice_bridge_prompt(
     lines.join("\n")
 }
 
+pub(crate) fn voice_bridge_prompt_for_announcement(
+    announcement: &VoiceTranscriptAnnouncement,
+) -> String {
+    voice_bridge_prompt(
+        &announcement.transcript,
+        &announcement.language,
+        announcement.verbose_progress,
+        None,
+    )
+}
+
 pub(crate) fn voice_foreground_prompt(text: &str, language: &str, max_chars: usize) -> String {
     let english = language.trim().to_ascii_lowercase().starts_with("en");
     let limit = max_chars.max(80);
@@ -338,6 +349,30 @@ mod tests {
             prompt.contains(&fence),
             "transcript must be fenced:\n{prompt}"
         );
+    }
+
+    #[test]
+    fn voice_bridge_prompt_for_announcement_omits_transport_metadata() {
+        let announcement = VoiceTranscriptAnnouncement {
+            transcript: "지금 상태 알려줘".to_string(),
+            user_id: "42".to_string(),
+            utterance_id: "20260515-062354.573-000004".to_string(),
+            language: "ko-KR".to_string(),
+            verbose_progress: false,
+            started_at: Some("2026-05-15T06:23:54.573725+09:00".to_string()),
+            completed_at: Some("2026-05-15T06:23:59.419661+09:00".to_string()),
+            samples_written: Some(222_720),
+        };
+
+        let prompt = voice_bridge_prompt_for_announcement(&announcement);
+
+        assert!(prompt.contains("<user_transcript>\n지금 상태 알려줘\n</user_transcript>"));
+        assert!(!prompt.contains("ADK_VOICE_TRANSCRIPT"));
+        assert!(!prompt.contains("user_id"));
+        assert!(!prompt.contains("voice_utterance_id"));
+        assert!(!prompt.contains("20260515-062354.573-000004"));
+        assert!(!prompt.contains("samples_written"));
+        assert!(!prompt.contains("222720"));
     }
 
     #[test]
