@@ -255,4 +255,41 @@ mod tests {
             } if model.as_deref() == Some("claude-opus-4-7")
         ));
     }
+
+    #[test]
+    fn replay_transcript_file_ignores_unknown_envelopes_until_result() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            concat!(
+                r#"{"type":"future-metadata","sessionId":"sess-tui","payload":{"field":1}}"#,
+                "\n",
+                r#"{"type":"system","subtype":"future_subtype","sessionId":"sess-tui"}"#,
+                "\n",
+                r#"{"type":"attachment","attachment":{"type":"future_preview"},"sessionId":"sess-tui"}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"still-running"}]},"sessionId":"sess-tui"}"#,
+                "\n",
+                r#"{"type":"result","result":"done","session_id":"sess-tui"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        let outcome = replay_transcript_file(file.path(), &tx).unwrap();
+        drop(tx);
+        let messages: Vec<_> = rx.iter().collect();
+
+        assert_eq!(outcome.lines_read, 5);
+        assert_eq!(messages.len(), 2);
+        assert!(
+            matches!(&messages[0], StreamMessage::Text { content } if content == "still-running")
+        );
+        assert!(matches!(
+            &messages[1],
+            StreamMessage::Done { result, session_id }
+                if result == "done" && session_id.as_deref() == Some("sess-tui")
+        ));
+    }
 }

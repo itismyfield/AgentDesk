@@ -341,7 +341,10 @@ pub fn extract_turn_analytics_from_output_range(
 }
 
 /// Process a single normalized wrapper JSONL line.
-/// Returns false when the sender channel is disconnected.
+///
+/// Unknown or malformed Claude envelope types are non-terminal: they are
+/// ignored and return `true` so future TUI history metadata cannot end the
+/// turn reader early. `false` is reserved for a disconnected sender channel.
 pub fn process_stream_line(
     line: &str,
     sender: &Sender<StreamMessage>,
@@ -457,32 +460,34 @@ pub fn process_stream_line(
 
     observe_stream_context(&json, state);
 
-    if let Some(message) = parse_stream_message_with_state(&json, state) {
-        match &message {
-            StreamMessage::Init { session_id, .. } => {
-                state.last_session_id = Some(session_id.clone());
-            }
-            StreamMessage::Done { result, session_id } => {
-                state.final_result = Some(result.clone());
-                if session_id.is_some() {
-                    state.last_session_id = session_id.clone();
-                }
-            }
-            StreamMessage::Error { message, .. } => {
-                state.stdout_error = Some((message.clone(), line.to_string()));
-                return true;
-            }
-            _ => {}
-        }
+    let Some(message) = parse_stream_message_with_state(&json, state) else {
+        return true;
+    };
 
-        if sender.send(message).is_err() {
+    match &message {
+        StreamMessage::Init { session_id, .. } => {
+            state.last_session_id = Some(session_id.clone());
+        }
+        StreamMessage::Done { result, session_id } => {
+            state.final_result = Some(result.clone());
+            if session_id.is_some() {
+                state.last_session_id = session_id.clone();
+            }
+        }
+        StreamMessage::Error { message, .. } => {
+            state.stdout_error = Some((message.clone(), line.to_string()));
+            return true;
+        }
+        _ => {}
+    }
+
+    if sender.send(message).is_err() {
+        return false;
+    }
+
+    for extra in parse_assistant_extra_tool_uses(&json) {
+        if sender.send(extra).is_err() {
             return false;
-        }
-
-        for extra in parse_assistant_extra_tool_uses(&json) {
-            if sender.send(extra).is_err() {
-                return false;
-            }
         }
     }
 
