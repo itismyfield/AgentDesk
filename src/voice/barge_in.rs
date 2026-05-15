@@ -85,10 +85,27 @@ pub(crate) trait BargeInPlayerStop: Send + Sync {
     fn stop(&self) -> Result<()>;
 }
 
+/// `TrackHandle::stop` 가 반환한 결과를 anyhow Result 로 매핑한다.
+/// `ControlError::Finished` 는 트랙이 더 이상 명령을 받지 않는 상태를 의미한다 —
+/// 자연 종료뿐만 아니라 call 종료, 드라이버 내부 오류로 트랙이 제거된 경우도
+/// 포함된다 (songbird::tracks::ControlError::Finished 문서 참조). barge-in 측에서는
+/// 이미 멈춘 트랙에 stop 을 또 보낼 이유가 없으므로 모두 성공으로 간주한다.
+/// 이렇게 처리하지 않으면 `observe_pcm` 의 `?` 경로가 매 frame 마다 같은 에러를
+/// 반환하며 WARN 폭주를 일으킨다 (#2154).
+fn map_track_stop_result(result: Result<(), songbird::tracks::ControlError>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(songbird::tracks::ControlError::Finished) => {
+            tracing::debug!("barge-in stop skipped: track no longer accepts commands");
+            Ok(())
+        }
+        Err(error) => Err(anyhow!("failed to stop songbird playback track: {error}")),
+    }
+}
+
 impl BargeInPlayerStop for songbird::tracks::TrackHandle {
     fn stop(&self) -> Result<()> {
-        songbird::tracks::TrackHandle::stop(self)
-            .map_err(|error| anyhow!("failed to stop songbird playback track: {error}"))
+        map_track_stop_result(songbird::tracks::TrackHandle::stop(self))
     }
 }
 
@@ -569,12 +586,26 @@ mod tests {
     #[derive(Default)]
     struct MockPlayer {
         stops: AtomicUsize,
+        already_finished: bool,
+    }
+
+    impl MockPlayer {
+        fn already_finished() -> Self {
+            Self {
+                stops: AtomicUsize::new(0),
+                already_finished: true,
+            }
+        }
     }
 
     impl BargeInPlayerStop for MockPlayer {
         fn stop(&self) -> Result<()> {
             self.stops.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            if self.already_finished {
+                map_track_stop_result(Err(songbird::tracks::ControlError::Finished))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -819,5 +850,76 @@ mod tests {
 
         assert!(state.expire_conservative_if_needed(now + Duration::from_secs(60)));
         assert_eq!(state.sensitivity(), BargeInSensitivity::Normal);
+    }
+
+    #[test]
+    fn map_track_stop_result_passes_through_ok() {
+        assert!(map_track_stop_result(Ok(())).is_ok());
+    }
+
+    #[test]
+    fn map_track_stop_result_treats_finished_as_success() {
+        let result = map_track_stop_result(Err(songbird::tracks::ControlError::Finished));
+        assert!(
+            result.is_ok(),
+            "ControlError::Finished should be coerced into Ok to avoid WARN flood (#2154), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn map_track_stop_result_surfaces_other_errors() {
+        let result = map_track_stop_result(Err(songbird::tracks::ControlError::Dropped));
+        let error = result.expect_err("non-Finished error must propagate");
+        let message = format!("{error}");
+        assert!(
+            message.contains("failed to stop songbird playback track"),
+            "expected wrapped error message, got: {message}"
+        );
+    }
+
+    /// Regression test for #2154 — when songbird `TrackHandle::stop` returns
+    /// `Finished` (track already ended), `observe_pcm` must still: surface the
+    /// cut, cancel the playback token, mark itself as triggered, and skip stop
+    /// on every subsequent frame so the WARN flood never happens.
+    #[test]
+    fn live_monitor_skips_repeat_stops_when_track_already_finished() {
+        let player = MockPlayer::already_finished();
+        let cancellation = CancellationToken::new();
+        let mut monitor = LiveBargeInMonitor::new(BargeInSensitivity::Normal);
+        let loud = stereo_pcm(&[16_384, -16_384, 16_384, -16_384]);
+
+        // Frame 1: candidate gauge ticks up but the trigger threshold is not met.
+        assert!(
+            monitor
+                .observe_pcm(&loud, &player, &cancellation)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(player.stops.load(Ordering::SeqCst), 0);
+
+        // Frame 2: trigger fires. `stop()` returns `Finished` but the monitor
+        // must treat that as success — cut returned, token cancelled, triggered=true.
+        let cut = monitor
+            .observe_pcm(&loud, &player, &cancellation)
+            .unwrap()
+            .expect("cut must be reported even when track already finished");
+        assert_eq!(cut.candidate_frames, 2);
+        assert!(cancellation.is_cancelled());
+        assert_eq!(player.stops.load(Ordering::SeqCst), 1);
+
+        // Subsequent frames must NOT re-call stop on the (still finished) track.
+        for _ in 0..10 {
+            assert!(
+                monitor
+                    .observe_pcm(&loud, &player, &cancellation)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            player.stops.load(Ordering::SeqCst),
+            1,
+            "stop() must not be invoked again after the first cut, even on Finished"
+        );
     }
 }
