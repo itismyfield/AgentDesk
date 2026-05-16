@@ -24,9 +24,23 @@ const DEFAULT_HOME_WIDGET_ORDER = [
   "quality",
   "missions",
 ];
+const DEFAULT_HOME_PRIMARY_WIDGET_ORDER = [
+  "m_tokens",
+  "m_cost",
+  "m_progress",
+  "m_rate_limit",
+  "kanban",
+];
 const CUSTOM_HOME_WIDGET_ORDER = [
   "missions",
   "quality",
+  "kanban",
+  "m_rate_limit",
+  "m_progress",
+  "m_cost",
+  "m_tokens",
+];
+const CUSTOM_HOME_PRIMARY_WIDGET_ORDER = [
   "kanban",
   "m_rate_limit",
   "m_progress",
@@ -1615,10 +1629,11 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
 
     await expect(page.getByTestId("home-widget-kanban")).toBeVisible({ timeout: 15000 });
-    await expect(await getHomeWidgetOrder(page)).toEqual(CUSTOM_HOME_WIDGET_ORDER);
+    await expect(await getHomeWidgetOrder(page)).toEqual(CUSTOM_HOME_PRIMARY_WIDGET_ORDER);
 
     await page.getByTestId("home-edit-toggle").click();
     await expect(page.getByTestId("home-reset-order")).toBeVisible();
+    await expect(await getHomeWidgetOrder(page)).toEqual(CUSTOM_HOME_WIDGET_ORDER);
     await page.getByTestId("home-reset-order").click();
 
     await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DEFAULT_HOME_WIDGET_ORDER);
@@ -1634,9 +1649,10 @@ test.describe("Dashboard smoke tests", () => {
 
     await page.goto("/home");
 
-    // PR #1258: office widget no longer in default; quality is in its place.
-    await expect(page.getByTestId("home-widget-quality")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("home-widget-kanban")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("home-widget-quality")).toHaveCount(0);
     await page.getByTestId("home-edit-toggle").click();
+    await expect(page.getByTestId("home-widget-quality")).toBeVisible();
 
     const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
     await page
@@ -1661,18 +1677,28 @@ test.describe("Dashboard smoke tests", () => {
       .toEqual(DRAGGED_HOME_WIDGET_ORDER);
   });
 
-  test("home: renders all handoff widgets and shared gamification blocks", async ({ page }, testInfo) => {
+  test("home: renders primary snapshot widgets and folds supporting widgets", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
 
     await page.goto("/home");
 
-    for (const widgetId of DEFAULT_HOME_WIDGET_ORDER) {
+    for (const widgetId of DEFAULT_HOME_PRIMARY_WIDGET_ORDER) {
       await expect(page.getByTestId(`home-widget-${widgetId}`)).toBeVisible({ timeout: 15000 });
     }
+    await expect(await getHomeWidgetOrder(page)).toEqual(DEFAULT_HOME_PRIMARY_WIDGET_ORDER);
 
     await expect(page.getByTestId("sidebar-user-level-ring")).toBeVisible();
     // PR #1258: home-streak-counter widget removed from default home IA.
     // The streak surface still exists on the Achievements page.
+    await expect(page.getByTestId("home-widget-quality")).toHaveCount(0);
+    await expect(page.getByTestId("home-widget-missions")).toHaveCount(0);
+    await expect(page.getByTestId("home-support-toggle")).toBeVisible();
+    await expect(page.getByTestId("home-support-toggle")).toHaveAttribute("aria-expanded", "false");
+
+    await page.getByTestId("home-support-toggle").click();
+    await expect(page.getByTestId("home-support-toggle")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("home-widget-quality")).toBeVisible();
+    await expect(page.getByTestId("home-widget-missions")).toBeVisible();
     await expect(page.getByTestId("home-daily-missions")).toBeVisible();
     await expect(page.getByTestId("home-daily-mission-dispatches_today")).toBeVisible();
     await expect(page.getByTestId("home-daily-mission-dispatches_today")).toContainText(

@@ -122,15 +122,23 @@ type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
 
 const MOBILE_TABBAR_SAFE_AREA_HEIGHT = "calc(3.5rem + env(safe-area-inset-bottom))";
 
-const HOME_DEFAULT_WIDGETS = [
+const HOME_PRIMARY_WIDGET_IDS = [
   "m_tokens",
   "m_cost",
   "m_progress",
   "m_rate_limit",
   "kanban",
+] as const;
+const HOME_SUPPORT_WIDGET_IDS = [
   "quality",
   "missions",
+] as const;
+const HOME_DEFAULT_WIDGETS = [
+  ...HOME_PRIMARY_WIDGET_IDS,
+  ...HOME_SUPPORT_WIDGET_IDS,
 ];
+const HOME_PRIMARY_WIDGET_SET = new Set<string>(HOME_PRIMARY_WIDGET_IDS);
+const HOME_SUPPORT_WIDGET_SET = new Set<string>(HOME_SUPPORT_WIDGET_IDS);
 const MOBILE_PRIMARY_ROUTE_IDS: AppRouteId[] = [
   "home",
   "office",
@@ -1851,6 +1859,10 @@ function HomeOverviewPage({
   );
   const localeTag = isKo ? "ko-KR" : "en-US";
   const [editing, setEditing] = useLocalStorage<boolean>(STORAGE_KEYS.homeEditing, false);
+  const [supportOpen, setSupportOpen] = useLocalStorage<boolean>(
+    STORAGE_KEYS.homeSupportOpen,
+    false,
+  );
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
   const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(
@@ -2627,6 +2639,13 @@ function HomeOverviewPage({
       localeTag,
     ],
   );
+  const primaryWidgets = widgets.filter((widgetId) => HOME_PRIMARY_WIDGET_SET.has(widgetId));
+  const supportWidgets = widgets.filter((widgetId) => HOME_SUPPORT_WIDGET_SET.has(widgetId));
+  const visibleWidgets = editing ? widgets : primaryWidgets;
+  const supportSummary = tr(
+    `품질·미션 ${supportWidgets.length}개`,
+    `${supportWidgets.length} quality/mission widgets`,
+  );
 
   return (
     <div className="mx-auto h-full w-full max-w-[92rem] overflow-auto px-4 py-6 pb-32 sm:px-6">
@@ -2695,7 +2714,7 @@ function HomeOverviewPage({
       )}
 
       <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-12">
-        {widgets.map((widgetId, index) => {
+        {visibleWidgets.map((widgetId, index) => {
           const spec = widgetSpecs[widgetId as keyof typeof widgetSpecs];
           if (!spec) return null;
           return (
@@ -2760,6 +2779,62 @@ function HomeOverviewPage({
           );
         })}
       </div>
+
+      {!editing && supportWidgets.length > 0 ? (
+        <section
+          className="mt-4 rounded-[1.15rem] border"
+          style={{
+            borderColor: "var(--th-border-subtle)",
+            background: "color-mix(in srgb, var(--th-card-bg) 86%, transparent)",
+          }}
+          data-testid="home-support-section"
+        >
+          <button
+            type="button"
+            className="flex min-h-[52px] w-full items-center justify-between gap-3 px-4 py-3 text-left sm:px-5"
+            onClick={() => setSupportOpen((value) => !value)}
+            aria-expanded={supportOpen}
+            data-testid="home-support-toggle"
+          >
+            <span className="min-w-0">
+              <span
+                className="block truncate text-sm font-medium"
+                style={{ color: "var(--th-text-secondary)" }}
+              >
+                {tr("보조 위젯", "Supporting widgets")}
+              </span>
+              <span
+                className="mt-0.5 block truncate text-[11px]"
+                style={{ color: "var(--th-text-muted)" }}
+              >
+                {supportSummary}
+              </span>
+            </span>
+            <ChevronRight
+              size={16}
+              className={supportOpen ? "shrink-0 rotate-90 transition-transform" : "shrink-0 transition-transform"}
+              style={{ color: "var(--th-text-muted)" }}
+            />
+          </button>
+          {supportOpen ? (
+            <div
+              className="grid grid-cols-1 gap-4 border-t p-4 sm:p-5 lg:grid-cols-12"
+              style={{ borderColor: "var(--th-border-subtle)" }}
+              data-testid="home-support-grid"
+            >
+              {supportWidgets.map((widgetId) => {
+                const spec = widgetSpecs[widgetId as keyof typeof widgetSpecs];
+                if (!spec) return null;
+                return (
+                  <div key={widgetId} data-testid={`home-widget-${widgetId}`} className={spec.className}>
+                    {spec.render()}
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
     </div>
   );
 }
@@ -2898,10 +2973,14 @@ function HomeWidgetShell({
     >
       <div className="flex items-start justify-between gap-3 border-b px-4 py-3 sm:px-5" style={{ borderColor: "var(--th-border-subtle)" }}>
         <div className="min-w-0">
-          <div className="text-[12.5px] font-medium" style={{ color: "var(--th-text-secondary)" }}>
+          <div className="truncate text-[12.5px] font-medium" style={{ color: "var(--th-text-secondary)" }}>
             {title}
           </div>
-          <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+          <div
+            className="mt-1 line-clamp-1 text-[11px] leading-5"
+            title={subtitle}
+            style={{ color: "var(--th-text-muted)" }}
+          >
             {subtitle}
           </div>
         </div>

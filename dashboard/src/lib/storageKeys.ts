@@ -9,6 +9,7 @@ export const STORAGE_KEYS = {
   sidebarCollapsed: "agentdesk.sidebar.collapsed",
   homeOrder: "agentdesk.home.order",
   homeEditing: "agentdesk.home.editing",
+  homeSupportOpen: "agentdesk.home.support-open",
   fsmDraft: "agentdesk.fsm.v2",
   kanbanDrawerLastId: "agentdesk.kanban.drawer.lastId",
   kanbanScopeOpen: "agentdesk.kanban.scope.open",
