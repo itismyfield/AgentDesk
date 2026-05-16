@@ -2388,7 +2388,13 @@ async fn redesign_dispute_oos_card_reopened_returns_409_stale() {
     .await;
     assert_eq!(status1, StatusCode::OK, "first close must succeed");
 
-    // Simulate a card re-open: advance review_round and reset latest_dispatch_id.
+    // Simulate a card re-open: advance review_round, set a fresh
+    // latest_dispatch_id, AND put the card back into a non-terminal
+    // status. The non-terminal status is what tells the idempotent path
+    // "the prior close was partial (or the card was reopened) — apply the
+    // strict generation marker check before resuming". A terminal card
+    // that retains the recorded generation matches the successful-close
+    // idempotent path instead (Codex round-2 [medium] fix).
     {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -2397,7 +2403,7 @@ async fn redesign_dispute_oos_card_reopened_returns_409_stale() {
         )
         .unwrap();
         conn.execute(
-            "UPDATE kanban_cards SET latest_dispatch_id = 'rd-reopened-new' WHERE id = 'card-2341-stale'",
+            "UPDATE kanban_cards SET latest_dispatch_id = 'rd-reopened-new', status = 'review' WHERE id = 'card-2341-stale'",
             [],
         )
         .unwrap();
@@ -2711,4 +2717,112 @@ async fn redesign_dispute_oos_idempotent_retry_resumes_partial_close() {
         "card must reach terminal after partial-close resume; got {}",
         card_status
     );
+}
+
+/// Codex round-2 [medium] regression: if the review-decision context
+/// includes a `source_review_dispatch_id` but that id does NOT resolve to
+/// a completed review (missing / uncompleted / different card), the close
+/// must FAIL CLOSED (409) instead of silently falling back to
+/// latest-completed and binding to a different (potentially unrelated)
+/// review row.
+#[tokio::test]
+async fn redesign_dispute_oos_unresolved_source_id_fails_closed() {
+    let (repo_dir, commit_sha) = init_test_git_repo_out_of_scope_2341(2341006);
+    let repo_dir_path = repo_dir.path().to_string_lossy().into_owned();
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-srid', 'SRID', '601', '602')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
+             review_status, github_issue_number, created_at, updated_at) \
+             VALUES ('card-2341-srid', 'SRID', 'review', 'agent-srid', 'rd-2341-srid', \
+                     'suggestion_pending', 2341006, datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, review_round, state, review_entered_at, updated_at) \
+             VALUES ('card-2341-srid', 1, 'reviewing', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        // A DIFFERENT (latest) completed review whose context references
+        // commit_sha. This is what latest-completed-fallback would bind to.
+        // If we silently fell back, the close would proceed (commit is
+        // out-of-scope). Failing closed prevents that.
+        let context_json = format!(
+            r#"{{"reviewed_commit":"{commit_sha}","target_repo":"{repo_dir_path}"}}"#
+        );
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, \
+             title, context, completed_at, created_at, updated_at) \
+             VALUES ('rv-2341-srid-latest', 'card-2341-srid', 'agent-srid', 'review', 'completed', \
+                     '[Review R1] latest', ?1, datetime('now'), datetime('now'), datetime('now'))",
+            sqlite_params![context_json.as_str()],
+        )
+        .unwrap();
+        // Review-decision context references an UNRESOLVED source id
+        // (e.g. the original source row was deleted / failed / cancelled).
+        let rd_context = r#"{"source_review_dispatch_id":"rv-deleted-source","verdict":"improve"}"#;
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, \
+             title, context, created_at, updated_at) \
+             VALUES ('rd-2341-srid', 'card-2341-srid', 'agent-srid', 'review-decision', 'pending', \
+                     '[Decision] srid', ?1, datetime('now'), datetime('now'))",
+            sqlite_params![rd_context],
+        )
+        .unwrap();
+    }
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-2341-srid".to_string(),
+            decision: "dispute".to_string(),
+            comment: Some("unresolved source id".to_string()),
+            commit_sha: None,
+            dispatch_id: Some("rd-2341-srid".to_string()),
+            out_of_scope: Some(true),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "unresolved source_review_dispatch_id must fail closed; body = {:?}",
+        body.0
+    );
+    assert_eq!(
+        body.0["reason"].as_str().unwrap(),
+        "source_review_unresolved",
+        "must report source_review_unresolved reason"
+    );
+
+    // Card and dispatch must be unchanged.
+    let conn = db.lock().unwrap();
+    let card_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-2341-srid'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let rd_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'rd-2341-srid'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(card_status, "review", "card must be unchanged on fail-closed");
+    assert_eq!(rd_status, "pending", "dispatch must be unchanged on fail-closed");
 }

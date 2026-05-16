@@ -784,19 +784,42 @@ async fn latest_completed_review_dispatch_pg_first(
     None
 }
 
-/// #2341 / #2200 sub-3 (Codex finding [medium]): bind the close path to the
-/// source review dispatch that produced THIS review-decision, not to the
-/// latest completed review for the card. Loads the review-decision dispatch
-/// context to extract `source_review_dispatch_id` (persisted by
-/// `discord_delivery::orchestration` when the follow-up was created), then
-/// loads that review row by id. Falls back to
-/// `latest_completed_review_dispatch_pg_first` only for legacy rows whose
-/// context predates the persistence change.
+/// #2341 / #2200 sub-3: outcome of the source-review-by-id lookup.
+#[derive(Debug)]
+enum SourceReviewLookup {
+    /// Source review id was loaded from the review-decision context and
+    /// resolved cleanly to a completed review row.
+    ResolvedById(CompletedReviewDispatch),
+    /// Review-decision context did NOT include `source_review_dispatch_id`
+    /// (legacy row from before the persistence change). Caller may fall
+    /// back to the latest completed review.
+    LegacyFallback(Option<CompletedReviewDispatch>),
+    /// Review-decision context referenced a `source_review_dispatch_id` that
+    /// does NOT resolve to a completed review row (missing, uncompleted,
+    /// cross-card, or wrong dispatch_type). Codex round-2 [medium]: caller
+    /// MUST fail closed — falling back to latest-completed would bind to a
+    /// duplicate or unrelated review.
+    UnresolvedSourceId(String),
+}
+
+/// #2341 / #2200 sub-3 (Codex round-1 [medium] + round-2 [medium]): bind
+/// the close path to the source review dispatch that produced THIS
+/// review-decision, not to the latest completed review for the card.
+/// Loads the review-decision dispatch context to extract
+/// `source_review_dispatch_id` (persisted by `discord_delivery::orchestration`
+/// when the follow-up was created), then loads that review row by id.
+/// Returns:
+///   * `ResolvedById` — the source id resolved to a completed review row.
+///   * `LegacyFallback(latest)` — context predates the persistence change;
+///     the caller may use latest-completed as a defensible fallback.
+///   * `UnresolvedSourceId(srid)` — context has a source id but it does not
+///     resolve; caller MUST fail closed (no silent fallback that could
+///     bind to the wrong review row).
 async fn source_review_dispatch_for_decision_pg_first(
     state: &AppState,
     card_id: &str,
     rd_id: &str,
-) -> Option<CompletedReviewDispatch> {
+) -> SourceReviewLookup {
     // Load the review-decision dispatch context.
     let rd_context_raw: Option<String> = if let Some(pool) = state.pg_pool_ref() {
         sqlx::query_scalar::<_, Option<String>>(
@@ -880,23 +903,31 @@ async fn source_review_dispatch_for_decision_pg_first(
 
         if let Some((id, context_raw)) = row {
             let active = build_active_review_dispatch(id, context_raw);
-            return Some(CompletedReviewDispatch {
+            return SourceReviewLookup::ResolvedById(CompletedReviewDispatch {
                 id: active.id,
                 reviewed_commit: active.reviewed_commit,
                 target_repo: active.target_repo,
             });
         }
+        // Codex round-2 [medium]: do NOT silently fall back to
+        // latest-completed when an explicit source id was recorded but does
+        // not resolve. That would reintroduce the wrong-row binding the by-id
+        // path was meant to prevent.
         tracing::warn!(
             card_id,
             rd_id,
             source_review_dispatch_id = %srid,
-            "[review-decision] #2341 source_review_dispatch_id from review-decision context did not resolve to a completed review row; falling back to latest_completed_review"
+            "[review-decision] #2341 source_review_dispatch_id from review-decision context did not resolve to a completed review row; failing closed (no silent latest-completed fallback)"
         );
+        return SourceReviewLookup::UnresolvedSourceId(srid);
     }
 
     // Legacy fallback: review-decision context predates the
-    // source_review_dispatch_id persistence change.
-    latest_completed_review_dispatch_pg_first(state, card_id).await
+    // source_review_dispatch_id persistence change. Latest-completed is
+    // defensible here because there was no recorded source id to honor.
+    SourceReviewLookup::LegacyFallback(
+        latest_completed_review_dispatch_pg_first(state, card_id).await,
+    )
 }
 
 /// #2341 / #2200 sub-3 redesign: card lifecycle generation marker.
@@ -1867,40 +1898,19 @@ pub async fn submit_review_decision(
                     );
                 }
 
-                // Generation marker: if the dispatch result recorded a
-                // lifecycle snapshot, require the current snapshot to still
-                // match. If a fresh review round has started since the close,
-                // we refuse the idempotent path — terminalizing a re-opened
-                // card via stale closure would be the failure mode HIGH 2
-                // warned about.
-                if let Some(expected) = prior.lifecycle_generation.clone() {
-                    let actual =
-                        card_lifecycle_snapshot_pg_first(&state, &body.card_id).await;
-                    if actual != expected {
-                        tracing::warn!(
-                            card_id = %body.card_id,
-                            ?expected,
-                            ?actual,
-                            "[review-decision] #2341 idempotent resume refused: card lifecycle advanced since prior scope_mismatch_closed"
-                        );
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "card lifecycle has advanced since the prior scope_mismatch_closed; refusing idempotent close on a re-opened card",
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": prior.dispatch_id,
-                                "reason": "lifecycle_generation_mismatch",
-                            })),
-                        );
-                    }
-                }
-
-                // Codex finding [high]: a previous call may have flipped
-                // the dispatch to scope_mismatch_closed but then failed at
-                // card transition or dismiss cleanup. Returning 200 on
-                // retry without finishing those steps would leave the card
-                // in `review` while the API reported success. Detect this
-                // case and resume terminalization before returning OK.
+                // Determine whether the card already reached terminal in a
+                // prior successful call. Terminal cleanup clears
+                // `kanban_cards.latest_dispatch_id` (Codex round-2 [medium]),
+                // which would otherwise make the stored lifecycle generation
+                // diverge from the current snapshot for a fully successful
+                // close — leading to a spurious 409 on retry. So:
+                //   - If the card IS terminal: the prior close completed;
+                //     skip the strict generation comparison, return
+                //     already_finalized.
+                //   - If the card is NOT terminal: the prior close was
+                //     partial (tx committed but transition / cleanup did
+                //     not run). Strict generation comparison is then the
+                //     correct guard against terminalizing a re-opened card.
                 let card_ctx =
                     load_review_decision_card_context_pg_first(&state, &body.card_id).await;
                 let effective_pipeline = resolve_effective_pipeline_pg_first(
@@ -1917,6 +1927,36 @@ pub async fn submit_review_decision(
                     .map(|s| s.id.clone())
                     .unwrap_or_else(|| "done".to_string());
                 let card_is_terminal = effective_pipeline.is_terminal(&current_status);
+
+                if !card_is_terminal {
+                    // Generation marker: enforce only on the non-terminal
+                    // resume path. Terminalizing a re-opened card from a
+                    // stale closure is the failure mode HIGH 2 warned
+                    // about. The dispatch_id match above already proved
+                    // dispatch-scope authorization; lifecycle proves the
+                    // card is the same generation we closed against.
+                    if let Some(expected) = prior.lifecycle_generation.clone() {
+                        let actual =
+                            card_lifecycle_snapshot_pg_first(&state, &body.card_id).await;
+                        if actual != expected {
+                            tracing::warn!(
+                                card_id = %body.card_id,
+                                ?expected,
+                                ?actual,
+                                "[review-decision] #2341 idempotent resume refused: card lifecycle advanced since prior scope_mismatch_closed (non-terminal card)"
+                            );
+                            return (
+                                StatusCode::CONFLICT,
+                                Json(json!({
+                                    "error": "card lifecycle has advanced since the prior scope_mismatch_closed; refusing idempotent close on a re-opened card",
+                                    "card_id": body.card_id,
+                                    "pending_dispatch_id": prior.dispatch_id,
+                                    "reason": "lifecycle_generation_mismatch",
+                                })),
+                            );
+                        }
+                    }
+                }
 
                 let mut resumed_steps: Vec<&'static str> = Vec::new();
                 if !card_is_terminal {
@@ -2636,31 +2676,44 @@ pub async fn submit_review_decision(
                 // 2. Bind to the **source** review dispatch that produced THIS
                 //    review-decision (loaded by id from the review-decision's
                 //    `context.source_review_dispatch_id`), not to the latest
-                //    completed review for the card. This closes Codex finding
-                //    [medium]: a duplicate or delayed completed review row
-                //    could otherwise bind the close to the wrong reviewed_commit.
-                //    Legacy review-decision rows whose context predates this
-                //    field fall back to `latest_completed_review_dispatch_pg_first`.
-                let completed_review =
-                    match source_review_dispatch_for_decision_pg_first(
-                        &state,
-                        &body.card_id,
-                        &rd_id,
-                    )
-                    .await
-                    {
-                        Some(d) => d,
-                        None => {
-                            return (
-                                StatusCode::CONFLICT,
-                                Json(json!({
-                                    "error": "out_of_scope dispute requires a completed review dispatch whose reviewed_commit can be verified against the card issue",
-                                    "card_id": body.card_id,
-                                    "pending_dispatch_id": rd_id,
-                                })),
-                            );
-                        }
-                    };
+                //    completed review for the card. This closes Codex r1 [medium]:
+                //    a duplicate or delayed completed review row could otherwise
+                //    bind the close to the wrong reviewed_commit.
+                //    Codex r2 [medium]: if the source id is present but does
+                //    not resolve, fail closed — no silent latest-completed
+                //    fallback.
+                let completed_review = match source_review_dispatch_for_decision_pg_first(
+                    &state,
+                    &body.card_id,
+                    &rd_id,
+                )
+                .await
+                {
+                    SourceReviewLookup::ResolvedById(d) => d,
+                    SourceReviewLookup::LegacyFallback(Some(d)) => d,
+                    SourceReviewLookup::LegacyFallback(None) => {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "error": "out_of_scope dispute requires a completed review dispatch whose reviewed_commit can be verified against the card issue",
+                                "card_id": body.card_id,
+                                "pending_dispatch_id": rd_id,
+                            })),
+                        );
+                    }
+                    SourceReviewLookup::UnresolvedSourceId(srid) => {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "error": "out_of_scope dispute refused: review-decision context references a source review that does not resolve to a completed review row; cannot verify scope",
+                                "card_id": body.card_id,
+                                "pending_dispatch_id": rd_id,
+                                "source_review_dispatch_id": srid,
+                                "reason": "source_review_unresolved",
+                            })),
+                        );
+                    }
+                };
                 let reviewed_commit = match completed_review.reviewed_commit.clone() {
                     Some(c) if !c.trim().is_empty() => c,
                     _ => {
@@ -2806,26 +2859,14 @@ pub async fn submit_review_decision(
                     }
                 }
 
-                // 6. Cancel stale review/review-decision dispatches so the
-                //    dedup guard doesn't strand them. Outside the tx because
-                //    cancel touches multiple rows + may dispatch outbox
-                //    messages.
-                let stale_ids =
-                    stale_review_dispatch_ids_pg_first(&state, &body.card_id).await;
-                let mut cancelled_stale = 0usize;
-                for stale_id in &stale_ids {
-                    if cancel_dispatch_pg_first(&state, stale_id, Some("scope_mismatch_closed"))
-                        .await
-                        .unwrap_or(0)
-                        > 0
-                    {
-                        cancelled_stale += 1;
-                    }
-                }
-
-                // 7. Transition card to terminal state. Re-check lifecycle
-                //    once more — if the card was re-opened between the tx
-                //    commit and the transition, we still refuse.
+                // 6. Re-check lifecycle BEFORE any destructive action.
+                //    Codex round-2 [high]: cancel-stale must NOT run before
+                //    the lifecycle re-check, otherwise a re-open that
+                //    happened between the tx commit and this point would
+                //    have its fresh review dispatch cancelled by
+                //    stale_review_dispatch_ids_pg_first before we discover
+                //    the re-open and refuse. Re-checking first means the
+                //    409 refusal triggers before any side effects.
                 let post_tx_lifecycle =
                     card_lifecycle_snapshot_pg_first(&state, &body.card_id).await;
                 if post_tx_lifecycle != lifecycle_snapshot {
@@ -2834,7 +2875,7 @@ pub async fn submit_review_decision(
                         pending_rd_id = %rd_id,
                         ?lifecycle_snapshot,
                         ?post_tx_lifecycle,
-                        "[review-decision] #2341 lifecycle changed after tx commit but before transition; leaving dispatch finalized for idempotent resume"
+                        "[review-decision] #2341 lifecycle changed after tx commit but before cleanup; leaving dispatch finalized for idempotent resume, no destructive actions taken"
                     );
                     return (
                         StatusCode::CONFLICT,
@@ -2846,6 +2887,24 @@ pub async fn submit_review_decision(
                             "reason": "lifecycle_generation_mismatch_post_tx",
                         })),
                     );
+                }
+
+                // 7. Cancel stale review/review-decision dispatches so the
+                //    dedup guard doesn't strand them. Outside the tx because
+                //    cancel touches multiple rows + may dispatch outbox
+                //    messages. Safe to run now: the post-tx lifecycle
+                //    re-check above guaranteed no fresh generation exists.
+                let stale_ids =
+                    stale_review_dispatch_ids_pg_first(&state, &body.card_id).await;
+                let mut cancelled_stale = 0usize;
+                for stale_id in &stale_ids {
+                    if cancel_dispatch_pg_first(&state, stale_id, Some("scope_mismatch_closed"))
+                        .await
+                        .unwrap_or(0)
+                        > 0
+                    {
+                        cancelled_stale += 1;
+                    }
                 }
 
                 let card_ctx =
