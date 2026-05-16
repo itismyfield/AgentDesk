@@ -14,3 +14,5 @@ pub(crate) mod intake_worker;
 pub mod session_discovery;
 pub mod session_matcher;
 pub mod session_registry;
+pub mod stream_relay;
+pub mod watcher_supervisor;

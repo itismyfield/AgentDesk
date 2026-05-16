@@ -835,6 +835,14 @@ pub struct ClusterConfig {
     pub dispatch_routing: ClusterDispatchRoutingConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub semaphores: BTreeMap<String, ClusterSemaphoreConfig>,
+    /// Epic #2285 / E3 gate. When `true`, the new session-bound
+    /// `WatcherSupervisor` + `StreamRelay` infrastructure is wired in; when
+    /// `false` (default), the legacy per-turn watcher branching remains the
+    /// sole relay path. E3 (#2345) lands the infrastructure with the flag
+    /// defaulting OFF so there is no behavior change. The follow-up migration
+    /// (#2346 / E4) flips the flag and removes the legacy branching.
+    #[serde(default)]
+    pub session_bound_relay_enabled: bool,
 }
 
 impl Default for ClusterConfig {
@@ -852,6 +860,7 @@ impl Default for ClusterConfig {
             blackout_windows: BTreeMap::new(),
             dispatch_routing: ClusterDispatchRoutingConfig::default(),
             semaphores: BTreeMap::new(),
+            session_bound_relay_enabled: false,
         }
     }
 }

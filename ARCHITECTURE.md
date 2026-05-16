@@ -370,7 +370,9 @@ src/
 │   │   ├── mod.rs
 │   │   ├── session_discovery.rs
 │   │   ├── session_matcher.rs
-│   │   └── session_registry.rs
+│   │   ├── session_registry.rs
+│   │   ├── stream_relay.rs
+│   │   └── watcher_supervisor.rs
 │   ├── codex_tui/
 │   │   ├── input.rs
 │   │   ├── mod.rs
