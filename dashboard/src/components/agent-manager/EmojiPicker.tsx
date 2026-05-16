@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
-import { EMOJI_GROUPS } from "./constants";
+import { Suspense, lazy, useEffect, useRef, useState, type SyntheticEvent } from "react";
+
+const EmojiPickerLibraryPanel = lazy(() => import("./EmojiPickerLibraryPanel"));
 
 const SPRITE_ICON_FALLBACK_SRC = "/sprites/1-D-1.png";
 
 export function StackedSpriteIcon({ sprites }: { sprites: [number, number] }) {
-  const handleImageError = (event: React.SyntheticEvent<HTMLImageElement>) => {
+  const handleImageError = (event: SyntheticEvent<HTMLImageElement>) => {
     const image = event.currentTarget;
     image.onerror = null;
     image.src = SPRITE_ICON_FALLBACK_SRC;
@@ -52,6 +53,12 @@ export default function EmojiPicker({
   }, [open]);
 
   const btnSize = size === "sm" ? "w-10 h-10 text-lg" : "w-14 h-10 text-xl";
+  const pickerWidth = size === "sm" ? 300 : 336;
+  const pickerHeight = size === "sm" ? 360 : 420;
+  const handleEmojiSelect = (emoji: string) => {
+    onChange(emoji);
+    setOpen(false);
+  };
 
   return (
     <div className="relative" ref={ref}>
@@ -70,47 +77,33 @@ export default function EmojiPicker({
         <div
           role="dialog"
           aria-label="Choose an emoji"
-          className="absolute z-[60] top-full mt-1 left-0 rounded-xl shadow-2xl p-3 w-72 max-h-[60vh] overflow-y-auto overscroll-contain"
+          className="absolute left-0 top-full z-[60] mt-1 overflow-hidden rounded-xl shadow-2xl"
           style={{
             background:
               "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
             border: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)",
           }}
         >
-          {EMOJI_GROUPS.map((group) => (
-            <div key={group.label} className="mb-2 last:mb-0">
+          <Suspense
+            fallback={(
               <div
-                className="text-xs font-semibold uppercase tracking-widest mb-1"
-                style={{ color: "var(--th-text-muted)" }}
+                className="flex items-center justify-center text-sm"
+                style={{
+                  color: "var(--th-text-muted)",
+                  height: pickerHeight,
+                  width: pickerWidth,
+                }}
               >
-                {group.label}
+                Loading emoji...
               </div>
-              <div className="grid grid-cols-8 gap-0.5">
-                {group.emojis.map((emoji) => (
-                  <button
-                    key={emoji}
-                    type="button"
-                    aria-pressed={value === emoji}
-                    onClick={() => {
-                      onChange(emoji);
-                      setOpen(false);
-                    }}
-                    className={`w-8 h-8 rounded-lg text-base flex items-center justify-center transition-all hover:scale-125 ${
-                      value === emoji ? "ring-2 ring-blue-400 bg-blue-500/15" : ""
-                    }`}
-                    style={{
-                      background: value === emoji
-                        ? "rgba(59,130,246,0.15)"
-                        : "transparent",
-                    }}
-                    aria-label={emoji}
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
+            )}
+          >
+            <EmojiPickerLibraryPanel
+              height={pickerHeight}
+              onSelect={handleEmojiSelect}
+              width={pickerWidth}
+            />
+          </Suspense>
         </div>
       )}
     </div>
