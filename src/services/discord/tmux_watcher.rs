@@ -135,12 +135,13 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
     tmux_session_name: &str,
     task_notification_kind: Option<crate::services::agent_protocol::TaskNotificationKind>,
 ) -> TuiCompletionGateOutcome {
-    let inflight = crate::services::discord::inflight::load_inflight_state(
-        provider,
-        channel_id.get(),
-    );
+    let inflight =
+        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get());
     let runtime_kind = inflight.as_ref().and_then(|state| state.runtime_kind);
-    let rebind_origin = inflight.as_ref().map(|state| state.rebind_origin).unwrap_or(false);
+    let rebind_origin = inflight
+        .as_ref()
+        .map(|state| state.rebind_origin)
+        .unwrap_or(false);
 
     if !crate::services::discord::tmux::should_gate_completion_for_tui_quiescence(
         runtime_kind,
@@ -166,8 +167,7 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
         if ready {
             return TuiCompletionGateOutcome::ConfirmedIdle;
         }
-        if started_at.elapsed()
-            >= crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT
+        if started_at.elapsed() >= crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
@@ -180,10 +180,8 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
             );
             return TuiCompletionGateOutcome::TimedOut;
         }
-        tokio::time::sleep(
-            crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_POLL_INTERVAL,
-        )
-        .await;
+        tokio::time::sleep(crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_POLL_INTERVAL)
+            .await;
     }
 }
 
@@ -2775,10 +2773,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // don't complete the dispatch, don't kick off queued work, and
         // leave inflight alone so the next watcher pass / placeholder
         // sweeper observes the still-busy pane and reconciles.
-        let dispatch_ok = if matches!(
-            watcher_tui_gate_outcome,
-            TuiCompletionGateOutcome::TimedOut
-        ) {
+        let dispatch_ok = if matches!(watcher_tui_gate_outcome, TuiCompletionGateOutcome::TimedOut)
+        {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %watcher_provider.as_str(),

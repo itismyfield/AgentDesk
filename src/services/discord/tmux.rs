@@ -1657,7 +1657,9 @@ mod tui_completion_gate_tests {
 
     #[test]
     fn missing_runtime_kind_skips_the_gate() {
-        assert!(!should_gate_completion_for_tui_quiescence(None, false, None,));
+        assert!(!should_gate_completion_for_tui_quiescence(
+            None, false, None,
+        ));
     }
 
     #[test]
