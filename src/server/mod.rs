@@ -206,13 +206,25 @@ pub(crate) async fn run(
     // Issue #2210 item 2: one-shot startup self-check on the Codex hook trust
     // hash canonicalization. Runs only when the Codex CLI is detected on PATH;
     // never blocks startup but emits a clear operator warning if AgentDesk's
-    // own invariants don't hold, so the SessionStart-silently-disabled failure
-    // mode is at least surfaced before users hit it on a Codex CLI bump.
+    // own invariants don't hold or the detected Codex CLI version isn't on
+    // AgentDesk's verified allowlist (so the SessionStart-silently-disabled
+    // failure mode is at least surfaced before users hit it on a Codex bump).
+    //
+    // The probe deliberately runs against `resolve_codex_path()` — the same
+    // resolution session launches use today via `resolve_codex_binary()`. If a
+    // session ever points at a different Codex binary, the warning will be
+    // off by one binary; tracked alongside the real cross-CLI verification
+    // (#2259) as a known limitation.
     {
-        let codex_cli_present =
-            crate::services::codex::resolve_codex_path().is_some();
+        let codex_cli_path = crate::services::codex::resolve_codex_path();
+        let codex_cli_present = codex_cli_path.is_some();
+        let codex_cli_version = codex_cli_path
+            .as_deref()
+            .and_then(crate::services::claude_tui::hook_bundle::probe_codex_cli_version);
         let _ = crate::services::claude_tui::hook_bundle::run_codex_hook_startup_self_check(
             codex_cli_present,
+            codex_cli_version.as_deref(),
+            codex_cli_path.as_deref(),
         );
     }
     let cluster_runtime = cluster::bootstrap(&config, pg_pool.clone()).await;

@@ -401,6 +401,14 @@ fn synthetic_self_check_config() -> HookBundleConfig {
     }
 }
 
+/// Codex CLI versions whose hook trust-hash canonicalization AgentDesk has
+/// been audited against. When the detected CLI version is in this list, the
+/// startup self-check can confidently report the in-process invariants align
+/// with the real CLI's contract. For any other version we emit a warning even
+/// when the in-process invariants pass, because AgentDesk has no way to know
+/// (until #2259 lands) whether Codex changed its canonicalization upstream.
+const VERIFIED_CODEX_CLI_VERSIONS: &[&str] = &["codex-cli 0.130.0"];
+
 /// One-shot startup self-check (issue #2210 item 2).
 ///
 /// If the Codex CLI is present on `PATH`, recompute the AgentDesk trust hash
@@ -409,9 +417,20 @@ fn synthetic_self_check_config() -> HookBundleConfig {
 /// actionable hint so an operator can investigate before SessionStart silently
 /// stops firing on a Codex CLI bump.
 ///
-/// Returns `true` when the check passed (or was skipped because Codex CLI is
-/// absent), `false` when at least one failure was logged.
-pub fn run_codex_hook_startup_self_check(codex_cli_present: bool) -> bool {
+/// The self-check is intentionally in-process: it verifies AgentDesk's own
+/// canonicalization is structurally sane and pins the matcher contract.
+/// It does NOT call the Codex CLI to recompute and compare hashes — that
+/// cross-CLI verification is tracked in #2259 (and requires a Codex CLI
+/// binary in CI). To surface the cross-CLI drift risk anyway, the check also
+/// warns when the detected Codex CLI version isn't in `VERIFIED_CODEX_CLI_VERSIONS`.
+///
+/// Returns `true` when the in-process check passed AND the Codex CLI version
+/// is on the verified allowlist, `false` otherwise (a warning is logged).
+pub fn run_codex_hook_startup_self_check(
+    codex_cli_present: bool,
+    codex_cli_version: Option<&str>,
+    codex_cli_path: Option<&str>,
+) -> bool {
     if !codex_cli_present {
         tracing::debug!(
             "codex_tui hook self-check skipped: codex CLI not detected on PATH"
@@ -421,30 +440,58 @@ pub fn run_codex_hook_startup_self_check(codex_cli_present: bool) -> bool {
 
     let config = synthetic_self_check_config();
     let failures = codex_hook_self_check_failures(&config);
+    let entries = codex_hook_state_entries(&config);
+    let session_start_hashes: Vec<String> = entries
+        .iter()
+        .filter(|entry| entry.event == "SessionStart")
+        .map(|entry| {
+            format!(
+                "{}={}",
+                entry.matcher.unwrap_or("(none)"),
+                entry.trusted_hash
+            )
+        })
+        .collect();
+    let version_display = codex_cli_version.unwrap_or("unknown");
+    let path_display = codex_cli_path.unwrap_or("unknown");
+
     if failures.is_empty() {
-        let entries = codex_hook_state_entries(&config);
-        let session_start_hashes: Vec<String> = entries
-            .iter()
-            .filter(|entry| entry.event == "SessionStart")
-            .map(|entry| {
-                format!(
-                    "{}={}",
-                    entry.matcher.unwrap_or("(none)"),
-                    entry.trusted_hash
-                )
-            })
-            .collect();
-        tracing::info!(
-            session_start_trust_hashes = session_start_hashes.join(","),
-            "codex_tui hook trust hash self-check passed"
-        );
-        return true;
+        let version_verified = codex_cli_version
+            .map(|version| VERIFIED_CODEX_CLI_VERSIONS.iter().any(|v| *v == version))
+            .unwrap_or(false);
+        if version_verified {
+            tracing::info!(
+                codex_cli_version = version_display,
+                codex_cli_path = path_display,
+                session_start_trust_hashes = session_start_hashes.join(","),
+                "codex_tui hook trust hash self-check passed (in-process invariants ok, \
+                 Codex CLI version is on the verified allowlist)"
+            );
+            return true;
+        } else {
+            tracing::warn!(
+                codex_cli_version = version_display,
+                codex_cli_path = path_display,
+                verified_versions = VERIFIED_CODEX_CLI_VERSIONS.join(","),
+                session_start_trust_hashes = session_start_hashes.join(","),
+                "codex_tui hook trust hash self-check PARTIAL: in-process invariants hold, \
+                 but the detected Codex CLI version is NOT on the AgentDesk-verified \
+                 allowlist. AgentDesk cannot cross-check its computed trust hashes \
+                 against this Codex CLI in-process (cross-CLI verification is tracked in \
+                 #2259). The feature will silently break on Codex CLI upgrade if Codex \
+                 changes its canonicalization. Update VERIFIED_CODEX_CLI_VERSIONS in \
+                 src/services/claude_tui/hook_bundle.rs after auditing this version."
+            );
+            return false;
+        }
     }
 
     for failure in &failures {
         match failure {
             CodexHookSelfCheckFailure::EmptyHash { event, matcher } => {
                 tracing::warn!(
+                    codex_cli_version = version_display,
+                    codex_cli_path = path_display,
                     event = *event,
                     matcher = matcher.unwrap_or("(none)"),
                     "codex_tui hook trust hash self-check FAILED: empty or malformed hash. \
@@ -456,6 +503,8 @@ pub fn run_codex_hook_startup_self_check(codex_cli_present: bool) -> bool {
             }
             CodexHookSelfCheckFailure::DuplicateStateKey { state_key } => {
                 tracing::warn!(
+                    codex_cli_version = version_display,
+                    codex_cli_path = path_display,
                     state_key = state_key.as_str(),
                     "codex_tui hook trust hash self-check FAILED: duplicate state key. \
                      Codex CLI is on PATH but AgentDesk emits two hook entries that collide \
@@ -467,6 +516,8 @@ pub fn run_codex_hook_startup_self_check(codex_cli_present: bool) -> bool {
             }
             CodexHookSelfCheckFailure::MissingExpectedEvent { event } => {
                 tracing::warn!(
+                    codex_cli_version = version_display,
+                    codex_cli_path = path_display,
                     event = *event,
                     "codex_tui hook trust hash self-check FAILED: expected event not advertised. \
                      Codex CLI is on PATH but AgentDesk no longer emits this hook event; \
@@ -480,6 +531,8 @@ pub fn run_codex_hook_startup_self_check(codex_cli_present: bool) -> bool {
                 actual,
             } => {
                 tracing::warn!(
+                    codex_cli_version = version_display,
+                    codex_cli_path = path_display,
                     event = *event,
                     expected = *expected,
                     actual = *actual,
@@ -494,6 +547,51 @@ pub fn run_codex_hook_startup_self_check(codex_cli_present: bool) -> bool {
     }
 
     false
+}
+
+/// Probes `codex --version` to obtain the CLI version string for the
+/// startup self-check. Returns `None` if Codex CLI is absent, unreachable,
+/// or doesn't print a parseable version on stdout. The probe is best-effort
+/// and never blocks startup for long: a 2-second hard timeout guards against
+/// a hanging CLI subprocess.
+pub fn probe_codex_cli_version(codex_path: &str) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new(codex_path)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait().ok()? {
+            Some(_) => break,
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+
+    let mut buf = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut buf);
+    }
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.lines().next().unwrap_or(trimmed).to_string())
+    }
 }
 
 fn canonical_json(value: &Value) -> Value {
@@ -670,15 +768,38 @@ mod tests {
     #[test]
     fn run_codex_hook_startup_self_check_skips_when_codex_absent() {
         // No Codex CLI on PATH → no warning, returns true (no-op).
-        assert!(run_codex_hook_startup_self_check(false));
+        assert!(run_codex_hook_startup_self_check(false, None, None));
     }
 
     #[test]
-    fn run_codex_hook_startup_self_check_passes_when_codex_present() {
-        // Synthetic check uses a deterministic config, so even when this test
-        // runs in an environment with Codex CLI installed the result should be
-        // a clean pass (no warnings logged).
-        assert!(run_codex_hook_startup_self_check(true));
+    fn run_codex_hook_startup_self_check_passes_on_verified_version() {
+        // In-process invariants hold + verified Codex CLI version → returns true.
+        assert!(run_codex_hook_startup_self_check(
+            true,
+            Some("codex-cli 0.130.0"),
+            Some("/opt/homebrew/bin/codex"),
+        ));
+    }
+
+    #[test]
+    fn run_codex_hook_startup_self_check_warns_on_unverified_version() {
+        // In-process invariants hold but Codex CLI version is unknown to
+        // AgentDesk → still emits a PARTIAL warning (cross-CLI drift risk)
+        // and returns false so callers can surface it elsewhere.
+        let pass = run_codex_hook_startup_self_check(
+            true,
+            Some("codex-cli 9.99.99"),
+            Some("/tmp/codex"),
+        );
+        assert!(!pass);
+    }
+
+    #[test]
+    fn run_codex_hook_startup_self_check_warns_when_version_unknown() {
+        // Codex CLI on PATH but version probe failed → still warn (don't claim
+        // success on a totally unknown CLI).
+        let pass = run_codex_hook_startup_self_check(true, None, Some("/tmp/codex"));
+        assert!(!pass);
     }
 
     #[test]
