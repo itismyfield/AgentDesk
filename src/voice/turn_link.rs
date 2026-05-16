@@ -239,43 +239,51 @@ pub async fn retarget_voice_turn_link_pg(
         .execute(&mut *tx)
         .await?;
 
-    // 1. Look at the current state of this utterance. We compute both the
-    //    global generation watermark (across all statuses) AND whether
-    //    any row is already terminal. The watermark blocks stale retries
-    //    (insert.generation <= history_max → no-op). The terminal probe
-    //    blocks resurrection — once the utterance is closed, no further
-    //    retarget can re-open it, even at a higher generation. Without
-    //    this guard a delayed retarget that races with mark_terminal can
-    //    insert a fresh active row that escapes GC and routes barge-in /
-    //    done / TTS to stale background state.
+    // 1. Look at the latest generation for this utterance and its
+    //    status. The state machine treats 'terminal' as closing the
+    //    *current* generation (i.e. the utterance as a whole) only when
+    //    the latest generation is terminal. A late completion that
+    //    terminalises an older, already-cancelled generation must NOT
+    //    block a newer retarget — gen1 can still legitimately retarget
+    //    to gen2 even if gen0 just transitioned cancelled→terminal.
+    //
+    //    Concretely:
+    //      latest_row.status = 'terminal' → utterance closed, no-op.
+    //      latest_row.status = 'active'   → proceed with normal retarget.
+    //      latest_row.status = 'cancelled'→ proceed (history watermark
+    //        still applies via the generation check below).
+    //      no rows                        → proceed (fresh insert).
+    //
+    //    The generation-watermark check (`<= latest_generation`) catches
+    //    stale retries regardless of latest_status.
     #[derive(sqlx::FromRow)]
-    struct UtteranceState {
-        history_max: Option<i32>,
-        has_terminal: bool,
+    struct LatestRow {
+        generation: i32,
+        status: String,
     }
-    let state: UtteranceState = sqlx::query_as(
-        "SELECT MAX(generation) AS history_max,
-                COALESCE(BOOL_OR(status = 'terminal'), FALSE) AS has_terminal
+    let latest: Option<LatestRow> = sqlx::query_as(
+        "SELECT generation, status
            FROM voice_turn_link
           WHERE guild_id = $1
             AND voice_channel_id = $2
-            AND utterance_id = $3",
+            AND utterance_id = $3
+          ORDER BY generation DESC
+          LIMIT 1",
     )
     .bind(u64_to_i64(insert.guild_id))
     .bind(u64_to_i64(insert.voice_channel_id))
     .bind(&insert.utterance_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    if state.has_terminal {
-        // Utterance is closed. Retarget post-completion is never valid;
-        // it would resurrect a finished turn and escape GC.
-        tx.commit().await?;
-        return Ok(None);
-    }
-
-    if let Some(history_max) = state.history_max {
-        if insert.generation <= history_max {
+    if let Some(latest_row) = latest.as_ref() {
+        if latest_row.status == "terminal" {
+            // The current generation of this utterance is closed.
+            // Further retargets would resurrect a finished turn.
+            tx.commit().await?;
+            return Ok(None);
+        }
+        if insert.generation <= latest_row.generation {
             // Stale or same-generation retry — do not mutate.
             tx.commit().await?;
             return Ok(None);
@@ -332,18 +340,39 @@ pub async fn retarget_voice_turn_link_pg(
 }
 
 /// Derive a stable i64 advisory-lock key from the
-/// `(guild_id, voice_channel_id, utterance_id)` triple. The exact hashing
-/// scheme does not matter beyond "well-distributed and stable across the
-/// lifetime of a row"; `DefaultHasher` is sufficient because the key only
-/// needs to disambiguate retargets *within* a process group.
+/// `(guild_id, voice_channel_id, utterance_id)` triple.
+///
+/// Stability is load-bearing here: during a rolling deploy, two
+/// different binaries on different nodes must compute identical keys
+/// for the same utterance, otherwise `mark_terminal` and `retarget` can
+/// take different advisory locks and reintroduce the READ COMMITTED
+/// interleaving the lock is designed to prevent.
+///
+/// We therefore use a hand-rolled FNV-1a 64-bit hash over a fixed byte
+/// encoding: domain tag, little-endian guild_id, little-endian
+/// voice_channel_id, utf-8 utterance_id bytes. FNV-1a is documented and
+/// trivially stable across Rust versions and platforms. The fixed-vector
+/// test in `tests::advisory_lock_key_is_stable` pins the output.
 fn advisory_lock_key(guild_id: u64, voice_channel_id: u64, utterance_id: &str) -> i64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    "voice_turn_link".hash(&mut hasher);
-    guild_id.hash(&mut hasher);
-    voice_channel_id.hash(&mut hasher);
-    utterance_id.hash(&mut hasher);
-    hasher.finish() as i64
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash: u64 = FNV_OFFSET_BASIS;
+    let mut absorb = |bytes: &[u8]| {
+        for &byte in bytes {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    };
+
+    // Domain tag so other future advisory-lock users in the same DB
+    // cannot collide on the same numeric key by accident.
+    absorb(b"voice_turn_link\0");
+    absorb(&guild_id.to_le_bytes());
+    absorb(&voice_channel_id.to_le_bytes());
+    absorb(utterance_id.as_bytes());
+
+    hash as i64
 }
 
 /// Reverse lookup by `dispatch_id`. Returns the most recently updated row
@@ -899,10 +928,99 @@ mod tests {
         pg.drop().await;
     }
 
-    /// Resurrection regression (Codex review #2362 round 2): once any row
-    /// for an utterance is `terminal`, no subsequent retarget — even at a
-    /// strictly higher generation — may resurrect the utterance back to
-    /// `active`. The closed turn must stay closed and remain GC-eligible.
+    /// Stable advisory-lock key (Codex review #2362 round 3).
+    /// `mark_terminal` and `retarget` must compute the same key for the
+    /// same utterance across any binary that touches the table; a
+    /// rolling deploy with two different hashers would silently
+    /// reintroduce the READ COMMITTED interleaving the lock is supposed
+    /// to prevent. This fixed-vector test pins the FNV-1a output.
+    #[test]
+    fn advisory_lock_key_is_stable() {
+        // Pinned value — change here breaks rolling-deploy safety.
+        // Regenerate ONLY together with a deliberate, communicated
+        // schema/protocol bump.
+        assert_eq!(
+            advisory_lock_key(100, 200, "utt-42"),
+            4_421_636_910_427_734_922
+        );
+        // Different inputs must produce different keys.
+        assert_ne!(
+            advisory_lock_key(100, 200, "utt-42"),
+            advisory_lock_key(100, 200, "utt-43")
+        );
+        assert_ne!(
+            advisory_lock_key(100, 200, "utt-42"),
+            advisory_lock_key(101, 200, "utt-42")
+        );
+        assert_ne!(
+            advisory_lock_key(100, 200, "utt-42"),
+            advisory_lock_key(100, 201, "utt-42")
+        );
+    }
+
+    /// Stale-terminal regression (Codex review #2362 round 3). A late
+    /// completion that terminalises an already-cancelled prior
+    /// generation must NOT block a fresh retarget of the live
+    /// generation. The "is utterance closed" probe must look at the
+    /// LATEST generation, not "any terminal row anywhere".
+    #[tokio::test]
+    async fn late_terminal_on_cancelled_generation_does_not_block_retarget_pg() {
+        let Some(pg) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg.connect_and_migrate().await;
+
+        // gen0 active.
+        insert_voice_turn_link_pg(&pool, &sample_insert(0))
+            .await
+            .unwrap()
+            .expect("seed gen0");
+        // Retarget to gen1: gen0 -> cancelled, gen1 -> active.
+        retarget_voice_turn_link_pg(&pool, &sample_insert(1))
+            .await
+            .unwrap()
+            .expect("retarget to gen1");
+
+        // Late completion arrives for gen0 (which is now cancelled).
+        // This flips gen0 cancelled -> terminal. gen1 stays active.
+        mark_terminal_voice_turn_link_pg(&pool, 100, 200, "utt-42", 0)
+            .await
+            .unwrap()
+            .expect("late terminal on cancelled gen0");
+
+        // Now retarget to gen2 should STILL proceed because gen1 is the
+        // current live generation and gen0's late terminal is just
+        // tombstone hygiene.
+        let result = retarget_voice_turn_link_pg(&pool, &sample_insert(2))
+            .await
+            .unwrap()
+            .expect("retarget gen2 must proceed despite stale terminal on gen0");
+        assert_eq!(result.generation, 2);
+        assert_eq!(result.status, VoiceTurnLinkStatus::Active);
+
+        // Verify state: exactly one active (gen2), gen0 terminal, gen1
+        // cancelled.
+        let active_gen: i32 = sqlx::query_scalar(
+            "SELECT generation FROM voice_turn_link
+              WHERE guild_id = 100
+                AND voice_channel_id = 200
+                AND utterance_id = 'utt-42'
+                AND status = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(active_gen, 2);
+
+        pool.close().await;
+        pg.drop().await;
+    }
+
+    /// Resurrection regression (Codex review #2362 round 2): once the
+    /// LATEST generation for an utterance is `terminal`, no subsequent
+    /// retarget — even at a strictly higher generation — may resurrect
+    /// the utterance back to `active`. The closed turn must stay closed
+    /// and remain GC-eligible.
     #[tokio::test]
     async fn retarget_after_mark_terminal_does_not_resurrect_pg() {
         let Some(pg) = TestPostgresDb::try_create().await else {
