@@ -673,6 +673,244 @@ async fn pending_review_decision_dispatch_id_pg_first(
     None
 }
 
+/// #2200 sub-fix 1 (`stale-state`): Snapshot of the most recent originating
+/// review-decision dispatch for a card together with the canonical
+/// `card_review_state.last_decision`. Used to decide whether a late
+/// `/api/review-decision` call should idempotently short-circuit because the
+/// originating dispatch was already consumed by a follow-up (rework/review) or
+/// by the auto-accept policy.
+#[derive(Debug, Clone, Default)]
+struct FinalizedReviewDecisionInfo {
+    /// Most recent review-decision dispatch row for this card, regardless of
+    /// status. `None` means there is no originating dispatch at all.
+    latest_dispatch_id: Option<String>,
+    /// Status of `latest_dispatch_id` (e.g. completed/cancelled/failed). When
+    /// the dispatch is still pending/dispatched the caller should NOT use this
+    /// helper — `pending_review_decision_dispatch_id_pg_first` handles the
+    /// live case.
+    latest_dispatch_status: Option<String>,
+    /// `result` JSON column of the latest review-decision dispatch row. Parsed
+    /// lazily to discover the recorded decision and finalization source.
+    latest_dispatch_result: Option<String>,
+    /// `card_review_state.last_decision` — typically one of
+    /// `accept` / `dispute` / `dismiss` / `auto_accept`.
+    last_decision: Option<String>,
+    /// `card_review_state.state` — e.g. `rework_pending`, `reviewing`, `idle`.
+    review_state: Option<String>,
+}
+
+impl FinalizedReviewDecisionInfo {
+    fn has_originating_dispatch(&self) -> bool {
+        self.latest_dispatch_id.is_some()
+    }
+
+    fn parsed_result(&self) -> Option<serde_json::Value> {
+        self.latest_dispatch_result
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+    }
+
+    /// `completion_source` from the dispatch `result`, if any. Used to gate
+    /// the idempotent-finalize path to dispatch rows that were finalized by a
+    /// trusted route-owned path. An attacker (or another finalizer) writing
+    /// `{"decision":"accept"}` into `result` is NOT sufficient on its own —
+    /// the row must also carry a recognized `completion_source`.
+    fn completion_source(&self) -> Option<String> {
+        self.parsed_result()?
+            .get("completion_source")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    }
+
+    /// Cancellation reason from the dispatch `result`, if any.
+    fn cancellation_reason(&self) -> Option<String> {
+        self.parsed_result()?
+            .get("reason")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    }
+
+    /// Returns the canonical decision that the originating review-decision
+    /// dispatch was finalized with, if and only if we can prove it from the
+    /// dispatch row's own `status`+`result` AND a recognized
+    /// `completion_source`. Dispatch-scoped: we never derive the decision
+    /// from unscoped `card_review_state.last_decision` (which can be stale
+    /// from a prior round).
+    ///
+    /// Recognized proofs:
+    /// - status=completed, completion_source=review_decision_api, result.decision is one of accept/dispute/dismiss
+    /// - status=completed, completion_source=review_auto_accept_policy, result.decision=auto_accept (maps to accept)
+    /// - status=cancelled, completion_source=force_transition, result.reason=auto_cancelled_on_terminal_card
+    ///   AND result.decision present (auto-cleanup path that records the consumed decision)
+    fn proven_finalized_decision(&self) -> Option<&'static str> {
+        let result = self.parsed_result()?;
+        let recorded_decision = result.get("decision").and_then(|v| v.as_str());
+        let source = self.completion_source();
+        match self.latest_dispatch_status.as_deref() {
+            Some("completed") => match source.as_deref() {
+                Some("review_decision_api") => match recorded_decision? {
+                    "accept" => Some("accept"),
+                    "dispute" => Some("dispute"),
+                    "dismiss" => Some("dismiss"),
+                    _ => None,
+                },
+                Some("review_auto_accept_policy") => match recorded_decision? {
+                    "auto_accept" | "accept" => Some("accept"),
+                    _ => None,
+                },
+                // Any other completion_source (e.g. orphan_recovery, unknown,
+                // or absent) does NOT prove a decision — fall through to 409
+                // so the caller can investigate.
+                _ => None,
+            },
+            Some("cancelled") => {
+                // Cleanup-cancelled rows: we require BOTH the cleanup-source
+                // marker AND a recorded decision on this dispatch row. We do
+                // NOT consult card-level `last_decision` because that field
+                // is not dispatch-scoped — a fresh dispatch could be cancelled
+                // by terminal cleanup while an older `last_decision` remains
+                // from a previous round.
+                let reason = self.cancellation_reason();
+                let is_cleanup = matches!(
+                    source.as_deref(),
+                    Some("force_transition") | Some("js_terminal_cleanup")
+                ) && matches!(
+                    reason.as_deref(),
+                    Some("auto_cancelled_on_terminal_card") | Some("js_terminal_cleanup")
+                );
+                if !is_cleanup {
+                    return None;
+                }
+                match recorded_decision? {
+                    "accept" | "auto_accept" => Some("accept"),
+                    "dispute" => Some("dispute"),
+                    "dismiss" => Some("dismiss"),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+/// #2200 sub-fix 1 (`stale-state`): load the most recent review-decision
+/// dispatch for the card and the canonical `card_review_state` snapshot. This
+/// is intentionally narrow — it does NOT pick up unrelated dispatch types and
+/// does NOT mutate state.
+async fn finalized_review_decision_info_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> FinalizedReviewDecisionInfo {
+    let mut info = FinalizedReviewDecisionInfo::default();
+
+    if let Some(pool) = state.pg_pool_ref() {
+        match sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT id, status, result
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = 'review-decision'
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((id, status, result))) => {
+                info.latest_dispatch_id = Some(id);
+                info.latest_dispatch_status = Some(status);
+                info.latest_dispatch_result = result;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    card_id,
+                    %error,
+                    "[review-decision] failed to load latest review-decision dispatch for idempotent finalize check"
+                );
+            }
+        }
+
+        match sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT last_decision, state
+             FROM card_review_state
+             WHERE card_id = $1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((last_decision, review_state))) => {
+                info.last_decision = last_decision;
+                info.review_state = review_state;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    card_id,
+                    %error,
+                    "[review-decision] failed to load card_review_state for idempotent finalize check"
+                );
+            }
+        }
+
+        return info;
+    }
+
+    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+    if let Some(db) = state.legacy_db() {
+        if let Ok(conn) = db.separate_conn() {
+            if let Ok(row) = conn
+                .query_row(
+                    "SELECT id, status, result
+                     FROM task_dispatches
+                     WHERE kanban_card_id = ?1
+                       AND dispatch_type = 'review-decision'
+                     ORDER BY created_at DESC
+                     LIMIT 1",
+                    [card_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+            {
+                if let Some((id, status, result)) = row {
+                    info.latest_dispatch_id = Some(id);
+                    info.latest_dispatch_status = Some(status);
+                    info.latest_dispatch_result = result;
+                }
+            }
+            if let Ok(row) = conn
+                .query_row(
+                    "SELECT last_decision, state
+                     FROM card_review_state
+                     WHERE card_id = ?1",
+                    [card_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
+                )
+                .optional()
+            {
+                if let Some((last_decision, review_state)) = row {
+                    info.last_decision = last_decision;
+                    info.review_state = review_state;
+                }
+            }
+        }
+    }
+
+    info
+}
+
 async fn emit_card_updated(state: &AppState, card_id: &str) {
     if let Some(pool) = state.pg_pool_ref() {
         match super::super::kanban::load_card_json_pg(pool, card_id).await {
@@ -2321,6 +2559,86 @@ pub async fn submit_review_decision(
         }
         // No pending review-decision dispatch → stale or duplicate call.
         // No dispatch_id to disambiguate either.
+        //
+        // #2200 sub-fix 1 (`stale-state`): when the originating review-decision
+        // dispatch is missing because a follow-up (rework/review) or the
+        // auto-accept policy already consumed it, idempotently short-circuit
+        // instead of rejecting with 409 — but ONLY when:
+        //   1. The caller supplied a `dispatch_id` that names the most-recent
+        //      originating review-decision dispatch for this card (dispatch-
+        //      scoped — closes the probing oracle described in Codex review).
+        //      Callers without dispatch_id continue to see the legacy 409.
+        //   2. The latest dispatch carries dispatch-scoped proof of the
+        //      finalized decision (status + recognized completion_source +
+        //      recorded decision). We never trust unscoped card-level
+        //      `last_decision` alone (it can be stale from a prior round).
+        //   3. The submitted decision matches the proven prior decision (a
+        //      caller cannot flip a finalized decision by re-POSTing a
+        //      different verdict — preserves legacy 409 for that case).
+
+        // Without dispatch_id, return the generic legacy 409 — no card-
+        // history-specific body shapes, no probing oracle.
+        let Some(submitted_did) = body.dispatch_id.as_deref() else {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "no pending review-decision dispatch for this card",
+                    "card_id": body.card_id,
+                })),
+            );
+        };
+
+        let finalized = finalized_review_decision_info_pg_first(&state, &body.card_id).await;
+
+        // dispatch_id must match the latest originating review-decision
+        // dispatch on file. Mismatch or no originating dispatch at all →
+        // return the generic legacy 409 (no history disclosure).
+        let matches_latest = finalized
+            .latest_dispatch_id
+            .as_deref()
+            .is_some_and(|id| id == submitted_did);
+        if !matches_latest {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "no pending review-decision dispatch for this card",
+                    "card_id": body.card_id,
+                })),
+            );
+        }
+
+        if let Some(proven) = finalized.proven_finalized_decision() {
+            if proven == body.decision.as_str() {
+                tracing::info!(
+                    card_id = %body.card_id,
+                    submitted_decision = %body.decision,
+                    latest_dispatch_id = ?finalized.latest_dispatch_id,
+                    latest_dispatch_status = ?finalized.latest_dispatch_status,
+                    review_state = ?finalized.review_state,
+                    "[review-decision] #2200 stale-state: returning already_finalized for idempotent re-POST"
+                );
+                return (
+                    StatusCode::OK,
+                    Json(json!({
+                        "ok": true,
+                        "card_id": body.card_id,
+                        "decision": body.decision,
+                        "outcome": "already_finalized",
+                        "message": "review-decision was already finalized; idempotent no-op",
+                    })),
+                );
+            }
+            tracing::warn!(
+                card_id = %body.card_id,
+                submitted_decision = %body.decision,
+                proven_decision = %proven,
+                "[review-decision] #2200 stale-state: rejecting decision-mismatch replay against finalized dispatch"
+            );
+        }
+
+        // Originating dispatch matches but proof of finalization is missing
+        // (e.g. status=failed, missing completion_source, or recorded decision
+        // does not match). Return the legacy 409.
         return (
             StatusCode::CONFLICT,
             Json(json!({
