@@ -207,18 +207,25 @@ pub(crate) fn load_single_policy_with_deadline(
         // #2372 round-3: arm the deadline ONLY here, after `ctx.with` has
         // acquired the runtime lock. The interrupt handler installed by
         // `start_hot_reload` checks the deadline on every bytecode tick,
-        // and dropping `_deadline_guard` immediately after eval clears the
-        // slot back to 0. This guarantees the deadline can never expire
-        // while an unrelated live hook is the currently-running JS on the
-        // runtime — the only JS that can be executing between arm and
-        // disarm is *this* eval, because we hold the lock.
+        // and dropping `_deadline_guard` clears the slot back to 0. This
+        // guarantees the deadline can never expire while an unrelated live
+        // hook is the currently-running JS on the runtime — the only JS
+        // that can be executing between arm and disarm is *this* policy
+        // file's pre-validation, because we hold the lock.
+        //
+        // #2378 (Codex follow-up): the guard's scope extends through ALL
+        // subsequent `policy_obj.get(...)` / `keys()` calls below. Property
+        // access on the captured object can invoke user-defined getters or
+        // Proxy traps that re-enter JS (`while(true){}`, `agentdesk.exec`,
+        // etc.), and without coverage those re-entries would run completely
+        // unbounded. The guard is therefore dropped only after all
+        // user-controlled property reads have completed.
         let _deadline_guard =
             eval_deadline.map(|slot| ArmedDeadline::new(slot, HOT_RELOAD_EVAL_BUDGET));
         let mut eval_opts = rquickjs::context::EvalOptions::default();
         eval_opts.strict = false;
         let eval_result: rquickjs::Result<rquickjs::Value> =
             ctx.eval_with_options(source.as_bytes().to_vec(), eval_opts);
-        drop(_deadline_guard);
 
         if let Err(e) = eval_result {
             return Err(anyhow::anyhow!("JS eval error in {}: {e}", path.display()));
@@ -1433,6 +1440,78 @@ mod tests {
             0,
             "ArmedDeadline drop must reset the shared deadline slot"
         );
+    }
+
+    /// #2378 (Codex follow-up): a policy whose `name` getter contains an
+    /// infinite loop must be interrupted by the deadline. Prior to this
+    /// fix the deadline guard was dropped immediately after
+    /// `eval_with_options` returned, so the subsequent `policy_obj.get(...)`
+    /// — which actually invokes the user's getter — ran completely
+    /// unbounded. This regression test exercises the full hot-reload load
+    /// path on disk with a runaway getter to confirm the deadline covers
+    /// it.
+    #[test]
+    fn load_single_policy_deadline_covers_user_property_getters() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let deadline_slot = guard.eval_deadline.clone();
+
+        // Policy whose `name` accessor spins forever. The eval itself
+        // returns immediately (registerPolicy completes), so the deadline
+        // must remain armed through the subsequent `policy_obj.get("name")`
+        // for the spin to be interrupted.
+        let policy_file = tmp.path().join("runaway_getter.js");
+        std::fs::write(
+            &policy_file,
+            r#"
+                agentdesk.registerPolicy({
+                    get name() {
+                        while (true) {}
+                    }
+                });
+            "#,
+        )
+        .expect("write runaway-getter policy");
+
+        let runtime_for_thread = runtime.clone();
+        let load_thread = std::thread::spawn(move || {
+            let probe_ctx = Context::full(&runtime_for_thread).expect("probe context");
+            let start = Instant::now();
+            let result =
+                load_single_policy_with_deadline(&probe_ctx, &policy_file, Some(&deadline_slot));
+            let elapsed = start.elapsed();
+            drop(probe_ctx);
+            (result.is_err(), elapsed)
+        });
+
+        let join_deadline = Instant::now() + HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3);
+        loop {
+            if load_thread.is_finished() {
+                break;
+            }
+            assert!(
+                Instant::now() < join_deadline,
+                "deadline did not cover user-controlled property getter within budget+3s"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (is_err, elapsed) = load_thread.join().expect("load thread join");
+        assert!(
+            is_err,
+            "runaway getter should propagate as a load error (deadline interrupt expected)"
+        );
+        assert!(
+            elapsed < HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(1),
+            "deadline fired too late on getter: {elapsed:?} (budget {HOT_RELOAD_EVAL_BUDGET:?})"
+        );
+
+        drop(guard);
+        drop(runtime);
     }
 
     #[test]
