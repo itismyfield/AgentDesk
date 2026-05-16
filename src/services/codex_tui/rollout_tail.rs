@@ -571,9 +571,16 @@ fn tail_rollout_file_until_assistant_response(
     let mut buf = [0u8; 8192];
     let mut last_output_at: Option<Instant> = None;
     let started_at = Instant::now();
+    // #2172 cancel boundary: wrap the raw sender so any send after the
+    // shared `cancel_token` flips becomes a no-op. The producer (this
+    // tail) is the relay-suppression enforcement point — once the user
+    // cancels a turn, no further rollout-derived StreamMessage may reach
+    // the bridge / Discord for that turn. See
+    // docs/codex-tui-cancel-boundary.md for the full contract.
+    let sender = RelaySuppressionSender::new(sender, cancel_token.as_deref());
 
     loop {
-        if cancel_requested(cancel_token.as_deref()) {
+        if sender.cancel_observed() {
             return Ok((
                 ReadOutputResult::Cancelled {
                     offset: current_offset,
@@ -584,7 +591,7 @@ fn tail_rollout_file_until_assistant_response(
 
         match file.read(&mut buf) {
             Ok(0) => {
-                if try_process_complete_partial_line(&mut partial_line, sender, &mut state) {
+                if try_process_complete_partial_line(&mut partial_line, &sender, &mut state) {
                     last_output_at = Some(Instant::now());
                     continue;
                 }
@@ -592,7 +599,7 @@ fn tail_rollout_file_until_assistant_response(
                     if terminal_drain.is_zero()
                         || last_output_at.is_some_and(|at| at.elapsed() >= terminal_drain)
                     {
-                        emit_done(sender, &state);
+                        emit_done(&sender, &state);
                         return Ok((
                             ReadOutputResult::Completed {
                                 offset: current_offset,
@@ -603,7 +610,7 @@ fn tail_rollout_file_until_assistant_response(
                 }
                 if !is_alive() {
                     let result = if state.saw_assistant_text {
-                        emit_done(sender, &state);
+                        emit_done(&sender, &state);
                         ReadOutputResult::Completed {
                             offset: current_offset,
                         }
@@ -627,7 +634,7 @@ fn tail_rollout_file_until_assistant_response(
                         elapsed_secs,
                         "Codex rollout tail timed out waiting for assistant response; emitting Done"
                     );
-                    let _ = sender.send(StreamMessage::Done {
+                    sender.send(StreamMessage::Done {
                         result: format!(
                             "⚠ Codex TUI produced no assistant response within {}s — turn timed out.",
                             elapsed_secs
@@ -646,10 +653,18 @@ fn tail_rollout_file_until_assistant_response(
             Ok(n) => {
                 current_offset += n as u64;
                 partial_line.extend_from_slice(&buf[..n]);
+                // #2172 cancel boundary: a single `read` may return many
+                // newline-delimited rollout records. Without this check,
+                // every line drained from the just-read buffer would be
+                // pushed to the sender BEFORE the next loop iteration
+                // observes cancel — even if the user has already pressed
+                // /stop. The `RelaySuppressionSender` is the canonical
+                // enforcement point: once the shared cancel flag flips,
+                // every `send` call drops on the floor.
                 while let Some(pos) = partial_line.iter().position(|byte| *byte == b'\n') {
                     let line: Vec<u8> = partial_line.drain(..=pos).collect();
                     state.record(line.len());
-                    if process_rollout_line_bytes(&line, sender, &mut state) {
+                    if process_rollout_line_bytes(&line, &sender, &mut state) {
                         last_output_at = Some(Instant::now());
                     }
                 }
@@ -664,9 +679,53 @@ fn tail_rollout_file_until_assistant_response(
     }
 }
 
+/// Relay suppression wrapper for `Sender<StreamMessage>` used by the Codex
+/// TUI rollout tail.
+///
+/// Contract (see docs/codex-tui-cancel-boundary.md):
+/// - Once the shared `CancelToken` is flipped to cancelled, every subsequent
+///   `send` is dropped silently. There is no "drain the in-flight assistant
+///   text first" carve-out: a cancel is a hard relay boundary.
+/// - This is the single producer-side enforcement point. The bridge / watcher
+///   consumers will also drain `rx` after cancel but the canonical guarantee
+///   that no post-cancel `StreamMessage` is emitted lives here, in the only
+///   thread that owns the rollout file.
+/// - `cancel_observed()` is a snapshot of the shared flag and is used by the
+///   read loop to decide whether to return `ReadOutputResult::Cancelled` —
+///   it MUST remain consistent with the actual `send` suppression so a tail
+///   that returned `Cancelled` is guaranteed to have stopped emitting.
+struct RelaySuppressionSender<'a> {
+    inner: &'a Sender<StreamMessage>,
+    cancel_token: Option<&'a CancelToken>,
+}
+
+impl<'a> RelaySuppressionSender<'a> {
+    fn new(inner: &'a Sender<StreamMessage>, cancel_token: Option<&'a CancelToken>) -> Self {
+        Self {
+            inner,
+            cancel_token,
+        }
+    }
+
+    fn cancel_observed(&self) -> bool {
+        cancel_requested(self.cancel_token)
+    }
+
+    fn send(&self, message: StreamMessage) {
+        if self.cancel_observed() {
+            // Post-cancel relay suppression. Dropping the message here is
+            // intentional: the cancelled turn must not emit any further
+            // StreamMessage so the bridge does not relay it to Discord or
+            // mutate inflight state on its behalf.
+            return;
+        }
+        let _ = self.inner.send(message);
+    }
+}
+
 fn try_process_complete_partial_line(
     partial_line: &mut Vec<u8>,
-    sender: &Sender<StreamMessage>,
+    sender: &RelaySuppressionSender<'_>,
     state: &mut RolloutParseState,
 ) -> bool {
     let Ok(line) = std::str::from_utf8(partial_line) else {
@@ -690,8 +749,8 @@ fn outcome(state: &RolloutParseState, final_offset: u64) -> RolloutTailOutcome {
     }
 }
 
-fn emit_done(sender: &Sender<StreamMessage>, state: &RolloutParseState) {
-    let _ = sender.send(StreamMessage::Done {
+fn emit_done(sender: &RelaySuppressionSender<'_>, state: &RolloutParseState) {
+    sender.send(StreamMessage::Done {
         result: state.final_text.clone(),
         session_id: state.session_id.clone(),
     });
@@ -699,7 +758,7 @@ fn emit_done(sender: &Sender<StreamMessage>, state: &RolloutParseState) {
 
 fn process_rollout_line(
     line: &str,
-    sender: &Sender<StreamMessage>,
+    sender: &RelaySuppressionSender<'_>,
     state: &mut RolloutParseState,
 ) -> bool {
     let trimmed = line.trim();
@@ -714,14 +773,14 @@ fn process_rollout_line(
     let messages = rollout_messages(&json, state);
     let emitted = !messages.is_empty();
     for message in messages {
-        let _ = sender.send(message);
+        sender.send(message);
     }
     emitted
 }
 
 fn process_rollout_line_bytes(
     line: &[u8],
-    sender: &Sender<StreamMessage>,
+    sender: &RelaySuppressionSender<'_>,
     state: &mut RolloutParseState,
 ) -> bool {
     let Ok(line) = std::str::from_utf8(line) else {
@@ -1206,6 +1265,94 @@ mod tests {
             done,
             Some(StreamMessage::Done { result, .. }) if result.contains("timed out")
         ));
+    }
+
+    #[test]
+    fn relay_suppression_drops_post_cancel_output() {
+        // #2172 cancel boundary: once the cancel token flips, the rollout
+        // tail MUST stop emitting StreamMessages — even for lines that were
+        // already buffered or are written to the rollout AFTER cancel. The
+        // bridge / Discord must not see a single post-cancel frame for the
+        // cancelled turn.
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"cancel-suppress\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-cancel.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+
+        let token = Arc::new(CancelToken::new());
+        let (tx, rx) = mpsc::channel();
+
+        // Spawn the tail. We cancel before any assistant text appears, then
+        // append a "post_cancel" assistant message and verify it is never
+        // delivered.
+        let tail_token = token.clone();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                Some(tail_token),
+                || true,
+                Duration::ZERO,
+                Some(Duration::from_secs(5)),
+            )
+        });
+
+        // Let the tail consume session_meta and reach the EOF wait.
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Fire the cancel BEFORE writing more rollout content, so the tail
+        // observes cancel in the wait loop AND the relay-suppression
+        // sender drops the post-cancel append even if a race lets the read
+        // pick it up.
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Append a post-cancel assistant text that, without suppression,
+        // would be relayed to Discord as part of the cancelled turn.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"post_cancel"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(
+            matches!(result, ReadOutputResult::Cancelled { .. }),
+            "tail must surface Cancelled after the token flips, got {:?}",
+            result
+        );
+
+        let messages: Vec<_> = rx.try_iter().collect();
+        assert!(
+            messages.iter().all(|m| !matches!(
+                m,
+                StreamMessage::Text { content } if content.contains("post_cancel")
+            )),
+            "post-cancel rollout content must NOT be relayed; got messages={:?}",
+            messages
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|m| !matches!(m, StreamMessage::Done { .. })),
+            "post-cancel Done must NOT be relayed; got messages={:?}",
+            messages
+        );
     }
 
     #[test]

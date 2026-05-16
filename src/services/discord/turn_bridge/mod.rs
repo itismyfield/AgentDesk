@@ -1841,7 +1841,18 @@ pub(super) fn spawn_turn_bridge(
         {
             let mut state_dirty = false;
 
-            if cancel_requested(Some(cancel_token.as_ref())) {
+            // #2172 cancel boundary: once `done` is true the turn's
+            // terminal outcome (Completed / Done message) has already been
+            // observed; the loop continues only to drain residual control
+            // frames during `terminal_control_drain_until`. A cancel that
+            // arrives in that drain window MUST NOT reclassify the
+            // already-completed turn as cancelled (which would re-run
+            // stop_active_turn and dispatch-cancel finalisation). The
+            // documented "whichever comes first wins" priority is
+            // enforced by gating the cancel arm on `!done`. Cancels
+            // arriving during the drain window break out of the loop
+            // normally as a completed turn.
+            if !done && cancel_requested(Some(cancel_token.as_ref())) {
                 if sync_inflight_restart_mode_from_cancel(
                     cancel_token.as_ref(),
                     &mut inflight_state,
@@ -1856,6 +1867,14 @@ pub(super) fn spawn_turn_bridge(
                     "turn cancel",
                 )
                 .await;
+                break;
+            }
+            if done && cancel_requested(Some(cancel_token.as_ref())) {
+                // #2172: cancel-after-Done during terminal drain — exit
+                // the drain immediately as a completed turn instead of
+                // burning the rest of the drain window. Suppressing the
+                // reclassification still preserves the "stop after
+                // completion is a no-op" UX.
                 break;
             }
 
@@ -1866,7 +1885,7 @@ pub(super) fn spawn_turn_bridge(
             };
             tokio::time::sleep(loop_sleep).await;
 
-            if cancel_requested(Some(cancel_token.as_ref())) {
+            if !done && cancel_requested(Some(cancel_token.as_ref())) {
                 if sync_inflight_restart_mode_from_cancel(
                     cancel_token.as_ref(),
                     &mut inflight_state,
@@ -1883,8 +1902,29 @@ pub(super) fn spawn_turn_bridge(
                 .await;
                 break;
             }
+            if done && cancel_requested(Some(cancel_token.as_ref())) {
+                // See note above on the cancel-after-Done race.
+                break;
+            }
 
             loop {
+                // #2172 cancel boundary: re-check the cancel flag between
+                // drained messages. Without this, the outer loop samples
+                // `cancel_requested` once and then drains EVERY queued
+                // StreamMessage to completion — so a cancel that flips
+                // mid-drain can let a queued `Done` set `done = true`
+                // before the outer cancel-arm runs, which then can no
+                // longer classify the turn as cancelled (the `!done`
+                // gate suppresses it). Break out of the drain on cancel
+                // so the outer cancel-arm gets first claim on the
+                // turn outcome. Frames already pulled before cancel was
+                // observed have been processed (acceptable: they
+                // happened before the user pressed stop); subsequent
+                // frames are left in `rx` and dropped by the bridge
+                // shutdown path.
+                if !done && cancel_requested(Some(cancel_token.as_ref())) {
+                    break;
+                }
                 match rx.try_recv() {
                     Ok(msg) => match msg {
                         StreamMessage::RetryBoundary => {
