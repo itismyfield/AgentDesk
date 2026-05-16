@@ -41,6 +41,19 @@ CREATE TABLE IF NOT EXISTS voice_turn_link (
         UNIQUE (guild_id, voice_channel_id, utterance_id, generation)
 );
 
+-- At most one 'active' row per (guild, voice channel, utterance). This is
+-- the schema-level invariant that retarget_voice_turn_link_pg's
+-- transaction relies on. Without it, two concurrent retargets running at
+-- READ COMMITTED could each pass the "cancel prior actives" UPDATE
+-- without seeing the other's not-yet-committed INSERT, both commit, and
+-- leave two active rows for the same utterance — making reverse-lookup
+-- (which active background channel owns this voice turn?) ambiguous.
+-- The partial unique index forces the second committer to fail and
+-- retry, so the application-level ordering is backstopped by the DB.
+CREATE UNIQUE INDEX IF NOT EXISTS voice_turn_link_unique_active
+    ON voice_turn_link (guild_id, voice_channel_id, utterance_id)
+    WHERE status = 'active';
+
 -- Reverse lookup index for `lookup_voice_turn_link_by_dispatch_id_pg`.
 -- Sparse (NULL dispatch_id rows are excluded) and inexpensive.
 CREATE INDEX IF NOT EXISTS idx_voice_turn_link_dispatch_id

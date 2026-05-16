@@ -134,9 +134,10 @@ const RETURNING_COLUMNS: &str = "id, guild_id, voice_channel_id, background_chan
 /// Insert a new voice turn link as `active`. Idempotent on
 /// `(guild_id, voice_channel_id, utterance_id, generation)`: simple retries
 /// that supply identical content collide on the unique key and are deduped
-/// (`Ok(None)` returned). Conflicting payloads (e.g. different
-/// `background_channel_id` for the same key) also return `Ok(None)` —
-/// callers that need retarget semantics should use
+/// (`Ok(None)` returned). Concurrent attempts to insert a *different*
+/// generation for the same utterance also dedupe to `Ok(None)` rather
+/// than violating the `voice_turn_link_unique_active` partial unique
+/// index — callers that need a true retarget should use
 /// [`retarget_voice_turn_link_pg`].
 ///
 /// Returns the inserted row on success, or `None` on idempotent dedup.
@@ -144,6 +145,39 @@ pub async fn insert_voice_turn_link_pg(
     pool: &PgPool,
     insert: &VoiceTurnLinkInsert,
 ) -> Result<Option<VoiceTurnLink>> {
+    let mut tx = pool.begin().await?;
+
+    let lock_key = advisory_lock_key(
+        insert.guild_id,
+        insert.voice_channel_id,
+        &insert.utterance_id,
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await?;
+
+    // If an active row already exists for this utterance (any generation),
+    // dedupe to None — initial-insert is not a retarget.
+    let active_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM voice_turn_link
+              WHERE guild_id = $1
+                AND voice_channel_id = $2
+                AND utterance_id = $3
+                AND status = 'active'
+         )",
+    )
+    .bind(u64_to_i64(insert.guild_id))
+    .bind(u64_to_i64(insert.voice_channel_id))
+    .bind(&insert.utterance_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if active_exists {
+        tx.commit().await?;
+        return Ok(None);
+    }
+
     let sql = format!(
         "INSERT INTO voice_turn_link (
              guild_id, voice_channel_id, background_channel_id,
@@ -163,41 +197,84 @@ pub async fn insert_voice_turn_link_pg(
         .bind(insert.generation)
         .bind(insert.announce_message_id.map(u64_to_i64))
         .bind(insert.dispatch_id.as_deref())
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     Ok(row.as_ref().map(row_to_link))
 }
 
-/// Atomic retarget: mark every prior `active` row for
+/// Atomic retarget: mark every strictly-prior `active` row for
 /// `(guild_id, voice_channel_id, utterance_id)` as `cancelled`, then insert
-/// the new generation as `active`. Wrapped in a single transaction so a
-/// crash mid-retarget can never leave two `active` rows for the same
-/// utterance.
+/// the new generation as `active`. Wrapped in a single transaction with a
+/// per-utterance `pg_advisory_xact_lock` so concurrent retargets for the
+/// same utterance run serially and cannot both leave `active` rows behind.
+/// The partial unique index `voice_turn_link_unique_active` provides a
+/// schema-level backstop for the same invariant.
 ///
-/// If a row with the same `(guild_id, voice_channel_id, utterance_id,
-/// generation)` already exists (simple retry — same generation), the
-/// insert no-ops via `ON CONFLICT DO NOTHING` and `Ok(None)` is returned.
-/// The cancellation pass still runs in that case so it remains a safe
-/// "re-apply" operation.
+/// Stale-retry semantics: if a delayed retry arrives for `generation = N`
+/// after a later retarget has already advanced the utterance to
+/// `generation = M > N`, the stale call is treated as a no-op. The newer
+/// active row is **not** cancelled, and `Ok(None)` is returned. Likewise a
+/// same-generation retry of the most recent active row deduplicates to
+/// `Ok(None)` without mutation.
 pub async fn retarget_voice_turn_link_pg(
     pool: &PgPool,
     insert: &VoiceTurnLinkInsert,
 ) -> Result<Option<VoiceTurnLink>> {
     let mut tx = pool.begin().await?;
 
-    // 1. Cancel every prior generation still 'active' for this utterance.
-    //    We deliberately exclude rows whose generation == the new
-    //    generation so that an idempotent retry against the same generation
-    //    does not flip its own row to 'cancelled' before the conflict
-    //    check.
+    // 0. Serialize concurrent retargets for the same utterance. The lock
+    //    key is derived from (guild_id, voice_channel_id, utterance_id)
+    //    so it does not collide across utterances. `xact` flavour
+    //    releases automatically at COMMIT/ROLLBACK.
+    let lock_key = advisory_lock_key(
+        insert.guild_id,
+        insert.voice_channel_id,
+        &insert.utterance_id,
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await?;
+
+    // 1. Look at the current max active generation for this utterance.
+    //    A stale retry whose generation is <= the current max must not
+    //    mutate the newer row — it just becomes a no-op.
+    let current_active_max: Option<i32> = sqlx::query_scalar(
+        "SELECT MAX(generation) FROM voice_turn_link
+          WHERE guild_id = $1
+            AND voice_channel_id = $2
+            AND utterance_id = $3
+            AND status = 'active'",
+    )
+    .bind(u64_to_i64(insert.guild_id))
+    .bind(u64_to_i64(insert.voice_channel_id))
+    .bind(&insert.utterance_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if let Some(active_max) = current_active_max {
+        if insert.generation <= active_max {
+            // Stale or same-generation retry. Do not touch anything; the
+            // INSERT below would only ON CONFLICT DO NOTHING and the
+            // UPDATE pass would wrongly cancel the newer row.
+            tx.commit().await?;
+            return Ok(None);
+        }
+    }
+
+    // 2. Cancel strictly-prior active rows. Using `<` (not `<>`) protects
+    //    a future-generation that may already exist in 'cancelled' or
+    //    'terminal' state — those are immutable history.
     sqlx::query(
         "UPDATE voice_turn_link
             SET status = 'cancelled', updated_at = NOW()
           WHERE guild_id = $1
             AND voice_channel_id = $2
             AND utterance_id = $3
-            AND generation <> $4
+            AND generation < $4
             AND status = 'active'",
     )
     .bind(u64_to_i64(insert.guild_id))
@@ -207,8 +284,10 @@ pub async fn retarget_voice_turn_link_pg(
     .execute(&mut *tx)
     .await?;
 
-    // 2. Insert the new generation. Same-key collision (e.g. naive retry of
-    //    the same retarget) is deduped via ON CONFLICT DO NOTHING.
+    // 3. Insert the new generation. ON CONFLICT covers the rare case where
+    //    the same (utterance, generation) was inserted by a prior commit
+    //    that we somehow raced past — defensive only, since the advisory
+    //    lock already serialises us.
     let sql = format!(
         "INSERT INTO voice_turn_link (
              guild_id, voice_channel_id, background_channel_id,
@@ -233,6 +312,21 @@ pub async fn retarget_voice_turn_link_pg(
     tx.commit().await?;
 
     Ok(inserted.as_ref().map(row_to_link))
+}
+
+/// Derive a stable i64 advisory-lock key from the
+/// `(guild_id, voice_channel_id, utterance_id)` triple. The exact hashing
+/// scheme does not matter beyond "well-distributed and stable across the
+/// lifetime of a row"; `DefaultHasher` is sufficient because the key only
+/// needs to disambiguate retargets *within* a process group.
+fn advisory_lock_key(guild_id: u64, voice_channel_id: u64, utterance_id: &str) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "voice_turn_link".hash(&mut hasher);
+    guild_id.hash(&mut hasher);
+    voice_channel_id.hash(&mut hasher);
+    utterance_id.hash(&mut hasher);
+    hasher.finish() as i64
 }
 
 /// Reverse lookup by `dispatch_id`. Returns the most recently updated row
@@ -378,6 +472,16 @@ mod tests {
             crate::db::postgres::connect_test_pool_and_migrate(
                 &self.database_url,
                 "voice turn link tests",
+            )
+            .await
+            .unwrap()
+        }
+
+        async fn connect_and_migrate_with_max_connections(&self, max_connections: u32) -> PgPool {
+            crate::db::postgres::connect_test_pool_with_max_connections_and_migrate(
+                &self.database_url,
+                "voice turn link tests",
+                max_connections,
             )
             .await
             .unwrap()
@@ -694,6 +798,148 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted_again, 0, "young terminal rows must not be GC'd");
+
+        pool.close().await;
+        pg.drop().await;
+    }
+
+    /// Stale-retry regression (Codex review #2362): a delayed retarget
+    /// retry for generation N must NOT cancel a newer active row at
+    /// generation M (M > N). Reapplying gen 1 after gen 2 is active is
+    /// a no-op.
+    #[tokio::test]
+    async fn stale_retarget_retry_does_not_cancel_newer_active_pg() {
+        let Some(pg) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg.connect_and_migrate().await;
+
+        // Establish initial active gen 0.
+        insert_voice_turn_link_pg(&pool, &sample_insert(0))
+            .await
+            .unwrap()
+            .expect("seed insert");
+
+        // Advance to gen 2 via two retargets.
+        retarget_voice_turn_link_pg(&pool, &sample_insert(1))
+            .await
+            .unwrap()
+            .expect("retarget to gen 1");
+        retarget_voice_turn_link_pg(&pool, &sample_insert(2))
+            .await
+            .unwrap()
+            .expect("retarget to gen 2");
+
+        // A *stale* retry for gen 1 arrives late.
+        let stale = retarget_voice_turn_link_pg(&pool, &sample_insert(1))
+            .await
+            .unwrap();
+        assert!(
+            stale.is_none(),
+            "stale retarget retry must dedupe to None, not mutate newer rows"
+        );
+
+        // The newer gen 2 row must still be active. We look it up by
+        // dispatch_id directly to be unambiguous.
+        let gen2 = lookup_voice_turn_link_by_dispatch_id_pg(&pool, "dispatch-2")
+            .await
+            .unwrap()
+            .expect("gen 2 row exists");
+        assert_eq!(gen2.generation, 2);
+        assert_eq!(
+            gen2.status,
+            VoiceTurnLinkStatus::Active,
+            "newer active row must NOT be cancelled by stale retry"
+        );
+
+        // And there must be exactly one active row for this utterance.
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM voice_turn_link
+              WHERE guild_id = 100
+                AND voice_channel_id = 200
+                AND utterance_id = 'utt-42'
+                AND status = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(active_count, 1, "exactly one active row per utterance");
+
+        pool.close().await;
+        pg.drop().await;
+    }
+
+    /// Concurrent-retarget regression (Codex review #2362): two
+    /// retargets running in parallel for the same utterance must
+    /// serialize and leave exactly one active row. The partial unique
+    /// index `voice_turn_link_unique_active` is the schema-level
+    /// backstop; the advisory lock makes the failure path observable as
+    /// "the late writer becomes a no-op" rather than "constraint
+    /// violation".
+    #[tokio::test]
+    async fn concurrent_retarget_leaves_exactly_one_active_pg() {
+        let Some(pg) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg.connect_and_migrate_with_max_connections(8).await;
+
+        insert_voice_turn_link_pg(&pool, &sample_insert(0))
+            .await
+            .unwrap()
+            .expect("seed insert");
+
+        // Fire two retargets concurrently — one to gen 1, one to gen 2.
+        // Whichever commits second observes the other's active row and
+        // either no-ops (if its own generation is now stale) or cancels
+        // the older one and inserts itself.
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let handle_a =
+            tokio::spawn(
+                async move { retarget_voice_turn_link_pg(&pool_a, &sample_insert(1)).await },
+            );
+        let handle_b =
+            tokio::spawn(
+                async move { retarget_voice_turn_link_pg(&pool_b, &sample_insert(2)).await },
+            );
+        let _ = handle_a.await.unwrap().unwrap();
+        let _ = handle_b.await.unwrap().unwrap();
+
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM voice_turn_link
+              WHERE guild_id = 100
+                AND voice_channel_id = 200
+                AND utterance_id = 'utt-42'
+                AND status = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            active_count, 1,
+            "concurrent retargets must leave exactly one active row"
+        );
+
+        // The winning generation must be the higher of the two we fired
+        // (gen 2). Either order of commit yields gen 2 active because:
+        //   - if gen 1 commits first, gen 2 sees active_max=1, 2>1 →
+        //     cancels gen 1, inserts gen 2.
+        //   - if gen 2 commits first, gen 1 sees active_max=2, 1<=2 →
+        //     no-op; gen 2 stays active.
+        let winning_generation: i32 = sqlx::query_scalar(
+            "SELECT generation FROM voice_turn_link
+              WHERE guild_id = 100
+                AND voice_channel_id = 200
+                AND utterance_id = 'utt-42'
+                AND status = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            winning_generation, 2,
+            "the higher generation must win regardless of commit order"
+        );
 
         pool.close().await;
         pg.drop().await;
