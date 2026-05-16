@@ -1152,6 +1152,25 @@ fn execute_streaming_local_tui_tmux(
             session_id: None,
         });
     } else {
+        // #2171: log the post-turn composer-readiness snapshot so we get
+        // telemetry on whether the pane-marker detector matches reality
+        // in production. This is intentionally non-fatal: the rollout
+        // tail already produced an assistant response, so the turn is
+        // complete regardless of what the visual detector thinks. Once
+        // we have enough telemetry to trust the detector, follow-up
+        // prompt injection (separate PR) can gate on it via
+        // `codex_tui::input::send_followup_prompt`.
+        let snapshot = crate::services::codex_tui::input::prompt_readiness_snapshot(
+            tmux_session_name,
+        );
+        tracing::debug!(
+            tmux_session = tmux_session_name,
+            composer_marker_detected = snapshot.composer_marker_detected,
+            tmux_pane_alive = snapshot.tmux_pane_alive,
+            capture_available = snapshot.capture_available,
+            "codex tui post-turn input readiness snapshot"
+        );
+
         let _ = sender.send(StreamMessage::RuntimeReady {
             handoff: RuntimeHandoff::CodexTui {
                 rollout_path: tail_result.rollout_path.display().to_string(),

@@ -17,34 +17,54 @@
 //!
 //! ## Signal source (priority order)
 //!
-//! The detector combines two complementary signals:
+//! The detector combines three complementary signals on every probe:
 //!
-//! 1. **Pane capture markers (primary).** The Codex TUI input
-//!    composer is recognisable by its bottom-of-pane box-drawing
-//!    border AND a footer hint line containing `Esc to interrupt`,
-//!    `Ctrl+J newline`, or similar. We scan the most recent
-//!    [`PROMPT_READY_SCAN_LINES`] non-empty lines. Both halves must
-//!    be present so prompt-like glyphs *inside* assistant output
-//!    cannot be mistaken for readiness.
+//! 1. **Bottom-anchored composer frame (primary).** The Codex TUI
+//!    composer renders at the *bottom* of the pane. We require that
+//!    a composer-edge line (mostly Unicode box-drawing chars) appear
+//!    within the last [`COMPOSER_EDGE_BOTTOM_WINDOW`] non-empty lines
+//!    AND that a footer-hint line (`Esc to interrupt`, `Ctrl+J newline`,
+//!    or similar) appear within [`FOOTER_HINT_BOTTOM_WINDOW`] of the
+//!    pane bottom. Bottom-anchoring kills the false positive where a
+//!    model-rendered table several screens up still has glyphs in
+//!    the scan tail.
 //!
-//! 2. **Live pane (gate).** A dead pane cannot be ready; we fail
+//! 2. **Adjacency.** The footer hint and the composer edge must
+//!    co-occur within [`COMPOSER_FOOTER_ADJACENCY_LINES`] of each
+//!    other. A copied UI frame in assistant prose will not satisfy
+//!    this because it lacks the live footer underneath, and a real
+//!    footer never lives more than a few rows below the composer.
+//!
+//! 3. **Live pane (gate).** A dead pane cannot be ready; we fail
 //!    fast with a structured error instead of waiting out the full
 //!    timeout, so the caller can decide to recreate the session.
 //!
 //! A rollout-event-driven signal (turn-complete from
-//! `codex_tui::rollout_tail`) was considered as a third source and
-//! deliberately **not** added here. The rollout terminal event tells
-//! the bridge that the *turn* finished, but the TUI may still be
-//! repainting its composer frame for ~one tick after. Today the
-//! caller already gates on the rollout `Done` (via `RuntimeReady`
-//! handoff in `execute_streaming_local_tui_tmux`) and only then asks
-//! this module whether the pane is *visually* ready. Folding the
-//! rollout event into this module would couple TUI input to rollout
-//! plumbing and duplicate work. If a future PR proves the pane
-//! marker is too flaky (e.g. across Codex CLI versions that change
-//! the footer copy), add a rollout-event channel as signal #1 and
-//! demote the pane scan to corroboration — see the follow-up note
-//! in `codex_tui::rollout_tail::tail_rollout_file_until_assistant_response`.
+//! `codex_tui::rollout_tail`) was considered as an explicit signal
+//! source and deliberately **not** added here. The rollout terminal
+//! event tells the bridge that the *turn* finished, but the TUI may
+//! still be repainting its composer frame for ~one tick after. The
+//! caller is expected to gate on the rollout `Done` (via the
+//! `RuntimeReady` handoff in `execute_streaming_local_tui_tmux`) and
+//! only then ask this module whether the pane is *visually* ready.
+//! Folding the rollout event into this module would couple TUI input
+//! to rollout plumbing and duplicate work. If a future PR proves the
+//! pane marker is too flaky (e.g. across Codex CLI versions that
+//! change the footer copy), add a rollout-event channel as signal
+//! #1 and demote the pane scan to corroboration — see the follow-up
+//! note in `codex_tui::rollout_tail::tail_rollout_file_until_assistant_response`.
+//!
+//! ## Cancellation contract
+//!
+//! [`wait_until_codex_tui_input_ready`] accepts an optional
+//! [`CancelToken`]. The wait checks the token before each capture
+//! and after each sleep so a `/stop` arriving while the TUI is hung
+//! (live pane, never-arriving composer) crosses the boundary inside
+//! ~one wait-interval rather than waiting out the 45s/120s budget.
+//! Cancellation returns a distinct
+//! [`PROMPT_READY_CANCELLED_ERROR`] string so the caller can release
+//! the turn without recreating the session — this matches the cancel
+//! boundary contract in PR #2284 where user-cancel beats deadline.
 //!
 //! ## Timeout / fail-safe
 //!
@@ -54,26 +74,44 @@
 //! whether to recreate the session or surface a user-visible error
 //! — same contract as `claude_tui::input::is_prompt_ready_timeout_error`.
 //! Combined with the Codex TUI cancel boundary (PR #2284), a hung TUI
-//! has two independent escape hatches: this readiness timeout (caller
-//! recreates) and the rollout deadline (caller emits `Done`).
+//! has three independent escape hatches: cancel (above), this
+//! readiness timeout (caller recreates), and the rollout deadline
+//! (caller emits `Done`).
 
 use std::process::Output;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use crate::services::provider::{CancelToken, cancel_requested};
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 const PROMPT_READY_CAPTURE_SCROLLBACK: i32 = -80;
 const PROMPT_READY_DEBUG_TAIL_LINES: usize = 24;
 const PROMPT_READY_DEBUG_TAIL_BYTES: usize = 4096;
-/// Number of trailing non-empty lines we scan for the composer box +
-/// footer hint pair. Kept tight so prompt-like glyphs deep in assistant
-/// output cannot be re-interpreted as a fresh composer.
+
+/// Number of trailing non-empty lines scanned for *any* part of the
+/// composer pattern. Sets the outer search window.
 const PROMPT_READY_SCAN_LINES: usize = 14;
+/// A composer-edge line must appear within this many trailing non-empty
+/// lines (counted from pane bottom). Bottom-anchoring rejects stale
+/// composer frames scrolled deep into history.
+const COMPOSER_EDGE_BOTTOM_WINDOW: usize = 6;
+/// A footer hint must appear within this many trailing non-empty lines.
+/// Codex TUI prints `Esc to interrupt` etc. immediately under the
+/// composer; in practice it sits in the last 1–3 visible rows.
+const FOOTER_HINT_BOTTOM_WINDOW: usize = 5;
+/// Composer edge and footer hint must co-occur within this many lines
+/// of each other so a screenshot of the TUI in assistant prose cannot
+/// pair with a real footer further down the buffer.
+const COMPOSER_FOOTER_ADJACENCY_LINES: usize = 6;
 
 pub const FRESH_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const FOLLOWUP_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const PROMPT_READY_TIMEOUT_ERROR_PREFIX: &str = "timeout waiting for codex tui";
 const PROMPT_READY_SESSION_DEAD_ERROR: &str =
     "codex tui session died before prompt input was ready";
+pub const PROMPT_READY_CANCELLED_ERROR: &str =
+    "codex tui prompt readiness wait cancelled";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptReadinessKind {
@@ -144,14 +182,32 @@ pub fn plan_cancel() -> Vec<TuiInputAction> {
 
 /// Inject a fresh-turn prompt: waits up to `FRESH_PROMPT_READY_TIMEOUT`
 /// for the composer to appear before sending.
-pub fn send_fresh_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
-    send_prompt_with_readiness(session_name, prompt, PromptReadinessKind::FreshTurn)
+pub fn send_fresh_prompt(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: Option<&Arc<CancelToken>>,
+) -> Result<(), String> {
+    send_prompt_with_readiness(
+        session_name,
+        prompt,
+        PromptReadinessKind::FreshTurn,
+        cancel_token,
+    )
 }
 
 /// Inject a follow-up prompt: waits up to `FOLLOWUP_PROMPT_READY_TIMEOUT`
 /// for the composer to redraw after the previous turn before sending.
-pub fn send_followup_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
-    send_prompt_with_readiness(session_name, prompt, PromptReadinessKind::Followup)
+pub fn send_followup_prompt(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: Option<&Arc<CancelToken>>,
+) -> Result<(), String> {
+    send_prompt_with_readiness(
+        session_name,
+        prompt,
+        PromptReadinessKind::Followup,
+        cancel_token,
+    )
 }
 
 pub fn is_prompt_ready_timeout_error(error: &str) -> bool {
@@ -160,6 +216,10 @@ pub fn is_prompt_ready_timeout_error(error: &str) -> bool {
 
 pub fn is_session_dead_error(error: &str) -> bool {
     error == PROMPT_READY_SESSION_DEAD_ERROR
+}
+
+pub fn is_prompt_ready_cancelled_error(error: &str) -> bool {
+    error == PROMPT_READY_CANCELLED_ERROR
 }
 
 /// Capture the current pane and classify whether the Codex composer
@@ -189,16 +249,26 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
 
 /// Block until the Codex TUI composer is visible or `timeout` elapses.
 /// Returns `Ok(())` on success, a session-dead error if the tmux pane
-/// disappears, or a timeout error prefixed with
-/// [`PROMPT_READY_TIMEOUT_ERROR_PREFIX`].
+/// disappears, a cancelled error if `cancel_token` flips, or a timeout
+/// error prefixed with [`PROMPT_READY_TIMEOUT_ERROR_PREFIX`].
+///
+/// Cancellation is checked before each pane capture and after each
+/// sleep so a `/stop` arriving while the TUI is hung (live pane,
+/// never-arriving composer) crosses the boundary inside ~one
+/// wait-interval.
 pub fn wait_until_codex_tui_input_ready(
     session_name: &str,
     readiness: PromptReadinessKind,
+    cancel_token: Option<&Arc<CancelToken>>,
 ) -> Result<(), String> {
     let timeout = readiness.timeout();
     let start = Instant::now();
     let mut wait_interval = Duration::from_millis(100);
+    let token_ref = cancel_token.map(Arc::as_ref);
     loop {
+        if cancel_requested(token_ref) {
+            return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
+        }
         let snapshot = prompt_readiness_snapshot(session_name);
         if snapshot.composer_marker_detected {
             return Ok(());
@@ -216,6 +286,9 @@ pub fn wait_until_codex_tui_input_ready(
             ));
         }
         std::thread::sleep(wait_interval);
+        if cancel_requested(token_ref) {
+            return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
+        }
         wait_interval = std::cmp::min(wait_interval * 2, Duration::from_millis(1000));
     }
 }
@@ -224,9 +297,13 @@ fn send_prompt_with_readiness(
     session_name: &str,
     prompt: &str,
     readiness: PromptReadinessKind,
+    cancel_token: Option<&Arc<CancelToken>>,
 ) -> Result<(), String> {
     let actions = plan_prompt_submit(prompt)?;
-    wait_until_codex_tui_input_ready(session_name, readiness)?;
+    wait_until_codex_tui_input_ready(session_name, readiness, cancel_token)?;
+    if cancel_requested(cancel_token.map(Arc::as_ref)) {
+        return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
+    }
     run_actions(session_name, &actions)
 }
 
@@ -282,16 +359,23 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
 /// Pane-capture classifier: returns true when the recent tail looks
 /// like the Codex composer waiting for input.
 ///
-/// The classifier requires BOTH:
-/// - a Codex composer box edge (a line that is "mostly" box-drawing
-///   chars), and
-/// - a footer hint line (matches one of [`CODEX_TUI_FOOTER_HINTS`]).
+/// Three independent gates, all required:
 ///
-/// Both halves must appear within the most recent
-/// `PROMPT_READY_SCAN_LINES` non-empty lines so old composer frames
-/// scrolled deep into pane history cannot trip the detector after
-/// the model produced new output.
+/// 1. **Bottom-anchored composer edge** — a mostly box-drawing line
+///    within the last [`COMPOSER_EDGE_BOTTOM_WINDOW`] non-empty lines.
+/// 2. **Bottom-anchored footer hint** — a footer phrase line within
+///    the last [`FOOTER_HINT_BOTTOM_WINDOW`] non-empty lines.
+/// 3. **Adjacency** — the composer edge and the footer hint co-occur
+///    within [`COMPOSER_FOOTER_ADJACENCY_LINES`] of each other.
+///
+/// These together reject:
+/// - stale composer frames scrolled deep into pane history;
+/// - assistant prose that happens to mention `Esc to interrupt`;
+/// - assistant output rendering a box-drawing table separately from
+///   the live footer;
+/// - a screenshot of a Codex TUI frame quoted inside model output.
 pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
+    // recent[0] is the bottom-most non-empty line.
     let recent: Vec<&str> = pane
         .lines()
         .map(str::trim_end)
@@ -299,9 +383,23 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
         .rev()
         .take(PROMPT_READY_SCAN_LINES)
         .collect();
-    let saw_footer = recent.iter().any(|line| line_is_codex_footer_hint(line));
-    let saw_box_edge = recent.iter().any(|line| line_is_codex_composer_edge(line));
-    saw_footer && saw_box_edge
+    if recent.is_empty() {
+        return false;
+    }
+
+    let footer_idx = recent
+        .iter()
+        .take(FOOTER_HINT_BOTTOM_WINDOW)
+        .position(|line| line_is_codex_footer_hint(line));
+    let edge_idx = recent
+        .iter()
+        .take(COMPOSER_EDGE_BOTTOM_WINDOW)
+        .position(|line| line_is_codex_composer_edge(line));
+
+    match (footer_idx, edge_idx) {
+        (Some(f), Some(e)) => f.abs_diff(e) <= COMPOSER_FOOTER_ADJACENCY_LINES,
+        _ => false,
+    }
 }
 
 /// Codex TUI footer hints printed below the composer box. Matching any
@@ -653,6 +751,95 @@ The diagram shows ╭ here.\n\
         assert!(!is_session_dead_error(
             "timeout waiting for codex tui follow-up prompt input readiness after 45s"
         ));
+    }
+
+    #[test]
+    fn cancelled_error_is_classified_and_distinct_from_timeout_and_session_dead() {
+        assert!(is_prompt_ready_cancelled_error(PROMPT_READY_CANCELLED_ERROR));
+        assert!(!is_prompt_ready_timeout_error(PROMPT_READY_CANCELLED_ERROR));
+        assert!(!is_session_dead_error(PROMPT_READY_CANCELLED_ERROR));
+    }
+
+    // ------------------------------------------------------------------
+    // Cancellation contract (no tmux required — uses dead session name
+    // and a pre-cancelled token to drive the wait loop deterministically).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn wait_returns_cancelled_immediately_when_token_is_pre_cancelled() {
+        let token = Arc::new(CancelToken::new());
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let result = wait_until_codex_tui_input_ready(
+            "agentdesk-codex-tui-input-test-cancelled-pre",
+            PromptReadinessKind::Followup,
+            Some(&token),
+        );
+        let error = result.expect_err("pre-cancelled token must short-circuit the wait");
+        assert!(is_prompt_ready_cancelled_error(&error), "got: {error}");
+        assert!(!is_prompt_ready_timeout_error(&error));
+    }
+
+    #[test]
+    fn wait_returns_cancelled_when_token_flips_mid_wait_even_with_no_pane() {
+        // No tmux session of this name exists. Without cancellation the
+        // wait would observe `tmux_pane_alive=false` and return the
+        // session-dead error. With cancellation pre-set, the cancel
+        // check fires first.
+        let token = Arc::new(CancelToken::new());
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let error = wait_until_codex_tui_input_ready(
+            "agentdesk-codex-tui-input-test-cancelled-mid",
+            PromptReadinessKind::Followup,
+            Some(&token),
+        )
+        .expect_err("cancelled wait must return Err");
+        assert!(is_prompt_ready_cancelled_error(&error), "got: {error}");
+    }
+
+    // ------------------------------------------------------------------
+    // Adversarial false-positive fixtures
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn copied_tui_frame_in_assistant_output_during_active_turn_is_not_ready() {
+        // Model output literally copies a Codex TUI frame for documentation
+        // purposes while the turn is still active. In a live Codex TUI the
+        // composer/footer always anchor at the bottom of the pane; during an
+        // active turn the bottom rows show the working/thinking status
+        // instead. The detector must NOT confuse the embedded frame for
+        // readiness when the bottom is occupied by status output.
+        let pane = "\
+Here's what the prompt looks like in Codex TUI:\n\
+╭──────────────────────────────────────────────────────────────╮\n\
+│ ▌ example prompt                                             │\n\
+╰──────────────────────────────────────────────────────────────╯\n\
+  Esc to interrupt   Ctrl+J newline   ⏎ send\n\
+\n\
+Continuing to work on your task — running tests now.\n\
+⠙ Working...   tokens 1234   ctx 12%\n\
+running cargo test ...\n\
+test result: ok. 5 passed\n\
+⠹ Working...   tokens 1456   ctx 13%\n\
+finalising response";
+        assert!(!pane_looks_ready_for_codex_prompt(pane));
+    }
+
+    #[test]
+    fn footer_at_bottom_without_nearby_box_edge_is_not_ready() {
+        // Footer hint at very bottom, but the only box-drawing line is
+        // far away (a model-rendered table 20+ lines up). Adjacency
+        // check must reject this.
+        let mut pane = String::new();
+        pane.push_str("┌────────┬────────┐\n│ a      │ b      │\n└────────┴────────┘\n");
+        for i in 0..20 {
+            pane.push_str(&format!("plain prose line {i}\n"));
+        }
+        pane.push_str("  Esc to interrupt · Ctrl+J newline");
+        assert!(!pane_looks_ready_for_codex_prompt(&pane));
     }
 
     // ------------------------------------------------------------------
