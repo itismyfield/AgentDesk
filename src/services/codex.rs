@@ -35,6 +35,51 @@ const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_ID: &str = "codex-background-event";
 pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS: &str = "completed";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodexRuntimeKind {
+    DirectTui,
+    LegacyWrapperFallback,
+    ProcessBackend,
+    RemoteDirect,
+    RemoteTmux,
+    DirectHeadless,
+    SimpleHeadless,
+}
+
+impl CodexRuntimeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectTui => "direct-tui",
+            Self::LegacyWrapperFallback => "legacy-wrapper-fallback",
+            Self::ProcessBackend => "process-backend",
+            Self::RemoteDirect => "remote-direct",
+            Self::RemoteTmux => "remote-tmux",
+            Self::DirectHeadless => "direct-headless",
+            Self::SimpleHeadless => "simple-headless",
+        }
+    }
+
+    fn uses_codex_exec_json(self) -> bool {
+        match self {
+            Self::DirectTui | Self::RemoteDirect | Self::RemoteTmux => false,
+            Self::LegacyWrapperFallback
+            | Self::ProcessBackend
+            | Self::DirectHeadless
+            | Self::SimpleHeadless => true,
+        }
+    }
+}
+
+fn log_codex_runtime_kind(entrypoint: &'static str, runtime_kind: CodexRuntimeKind) {
+    tracing::info!(
+        provider = "codex",
+        runtime_kind = runtime_kind.as_str(),
+        uses_codex_exec_json = runtime_kind.uses_codex_exec_json(),
+        entrypoint,
+        "codex runtime kind selected"
+    );
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CodexLaunchOptions {
     pub(crate) prompt: String,
@@ -502,6 +547,10 @@ fn execute_command_simple_cancellable_with_options(
             false,
         );
     session_selection.log_start("codex.execute_command_simple");
+    log_codex_runtime_kind(
+        "codex.execute_command_simple",
+        CodexRuntimeKind::SimpleHeadless,
+    );
 
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
@@ -634,6 +683,10 @@ pub fn execute_command_streaming(
                     .unwrap_or(false);
             if use_remote_tmux {
                 let tmux_name = tmux_session_name.expect("checked is_some above");
+                log_codex_runtime_kind(
+                    "codex.execute_command_streaming",
+                    CodexRuntimeKind::RemoteTmux,
+                );
                 return execute_streaming_remote_tmux(
                     profile,
                     &prompt,
@@ -649,6 +702,10 @@ pub fn execute_command_streaming(
                 );
             }
         }
+        log_codex_runtime_kind(
+            "codex.execute_command_streaming",
+            CodexRuntimeKind::RemoteDirect,
+        );
         return execute_streaming_remote_direct(
             profile,
             session_id,
@@ -668,6 +725,10 @@ pub fn execute_command_streaming(
             if session_selection.driver
                 == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting
             {
+                log_codex_runtime_kind(
+                    "codex.execute_command_streaming",
+                    CodexRuntimeKind::DirectTui,
+                );
                 return execute_streaming_local_tui_tmux(
                     &prompt,
                     session_id,
@@ -685,6 +746,10 @@ pub fn execute_command_streaming(
                     force_fresh_provider_session,
                 );
             }
+            log_codex_runtime_kind(
+                "codex.execute_command_streaming",
+                CodexRuntimeKind::LegacyWrapperFallback,
+            );
             return execute_streaming_local_tmux(
                 &prompt,
                 model,
@@ -702,6 +767,10 @@ pub fn execute_command_streaming(
             );
         }
         // ProcessBackend fallback for Codex (no tmux or non-unix)
+        log_codex_runtime_kind(
+            "codex.execute_command_streaming",
+            CodexRuntimeKind::ProcessBackend,
+        );
         return execute_streaming_local_process_codex(
             &prompt,
             model,
@@ -717,6 +786,10 @@ pub fn execute_command_streaming(
         );
     }
 
+    log_codex_runtime_kind(
+        "codex.execute_command_streaming",
+        CodexRuntimeKind::DirectHeadless,
+    );
     execute_streaming_direct(
         &prompt,
         session_id,
@@ -1833,8 +1906,8 @@ fn handle_codex_json_line(
 #[cfg(test)]
 mod tui_hosting_tests {
     use super::{
-        CodexLaunchOptions, append_codex_config_overrides, base_tui_args, build_codex_tui_args,
-        build_tmux_launch_env_lines, direct_tui_material_fallback_reason,
+        CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides, base_tui_args,
+        build_codex_tui_args, build_tmux_launch_env_lines, direct_tui_material_fallback_reason,
         render_codex_tui_tmux_script, render_codex_wrapper_tmux_script,
     };
     use crate::services::discord::restart_report::{
@@ -2062,6 +2135,17 @@ mod tui_hosting_tests {
         assert!(script.contains("'--compact-token-limit'"));
         assert!(script.contains("'120000'"));
         assert!(!script.contains("exec '/opt/bin/codex' "));
+    }
+
+    #[test]
+    fn codex_runtime_kind_records_exec_json_policy() {
+        assert!(!CodexRuntimeKind::DirectTui.uses_codex_exec_json());
+        assert!(CodexRuntimeKind::LegacyWrapperFallback.uses_codex_exec_json());
+        assert!(CodexRuntimeKind::ProcessBackend.uses_codex_exec_json());
+        assert!(!CodexRuntimeKind::RemoteDirect.uses_codex_exec_json());
+        assert!(!CodexRuntimeKind::RemoteTmux.uses_codex_exec_json());
+        assert!(CodexRuntimeKind::DirectHeadless.uses_codex_exec_json());
+        assert!(CodexRuntimeKind::SimpleHeadless.uses_codex_exec_json());
     }
 }
 
