@@ -144,6 +144,24 @@ pub struct DiscordConfig {
 pub struct ProviderConfig {
     #[serde(default, alias = "tuiHosting", skip_serializing_if = "Option::is_none")]
     pub tui_hosting: Option<bool>,
+    /// Issue #2193 — Codex remote SSH runtime gate.
+    ///
+    /// Defaults to `false`. When `true`, the operator asserts that every
+    /// prerequisite in `docs/codex-remote-ssh-policy.md` is in place.
+    /// At time of writing, the ADR's follow-ups are NOT in place
+    /// (`services::remote_stub` still returns errors, the allow-list
+    /// schema is not wired, the integration test does not exist).
+    /// Bootstrap therefore **hard-fails** when this flag is `true` and
+    /// `crate::services::codex_remote_policy::PREREQUISITES_SATISFIED`
+    /// is `false`, so a warn-only gate cannot become a persisted
+    /// "enabled" signal that a partial future implementation silently
+    /// honors.
+    #[serde(
+        default,
+        alias = "remoteSshEnabled",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub remote_ssh_enabled: Option<bool>,
 }
 
 pub fn default_provider_tui_hosting(provider: &str) -> bool {
@@ -170,6 +188,18 @@ impl Config {
                 .providers
                 .values()
                 .any(|provider| provider.tui_hosting == Some(true))
+    }
+
+    /// Issue #2193 — Codex remote SSH gate accessor.
+    ///
+    /// Returns `true` only when the operator has explicitly set
+    /// `providers.codex.remote_ssh_enabled: true` in `agentdesk.yaml`.
+    /// Defaults to `false` per `docs/codex-remote-ssh-policy.md`.
+    pub fn codex_remote_ssh_enabled(&self) -> bool {
+        self.providers
+            .get("codex")
+            .and_then(|cfg| cfg.remote_ssh_enabled)
+            .unwrap_or(false)
     }
 }
 

@@ -65,5 +65,29 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     crate::db::prompt_manifests::install_retention_config(config.prompt_manifest_retention.clone());
     crate::services::provider_hosting::install_provider_hosting_config(&config);
 
+    // Issue #2193 — Codex remote SSH runtime gate.
+    //
+    // The ADR (`docs/codex-remote-ssh-policy.md`) lands the gate now and
+    // pins it to a compile-time prerequisites constant. Until every
+    // ADR follow-up (real `services::remote`, `providers.codex.remote_hosts`
+    // allow-list, PTY-bound process-group cancel, hardened SSH
+    // invocation, cancel integration test) lands, that constant stays
+    // `false`. Flipping `providers.codex.remote_ssh_enabled: true` in
+    // `agentdesk.yaml` is a hard bootstrap error — not a warning —
+    // because a warn-only gate becomes a persisted "enabled" signal
+    // that a partial future implementation could silently honor.
+    if config.codex_remote_ssh_enabled()
+        && !crate::services::codex_remote_policy::PREREQUISITES_SATISFIED
+    {
+        return Err(anyhow::anyhow!(
+            "providers.codex.remote_ssh_enabled is true, but the prerequisites in \
+             docs/codex-remote-ssh-policy.md are not satisfied yet \
+             (services::remote SSH implementation, providers.codex.remote_hosts \
+             allow-list, hardened SSH invocation, process-group cancel, and the \
+             cancel integration test). Set providers.codex.remote_ssh_enabled \
+             back to false until the ADR follow-ups land (#2193)."
+        ));
+    }
+
     Ok(BootstrapState { config })
 }
