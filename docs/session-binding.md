@@ -83,11 +83,21 @@ The pure helper `detect_provider_from_pane_command(pane_cmd: &str)` maps a
 tmux pane current-command string (as reported by
 `tmux display-message -p '#{pane_current_command}'`) to a `ProviderKind`.
 It is plumbed through `match_session(session, pane_cmd, &directory)` — a
-session whose pane runs the wrong (or no) provider is rejected with
-`PaneProviderMismatch`, even when the session name and channel binding
-otherwise line up. Callers that don't yet have a pane command (e.g. while a
-session is warming up) pass `None`; the matcher accepts the binding and lets
-the supervisor layer re-probe later.
+session whose pane runs the wrong provider is rejected with
+`PaneProviderMismatch`. An empty / whitespace pane command is rejected with
+`PaneProviderUnknown` (retryable: the supervisor re-probes before adopting);
+the matcher never silently adopts a session whose provider has not been
+positively identified. Pure offline audits use the distinct
+`match_session_offline` API, which returns a `MatchedChannelAudit` wrapper
+type so audit results can never be mistaken for adoption-grade matches.
+
+AgentDesk-managed sessions foreground the `agentdesk` tmux-wrapper subcommand
+(`tmux-wrapper`, `codex-tmux-wrapper`, `qwen-tmux-wrapper`, …), so the pane
+current command for such sessions is `agentdesk`, not `claude` / `codex` /
+`qwen`. `is_agentdesk_managed_wrapper_command` detects that case and the
+matcher trusts the session-name-encoded provider for these. The supervisor
+layer should still verify the provider child process out of band before
+relying on the matched binding for cancellation / kill decisions.
 
 Matching rules, in order:
 

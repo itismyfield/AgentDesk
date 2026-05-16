@@ -149,7 +149,11 @@ impl ChannelDirectory {
     pub fn insert(&mut self, binding: ChannelBinding) -> Result<(), DirectoryBuildError> {
         let key = expected_session_name_for(None, &binding.provider, &binding.channel_id);
         if let Some(existing) = self.by_session_name.get(&key) {
-            if existing.channel_id != binding.channel_id || existing.provider != binding.provider {
+            if existing != &binding {
+                // Same expected session name but the binding differs in *any*
+                // field (channel_id post-truncation collision, provider, or
+                // agent_id). Fail closed — silently overwriting would create
+                // cross-agent ownership / dispatch / observability corruption.
                 return Err(DirectoryBuildError::SessionNameCollision {
                     expected_session_name: key,
                     existing_channel_id: existing.channel_id.clone(),
@@ -203,6 +207,14 @@ pub enum MatchRejection {
         session_name: String,
         provider: ProviderKind,
     },
+    /// Pane current command is unavailable (None / empty / whitespace).
+    /// Retryable — the supervisor must re-probe the pane before adopting.
+    /// Never produced by [`match_session_offline`]; [`match_session`] requires
+    /// a positive provider fingerprint.
+    PaneProviderUnknown {
+        session_name: String,
+        expected: ProviderKind,
+    },
     /// The tmux pane is running a different provider than the session name
     /// (and binding) declares — operator-created sessions with the wrong
     /// binary, or stale sessions where the provider has crashed back to a
@@ -223,29 +235,66 @@ pub enum MatchOutcome {
     Rejected(MatchRejection),
 }
 
-/// Pure function: map a tmux session name to a channel binding, if any.
+/// Strict, adoption-grade match. Requires a positive provider fingerprint
+/// from the live tmux pane.
 ///
 /// `pane_current_command` is the string AgentDesk reads from
-/// `tmux display-message -p '#{pane_current_command}'`. Pass `None` when the
-/// pane command is not (yet) known — e.g. while doing an offline directory
-/// audit. When `Some`, it is verified against the binding's expected provider
-/// and a mismatch turns the result into [`MatchRejection::PaneProviderMismatch`].
+/// `tmux display-message -p '#{pane_current_command}'`. The supervisor layer
+/// must have just probed the pane; we treat an absent / blank command as a
+/// **retryable rejection** ([`MatchRejection::PaneProviderUnknown`]) rather
+/// than silently adopting the session.
 ///
 /// `None` is returned for any rejection — call [`match_session_detailed`] when
 /// you want to know *why*.
 pub fn match_session(
     session_name: &str,
-    pane_current_command: Option<&str>,
+    pane_current_command: &str,
     channels: &ChannelDirectory,
 ) -> Option<MatchedChannel> {
-    match match_session_detailed(session_name, pane_current_command, channels) {
+    match match_session_detailed(session_name, Some(pane_current_command), channels) {
         MatchOutcome::Matched(matched) => Some(matched),
         MatchOutcome::Rejected(_) => None,
     }
 }
 
-/// Pure function with diagnostic detail. See [`match_session`] for the
-/// option-shaped convenience wrapper.
+/// Offline / audit-only variant. Skips pane-provider verification — useful for
+/// operator dashboards or unit-test fixtures that just want to know "would
+/// this binding be present, ignoring provider liveness?". The output is a
+/// distinct type so it can never be mistaken for the adoption-grade result of
+/// [`match_session`].
+pub fn match_session_offline(
+    session_name: &str,
+    channels: &ChannelDirectory,
+) -> Option<MatchedChannelAudit> {
+    // Same name/binding gating as the strict path, but skip the pane probe.
+    let _ = parse_provider_and_channel_from_tmux_name(session_name)?;
+    let binding = channels.binding_for_session_name(session_name)?;
+    Some(MatchedChannelAudit(MatchedChannel {
+        channel_id: binding.channel_id.clone(),
+        agent_id: binding.agent_id.clone(),
+        provider: binding.provider.clone(),
+        expected_session_name: session_name.to_string(),
+        expected_rollout_path: expected_rollout_path_for(session_name),
+    }))
+}
+
+/// Audit-only wrapper around [`MatchedChannel`]. The type system enforces that
+/// callers wanting to actually attach a watcher go through [`match_session`]
+/// (which verifies the pane provider) instead of the offline path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchedChannelAudit(MatchedChannel);
+
+impl MatchedChannelAudit {
+    pub fn binding(&self) -> &MatchedChannel {
+        &self.0
+    }
+}
+
+/// Pure function with diagnostic detail. `pane_current_command = None` is the
+/// audit-only path and never produces [`MatchRejection::PaneProviderMismatch`]
+/// — it returns [`MatchRejection::PaneProviderUnknown`] instead so the calling
+/// API can decide whether unknown is fatal (live discovery) or acceptable
+/// (offline audit).
 pub fn match_session_detailed(
     session_name: &str,
     pane_current_command: Option<&str>,
@@ -254,7 +303,6 @@ pub fn match_session_detailed(
     let Some((provider, _channel_segment)) =
         parse_provider_and_channel_from_tmux_name(session_name)
     else {
-        // Either no AgentDesk- prefix, or unknown provider segment.
         let prefix = format!("{}-", TMUX_SESSION_PREFIX);
         if let Some(stripped) = session_name.strip_prefix(&prefix) {
             let provider_segment = stripped.split('-').next().unwrap_or("").to_string();
@@ -270,22 +318,27 @@ pub fn match_session_detailed(
         });
     };
 
-    // Provider fingerprint check — only when the caller actually has a pane
-    // command to verify. Empty / whitespace-only commands are treated as
-    // "unknown" (the pane may still be initializing); the supervisor layer
-    // is what decides whether to retry, not the matcher.
-    if let Some(pane_cmd) = pane_current_command {
-        let pane_cmd_trimmed = pane_cmd.trim();
-        if !pane_cmd_trimmed.is_empty() {
-            let detected = detect_provider_from_pane_command(pane_cmd_trimmed);
-            if detected.as_ref() != Some(&binding.provider) {
-                return MatchOutcome::Rejected(MatchRejection::PaneProviderMismatch {
-                    session_name: session_name.to_string(),
-                    expected: binding.provider.clone(),
-                    actual_pane_command: pane_cmd_trimmed.to_string(),
-                    detected,
-                });
-            }
+    let pane_cmd_trimmed = pane_current_command.map(str::trim).unwrap_or("");
+    if pane_cmd_trimmed.is_empty() {
+        return MatchOutcome::Rejected(MatchRejection::PaneProviderUnknown {
+            session_name: session_name.to_string(),
+            expected: binding.provider.clone(),
+        });
+    }
+
+    // Managed-wrapper case: pane shows `agentdesk` because we foregrounded a
+    // tmux-wrapper subcommand. The provider lives as a child process. Trust
+    // the session-name-encoded provider (which by construction equals the
+    // binding provider — we already looked the binding up by exact name).
+    if !is_agentdesk_managed_wrapper_command(pane_cmd_trimmed) {
+        let detected = detect_provider_from_pane_command(pane_cmd_trimmed);
+        if detected.as_ref() != Some(&binding.provider) {
+            return MatchOutcome::Rejected(MatchRejection::PaneProviderMismatch {
+                session_name: session_name.to_string(),
+                expected: binding.provider.clone(),
+                actual_pane_command: pane_cmd_trimmed.to_string(),
+                detected,
+            });
         }
     }
 
@@ -341,11 +394,18 @@ pub fn expected_rollout_path_for(session_name: &str) -> String {
 ///
 /// - exact match against the binary name (`codex` → Codex),
 /// - prefix match with a `-` / `_` / `.` separator (`codex-cli`, `codex_v2`),
-/// - substring match anchored at a word boundary (`/path/to/codex` → Codex).
+/// - absolute-path basename matching (`/path/to/codex` → Codex).
 ///
 /// This is deliberately permissive so that *future* Codex / Claude CLI version
 /// drift (renamed shims, vendored binary names) keeps matching without code
 /// changes — the registry stays the single source of truth.
+///
+/// **Important**: AgentDesk-managed panes foreground the `agentdesk` tmux
+/// wrapper (a tmux-wrapper / codex-tmux-wrapper / qwen-tmux-wrapper
+/// subcommand), so `#{pane_current_command}` reports `agentdesk` rather than
+/// the provider binary even though the provider is alive as a child process.
+/// Use [`is_agentdesk_managed_wrapper_command`] to detect that case before
+/// rejecting on provider mismatch.
 pub fn detect_provider_from_pane_command(pane_cmd: &str) -> Option<ProviderKind> {
     let cmd = pane_cmd.trim();
     if cmd.is_empty() {
@@ -374,6 +434,22 @@ pub fn detect_provider_from_pane_command(pane_cmd: &str) -> Option<ProviderKind>
         }
     }
     None
+}
+
+/// Returns true when the pane current command looks like the AgentDesk binary
+/// itself — i.e. the pane is running one of the managed tmux-wrapper
+/// subcommands (`tmux-wrapper`, `codex-tmux-wrapper`, `qwen-tmux-wrapper`,
+/// etc.). In that case the pane's *foreground* process is a wrapper and the
+/// provider lives as a child; the matcher trusts the session-name-encoded
+/// provider for these.
+pub fn is_agentdesk_managed_wrapper_command(pane_cmd: &str) -> bool {
+    let cmd = pane_cmd.trim();
+    if cmd.is_empty() {
+        return false;
+    }
+    let lower = cmd.to_ascii_lowercase();
+    let leaf = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    leaf == "agentdesk" || leaf.starts_with("agentdesk-") || leaf.starts_with("agentdesk.")
 }
 
 /// Sanity-check helper exposed for the upcoming session discovery loop (E2):
@@ -413,8 +489,7 @@ mod tests {
         let session = ProviderKind::Claude.build_tmux_session_name(channel);
         let directory =
             dir_with(vec![binding(channel, "agent-a3061", ProviderKind::Claude)]);
-        let matched =
-            match_session(&session, Some("claude"), &directory).expect("should match");
+        let matched = match_session(&session, "claude", &directory).expect("should match");
         assert_eq!(matched.channel_id, channel);
         assert_eq!(matched.agent_id, "agent-a3061");
         assert_eq!(matched.provider, ProviderKind::Claude);
@@ -428,22 +503,42 @@ mod tests {
         let channel = "dev-cdx";
         let session = ProviderKind::Codex.build_tmux_session_name(channel);
         let directory = dir_with(vec![binding(channel, "td", ProviderKind::Codex)]);
-        let matched =
-            match_session(&session, Some("codex"), &directory).expect("should match");
+        let matched = match_session(&session, "codex", &directory).expect("should match");
         assert_eq!(matched.provider, ProviderKind::Codex);
         assert_eq!(matched.agent_id, "td");
     }
 
     #[test]
-    fn match_session_unknown_pane_command_accepts_match() {
-        // None pane_cmd → can't verify, but the matcher accepts. Supervisor
-        // is responsible for re-probing once the pane is ready.
+    fn match_session_unknown_pane_command_is_retryable_rejection() {
+        // Empty / whitespace pane_cmd is a *retryable* rejection (the
+        // supervisor must re-probe). It does NOT silently adopt.
         let channel = "agent-warmup";
         let session = ProviderKind::Claude.build_tmux_session_name(channel);
         let directory = dir_with(vec![binding(channel, "td", ProviderKind::Claude)]);
-        assert!(match_session(&session, None, &directory).is_some());
-        // Empty / whitespace pane_cmd also accepted (provider still warming up).
-        assert!(match_session(&session, Some("   "), &directory).is_some());
+        assert!(match_session(&session, "", &directory).is_none());
+        assert!(match_session(&session, "   ", &directory).is_none());
+        match match_session_detailed(&session, Some("   "), &directory) {
+            MatchOutcome::Rejected(MatchRejection::PaneProviderUnknown {
+                session_name,
+                expected,
+            }) => {
+                assert_eq!(session_name, session);
+                assert_eq!(expected, ProviderKind::Claude);
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_session_offline_skips_provider_check() {
+        // The offline audit API returns a distinct type that the type system
+        // prevents callers from mistakenly using for live adoption.
+        let channel = "audit-chan";
+        let session = ProviderKind::Claude.build_tmux_session_name(channel);
+        let directory = dir_with(vec![binding(channel, "td", ProviderKind::Claude)]);
+        let audit = match_session_offline(&session, &directory).expect("audit match");
+        assert_eq!(audit.binding().agent_id, "td");
+        assert_eq!(audit.binding().provider, ProviderKind::Claude);
     }
 
     #[test]
@@ -451,7 +546,7 @@ mod tests {
         let channel = "ghost-channel";
         let session = ProviderKind::Codex.build_tmux_session_name(channel);
         let directory = ChannelDirectory::new();
-        assert!(match_session(&session, Some("codex"), &directory).is_none());
+        assert!(match_session(&session, "codex", &directory).is_none());
         match match_session_detailed(&session, Some("codex"), &directory) {
             MatchOutcome::Rejected(MatchRejection::NoChannelBinding {
                 session_name,
@@ -501,6 +596,45 @@ mod tests {
     }
 
     #[test]
+    fn match_session_managed_wrapper_pane_is_trusted() {
+        // AgentDesk-launched sessions foreground the `agentdesk` wrapper
+        // subcommand; `#{pane_current_command}` reports `agentdesk` even
+        // though claude/codex is alive as a child process. Matcher must
+        // accept this.
+        let channel = "agent-managed";
+        let session = ProviderKind::Codex.build_tmux_session_name(channel);
+        let directory = dir_with(vec![binding(channel, "td", ProviderKind::Codex)]);
+        for pane in [
+            "agentdesk",
+            "/usr/local/bin/agentdesk",
+            "agentdesk-helper",
+            "agentdesk.real",
+        ] {
+            let m = match_session(&session, pane, &directory)
+                .unwrap_or_else(|| panic!("managed wrapper '{pane}' should match"));
+            assert_eq!(m.agent_id, "td");
+            assert_eq!(m.provider, ProviderKind::Codex);
+        }
+        assert!(is_agentdesk_managed_wrapper_command("agentdesk"));
+        assert!(!is_agentdesk_managed_wrapper_command("agentdeskish"));
+        assert!(!is_agentdesk_managed_wrapper_command(""));
+    }
+
+    #[test]
+    fn try_from_bindings_rejects_duplicate_agent_id() {
+        // Same (channel_id, provider) but different agent_id must fail closed.
+        let chan = "agent-dupkey";
+        let result = ChannelDirectory::try_from_bindings(vec![
+            binding(chan, "agent-a", ProviderKind::Claude),
+            binding(chan, "agent-b", ProviderKind::Claude),
+        ]);
+        match result {
+            Err(DirectoryBuildError::SessionNameCollision { .. }) => {}
+            other => panic!("expected collision for differing agent_id, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn match_session_not_agentdesk_named() {
         let directory = ChannelDirectory::new();
         match match_session_detailed("zellij-foo", None, &directory) {
@@ -525,8 +659,7 @@ mod tests {
         );
 
         let directory = dir_with(vec![binding(long_channel, "td", ProviderKind::Codex)]);
-        let matched =
-            match_session(&session, Some("codex"), &directory).expect("matched");
+        let matched = match_session(&session, "codex", &directory).expect("matched");
         // Critically: agent_id and original (untruncated) channel_id survive.
         assert_eq!(matched.agent_id, "td");
         assert_eq!(matched.channel_id, long_channel);
@@ -617,8 +750,7 @@ mod tests {
         let session = ProviderKind::Claude.build_tmux_session_name(channel);
         let directory =
             dir_with(vec![binding(channel, "agent", ProviderKind::Claude)]);
-        let matched =
-            match_session(&session, Some("claude"), &directory).expect("matches");
+        let matched = match_session(&session, "claude", &directory).expect("matches");
         // Expected path is reported even though no jsonl exists on disk.
         assert!(matched.expected_rollout_path.contains(&session));
     }
@@ -700,11 +832,11 @@ mod tests {
         let claude_session = ProviderKind::Claude.build_tmux_session_name(channel);
         let codex_session = ProviderKind::Codex.build_tmux_session_name(channel);
 
-        let m_claude = match_session(&claude_session, Some("claude"), &directory).unwrap();
+        let m_claude = match_session(&claude_session, "claude", &directory).unwrap();
         assert_eq!(m_claude.agent_id, "agent-a");
         assert_eq!(m_claude.provider, ProviderKind::Claude);
 
-        let m_codex = match_session(&codex_session, Some("codex"), &directory).unwrap();
+        let m_codex = match_session(&codex_session, "codex", &directory).unwrap();
         assert_eq!(m_codex.agent_id, "agent-b");
         assert_eq!(m_codex.provider, ProviderKind::Codex);
     }
