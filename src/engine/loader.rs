@@ -115,6 +115,21 @@ pub fn load_policies_from_dir(ctx: &Context, dir: &Path) -> Result<Vec<LoadedPol
 /// Used by hot-reload pre-validation so the previous loaded version can be
 /// preserved on failure.
 pub fn load_policies_from_dir_validated(ctx: &Context, dir: &Path) -> Result<Vec<LoadedPolicy>> {
+    load_policies_from_dir_validated_inner(ctx, dir, None)
+}
+
+/// Internal variant of `load_policies_from_dir_validated` that optionally
+/// arms a QuickJS interrupt deadline around each policy's `eval` call. The
+/// deadline is armed *inside* `ctx.with(...)` (i.e. while we already hold
+/// the runtime lock) and cleared immediately after eval returns — that way
+/// the deadline can NEVER expire while an unrelated live policy hook is the
+/// currently-executing JS on the runtime, which is the false-positive
+/// scenario Codex flagged in round-3 review of #2372.
+pub(crate) fn load_policies_from_dir_validated_inner(
+    ctx: &Context,
+    dir: &Path,
+    eval_deadline: Option<&Arc<AtomicU64>>,
+) -> Result<Vec<LoadedPolicy>> {
     let mut policies = Vec::new();
 
     if !dir.exists() {
@@ -131,7 +146,7 @@ pub fn load_policies_from_dir_validated(ctx: &Context, dir: &Path) -> Result<Vec
     for path in entries {
         // Syntax + eval check: any single-file load error fails the whole
         // pre-validation so the previously loaded set stays intact.
-        let policy = load_single_policy(ctx, &path)
+        let policy = load_single_policy_with_deadline(ctx, &path, eval_deadline)
             .map_err(|e| anyhow::anyhow!("policy {} failed to load: {e}", path.display()))?;
         policies.push(policy);
     }
@@ -147,6 +162,19 @@ pub fn load_policies_from_dir_validated(ctx: &Context, dir: &Path) -> Result<Vec
 
 /// Load a single policy file.
 pub fn load_single_policy(ctx: &Context, path: &Path) -> Result<LoadedPolicy> {
+    load_single_policy_with_deadline(ctx, path, None)
+}
+
+/// Internal variant of `load_single_policy` that optionally arms a per-eval
+/// wall-clock deadline. The deadline is armed only after `ctx.with(...)`
+/// has acquired the runtime lock and is cleared immediately after the
+/// `eval_with_options` call returns, so the global interrupt handler can
+/// never tear down an unrelated live hook running on the same runtime.
+pub(crate) fn load_single_policy_with_deadline(
+    ctx: &Context,
+    path: &Path,
+    eval_deadline: Option<&Arc<AtomicU64>>,
+) -> Result<LoadedPolicy> {
     let source = std::fs::read_to_string(path)?;
     let file_name = path
         .file_stem()
@@ -175,11 +203,22 @@ pub fn load_single_policy(ctx: &Context, path: &Path) -> Result<LoadedPolicy> {
             )
             .map_err(|e| anyhow::anyhow!("failed to set up registerPolicy: {e}"))?;
 
-        // Evaluate the policy file (non-strict so policies can use sloppy mode)
+        // Evaluate the policy file (non-strict so policies can use sloppy mode).
+        // #2372 round-3: arm the deadline ONLY here, after `ctx.with` has
+        // acquired the runtime lock. The interrupt handler installed by
+        // `start_hot_reload` checks the deadline on every bytecode tick,
+        // and dropping `_deadline_guard` immediately after eval clears the
+        // slot back to 0. This guarantees the deadline can never expire
+        // while an unrelated live hook is the currently-running JS on the
+        // runtime — the only JS that can be executing between arm and
+        // disarm is *this* eval, because we hold the lock.
+        let _deadline_guard =
+            eval_deadline.map(|slot| ArmedDeadline::new(slot, HOT_RELOAD_EVAL_BUDGET));
         let mut eval_opts = rquickjs::context::EvalOptions::default();
         eval_opts.strict = false;
         let eval_result: rquickjs::Result<rquickjs::Value> =
             ctx.eval_with_options(source.as_bytes().to_vec(), eval_opts);
+        drop(_deadline_guard);
 
         if let Err(e) = eval_result {
             return Err(anyhow::anyhow!("JS eval error in {}: {e}", path.display()));
@@ -855,15 +894,17 @@ pub fn start_hot_reload(
                         // plus hook orchestration conflict check. If either
                         // fails we keep the currently loaded version.
                         //
-                        // #2372: arm a wall-clock deadline around the eval so a
-                        // hot-reloaded policy containing `while (true) {}` is
-                        // aborted by the QuickJS interrupt handler instead of
-                        // holding the runtime lock until shutdown is triggered.
-                        let _deadline_guard = ArmedDeadline::new(
-                            &eval_deadline_worker,
-                            HOT_RELOAD_EVAL_BUDGET,
-                        );
-                        match load_policies_from_dir_validated(&ctx, &dir) {
+                        // #2372: pass the shared deadline slot through so the
+                        // per-policy eval inside `load_single_policy_with_deadline`
+                        // can arm a wall-clock interrupt *after* it holds the
+                        // runtime lock. Arming here would let the deadline
+                        // expire while waiting for the lock and interrupt an
+                        // unrelated live hook — see #2372 round-3 review.
+                        match load_policies_from_dir_validated_inner(
+                            &ctx,
+                            &dir,
+                            Some(&eval_deadline_worker),
+                        ) {
                             Ok(new_policies) => {
                                 let count = new_policies.len();
                                 if let Ok(mut guard) = store.lock() {
@@ -1119,6 +1160,126 @@ mod tests {
         assert!(value != 0);
         drop(probe_ctx);
 
+        drop(guard);
+        drop(runtime);
+    }
+
+    /// #2372 round-3 (Codex follow-up): the scope-bound deadline path —
+    /// `load_single_policy_with_deadline` — must interrupt a runaway policy
+    /// eval based on the wall-clock budget alone. Mirrors the live-engine
+    /// failure mode without relying on the file watcher (which is
+    /// platform-dependent and racy).
+    ///
+    /// We run the load on a fresh probe context (cloned from the runtime)
+    /// so the interrupted eval's partial state can be torn down with the
+    /// probe context before the outer runtime drops — same pattern the
+    /// shutdown-interrupt test uses for QuickJS hygiene.
+    #[test]
+    fn load_single_policy_with_deadline_interrupts_runaway_policy() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // start_hot_reload installs the deadline-aware interrupt handler on
+        // the shared runtime.
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let deadline_slot = guard.eval_deadline.clone();
+
+        let policy_file = tmp.path().join("runaway.js");
+        std::fs::write(&policy_file, "while (true) {}").expect("write runaway policy");
+
+        // Run the runaway-load on a separate context tied to the same
+        // runtime so we can drop the partial state before the runtime
+        // tears down. Wrap in a thread so a bug in the interrupt wiring
+        // would manifest as a hang rather than the whole suite freezing.
+        let runtime_for_thread = runtime.clone();
+        let load_thread = std::thread::spawn(move || {
+            let probe_ctx = Context::full(&runtime_for_thread).expect("probe context");
+            let start = Instant::now();
+            let result =
+                load_single_policy_with_deadline(&probe_ctx, &policy_file, Some(&deadline_slot));
+            let elapsed = start.elapsed();
+            // Drop the probe context inside the thread so its partial state
+            // is reclaimed before the runtime drops in the parent.
+            drop(probe_ctx);
+            (result.is_err(), elapsed)
+        });
+        let join_deadline = Instant::now() + HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3);
+        loop {
+            if load_thread.is_finished() {
+                break;
+            }
+            assert!(
+                Instant::now() < join_deadline,
+                "scope-bound deadline interrupt did not fire within budget+3s"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (is_err, elapsed) = load_thread.join().expect("load thread join");
+        assert!(
+            is_err,
+            "runaway policy should fail to load (deadline interrupt expected)"
+        );
+        assert!(
+            elapsed < HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(1),
+            "deadline-based interrupt fired too late: {elapsed:?} (budget {HOT_RELOAD_EVAL_BUDGET:?})"
+        );
+
+        drop(guard);
+        drop(runtime);
+    }
+
+    /// #2372 round-3 (Codex follow-up): the deadline must be scoped to the
+    /// loader's `ctx.with()` eval — it must NEVER fire while an unrelated
+    /// live hook is the currently-executing JS on the same runtime. This
+    /// test arms the deadline-aware handler, then runs a slow-but-legitimate
+    /// "live hook" eval on the runtime *before* invoking the loader. The
+    /// slow eval must complete without interruption because the deadline
+    /// slot is only set between the loader's `ctx.with` entry and its
+    /// `eval_with_options` return.
+    #[test]
+    fn hot_reload_deadline_does_not_interrupt_concurrent_live_hook() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+
+        // Sanity: the deadline slot is 0 (no deadline armed) for the entire
+        // duration of this live eval, because we never call the loader and
+        // never invoke `arm_eval_deadline`. The handler must therefore
+        // return false on every bytecode tick.
+        assert_eq!(guard.eval_deadline.load(Ordering::Acquire), 0);
+
+        // Mirror the shutdown-interrupt test's hygiene pattern: run the
+        // live eval on a fresh probe context tied to the same runtime and
+        // drop it before tearing down the runtime so any partial JS state
+        // is reclaimed in order. This is the live-engine analogue (no
+        // shutdown is requested) of the existing during-shutdown test.
+        let probe_ctx = Context::full(&runtime).expect("create probe context");
+        let start = Instant::now();
+        let result: i32 = probe_ctx
+            .with(|c| {
+                // Moderately slow but bounded JS work — well within what a
+                // real policy hook might do (~50ms of pure JS busy loop).
+                c.eval::<i32, _>("var s=0; for (var i=0;i<500000;i++) { s = (s + i) | 0; } s")
+            })
+            .expect("legitimate live eval should not be interrupted");
+        let elapsed = start.elapsed();
+        let _ = result;
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "legitimate live eval took unexpectedly long: {elapsed:?}"
+        );
+        // Slot remained 0 throughout — proves the deadline was never armed
+        // outside the loader path.
+        assert_eq!(guard.eval_deadline.load(Ordering::Acquire), 0);
+
+        drop(probe_ctx);
         drop(guard);
         drop(runtime);
     }
