@@ -2245,25 +2245,43 @@ pub(crate) async fn execute_intake_turn_core(
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DurablePeekOutcome {
+    /// Row found in the durable table.
+    Found(crate::voice::prompt::VoiceTranscriptAnnouncement),
+    /// No row matched (never produced, or already consumed/expired).
+    NotFound,
+    /// No pg pool configured (single-node dev).
+    NoPool,
+    /// Pg pool IS configured but the peek query errored. Caller MUST
+    /// abort intake for any visible voice-announce candidate — falling
+    /// through to ordinary text would mis-route the message.
+    QueryError,
+}
+
 /// #2209 finding #2 — peek (non-destructive) durable metadata for intake.
-/// The durable row is only deleted via [`consume_durable_voice_announcement_after_handoff`]
-/// once the announcement has been successfully handed to the provider
-/// (after validation, barge-in, and inflight-state save). A worker crash
-/// between peek and consume leaves the row intact for the next retry.
+/// The durable row is only consumed via
+/// [`consume_durable_voice_announcement_after_handoff`] once intake has
+/// committed to dispatch. v5 review — tri-state result: query errors
+/// must NOT collapse to "not a voice announce" because that would
+/// silently downgrade the message to ordinary text.
 async fn peek_durable_voice_announcement_for_intake(
     pg_pool: Option<&sqlx::PgPool>,
     message_id: MessageId,
-) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
-    let pool = pg_pool?;
+) -> DurablePeekOutcome {
+    let Some(pool) = pg_pool else {
+        return DurablePeekOutcome::NoPool;
+    };
     match crate::voice::announce_meta::peek_durable(pool, message_id).await {
-        Ok(announcement) => announcement,
+        Ok(Some(announcement)) => DurablePeekOutcome::Found(announcement),
+        Ok(None) => DurablePeekOutcome::NotFound,
         Err(error) => {
             tracing::warn!(
                 error = %error,
                 message_id = message_id.get(),
-                "failed to peek durable voice transcript announcement metadata"
+                "failed to peek durable voice transcript announcement metadata — failing closed"
             );
-            None
+            DurablePeekOutcome::QueryError
         }
     }
 }
@@ -2316,7 +2334,11 @@ async fn take_durable_voice_announcement_for_intake(
     pg_pool: Option<&sqlx::PgPool>,
     message_id: MessageId,
 ) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
-    let announcement = peek_durable_voice_announcement_for_intake(pg_pool, message_id).await?;
+    let announcement = match peek_durable_voice_announcement_for_intake(pg_pool, message_id).await
+    {
+        DurablePeekOutcome::Found(a) => a,
+        _ => return None,
+    };
     match consume_durable_voice_announcement_after_handoff(pg_pool, message_id).await {
         DurableConsumeOutcome::Claimed => Some(announcement),
         _ => None,
@@ -2355,13 +2377,31 @@ pub(in crate::services::discord) async fn handle_text_message(
             None
         };
     let has_parsed_voice_announcement = parsed_voice_announcement.is_some();
-    // #2209 finding #2: peek only — durable row stays in place until the
-    // announcement has been successfully handed off to the provider below.
-    let durable_voice_announcement = if stored_voice_announcement.is_none()
+    // #2209 finding #2 + v5 review: peek only — durable row stays in place
+    // until the atomic claim runs below. Tri-state: a query error on a
+    // visible voice-announce candidate must abort, not fall through.
+    let visible_voice_candidate = stored_voice_announcement.is_none()
         && !has_parsed_voice_announcement
-        && crate::voice::prompt::is_visible_voice_transcript_announcement(user_text)
-    {
-        peek_durable_voice_announcement_for_intake(shared.pg_pool.as_ref(), user_msg_id).await
+        && crate::voice::prompt::is_visible_voice_transcript_announcement(user_text);
+    let durable_voice_announcement = if visible_voice_candidate {
+        match peek_durable_voice_announcement_for_intake(shared.pg_pool.as_ref(), user_msg_id)
+            .await
+        {
+            DurablePeekOutcome::Found(announcement) => Some(announcement),
+            DurablePeekOutcome::NotFound => None,
+            DurablePeekOutcome::NoPool => None,
+            DurablePeekOutcome::QueryError => {
+                // Cannot prove ownership without the durable table —
+                // refuse to fall through to ordinary text intake.
+                tracing::warn!(
+                    event = "voice_announce_durable_peek_query_error",
+                    channel_id = channel_id.get(),
+                    message_id = user_msg_id.get(),
+                    "aborting intake — durable peek query errored on a visible voice-announce candidate; refusing to downgrade to ordinary text"
+                );
+                return Ok(());
+            }
+        }
     } else {
         None
     };
@@ -6486,17 +6526,22 @@ mod voice_announce_meta_reconstruction_tests {
             .await
             .expect("persist durable voice announcement metadata");
 
-        let peeked = peek_durable_voice_announcement_for_intake(Some(&pool), message_id)
+        let peeked = match peek_durable_voice_announcement_for_intake(Some(&pool), message_id)
             .await
-            .expect("peek should observe the row");
+        {
+            DurablePeekOutcome::Found(a) => a,
+            other => panic!("expected Found peek, got {other:?}"),
+        };
         assert_eq!(peeked, expected);
 
         // Simulate crash: consume never runs.
 
         // Retry peek must still see the row.
-        let retry_peeked = peek_durable_voice_announcement_for_intake(Some(&pool), message_id)
-            .await
-            .expect("row should survive a peek-without-consume");
+        let retry_peeked =
+            match peek_durable_voice_announcement_for_intake(Some(&pool), message_id).await {
+                DurablePeekOutcome::Found(a) => a,
+                other => panic!("expected Found retry peek, got {other:?}"),
+            };
         assert_eq!(retry_peeked, expected);
 
         // Successful retry: atomic claim succeeds.
@@ -6504,9 +6549,10 @@ mod voice_announce_meta_reconstruction_tests {
             consume_durable_voice_announcement_after_handoff(Some(&pool), message_id).await;
         assert_eq!(outcome, DurableConsumeOutcome::Claimed);
         assert!(
-            peek_durable_voice_announcement_for_intake(Some(&pool), message_id)
-                .await
-                .is_none(),
+            matches!(
+                peek_durable_voice_announcement_for_intake(Some(&pool), message_id).await,
+                DurablePeekOutcome::NotFound
+            ),
             "consumed row must be invisible to subsequent peeks"
         );
         // Sibling/duplicate consume sees the lost-claim outcome.

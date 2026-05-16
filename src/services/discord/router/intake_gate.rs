@@ -1698,7 +1698,11 @@ pub(in crate::services::discord) async fn handle_event(
             // to the parent channel are queued so they don't start a parallel
             // turn (the thread's cancel_token is keyed by thread_id, leaving
             // the parent channel "unlocked").
-            if is_allowed_bot {
+            //
+            // #2209 v5 review — exclude voice-announcement messages so they
+            // flow through handle_text_message where the atomic durable claim
+            // is the first side-effect gate.
+            if is_allowed_bot && !is_voice_transcript_announcement {
                 // #1446 — copy the mapped thread_id and immediately drop the
                 // DashMap ref. `thread_guard_force_clean_stale_thread`
                 // re-acquires the same shard lock to call `.remove()`; if the
@@ -2043,7 +2047,16 @@ pub(in crate::services::discord) async fn handle_event(
             // otherwise-idle channel, keep FIFO order by queuing this message behind
             // them and re-triggering idle queue kickoff instead of letting this turn
             // jump ahead.
-            let queued_behind_idle_backlog = {
+            //
+            // #2209 v5 review — voice-announcement messages must bypass this
+            // path so the atomic durable claim runs as the first side-effect
+            // gate inside handle_text_message. Otherwise the durable row sits
+            // unclaimed behind backlog and can exceed its 10-minute TTL,
+            // leaving the visible 🎙 text to be processed as an ordinary
+            // announce-bot turn.
+            let queued_behind_idle_backlog = if is_voice_transcript_announcement {
+                None
+            } else {
                 let has_active_turn = mailbox_has_active_turn(&data.shared, channel_id).await;
                 let has_pending_backlog =
                     mailbox_has_pending_soft_queue(&data.shared, &data.provider, channel_id)

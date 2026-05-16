@@ -2141,6 +2141,7 @@ impl VoiceBargeInRuntime {
             .await
         {
             Ok(outcome) => {
+                let mut durable_publish_failed = false;
                 if let Some(message_id) = outcome.message_id {
                     // #2209 follow-up review — publish to the durable
                     // table BEFORE the in-process local store. Otherwise
@@ -2152,10 +2153,13 @@ impl VoiceBargeInRuntime {
                     //
                     // v4 review — when pg pool is configured but the
                     // durable INSERT fails, do NOT publish the local
-                    // store entry either. Intake will then treat the
-                    // message as an unowned voice-announce candidate
-                    // and drop it via voice_announce_durable_miss
-                    // rather than dispatch a turn nobody can claim.
+                    // store entry either.
+                    //
+                    // v5 review — durable publish is a PREREQUISITE for
+                    // VoiceTurnStarted when pg is configured. If the
+                    // INSERT fails we return VoiceTurnStartFailed so
+                    // upstream telemetry/retry logic can surface the
+                    // data loss instead of believing the turn started.
                     let durable_publish = if let Some(pool) = shared.pg_pool.as_ref() {
                         match crate::voice::announce_meta::persist_durable(
                             pool,
@@ -2172,8 +2176,9 @@ impl VoiceBargeInRuntime {
                                     target_channel_id = target_channel_id.get(),
                                     message_id = message_id.get(),
                                     utterance_id = %utterance.utterance_id,
-                                    "failed to persist voice transcript announcement metadata — skipping local-store publish to keep ownership consistent"
+                                    "failed to persist voice transcript announcement metadata — voice turn cannot be claimed; reporting VoiceTurnStartFailed"
                                 );
+                                durable_publish_failed = true;
                                 false
                             }
                         }
@@ -2186,6 +2191,11 @@ impl VoiceBargeInRuntime {
                         crate::voice::announce_meta::global_store()
                             .insert(message_id, announcement_meta.clone());
                     }
+                }
+                if durable_publish_failed {
+                    return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(
+                        "durable_announce_meta_persist_failed".to_string(),
+                    );
                 }
                 tracing::info!(
                     source_channel_id = source_channel_id.get(),
