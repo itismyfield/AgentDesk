@@ -1120,6 +1120,35 @@ pub(super) async fn restore_inflight_turns(
         }
 
         let channel_id = ChannelId::new(state.channel_id);
+
+        // #2235: rows written by a newer binary may carry an unknown
+        // `runtime_kind` variant; `deserialize_runtime_kind_tolerant` collapsed
+        // that to `None`. When a row's persisted `version` is ahead of this
+        // binary's `INFLIGHT_STATE_VERSION` AND its `runtime_kind` is missing,
+        // the semantics of the row are owned by code we don't understand —
+        // any recovery attempt would guess at runtime/handoff shape. Silent
+        // skip (debug-level log + clear) is strictly better than guessing or
+        // surfacing the legacy "input fifo path missing" notice.
+        if state.runtime_kind.is_none()
+            && state.version > super::inflight::inflight_state_version()
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::debug!(
+                "  [{ts}] ↩ inflight recovery silent-skip for channel {}: row version {} > local {} with unknown runtime_kind",
+                state.channel_id,
+                state.version,
+                super::inflight::inflight_state_version()
+            );
+            finish_recovered_turn_mailbox(
+                shared,
+                provider,
+                channel_id,
+                "recovery_runtime_kind_unknown_skip",
+            )
+            .await;
+            clear_inflight_state(provider, state.channel_id);
+            continue;
+        }
         let is_dm = matches!(
             channel_id.to_channel(http).await,
             Ok(serenity::model::channel::Channel::Private(_))

@@ -1237,6 +1237,21 @@ fn handle_watcher_runtime_handoff(
     }
     inflight_state.input_fifo_path = fifo_path;
     inflight_state.last_offset = last_offset;
+    // #2235: persist the watcher handoff stamp BEFORE the watcher claim /
+    // spawn side effects below. A bridge crash between in-memory stamp and
+    // the later centralized state_dirty flush would otherwise leave disk
+    // holding the stale pre-handoff shape (e.g. prelaunch LegacyTmuxWrapper
+    // with the wrong FIFO/output) — exactly the rollback failure mode this
+    // issue is meant to close. Failures are logged but non-fatal: the
+    // subsequent state_dirty flush still runs and watcher spawn must not
+    // block on disk hiccups.
+    if let Err(error) = save_inflight_state(inflight_state) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ inflight save after runtime handoff stamp failed for channel {}: {error}",
+            channel_id
+        );
+    }
 
     // #226: Atomic claim via try_claim_watcher
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
