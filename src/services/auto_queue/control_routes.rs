@@ -293,6 +293,76 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
     )
 }
 
+/// POST /api/queue/runs/{id}/phase-gates/repair
+pub async fn repair_phase_gates(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let body: RepairPhaseGateBody = match parse_json_body(body, "phase-gates/repair") {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable_response();
+    };
+
+    let options = crate::db::auto_queue::PhaseGateRepairOptions {
+        phase: body.phase,
+        dispatch_id: body.dispatch_id,
+    };
+    match crate::db::auto_queue::repair_phase_gates_for_run_on_pg(pool, &id, options).await {
+        Ok(summary) => {
+            let outcomes: Vec<serde_json::Value> = summary
+                .outcomes
+                .into_iter()
+                .map(|outcome| {
+                    json!({
+                        "dispatch_id": outcome.dispatch_id,
+                        "phase": outcome.phase,
+                        "outcome": outcome.outcome,
+                        "run_resumed": outcome.run_resumed,
+                        "run_finalized": outcome.run_finalized,
+                        "pending_count": outcome.pending_count,
+                        "failed_reason": outcome.failed_reason,
+                    })
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "run_id": summary.run_id,
+                    "phase_filter": summary.phase_filter,
+                    "dispatch_id_filter": summary.dispatch_id_filter,
+                    "candidate_dispatches": summary.candidate_dispatches,
+                    "cleared_gates": summary.cleared_gates,
+                    "failed_gates": summary.failed_gates,
+                    "awaiting_siblings": summary.awaiting_siblings,
+                    "stale_dispatches": summary.stale_dispatches,
+                    "no_context_dispatches": summary.no_context_dispatches,
+                    "blocking_gates_remaining": summary.blocking_gates_remaining,
+                    "run_status": summary.run_status,
+                    "outcomes": outcomes,
+                })),
+            )
+        }
+        Err(error) if error.starts_with("not_found:") => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": error.trim_start_matches("not_found:")})),
+        ),
+        Err(error) if error == "run_id is required" || error == "phase must be >= 0" => {
+            (StatusCode::BAD_REQUEST, Json(json!({"error": error})))
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        ),
+    }
+}
+
 /// POST /api/queue/cancel — cancel all active/paused runs and pending entries
 pub async fn cancel(
     State(state): State<AppState>,

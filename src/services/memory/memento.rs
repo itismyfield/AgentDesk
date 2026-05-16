@@ -2099,6 +2099,7 @@ mod tests {
                 provider: ProviderKind::Codex,
                 role_id: "project-agentdesk".to_string(),
                 channel_id: 42,
+                channel_name: None,
                 session_id: "session-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "What is empty?".to_string(),
