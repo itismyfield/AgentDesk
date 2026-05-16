@@ -71,13 +71,18 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Cache cargo registry & build
+      # Cache only cargo registry/git. `target/` is intentionally NOT cached
+      # because sccache (GHA-backed) already caches compiled rustc output and
+      # caching multi-GB `target/` directories starves the 10GB GHA cache
+      # quota, causing constant LRU eviction of sccache shards (observed:
+      # Rust hit-rate collapsed from 99.80% → 0.00% over a few hours of
+      # merges). See PR description and docs/ci/sccache-setup.md §4.2.
+      - name: Cache cargo registry & git
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-main-full-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-main-full-
@@ -108,6 +113,10 @@ jobs:
           cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
         env:
           RUST_BACKTRACE: 1
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   postgres:
     name: PostgreSQL tests
@@ -146,13 +155,14 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Cache cargo registry & build
+      # See ci-main.yml `full_non_pg` for rationale: `target/` excluded so the
+      # GHA cache quota is not starved out from under sccache.
+      - name: Cache cargo registry & git
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-postgres-main-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-postgres-main-
@@ -165,6 +175,10 @@ jobs:
           cargo test _pg -- --nocapture --test-threads=1
           cargo test pg_ -- --nocapture --test-threads=1
           cargo test postgres -- --nocapture --test-threads=1
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   high-risk-recovery:
     name: High-risk recovery
@@ -205,19 +219,23 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Cache cargo registry & build
+      # See ci-main.yml `full_non_pg` for rationale.
+      - name: Cache cargo registry & git
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-recovery-main-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-recovery-main-
 
       - name: High-risk recovery lane
         run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   scripts:
     name: Script checks

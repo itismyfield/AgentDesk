@@ -41,17 +41,22 @@ binary is absent — no hard-fail.
 
 ```toml
 [build]
-# Keep per-worktree target/ directories, but share rustc output through sccache.
-rustc-wrapper = "sccache"
-# Campaign worktrees are build-once-and-discard; disabling incremental avoids
-# multi-GB target/debug/incremental caches in every parallel worktree.
+rustc-wrapper = "./scripts/rustc-wrapper-sccache.sh"
 incremental = false
 ```
 
 Every `cargo` invocation inside this repo — whether from a human shell, a
-campaign worktree, or an agent session — automatically picks this up. There is
-no way to scope this to just release builds; dev builds also use the shared
-sccache wrapper and non-incremental Cargo profile.
+campaign worktree, or an agent session — picks up the wrapper automatically.
+
+The wrapper (`scripts/rustc-wrapper-sccache.sh`) prefers an explicit `SCCACHE_BIN`
+override, then falls back to `command -v sccache`, then `/opt/homebrew/bin/sccache`,
+then a plain `rustc` exec. This is the key fix for the historical
+"`No such file or directory` for `sccache`" failure that forced agents and
+developers to prefix every cargo call with `RUSTC_WRAPPER=`. Bare
+`cargo build`/`cargo check`/`cargo test` now Just Works regardless of whether
+sccache is installed.
+
+Escape hatch: `RUSTC_WRAPPER_DISABLE=1 cargo build` skips the wrapper entirely.
 
 > **Gotcha**: `SCCACHE_CACHE_SIZE` cannot be set via `config.toml [env]` in a
 > way that reaches `sccache` itself — the wrapper reads its own env from the
@@ -152,16 +157,48 @@ work (this PR) lands the plumbing only.
 
 ---
 
+## 4.2 CI cache budget (GHA backend)
+
+GitHub Actions cache has a **10GB per-repo quota** with LRU eviction. The
+sccache GHA backend (`SCCACHE_GHA_ENABLED=true`) writes one cache entry per
+rustc invocation, sharded under `sccache/` keys. Anything else cached via
+`actions/cache@v4` competes for the same 10GB quota.
+
+We previously cached the entire `target/` directory alongside sccache; each
+`target/` cache key is 0.8–1.2GB and several lanes (full_non_pg, postgres,
+recovery, lint, fast-tests) created independent keys. Total cache footprint
+ballooned to ~20GB, well above the 10GB cap, and GHA's LRU started evicting
+sccache shards constantly. Observed effect: **Rust cache hit rate collapsed
+from 99.80% to 0.00% within a few hours of merges**, even though every
+workflow continued to run `mozilla-actions/sccache-action`.
+
+The fix in this repo: keep `actions/cache@v4` for `~/.cargo/registry` +
+`~/.cargo/git` only (small, low-churn). Let sccache own all compiled rustc
+output. This keeps the GHA quota dominated by small sccache shards, which is
+the documented best practice for `mozilla-actions/sccache-action`.
+
+Verification: every Rust job ends with an explicit `sccache --show-stats` step
+so the hit-rate trend is visible directly in CI logs without needing to grep
+through the action's post-step output.
+
+---
+
 ## 5. Troubleshooting
 
-- **`error: process didn't exit successfully: sccache`** — the wrapper in
-  `.cargo/config.toml` is being used but the binary is missing. Either install
-  sccache (§1) or temporarily run `RUSTC_WRAPPER= cargo build` to bypass.
+- **`error: process didn't exit successfully` for the rustc wrapper** — the
+  wrapper script (`scripts/rustc-wrapper-sccache.sh`) should never hard-fail
+  on a missing sccache binary; it falls back to a plain rustc exec. If you
+  hit this anyway, confirm the script is executable
+  (`chmod +x scripts/rustc-wrapper-sccache.sh`) and run with
+  `RUSTC_WRAPPER_DISABLE=1 cargo …` to confirm the wrapper is the culprit.
 - **No hit-rate improvement across worktrees** — confirm each worktree sees
   the same `SCCACHE_DIR`. By default it is `$HOME/.cache/sccache`, which is
   shared across worktrees.
 - **`sccache` spawns but no cache activity** — check `sccache --show-stats`
   for `Non-cacheable calls`; proc-macro crates and some build scripts are not
-  cacheable.
-- **CI cache not warming up** — the `mozilla-actions/sccache-action` requires
-  the workflow to have `actions/cache` permissions (default `read` is fine).
+  cacheable. Cargo also requires `CARGO_INCREMENTAL=0` (which `.cargo/config.toml`
+  enables via `incremental = false`) — sccache cannot cache incremental rustc
+  invocations.
+- **CI Rust hit rate stuck at 0%** — see §4.2. Most commonly the GHA cache
+  budget is being consumed by something other than sccache (e.g. `target/`
+  added back to `actions/cache@v4`).

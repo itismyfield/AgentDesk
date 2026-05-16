@@ -47,11 +47,12 @@ cargo build --release
 
 AgentDesk intentionally keeps a separate `target/` directory per worktree. Sharing `CARGO_TARGET_DIR` across always-parallel worktrees causes Cargo lock contention, so the supported acceleration path is a shared `sccache` rustc cache instead.
 
-- `.cargo/config.toml` enables `build.rustc-wrapper = "sccache"`
+- `.cargo/config.toml` points `build.rustc-wrapper` at `scripts/rustc-wrapper-sccache.sh`
+- the wrapper transparently uses `sccache` when it is on `PATH` and falls back to a plain `rustc` exec when it is not — bare `cargo build`/`cargo test` works on every machine without a `RUSTC_WRAPPER=` override
 - worktree builds use the documented env default `SCCACHE_CACHE_SIZE=10G`; export another value before building to override it
-- plain `cargo build` / `cargo test` reuse the same cache automatically once `sccache` is on `PATH`
+- set `RUSTC_WRAPPER_DISABLE=1` to bypass the wrapper entirely (rare; debugging only)
 
-Install `sccache` before building:
+Install `sccache` to actually engage caching:
 
 ```bash
 brew install sccache
@@ -72,7 +73,7 @@ cargo build --bin agentdesk
 sccache --show-stats
 ```
 
-If Cargo fails with `No such file or directory (os error 2)` for `sccache`, install it and ensure the binary is available on `PATH` (`/opt/homebrew/bin` on Apple Silicon Homebrew).
+The historical `No such file or directory (os error 2)` failure mode no longer applies — Cargo invokes the wrapper script, which gracefully degrades when sccache is missing.
 
 ### Dawn LaunchDaemon Operations (macOS)
 

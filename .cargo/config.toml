@@ -1,8 +1,14 @@
 [build]
-# Keep per-worktree target/ directories, but share rustc output through sccache.
-rustc-wrapper = "sccache"
+# Keep per-worktree target/ directories, but share rustc output through sccache
+# when it is installed. The wrapper script transparently degrades to a plain
+# rustc exec when sccache is missing, so bare `cargo build` works on every
+# developer machine and agent subprocess without a `RUSTC_WRAPPER=` override.
+# Set `RUSTC_WRAPPER_DISABLE=1` to bypass entirely (rare; use for debugging
+# wrapper-related issues only).
+rustc-wrapper = "./scripts/rustc-wrapper-sccache.sh"
 # Campaign worktrees are build-once-and-discard; disabling incremental avoids
 # multi-GB target/debug/incremental caches in every parallel worktree.
+# sccache also requires CARGO_INCREMENTAL=0 to cache rustc invocations.
 incremental = false
 
 [target.x86_64-pc-windows-msvc]
