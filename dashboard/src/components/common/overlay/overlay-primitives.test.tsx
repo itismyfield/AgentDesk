@@ -228,7 +228,11 @@ describe("overlay primitives", () => {
     captured.vaulContentProps[0].onEscapeKeyDown?.(escapeEvent);
     captured.vaulContentProps[0].onInteractOutside?.(outsideEvent);
 
-    expect(captured.vaulRootProps[0].dismissible).toBe(false);
+    // #2204 follow-up: dismissible stays true so the header X
+    // (wrapped in <VaulDrawer.Close>) still fires onOpenChange.
+    // ESC / outside-click guarding now lives entirely in the
+    // onEscapeKeyDown / onInteractOutside preventDefault below.
+    expect(captured.vaulRootProps[0].dismissible).toBe(true);
     expect(escapeEvent.preventDefault).toHaveBeenCalledTimes(1);
     expect(outsideEvent.preventDefault).toHaveBeenCalledTimes(1);
   });
