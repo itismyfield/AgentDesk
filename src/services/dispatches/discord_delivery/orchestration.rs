@@ -1466,6 +1466,15 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
 
         let mut decision_context = serde_json::Map::new();
         decision_context.insert("verdict".to_string(), serde_json::json!(verdict));
+        // #2341: persist the source review dispatch id so the
+        // out-of-scope close path can bind scope verification to the EXACT
+        // review that produced this decision, not to the latest completed
+        // review for the card (which may not be the same row if a duplicate
+        // or delayed review arrives).
+        decision_context.insert(
+            "source_review_dispatch_id".to_string(),
+            serde_json::json!(review_dispatch_id),
+        );
         if let Some(provider) = review_context_json
             .as_ref()
             .and_then(|ctx| ctx.get("from_provider"))
@@ -1488,6 +1497,16 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
             decision_context.insert(
                 "reviewed_commit".to_string(),
                 serde_json::json!(reviewed_commit),
+            );
+        }
+        if let Some(target_repo) = review_context_json
+            .as_ref()
+            .and_then(|ctx| ctx.get("target_repo"))
+            .and_then(|value| value.as_str())
+        {
+            decision_context.insert(
+                "target_repo".to_string(),
+                serde_json::json!(target_repo),
             );
         }
 

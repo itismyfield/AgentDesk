@@ -784,6 +784,121 @@ async fn latest_completed_review_dispatch_pg_first(
     None
 }
 
+/// #2341 / #2200 sub-3 (Codex finding [medium]): bind the close path to the
+/// source review dispatch that produced THIS review-decision, not to the
+/// latest completed review for the card. Loads the review-decision dispatch
+/// context to extract `source_review_dispatch_id` (persisted by
+/// `discord_delivery::orchestration` when the follow-up was created), then
+/// loads that review row by id. Falls back to
+/// `latest_completed_review_dispatch_pg_first` only for legacy rows whose
+/// context predates the persistence change.
+async fn source_review_dispatch_for_decision_pg_first(
+    state: &AppState,
+    card_id: &str,
+    rd_id: &str,
+) -> Option<CompletedReviewDispatch> {
+    // Load the review-decision dispatch context.
+    let rd_context_raw: Option<String> = if let Some(pool) = state.pg_pool_ref() {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT context FROM task_dispatches WHERE id = $1 AND kanban_card_id = $2 AND dispatch_type = 'review-decision'",
+        )
+        .bind(rd_id)
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+    } else {
+        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+        {
+            state
+                .legacy_db()
+                .and_then(|db| db.separate_conn().ok())
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT context FROM task_dispatches WHERE id = ?1 AND kanban_card_id = ?2 AND dispatch_type = 'review-decision'",
+                        [rd_id, card_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .flatten()
+                })
+        }
+        #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+        {
+            None
+        }
+    };
+
+    let source_review_dispatch_id: Option<String> = rd_context_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|v| {
+            v.get("source_review_dispatch_id")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        });
+
+    if let Some(srid) = source_review_dispatch_id {
+        // Load the EXACT review by id — scoped to the same card +
+        // dispatch_type so a stale or unrelated id cannot bind.
+        let row: Option<(String, Option<String>)> = if let Some(pool) = state.pg_pool_ref() {
+            sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT id, context FROM task_dispatches WHERE id = $1 AND kanban_card_id = $2 AND dispatch_type = 'review' AND status = 'completed'",
+            )
+            .bind(&srid)
+            .bind(card_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+        } else {
+            #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+            {
+                state
+                    .legacy_db()
+                    .and_then(|db| db.separate_conn().ok())
+                    .and_then(|conn| {
+                        conn.query_row(
+                            "SELECT id, context FROM task_dispatches WHERE id = ?1 AND kanban_card_id = ?2 AND dispatch_type = 'review' AND status = 'completed'",
+                            [srid.as_str(), card_id],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                        )
+                        .optional()
+                        .ok()
+                        .flatten()
+                    })
+            }
+            #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+            {
+                None
+            }
+        };
+
+        if let Some((id, context_raw)) = row {
+            let active = build_active_review_dispatch(id, context_raw);
+            return Some(CompletedReviewDispatch {
+                id: active.id,
+                reviewed_commit: active.reviewed_commit,
+                target_repo: active.target_repo,
+            });
+        }
+        tracing::warn!(
+            card_id,
+            rd_id,
+            source_review_dispatch_id = %srid,
+            "[review-decision] #2341 source_review_dispatch_id from review-decision context did not resolve to a completed review row; falling back to latest_completed_review"
+        );
+    }
+
+    // Legacy fallback: review-decision context predates the
+    // source_review_dispatch_id persistence change.
+    latest_completed_review_dispatch_pg_first(state, card_id).await
+}
+
 /// #2341 / #2200 sub-3 redesign: card lifecycle generation marker.
 ///
 /// The close path captures this snapshot before doing any work and re-checks
@@ -1780,9 +1895,127 @@ pub async fn submit_review_decision(
                     }
                 }
 
+                // Codex finding [high]: a previous call may have flipped
+                // the dispatch to scope_mismatch_closed but then failed at
+                // card transition or dismiss cleanup. Returning 200 on
+                // retry without finishing those steps would leave the card
+                // in `review` while the API reported success. Detect this
+                // case and resume terminalization before returning OK.
+                let card_ctx =
+                    load_review_decision_card_context_pg_first(&state, &body.card_id).await;
+                let effective_pipeline = resolve_effective_pipeline_pg_first(
+                    &state,
+                    card_ctx.repo_id.as_deref(),
+                    card_ctx.agent_id.as_deref(),
+                )
+                .await;
+                let current_status = card_ctx.status.clone().unwrap_or_default();
+                let terminal_state = effective_pipeline
+                    .states
+                    .iter()
+                    .find(|s| s.terminal)
+                    .map(|s| s.id.clone())
+                    .unwrap_or_else(|| "done".to_string());
+                let card_is_terminal = effective_pipeline.is_terminal(&current_status);
+
+                let mut resumed_steps: Vec<&'static str> = Vec::new();
+                if !card_is_terminal {
+                    // Resume: cancel stale + transition + cleanup. We
+                    // already verified lifecycle generation above, so the
+                    // card is still the same generation we closed against.
+                    tracing::warn!(
+                        card_id = %body.card_id,
+                        pending_rd_id = %prior.dispatch_id,
+                        current_status = %current_status,
+                        terminal_state = %terminal_state,
+                        "[review-decision] #2341 resuming partial-close: dispatch was scope_mismatch_closed but card never reached terminal"
+                    );
+
+                    let stale_ids =
+                        stale_review_dispatch_ids_pg_first(&state, &body.card_id).await;
+                    let mut cancelled_stale = 0usize;
+                    for stale_id in &stale_ids {
+                        if cancel_dispatch_pg_first(
+                            &state,
+                            stale_id,
+                            Some("scope_mismatch_closed_resume"),
+                        )
+                        .await
+                        .unwrap_or(0)
+                            > 0
+                        {
+                            cancelled_stale += 1;
+                        }
+                    }
+                    if cancelled_stale > 0 {
+                        resumed_steps.push("cancelled_stale");
+                    }
+
+                    match transition_status_pg_first(
+                        &state,
+                        &body.card_id,
+                        &terminal_state,
+                        "dispute_scope_mismatch_closed_resume",
+                        crate::engine::transition::ForceIntent::SystemRecovery,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            resumed_steps.push("transition_terminal");
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                card_id = %body.card_id,
+                                pending_rd_id = %prior.dispatch_id,
+                                terminal_state = %terminal_state,
+                                error = %e,
+                                "[review-decision] #2341 resume failed to transition card to terminal"
+                            );
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({
+                                    "error": format!(
+                                        "scope_mismatch_closed resume: card transition to {terminal_state} failed: {e}"
+                                    ),
+                                    "card_id": body.card_id,
+                                    "pending_dispatch_id": prior.dispatch_id,
+                                    "resumed_steps": resumed_steps,
+                                })),
+                            );
+                        }
+                    }
+
+                    if let Err(error) =
+                        dismiss_review_cleanup_pg_first(&state, &body.card_id).await
+                    {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": error,
+                                "card_id": body.card_id,
+                                "pending_dispatch_id": prior.dispatch_id,
+                                "resumed_steps": resumed_steps,
+                            })),
+                        );
+                    }
+                    resumed_steps.push("dismiss_cleanup");
+
+                    update_card_review_state(
+                        review_state_db(&state),
+                        state.pg_pool_ref(),
+                        &body.card_id,
+                        "dispute_scope_mismatch_closed",
+                        Some(&prior.dispatch_id),
+                    );
+
+                    emit_card_updated(&state, &body.card_id).await;
+                }
+
                 tracing::info!(
                     card_id = %body.card_id,
                     pending_rd_id = %prior.dispatch_id,
+                    card_was_terminal = card_is_terminal,
+                    resumed_steps = ?resumed_steps,
                     "[review-decision] #2341 idempotent: returning 200 already_finalized for retried scope_mismatch_closed"
                 );
                 return (
@@ -1795,7 +2028,13 @@ pub async fn submit_review_decision(
                         "pending_dispatch_id": prior.dispatch_id,
                         "review_dispatch_id": prior.review_dispatch_id,
                         "reviewed_commit": prior.reviewed_commit,
-                        "message": "scope_mismatch_closed already finalized; idempotent no-op",
+                        "resumed": !card_is_terminal,
+                        "resumed_steps": resumed_steps,
+                        "message": if card_is_terminal {
+                            "scope_mismatch_closed already finalized; idempotent no-op"
+                        } else {
+                            "scope_mismatch_closed resumed: card transitioned to terminal after prior partial close"
+                        },
                     })),
                 );
             }
@@ -2394,12 +2633,22 @@ pub async fn submit_review_decision(
                     }
                 };
 
-                // 2. Bind to the latest **completed** review dispatch — that's
-                //    what is available in the production flow at decision time.
-                //    The dispute payload references this completed dispatch by
-                //    surfacing its id + reviewed_commit in the close result.
+                // 2. Bind to the **source** review dispatch that produced THIS
+                //    review-decision (loaded by id from the review-decision's
+                //    `context.source_review_dispatch_id`), not to the latest
+                //    completed review for the card. This closes Codex finding
+                //    [medium]: a duplicate or delayed completed review row
+                //    could otherwise bind the close to the wrong reviewed_commit.
+                //    Legacy review-decision rows whose context predates this
+                //    field fall back to `latest_completed_review_dispatch_pg_first`.
                 let completed_review =
-                    match latest_completed_review_dispatch_pg_first(&state, &body.card_id).await {
+                    match source_review_dispatch_for_decision_pg_first(
+                        &state,
+                        &body.card_id,
+                        &rd_id,
+                    )
+                    .await
+                    {
                         Some(d) => d,
                         None => {
                             return (

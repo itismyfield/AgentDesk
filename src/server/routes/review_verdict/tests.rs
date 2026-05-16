@@ -2584,3 +2584,131 @@ async fn redesign_dispute_without_out_of_scope_flag_uses_legacy_path() {
         body_false.0
     );
 }
+
+/// PARTIAL-CLOSE RESUME (Codex finding [high] fix): if the first call
+/// flipped the dispatch to scope_mismatch_closed but never transitioned the
+/// card (e.g. transition failure between tx commit and the transition
+/// call), a retry must FINISH the close — not falsely report
+/// already-finalized while leaving the card in `review`.
+///
+/// We simulate the partial state by:
+///   1. Manually flipping the review-decision dispatch to scope_mismatch_closed
+///      with a recorded lifecycle_generation matching the current card state.
+///   2. Leaving the card in `review` (no transition).
+///   3. Calling the API; it should detect non-terminal card + prior
+///      finalize, resume transition + cleanup, and return 200 resumed=true.
+#[tokio::test]
+async fn redesign_dispute_oos_idempotent_retry_resumes_partial_close() {
+    let (repo_dir, commit_sha) = init_test_git_repo_out_of_scope_2341(2341005);
+    let _ = (repo_dir, commit_sha); // not needed; we synthesize the partial state directly
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-pc', 'PC', '501', '502')",
+            [],
+        )
+        .unwrap();
+        // Card stuck in `review` after partial close.
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
+             review_status, github_issue_number, created_at, updated_at) \
+             VALUES ('card-2341-pc', 'Partial Close', 'review', 'agent-pc', 'rd-2341-pc', \
+                     'suggestion_pending', 2341005, datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, review_round, state, review_entered_at, updated_at) \
+             VALUES ('card-2341-pc', 1, 'reviewing', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        // The completed review (id pinned so source_review_dispatch_id can resolve it).
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, \
+             title, context, completed_at, created_at, updated_at) \
+             VALUES ('rv-2341-pc-completed', 'card-2341-pc', 'agent-pc', 'review', 'completed', \
+                     '[Review R1] completed', \
+                     '{\"reviewed_commit\":\"deadbeef1234567\",\"target_repo\":\"/nonexistent\"}', \
+                     datetime('now'), datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        // The review-decision dispatch already in scope_mismatch_closed state
+        // (simulating "atomic tx committed; transition crashed").
+        let result_json = serde_json::json!({
+            "decision": "dispute",
+            "outcome": "scope_mismatch_closed",
+            "completion_source": "review_decision_api",
+            "review_dispatch_id": "rv-2341-pc-completed",
+            "reviewed_commit": "deadbeef1234567",
+            "lifecycle_generation": {
+                "latest_dispatch_id": "rd-2341-pc",
+                "review_round": 1,
+                "review_entered_at_iso": null
+            }
+        });
+        // sqlite test stores TIMESTAMPTZ via datetime() which is a string;
+        // the actual `review_entered_at_iso` extraction in `card_lifecycle_snapshot_pg_first`
+        // for sqlite reads the column as a String, so we match by setting
+        // review_entered_at to NULL on card_review_state to keep the
+        // generation marker simple.
+        conn.execute(
+            "UPDATE card_review_state SET review_entered_at = NULL WHERE card_id = 'card-2341-pc'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, \
+             title, result, completed_at, created_at, updated_at) \
+             VALUES ('rd-2341-pc', 'card-2341-pc', 'agent-pc', 'review-decision', 'completed', \
+                     '[Decision] partial', ?1, datetime('now'), datetime('now'), datetime('now'))",
+            sqlite_params![result_json.to_string()],
+        )
+        .unwrap();
+    }
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-2341-pc".to_string(),
+            decision: "dispute".to_string(),
+            comment: Some("retry after partial close".to_string()),
+            commit_sha: None,
+            dispatch_id: Some("rd-2341-pc".to_string()),
+            out_of_scope: Some(true),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "partial-close retry must succeed; body = {:?}",
+        body.0
+    );
+    assert_eq!(
+        body.0["resumed"].as_bool().unwrap_or(false),
+        true,
+        "must report resumed=true so callers know terminalization advanced; body = {:?}",
+        body.0
+    );
+
+    let conn = db.lock().unwrap();
+    let card_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-2341-pc'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        card_status, "done",
+        "card must reach terminal after partial-close resume; got {}",
+        card_status
+    );
+}
