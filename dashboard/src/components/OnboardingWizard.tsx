@@ -36,6 +36,7 @@ import {
 } from "./onboarding/OnboardingWizardSections";
 import { Step1BotConnection } from "./onboarding/Step1BotConnection";
 import { Step2ProviderVerification } from "./onboarding/Step2ProviderVerification";
+import { Step4ChannelSetup } from "./onboarding/Step4ChannelSetup";
 
 // ── Types ─────────────────────────────────────────────
 
@@ -1305,132 +1306,28 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
 
       {/* ──────────────── Step 4: Channel Setup ──────────────── */}
       {step === 4 && (
-        <div className={stepBox} style={{ borderColor: borderLight }}>
-          <div>
-            <h2 ref={stepHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
-              {tr("채널 설정", "Channel Setup")}
-            </h2>
-            <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
-              {tr(
-                "각 에이전트가 사용할 Discord 채널을 실제 서버 기준으로 설정합니다. 기존 채널을 재사용하거나, 추천 이름으로 새 채널을 만들 수 있습니다.",
-                "Configure real Discord channels for each agent. Reuse existing channels or create new ones from the recommended names.",
-              )}
-            </p>
-          </div>
-
-          {/* Guild selection */}
-          {guilds.length > 0 && (
-            <div>
-              <label className={labelStyle} style={{ color: "var(--th-text-secondary)" }}>
-                {tr("Discord 서버", "Discord Server")}
-              </label>
-              {guilds.length === 1 ? (
-                <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
-                  {guilds[0].name}
-                </div>
-              ) : (
-                <select
-                  value={selectedGuild}
-                  onChange={(e) => setSelectedGuild(e.target.value)}
-                  className={inputStyle}
-                  style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
-                >
-                  <option value="">{tr("서버 선택", "Select server")}</option>
-                  {guilds.map((g) => (
-                    <option key={g.id} value={g.id}>{g.name}</option>
-                  ))}
-                </select>
-              )}
-            </div>
-          )}
-
-          {guilds.length === 0 && (
-            <div className="rounded-xl p-4 text-sm" style={{ backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)" }}>
-              <div style={{ color: "#fde68a" }}>
-                {tr(
-                  "통신 봇이 어떤 서버에도 초대되지 않았거나 토큰 검증이 끝나지 않았습니다. 실제 채널 생성 보장을 위해 Step 1로 돌아가 봇 초대부터 완료하세요.",
-                  "The communication bot is not invited to any server yet, or token validation is incomplete. Go back to Step 1 and finish the invite before continuing.",
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Channel assignments */}
-          <div className="space-y-2">
-            {channelAssignments.map((ca, i) => (
-              <div key={ca.agentId} className="rounded-xl p-3 border space-y-2" style={{ borderColor: "rgba(148,163,184,0.15)" }}>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>{ca.agentName}</span>
-                  <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>→</span>
-                </div>
-                <div className="flex flex-col sm:flex-row gap-2">
-                  {guild && guild.channels.length > 0 ? (
-                    <select
-                      value={ca.channelId}
-                      onChange={(e) => {
-                        const ch = guild.channels.find((c) => c.id === e.target.value);
-                        setChannelAssignments((prev) => {
-                          const copy = [...prev];
-                          copy[i] = {
-                            ...ca,
-                            channelId: e.target.value,
-                            channelName: ch?.name || ca.recommendedName,
-                          };
-                          return copy;
-                        });
-                      }}
-                      className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
-                      style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
-                    >
-                      <option value="">{tr(`새 채널: #${ca.recommendedName}`, `New: #${ca.recommendedName}`)}</option>
-                      {guild.channels.map((ch) => (
-                        <option key={ch.id} value={ch.id}>#{ch.name}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      type="text"
-                      value={ca.channelName || ca.recommendedName}
-                      readOnly
-                      className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
-                      style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
-                      placeholder={ca.recommendedName}
-                    />
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {guild && (
-            <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-              {tr(
-                "\"새 채널\"을 선택하면 통신 봇이 온보딩 완료 시 해당 채널을 자동 생성합니다.",
-                "Selecting \"New\" makes the communication bot create that channel automatically during onboarding.",
-              )}
-            </p>
-          )}
-
-          {!guild && (
-            <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-              {tr(
-                "서버를 선택하면 각 추천 채널명을 기존 채널에 연결하거나 새 채널로 생성할 수 있습니다.",
-                "Once a server is selected, each recommended channel can be linked to an existing channel or created as a new one.",
-              )}
-            </p>
-          )}
-
-          <ChecklistPanel title={tr("Step 4 체크리스트", "Step 4 checklist")} items={step4Checklist} />
-
-          <div className={actionRow}>
-            <button type="button" onClick={() => goToStep(3)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
-              {tr("이전", "Back")}
-            </button>
-            <button type="button" onClick={() => goToStep(5)} disabled={!hasSelectedGuild || !channelAssignmentsReady} className={btnPrimary}>
-              {tr("다음", "Next")}
-            </button>
-          </div>
-        </div>
+        <Step4ChannelSetup
+          actionRow={actionRow}
+          borderInput={borderInput}
+          borderLight={borderLight}
+          btnPrimary={btnPrimary}
+          btnSecondary={btnSecondary}
+          channelAssignments={channelAssignments}
+          channelAssignmentsReady={channelAssignmentsReady}
+          goToStep={goToStep}
+          guild={guild}
+          guilds={guilds}
+          hasSelectedGuild={hasSelectedGuild}
+          inputStyle={inputStyle}
+          labelStyle={labelStyle}
+          selectedGuild={selectedGuild}
+          setChannelAssignments={setChannelAssignments}
+          setSelectedGuild={setSelectedGuild}
+          step4Checklist={step4Checklist}
+          stepBox={stepBox}
+          stepHeadingRef={stepHeadingRef}
+          tr={tr}
+        />
       )}
 
       {/* ──────────────── Step 5: Owner + Confirm ──────────────── */}
