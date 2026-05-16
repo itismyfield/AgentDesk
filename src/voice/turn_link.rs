@@ -239,15 +239,27 @@ pub async fn retarget_voice_turn_link_pg(
         .execute(&mut *tx)
         .await?;
 
-    // 1. Look at the current max active generation for this utterance.
-    //    A stale retry whose generation is <= the current max must not
-    //    mutate the newer row — it just becomes a no-op.
-    let current_active_max: Option<i32> = sqlx::query_scalar(
-        "SELECT MAX(generation) FROM voice_turn_link
+    // 1. Look at the current state of this utterance. We compute both the
+    //    global generation watermark (across all statuses) AND whether
+    //    any row is already terminal. The watermark blocks stale retries
+    //    (insert.generation <= history_max → no-op). The terminal probe
+    //    blocks resurrection — once the utterance is closed, no further
+    //    retarget can re-open it, even at a higher generation. Without
+    //    this guard a delayed retarget that races with mark_terminal can
+    //    insert a fresh active row that escapes GC and routes barge-in /
+    //    done / TTS to stale background state.
+    #[derive(sqlx::FromRow)]
+    struct UtteranceState {
+        history_max: Option<i32>,
+        has_terminal: bool,
+    }
+    let state: UtteranceState = sqlx::query_as(
+        "SELECT MAX(generation) AS history_max,
+                COALESCE(BOOL_OR(status = 'terminal'), FALSE) AS has_terminal
+           FROM voice_turn_link
           WHERE guild_id = $1
             AND voice_channel_id = $2
-            AND utterance_id = $3
-            AND status = 'active'",
+            AND utterance_id = $3",
     )
     .bind(u64_to_i64(insert.guild_id))
     .bind(u64_to_i64(insert.voice_channel_id))
@@ -255,11 +267,16 @@ pub async fn retarget_voice_turn_link_pg(
     .fetch_one(&mut *tx)
     .await?;
 
-    if let Some(active_max) = current_active_max {
-        if insert.generation <= active_max {
-            // Stale or same-generation retry. Do not touch anything; the
-            // INSERT below would only ON CONFLICT DO NOTHING and the
-            // UPDATE pass would wrongly cancel the newer row.
+    if state.has_terminal {
+        // Utterance is closed. Retarget post-completion is never valid;
+        // it would resurrect a finished turn and escape GC.
+        tx.commit().await?;
+        return Ok(None);
+    }
+
+    if let Some(history_max) = state.history_max {
+        if insert.generation <= history_max {
+            // Stale or same-generation retry — do not mutate.
             tx.commit().await?;
             return Ok(None);
         }
@@ -386,6 +403,17 @@ pub async fn mark_terminal_voice_turn_link_pg(
     utterance_id: &str,
     generation: i32,
 ) -> Result<Option<VoiceTurnLink>> {
+    let mut tx = pool.begin().await?;
+
+    // Same advisory lock as insert/retarget so completion can never
+    // interleave with a concurrent retarget in a way that resurrects the
+    // closed utterance back to active.
+    let lock_key = advisory_lock_key(guild_id, voice_channel_id, utterance_id);
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await?;
+
     let sql = format!(
         "UPDATE voice_turn_link
             SET status = 'terminal', updated_at = NOW()
@@ -400,8 +428,10 @@ pub async fn mark_terminal_voice_turn_link_pg(
         .bind(u64_to_i64(voice_channel_id))
         .bind(utterance_id)
         .bind(generation)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
+
+    tx.commit().await?;
     Ok(row.as_ref().map(row_to_link))
 }
 
@@ -864,6 +894,122 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active_count, 1, "exactly one active row per utterance");
+
+        pool.close().await;
+        pg.drop().await;
+    }
+
+    /// Resurrection regression (Codex review #2362 round 2): once any row
+    /// for an utterance is `terminal`, no subsequent retarget — even at a
+    /// strictly higher generation — may resurrect the utterance back to
+    /// `active`. The closed turn must stay closed and remain GC-eligible.
+    #[tokio::test]
+    async fn retarget_after_mark_terminal_does_not_resurrect_pg() {
+        let Some(pg) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg.connect_and_migrate().await;
+
+        insert_voice_turn_link_pg(&pool, &sample_insert(0))
+            .await
+            .unwrap()
+            .expect("seed insert");
+        mark_terminal_voice_turn_link_pg(&pool, 100, 200, "utt-42", 0)
+            .await
+            .unwrap()
+            .expect("mark_terminal");
+
+        // A late retarget arrives — try gen 1 (strictly higher than the
+        // terminalised gen 0). It MUST become a no-op; otherwise the
+        // closed turn is resurrected.
+        let result = retarget_voice_turn_link_pg(&pool, &sample_insert(1))
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "retarget after mark_terminal must NOT resurrect the utterance"
+        );
+
+        // No active rows must exist for this utterance.
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM voice_turn_link
+              WHERE guild_id = 100
+                AND voice_channel_id = 200
+                AND utterance_id = 'utt-42'
+                AND status = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(active_count, 0, "no active row may exist post-terminal");
+
+        // And the terminal row must still be the gen 0 we created.
+        let terminal_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM voice_turn_link
+              WHERE guild_id = 100
+                AND voice_channel_id = 200
+                AND utterance_id = 'utt-42'
+                AND status = 'terminal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(terminal_count, 1, "terminal row remains intact");
+
+        pool.close().await;
+        pg.drop().await;
+    }
+
+    /// Concurrent mark_terminal vs retarget (Codex review #2362 round 2):
+    /// these two ops on the same utterance must serialize via the
+    /// advisory lock. Whichever commits first wins; the other becomes a
+    /// no-op rather than violating the "one active row" invariant or
+    /// resurrecting a terminal turn.
+    #[tokio::test]
+    async fn concurrent_mark_terminal_and_retarget_serialize_pg() {
+        let Some(pg) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg.connect_and_migrate_with_max_connections(8).await;
+
+        insert_voice_turn_link_pg(&pool, &sample_insert(0))
+            .await
+            .unwrap()
+            .expect("seed insert");
+
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let terminal_handle = tokio::spawn(async move {
+            mark_terminal_voice_turn_link_pg(&pool_a, 100, 200, "utt-42", 0).await
+        });
+        let retarget_handle =
+            tokio::spawn(
+                async move { retarget_voice_turn_link_pg(&pool_b, &sample_insert(1)).await },
+            );
+        let _ = terminal_handle.await.unwrap().unwrap();
+        let _ = retarget_handle.await.unwrap().unwrap();
+
+        // Either order:
+        //  (A) terminal commits first → retarget sees has_terminal=true → no-op.
+        //      Final: 1 terminal row, 0 active.
+        //  (B) retarget commits first → terminal then flips gen 0 to terminal.
+        //      Final: 1 active row (gen 1), 1 terminal row (gen 0).
+        // Both orders are valid. The invariant we enforce: at most one
+        // active row for the utterance.
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM voice_turn_link
+              WHERE guild_id = 100
+                AND voice_channel_id = 200
+                AND utterance_id = 'utt-42'
+                AND status = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            active_count <= 1,
+            "at most one active row allowed; got {active_count}"
+        );
 
         pool.close().await;
         pg.drop().await;
