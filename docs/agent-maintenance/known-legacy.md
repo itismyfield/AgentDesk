@@ -4,7 +4,7 @@
 > owner issue. Touch these paths only inside the scope of the listed issue or
 > for a single narrow bugfix; do not extend them with new logic.
 >
-> Last refreshed: 2026-04-30 (against `main` @ `58c26894784f12235ae33ee3b0963a248e0b23f5`).
+> Last refreshed: 2026-05-17 (against `main` @ `cfef5b4fae6f129fa6ee7f4b6eb48588712c28c0`).
 > Baseline note: legacy SQLite adapter crates are absent from the default
 > `cargo tree`.
 

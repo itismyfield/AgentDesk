@@ -2,7 +2,7 @@
 
 > Status: PR #95 implementation spec and status record
 >
-> Last refreshed: 2026-04-29 (against `main` @ `1d165cd3844e94015ab30cda8e4b1bba717f934d`).
+> Last refreshed: 2026-05-17 (against `main` @ `cfef5b4fae6f129fa6ee7f4b6eb48588712c28c0`).
 >
 > Scope: raise the Discord-facing OpenCode experience to the practical level
 > already expected from Claude/Codex, without pretending the provider backends
