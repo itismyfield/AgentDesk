@@ -179,6 +179,10 @@ const kanbanCardGitHubCommentsQueryKey = (cardId: string) =>
   [...kanbanCardActivityQueryKey(cardId), "github-comments"] as const;
 const kanbanCardReviewsQueryKey = (cardId: string) =>
   [...kanbanCardActivityQueryKey(cardId), "reviews"] as const;
+const kanbanRepoSourcesQueryKey = ["kanban", "repo-sources"] as const;
+const kanbanAvailableReposQueryKey = ["kanban", "available-repos"] as const;
+const kanbanRepoIssuesQueryKey = (repo: string) =>
+  ["kanban", "repo-issues", repo] as const;
 
 function latestActionableReview(reviews: KanbanReview[]): KanbanReview | null {
   return reviews
@@ -229,13 +233,10 @@ export default function KanbanTab({
 }: KanbanTabProps) {
   const queryClient = useQueryClient();
   const LIVE_TURN_POLL_MS = 4_000;
-  const [repoSources, setRepoSources] = useState<KanbanRepoSource[]>([]);
   const [repoInput, setRepoInput] = useState("");
   const [selectedRepo, setSelectedRepo] = useState("");
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [agentPipelineStages, setAgentPipelineStages] = useState<import("../../types").PipelineStage[]>([]);
-  const [availableRepos, setAvailableRepos] = useState<GitHubRepoOption[]>([]);
-  const [issues, setIssues] = useState<GitHubIssue[]>([]);
   const [agentFilter, setAgentFilter] = useState("all");
   const [deptFilter, setDeptFilter] = useState("all");
   const [cardTypeFilter, setCardTypeFilter] = useState<"all" | "issue" | "review">("all");
@@ -246,8 +247,6 @@ export default function KanbanTab({
   const [editor, setEditor] = useState<EditorState>(EMPTY_EDITOR);
   const [assignIssue, setAssignIssue] = useState<GitHubIssue | null>(null);
   const [assignAssigneeId, setAssignAssigneeId] = useState("");
-  const [loadingIssues, setLoadingIssues] = useState(false);
-  const [initialLoading, setInitialLoading] = useState(true);
   const [savingCard, setSavingCard] = useState(false);
   const [retryingCard, setRetryingCard] = useState(false);
   const [redispatching, setRedispatching] = useState(false);
@@ -300,6 +299,29 @@ export default function KanbanTab({
   const deliveryEvents = deliveryEventsState.events;
   const deliveryEventsLoading = deliveryEventsState.loading;
   const deliveryEventsError = deliveryEventsState.error;
+  const repoSourcesQuery = useQuery({
+    queryKey: kanbanRepoSourcesQueryKey,
+    queryFn: () => api.getKanbanRepoSources(),
+    staleTime: 60_000,
+  });
+  const availableReposQuery = useQuery({
+    queryKey: kanbanAvailableReposQueryKey,
+    queryFn: () => api.getGitHubRepos().then((result) => result.repos),
+    staleTime: 5 * 60_000,
+  });
+  const repoIssuesQuery = useQuery({
+    queryKey: selectedRepo
+      ? kanbanRepoIssuesQueryKey(selectedRepo)
+      : ["kanban", "repo-issues", "none"],
+    queryFn: () => api.getGitHubIssues(selectedRepo, "open", 100),
+    enabled: Boolean(selectedRepo),
+    staleTime: 30_000,
+  });
+  const repoSources = repoSourcesQuery.data ?? [];
+  const availableRepos = availableReposQuery.data ?? [];
+  const issues = repoIssuesQuery.data?.issues ?? [];
+  const loadingIssues = repoIssuesQuery.isFetching;
+  const initialLoading = repoSourcesQuery.isLoading || availableReposQuery.isLoading;
 
   const agentMap = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const cardsById = useMemo(() => new Map(cards.map((card) => [card.id, card])), [cards]);
@@ -471,19 +493,6 @@ export default function KanbanTab({
   }, [advancedFiltersOpen]);
 
   useEffect(() => {
-    Promise.all([
-      api.getKanbanRepoSources().catch(() => [] as KanbanRepoSource[]),
-      api.getGitHubRepos().then((result) => result.repos).catch(() => [] as GitHubRepoOption[]),
-    ]).then(([sources, repos]) => {
-      setRepoSources(sources);
-      setAvailableRepos(repos);
-      if (!selectedRepo && sources[0]?.repo) {
-        setSelectedRepo(sources[0].repo);
-      }
-    }).finally(() => setInitialLoading(false));
-  }, []);
-
-  useEffect(() => {
     if (!selectedRepo && repoSources[0]?.repo) {
       setSelectedRepo(repoSources[0].repo);
       return;
@@ -494,33 +503,16 @@ export default function KanbanTab({
   }, [repoSources, selectedRepo]);
 
   useEffect(() => {
-    if (!selectedRepo) {
-      setIssues([]);
-      setLoadingIssues(false);
+    if (repoIssuesQuery.error) {
+      setActionError(repoIssuesQuery.error instanceof Error
+        ? repoIssuesQuery.error.message
+        : "Failed to load GitHub issues.");
       return;
     }
-
-    let stale = false;
-    setIssues([]);
-    setLoadingIssues(true);
-    setActionError(null);
-    api.getGitHubIssues(selectedRepo, "open", 100)
-      .then((result) => {
-        if (stale) return;
-        setIssues(result.issues);
-        if (result.error) {
-          setActionError(result.error);
-        }
-      })
-      .catch((error) => {
-        if (stale) return;
-        setIssues([]);
-        setActionError(error instanceof Error ? error.message : "Failed to load GitHub issues.");
-      })
-      .finally(() => { if (!stale) setLoadingIssues(false); });
-    return () => { stale = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRepo]);
+    if (repoIssuesQuery.data?.error) {
+      setActionError(repoIssuesQuery.data.error);
+    }
+  }, [repoIssuesQuery.data?.error, repoIssuesQuery.error]);
 
   useEffect(() => {
     if (!showClosed && mobileColumnStatus === "done") {
@@ -1104,7 +1096,9 @@ export default function KanbanTab({
     setActionError(null);
     try {
       const created = await api.addKanbanRepoSource(repo);
-      setRepoSources((prev) => prev.some((source) => source.id === created.id) ? prev : [...prev, created]);
+      queryClient.setQueryData<KanbanRepoSource[]>(kanbanRepoSourcesQueryKey, (prev = []) =>
+        prev.some((source) => source.id === created.id) ? prev : [...prev, created],
+      );
       setSelectedRepo(created.repo);
       setRepoInput("");
     } catch (error) {
@@ -1124,7 +1118,9 @@ export default function KanbanTab({
     setActionError(null);
     try {
       await api.deleteKanbanRepoSource(source.id);
-      setRepoSources((prev) => prev.filter((item) => item.id !== source.id));
+      queryClient.setQueryData<KanbanRepoSource[]>(kanbanRepoSourcesQueryKey, (prev = []) =>
+        prev.filter((item) => item.id !== source.id),
+      );
     } catch (error) {
       setActionError(error instanceof Error ? error.message : tr("repo 제거에 실패했습니다.", "Failed to remove repo."));
     } finally {
@@ -1263,7 +1259,13 @@ export default function KanbanTab({
     setActionError(null);
     try {
       await api.closeGitHubIssue(selectedRepo, issue.number);
-      setIssues((prev) => prev.filter((i) => i.number !== issue.number));
+      queryClient.setQueryData<Awaited<ReturnType<typeof api.getGitHubIssues>>>(
+        kanbanRepoIssuesQueryKey(selectedRepo),
+        (prev) => prev ? {
+          ...prev,
+          issues: prev.issues.filter((item) => item.number !== issue.number),
+        } : prev,
+      );
     } catch (error) {
       setActionError(error instanceof Error ? error.message : tr("이슈 닫기에 실패했습니다.", "Failed to close issue."));
     } finally {
@@ -1833,11 +1835,13 @@ export default function KanbanTab({
                   onChange={(event) => {
                     const value = event.target.value || null;
                     void api.updateKanbanRepoSource(selectedRepoSource.id, { default_agent_id: value });
-                    setRepoSources((prev) => prev.map((source) => (
-                      source.id === selectedRepoSource.id
-                        ? { ...source, default_agent_id: value }
-                        : source
-                    )));
+                    queryClient.setQueryData<KanbanRepoSource[]>(kanbanRepoSourcesQueryKey, (prev = []) =>
+                      prev.map((source) => (
+                        source.id === selectedRepoSource.id
+                          ? { ...source, default_agent_id: value }
+                          : source
+                      )),
+                    );
                   }}
                   className="min-w-0 flex-1 rounded-lg border px-2 py-1 text-xs"
                   style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
