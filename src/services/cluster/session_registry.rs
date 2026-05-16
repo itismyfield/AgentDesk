@@ -7,10 +7,12 @@
 //!
 //! ## Design constraints
 //!
-//! - **Single source of truth**: there is exactly one process-wide registry
-//!   instance, exposed via [`global_session_registry`]. Multiple readers
-//!   (HTTP diagnostic endpoint, future supervisor) and exactly one writer
-//!   (`SessionDiscovery`, leader-only).
+//! - **Single source of truth (per process)**: each dcserver process owns
+//!   exactly one registry, exposed via [`global_session_registry`]. Discovery
+//!   runs on every node (worker-local — tmux is host-scoped) and writes only
+//!   to its own `instance_id` slice via [`SessionRegistry::reconcile_for_node`].
+//!   Multiple readers (HTTP diagnostic endpoint, future supervisor) share the
+//!   same in-memory state.
 //! - **Lock-free reads**: the registry stores its state behind a `RwLock`
 //!   so the supervisor / API readers do not block discovery.
 //! - **Change notifications**: every registry mutation publishes a
@@ -38,13 +40,22 @@ use super::session_matcher::MatchedChannel;
 const CHANGE_CHANNEL_CAPACITY: usize = 256;
 
 /// A single registry entry. Wraps the pure [`MatchedChannel`] with bookkeeping
-/// metadata (when it first appeared, when it was last reconfirmed) so the
-/// supervisor / API can reason about freshness without re-probing tmux.
+/// metadata (when it first appeared, when it was last reconfirmed, which
+/// cluster node owns the tmux server) so the supervisor / API can reason about
+/// freshness and ownership without re-probing tmux.
+///
+/// `instance_id` is the cluster instance whose dcserver process observed this
+/// session via its local `tmux list-sessions`. Discovery runs on every node
+/// (worker-local) so the supervisor can match watcher placement to host —
+/// tmux is host-scoped and a leader on machine A cannot drive a session on
+/// machine B. The field is `Option<String>` only to keep legacy / test
+/// fixtures simple; production callers always set it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegisteredSession {
     pub matched: MatchedChannel,
-    /// First time this `(session_name)` entered the registry. Stable across
-    /// re-matches as long as the session keeps being matched.
+    pub instance_id: Option<String>,
+    /// First time this `(session_name, instance_id)` entered the registry.
+    /// Stable across re-matches as long as the session keeps being matched.
     pub first_seen_at: DateTime<Utc>,
     /// Most recent time discovery confirmed this binding was still live.
     pub last_seen_at: DateTime<Utc>,
@@ -65,6 +76,7 @@ impl RegisteredSession {
                 "expected_session_name": self.matched.expected_session_name,
                 "expected_rollout_path": self.matched.expected_rollout_path,
             },
+            "instance_id": self.instance_id,
             "first_seen_at": self.first_seen_at,
             "last_seen_at": self.last_seen_at,
         })
@@ -123,19 +135,32 @@ impl SessionRegistry {
         self.changes.subscribe()
     }
 
-    /// Insert or update a matched session. Returns the change that was
-    /// published (or `None` if the entry was identical and no event was sent —
-    /// idempotent reconciles do not spam the broadcast channel).
-    pub fn upsert(&self, matched: MatchedChannel) -> Option<RegistryChange> {
-        self.upsert_at(matched, Utc::now())
+    /// Insert or update a matched session for the given node. Returns the
+    /// change that was published (or `None` if the entry was identical and no
+    /// event was sent — idempotent reconciles do not spam the broadcast
+    /// channel).
+    pub fn upsert(
+        &self,
+        matched: MatchedChannel,
+        instance_id: Option<&str>,
+    ) -> Option<RegistryChange> {
+        self.upsert_at(matched, instance_id, Utc::now())
     }
 
     /// Test-friendly variant that lets the caller pin the timestamp.
-    pub fn upsert_at(&self, matched: MatchedChannel, now: DateTime<Utc>) -> Option<RegistryChange> {
+    pub fn upsert_at(
+        &self,
+        matched: MatchedChannel,
+        instance_id: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Option<RegistryChange> {
         let session_name = matched.expected_session_name.clone();
+        let owned_instance = instance_id.map(|s| s.to_string());
         let mut guard = self.inner.write().expect("session registry write lock");
         let change = match guard.get(&session_name) {
-            Some(existing) if existing.matched == matched => {
+            Some(existing)
+                if existing.matched == matched && existing.instance_id == owned_instance =>
+            {
                 // Idempotent re-confirmation — only refresh `last_seen_at` so
                 // staleness pruning has up-to-date data; no broadcast.
                 let mut refreshed = existing.clone();
@@ -146,6 +171,7 @@ impl SessionRegistry {
             Some(existing) => {
                 let updated = RegisteredSession {
                     matched: matched.clone(),
+                    instance_id: owned_instance,
                     first_seen_at: existing.first_seen_at,
                     last_seen_at: now,
                 };
@@ -155,6 +181,7 @@ impl SessionRegistry {
             None => {
                 let added = RegisteredSession {
                     matched: matched.clone(),
+                    instance_id: owned_instance,
                     first_seen_at: now,
                     last_seen_at: now,
                 };
@@ -216,47 +243,70 @@ impl SessionRegistry {
             .is_empty()
     }
 
-    /// Replace the registry contents with the exact set of `current_matches`
-    /// — anything not in the set is removed, anything new is added. Used by
-    /// `SessionDiscovery` at the end of each poll cycle so the registry stays
-    /// in sync with the live tmux world without callers having to compute the
-    /// diff manually.
+    /// Replace the *node-scoped* slice of the registry with `current_matches`.
+    /// Entries owned by `instance_id` that aren't in the set are removed;
+    /// entries owned by other nodes are left untouched. This is crucial for
+    /// multi-node clusters where every node runs its own discovery (tmux is
+    /// host-local) and must not stomp on its peers' entries.
+    ///
+    /// `preserve_present` is the set of session names whose enumeration
+    /// surfaced a *retryable* rejection (e.g. an empty pane_current_command
+    /// that the matcher will re-evaluate next tick). These sessions are still
+    /// physically present in tmux, so we must not remove them from the
+    /// registry — that would falsely tell the supervisor to tear down a live
+    /// watcher.
     ///
     /// Returns the ordered list of changes that were broadcast (handy for
     /// tests and for tracing).
-    pub fn reconcile(&self, current_matches: Vec<MatchedChannel>) -> Vec<RegistryChange> {
-        self.reconcile_at(current_matches, Utc::now())
+    pub fn reconcile_for_node(
+        &self,
+        instance_id: Option<&str>,
+        current_matches: Vec<MatchedChannel>,
+        preserve_present: &[String],
+    ) -> Vec<RegistryChange> {
+        self.reconcile_for_node_at(instance_id, current_matches, preserve_present, Utc::now())
     }
 
-    pub fn reconcile_at(
+    pub fn reconcile_for_node_at(
         &self,
+        instance_id: Option<&str>,
         current_matches: Vec<MatchedChannel>,
+        preserve_present: &[String],
         now: DateTime<Utc>,
     ) -> Vec<RegistryChange> {
+        let owned_instance = instance_id.map(|s| s.to_string());
         // Collect names we expect to be present after reconcile.
         let mut keep: BTreeMap<String, MatchedChannel> = BTreeMap::new();
         for matched in current_matches {
             keep.insert(matched.expected_session_name.clone(), matched);
         }
+        let preserve: std::collections::BTreeSet<&String> = preserve_present.iter().collect();
 
-        let existing_names: Vec<String> = self
+        let stale_for_this_node: Vec<String> = self
             .inner
             .read()
             .expect("session registry read lock")
-            .keys()
-            .cloned()
+            .iter()
+            .filter_map(|(name, entry)| {
+                if entry.instance_id == owned_instance
+                    && !keep.contains_key(name)
+                    && !preserve.contains(name)
+                {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let mut emitted = Vec::new();
-        for name in existing_names {
-            if !keep.contains_key(&name) {
-                if let Some(change) = self.remove(&name) {
-                    emitted.push(change);
-                }
+        for name in stale_for_this_node {
+            if let Some(change) = self.remove(&name) {
+                emitted.push(change);
             }
         }
         for (_name, matched) in keep {
-            if let Some(change) = self.upsert_at(matched, now) {
+            if let Some(change) = self.upsert_at(matched, instance_id, now) {
                 emitted.push(change);
             }
         }
@@ -302,18 +352,23 @@ mod tests {
         }
     }
 
+    const NODE_A: &str = "mac-mini";
+    const NODE_B: &str = "mac-book";
+
     #[test]
     fn upsert_emits_added_then_idempotent() {
         let registry = SessionRegistry::new();
         let mut rx = registry.subscribe();
         let m = matched("c1", "agent-a", ProviderKind::Claude);
 
-        let change = registry.upsert(m.clone()).expect("first upsert publishes");
+        let change = registry
+            .upsert(m.clone(), Some(NODE_A))
+            .expect("first upsert publishes");
         assert!(matches!(change, RegistryChange::Added(_)));
         assert_eq!(rx.try_recv().ok(), Some(change.clone()));
 
         // Idempotent re-upsert with same value: no broadcast.
-        assert!(registry.upsert(m.clone()).is_none());
+        assert!(registry.upsert(m.clone(), Some(NODE_A)).is_none());
         assert!(rx.try_recv().is_err());
         assert_eq!(registry.len(), 1);
     }
@@ -339,9 +394,11 @@ mod tests {
             agent_id: "agent-b".to_string(),
             ..m1.clone()
         };
-        let _ = registry.upsert(m1);
+        let _ = registry.upsert(m1, Some(NODE_A));
         rx.try_recv().expect("first add");
-        let change = registry.upsert(m2.clone()).expect("update publishes");
+        let change = registry
+            .upsert(m2.clone(), Some(NODE_A))
+            .expect("update publishes");
         match change {
             RegistryChange::Updated(entry) => assert_eq!(entry.matched.agent_id, "agent-b"),
             other => panic!("expected Updated, got {other:?}"),
@@ -349,11 +406,33 @@ mod tests {
     }
 
     #[test]
+    fn upsert_emits_updated_when_instance_id_changes() {
+        // Session migrated between hosts (rare but possible if an operator
+        // restored tmux state). The registry must broadcast an Updated so the
+        // E3 supervisor can re-evaluate host placement.
+        let registry = SessionRegistry::new();
+        let m = matched("c1", "td", ProviderKind::Codex);
+        let _ = registry.upsert(m.clone(), Some(NODE_A));
+        let change = registry
+            .upsert(m.clone(), Some(NODE_B))
+            .expect("instance change publishes");
+        assert!(matches!(change, RegistryChange::Updated(_)));
+        assert_eq!(
+            registry
+                .lookup(&m.expected_session_name)
+                .unwrap()
+                .instance_id
+                .as_deref(),
+            Some(NODE_B)
+        );
+    }
+
+    #[test]
     fn remove_emits_removed_only_when_present() {
         let registry = SessionRegistry::new();
         let mut rx = registry.subscribe();
         let m = matched("c1", "td", ProviderKind::Codex);
-        let _ = registry.upsert(m.clone());
+        let _ = registry.upsert(m.clone(), Some(NODE_A));
         rx.try_recv().expect("added");
 
         let removed = registry.remove(&m.expected_session_name);
@@ -370,8 +449,8 @@ mod tests {
         let registry = SessionRegistry::new();
         let a = matched("ca", "agent-a", ProviderKind::Claude);
         let b = matched("cb", "agent-b", ProviderKind::Codex);
-        registry.upsert(a.clone());
-        registry.upsert(b.clone());
+        registry.upsert(a.clone(), Some(NODE_A));
+        registry.upsert(b.clone(), Some(NODE_A));
 
         let listed = registry.list_matched();
         assert_eq!(listed.len(), 2);
@@ -390,20 +469,20 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_removes_missing_and_adds_new() {
+    fn reconcile_for_node_removes_missing_and_adds_new() {
         let registry = SessionRegistry::new();
         let mut rx = registry.subscribe();
         let a = matched("ca", "agent-a", ProviderKind::Claude);
         let b = matched("cb", "agent-b", ProviderKind::Codex);
-        registry.upsert(a.clone());
-        registry.upsert(b.clone());
+        registry.upsert(a.clone(), Some(NODE_A));
+        registry.upsert(b.clone(), Some(NODE_A));
         // Drain the two Added events.
         let _ = rx.try_recv();
         let _ = rx.try_recv();
 
         // New world: b is gone, c is new, a unchanged.
         let c = matched("cc", "agent-c", ProviderKind::Claude);
-        let changes = registry.reconcile(vec![a.clone(), c.clone()]);
+        let changes = registry.reconcile_for_node(Some(NODE_A), vec![a.clone(), c.clone()], &[]);
         assert_eq!(changes.len(), 2);
         // Removal happens before addition in the reconcile order; this keeps
         // supervisor logic predictable (free a port before spawning the
@@ -422,18 +501,63 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_for_node_does_not_touch_other_nodes_entries() {
+        // mac-mini's discovery sweep must leave mac-book's entries alone.
+        let registry = SessionRegistry::new();
+        let local = matched("c-local", "agent-local", ProviderKind::Claude);
+        let foreign = matched("c-foreign", "agent-foreign", ProviderKind::Claude);
+        registry.upsert(local.clone(), Some(NODE_A));
+        registry.upsert(foreign.clone(), Some(NODE_B));
+
+        // NODE_A sweeps and reports an EMPTY local enumeration.
+        let changes = registry.reconcile_for_node(Some(NODE_A), vec![], &[]);
+        // Only NODE_A's `local` should be removed.
+        assert_eq!(changes.len(), 1);
+        match &changes[0] {
+            RegistryChange::Removed { session_name } => {
+                assert_eq!(session_name, &local.expected_session_name);
+            }
+            other => panic!("unexpected change: {other:?}"),
+        }
+        // NODE_B's foreign entry survives.
+        assert!(registry.lookup(&foreign.expected_session_name).is_some());
+    }
+
+    #[test]
+    fn reconcile_for_node_preserves_retryable_misses() {
+        // Session is enumerated by tmux but the pane probe came back blank;
+        // matcher returned PaneProviderUnknown. The discovery layer passes the
+        // session name through `preserve_present` so the registry does not
+        // tear down a watcher for a still-alive session.
+        let registry = SessionRegistry::new();
+        let m = matched("c1", "td", ProviderKind::Codex);
+        registry.upsert(m.clone(), Some(NODE_A));
+
+        let changes = registry.reconcile_for_node(
+            Some(NODE_A),
+            vec![],
+            std::slice::from_ref(&m.expected_session_name),
+        );
+        assert!(
+            changes.is_empty(),
+            "retryable miss must not emit Removed: {changes:?}"
+        );
+        assert!(registry.lookup(&m.expected_session_name).is_some());
+    }
+
+    #[test]
     fn last_seen_refreshes_on_idempotent_upsert() {
         let registry = SessionRegistry::new();
         let m = matched("c1", "td", ProviderKind::Codex);
         let t0 = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
         let t1 = DateTime::<Utc>::from_timestamp(1_700_000_060, 0).unwrap();
 
-        registry.upsert_at(m.clone(), t0);
+        registry.upsert_at(m.clone(), Some(NODE_A), t0);
         let snap0 = registry.lookup(&m.expected_session_name).unwrap();
         assert_eq!(snap0.first_seen_at, t0);
         assert_eq!(snap0.last_seen_at, t0);
 
-        registry.upsert_at(m.clone(), t1);
+        registry.upsert_at(m.clone(), Some(NODE_A), t1);
         let snap1 = registry.lookup(&m.expected_session_name).unwrap();
         assert_eq!(snap1.first_seen_at, t0, "first_seen is stable");
         assert_eq!(snap1.last_seen_at, t1, "last_seen refreshes");

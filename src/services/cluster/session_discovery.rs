@@ -1,29 +1,38 @@
-//! `SessionDiscovery` — leader-only worker that periodically enumerates live
+//! `SessionDiscovery` — worker-local loop that periodically enumerates live
 //! tmux sessions, runs them through [`super::session_matcher::match_session`],
-//! and reconciles the result into the process-wide [`SessionRegistry`].
+//! and reconciles its node's slice of the process-wide [`SessionRegistry`].
 //!
 //! Epic #2285 / E2 (issue #2344). Sits between the pure matcher (E1) and the
 //! future `WatcherSupervisor` (E3) which will react to registry change
 //! broadcasts. This module deliberately does **not** spawn or stop any
 //! watchers — its only job is to keep the registry honest.
 //!
-//! ## Why a single leader
+//! ## Why worker-local (not leader-only)
 //!
-//! tmux is host-scoped, so every node in the cluster sees only the sessions
-//! on its own machine. But the registry / watcher mapping is *cluster-wide*:
-//! two nodes simultaneously discovering the same session would race to spawn
-//! duplicate watchers. We avoid that by running discovery on the cluster
-//! leader only — exactly how the existing `worker_registry` leader-only
-//! workers (`policy-tick`, `routine-runtime`, …) handle the same problem.
-//! Per-node tmux observability is recovered via `tmux_reaper` (which already
-//! runs cluster-wide) and via the future E3 supervisor pinging each node.
+//! tmux is host-scoped: every node in the cluster sees only the sessions on
+//! its own machine. A leader-only discovery loop on machine A literally
+//! cannot enumerate sessions on machine B, so leader takeover would silently
+//! lose observability of the previous leader's host. Discovery therefore runs
+//! on **every** node, and `reconcile_for_node` scopes mutations to the
+//! current `instance_id` — peer nodes' entries are never touched. The
+//! registry's keying (session name → entry) plus the `instance_id` field
+//! guarantees uniqueness even when two nodes briefly disagree.
 //!
 //! ## Boot reconcile
 //!
-//! The first poll cycle runs **immediately** after leader acquisition (the
-//! supervisor's outer loop is the one that waits for `is_leader()`). This
+//! The first poll cycle runs **immediately** when the worker starts. This
 //! re-attaches the registry to any session that survived a dcserver restart
 //! within a single poll cycle — Acceptance criterion B in the epic.
+//!
+//! ## Failure modes
+//!
+//! - Postgres binding-load failure: the tick is *aborted* (registry left
+//!   untouched). Returning an empty directory and reconciling against it
+//!   would mass-remove every entry and tell E3 to tear down every watcher.
+//! - tmux enumeration failure: same — abort the tick.
+//! - Pane probe returns blank (retryable `PaneProviderUnknown`): the session
+//!   name is added to `preserve_present` so the registry keeps the entry
+//!   even though the matcher couldn't confirm it this tick.
 //!
 //! ## Polling cadence
 //!
@@ -85,17 +94,17 @@ pub fn request_discovery_tick() {
     discovery_notifier().notify_one();
 }
 
-/// Build a [`ChannelDirectory`] from the live agents table. Discards bindings
-/// that don't yield a usable `(provider, channel_id)` pair. Logs at WARN if
-/// the directory builder rejects a binding collision so operators can fix it.
-pub async fn build_channel_directory_from_pg(pool: &PgPool) -> ChannelDirectory {
-    let all = match crate::db::agents::load_all_agent_channel_bindings_pg(pool).await {
-        Ok(map) => map,
-        Err(error) => {
-            tracing::warn!(?error, "session-discovery: failed to load agent bindings");
-            return ChannelDirectory::new();
-        }
-    };
+/// Build a [`ChannelDirectory`] from the live agents table. Returns an error
+/// when the underlying PG query fails — callers MUST treat that as "skip this
+/// tick" rather than "reconcile against an empty directory", or a transient
+/// DB hiccup would tear down every entry in the registry.
+///
+/// Logs at WARN if the directory builder rejects a per-binding collision so
+/// operators can fix the config without aborting the whole tick.
+pub async fn build_channel_directory_from_pg(
+    pool: &PgPool,
+) -> Result<ChannelDirectory, sqlx::Error> {
+    let all = crate::db::agents::load_all_agent_channel_bindings_pg(pool).await?;
 
     let mut directory = ChannelDirectory::new();
     for (agent_id, bindings) in all {
@@ -118,7 +127,7 @@ pub async fn build_channel_directory_from_pg(pool: &PgPool) -> ChannelDirectory 
             }
         }
     }
-    directory
+    Ok(directory)
 }
 
 /// Extract the `(provider, channel_id)` pairs an agent declares. Today this
@@ -160,13 +169,24 @@ pub struct TickReport {
 
 /// Pure-ish tick body — accepts the live tmux enumeration as input so unit
 /// tests don't need a real tmux. Returns the change set the registry emitted.
+///
+/// `instance_id` is the cluster identity of the current dcserver process. Each
+/// node only reconciles its own slice of the registry (tmux is host-local);
+/// entries owned by other nodes are not touched.
+///
+/// Sessions whose matcher outcome is a *retryable* rejection (e.g. blank pane
+/// command — see [`MatchRejection::PaneProviderUnknown`]) are passed to
+/// `reconcile_for_node` as `preserve_present` so the registry does not remove
+/// a still-alive session just because the pane probe was momentarily empty.
 pub fn reconcile_from_enumeration(
+    instance_id: Option<&str>,
     enumeration: Vec<EnumeratedSession>,
     directory: &ChannelDirectory,
     registry: &SessionRegistry,
 ) -> TickReport {
     let enumerated = enumeration.len();
     let mut matches: Vec<MatchedChannel> = Vec::new();
+    let mut preserve_present: Vec<String> = Vec::new();
     for session in enumeration {
         let outcome = match_session_detailed(
             &session.session_name,
@@ -176,17 +196,24 @@ pub fn reconcile_from_enumeration(
         match outcome {
             MatchOutcome::Matched(matched) => matches.push(matched),
             MatchOutcome::Rejected(reason) => {
+                if is_retryable_rejection(&reason) {
+                    // Session is physically present in tmux — protect the
+                    // registry entry from removal until we have a definitive
+                    // answer.
+                    preserve_present.push(session.session_name.clone());
+                }
                 trace_rejection(&session, &reason);
             }
         }
     }
     let matched = matches.len();
-    let changes = registry.reconcile(matches);
+    let changes = registry.reconcile_for_node(instance_id, matches, &preserve_present);
     if !changes.is_empty() {
         tracing::info!(
             change_count = changes.len(),
             enumerated,
             matched,
+            preserve_present = preserve_present.len(),
             "session-discovery tick produced registry changes"
         );
     }
@@ -195,6 +222,18 @@ pub fn reconcile_from_enumeration(
         matched,
         changes,
     }
+}
+
+/// Returns true when a `MatchRejection` reflects a *transient* probing issue
+/// rather than a definitive "this session does not belong in the registry".
+///
+/// Only [`MatchRejection::PaneProviderUnknown`] (blank/unreadable pane command)
+/// qualifies today. `PaneProviderMismatch` is intentionally NOT retryable: a
+/// pane that is now running a different binary is a definitive sign the
+/// previously-matched provider has died, and the supervisor should tear the
+/// watcher down (propagated as a normal `Removed` event).
+fn is_retryable_rejection(reason: &MatchRejection) -> bool {
+    matches!(reason, MatchRejection::PaneProviderUnknown { .. })
 }
 
 fn trace_rejection(session: &EnumeratedSession, reason: &MatchRejection) {
@@ -244,9 +283,14 @@ fn trace_rejection(session: &EnumeratedSession, reason: &MatchRejection) {
     }
 }
 
-/// The leader-only discovery loop. Used by the worker_registry supervisor;
-/// returns when `shutdown` flips true.
+/// The discovery loop — runs on every cluster node (worker-local), each
+/// scoped to its own `instance_id` slice of the shared in-memory registry.
+/// tmux is host-local, so cross-node leader takeover cannot relocate
+/// observability; therefore discovery cannot be leader-only.
+///
+/// Returns when `shutdown` flips true.
 pub async fn run_discovery_loop(
+    instance_id: Option<String>,
     pool: Arc<PgPool>,
     config: DiscoveryConfig,
     shutdown: Arc<AtomicBool>,
@@ -254,6 +298,7 @@ pub async fn run_discovery_loop(
     let registry = global_session_registry();
     let notifier = discovery_notifier();
     tracing::info!(
+        instance_id = instance_id.as_deref().unwrap_or("<none>"),
         poll_interval_ms = config.poll_interval.as_millis() as u64,
         "session-discovery loop entering"
     );
@@ -261,7 +306,7 @@ pub async fn run_discovery_loop(
     // Boot reconcile: run once immediately so survived sessions re-attach
     // within one poll cycle (epic acceptance criterion).
     if !shutdown.load(Ordering::Acquire) {
-        run_single_tick(pool.as_ref(), &registry).await;
+        run_single_tick(instance_id.as_deref(), pool.as_ref(), &registry).await;
     }
 
     loop {
@@ -281,13 +326,28 @@ pub async fn run_discovery_loop(
         if shutdown.load(Ordering::Acquire) {
             break;
         }
-        run_single_tick(pool.as_ref(), &registry).await;
+        run_single_tick(instance_id.as_deref(), pool.as_ref(), &registry).await;
     }
     tracing::info!("session-discovery loop exiting");
 }
 
-async fn run_single_tick(pool: &PgPool, registry: &SessionRegistry) -> TickReport {
-    let directory = build_channel_directory_from_pg(pool).await;
+async fn run_single_tick(
+    instance_id: Option<&str>,
+    pool: &PgPool,
+    registry: &SessionRegistry,
+) -> TickReport {
+    // PG load failure → ABORT THE TICK. Returning a default report leaves the
+    // registry untouched, so a transient PG hiccup never wipes live entries.
+    let directory = match build_channel_directory_from_pg(pool).await {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                "session-discovery: agent-binding load failed; skipping tick to preserve registry",
+            );
+            return TickReport::default();
+        }
+    };
     let enumeration_result = tokio::task::spawn_blocking(list_sessions_with_pane_command).await;
     let enumeration = match enumeration_result {
         Ok(Ok(sessions)) => sessions,
@@ -300,7 +360,7 @@ async fn run_single_tick(pool: &PgPool, registry: &SessionRegistry) -> TickRepor
             return TickReport::default();
         }
     };
-    reconcile_from_enumeration(enumeration, &directory, registry)
+    reconcile_from_enumeration(instance_id, enumeration, &directory, registry)
 }
 
 #[cfg(test)]
@@ -322,6 +382,9 @@ mod tests {
             pane_current_command: pane.to_string(),
         }
     }
+
+    const NODE_A: &str = "mac-mini";
+    const NODE_B: &str = "mac-book";
 
     #[test]
     fn reconcile_adds_matched_sessions_and_skips_garbage() {
@@ -345,7 +408,7 @@ mod tests {
             ),
         ];
 
-        let report = reconcile_from_enumeration(enumeration, &directory, &registry);
+        let report = reconcile_from_enumeration(Some(NODE_A), enumeration, &directory, &registry);
         assert_eq!(report.enumerated, 4);
         assert_eq!(report.matched, 2);
         assert_eq!(registry.len(), 2);
@@ -363,6 +426,7 @@ mod tests {
 
         // Initial sweep: both are alive.
         let _ = reconcile_from_enumeration(
+            Some(NODE_A),
             vec![enumerated(&s_a, "claude"), enumerated(&s_b, "claude")],
             &directory,
             &registry,
@@ -371,8 +435,12 @@ mod tests {
 
         // Subsequent sweep: only A still exists. B must be removed.
         let mut rx = registry.subscribe();
-        let report =
-            reconcile_from_enumeration(vec![enumerated(&s_a, "claude")], &directory, &registry);
+        let report = reconcile_from_enumeration(
+            Some(NODE_A),
+            vec![enumerated(&s_a, "claude")],
+            &directory,
+            &registry,
+        );
         assert_eq!(report.matched, 1);
         assert_eq!(registry.len(), 1);
         // At least one Removed change was emitted.
@@ -388,31 +456,105 @@ mod tests {
     #[test]
     fn reconcile_ignores_pane_with_wrong_provider() {
         // Binding says Claude, pane is running bash. Matcher rejects with
-        // PaneProviderMismatch; registry stays empty.
+        // PaneProviderMismatch (definitive — not retryable); registry stays
+        // empty.
         let directory =
             ChannelDirectory::from_bindings(vec![binding("c-x", "agent", ProviderKind::Claude)]);
         let registry = SessionRegistry::new();
         let s_x = expected_session_name_for(None, &ProviderKind::Claude, "c-x");
 
-        let report =
-            reconcile_from_enumeration(vec![enumerated(&s_x, "bash")], &directory, &registry);
+        let report = reconcile_from_enumeration(
+            Some(NODE_A),
+            vec![enumerated(&s_x, "bash")],
+            &directory,
+            &registry,
+        );
         assert_eq!(report.matched, 0);
         assert!(registry.is_empty());
     }
 
     #[test]
     fn reconcile_accepts_agentdesk_managed_wrapper_pane() {
-        // AgentDesk-launched sessions report `agentdesk` as pane command;
-        // matcher trusts the session name for these.
         let directory =
             ChannelDirectory::from_bindings(vec![binding("c-y", "agent", ProviderKind::Codex)]);
         let registry = SessionRegistry::new();
         let s_y = expected_session_name_for(None, &ProviderKind::Codex, "c-y");
 
-        let report =
-            reconcile_from_enumeration(vec![enumerated(&s_y, "agentdesk")], &directory, &registry);
+        let report = reconcile_from_enumeration(
+            Some(NODE_A),
+            vec![enumerated(&s_y, "agentdesk")],
+            &directory,
+            &registry,
+        );
         assert_eq!(report.matched, 1);
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn empty_pane_command_is_retryable_does_not_remove_existing_entry() {
+        // Codex review finding #3: a session that is *still in tmux* but whose
+        // pane_current_command came back blank for one tick must NOT be
+        // removed from the registry — that would tell E3 to tear down a
+        // still-live watcher.
+        let directory =
+            ChannelDirectory::from_bindings(vec![binding("c-blank", "agent", ProviderKind::Codex)]);
+        let registry = SessionRegistry::new();
+        let s = expected_session_name_for(None, &ProviderKind::Codex, "c-blank");
+
+        // Tick 1: pane is healthy → entry added.
+        let r1 = reconcile_from_enumeration(
+            Some(NODE_A),
+            vec![enumerated(&s, "codex")],
+            &directory,
+            &registry,
+        );
+        assert_eq!(r1.matched, 1);
+        assert!(registry.lookup(&s).is_some());
+
+        // Tick 2: pane probe came back blank (PaneProviderUnknown). Entry
+        // must survive because the session is still present in tmux.
+        let r2 = reconcile_from_enumeration(
+            Some(NODE_A),
+            vec![enumerated(&s, "")],
+            &directory,
+            &registry,
+        );
+        assert_eq!(r2.matched, 0);
+        assert!(
+            r2.changes.is_empty(),
+            "retryable miss must not emit registry changes: {:?}",
+            r2.changes
+        );
+        assert!(
+            registry.lookup(&s).is_some(),
+            "retryable miss must preserve existing entry"
+        );
+    }
+
+    #[test]
+    fn reconcile_does_not_touch_other_nodes_entries() {
+        // Codex review finding #2: each node's sweep must scope removal to
+        // its own instance_id; peer entries are sacrosanct.
+        let directory =
+            ChannelDirectory::from_bindings(vec![binding("c-x", "agent", ProviderKind::Claude)]);
+        let registry = SessionRegistry::new();
+        let s_x = expected_session_name_for(None, &ProviderKind::Claude, "c-x");
+
+        // Pre-populate: NODE_B owns s_x.
+        let _ = reconcile_from_enumeration(
+            Some(NODE_B),
+            vec![enumerated(&s_x, "claude")],
+            &directory,
+            &registry,
+        );
+        assert!(registry.lookup(&s_x).is_some());
+
+        // NODE_A sweeps with empty local enumeration — must not touch
+        // NODE_B's entry.
+        let r = reconcile_from_enumeration(Some(NODE_A), vec![], &directory, &registry);
+        assert!(r.changes.is_empty());
+        let entry = registry.lookup(&s_x).expect("peer entry survives");
+        assert_eq!(entry.instance_id.as_deref(), Some(NODE_B));
     }
 
     #[test]

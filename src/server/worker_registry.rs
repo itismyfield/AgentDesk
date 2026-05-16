@@ -365,11 +365,13 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 10] = [
         start_order: 65,
         restart_policy: WorkerRestartPolicy::LoopOwned,
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
-        execution_scope: WorkerExecutionScope::LeaderOnly,
+        execution_scope: WorkerExecutionScope::WorkerLocal,
         health_owner: "SessionRegistry contents and /api/cluster/sessions diagnostic",
-        notes: "Leader-only because tmux is host-scoped but watcher mapping is cluster-wide. \
-                Boot reconcile runs immediately on leader acquisition; subsequent polls every 10s. \
-                External request_discovery_tick() nudges fire an immediate tick for E3 event hooks.",
+        notes: "Worker-local because tmux is host-scoped — every node must enumerate its own \
+                sessions for the cluster registry. Reconcile is instance_id-scoped so peers \
+                cannot stomp each other's entries. Boot reconcile runs immediately; subsequent \
+                polls every 10s. External request_discovery_tick() nudges fire an immediate tick \
+                for E3 event hooks.",
     },
     WorkerSpec {
         id: ServerWorkerId::WsBatchFlusher,
@@ -672,18 +674,20 @@ impl SupervisedWorkerRegistry {
                     self.log_skip(spec, "postgres pool unavailable");
                     return Ok(None);
                 };
+                let instance_id = Some(self.cluster_runtime.instance_id().to_string());
                 let shutdown = self.shutdown.clone();
-                self.register_leader_tokio(spec, move || {
-                    let pool = discovery_pg_pool.clone();
-                    let shutdown = shutdown.clone();
-                    async move {
-                        crate::services::cluster::session_discovery::run_discovery_loop(
-                            pool,
-                            crate::services::cluster::session_discovery::DiscoveryConfig::default(),
-                            shutdown,
-                        )
-                        .await;
-                    }
+                // Worker-local (not register_leader_tokio): tmux is host-scoped,
+                // so every node must enumerate its own sessions. The registry's
+                // reconcile_for_node is instance_id-scoped to keep peers from
+                // stomping each other's entries.
+                self.register_tokio(spec, async move {
+                    crate::services::cluster::session_discovery::run_discovery_loop(
+                        instance_id,
+                        discovery_pg_pool,
+                        crate::services::cluster::session_discovery::DiscoveryConfig::default(),
+                        shutdown,
+                    )
+                    .await;
                 });
                 Ok(None)
             }
@@ -1011,14 +1015,14 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.execution_scope == WorkerExecutionScope::LeaderOnly)
                 .count(),
-            7
+            6
         );
         assert_eq!(
             WORKER_SPECS
                 .iter()
                 .filter(|spec| spec.execution_scope == WorkerExecutionScope::WorkerLocal)
                 .count(),
-            2
+            3
         );
         assert!(WORKER_SPECS.iter().all(|spec| !spec.owner.is_empty()));
         assert!(
