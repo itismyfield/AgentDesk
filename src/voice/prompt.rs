@@ -11,8 +11,6 @@ pub(crate) struct VoiceTranscriptAnnouncement {
 }
 
 const VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX: &str = "ADK_VOICE_TRANSCRIPT v1";
-const LEGACY_TRANSCRIPT_OPEN: &str = "<user_transcript>";
-const LEGACY_TRANSCRIPT_CLOSE: &str = "</user_transcript>";
 const TRANSCRIPT_TAG_PREFIX: &str = "user_transcript_";
 
 pub(crate) fn voice_bridge_prompt(
@@ -250,17 +248,13 @@ pub(crate) fn parse_voice_transcript_announcement(
         }
     }
 
-    let transcript = if let Some(nonce) = transcript_nonce.as_deref() {
-        if !is_valid_transcript_nonce(nonce) {
-            return None;
-        }
-        let open = nonce_bound_transcript_open(nonce);
-        let close = nonce_bound_transcript_close(nonce);
-        extract_transcript_between(text, &open, &close)?
-    } else {
-        extract_transcript_between(text, LEGACY_TRANSCRIPT_OPEN, LEGACY_TRANSCRIPT_CLOSE)?
+    let nonce = transcript_nonce.as_deref()?;
+    if !is_valid_transcript_nonce(nonce) {
+        return None;
     }
-    .trim();
+    let open = nonce_bound_transcript_open(nonce);
+    let close = nonce_bound_transcript_close(nonce);
+    let transcript = extract_transcript_between(text, &open, &close)?.trim();
     if transcript.is_empty() {
         return None;
     }
@@ -467,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_voice_transcript_announcement_still_parses() {
+    fn legacy_voice_transcript_announcement_without_nonce_is_rejected() {
         let legacy = concat!(
             "🎙️ 음성 전사\n",
             "<user_transcript>\n",
@@ -476,21 +470,7 @@ mod tests {
             "||ADK_VOICE_TRANSCRIPT v1 user_id=42 utterance_id=utt-1 language=ko-KR verbose_progress=true started_at=2026-05-14T18:00:00+09:00 completed_at=2026-05-14T18:00:01+09:00 samples_written=48000||",
         );
 
-        let parsed = parse_voice_transcript_announcement(legacy).unwrap();
-        assert_eq!(parsed.transcript, "@everyone 배포해줘");
-        assert_eq!(parsed.user_id, "42");
-        assert_eq!(parsed.utterance_id, "utt-1");
-        assert_eq!(parsed.language, "ko-KR");
-        assert!(parsed.verbose_progress);
-        assert_eq!(
-            parsed.started_at.as_deref(),
-            Some("2026-05-14T18:00:00+09:00")
-        );
-        assert_eq!(
-            parsed.completed_at.as_deref(),
-            Some("2026-05-14T18:00:01+09:00")
-        );
-        assert_eq!(parsed.samples_written, Some(48_000));
+        assert!(parse_voice_transcript_announcement(legacy).is_none());
     }
 
     #[test]
@@ -523,20 +503,27 @@ mod tests {
     }
 
     #[test]
-    fn voice_transcript_announcement_requires_announce_bot_author() {
+    fn nonce_voice_transcript_announcement_requires_matching_nonce_close() {
         let announcement = concat!(
             "🎙️ 음성 전사\n",
-            "<user_transcript>\n",
+            "<user_transcript_nonce-2167>\n",
             "상태 알려줘\n",
             "</user_transcript>\n",
-            "||ADK_VOICE_TRANSCRIPT v1 user_id=42 utterance_id=utt-2 language=ko-KR verbose_progress=false started_at=2026-05-14T18:00:00+09:00 completed_at=2026-05-14T18:00:01+09:00 samples_written=12000||",
+            "||ADK_VOICE_TRANSCRIPT v1 user_id=42 utterance_id=utt-1 language=ko-KR verbose_progress=true transcript_nonce=nonce-2167 started_at=2026-05-14T18:00:00+09:00 completed_at=2026-05-14T18:00:01+09:00 samples_written=48000||",
         );
 
+        assert!(parse_voice_transcript_announcement(announcement).is_none());
+    }
+
+    #[test]
+    fn voice_transcript_announcement_requires_announce_bot_author() {
+        let announcement = nonce_announcement("nonce-2185", "상태 알려줘");
+
         assert!(
-            parse_authorized_voice_transcript_announcement(announcement, 99, Some(100)).is_none()
+            parse_authorized_voice_transcript_announcement(&announcement, 99, Some(100)).is_none()
         );
         assert!(
-            parse_authorized_voice_transcript_announcement(announcement, 100, Some(100)).is_some()
+            parse_authorized_voice_transcript_announcement(&announcement, 100, Some(100)).is_some()
         );
     }
 
