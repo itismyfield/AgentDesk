@@ -89,6 +89,11 @@ set* so we can add `mac-book` later without changing the workflow:
 | `arm64` | Architecture (mac-mini M-series). |
 | `agentdesk-mac-mini` | Host-specific. A future `mac-book` runner adds `agentdesk-mac-book` and keeps the first three. |
 
+> **Two label formats — don't confuse them.** `config.sh --labels` takes a
+> comma-delimited string (shown above). `runs-on: ${{ fromJSON(...) }}` in
+> the workflow needs a JSON array string in `vars.MACOS_RUNNER` (§4). The
+> labels themselves are identical; only the delimiter differs.
+
 ### 3.2 launchd service (user LaunchAgent)
 
 Create `~/Library/LaunchAgents/com.agentdesk.ghrunner.plist`:
@@ -139,34 +144,53 @@ should show `Idle`.
 ## 4. Opt-in from the workflow side
 
 This PR introduces a single source of truth for the macOS runner label, used
-by both `ci-pr.yml` (`check_fast` matrix) and `ci-nightly.yml` (`full_macos`):
+by both `ci-pr.yml` (`check_fast` matrix) and `ci-nightly.yml` (`full_macos`).
+The variable is consumed via `fromJSON` so multi-label matching works as
+documented by GitHub (label *intersection*, requiring an array of labels —
+not a comma-delimited string):
 
 ```yaml
-runs-on: ${{ matrix.os == 'macos-latest' && (vars.MACOS_RUNNER || 'macos-latest') || matrix.os }}
-# and (nightly, non-matrix)
-runs-on: ${{ vars.MACOS_RUNNER || 'macos-latest' }}
+# ci-pr.yml (matrix; fork-PR guard forces hosted runner regardless of variable)
+runs-on: ${{ fromJSON((matrix.os == 'macos-latest' && vars.MACOS_RUNNER != ''
+  && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository))
+  && vars.MACOS_RUNNER || format('"{0}"', matrix.os)) }}
+
+# ci-nightly.yml (schedule + workflow_dispatch only, no fork exposure)
+runs-on: ${{ fromJSON(vars.MACOS_RUNNER != '' && vars.MACOS_RUNNER || '"macos-latest"') }}
 ```
 
 **Default behaviour: unchanged.** `vars.MACOS_RUNNER` is unset → jobs run on
 GitHub-hosted `macos-latest`.
 
+**Fork-PR safety: enforced in the workflow.** Even with `MACOS_RUNNER` set,
+the `check_fast` macOS entry stays on `macos-latest` when the event is a
+`pull_request` whose head repo differs from the base repo. See
+[§6 Security notes](#6-security-notes) for the threat model.
+
 To opt in *after* the runner is live and `Idle`:
 
 1. GitHub → **Settings → Secrets and variables → Actions → Variables**.
-2. Add repo variable `MACOS_RUNNER` with value:
+2. Add repo variable `MACOS_RUNNER` with value (JSON array, exact format):
+   ```json
+   ["self-hosted","macOS","arm64","agentdesk-mac-mini"]
    ```
-   self-hosted,macOS,arm64,agentdesk-mac-mini
-   ```
-   GitHub Actions accepts a comma-delimited string for `runs-on` and matches
-   the full label intersection.
-3. Re-run a PR. The macOS lane should pick up the self-hosted runner. If it
-   doesn't, see [§7 Failure modes](#7-failure-modes).
+   The double quotes and brackets are required — `runs-on` selects a runner
+   that matches **all** labels in the array. A bare string like
+   `"macos-latest"` (quotes included) is also valid for GitHub-hosted images.
+3. Re-run a PR from a same-repo branch (or `workflow_dispatch`). The macOS
+   lane should pick up the self-hosted runner. If it doesn't, see
+   [§7 Failure modes](#7-failure-modes).
 
 To roll back: delete the variable. Next workflow run goes back to
 `macos-latest`. No code change needed.
 
 > **Why a variable and not a secret?** Labels are not sensitive and we want
 > them visible in logs for debugging.
+
+> **Validating the JSON format locally before saving:**
+> `printf '%s' '["self-hosted","macOS","arm64","agentdesk-mac-mini"]' | python3 -c "import json,sys; print(json.load(sys.stdin))"`
+> should print a Python list of four strings.
 
 ---
 
@@ -196,14 +220,19 @@ canonical compromise vector and is called out in
 
 **Policy for this repo:**
 
-1. **Forks stay on GH-hosted runners.** The opt-in mechanism is via repo
-   variable, but the workflow trigger surface for `check_fast` includes
-   `pull_request` from forks. Until a hardened mode lands (see follow-ups
-   below), the operator must **not** flip `MACOS_RUNNER` while forks can
-   trigger macOS lanes, OR must add a guarding `if:` (see follow-up §8.a).
-2. Acceptable triggers for self-hosted: `push` to branches owned by this
-   repo, `pull_request_target` (which uses base-branch workflow), `schedule`,
-   `workflow_dispatch`.
+1. **Forks stay on GH-hosted runners — enforced in the workflow.** The
+   `runs-on` expression in `check_fast` evaluates
+   `github.event.pull_request.head.repo.full_name == github.repository` and
+   falls back to `macos-latest` when the head repo differs. This means
+   setting `MACOS_RUNNER` is safe with respect to fork PRs: their macOS jobs
+   route to GitHub-hosted runners regardless of the variable. `ci-nightly.yml`
+   has no fork exposure (triggers are `schedule` + `workflow_dispatch` only).
+2. Acceptable triggers for the self-hosted runner: `push` to branches owned
+   by this repo, same-repo `pull_request`, `schedule`, `workflow_dispatch`.
+   Do **not** add `pull_request_target` without re-reviewing this section —
+   that trigger runs the *base branch* workflow with elevated permissions,
+   which is fine for the security boundary but expands the attack surface
+   for any new self-hosted lanes you add.
 3. Runner runs as the operator's user — **not** root. Do not `sudo` from
    within steps. Keep the runner dir on the same volume as the operator's
    home so file ownership is unsurprising.
@@ -218,6 +247,8 @@ canonical compromise vector and is called out in
 | Symptom | What happens | Operator action |
 |---------|--------------|-----------------|
 | Runner offline (launchd dead, host off, network down) | Jobs **queue indefinitely** on the self-hosted label. GitHub does **not** auto-fall-back to hosted. | Either: (a) bring the runner back, or (b) delete `vars.MACOS_RUNNER` to revert to `macos-latest` and re-run. |
+| Fork-PR macOS job didn't pick up self-hosted runner | Expected. The workflow forces `macos-latest` for `pull_request` from forks regardless of `MACOS_RUNNER`. | No action — this is the security boundary working as designed. |
+| `MACOS_RUNNER` value rejected at runtime with a `fromJSON` error | The variable is not valid JSON. | Re-save it as a JSON array (with double quotes and brackets) — e.g. `["self-hosted","macOS","arm64","agentdesk-mac-mini"]`. |
 | Runner online but stuck on prior job | New jobs queue behind it. | `launchctl kickstart -k …` to restart; cancel any zombie job from GitHub UI. |
 | Token expired during `config.sh` | `config.sh` exits non-zero with `Http response code: NotFound`. | Re-fetch token (§2). Tokens last ~1h. |
 | Brew dep drift (e.g. `opus` removed) | Cargo build fails at link time. | Re-run §1 brew install line. Add the package to the launchd `EnvironmentVariables` `PATH` if it lands outside `/opt/homebrew/bin`. |
@@ -234,33 +265,27 @@ canonical compromise vector and is called out in
 These are tracked here rather than as separate issues until the operator
 confirms direction. Each item is independent.
 
-a. **Restrict self-hosted to trusted refs.** Add a job-level guard so the
-   self-hosted runner only takes work from this repo's own branches:
-   ```yaml
-   if: github.event.pull_request.head.repo.full_name == github.repository
-   ```
-   Combined with a hosted-runner fallback job for the fork case.
-
-b. **sccache on local disk.** The workflow currently disables sccache on
+a. **sccache on local disk.** The workflow currently disables sccache on
    macOS (`RUSTC_WRAPPER=` is exported). On self-hosted we want it **on**,
    pointing at `~/.cache/sccache` (already set in the launchd plist). Gate
    the disable step with `if: runner.os == 'macOS' && !contains(runner.labels, 'self-hosted')`.
 
-c. **Cache directory persistence.** GitHub's `actions/cache@v4` still works
+b. **Cache directory persistence.** GitHub's `actions/cache@v4` still works
    on self-hosted but writes to its own scratch dir. For maximum hit rate,
    add a step that hard-links / rsyncs to a persistent dir on the runner
    (e.g. `~/cache/cargo-registry`) and back. See `runner.tool_cache`.
 
-d. **Cleanup cron.** A launchd `StartCalendarInterval` agent that runs daily
+c. **Cleanup cron.** A launchd `StartCalendarInterval` agent that runs daily
    at 04:00 KST and prunes `_work/*` older than 3 days plus `sccache --zero-stats`
    if size > 18 GB.
 
-e. **Monitoring.** Polling `gh api /repos/{owner}/{repo}/actions/runners`
+d. **Monitoring.** Polling `gh api /repos/{owner}/{repo}/actions/runners`
    from the existing dcserver health loop and surfacing `status != online`
    to the operator's Discord channel.
 
-f. **`mac-book` as a second runner.** Repeat §3 with
+e. **`mac-book` as a second runner.** Repeat §3 with
    `--name agentdesk-mac-book --labels self-hosted,macOS,arm64,agentdesk-mac-book`.
    The workflow toggle continues to work — set
-   `MACOS_RUNNER=self-hosted,macOS,arm64` to let either host pick up the
-   job, or keep host pinning by including the host label.
+   `MACOS_RUNNER='["self-hosted","macOS","arm64"]'` to let either host pick
+   up the job, or keep host pinning by including the host label in the JSON
+   array.
