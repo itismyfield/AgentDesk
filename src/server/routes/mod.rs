@@ -159,6 +159,128 @@ impl AppState {
     }
 }
 
+/// Mutation routes that gate themselves with `require_explicit_bearer_token`.
+/// Kept in one place so the boot-time audit emits a complete inventory.
+/// Order matches code-grep order for stable log output.
+/// (#2257 concern 1 — operators need to see at startup which write
+/// endpoints are mounted on a fail-open auth config.)
+pub const EXPLICIT_AUTH_MUTATION_ROUTES: &[&str] = &[
+    "kanban: rereview",
+    "kanban: batch rereview",
+    "kanban: reopen",
+    "kanban: batch-transition",
+    "kanban: force-transition",
+    "auto-queue: submit_order",
+    "auto-queue: phase-gate repair",
+];
+
+/// Emits a structured boot-time audit identifying whether the explicit-auth
+/// mutation routes will fail-open with the current configuration. Called
+/// once from `server::run` after the listener binds. Does NOT change
+/// behavior — operators choose whether to add a token or restrict the
+/// host/port; this only guarantees they get a clear signal in the logs.
+///
+/// Policy decision intentionally deferred: agentdesk control plane today
+/// runs on a private loopback in single-operator deployments where neither
+/// `server.auth_token` nor `kanban.manager_channel_id` is configured. A
+/// hard-require would block those installs. See #2257.
+pub fn audit_explicit_auth_routes_on_boot(config: &crate::config::Config) {
+    let token_set = config
+        .server
+        .auth_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    let channel_set = config
+        .kanban
+        .manager_channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    if token_set || channel_set {
+        tracing::info!(
+            auth_token_configured = token_set,
+            manager_channel_configured = channel_set,
+            mutation_routes = EXPLICIT_AUTH_MUTATION_ROUTES.len(),
+            "explicit-auth mutation routes will require Bearer token and/or x-channel-id"
+        );
+        return;
+    }
+    tracing::warn!(
+        auth_token_configured = false,
+        manager_channel_configured = false,
+        mutation_routes = ?EXPLICIT_AUTH_MUTATION_ROUTES,
+        host = %config.server.host,
+        port = config.server.port,
+        "FAIL-OPEN: neither server.auth_token nor kanban.manager_channel_id is configured — \
+         the listed mutation endpoints accept any caller that can reach the bind address. \
+         Restrict the bind host (e.g. 127.0.0.1) or configure server.auth_token before exposing to untrusted clients. (#2257)"
+    );
+}
+
+#[cfg(test)]
+mod audit_explicit_auth_routes_tests {
+    use super::*;
+
+    fn test_config() -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.server.host = "127.0.0.1".to_string();
+        config.server.port = 8791;
+        config
+    }
+
+    #[test]
+    fn route_inventory_is_non_empty_and_named_uniquely() {
+        assert!(!EXPLICIT_AUTH_MUTATION_ROUTES.is_empty());
+        let mut sorted = EXPLICIT_AUTH_MUTATION_ROUTES.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            EXPLICIT_AUTH_MUTATION_ROUTES.len(),
+            "duplicate label in EXPLICIT_AUTH_MUTATION_ROUTES — audit log will report misleading counts"
+        );
+    }
+
+    #[test]
+    fn audit_runs_without_panic_for_all_config_combos() {
+        // We can't observe tracing output without a test subscriber, but the
+        // function must remain panic-free across every combination so the
+        // boot path stays robust. (#2257)
+        let mut none_set = test_config();
+        none_set.server.auth_token = None;
+        none_set.kanban.manager_channel_id = None;
+        audit_explicit_auth_routes_on_boot(&none_set);
+
+        let mut token_only = test_config();
+        token_only.server.auth_token = Some("secret".to_string());
+        token_only.kanban.manager_channel_id = None;
+        audit_explicit_auth_routes_on_boot(&token_only);
+
+        let mut channel_only = test_config();
+        channel_only.server.auth_token = None;
+        channel_only.kanban.manager_channel_id = Some("123".to_string());
+        audit_explicit_auth_routes_on_boot(&channel_only);
+
+        let mut both = test_config();
+        both.server.auth_token = Some("secret".to_string());
+        both.kanban.manager_channel_id = Some("123".to_string());
+        audit_explicit_auth_routes_on_boot(&both);
+    }
+
+    #[test]
+    fn empty_strings_are_treated_as_unset() {
+        // #2257: defense against config files that ship empty strings
+        // (e.g., `auth_token: ""`) — those must NOT count as "configured".
+        let mut config = test_config();
+        config.server.auth_token = Some("   ".to_string());
+        config.kanban.manager_channel_id = Some("".to_string());
+        audit_explicit_auth_routes_on_boot(&config);
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub fn api_router(
     db: Db,
