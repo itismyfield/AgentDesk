@@ -247,9 +247,9 @@ pub(super) async fn update_dispatch(
         .await
         .map_err(|error| format!("direct runtime API {path}: {error}"))?;
     let status = response.status();
-    let body_value = response.json::<Value>().await.unwrap_or_else(|error| {
-        serde_json::json!({ "error": format!("invalid direct API response: {error}") })
-    });
+    let body_value = response.json::<Value>().await.unwrap_or_else(
+        |error| serde_json::json!({ "error": format!("invalid direct API response: {error}") }),
+    );
     if status.is_success() {
         Ok(DispatchUpdateOutcome::Updated(body_value))
     } else if status == reqwest::StatusCode::CONFLICT {
