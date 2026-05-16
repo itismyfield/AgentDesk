@@ -250,31 +250,84 @@ pub(crate) fn load_single_policy_with_deadline(
             .into_object()
             .ok_or_else(|| anyhow::anyhow!("registerPolicy argument is not an object"))?;
 
-        // Extract name
-        let name: String = policy_obj
-            .get::<_, rquickjs::Value>("name")
-            .ok()
-            .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()))
-            .unwrap_or_else(|| file_name.clone());
+        // #2378 (Codex round-2): every `policy_obj.get(...)` call below can
+        // execute user-defined JS via getters / Proxy traps. We must NOT
+        // silently swallow `Err` returns — a deadline-interrupted getter
+        // would otherwise fall through to default values (file-stem name,
+        // priority 100, missing hooks) and the hot-reload validator would
+        // accept the file. Use `contains_key` to distinguish "property
+        // absent (use default)" from "property present (read must
+        // succeed)", and propagate any read error as a load failure so
+        // the previous policy set is preserved.
 
-        // Extract priority
-        let priority: i32 = policy_obj
-            .get::<_, rquickjs::Value>("priority")
-            .ok()
-            .and_then(|v| v.as_int())
-            .unwrap_or(100);
+        // Extract name (optional; falls back to file stem when absent).
+        let name: String = if policy_obj.contains_key("name").map_err(|e| {
+            anyhow::anyhow!("policy {}: contains_key(name) failed: {e}", path.display())
+        })? {
+            let value: rquickjs::Value = policy_obj
+                .get("name")
+                .map_err(|e| anyhow::anyhow!("policy {}: read name: {e}", path.display()))?;
+            if value.is_undefined() || value.is_null() {
+                file_name.clone()
+            } else {
+                value
+                    .as_string()
+                    .and_then(|s| s.to_string().ok())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("policy {}: name must be a string", path.display())
+                    })?
+            }
+        } else {
+            file_name.clone()
+        };
 
-        // Extract known hooks (Hook enum variants)
+        // Extract priority (optional; defaults to 100).
+        let priority: i32 = if policy_obj.contains_key("priority").map_err(|e| {
+            anyhow::anyhow!(
+                "policy {}: contains_key(priority) failed: {e}",
+                path.display()
+            )
+        })? {
+            let value: rquickjs::Value = policy_obj
+                .get("priority")
+                .map_err(|e| anyhow::anyhow!("policy {}: read priority: {e}", path.display()))?;
+            if value.is_undefined() || value.is_null() {
+                100
+            } else {
+                value.as_int().ok_or_else(|| {
+                    anyhow::anyhow!("policy {}: priority must be an integer", path.display())
+                })?
+            }
+        } else {
+            100
+        };
+
+        // Extract known hooks (Hook enum variants). Reads that raise a JS
+        // error (e.g. deadline-interrupted getter) propagate as a load
+        // failure rather than silently being treated as "hook absent".
         let mut hooks = HashMap::new();
         let known_js_names: Vec<&str> = Hook::all().iter().map(|h| h.js_name()).collect();
         for hook in Hook::all() {
-            let hook_val: rquickjs::Result<rquickjs::Value> = policy_obj.get(hook.js_name());
-            if let Ok(val) = hook_val {
-                if val.is_function() {
-                    let func = val.into_function().unwrap();
-                    let persistent = Persistent::save(&ctx, func);
-                    hooks.insert(*hook, persistent);
-                }
+            if !policy_obj.contains_key(hook.js_name()).map_err(|e| {
+                anyhow::anyhow!(
+                    "policy {}: contains_key({}) failed: {e}",
+                    path.display(),
+                    hook.js_name()
+                )
+            })? {
+                continue;
+            }
+            let val: rquickjs::Value = policy_obj.get(hook.js_name()).map_err(|e| {
+                anyhow::anyhow!(
+                    "policy {}: read hook {}: {e}",
+                    path.display(),
+                    hook.js_name()
+                )
+            })?;
+            if val.is_function() {
+                let func = val.into_function().unwrap();
+                let persistent = Persistent::save(&ctx, func);
+                hooks.insert(*hook, persistent);
             }
         }
 
@@ -283,25 +336,26 @@ pub(crate) fn load_single_policy_with_deadline(
         let skip_keys = ["name", "priority", "after", "before"];
         let props = policy_obj.keys::<String>();
         for key_result in props {
-            if let Ok(key) = key_result {
-                if skip_keys.contains(&key.as_str()) || known_js_names.contains(&key.as_str()) {
-                    continue;
-                }
-                if let Ok(val) = policy_obj.get::<_, rquickjs::Value>(&key) {
-                    if val.is_function() {
-                        let func = val.into_function().unwrap();
-                        let persistent = Persistent::save(&ctx, func);
-                        dynamic_hooks.insert(key, persistent);
-                    }
-                }
+            let key = key_result
+                .map_err(|e| anyhow::anyhow!("policy {}: enumerate keys: {e}", path.display()))?;
+            if skip_keys.contains(&key.as_str()) || known_js_names.contains(&key.as_str()) {
+                continue;
+            }
+            let val: rquickjs::Value = policy_obj.get(&key).map_err(|e| {
+                anyhow::anyhow!("policy {}: read dynamic hook {}: {e}", path.display(), key)
+            })?;
+            if val.is_function() {
+                let func = val.into_function().unwrap();
+                let persistent = Persistent::save(&ctx, func);
+                dynamic_hooks.insert(key, persistent);
             }
         }
 
         // Extract optional ordering annotations: `after: ["policy-name", ...]`
         // and `before: [...]`. These provide an explicit DAG override for
         // policies that must register the same hook at similar priorities.
-        let after = extract_string_array(&policy_obj, "after");
-        let before = extract_string_array(&policy_obj, "before");
+        let after = extract_string_array_strict(&policy_obj, "after", path)?;
+        let before = extract_string_array_strict(&policy_obj, "before", path)?;
 
         Ok(LoadedPolicy {
             name,
@@ -320,6 +374,7 @@ pub(crate) fn load_single_policy_with_deadline(
 
 /// Read an optional `string[]` property from a JS object. Missing or wrongly
 /// typed values return an empty Vec (permissive — annotations are optional).
+#[allow(dead_code)]
 fn extract_string_array(obj: &rquickjs::Object<'_>, key: &str) -> Vec<String> {
     let Ok(val) = obj.get::<_, rquickjs::Value>(key) else {
         return Vec::new();
@@ -336,6 +391,50 @@ fn extract_string_array(obj: &rquickjs::Object<'_>, key: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Strict variant of `extract_string_array`: any `Err` from a property
+/// access or array element read (e.g. a deadline-interrupted JS getter or
+/// Proxy trap) propagates as a load failure rather than being treated as
+/// an empty annotation list (#2378). Missing properties and wrong-type
+/// values still return `Ok(Vec::new())` — annotations remain optional, we
+/// only tighten the error-propagation path.
+fn extract_string_array_strict(
+    obj: &rquickjs::Object<'_>,
+    key: &str,
+    path: &Path,
+) -> Result<Vec<String>> {
+    if !obj.contains_key(key).map_err(|e| {
+        anyhow::anyhow!(
+            "policy {}: contains_key({}) failed: {e}",
+            path.display(),
+            key
+        )
+    })? {
+        return Ok(Vec::new());
+    }
+    let val: rquickjs::Value = obj
+        .get(key)
+        .map_err(|e| anyhow::anyhow!("policy {}: read annotation {}: {e}", path.display(), key))?;
+    let Some(arr) = val.into_array() else {
+        // Wrong-type values stay tolerant — annotations are optional.
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for i in 0..arr.len() {
+        let item: rquickjs::Value = arr.get(i).map_err(|e| {
+            anyhow::anyhow!(
+                "policy {}: read annotation {}[{}]: {e}",
+                path.display(),
+                key,
+                i
+            )
+        })?;
+        if let Some(s) = item.as_string().and_then(|s| s.to_string().ok()) {
+            out.push(s);
+        }
+    }
+    Ok(out)
 }
 
 /// Detect `(priority, hook)` collisions and missing `after/before` referents.
@@ -1443,13 +1542,14 @@ mod tests {
     }
 
     /// #2378 (Codex follow-up): a policy whose `name` getter contains an
-    /// infinite loop must be interrupted by the deadline. Prior to this
-    /// fix the deadline guard was dropped immediately after
-    /// `eval_with_options` returned, so the subsequent `policy_obj.get(...)`
-    /// — which actually invokes the user's getter — ran completely
-    /// unbounded. This regression test exercises the full hot-reload load
-    /// path on disk with a runaway getter to confirm the deadline covers
-    /// it.
+    /// infinite loop must be interrupted by the deadline AND that
+    /// interrupt must propagate as a load failure rather than being
+    /// silently swallowed into a fallback name.
+    ///
+    /// The probe context registers a minimal `agentdesk.registerPolicy`
+    /// so the policy eval itself succeeds — the runaway then triggers
+    /// only inside `policy_obj.get("name")`, which is exactly the path
+    /// Codex round-2 flagged as both unbounded AND error-swallowing.
     #[test]
     fn load_single_policy_deadline_covers_user_property_getters() {
         let runtime = Runtime::new().expect("create QuickJS runtime");
@@ -1464,7 +1564,8 @@ mod tests {
         // Policy whose `name` accessor spins forever. The eval itself
         // returns immediately (registerPolicy completes), so the deadline
         // must remain armed through the subsequent `policy_obj.get("name")`
-        // for the spin to be interrupted.
+        // for the spin to be interrupted — and the interrupted read must
+        // propagate as a load failure.
         let policy_file = tmp.path().join("runaway_getter.js");
         std::fs::write(
             &policy_file,
@@ -1481,12 +1582,30 @@ mod tests {
         let runtime_for_thread = runtime.clone();
         let load_thread = std::thread::spawn(move || {
             let probe_ctx = Context::full(&runtime_for_thread).expect("probe context");
+            // Bootstrap the bare-minimum agentdesk surface so the policy
+            // eval reaches `registerPolicy` and produces a real captured
+            // object whose getter exercises the deadline path. Without
+            // this the eval would fail with `agentdesk is not defined`
+            // *before* reaching the getter — masking the regression we
+            // are guarding against (Codex round-2 finding).
+            probe_ctx.with(|ctx| {
+                let _: rquickjs::Value = ctx
+                    .eval(
+                        r#"
+                        globalThis.agentdesk = globalThis.agentdesk || {};
+                        agentdesk.registerPolicy = function() {};
+                        "#,
+                    )
+                    .expect("bootstrap agentdesk surface");
+            });
+
             let start = Instant::now();
             let result =
                 load_single_policy_with_deadline(&probe_ctx, &policy_file, Some(&deadline_slot));
             let elapsed = start.elapsed();
+            let err_message = result.as_ref().err().map(|e| e.to_string());
             drop(probe_ctx);
-            (result.is_err(), elapsed)
+            (result.is_err(), elapsed, err_message)
         });
 
         let join_deadline = Instant::now() + HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3);
@@ -1500,10 +1619,20 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
-        let (is_err, elapsed) = load_thread.join().expect("load thread join");
+        let (is_err, elapsed, err_message) = load_thread.join().expect("load thread join");
         assert!(
             is_err,
-            "runaway getter should propagate as a load error (deadline interrupt expected)"
+            "runaway getter should propagate as a load error (deadline interrupt expected); \
+             message={err_message:?}"
+        );
+        // The error must originate from the `name` read path — i.e. the
+        // deadline interrupt must NOT have been swallowed by `.ok()` and
+        // fallen through to the file-stem default.
+        assert!(
+            err_message
+                .as_deref()
+                .is_some_and(|m| m.contains("read name") || m.contains("contains_key(name)")),
+            "expected name-read failure, got: {err_message:?}"
         );
         assert!(
             elapsed < HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(1),
