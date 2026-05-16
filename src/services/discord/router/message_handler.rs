@@ -2061,25 +2061,45 @@ pub(in crate::services::discord) async fn handle_text_message(
         token,
     } = *deps;
     let original_channel_id = channel_id;
+    let stored_voice_announcement = crate::voice::announce_meta::global_store().take(user_msg_id);
+    let has_stored_voice_announcement = stored_voice_announcement.is_some();
     let parsed_voice_announcement =
         if crate::voice::prompt::is_voice_transcript_announcement_candidate(user_text) {
             crate::voice::prompt::parse_voice_transcript_announcement(user_text)
         } else {
             None
         };
-    let announce_bot_id = if parsed_voice_announcement.is_some() {
+    let announce_bot_id = if has_stored_voice_announcement || parsed_voice_announcement.is_some() {
         super::super::resolve_announce_bot_user_id(shared).await
     } else {
         None
     };
-    let voice_announcement = crate::voice::prompt::parse_authorized_voice_transcript_announcement(
-        user_text,
-        request_owner.get(),
-        announce_bot_id,
-    );
-    if parsed_voice_announcement.is_some() && voice_announcement.is_none() {
+    let voice_announcement = if announce_bot_id == Some(request_owner.get()) {
+        if has_stored_voice_announcement {
+            stored_voice_announcement
+        } else {
+            crate::voice::prompt::parse_authorized_voice_transcript_announcement(
+                user_text,
+                request_owner.get(),
+                announce_bot_id,
+            )
+        }
+    } else {
+        None
+    };
+    if has_stored_voice_announcement && announce_bot_id.is_none() {
         tracing::warn!(
             channel_id = channel_id.get(),
+            message_id = user_msg_id.get(),
+            author_id = request_owner.get(),
+            "dropping stored voice transcript announcement because announce bot user id is unavailable"
+        );
+    } else if (has_stored_voice_announcement || parsed_voice_announcement.is_some())
+        && voice_announcement.is_none()
+    {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            message_id = user_msg_id.get(),
             author_id = request_owner.get(),
             announce_bot_id = ?announce_bot_id,
             "ignoring spoofed voice transcript announcement from non-announce author"

@@ -171,6 +171,20 @@ pub(crate) fn voice_channel_text_prompt(text: &str, language: &str, max_chars: u
 
 pub(crate) fn build_voice_transcript_announcement(
     transcript: &str,
+    _user_id: u64,
+    _utterance_id: &str,
+    _language: &str,
+    _verbose_progress: bool,
+    _started_at: &str,
+    _completed_at: &str,
+    _samples_written: usize,
+) -> String {
+    let transcript = readable_transcript_line(transcript);
+    format!("🎙️ \"{transcript}\"")
+}
+
+pub(crate) fn voice_transcript_announcement_meta(
+    transcript: &str,
     user_id: u64,
     utterance_id: &str,
     language: &str,
@@ -178,22 +192,17 @@ pub(crate) fn build_voice_transcript_announcement(
     started_at: &str,
     completed_at: &str,
     samples_written: usize,
-) -> String {
-    let transcript = escape_discord_mentions(transcript.trim());
-    let header = format!(
-        "{VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX} user_id={} utterance_id={} language={} verbose_progress={} started_at={} completed_at={} samples_written={}",
-        user_id,
-        shell_escape_value(utterance_id),
-        shell_escape_value(language),
+) -> VoiceTranscriptAnnouncement {
+    VoiceTranscriptAnnouncement {
+        transcript: transcript.trim().to_string(),
+        user_id: user_id.to_string(),
+        utterance_id: utterance_id.to_string(),
+        language: language.to_string(),
         verbose_progress,
-        shell_escape_value(started_at),
-        shell_escape_value(completed_at),
-        samples_written,
-    );
-    format!(
-        "🎙️ 음성 전사\n{}\n{}\n{}\n||{}||",
-        TRANSCRIPT_OPEN, transcript, TRANSCRIPT_CLOSE, header,
-    )
+        started_at: Some(started_at.to_string()),
+        completed_at: Some(completed_at.to_string()),
+        samples_written: Some(samples_written),
+    }
 }
 
 pub(crate) fn parse_voice_transcript_announcement(
@@ -284,14 +293,12 @@ fn escape_discord_mentions(text: &str) -> String {
     text.replace('@', "@\u{200B}")
 }
 
-fn unescape_discord_mentions(text: &str) -> String {
-    text.replace("@\u{200B}", "@")
+fn readable_transcript_line(text: &str) -> String {
+    escape_discord_mentions(&text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
-fn shell_escape_value(text: &str) -> String {
-    text.chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '+'))
-        .collect::<String>()
+fn unescape_discord_mentions(text: &str) -> String {
+    text.replace("@\u{200B}", "@")
 }
 
 fn parse_header_value(text: &str) -> String {
@@ -341,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_transcript_announcement_round_trips_and_escapes_mentions() {
+    fn voice_transcript_announcement_is_readable_only_and_escapes_mentions() {
         let announcement = build_voice_transcript_announcement(
             "@everyone 배포해줘",
             42,
@@ -355,10 +362,52 @@ mod tests {
 
         assert!(announcement.contains("@\u{200B}everyone"));
         assert!(!announcement.contains("@everyone"));
-        assert!(announcement.starts_with("🎙️ 음성 전사"));
-        assert!(announcement.contains("||ADK_VOICE_TRANSCRIPT v1"));
+        assert_eq!(announcement, "🎙️ \"@\u{200B}everyone 배포해줘\"");
+        assert!(!announcement.contains("ADK_VOICE_TRANSCRIPT"));
+        assert!(!announcement.contains("<user_transcript>"));
+        assert!(!announcement.contains("||"));
+    }
 
-        let parsed = parse_voice_transcript_announcement(&announcement).unwrap();
+    #[test]
+    fn voice_transcript_announcement_meta_preserves_hidden_fields() {
+        let meta = voice_transcript_announcement_meta(
+            "@everyone 배포해줘",
+            42,
+            "utt-1",
+            "ko-KR",
+            true,
+            "2026-05-14T18:00:00+09:00",
+            "2026-05-14T18:00:01+09:00",
+            48_000,
+        );
+
+        assert_eq!(meta.transcript, "@everyone 배포해줘");
+        assert_eq!(meta.user_id, "42");
+        assert_eq!(meta.utterance_id, "utt-1");
+        assert_eq!(meta.language, "ko-KR");
+        assert!(meta.verbose_progress);
+        assert_eq!(
+            meta.started_at.as_deref(),
+            Some("2026-05-14T18:00:00+09:00")
+        );
+        assert_eq!(
+            meta.completed_at.as_deref(),
+            Some("2026-05-14T18:00:01+09:00")
+        );
+        assert_eq!(meta.samples_written, Some(48_000));
+    }
+
+    #[test]
+    fn legacy_voice_transcript_announcement_still_parses() {
+        let legacy = concat!(
+            "🎙️ 음성 전사\n",
+            "<user_transcript>\n",
+            "@\u{200B}everyone 배포해줘\n",
+            "</user_transcript>\n",
+            "||ADK_VOICE_TRANSCRIPT v1 user_id=42 utterance_id=utt-1 language=ko-KR verbose_progress=true started_at=2026-05-14T18:00:00+09:00 completed_at=2026-05-14T18:00:01+09:00 samples_written=48000||",
+        );
+
+        let parsed = parse_voice_transcript_announcement(legacy).unwrap();
         assert_eq!(parsed.transcript, "@everyone 배포해줘");
         assert_eq!(parsed.user_id, "42");
         assert_eq!(parsed.utterance_id, "utt-1");
@@ -377,22 +426,19 @@ mod tests {
 
     #[test]
     fn voice_transcript_announcement_requires_announce_bot_author() {
-        let announcement = build_voice_transcript_announcement(
-            "상태 알려줘",
-            42,
-            "utt-2",
-            "ko-KR",
-            false,
-            "2026-05-14T18:00:00+09:00",
-            "2026-05-14T18:00:01+09:00",
-            12_000,
+        let announcement = concat!(
+            "🎙️ 음성 전사\n",
+            "<user_transcript>\n",
+            "상태 알려줘\n",
+            "</user_transcript>\n",
+            "||ADK_VOICE_TRANSCRIPT v1 user_id=42 utterance_id=utt-2 language=ko-KR verbose_progress=false started_at=2026-05-14T18:00:00+09:00 completed_at=2026-05-14T18:00:01+09:00 samples_written=12000||",
         );
 
         assert!(
-            parse_authorized_voice_transcript_announcement(&announcement, 99, Some(100)).is_none()
+            parse_authorized_voice_transcript_announcement(announcement, 99, Some(100)).is_none()
         );
         assert!(
-            parse_authorized_voice_transcript_announcement(&announcement, 100, Some(100)).is_some()
+            parse_authorized_voice_transcript_announcement(announcement, 100, Some(100)).is_some()
         );
     }
 
