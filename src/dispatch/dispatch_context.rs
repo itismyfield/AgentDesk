@@ -615,7 +615,7 @@ fn worktree_head_matches_commit(dir: &str, commit_sha: &str) -> bool {
     head == commit_sha
 }
 
-fn clean_exact_review_worktree_path(
+async fn clean_exact_review_worktree_path(
     card_id: &str,
     source: &str,
     path: &str,
@@ -625,8 +625,18 @@ fn clean_exact_review_worktree_path(
         return None;
     }
 
-    let dirty_paths =
-        crate::services::platform::shell::git_tracked_change_paths(path).unwrap_or_default();
+    // #2237 item 3: `git_tracked_change_paths` shells out to `git status`
+    // and can block for a meaningful amount of time on a large monorepo
+    // worktree. This function is reached from the async rereview resolver
+    // (`resolve_pr_tracking_review_target_pg`), so a blocking git call here
+    // stalls the tokio runtime thread that drives every other dispatch
+    // task. Move the synchronous git invocation onto a blocking thread.
+    let path_owned = path.to_string();
+    let dirty_paths = tokio::task::spawn_blocking(move || {
+        crate::services::platform::shell::git_tracked_change_paths(&path_owned).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
     if dirty_paths.is_empty() {
         return Some(path.to_string());
     }
@@ -1098,8 +1108,15 @@ fn apply_review_target_context(
         "reviewed_commit".to_string(),
         json!(target.reviewed_commit.clone()),
     );
+    // #2237 item 2: when the resolver returns None for branch/worktree_path/
+    // target_repo, symmetrically remove any stale value from the persisted
+    // context. Previously only `worktree_path` was cleared, allowing a prior
+    // failed rereview's `branch` or `target_repo` to leak into the new
+    // dispatch context.
     if let Some(branch) = target.branch.as_deref() {
         obj.insert("branch".to_string(), json!(branch));
+    } else {
+        obj.remove("branch");
     }
     if let Some(path) = target.worktree_path.as_deref() {
         obj.insert("worktree_path".to_string(), json!(path));
@@ -1108,6 +1125,8 @@ fn apply_review_target_context(
     }
     if let Some(target_repo) = target.target_repo.as_deref() {
         obj.insert("target_repo".to_string(), json!(target_repo));
+    } else {
+        obj.remove("target_repo");
     }
 }
 
@@ -2474,7 +2493,7 @@ async fn resolve_pr_tracking_review_target_pg(
             commit_lookup_dir = Some(path.to_string());
         }
         worktree_path =
-            clean_exact_review_worktree_path(card_id, "pr_tracking", path, &reviewed_commit);
+            clean_exact_review_worktree_path(card_id, "pr_tracking", path, &reviewed_commit).await;
     }
 
     if let Some(repo_dir) = repo_dir.as_deref() {
@@ -2487,7 +2506,8 @@ async fn resolve_pr_tracking_review_target_pg(
                 "pr_tracking repo",
                 repo_dir,
                 &reviewed_commit,
-            );
+            )
+            .await;
         }
     }
 
@@ -2590,17 +2610,42 @@ async fn latest_completed_dispatch_commit_for_card_pg(
     pool: &PgPool,
     kanban_card_id: &str,
 ) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
+    // #2237 item 5: previously the CTE cast `result::TEXT` and `context::TEXT`
+    // straight to `jsonb`. A single legacy / partial-write row with non-JSON
+    // garbage in `result` (or `context`) raises a Postgres cast error that
+    // aborts the entire query — `fetch_optional(...).ok().flatten()` then
+    // silently dropped the result, masking the data quality issue AND
+    // breaking the dirty-worktree fallback for every card the query
+    // touched.
+    //
+    // Defenses in this revision:
+    //   1. Each row's `result` and `context` are only cast when the text
+    //      starts with `{` (i.e. plausibly an object literal); otherwise the
+    //      per-row JSON value is `NULL` and the COALESCE chain skips it.
+    //      Garbage rows no longer abort the whole query.
+    //   2. The SQL error path now logs at warn level instead of being
+    //      silently swallowed via `.ok().flatten()`, so operators can see
+    //      when the query genuinely fails versus simply finding no row.
+    //
+    // `jsonb_path_exists` would be an alternative guard, but the regex
+    // prefix-check is cheap, indexable in the planner's row filter, and
+    // covers the real-world "stored an error string" shape that motivated
+    // this issue (see #2237).
+    let row = sqlx::query_scalar::<_, String>(
         "WITH completed_dispatch_commits AS (
              SELECT
-                 COALESCE(
-                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(result::TEXT), ''), '{}')::jsonb)->>'completed_commit'), ''),
-                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(result::TEXT), ''), '{}')::jsonb)->>'head_sha'), ''),
-                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(result::TEXT), ''), '{}')::jsonb)->>'reviewed_commit'), ''),
-                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(context::TEXT), ''), '{}')::jsonb)->>'completed_commit'), ''),
-                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(context::TEXT), ''), '{}')::jsonb)->>'head_sha'), ''),
-                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(context::TEXT), ''), '{}')::jsonb)->>'reviewed_commit'), '')
-                 ) AS commit,
+                 CASE
+                     WHEN result IS NOT NULL
+                          AND BTRIM(result::TEXT) ~ '^\\s*\\{'
+                     THEN BTRIM(result::TEXT)::jsonb
+                     ELSE NULL
+                 END AS result_json,
+                 CASE
+                     WHEN context IS NOT NULL
+                          AND BTRIM(context::TEXT) ~ '^\\s*\\{'
+                     THEN BTRIM(context::TEXT)::jsonb
+                     ELSE NULL
+                 END AS context_json,
                  updated_at,
                  id
              FROM task_dispatches
@@ -2608,17 +2653,40 @@ async fn latest_completed_dispatch_commit_for_card_pg(
                AND dispatch_type IN ('implementation', 'rework')
                AND status = 'completed'
          )
-         SELECT commit
-         FROM completed_dispatch_commits
+         SELECT commit FROM (
+             SELECT
+                 COALESCE(
+                     NULLIF(BTRIM(result_json->>'completed_commit'), ''),
+                     NULLIF(BTRIM(result_json->>'head_sha'), ''),
+                     NULLIF(BTRIM(result_json->>'reviewed_commit'), ''),
+                     NULLIF(BTRIM(context_json->>'completed_commit'), ''),
+                     NULLIF(BTRIM(context_json->>'head_sha'), ''),
+                     NULLIF(BTRIM(context_json->>'reviewed_commit'), '')
+                 ) AS commit,
+                 updated_at,
+                 id
+             FROM completed_dispatch_commits
+         ) AS commits
          WHERE commit IS NOT NULL
          ORDER BY updated_at DESC, id DESC
          LIMIT 1",
     )
     .bind(kanban_card_id)
     .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
+    .await;
+
+    match row {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                "[dispatch] latest_completed_dispatch_commit_for_card_pg query failed for card {}: {}. \
+                 Treating as 'no completed commit' so the caller can fall through to other resolvers.",
+                kanban_card_id,
+                error
+            );
+            None
+        }
+    }
 }
 
 /// PG-native variant of [`build_review_context`].
@@ -2899,6 +2967,46 @@ mod review_target_context_tests {
         assert_eq!(obj["branch"], json!("main"));
         assert_eq!(obj["target_repo"], json!("/repo"));
         assert!(obj.get("worktree_path").is_none());
+    }
+
+    /// #2237 item 2: when the resolver returns `None` for branch /
+    /// worktree_path / target_repo, the persisted context must shed any
+    /// stale values for ALL three fields — not just `worktree_path`. This
+    /// guards against a prior failed rereview leaking its branch or
+    /// target_repo into the next dispatch context.
+    #[test]
+    fn apply_review_target_context_symmetrically_clears_all_target_fields_when_none() {
+        let target = DispatchExecutionTarget {
+            reviewed_commit: "abc123".to_string(),
+            branch: None,
+            worktree_path: None,
+            target_repo: None,
+        };
+        let mut obj = serde_json::Map::from_iter([
+            ("reviewed_commit".to_string(), json!("old")),
+            ("branch".to_string(), json!("stale-branch")),
+            ("worktree_path".to_string(), json!("/stale-worktree")),
+            ("target_repo".to_string(), json!("/stale-repo")),
+            ("unrelated".to_string(), json!("keep-me")),
+        ]);
+
+        apply_review_target_context(&target, &mut obj);
+
+        assert_eq!(obj["reviewed_commit"], json!("abc123"));
+        assert!(
+            obj.get("branch").is_none(),
+            "stale branch must be cleared when target.branch is None"
+        );
+        assert!(
+            obj.get("worktree_path").is_none(),
+            "stale worktree_path must be cleared when target.worktree_path is None"
+        );
+        assert!(
+            obj.get("target_repo").is_none(),
+            "stale target_repo must be cleared when target.target_repo is None"
+        );
+        // Sanity: unrelated fields are not touched.
+        assert_eq!(obj["unrelated"], json!("keep-me"));
     }
 }
 
