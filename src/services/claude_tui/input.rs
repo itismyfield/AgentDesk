@@ -32,6 +32,14 @@ impl PromptReadinessKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptReadinessSnapshot {
+    pub prompt_marker_detected: bool,
+    pub tmux_pane_alive: bool,
+    pub capture_available: bool,
+    pub pane_tail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TuiInputAction {
     Literal(String),
     PasteBuffer(String),
@@ -79,6 +87,26 @@ pub fn send_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
 
 pub fn is_prompt_ready_timeout_error(error: &str) -> bool {
     error.starts_with(PROMPT_READY_TIMEOUT_ERROR_PREFIX)
+}
+
+pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot {
+    let pane = crate::services::platform::tmux::capture_pane(
+        session_name,
+        PROMPT_READY_CAPTURE_SCROLLBACK,
+    );
+    let prompt_marker_detected = pane.as_deref().is_some_and(pane_looks_ready_for_prompt);
+    let pane_tail = pane
+        .as_deref()
+        .map(prompt_ready_debug_tail)
+        .unwrap_or_else(|| "<capture unavailable>".to_string());
+    PromptReadinessSnapshot {
+        prompt_marker_detected,
+        tmux_pane_alive: crate::services::tmux_diagnostics::tmux_session_has_live_pane(
+            session_name,
+        ),
+        capture_available: pane.is_some(),
+        pane_tail,
+    }
 }
 
 fn send_prompt_with_readiness(
@@ -142,22 +170,20 @@ fn wait_for_prompt_ready(session_name: &str, readiness: PromptReadinessKind) -> 
     let start = Instant::now();
     let mut wait_interval = Duration::from_millis(100);
     loop {
-        if let Some(pane) = crate::services::platform::tmux::capture_pane(
-            session_name,
-            PROMPT_READY_CAPTURE_SCROLLBACK,
-        ) && pane_looks_ready_for_prompt(&pane)
-        {
+        let snapshot = prompt_readiness_snapshot(session_name);
+        if snapshot.prompt_marker_detected {
             return Ok(());
         }
-        if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(session_name) {
+        if !snapshot.tmux_pane_alive {
             return Err("claude tui session died before prompt input was ready".to_string());
         }
         if start.elapsed() >= timeout {
-            log_prompt_ready_timeout(session_name, readiness, timeout);
+            log_prompt_ready_timeout(session_name, readiness, timeout, &snapshot);
             return Err(format!(
-                "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s",
+                "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; capture_available={}",
                 readiness.label(),
-                timeout.as_secs()
+                timeout.as_secs(),
+                snapshot.capture_available
             ));
         }
         std::thread::sleep(wait_interval);
@@ -169,28 +195,35 @@ fn pane_looks_ready_for_prompt(pane: &str) -> bool {
     crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(pane)
 }
 
-fn log_prompt_ready_timeout(session_name: &str, readiness: PromptReadinessKind, timeout: Duration) {
-    let pane_tail = crate::services::platform::tmux::capture_pane(
-        session_name,
-        PROMPT_READY_CAPTURE_SCROLLBACK,
-    )
-    .map(|pane| prompt_ready_debug_tail(&pane))
-    .unwrap_or_else(|| "<capture unavailable>".to_string());
+fn log_prompt_ready_timeout(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+    timeout: Duration,
+    snapshot: &PromptReadinessSnapshot,
+) {
     tracing::debug!(
         tmux_session_name = session_name,
         readiness = readiness.label(),
         timeout_secs = timeout.as_secs(),
-        pane_tail = %pane_tail,
+        prompt_marker_detected = snapshot.prompt_marker_detected,
+        previous_tui_turn_still_running = snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
+        tmux_pane_alive = snapshot.tmux_pane_alive,
+        capture_available = snapshot.capture_available,
+        pane_tail = %snapshot.pane_tail,
         "claude_tui prompt readiness timed out"
     );
     crate::services::claude::debug_log_to(
         "claude_tui.log",
         &format!(
-            "prompt readiness timeout session={} readiness={} timeout={}s pane_tail:\n{}",
+            "prompt readiness timeout session={} readiness={} timeout={}s prompt_marker_detected={} previous_tui_turn_still_running={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
             session_name,
             readiness.label(),
             timeout.as_secs(),
-            pane_tail
+            snapshot.prompt_marker_detected,
+            snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
+            snapshot.tmux_pane_alive,
+            snapshot.capture_available,
+            snapshot.pane_tail
         ),
     );
 }
