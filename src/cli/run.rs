@@ -3,7 +3,7 @@ use anyhow::Result;
 use super::args::{
     AgentHandoffChannelKindArg, AutoQueueAction, CardAction, Commands, ConfigAction,
     DispatchAction, DoctorProfileArg, IntakeOutboxAction, MigrateAction, MonitoringAction,
-    ReportProvider,
+    ReportProvider, ShowAction,
 };
 
 fn agent_handoff_channel_kind(
@@ -477,7 +477,50 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             }
         }),
         Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
+        Commands::Show { action } => exit_for_cli(handle_show(action)),
     }
+}
+
+fn handle_show(action: ShowAction) -> std::result::Result<(), String> {
+    match action {
+        ShowAction::SessionName { channel, provider } => {
+            cmd_show_session_name(&channel, provider.as_deref())
+        }
+    }
+}
+
+/// `agentdesk show session-name --channel <id> [--provider <kind>]`.
+///
+/// Prints the deterministic tmux session name AgentDesk will use for the given
+/// channel. Operator-facing: pre-create matching sessions with
+/// `tmux new -s "$(agentdesk show session-name --channel <id>)"`.
+///
+/// Provider resolution order:
+///   1. explicit `--provider` flag (if any),
+///   2. channel-suffix heuristic (`-cc` → claude, `-cdx` → codex, ...),
+///   3. default channel provider from the registry.
+fn cmd_show_session_name(
+    channel: &str,
+    provider: Option<&str>,
+) -> std::result::Result<(), String> {
+    use crate::services::cluster::session_matcher::expected_session_name_for;
+    use crate::services::provider::ProviderKind;
+
+    let resolved = match provider {
+        Some(raw) => ProviderKind::from_str(raw).ok_or_else(|| {
+            format!(
+                "unknown provider '{raw}'. supported: {}",
+                crate::services::provider::supported_provider_ids().join(", ")
+            )
+        })?,
+        None => ProviderKind::resolve_channel_provider(Some(channel), None).ok_or_else(|| {
+            "could not resolve provider from channel; pass --provider".to_string()
+        })?,
+    };
+
+    let session = expected_session_name_for(None, &resolved, channel);
+    println!("{session}");
+    Ok(())
 }
 
 fn build_restart_report_context(

@@ -11,3 +11,4 @@
 pub(crate) mod intake_router_hook;
 pub(crate) mod intake_routing;
 pub(crate) mod intake_worker;
+pub mod session_matcher;

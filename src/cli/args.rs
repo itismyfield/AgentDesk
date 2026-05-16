@@ -449,6 +449,26 @@ pub(crate) enum Commands {
     },
     /// Provider CLI safe migration management
     ProviderCli(super::provider_cli::ProviderCliArgs),
+    /// Inspect deterministic session-binding values (epic #2285 E1).
+    Show {
+        #[command(subcommand)]
+        action: ShowAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ShowAction {
+    /// Print the expected tmux session name for a Discord channel.
+    SessionName {
+        /// Discord channel id (or stable channel identifier) — same value
+        /// AgentDesk uses when composing the tmux session name.
+        #[arg(long = "channel")]
+        channel: String,
+        /// Override the provider. Defaults to the channel binding's resolved
+        /// primary provider, then to the channel-suffix heuristic.
+        #[arg(long)]
+        provider: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
