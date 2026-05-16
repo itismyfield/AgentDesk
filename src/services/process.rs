@@ -1,8 +1,80 @@
 #![allow(dead_code)]
 
 use std::process::{Command, Output};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
+
+use crate::services::provider::{CancelToken, cancel_requested};
+
+/// Handle returned by [`spawn_simple_cancel_watcher`].
+///
+/// Drop or call [`SimpleCancelWatcher::disarm`] once the child has been
+/// reaped to stop the polling thread; otherwise the watcher will exit on its
+/// own at most ~`poll_interval` after the child terminates because the next
+/// `kill_pid_tree` call becomes a no-op.
+pub struct SimpleCancelWatcher {
+    armed: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SimpleCancelWatcher {
+    /// Stop polling the cancel token. Idempotent.
+    pub fn disarm(mut self) {
+        self.armed.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for SimpleCancelWatcher {
+    fn drop(&mut self) {
+        self.armed.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Spawn a lightweight thread that polls `cancel_token` every ~100ms and
+/// kills the child PID tree once cancellation is observed. Used by simple
+/// (`wait_with_output`-based) CLI call sites that cannot interleave a cancel
+/// check between spawn and wait. See ADR #2175.
+///
+/// If `cancel_token` is `None`, no thread is spawned and the returned handle
+/// is a no-op.
+pub fn spawn_simple_cancel_watcher(
+    cancel_token: Option<Arc<CancelToken>>,
+    child_pid: u32,
+) -> SimpleCancelWatcher {
+    let Some(token) = cancel_token else {
+        return SimpleCancelWatcher {
+            armed: Arc::new(AtomicBool::new(false)),
+            handle: None,
+        };
+    };
+
+    let armed = Arc::new(AtomicBool::new(true));
+    let armed_thread = armed.clone();
+
+    let handle = std::thread::Builder::new()
+        .name("simple-cancel-watcher".to_string())
+        .spawn(move || {
+            let poll = Duration::from_millis(100);
+            while armed_thread.load(Ordering::Relaxed) {
+                if cancel_requested(Some(token.as_ref())) {
+                    kill_pid_tree(child_pid);
+                    return;
+                }
+                std::thread::sleep(poll);
+            }
+        })
+        .ok();
+
+    SimpleCancelWatcher { armed, handle }
+}
 
 /// Configure a child command so `kill_pid_tree(child.id())` can clean up descendants.
 pub fn configure_child_process_group(command: &mut Command) {
@@ -702,5 +774,112 @@ mod tests {
         assert_eq!(cloned.pid, info.pid);
         assert_eq!(cloned.user, info.user);
         assert_eq!(cloned.command, info.command);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod simple_cancel_watcher_tests {
+    use super::{configure_child_process_group, spawn_simple_cancel_watcher};
+    use crate::services::provider::CancelToken;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    /// #2250: a CancelToken-driven watcher must kill the child process tree
+    /// within ~1s of the token flipping to cancelled. This guards against
+    /// regressions where the watcher loop is wired up but cancellation
+    /// signal does not actually terminate the child.
+    #[test]
+    fn watcher_kills_sleeping_child_when_token_is_cancelled() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        configure_child_process_group(&mut command);
+        let mut child = command.spawn().expect("sleep should spawn");
+        let pid = child.id();
+
+        let token = Arc::new(CancelToken::new());
+        let watcher = spawn_simple_cancel_watcher(Some(token.clone()), pid);
+
+        // Mid-flight cancel: the spawned watcher must observe this and
+        // SIGTERM the process group within 1-2 seconds.
+        let cancel_at = Instant::now();
+        token.cancelled.store(true, Ordering::Relaxed);
+
+        // Wait up to 2s for the child to exit (watcher poll = 100ms).
+        let status = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                break status;
+            }
+            if cancel_at.elapsed() > Duration::from_secs(2) {
+                let _ = child.kill();
+                panic!(
+                    "watcher did not kill child within 2s of cancel; elapsed {:?}",
+                    cancel_at.elapsed()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+
+        // child was killed by signal, not exit(0)
+        assert!(
+            !status.success(),
+            "expected non-zero exit because watcher killed the child, got {:?}",
+            status
+        );
+        watcher.disarm();
+    }
+
+    /// Sanity: when no token is supplied, the watcher must not interfere.
+    /// A None-token watcher should be an inert handle.
+    #[test]
+    fn watcher_is_noop_without_token() {
+        let watcher = spawn_simple_cancel_watcher(None, 0);
+        watcher.disarm();
+    }
+
+    /// #2250 (Codex review follow-up): when the spawned child has its own
+    /// process group (as codex/claude simple calls now do), the watcher's
+    /// `kill_pid_tree` must reap a grandchild that outlives the direct
+    /// child. This guards against regressions where wrapper / grandchild
+    /// processes leak after cancellation.
+    #[test]
+    fn watcher_reaps_grandchild_when_child_uses_process_group() {
+        // The parent `sh` exec's into a background `sleep` and a `wait` so
+        // the process group contains both. Killing only the direct PID
+        // would orphan the sleep; only a group kill reaps it within the
+        // assertion window.
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        configure_child_process_group(&mut command);
+        let mut child = command.spawn().expect("sh wrapper should spawn");
+        let pid = child.id();
+
+        let token = Arc::new(CancelToken::new());
+        let watcher = spawn_simple_cancel_watcher(Some(token.clone()), pid);
+        // Give the wrapper a moment to actually fork the sleep.
+        std::thread::sleep(Duration::from_millis(200));
+        token.cancelled.store(true, Ordering::Relaxed);
+
+        let cancel_at = Instant::now();
+        let status = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                break status;
+            }
+            if cancel_at.elapsed() > Duration::from_secs(3) {
+                let _ = child.kill();
+                panic!(
+                    "watcher did not kill process group within 3s; elapsed {:?}",
+                    cancel_at.elapsed()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(
+            !status.success(),
+            "expected non-zero exit after group kill, got {:?}",
+            status
+        );
+        watcher.disarm();
     }
 }

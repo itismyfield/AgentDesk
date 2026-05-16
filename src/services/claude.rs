@@ -420,7 +420,7 @@ pub fn execute_command_simple_cancellable(
     prompt: &str,
     cancel_token: Option<&CancelToken>,
 ) -> Result<String, String> {
-    execute_command_simple_with_model_and_cancel(prompt, None, cancel_token)
+    execute_command_simple_with_model_and_cancel(prompt, None, cancel_token, None)
 }
 
 /// Execute a simple Claude CLI call with optional model override (no tools, text-only response).
@@ -429,13 +429,37 @@ pub fn execute_command_simple_with_model(
     prompt: &str,
     model_override: Option<&str>,
 ) -> Result<String, String> {
-    execute_command_simple_with_model_and_cancel(prompt, model_override, None)
+    execute_command_simple_with_model_and_cancel(prompt, model_override, None, None)
+}
+
+/// Cancel-aware variant of [`execute_command_simple_with_model`].
+///
+/// Threads the supplied `CancelToken` into the spawned Claude child so that a
+/// mid-flight cancel (e.g. voice barge-in) terminates the process tree
+/// instead of letting it run to natural exit. Required by ADR #2175 for all
+/// non-foreground entry points — call sites that hold a `CancelToken` from
+/// the surrounding turn MUST use this variant.
+///
+/// This is a blocking function — call from `tokio::task::spawn_blocking`.
+pub fn execute_command_simple_cancellable_with_model(
+    prompt: &str,
+    model_override: Option<&str>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+) -> Result<String, String> {
+    let borrow = cancel_token.as_deref();
+    execute_command_simple_with_model_and_cancel(
+        prompt,
+        model_override,
+        borrow,
+        cancel_token.clone(),
+    )
 }
 
 fn execute_command_simple_with_model_and_cancel(
     prompt: &str,
     model_override: Option<&str>,
     cancel_token: Option<&CancelToken>,
+    cancel_token_arc: Option<std::sync::Arc<CancelToken>>,
 ) -> Result<String, String> {
     let session_selection =
         crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
@@ -464,6 +488,10 @@ fn execute_command_simple_with_model_and_cancel(
 
     let mut command = Command::new(&claude_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
+    // #2250: put Claude in its own process group so the simple-cancel
+    // watcher can terminate any wrapper / grandchild via
+    // `kill_pid_tree(child_pid)`. Without this, descendants survive cancel.
+    crate::services::process::configure_child_process_group(&mut command);
     let mut child = command
         .args(&args)
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
@@ -474,7 +502,8 @@ fn execute_command_simple_with_model_and_cancel(
         .spawn()
         .map_err(|e| format!("Failed to start Claude: {}", e))?;
 
-    register_child_pid(cancel_token, child.id());
+    let child_pid = child.id();
+    register_child_pid(cancel_token, child_pid);
     if cancel_requested(cancel_token) {
         kill_child_tree(&mut child);
         return Err("Claude request cancelled".to_string());
@@ -484,9 +513,18 @@ fn execute_command_simple_with_model_and_cancel(
         let _ = stdin.write_all(prompt.as_bytes());
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to read output: {}", e))?;
+    // ADR #2175: mid-flight cancel watcher; see codex.rs counterpart.
+    let cancel_watcher =
+        crate::services::process::spawn_simple_cancel_watcher(cancel_token_arc, child_pid);
+
+    let output_result = child.wait_with_output();
+    cancel_watcher.disarm();
+    let was_cancelled = cancel_requested(cancel_token);
+    let output = output_result.map_err(|e| format!("Failed to read output: {}", e))?;
+
+    if was_cancelled {
+        return Err("Claude request cancelled".to_string());
+    }
 
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
