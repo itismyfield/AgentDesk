@@ -4685,7 +4685,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/turns/{channel_id}/cancel",
             "queue",
-            "Cancel the active turn in a channel. Default (force=false) drains the channel mailbox and preserves the live tmux session and tool subprocesses (cargo, claude CLI, …) — the usual meaning of 'queue 정리'. force=true tears the tmux session down and SIGKILLs the entire child PID tree; the turn will not complete gracefully. Reserve force=true for explicit recovery (#1196). See src/server/routes/queue_api.rs::cancel_turn.",
+            "Cancel the active turn in a channel. Default (force=false) requests the preserve path: drain the channel mailbox while leaving the live tmux session and tool subprocesses (cargo, claude CLI, …) alone — the usual meaning of 'queue 정리'. NOTE: this is best-effort, not a hard guarantee. The underlying C-c → SIGKILL → child cleanup can still take the tmux session down as a side effect (e.g. the Claude TUI wrapper exits when `claude` exits). The authoritative side-effect signal is `tmux_killed=true` in the response; treat that flag as the source of truth regardless of `lifecycle_path` (canonical, runtime-fallback, and direct-fallback paths can all report `tmux_killed=true` on the preserve route — `lifecycle_path` only describes which cleanup route ran, not whether tmux survived). force=true tears the tmux session down and SIGKILLs the entire child PID tree; the turn will not complete gracefully. Reserve force=true for explicit recovery (#1196). Always inspect `tmux_killed`, `lifecycle_path`, `queue_preserved`, and `inflight_cleared` to learn what actually happened. `dispatch_cancelled` reports the *attempted* dispatch id (the one this cancel-turn correlated to); the underlying postgres dispatch cancel is best-effort and logs warnings on failure rather than aborting the response, so do not treat a non-null `dispatch_cancelled` as proof the dispatch row reached a terminal state — verify via `/api/dispatches/{id}` if certainty is required. See src/server/routes/queue_api.rs::cancel_turn and src/services/queue.rs::QueueService::cancel_turn.",
         )
         .with_params([
             ("channel_id", path_param("Discord channel ID hosting the live turn")),
@@ -4694,19 +4694,42 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 query_param(
                     "boolean",
                     false,
-                    "false (default): drain mailbox, keep tmux session + tool subprocesses alive. true: SIGKILL the tmux session and child PID tree; in-flight cargo/claude subprocesses are terminated.",
+                    "false (default): drain mailbox and request the preserve path (live tmux session + tool subprocesses kept alive on a best-effort basis; `tmux_killed=true` in the response indicates the session died as a side effect). true: SIGKILL the tmux session and child PID tree; in-flight cargo/claude subprocesses are terminated.",
                 )
                 .with_default(false),
             ),
         ])
         .with_example(
             json!({"path": {"channel_id": "1473922824350601297"}}),
-            json!({"ok": true, "channel_id": "1473922824350601297", "cancelled": true, "force": false}),
+            json!({
+                "ok": true,
+                "channel_id": "1473922824350601297",
+                "agent_id": "agent-cc",
+                "requested_provider": "claude",
+                "exact_channel_match": true,
+                "session_key": "claude:1473922824350601297:agentdesk-claude-channel-1473922824350601297",
+                "tmux_session": "agentdesk-claude-channel-1473922824350601297",
+                "tmux_killed": false,
+                "lifecycle_path": "canonical",
+                "queued_remaining": 0,
+                "queued_before": 0,
+                "queue_preserved": true,
+                "queue_disk_present_before": false,
+                "queue_disk_present_after": false,
+                "inflight_cleared": false,
+                "dispatch_cancelled": null,
+                "turn_status": "cancelled",
+                "turn_completed_at": "2026-05-17T03:00:00+00:00"
+            }),
         )
         .with_error_example(
             404,
             json!({"path": {"channel_id": "1473922824350601297"}}),
-            json!({"error": "no active turn for channel"}),
+            json!({
+                "error": "no active turn found for this channel",
+                "code": "queue",
+                "context": {"channel_id": "1473922824350601297"}
+            }),
         )
         .with_curl("curl -X POST 'http://localhost:8787/api/turns/1473922824350601297/cancel?force=false'"),
         ep(
