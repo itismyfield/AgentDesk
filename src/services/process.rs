@@ -837,4 +837,49 @@ mod simple_cancel_watcher_tests {
         let watcher = spawn_simple_cancel_watcher(None, 0);
         watcher.disarm();
     }
+
+    /// #2250 (Codex review follow-up): when the spawned child has its own
+    /// process group (as codex/claude simple calls now do), the watcher's
+    /// `kill_pid_tree` must reap a grandchild that outlives the direct
+    /// child. This guards against regressions where wrapper / grandchild
+    /// processes leak after cancellation.
+    #[test]
+    fn watcher_reaps_grandchild_when_child_uses_process_group() {
+        // The parent `sh` exec's into a background `sleep` and a `wait` so
+        // the process group contains both. Killing only the direct PID
+        // would orphan the sleep; only a group kill reaps it within the
+        // assertion window.
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        configure_child_process_group(&mut command);
+        let mut child = command.spawn().expect("sh wrapper should spawn");
+        let pid = child.id();
+
+        let token = Arc::new(CancelToken::new());
+        let watcher = spawn_simple_cancel_watcher(Some(token.clone()), pid);
+        // Give the wrapper a moment to actually fork the sleep.
+        std::thread::sleep(Duration::from_millis(200));
+        token.cancelled.store(true, Ordering::Relaxed);
+
+        let cancel_at = Instant::now();
+        let status = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                break status;
+            }
+            if cancel_at.elapsed() > Duration::from_secs(3) {
+                let _ = child.kill();
+                panic!(
+                    "watcher did not kill process group within 3s; elapsed {:?}",
+                    cancel_at.elapsed()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(
+            !status.success(),
+            "expected non-zero exit after group kill, got {:?}",
+            status
+        );
+        watcher.disarm();
+    }
 }

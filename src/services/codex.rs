@@ -642,6 +642,11 @@ fn execute_command_simple_inner(
 
     let mut command = Command::new(&codex_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
+    // #2250: put Codex in its own process group so that
+    // `kill_pid_tree(child_pid)` from the simple-cancel watcher reaches any
+    // wrapper / grandchild it may have spawned. Without this, the watcher
+    // can only terminate the immediate child PID and any descendants leak.
+    crate::services::process::configure_child_process_group(&mut command);
     let mut child = command
         .args(&args)
         .current_dir(working_dir)

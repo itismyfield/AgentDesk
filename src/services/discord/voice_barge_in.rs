@@ -324,11 +324,18 @@ async fn generate_foreground_ack_text(
             return None;
         }
         Err(_) => {
+            // #2250: on timeout, flip the shared CancelToken so the
+            // detached spawn_blocking task's mid-flight cancel watcher
+            // terminates the spawned child instead of letting it run to
+            // natural exit. Without this, dropping the JoinHandle has no
+            // effect on the running blocking task.
+            cancel_token.set_cancel_source("voice_foreground_ack_timeout");
+            cancel_token.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
                 foreground_model = %foreground.model,
-                "voice foreground model timed out; skipping spoken fallback"
+                "voice foreground model timed out; skipping spoken fallback (#2250: token cancelled)"
             );
             return None;
         }
@@ -473,11 +480,15 @@ async fn generate_voice_channel_text_reply(
             return None;
         }
         Err(_) => {
+            // #2250: see comment in `generate_foreground_ack_text` —
+            // signal cancel so the detached blocking child is killed.
+            cancel_token.set_cancel_source("voice_channel_text_reply_timeout");
+            cancel_token.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
                 foreground_model = %foreground.model,
-                "voice channel text model timed out"
+                "voice channel text model timed out (#2250: token cancelled)"
             );
             return None;
         }
@@ -559,11 +570,15 @@ async fn generate_voice_background_result_summary(
             return None;
         }
         Err(_) => {
+            // #2250: see comment in `generate_foreground_ack_text` —
+            // signal cancel so the detached blocking child is killed.
+            cancel_token.set_cancel_source("voice_background_summary_timeout");
+            cancel_token.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
                 foreground_model = %foreground.model,
-                "voice background summary model timed out"
+                "voice background summary model timed out (#2250: token cancelled)"
             );
             return None;
         }
@@ -1446,14 +1461,28 @@ impl VoiceBargeInRuntime {
             .await;
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
         self.register_inflight_foreground_cancel(voice_channel_id, cancel_token.clone());
-        let summary = generate_voice_background_result_summary(
+        let summary_result = generate_voice_background_result_summary(
             background_result,
             &language,
             &foreground,
             cancel_token.clone(),
         )
-        .await
-        .unwrap_or_else(|| {
+        .await;
+        self.unregister_inflight_foreground_cancel(voice_channel_id, &cancel_token);
+        // #2250: if cancel won the race (e.g. user barge-in or guild
+        // teardown), suppress fallback speech and skip TTS entirely.
+        // Otherwise the user would still hear the completion summary
+        // after they explicitly stopped.
+        if cancel_token.cancelled.load(Ordering::Relaxed) {
+            tracing::info!(
+                voice_channel_id = voice_channel_id.get(),
+                background_channel_id = background_channel_id.get(),
+                cancel_source = ?cancel_token.cancel_source(),
+                "voice background completion summary suppressed because cancel won the race (#2250)"
+            );
+            return;
+        }
+        let summary = summary_result.unwrap_or_else(|| {
             fallback_voice_background_result_summary(
                 background_result,
                 &language,
@@ -1461,7 +1490,6 @@ impl VoiceBargeInRuntime {
                 failed,
             )
         });
-        self.unregister_inflight_foreground_cancel(voice_channel_id, &cancel_token);
         if summary.trim().is_empty() {
             return;
         }
@@ -1682,7 +1710,15 @@ impl VoiceBargeInRuntime {
             return outcome;
         }
 
-        if !super::mailbox_has_active_turn(shared, channel_id).await {
+        // #2250: in-flight foreground Codex/Claude calls are also
+        // cancellable "active work" — do not bail with NoActiveTurn if the
+        // only active work is a foreground call, otherwise barge-in cannot
+        // reach the registered cancel token.
+        let has_inflight_foreground = self
+            .inflight_foreground_cancels
+            .get(&channel_id.get())
+            .is_some_and(|entry| !entry.value().is_empty());
+        if !super::mailbox_has_active_turn(shared, channel_id).await && !has_inflight_foreground {
             return VoiceBargeInTranscriptOutcome::NoActiveTurn;
         }
 
@@ -2317,7 +2353,16 @@ impl VoiceBargeInRuntime {
             return VoiceBargeInTranscriptOutcome::EmptyTranscript;
         }
 
-        if super::mailbox_has_active_turn(shared, channel_id).await {
+        // #2250: also treat in-flight foreground Codex/Claude calls as
+        // active work for barge-in purposes. Otherwise a barge-in arriving
+        // while we are still generating the ack / channel-text / summary
+        // would bypass `handle_processing_transcript` and never cancel the
+        // spawned child.
+        let has_inflight_foreground = self
+            .inflight_foreground_cancels
+            .get(&channel_id.get())
+            .is_some_and(|entry| !entry.value().is_empty());
+        if super::mailbox_has_active_turn(shared, channel_id).await || has_inflight_foreground {
             return self
                 .handle_processing_transcript(shared, provider, channel_id, transcript)
                 .await;

@@ -483,6 +483,10 @@ fn execute_command_simple_with_model_and_cancel(
 
     let mut command = Command::new(&claude_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
+    // #2250: put Claude in its own process group so the simple-cancel
+    // watcher can terminate any wrapper / grandchild via
+    // `kill_pid_tree(child_pid)`. Without this, descendants survive cancel.
+    crate::services::process::configure_child_process_group(&mut command);
     let mut child = command
         .args(&args)
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
