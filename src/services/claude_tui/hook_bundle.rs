@@ -346,9 +346,7 @@ fn expected_matcher_counts() -> &'static [(&'static str, usize)] {
 // TODO(#2259): add an integration test that exercises a real Codex CLI to
 // assert this AgentDesk-computed hash matches Codex's own hash for at least
 // one event. Deferred from #2210 because it requires a Codex CLI binary in CI.
-pub fn codex_hook_self_check_failures(
-    config: &HookBundleConfig,
-) -> Vec<CodexHookSelfCheckFailure> {
+pub fn codex_hook_self_check_failures(config: &HookBundleConfig) -> Vec<CodexHookSelfCheckFailure> {
     let mut failures = Vec::new();
     let entries = codex_hook_state_entries(config);
 
@@ -432,9 +430,7 @@ pub fn run_codex_hook_startup_self_check(
     codex_cli_path: Option<&str>,
 ) -> bool {
     if !codex_cli_present {
-        tracing::debug!(
-            "codex_tui hook self-check skipped: codex CLI not detected on PATH"
-        );
+        tracing::debug!("codex_tui hook self-check skipped: codex CLI not detected on PATH");
         return true;
     }
 
@@ -552,8 +548,9 @@ pub fn run_codex_hook_startup_self_check(
 /// Per-launch deduplication cache for the Codex hook self-check. Keyed by
 /// `(codex_bin_path, codex_cli_version)` so an operator only sees one warning
 /// per distinct binary across the lifetime of the dcserver process.
-static LAUNCH_SELF_CHECK_SEEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<(String, String)>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+static LAUNCH_SELF_CHECK_SEEN: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 /// Per-launch self-check runner. Called each time the Codex TUI launch path
 /// resolves a Codex binary so the operator gets a warning if a session-specific
@@ -870,11 +867,8 @@ mod tests {
         // In-process invariants hold but Codex CLI version is unknown to
         // AgentDesk → still emits a PARTIAL warning (cross-CLI drift risk)
         // and returns false so callers can surface it elsewhere.
-        let pass = run_codex_hook_startup_self_check(
-            true,
-            Some("codex-cli 9.99.99"),
-            Some("/tmp/codex"),
-        );
+        let pass =
+            run_codex_hook_startup_self_check(true, Some("codex-cli 9.99.99"), Some("/tmp/codex"));
         assert!(!pass);
     }
 
