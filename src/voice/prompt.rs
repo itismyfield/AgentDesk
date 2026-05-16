@@ -3,6 +3,10 @@
 /// every field keeps the payload optional + forward-compatible: queue files
 /// written by older binaries (which never embedded the announcement) still
 /// deserialize cleanly and yield `None` at the wrapping `Option` layer.
+///
+/// #2209: Also serialized into the Postgres `voice_transcript_announce_meta`
+/// side store so cross-process intake workers + dcserver restart + gateway
+/// race + TTL eviction paths can recover the announcement metadata.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct VoiceTranscriptAnnouncement {
     pub(crate) transcript: String,
@@ -327,6 +331,10 @@ pub(crate) fn parse_voice_transcript_announcement(
 pub(crate) fn is_voice_transcript_announcement_candidate(text: &str) -> bool {
     text.lines()
         .any(|line| voice_transcript_header_line(line).is_some())
+}
+
+pub(crate) fn is_visible_voice_transcript_announcement(text: &str) -> bool {
+    text.trim_start().starts_with("🎙")
 }
 
 fn voice_transcript_header_line(line: &str) -> Option<&str> {

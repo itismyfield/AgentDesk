@@ -2245,6 +2245,105 @@ pub(crate) async fn execute_intake_turn_core(
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DurablePeekOutcome {
+    /// Row found in the durable table.
+    Found(crate::voice::prompt::VoiceTranscriptAnnouncement),
+    /// No row matched (never produced, or already consumed/expired).
+    NotFound,
+    /// No pg pool configured (single-node dev).
+    NoPool,
+    /// Pg pool IS configured but the peek query errored. Caller MUST
+    /// abort intake for any visible voice-announce candidate — falling
+    /// through to ordinary text would mis-route the message.
+    QueryError,
+}
+
+/// #2209 finding #2 — peek (non-destructive) durable metadata for intake.
+/// The durable row is only consumed via
+/// [`consume_durable_voice_announcement_after_handoff`] once intake has
+/// committed to dispatch. v5 review — tri-state result: query errors
+/// must NOT collapse to "not a voice announce" because that would
+/// silently downgrade the message to ordinary text.
+async fn peek_durable_voice_announcement_for_intake(
+    pg_pool: Option<&sqlx::PgPool>,
+    message_id: MessageId,
+) -> DurablePeekOutcome {
+    let Some(pool) = pg_pool else {
+        return DurablePeekOutcome::NoPool;
+    };
+    match crate::voice::announce_meta::peek_durable(pool, message_id).await {
+        Ok(Some(announcement)) => DurablePeekOutcome::Found(announcement),
+        Ok(None) => DurablePeekOutcome::NotFound,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                message_id = message_id.get(),
+                "failed to peek durable voice transcript announcement metadata — failing closed"
+            );
+            DurablePeekOutcome::QueryError
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableConsumeOutcome {
+    /// This worker successfully claimed the row and may proceed
+    /// with dispatch.
+    Claimed,
+    /// A peer worker already claimed the row, or the row TTL'd
+    /// between peek and claim. Caller MUST abort dispatch.
+    AlreadyClaimedOrExpired,
+    /// No pg pool configured at all (single-node dev). The in-process
+    /// local store is the source of truth. Caller proceeds.
+    NoPool,
+    /// Pg pool IS configured but the claim query itself errored.
+    /// Caller MUST fail closed and abort — we cannot prove ownership.
+    QueryError,
+}
+
+/// Atomic ownership claim at the dispatch commit point. See
+/// `crate::voice::announce_meta::consume_durable` for the contract.
+async fn consume_durable_voice_announcement_after_handoff(
+    pg_pool: Option<&sqlx::PgPool>,
+    message_id: MessageId,
+) -> DurableConsumeOutcome {
+    let Some(pool) = pg_pool else {
+        return DurableConsumeOutcome::NoPool;
+    };
+    match crate::voice::announce_meta::consume_durable(pool, message_id).await {
+        Ok(Some(_)) => DurableConsumeOutcome::Claimed,
+        Ok(None) => DurableConsumeOutcome::AlreadyClaimedOrExpired,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                message_id = message_id.get(),
+                "failed to consume durable voice transcript announcement metadata — failing closed"
+            );
+            // #2209 v4 review — fail closed. A transient DB error at
+            // the ownership gate must NOT let the handler proceed
+            // into side-effectful work without proving it owns the
+            // durable row.
+            DurableConsumeOutcome::QueryError
+        }
+    }
+}
+
+#[cfg(test)]
+async fn take_durable_voice_announcement_for_intake(
+    pg_pool: Option<&sqlx::PgPool>,
+    message_id: MessageId,
+) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
+    let announcement = match peek_durable_voice_announcement_for_intake(pg_pool, message_id).await {
+        DurablePeekOutcome::Found(a) => a,
+        _ => return None,
+    };
+    match consume_durable_voice_announcement_after_handoff(pg_pool, message_id).await {
+        DurableConsumeOutcome::Claimed => Some(announcement),
+        _ => None,
+    }
+}
+
 pub(in crate::services::discord) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     channel_id: ChannelId,
@@ -2270,39 +2369,63 @@ pub(in crate::services::discord) async fn handle_text_message(
     } = *deps;
     let original_channel_id = channel_id;
     let stored_voice_announcement = crate::voice::announce_meta::global_store().take(user_msg_id);
-    let has_stored_voice_announcement = stored_voice_announcement.is_some();
     let parsed_voice_announcement =
         if crate::voice::prompt::is_voice_transcript_announcement_candidate(user_text) {
             crate::voice::prompt::parse_voice_transcript_announcement(user_text)
         } else {
             None
         };
-    let announce_bot_id = if has_stored_voice_announcement || parsed_voice_announcement.is_some() {
+    let has_parsed_voice_announcement = parsed_voice_announcement.is_some();
+    // #2209 finding #2 + v5 review: peek only — durable row stays in place
+    // until the atomic claim runs below. Tri-state: a query error on a
+    // visible voice-announce candidate must abort, not fall through.
+    let visible_voice_candidate = stored_voice_announcement.is_none()
+        && !has_parsed_voice_announcement
+        && crate::voice::prompt::is_visible_voice_transcript_announcement(user_text);
+    let durable_voice_announcement = if visible_voice_candidate {
+        match peek_durable_voice_announcement_for_intake(shared.pg_pool.as_ref(), user_msg_id).await
+        {
+            DurablePeekOutcome::Found(announcement) => Some(announcement),
+            DurablePeekOutcome::NotFound => None,
+            DurablePeekOutcome::NoPool => None,
+            DurablePeekOutcome::QueryError => {
+                // Cannot prove ownership without the durable table —
+                // refuse to fall through to ordinary text intake.
+                tracing::warn!(
+                    event = "voice_announce_durable_peek_query_error",
+                    channel_id = channel_id.get(),
+                    message_id = user_msg_id.get(),
+                    "aborting intake — durable peek query errored on a visible voice-announce candidate; refusing to downgrade to ordinary text"
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    // Capture source flags before the .or() chain below moves the options.
+    let had_local_store_entry = stored_voice_announcement.is_some();
+    let had_durable_peek = durable_voice_announcement.is_some();
+    let reconstructed_voice_announcement = stored_voice_announcement.or(durable_voice_announcement);
+    let has_reconstructed_voice_announcement = reconstructed_voice_announcement.is_some();
+    let announce_bot_id = if has_reconstructed_voice_announcement || has_parsed_voice_announcement {
         super::super::resolve_announce_bot_user_id(shared).await
     } else {
         None
     };
     let voice_announcement = if announce_bot_id == Some(request_owner.get()) {
-        if has_stored_voice_announcement {
-            stored_voice_announcement
-        } else {
-            crate::voice::prompt::parse_authorized_voice_transcript_announcement(
-                user_text,
-                request_owner.get(),
-                announce_bot_id,
-            )
-        }
+        reconstructed_voice_announcement.or(parsed_voice_announcement)
     } else {
         None
     };
-    if has_stored_voice_announcement && announce_bot_id.is_none() {
+    if has_reconstructed_voice_announcement && announce_bot_id.is_none() {
         tracing::warn!(
             channel_id = channel_id.get(),
             message_id = user_msg_id.get(),
             author_id = request_owner.get(),
-            "dropping stored voice transcript announcement because announce bot user id is unavailable"
+            "dropping reconstructed voice transcript announcement because announce bot user id is unavailable"
         );
-    } else if (has_stored_voice_announcement || parsed_voice_announcement.is_some())
+    } else if (has_reconstructed_voice_announcement || has_parsed_voice_announcement)
         && voice_announcement.is_none()
     {
         tracing::warn!(
@@ -2314,6 +2437,84 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
     }
     let is_voice_announcement = voice_announcement.is_some();
+    // KNOWN GAP (#2209 follow-up — Codex v6 finding):
+    // The atomic durable claim below runs BEFORE
+    // `mailbox_try_start_turn_with_terminal_marker_cleanup`. When the
+    // channel is busy and the race-loss path enqueues this turn as a
+    // plain `Intervention` (see `build_race_requeued_intervention`),
+    // the queued payload carries only the rewritten transcript text —
+    // not the full `VoiceTranscriptAnnouncement` (utterance_id,
+    // language, verbose_progress, started_at, samples_written) or
+    // `Source::Voice`. By the time the queued message dispatches, the
+    // durable row is already consumed, so the dispatched turn runs as
+    // ordinary text without voice metadata.
+    //
+    // Resolving this cleanly requires either:
+    //   (a) re-INSERTing the announcement into the durable table when
+    //       `mailbox_try_start_turn` returns `false`, restoring the
+    //       row so the requeued dispatch can peek+claim again, OR
+    //   (b) embedding the serialized `VoiceTranscriptAnnouncement` in
+    //       the queued `Intervention` payload so requeued dispatch
+    //       can re-hydrate metadata without touching the durable table.
+    //
+    // (a) is the smaller change but creates a transient window where a
+    // peer worker could re-claim before our requeue dispatches. (b)
+    // touches the `Intervention` struct and several encoders. Tracking
+    // as a follow-up to keep this PR scoped to the three original
+    // adversarial-review findings + the directly induced fail-closed
+    // and ordering corrections. The current behavior is a graceful
+    // degradation (voice turn runs as plain text on a busy channel),
+    // not a correctness violation or duplicate-dispatch race.
+    //
+    // #2209 v3 review — the atomic durable claim is the FIRST
+    // side-effectful gate for voice-announce intake. We claim
+    // unconditionally for any voice-announce intake (durable peek
+    // path AND local-store fast path) so a peer process can never
+    // run side effects for a turn we already own and vice versa.
+    //
+    // Producer ordering (see voice_barge_in.rs) guarantees the
+    // durable row is committed BEFORE the local store is published,
+    // so by the time any process intakes a voice announce message,
+    // a claimable durable row exists. The only `Skipped` case in
+    // practice is single-node dev with no pg pool, where the local
+    // store's `take()` semantics already provide single-consumer
+    // ownership inside the process.
+    if is_voice_announcement {
+        let outcome =
+            consume_durable_voice_announcement_after_handoff(shared.pg_pool.as_ref(), user_msg_id)
+                .await;
+        match outcome {
+            DurableConsumeOutcome::Claimed => {
+                // Authoritative owner — proceed with intake.
+            }
+            DurableConsumeOutcome::AlreadyClaimedOrExpired => {
+                tracing::warn!(
+                    event = "voice_announce_durable_claim_lost",
+                    channel_id = channel_id.get(),
+                    message_id = user_msg_id.get(),
+                    had_local_store_entry,
+                    had_durable_peek,
+                    "aborting intake — peer worker already claimed this voice announce (or TTL expired between peek and consume); no side effects performed"
+                );
+                return Ok(());
+            }
+            DurableConsumeOutcome::QueryError => {
+                tracing::warn!(
+                    event = "voice_announce_durable_claim_query_error",
+                    channel_id = channel_id.get(),
+                    message_id = user_msg_id.get(),
+                    had_local_store_entry,
+                    had_durable_peek,
+                    "aborting intake — durable claim query errored and ownership cannot be proven; no side effects performed"
+                );
+                return Ok(());
+            }
+            DurableConsumeOutcome::NoPool => {
+                // No pg pool configured — single-node dev. Local
+                // store `take` is the ownership token.
+            }
+        }
+    }
     let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
         let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
         if let Some(started_at) = announcement.started_at.as_deref() {
@@ -2365,6 +2566,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             .try_handle_voice_transcript_announcement(shared, channel_id, announcement)
             .await
     {
+        // Durable row already claimed at the top of this handler.
+        // No additional cleanup needed here.
         return Ok(());
     }
     if !is_voice_announcement
@@ -4587,6 +4790,11 @@ pub(in crate::services::discord) async fn handle_text_message(
         tracing::info!("  [{ts}]   ⚠ inflight state save failed: {e}");
     }
 
+    // Durable announce-meta row was already claimed at the top of
+    // this handler (before any side effects). No further consume is
+    // required here — reaching this point means we are the
+    // authoritative owner of this turn.
+
     // Create channel for streaming
     let (tx, rx) = mpsc::channel();
     let (completion_tx, completion_rx) = if wait_for_completion {
@@ -6282,6 +6490,102 @@ Any other message is sent to {p}.
         Ok(false)
     */
     super::super::commands::handle_text_command(ctx, msg, data, channel_id, text).await
+}
+
+#[cfg(test)]
+mod voice_announce_meta_reconstruction_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
+    fn announcement() -> crate::voice::prompt::VoiceTranscriptAnnouncement {
+        crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: "clustered worker should reconstruct this".to_string(),
+            user_id: "42".to_string(),
+            utterance_id: "utt-worker".to_string(),
+            language: "en-US".to_string(),
+            verbose_progress: true,
+            started_at: Some("2026-05-16T10:00:00+09:00".to_string()),
+            completed_at: Some("2026-05-16T10:00:01+09:00".to_string()),
+            samples_written: Some(48_000),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_reconstruction_consumes_durable_metadata_without_local_store() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(77_001);
+        let expected = announcement();
+
+        crate::voice::announce_meta::persist_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable voice announcement metadata");
+
+        let reconstructed = take_durable_voice_announcement_for_intake(Some(&pool), message_id)
+            .await
+            .expect("metadata should reconstruct across process-local stores");
+        assert_eq!(reconstructed, expected);
+        assert!(
+            take_durable_voice_announcement_for_intake(Some(&pool), message_id)
+                .await
+                .is_none(),
+            "durable metadata is one-shot once intake consumes it"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2209 finding #2 — peek must not delete; consume must.
+    /// Simulates the worker-crash window: intake peeks the row, then
+    /// the handler returns (worker crash) before consume runs. The
+    /// row must survive so a retry can recover.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peek_then_crash_before_consume_leaves_durable_row_intact() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(77_101);
+        let expected = announcement();
+
+        crate::voice::announce_meta::persist_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable voice announcement metadata");
+
+        let peeked = match peek_durable_voice_announcement_for_intake(Some(&pool), message_id).await
+        {
+            DurablePeekOutcome::Found(a) => a,
+            other => panic!("expected Found peek, got {other:?}"),
+        };
+        assert_eq!(peeked, expected);
+
+        // Simulate crash: consume never runs.
+
+        // Retry peek must still see the row.
+        let retry_peeked =
+            match peek_durable_voice_announcement_for_intake(Some(&pool), message_id).await {
+                DurablePeekOutcome::Found(a) => a,
+                other => panic!("expected Found retry peek, got {other:?}"),
+            };
+        assert_eq!(retry_peeked, expected);
+
+        // Successful retry: atomic claim succeeds.
+        let outcome =
+            consume_durable_voice_announcement_after_handoff(Some(&pool), message_id).await;
+        assert_eq!(outcome, DurableConsumeOutcome::Claimed);
+        assert!(
+            matches!(
+                peek_durable_voice_announcement_for_intake(Some(&pool), message_id).await,
+                DurablePeekOutcome::NotFound
+            ),
+            "consumed row must be invisible to subsequent peeks"
+        );
+        // Sibling/duplicate consume sees the lost-claim outcome.
+        let dup = consume_durable_voice_announcement_after_handoff(Some(&pool), message_id).await;
+        assert_eq!(dup, DurableConsumeOutcome::AlreadyClaimedOrExpired);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 #[cfg(test)]

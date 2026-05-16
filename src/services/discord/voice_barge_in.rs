@@ -2141,9 +2141,61 @@ impl VoiceBargeInRuntime {
             .await
         {
             Ok(outcome) => {
+                let mut durable_publish_failed = false;
                 if let Some(message_id) = outcome.message_id {
-                    crate::voice::announce_meta::global_store()
-                        .insert(message_id, announcement_meta);
+                    // #2209 follow-up review — publish to the durable
+                    // table BEFORE the in-process local store. Otherwise
+                    // a same-process MESSAGE_CREATE handler could pull
+                    // the local entry, run consume_durable (which sees
+                    // no row), dispatch, and THEN the durable INSERT
+                    // lands, leaving an orphaned replayable row until
+                    // the next GC sweep.
+                    //
+                    // v4 review — when pg pool is configured but the
+                    // durable INSERT fails, do NOT publish the local
+                    // store entry either.
+                    //
+                    // v5 review — durable publish is a PREREQUISITE for
+                    // VoiceTurnStarted when pg is configured. If the
+                    // INSERT fails we return VoiceTurnStartFailed so
+                    // upstream telemetry/retry logic can surface the
+                    // data loss instead of believing the turn started.
+                    let durable_publish = if let Some(pool) = shared.pg_pool.as_ref() {
+                        match crate::voice::announce_meta::persist_durable(
+                            pool,
+                            message_id,
+                            &announcement_meta,
+                        )
+                        .await
+                        {
+                            Ok(()) => true,
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    source_channel_id = source_channel_id.get(),
+                                    target_channel_id = target_channel_id.get(),
+                                    message_id = message_id.get(),
+                                    utterance_id = %utterance.utterance_id,
+                                    "failed to persist voice transcript announcement metadata — voice turn cannot be claimed; reporting VoiceTurnStartFailed"
+                                );
+                                durable_publish_failed = true;
+                                false
+                            }
+                        }
+                    } else {
+                        // No pg pool — local-only mode; the in-process
+                        // store IS the source of truth.
+                        true
+                    };
+                    if durable_publish {
+                        crate::voice::announce_meta::global_store()
+                            .insert(message_id, announcement_meta.clone());
+                    }
+                }
+                if durable_publish_failed {
+                    return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(
+                        "durable_announce_meta_persist_failed".to_string(),
+                    );
                 }
                 tracing::info!(
                     source_channel_id = source_channel_id.get(),

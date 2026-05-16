@@ -67,6 +67,7 @@ impl MaintenanceJobRegistry {
             Arc::new(QualityRegressionAlerterJob),
             Arc::new(CancelTombstonePruneJob),
             Arc::new(PromptManifestRetentionJob::new(prompt_manifest_retention)),
+            Arc::new(VoiceAnnounceMetaGcJob),
         ])
     }
 
@@ -230,6 +231,43 @@ impl MaintenanceJob for PromptManifestRetentionJob {
                     trimmed = report.trimmed_full_content,
                     horizon_at = ?report.horizon_at,
                     "[maintenance] prompt_manifest_retention trimmed full content"
+                );
+            }
+            Ok(())
+        })
+    }
+}
+
+/// #2209 finding #3 — sweep `voice_transcript_announce_meta` rows older
+/// than the durable-announce TTL (10 minutes). Runs every 15 minutes on
+/// the leader so the table cannot grow without bound when producers
+/// occasionally insert metadata that no intake ever consumes (e.g. shard
+/// failover, intake crash before `consume_durable`). Conservative 60-second
+/// stagger keeps it sequenced after the other storage jobs at boot.
+struct VoiceAnnounceMetaGcJob;
+
+impl MaintenanceJob for VoiceAnnounceMetaGcJob {
+    fn name(&self) -> &'static str {
+        "storage.voice_announce_meta_gc"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(Duration::from_secs(15 * 60), Duration::from_secs(60))
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let ttl = Duration::from_secs(
+                crate::voice::announce_meta::DURABLE_ANNOUNCE_META_TTL_SECS as u64,
+            );
+            let deleted = crate::voice::announce_meta::gc_expired_voice_announce_meta_pg(pool, ttl)
+                .await
+                .map_err(|error| anyhow::anyhow!("voice_announce_meta_gc failed: {error}"))?;
+            if deleted > 0 {
+                tracing::info!(
+                    job = self.name(),
+                    deleted,
+                    "[maintenance] voice_announce_meta_gc removed expired rows"
                 );
             }
             Ok(())
