@@ -832,8 +832,7 @@ impl Drop for SupervisedWorkerRegistry {
 mod leader_takeover_tests {
     use super::{
         LEADER_ONLY_WORKER_ACTIVE_COUNT, LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS,
-        LEADER_ONLY_WORKERS_STARTED, SupervisedWorkerRegistry, WORKER_SPECS,
-        WorkerExecutionScope,
+        LEADER_ONLY_WORKERS_STARTED, SupervisedWorkerRegistry, WORKER_SPECS, WorkerExecutionScope,
     };
     use crate::server::cluster::ClusterRuntime;
     use std::sync::Arc;
