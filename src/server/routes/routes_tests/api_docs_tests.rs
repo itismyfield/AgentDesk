@@ -770,7 +770,8 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
     let transition_description = transition["description"].as_str().unwrap_or_default();
     assert!(
         transition_description.contains("force-transition semantics")
-            && transition_description.contains("old /force-transition path is removed")
+            && transition_description.contains("/api/kanban-cards/{id}/force-transition")
+            && transition_description.contains("fully removed")
             && transition_description.contains("Bearer"),
         "transition docs must clarify force-transition semantics and canonical path: {transition_description}"
     );
