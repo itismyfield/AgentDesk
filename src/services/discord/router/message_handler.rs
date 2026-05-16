@@ -2334,8 +2334,7 @@ async fn take_durable_voice_announcement_for_intake(
     pg_pool: Option<&sqlx::PgPool>,
     message_id: MessageId,
 ) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
-    let announcement = match peek_durable_voice_announcement_for_intake(pg_pool, message_id).await
-    {
+    let announcement = match peek_durable_voice_announcement_for_intake(pg_pool, message_id).await {
         DurablePeekOutcome::Found(a) => a,
         _ => return None,
     };
@@ -2384,8 +2383,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         && !has_parsed_voice_announcement
         && crate::voice::prompt::is_visible_voice_transcript_announcement(user_text);
     let durable_voice_announcement = if visible_voice_candidate {
-        match peek_durable_voice_announcement_for_intake(shared.pg_pool.as_ref(), user_msg_id)
-            .await
+        match peek_durable_voice_announcement_for_intake(shared.pg_pool.as_ref(), user_msg_id).await
         {
             DurablePeekOutcome::Found(announcement) => Some(announcement),
             DurablePeekOutcome::NotFound => None,
@@ -2482,11 +2480,9 @@ pub(in crate::services::discord) async fn handle_text_message(
     // store's `take()` semantics already provide single-consumer
     // ownership inside the process.
     if is_voice_announcement {
-        let outcome = consume_durable_voice_announcement_after_handoff(
-            shared.pg_pool.as_ref(),
-            user_msg_id,
-        )
-        .await;
+        let outcome =
+            consume_durable_voice_announcement_after_handoff(shared.pg_pool.as_ref(), user_msg_id)
+                .await;
         match outcome {
             DurableConsumeOutcome::Claimed => {
                 // Authoritative owner — proceed with intake.
@@ -6555,8 +6551,7 @@ mod voice_announce_meta_reconstruction_tests {
             .await
             .expect("persist durable voice announcement metadata");
 
-        let peeked = match peek_durable_voice_announcement_for_intake(Some(&pool), message_id)
-            .await
+        let peeked = match peek_durable_voice_announcement_for_intake(Some(&pool), message_id).await
         {
             DurablePeekOutcome::Found(a) => a,
             other => panic!("expected Found peek, got {other:?}"),

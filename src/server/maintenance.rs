@@ -260,12 +260,9 @@ impl MaintenanceJob for VoiceAnnounceMetaGcJob {
             let ttl = Duration::from_secs(
                 crate::voice::announce_meta::DURABLE_ANNOUNCE_META_TTL_SECS as u64,
             );
-            let deleted =
-                crate::voice::announce_meta::gc_expired_voice_announce_meta_pg(pool, ttl)
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("voice_announce_meta_gc failed: {error}")
-                    })?;
+            let deleted = crate::voice::announce_meta::gc_expired_voice_announce_meta_pg(pool, ttl)
+                .await
+                .map_err(|error| anyhow::anyhow!("voice_announce_meta_gc failed: {error}"))?;
             if deleted > 0 {
                 tracing::info!(
                     job = self.name(),

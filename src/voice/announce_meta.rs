@@ -499,10 +499,7 @@ mod tests {
             .iter()
             .filter(|r| r.is_some())
             .count();
-        assert_eq!(
-            winners, 1,
-            "exactly one consumer must win the atomic claim"
-        );
+        assert_eq!(winners, 1, "exactly one consumer must win the atomic claim");
         let winner = result_a.as_ref().or(result_b.as_ref()).unwrap();
         assert_eq!(winner, &expected);
 
