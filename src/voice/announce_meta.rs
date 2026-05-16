@@ -44,6 +44,16 @@ impl VoiceAnnouncementMetaStore {
             .remove(&message_id.get())
             .map(|stored| stored.announcement)
     }
+
+    pub(crate) fn contains(&self, message_id: MessageId) -> bool {
+        let mut entries = match self.entries.write() {
+            Ok(entries) => entries,
+            Err(_) => return false,
+        };
+        let now = Instant::now();
+        prune_expired_locked(&mut entries, now);
+        entries.contains_key(&message_id.get())
+    }
 }
 
 fn prune_expired_locked(
@@ -83,5 +93,15 @@ mod tests {
 
         assert_eq!(store.take(message_id).unwrap().utterance_id, "utt-1");
         assert!(store.take(message_id).is_none());
+    }
+
+    #[test]
+    fn contains_does_not_consume_entry() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let message_id = MessageId::new(124);
+        store.insert(message_id, announcement());
+
+        assert!(store.contains(message_id));
+        assert_eq!(store.take(message_id).unwrap().utterance_id, "utt-1");
     }
 }

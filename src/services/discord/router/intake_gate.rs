@@ -1189,22 +1189,26 @@ pub(in crate::services::discord) async fn handle_event(
                 .map(|(parent_id, _)| parent_id)
                 .unwrap_or(channel_id);
             let settings_snapshot = { data.shared.settings.read().await.clone() };
-            if validate_live_channel_routing_with_dm_hint(
-                ctx,
-                &data.provider,
-                &settings_snapshot,
-                channel_id,
-                Some(is_dm),
-            )
-            .await
-            .is_err()
+            let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
+            let is_voice_transcript_announcement = announce_bot_id == Some(user_id.get())
+                && (crate::voice::announce_meta::global_store().contains(new_message.id)
+                    || crate::voice::prompt::parse_voice_transcript_announcement(
+                        &new_message.content,
+                    )
+                    .is_some());
+            if !is_voice_transcript_announcement
+                && validate_live_channel_routing_with_dm_hint(
+                    ctx,
+                    &data.provider,
+                    &settings_snapshot,
+                    channel_id,
+                    Some(is_dm),
+                )
+                .await
+                .is_err()
             {
                 return Ok(());
             }
-            let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
-            let is_voice_transcript_announcement = announce_bot_id == Some(user_id.get())
-                && crate::voice::prompt::parse_voice_transcript_announcement(&new_message.content)
-                    .is_some();
             if !is_voice_transcript_announcement
                 && should_skip_for_missing_required_mention(
                     &settings_snapshot,
@@ -1236,7 +1240,7 @@ pub(in crate::services::discord) async fn handle_event(
             {
                 return Ok(());
             }
-            if !is_dm {
+            if !is_dm && !is_voice_transcript_announcement {
                 match resolve_runtime_channel_binding_status(&ctx.http, effective_channel_id).await
                 {
                     RuntimeChannelBindingStatus::Owned => {}
