@@ -325,6 +325,9 @@ The remaining giant-file modules under `src/services/` not covered above:
   `src/services/qwen.rs` (2466), `src/services/codex.rs` (1665),
   `src/services/opencode.rs` (2133), `src/services/provider.rs` (2177) —
   provider adapters.
+- `src/services/codex_tui/rollout_tail.rs` (1031) — Codex TUI rollout tail
+  parsing and resume identity surface; split before adding non-bugfix behavior
+  beyond the #2169 session identity fix.
 - `src/services/memory/memento.rs` (2479).
 - `src/services/observability/mod.rs` (1158) and
   `src/services/observability/pg_io.rs` (1312).

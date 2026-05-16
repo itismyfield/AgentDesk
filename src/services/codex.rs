@@ -165,6 +165,7 @@ fn render_codex_wrapper_tmux_script(
 }
 
 fn base_tui_args(
+    resume_session_id: Option<&str>,
     prompt: &str,
     model: Option<&str>,
     model_reasoning_effort: Option<&str>,
@@ -173,6 +174,12 @@ fn base_tui_args(
     goals_enabled: Option<bool>,
 ) -> Vec<String> {
     let mut args = Vec::new();
+    let resume_session_id = resume_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if resume_session_id.is_some() {
+        args.push("resume".to_string());
+    }
     if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
         if let Some(effort) = model_reasoning_effort
             .map(str::trim)
@@ -190,6 +197,9 @@ fn base_tui_args(
         args.extend(["--sandbox".to_string(), "read-only".to_string()]);
     } else {
         args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+    }
+    if let Some(session_id) = resume_session_id {
+        args.push(session_id.to_string());
     }
     args.extend(["--".to_string(), prompt.to_string()]);
     args
@@ -450,6 +460,7 @@ pub fn execute_command_streaming(
                     model,
                     fast_mode_enabled,
                     goals_enabled,
+                    session_id,
                     working_dir,
                     sender,
                     cancel_token,
@@ -682,6 +693,7 @@ fn execute_streaming_local_tui_tmux(
     model: Option<&str>,
     fast_mode_enabled: Option<bool>,
     goals_enabled: Option<bool>,
+    session_id: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -718,6 +730,12 @@ fn execute_streaming_local_tui_tmux(
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
+    let session_selection = crate::services::codex_tui::session::resolve_codex_tui_session(
+        session_id,
+        std::path::Path::new(working_dir),
+        None,
+        force_fresh_provider_session,
+    );
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
     let env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
@@ -726,6 +744,7 @@ fn execute_streaming_local_tui_tmux(
     );
     let reasoning_effort = std::env::var("AGENTDESK_CODEX_REASONING_EFFORT").ok();
     let args = base_tui_args(
+        session_selection.resume_session_id(),
         prompt,
         model,
         reasoning_effort.as_deref(),
@@ -762,13 +781,35 @@ fn execute_streaming_local_tui_tmux(
         }
     }
 
-    let read_result = crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd(
-        std::path::Path::new(working_dir),
-        rollout_modified_since,
-        sender.clone(),
-        cancel_token,
-        || tmux_session_has_live_pane(tmux_session_name),
-    )?;
+    let read_result = if session_selection.resume {
+        let rollout_path = session_selection
+            .rollout_path
+            .as_deref()
+            .ok_or_else(|| "Codex TUI resume selected without rollout path".to_string())?;
+        let start_offset = session_selection.rollout_start_offset.unwrap_or(0);
+        let selected_session_id = session_selection
+            .selected_session_id
+            .as_deref()
+            .ok_or_else(|| "Codex TUI resume selected without session id".to_string())?;
+        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session(
+            std::path::Path::new(working_dir),
+            selected_session_id,
+            rollout_path,
+            start_offset,
+            rollout_modified_since,
+            sender.clone(),
+            cancel_token,
+            || tmux_session_has_live_pane(tmux_session_name),
+        )?
+    } else {
+        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd(
+            std::path::Path::new(working_dir),
+            rollout_modified_since,
+            sender.clone(),
+            cancel_token,
+            || tmux_session_has_live_pane(tmux_session_name),
+        )?
+    };
 
     if matches!(
         read_result,
@@ -1574,6 +1615,7 @@ mod tui_hosting_tests {
     #[test]
     fn codex_tui_tmux_script_launches_codex_directly_without_wrapper() {
         let args = base_tui_args(
+            None,
             "hello from tui",
             Some("gpt-5-codex"),
             Some("medium"),
@@ -1585,9 +1627,40 @@ mod tui_hosting_tests {
 
         assert!(script.contains("exec '/opt/bin/codex' "));
         assert!(!script.contains("codex-tmux-wrapper"));
+        assert!(!script.contains("'resume'"));
         assert!(script.contains("'-m' 'gpt-5-codex'"));
         assert!(script.contains("--dangerously-bypass-approvals-and-sandbox"));
         assert!(script.contains("'--' 'hello from tui'"));
+    }
+
+    #[test]
+    fn codex_tui_fresh_args_do_not_include_resume() {
+        let args = base_tui_args(None, "fresh prompt", None, None, true, None, None);
+
+        assert!(!args.iter().any(|arg| arg == "resume"));
+        assert_eq!(args.last().map(String::as_str), Some("fresh prompt"));
+    }
+
+    #[test]
+    fn codex_tui_resume_args_include_session_id_before_prompt() {
+        let args = base_tui_args(
+            Some("session-123"),
+            "resume prompt",
+            Some("gpt-5-codex"),
+            Some("high"),
+            false,
+            Some(true),
+            None,
+        );
+
+        assert_eq!(args.first().map(String::as_str), Some("resume"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-m" && pair[1] == "gpt-5-codex")
+        );
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(args[separator - 1], "session-123");
+        assert_eq!(args[separator + 1], "resume prompt");
     }
 
     #[test]
