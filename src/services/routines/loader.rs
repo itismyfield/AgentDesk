@@ -1199,11 +1199,23 @@ mod tests {
     fn bundled_sample_routines_load_and_validate() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routines");
         let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(loader.load_dir(&root).unwrap(), 8);
+        assert_eq!(loader.load_dir(&root).unwrap(), 20);
         assert_eq!(
             loader.script_refs().unwrap(),
             vec![
                 "agent-checkpoint-review.js".to_string(),
+                "migrated-launchd/agent-feedback-briefing.js".to_string(),
+                "migrated-launchd/ai-integrated-briefing.js".to_string(),
+                "migrated-launchd/banchan-day-reminder-cook.js".to_string(),
+                "migrated-launchd/banchan-day-reminder-prep.js".to_string(),
+                "migrated-launchd/cookingheart-daily-briefing.js".to_string(),
+                "migrated-launchd/family-morning-briefing-obujang.js".to_string(),
+                "migrated-launchd/family-morning-briefing-yohoejang.js".to_string(),
+                "migrated-launchd/memento-daily-report.js".to_string(),
+                "migrated-launchd/memento-hygiene.js".to_string(),
+                "migrated-launchd/memory-merge.js".to_string(),
+                "migrated-launchd/queue-stability-batch.js".to_string(),
+                "migrated-launchd/token-daily-report.js".to_string(),
                 "monitoring/automation-candidate-detector.js".to_string(),
                 "monitoring/automation-candidate-executor.js".to_string(),
                 "monitoring/automation-candidate-recommender.js".to_string(),
@@ -1273,6 +1285,31 @@ mod tests {
                 .execute_tick(
                     "agent-checkpoint-review.js",
                     context_for("agent-checkpoint-review.js", "agent-checkpoint-review")
+                )
+                .unwrap(),
+            crate::services::routines::RoutineAction::Agent { .. }
+        ));
+        // Spot-check one of the migrated launchd routines: must return Agent.
+        assert!(matches!(
+            loader
+                .execute_tick(
+                    "migrated-launchd/cookingheart-daily-briefing.js",
+                    context_for(
+                        "migrated-launchd/cookingheart-daily-briefing.js",
+                        "cookingheart-daily-briefing"
+                    )
+                )
+                .unwrap(),
+            crate::services::routines::RoutineAction::Agent { .. }
+        ));
+        assert!(matches!(
+            loader
+                .execute_tick(
+                    "migrated-launchd/queue-stability-batch.js",
+                    context_for(
+                        "migrated-launchd/queue-stability-batch.js",
+                        "queue-stability-batch"
+                    )
                 )
                 .unwrap(),
             crate::services::routines::RoutineAction::Agent { .. }
