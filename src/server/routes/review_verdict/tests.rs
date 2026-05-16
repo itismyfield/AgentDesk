@@ -3258,6 +3258,79 @@ async fn stale_dispatch_mismatch_equal_timestamp_tie_rejected() {
     assert_eq!(b, "dispatched");
 }
 
+/// Codex round-2 [medium]: equal-timestamp ties must also fail closed.
+/// When two live same-card review-decision rows share `created_at`, neither
+/// id is uniquely "latest" — both should be rejected as superseded.
+#[tokio::test]
+async fn stale_dispatch_mismatch_equal_timestamp_tie_rejected() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute_batch("DROP INDEX IF EXISTS idx_single_active_review_decision;")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at) \
+             VALUES ('card-tie', 'Tie Card', 'review', 'agent-1', NULL, 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        // Two live dispatches with identical created_at — neither is
+        // strictly latest, so honoring either would be a 50/50 gamble.
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-tie-a', 'card-tie', 'agent-1', 'review-decision', 'dispatched', '[Review Decision A]', '2026-01-01 00:00:00', '2026-01-01 00:00:00'), \
+                    ('dispatch-tie-b', 'card-tie', 'agent-1', 'review-decision', 'dispatched', '[Review Decision B]', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+            [],
+        )
+        .unwrap();
+    }
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-tie".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-tie-a".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "equal-timestamp tie must fail closed (no unique latest): {}",
+        body.0
+    );
+    let body_str = body.0.to_string();
+    assert!(
+        body_str.contains("superseded"),
+        "expected 'superseded' message for tie, got: {body_str}"
+    );
+
+    // Neither dispatch may have been consumed.
+    let conn = db.lock().unwrap();
+    let (a, b): (String, String) = conn
+        .query_row(
+            "SELECT (SELECT status FROM task_dispatches WHERE id = 'dispatch-tie-a'), \
+                    (SELECT status FROM task_dispatches WHERE id = 'dispatch-tie-b')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(a, "dispatched");
+    assert_eq!(b, "dispatched");
+}
+
 /// Regression: caller did NOT submit a dispatch_id AND there is no pending
 /// review-decision dispatch via the canonical link tables. Must stay 409
 /// with the original generic message (the by-id fallback only triggers when

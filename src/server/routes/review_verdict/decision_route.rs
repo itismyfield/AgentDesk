@@ -450,9 +450,10 @@ enum ReviewDecisionDispatchLookup {
 ///    via UUID guessing.
 /// 2. For a live (`pending`/`dispatched`) row we additionally require that
 ///    no other live `review-decision` dispatch exists for the same card
-///    with a strictly newer `created_at`. This blocks the "replay an older
-///    live id from a previous review round" attack — only the most recent
-///    live row is honored.
+///    with a `created_at >= submitted.created_at`. This blocks the "replay
+///    an older live id from a previous review round" attack — only the
+///    strict-latest live row is honored, with equal-timestamp ties failing
+///    closed (Codex round-2 [medium]).
 /// 3. Terminal rows are returned as `Terminal` and intentionally NOT
 ///    short-circuited into a 409 by this routine. Idempotent-finalize of
 ///    terminal dispatches is sub-fix 1's responsibility (PR #2280), and
@@ -495,6 +496,14 @@ async fn lookup_review_decision_dispatch_by_id(
             "pending" | "dispatched" => {
                 // Authorization gate (layer 2): reject if a newer live
                 // review-decision dispatch exists for the same card.
+                // Codex round-2 [medium]: reject equal-timestamp ties too —
+                // require strict uniqueness of "latest live" by treating any
+                // other live row with `created_at >= submitted.created_at`
+                // as a superseding row. Equal-timestamp duplicates are
+                // plausible under the schema-drift / migration-gap state
+                // this runtime guard defends against (the canonical
+                // partial-unique index blocks them in production but a
+                // defensive layer must not assume that).
                 match sqlx::query_scalar::<_, i64>(
                     "SELECT COUNT(*)
                      FROM task_dispatches
@@ -502,7 +511,7 @@ async fn lookup_review_decision_dispatch_by_id(
                        AND dispatch_type = 'review-decision'
                        AND status IN ('pending', 'dispatched')
                        AND id <> $2
-                       AND created_at > $3",
+                       AND created_at >= $3",
                 )
                 .bind(card_id)
                 .bind(dispatch_id)
@@ -555,7 +564,7 @@ async fn lookup_review_decision_dispatch_by_id(
                                    AND dispatch_type = 'review-decision'
                                    AND status IN ('pending', 'dispatched')
                                    AND id <> ?2
-                                   AND created_at > ?3",
+                                   AND created_at >= ?3",
                                 [card_id, dispatch_id, created_at.as_str()],
                                 |row| row.get::<_, i64>(0),
                             )
