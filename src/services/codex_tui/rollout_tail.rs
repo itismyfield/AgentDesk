@@ -10,18 +10,35 @@ use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested}
 
 const DEFAULT_ROLLOUT_WAIT_SECS: u64 = 30;
 const DEFAULT_TERMINAL_DRAIN_MS: u64 = 750;
+/// Upper bound on how long the tailer will sit at EOF waiting for the assistant
+/// response to begin streaming. Without this guard, a stuck Codex TUI (tool
+/// loop, network hang, etc.) keeps the tailer thread alive indefinitely and the
+/// caller never sees a terminal `StreamMessage::Done`.
+const DEFAULT_ASSISTANT_RESPONSE_DEADLINE_SECS: u64 = 30 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolloutTailOutcome {
     pub lines_read: usize,
     pub bytes_read: u64,
     pub final_offset: u64,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexTuiTailResult {
+    pub read_result: ReadOutputResult,
+    pub rollout_path: PathBuf,
+    pub final_offset: u64,
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RolloutTailOptions {
     pub wait_for_rollout: Duration,
     pub terminal_drain: Duration,
+    /// Maximum time the tailer waits at EOF for the assistant text to begin
+    /// streaming. `None` disables the deadline (used by `replay_rollout_file`).
+    pub assistant_response_deadline: Option<Duration>,
 }
 
 impl Default for RolloutTailOptions {
@@ -29,6 +46,9 @@ impl Default for RolloutTailOptions {
         Self {
             wait_for_rollout: Duration::from_secs(DEFAULT_ROLLOUT_WAIT_SECS),
             terminal_drain: Duration::from_millis(DEFAULT_TERMINAL_DRAIN_MS),
+            assistant_response_deadline: Some(Duration::from_secs(
+                DEFAULT_ASSISTANT_RESPONSE_DEADLINE_SECS,
+            )),
         }
     }
 }
@@ -74,14 +94,50 @@ pub fn tail_latest_rollout_for_cwd(
     )
 }
 
+pub fn tail_latest_rollout_for_cwd_with_handoff(
+    cwd: &Path,
+    modified_since: SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+) -> Result<CodexTuiTailResult, String> {
+    tail_latest_rollout_for_cwd_with_handoff_options(
+        cwd,
+        modified_since,
+        sender,
+        cancel_token,
+        is_alive,
+        RolloutTailOptions::default(),
+    )
+}
+
 pub fn tail_latest_rollout_for_cwd_with_options(
+    cwd: &Path,
+    modified_since: SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+    options: RolloutTailOptions,
+) -> Result<ReadOutputResult, String> {
+    tail_latest_rollout_for_cwd_with_handoff_options(
+        cwd,
+        modified_since,
+        sender,
+        cancel_token,
+        is_alive,
+        options,
+    )
+    .map(|result| result.read_result)
+}
+
+fn tail_latest_rollout_for_cwd_with_handoff_options(
     cwd: &Path,
     modified_since: SystemTime,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
     mut is_alive: impl FnMut() -> bool,
     options: RolloutTailOptions,
-) -> Result<ReadOutputResult, String> {
+) -> Result<CodexTuiTailResult, String> {
     let sessions_dir = default_codex_sessions_dir()
         .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
     let rollout_path = wait_for_latest_rollout_for_cwd(
@@ -100,8 +156,14 @@ pub fn tail_latest_rollout_for_cwd_with_options(
         cancel_token,
         is_alive,
         options.terminal_drain,
+        options.assistant_response_deadline,
     )
-    .map(|result| result.0)
+    .map(|(read_result, outcome)| CodexTuiTailResult {
+        read_result,
+        rollout_path,
+        final_offset: outcome.final_offset,
+        session_id: outcome.session_id,
+    })
 }
 
 pub fn replay_rollout_file(
@@ -117,6 +179,7 @@ pub fn replay_rollout_file(
         None,
         || false,
         Duration::ZERO,
+        None,
     )?;
     match result {
         ReadOutputResult::Completed { .. } | ReadOutputResult::SessionDied { .. } => Ok(outcome),
@@ -132,6 +195,7 @@ pub fn tail_rollout_file_from_offset(
     cancel_token: Option<Arc<CancelToken>>,
     is_alive: impl FnMut() -> bool,
 ) -> Result<ReadOutputResult, String> {
+    let defaults = RolloutTailOptions::default();
     tail_rollout_file_until_assistant_response(
         rollout_path,
         start_offset,
@@ -139,7 +203,8 @@ pub fn tail_rollout_file_from_offset(
         &sender,
         cancel_token,
         is_alive,
-        RolloutTailOptions::default().terminal_drain,
+        defaults.terminal_drain,
+        defaults.assistant_response_deadline,
     )
     .map(|result| result.0)
 }
@@ -170,6 +235,32 @@ pub fn tail_resumed_rollout_for_session(
     )
 }
 
+pub fn tail_resumed_rollout_for_session_with_handoff(
+    cwd: &Path,
+    session_id: &str,
+    previous_rollout_path: &Path,
+    previous_start_offset: u64,
+    modified_since: SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+) -> Result<CodexTuiTailResult, String> {
+    let sessions_dir = default_codex_sessions_dir()
+        .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
+    tail_resumed_rollout_for_session_with_handoff_options(
+        cwd,
+        session_id,
+        previous_rollout_path,
+        previous_start_offset,
+        modified_since,
+        &sessions_dir,
+        sender,
+        cancel_token,
+        is_alive,
+        RolloutTailOptions::default(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tail_resumed_rollout_for_session_with_options(
     cwd: &Path,
@@ -180,9 +271,37 @@ fn tail_resumed_rollout_for_session_with_options(
     sessions_dir: &Path,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    mut is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> bool,
     options: RolloutTailOptions,
 ) -> Result<ReadOutputResult, String> {
+    tail_resumed_rollout_for_session_with_handoff_options(
+        cwd,
+        session_id,
+        previous_rollout_path,
+        previous_start_offset,
+        modified_since,
+        sessions_dir,
+        sender,
+        cancel_token,
+        is_alive,
+        options,
+    )
+    .map(|result| result.read_result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tail_resumed_rollout_for_session_with_handoff_options(
+    cwd: &Path,
+    session_id: &str,
+    previous_rollout_path: &Path,
+    previous_start_offset: u64,
+    modified_since: SystemTime,
+    sessions_dir: &Path,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    mut is_alive: impl FnMut() -> bool,
+    options: RolloutTailOptions,
+) -> Result<CodexTuiTailResult, String> {
     let rollout_path = wait_for_resumed_rollout_for_session(
         cwd,
         session_id,
@@ -208,8 +327,14 @@ fn tail_resumed_rollout_for_session_with_options(
         cancel_token,
         is_alive,
         options.terminal_drain,
+        options.assistant_response_deadline,
     )
-    .map(|result| result.0)
+    .map(|(read_result, outcome)| CodexTuiTailResult {
+        read_result,
+        rollout_path,
+        final_offset: outcome.final_offset,
+        session_id: outcome.session_id,
+    })
 }
 
 fn wait_for_latest_rollout_for_cwd(
@@ -416,6 +541,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tail_rollout_file_until_assistant_response(
     rollout_path: &Path,
     start_offset: u64,
@@ -424,6 +550,7 @@ fn tail_rollout_file_until_assistant_response(
     cancel_token: Option<Arc<CancelToken>>,
     mut is_alive: impl FnMut() -> bool,
     terminal_drain: Duration,
+    assistant_response_deadline: Option<Duration>,
 ) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     let mut file = std::fs::File::open(rollout_path)
         .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?;
@@ -443,6 +570,7 @@ fn tail_rollout_file_until_assistant_response(
     let mut partial_line = Vec::new();
     let mut buf = [0u8; 8192];
     let mut last_output_at: Option<Instant> = None;
+    let started_at = Instant::now();
 
     loop {
         if cancel_requested(cancel_token.as_deref()) {
@@ -485,6 +613,33 @@ fn tail_rollout_file_until_assistant_response(
                         }
                     };
                     return Ok((result, outcome(&state, current_offset)));
+                }
+                // #2182 follow-up: global deadline guard. Without this, a
+                // stuck/hung Codex TUI keeps the tailer alive indefinitely
+                // and the upstream turn never sees `StreamMessage::Done`.
+                if !state.saw_assistant_text
+                    && let Some(deadline) = assistant_response_deadline
+                    && started_at.elapsed() >= deadline
+                {
+                    let elapsed_secs = started_at.elapsed().as_secs();
+                    tracing::warn!(
+                        rollout_path = %rollout_path.display(),
+                        elapsed_secs,
+                        "Codex rollout tail timed out waiting for assistant response; emitting Done"
+                    );
+                    let _ = sender.send(StreamMessage::Done {
+                        result: format!(
+                            "⚠ Codex TUI produced no assistant response within {}s — turn timed out.",
+                            elapsed_secs
+                        ),
+                        session_id: state.session_id.clone(),
+                    });
+                    return Ok((
+                        ReadOutputResult::Completed {
+                            offset: current_offset,
+                        },
+                        outcome(&state, current_offset),
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -531,6 +686,7 @@ fn outcome(state: &RolloutParseState, final_offset: u64) -> RolloutTailOutcome {
         lines_read: state.lines_read,
         bytes_read: state.bytes_read,
         final_offset,
+        session_id: state.session_id.clone(),
     }
 }
 
@@ -898,6 +1054,7 @@ mod tests {
             RolloutTailOptions {
                 wait_for_rollout: Duration::from_millis(10),
                 terminal_drain: Duration::ZERO,
+                assistant_response_deadline: None,
             },
         )
         .unwrap();
@@ -952,6 +1109,7 @@ mod tests {
             RolloutTailOptions {
                 wait_for_rollout: Duration::from_millis(10),
                 terminal_drain: Duration::ZERO,
+                assistant_response_deadline: None,
             },
         )
         .unwrap();
@@ -1008,6 +1166,45 @@ mod tests {
         assert!(matches!(
             messages.last(),
             Some(StreamMessage::Done { result, .. }) if result == "final no newline"
+        ));
+    }
+
+    #[test]
+    fn assistant_response_deadline_emits_timeout_done() {
+        // #2182 follow-up: when the rollout stays at EOF past the deadline
+        // and no assistant text has appeared, the tailer must emit a
+        // terminal Done so the upstream turn unblocks.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let rollout = write_rollout(
+            dir.path(),
+            "rollout-timeout.jsonl",
+            "session-timeout",
+            cwd.path(),
+            "",
+        );
+        let (tx, rx) = mpsc::channel();
+        let (result, _outcome) = tail_rollout_file_until_assistant_response(
+            &rollout,
+            0,
+            None,
+            &tx,
+            None,
+            || true, // pane stays alive — only the deadline rescues us
+            Duration::ZERO,
+            Some(Duration::from_millis(150)),
+        )
+        .unwrap();
+        drop(tx);
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        let done = messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message, StreamMessage::Done { .. }));
+        assert!(matches!(
+            done,
+            Some(StreamMessage::Done { result, .. }) if result.contains("timed out")
         ));
     }
 

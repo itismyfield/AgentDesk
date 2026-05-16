@@ -33,6 +33,7 @@ use super::turn_start::{
     session_reset_reason_for_turn, session_reset_reason_lifecycle_code,
     session_runtime_state_after_redirect, take_session_retry_context,
 };
+use crate::services::agent_protocol::RuntimeHandoffKind;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::services::git::GitCommand;
 use crate::services::memory::{
@@ -218,6 +219,58 @@ fn metadata_delivery_bot(metadata: Option<&serde_json::Value>) -> Option<String>
         .and_then(|value| value.get("delivery_bot"))
         .and_then(|value| value.as_str())
         .and_then(normalize_delivery_bot_name)
+}
+
+#[cfg(unix)]
+fn prelaunch_runtime_kind_for_managed_session(
+    provider: &ProviderKind,
+    remote_profile_is_none: bool,
+    has_tmux_session_name: bool,
+) -> Option<RuntimeHandoffKind> {
+    if !remote_profile_is_none
+        || !has_tmux_session_name
+        || !provider.uses_managed_tmux_backend()
+        || !claude::is_tmux_available()
+    {
+        return None;
+    }
+    let selection =
+        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+            provider, true,
+        );
+    if selection.driver == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting {
+        return match provider {
+            ProviderKind::Claude
+                if crate::services::claude_tui::hook_server::current_hook_endpoint().is_some() =>
+            {
+                Some(RuntimeHandoffKind::ClaudeTui)
+            }
+            ProviderKind::Codex => Some(RuntimeHandoffKind::CodexTui),
+            _ => Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+        };
+    }
+    Some(RuntimeHandoffKind::LegacyTmuxWrapper)
+}
+
+#[cfg(not(unix))]
+fn prelaunch_runtime_kind_for_managed_session(
+    _provider: &ProviderKind,
+    _remote_profile_is_none: bool,
+    _has_tmux_session_name: bool,
+) -> Option<RuntimeHandoffKind> {
+    None
+}
+
+fn apply_prelaunch_runtime_kind(
+    state: &mut InflightTurnState,
+    runtime_kind: Option<RuntimeHandoffKind>,
+) {
+    if let Some(kind) = runtime_kind {
+        state.runtime_kind = Some(kind);
+        if !kind.requires_input_fifo() {
+            state.input_fifo_path = None;
+        }
+    }
 }
 
 fn metadata_silent_flag(metadata: Option<&serde_json::Value>) -> bool {
@@ -1748,6 +1801,14 @@ async fn start_reserved_headless_turn_with_owner(
         inflight_output_path,
         inflight_input_fifo.clone(),
         inflight_offset,
+    );
+    apply_prelaunch_runtime_kind(
+        &mut inflight_state,
+        prelaunch_runtime_kind_for_managed_session(
+            &provider,
+            remote_profile.is_none(),
+            tmux_session_name.is_some(),
+        ),
     );
     let (worktree_path, worktree_branch, base_commit) = {
         let data = shared.core.lock().await;
@@ -4450,6 +4511,14 @@ pub(in crate::services::discord) async fn handle_text_message(
         inflight_output_path,
         inflight_input_fifo.clone(),
         inflight_offset,
+    );
+    apply_prelaunch_runtime_kind(
+        &mut inflight_state,
+        prelaunch_runtime_kind_for_managed_session(
+            &provider,
+            remote_profile.is_none(),
+            tmux_session_name.is_some(),
+        ),
     );
     let (worktree_path, worktree_branch, base_commit) = {
         let data = shared.core.lock().await;

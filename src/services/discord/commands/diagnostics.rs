@@ -6,7 +6,7 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
 use super::super::formatting::{send_long_message_ctx, truncate_str};
-use super::super::inflight::load_inflight_states;
+use super::super::inflight::{InflightTurnState, load_inflight_states};
 use super::super::metrics;
 use super::super::runtime_store;
 use super::super::{
@@ -35,6 +35,10 @@ fn shorten_session_identifier(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn inflight_runtime_label(state: &InflightTurnState) -> &'static str {
+    state.runtime_kind_for_recovery().label()
 }
 
 async fn run_blocking_gemini_command<T, F>(label: &'static str, task: F) -> Result<T, String>
@@ -219,7 +223,13 @@ pub(in crate::services::discord) async fn build_health_report(
         "idle"
     };
     let inflight_text = channel_inflight
-        .map(|state| format!("yes (offset {})", state.last_offset))
+        .map(|state| {
+            format!(
+                "yes (offset {}, runtime {})",
+                state.last_offset,
+                inflight_runtime_label(state)
+            )
+        })
         .unwrap_or_else(|| "no".to_string());
 
     format!(
@@ -344,6 +354,11 @@ pub(in crate::services::discord) async fn build_status_report(
         .map(|id| format!("<@{}>", id.get()))
         .unwrap_or_else(|| "(none)".to_string());
     let path_text = compact_path(session_path.unwrap_or_else(|| "(no session)".to_string()));
+    let inflight_runtime_text = load_inflight_states(provider)
+        .iter()
+        .find(|state| state.channel_id == channel_id.get())
+        .map(inflight_runtime_label)
+        .unwrap_or("none");
 
     format!(
         "\
@@ -356,6 +371,7 @@ pub(in crate::services::discord) async fn build_status_report(
 - raw_provider_session_id: `{}`
 - session_key: `{}`
 - tmux: `{}`
+- runtime: `{}`
 - owner: {}
 - queue: interventions `{}`, uploads `{}`
 - history: items `{}`, cleared `{}`
@@ -368,6 +384,7 @@ pub(in crate::services::discord) async fn build_status_report(
         raw_provider_session_id_short,
         truncate_str(&session_key_text, 96),
         tmux_alive,
+        inflight_runtime_text,
         owner_text,
         queued_count,
         pending_uploads,
@@ -417,6 +434,7 @@ pub(in crate::services::discord) async fn build_inflight_report(
 - started: `{}`
 - updated: `{}`
 - offset: `{}`
+- runtime: `{}`
 - session_id: `{}`
 - tmux: `{}`
 - placeholder_msg: `{}`
@@ -425,6 +443,7 @@ pub(in crate::services::discord) async fn build_inflight_report(
             state.started_at,
             state.updated_at,
             state.last_offset,
+            inflight_runtime_label(state),
             session_id_short,
             tmux_name,
             state.current_msg_id,
@@ -446,9 +465,10 @@ pub(in crate::services::discord) async fn build_inflight_report(
             .take(6)
             .map(|state| {
                 format!(
-                    "- `{}` (`{}`) offset `{}` updated `{}`",
+                    "- `{}` (`{}`) runtime `{}` offset `{}` updated `{}`",
                     state.channel_name.as_deref().unwrap_or("unknown"),
                     state.channel_id,
+                    inflight_runtime_label(state),
                     state.last_offset,
                     state.updated_at
                 )
@@ -476,6 +496,33 @@ pub(in crate::services::discord) async fn build_inflight_report(
         current_section,
         saved_channels
     )
+}
+
+#[cfg(test)]
+mod runtime_label_tests {
+    use super::*;
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+
+    #[test]
+    fn inflight_runtime_label_reports_direct_tui_kind() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            42,
+            Some("adk-claude".to_string()),
+            1,
+            2,
+            3,
+            "prompt".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+
+        assert_eq!(inflight_runtime_label(&state), "Claude TUI");
+    }
 }
 
 fn build_queue_report_sync(

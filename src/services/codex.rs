@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use crate::services::agent_protocol::StreamMessage;
+use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage};
 use crate::services::claude;
 use crate::services::claude_tui::hook_bundle::{HookBundleConfig, codex_hook_config_overrides};
 use crate::services::claude_tui::hook_server::current_hook_endpoint;
@@ -34,6 +34,51 @@ use crate::services::tmux_diagnostics::{
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_ID: &str = "codex-background-event";
 pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS: &str = "completed";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodexRuntimeKind {
+    DirectTui,
+    LegacyWrapperFallback,
+    ProcessBackend,
+    RemoteDirect,
+    RemoteTmux,
+    DirectHeadless,
+    SimpleHeadless,
+}
+
+impl CodexRuntimeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectTui => "direct-tui",
+            Self::LegacyWrapperFallback => "legacy-wrapper-fallback",
+            Self::ProcessBackend => "process-backend",
+            Self::RemoteDirect => "remote-direct",
+            Self::RemoteTmux => "remote-tmux",
+            Self::DirectHeadless => "direct-headless",
+            Self::SimpleHeadless => "simple-headless",
+        }
+    }
+
+    fn uses_codex_exec_json(self) -> bool {
+        match self {
+            Self::DirectTui | Self::RemoteDirect | Self::RemoteTmux => false,
+            Self::LegacyWrapperFallback
+            | Self::ProcessBackend
+            | Self::DirectHeadless
+            | Self::SimpleHeadless => true,
+        }
+    }
+}
+
+fn log_codex_runtime_kind(entrypoint: &'static str, runtime_kind: CodexRuntimeKind) {
+    tracing::info!(
+        provider = "codex",
+        runtime_kind = runtime_kind.as_str(),
+        uses_codex_exec_json = runtime_kind.uses_codex_exec_json(),
+        entrypoint,
+        "codex runtime kind selected"
+    );
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CodexLaunchOptions {
@@ -502,6 +547,10 @@ fn execute_command_simple_cancellable_with_options(
             false,
         );
     session_selection.log_start("codex.execute_command_simple");
+    log_codex_runtime_kind(
+        "codex.execute_command_simple",
+        CodexRuntimeKind::SimpleHeadless,
+    );
 
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
@@ -634,6 +683,10 @@ pub fn execute_command_streaming(
                     .unwrap_or(false);
             if use_remote_tmux {
                 let tmux_name = tmux_session_name.expect("checked is_some above");
+                log_codex_runtime_kind(
+                    "codex.execute_command_streaming",
+                    CodexRuntimeKind::RemoteTmux,
+                );
                 return execute_streaming_remote_tmux(
                     profile,
                     &prompt,
@@ -649,6 +702,10 @@ pub fn execute_command_streaming(
                 );
             }
         }
+        log_codex_runtime_kind(
+            "codex.execute_command_streaming",
+            CodexRuntimeKind::RemoteDirect,
+        );
         return execute_streaming_remote_direct(
             profile,
             session_id,
@@ -668,6 +725,10 @@ pub fn execute_command_streaming(
             if session_selection.driver
                 == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting
             {
+                log_codex_runtime_kind(
+                    "codex.execute_command_streaming",
+                    CodexRuntimeKind::DirectTui,
+                );
                 return execute_streaming_local_tui_tmux(
                     &prompt,
                     session_id,
@@ -685,6 +746,10 @@ pub fn execute_command_streaming(
                     force_fresh_provider_session,
                 );
             }
+            log_codex_runtime_kind(
+                "codex.execute_command_streaming",
+                CodexRuntimeKind::LegacyWrapperFallback,
+            );
             return execute_streaming_local_tmux(
                 &prompt,
                 model,
@@ -702,6 +767,10 @@ pub fn execute_command_streaming(
             );
         }
         // ProcessBackend fallback for Codex (no tmux or non-unix)
+        log_codex_runtime_kind(
+            "codex.execute_command_streaming",
+            CodexRuntimeKind::ProcessBackend,
+        );
         return execute_streaming_local_process_codex(
             &prompt,
             model,
@@ -717,6 +786,10 @@ pub fn execute_command_streaming(
         );
     }
 
+    log_codex_runtime_kind(
+        "codex.execute_command_streaming",
+        CodexRuntimeKind::DirectHeadless,
+    );
     execute_streaming_direct(
         &prompt,
         session_id,
@@ -1018,7 +1091,7 @@ fn execute_streaming_local_tui_tmux(
         }
     }
 
-    let read_result = if session_selection.resume {
+    let tail_result = if session_selection.resume {
         let rollout_path = session_selection
             .rollout_path
             .as_deref()
@@ -1028,7 +1101,7 @@ fn execute_streaming_local_tui_tmux(
             .selected_session_id
             .as_deref()
             .ok_or_else(|| "Codex TUI resume selected without session id".to_string())?;
-        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session(
+        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session_with_handoff(
             std::path::Path::new(working_dir),
             selected_session_id,
             rollout_path,
@@ -1037,17 +1110,39 @@ fn execute_streaming_local_tui_tmux(
             sender.clone(),
             cancel_token,
             || tmux_session_has_live_pane(tmux_session_name),
-        )?
+        )
     } else {
-        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd(
+        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff(
             std::path::Path::new(working_dir),
             rollout_modified_since,
             sender.clone(),
             cancel_token,
             || tmux_session_has_live_pane(tmux_session_name),
-        )?
+        )
     };
 
+    let tail_result = match tail_result {
+        Ok(result) => result,
+        Err(error) => {
+            // #2182 follow-up: rollout wait / tail failures used to leak the
+            // tmux session because `?` propagated Err without cleaning the
+            // launched session. Kill it explicitly so the worktree doesn't
+            // accumulate dangling Codex TUIs.
+            tracing::warn!(
+                tmux_session = tmux_session_name,
+                error = %error,
+                "Codex rollout tail failed; killing tmux session to avoid leak"
+            );
+            record_tmux_exit_reason(tmux_session_name, &format!("rollout tail failed: {error}"));
+            crate::services::platform::tmux::kill_session_with_reason(
+                tmux_session_name,
+                "codex rollout tail failed",
+            );
+            return Err(error);
+        }
+    };
+
+    let read_result = tail_result.read_result.clone();
     if matches!(
         read_result,
         crate::services::provider::ReadOutputResult::SessionDied { .. }
@@ -1055,6 +1150,15 @@ fn execute_streaming_local_tui_tmux(
         let _ = sender.send(StreamMessage::Done {
             result: "⚠ Codex TUI session ended before producing a response.".to_string(),
             session_id: None,
+        });
+    } else {
+        let _ = sender.send(StreamMessage::RuntimeReady {
+            handoff: RuntimeHandoff::CodexTui {
+                rollout_path: tail_result.rollout_path.display().to_string(),
+                thread_id: tail_result.session_id,
+                tmux_session_name: tmux_session_name.to_string(),
+                last_offset: tail_result.final_offset,
+            },
         });
     }
 
@@ -1802,8 +1906,8 @@ fn handle_codex_json_line(
 #[cfg(test)]
 mod tui_hosting_tests {
     use super::{
-        CodexLaunchOptions, append_codex_config_overrides, base_tui_args, build_codex_tui_args,
-        build_tmux_launch_env_lines, direct_tui_material_fallback_reason,
+        CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides, base_tui_args,
+        build_codex_tui_args, build_tmux_launch_env_lines, direct_tui_material_fallback_reason,
         render_codex_tui_tmux_script, render_codex_wrapper_tmux_script,
     };
     use crate::services::discord::restart_report::{
@@ -2031,6 +2135,17 @@ mod tui_hosting_tests {
         assert!(script.contains("'--compact-token-limit'"));
         assert!(script.contains("'120000'"));
         assert!(!script.contains("exec '/opt/bin/codex' "));
+    }
+
+    #[test]
+    fn codex_runtime_kind_records_exec_json_policy() {
+        assert!(!CodexRuntimeKind::DirectTui.uses_codex_exec_json());
+        assert!(CodexRuntimeKind::LegacyWrapperFallback.uses_codex_exec_json());
+        assert!(CodexRuntimeKind::ProcessBackend.uses_codex_exec_json());
+        assert!(!CodexRuntimeKind::RemoteDirect.uses_codex_exec_json());
+        assert!(!CodexRuntimeKind::RemoteTmux.uses_codex_exec_json());
+        assert!(CodexRuntimeKind::DirectHeadless.uses_codex_exec_json());
+        assert!(CodexRuntimeKind::SimpleHeadless.uses_codex_exec_json());
     }
 }
 

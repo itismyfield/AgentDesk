@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { useReturnFocus } from "./useReturnFocus";
 
 export interface ModalProps {
@@ -36,6 +36,7 @@ export function Modal({
   ariaLabel,
 }: ModalProps) {
   const accessibleTitle = title ?? ariaLabel ?? "Modal";
+  const descriptionId = useId();
   const returnFocus = useReturnFocus(open);
 
   return (
@@ -50,7 +51,7 @@ export function Modal({
         <Dialog.Overlay className="fixed inset-0 z-[70] bg-black/45 backdrop-blur-sm" />
         <Dialog.Content
           aria-label={ariaLabel}
-          aria-describedby={description ? undefined : undefined}
+          aria-describedby={description ? descriptionId : undefined}
           onEscapeKeyDown={(event) => {
             if (!closeOnEsc) event.preventDefault();
           }}
@@ -76,7 +77,10 @@ export function Modal({
                   </Dialog.Title>
                 )}
                 {description && (
-                  <Dialog.Description className="mt-1 text-xs text-[var(--th-text-muted,_#94a3b8)]">
+                  <Dialog.Description
+                    id={descriptionId}
+                    className="mt-1 text-xs text-[var(--th-text-muted,_#94a3b8)]"
+                  >
                     {description}
                   </Dialog.Description>
                 )}

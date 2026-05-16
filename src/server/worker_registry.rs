@@ -823,6 +823,104 @@ impl Drop for SupervisedWorkerRegistry {
     }
 }
 
+// #2202 regression guard. Verifies that `supervise_leader_tokio_worker` re-spawns
+// the underlying worker future after a lease takeover (leader=true → false → true),
+// which is the contract the PR #2115 fix introduced. Without it, leader-only
+// workers like `routine-runtime` go dormant on the new leader until dcserver
+// restart.
+#[cfg(test)]
+mod leader_takeover_tests {
+    use super::{
+        LEADER_ONLY_WORKER_ACTIVE_COUNT, LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS,
+        LEADER_ONLY_WORKERS_STARTED, SupervisedWorkerRegistry, WORKER_SPECS, WorkerExecutionScope,
+    };
+    use crate::server::cluster::ClusterRuntime;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    fn leader_only_spec_for_test() -> super::WorkerSpec {
+        WORKER_SPECS
+            .iter()
+            .copied()
+            .find(|spec| spec.execution_scope == WorkerExecutionScope::LeaderOnly)
+            .expect("at least one leader-only worker spec is registered")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supervisor_respawns_worker_after_lease_takeover() {
+        // Reset the globals the supervisor mutates so this test stays
+        // deterministic regardless of other tests in the binary.
+        LEADER_ONLY_WORKERS_STARTED.store(false, Ordering::Release);
+        LEADER_ONLY_WORKER_ACTIVE_COUNT.store(0, Ordering::Release);
+        LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS.store(0, Ordering::Release);
+
+        let leader_active = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let runtime = ClusterRuntime::for_test_with_leader(leader_active.clone());
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let spec = leader_only_spec_for_test();
+
+        let supervisor_count = spawn_count.clone();
+        let supervisor = tokio::spawn(SupervisedWorkerRegistry::supervise_leader_tokio_worker(
+            spec,
+            runtime,
+            shutdown.clone(),
+            move || {
+                let counter = supervisor_count.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::Release);
+                    // Park so the supervisor only re-spawns on a leader flip,
+                    // not because the worker future returned on its own.
+                    std::future::pending::<()>().await;
+                }
+            },
+        ));
+
+        // Not leader yet → supervisor blocks in wait_until_leader.
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(spawn_count.load(Ordering::Acquire), 0);
+
+        // Acquire leadership → supervisor must spawn the worker.
+        leader_active.store(true, Ordering::Release);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            spawn_count.load(Ordering::Acquire),
+            1,
+            "worker future should run as soon as leadership is acquired"
+        );
+        assert!(LEADER_ONLY_WORKERS_STARTED.load(Ordering::Acquire));
+        assert_eq!(LEADER_ONLY_WORKER_ACTIVE_COUNT.load(Ordering::Acquire), 1);
+
+        // Lose leadership → supervisor self-fences the worker.
+        leader_active.store(false, Ordering::Release);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(LEADER_ONLY_WORKER_ACTIVE_COUNT.load(Ordering::Acquire), 0);
+
+        // Lease takeover: regain leadership while supervisor is in the
+        // post-loss 5s cooldown. The supervisor must re-enter the spawn loop.
+        leader_active.store(true, Ordering::Release);
+        // 5s cooldown + 1s poll interval + jitter buffer.
+        tokio::time::advance(Duration::from_secs(8)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            spawn_count.load(Ordering::Acquire),
+            2,
+            "worker must re-spawn after lease takeover (regression guard for #2202)"
+        );
+        assert_eq!(LEADER_ONLY_WORKER_ACTIVE_COUNT.load(Ordering::Acquire), 1);
+
+        shutdown.store(true, Ordering::Release);
+        // Let the supervisor observe shutdown on its next poll tick and exit.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), supervisor).await;
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::{

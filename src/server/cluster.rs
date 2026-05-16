@@ -81,6 +81,21 @@ impl ClusterRuntime {
         !self.enabled || self.leader_active.load(Ordering::Acquire)
     }
 
+    /// Test-only constructor that builds an `enabled=true` runtime backed by a
+    /// caller-provided `leader_active` flag. Lets tests flip leadership at will
+    /// to exercise supervised workers across lease takeovers without standing
+    /// up a real cluster. See `worker_registry::tests`.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_leader(leader_active: Arc<AtomicBool>) -> Self {
+        Self {
+            enabled: true,
+            instance_id: "test-node".to_string(),
+            configured_role: ClusterRole::Auto,
+            effective_role: ClusterRole::Worker,
+            leader_active,
+        }
+    }
+
     pub(crate) fn instance_id(&self) -> &str {
         &self.instance_id
     }

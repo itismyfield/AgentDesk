@@ -298,6 +298,7 @@ pub(crate) async fn run(
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("HTTP server listening on {addr}");
+    routes::audit_explicit_auth_routes_on_boot(&config);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -398,6 +399,26 @@ async fn policy_tick_loop(
         if is_five_min_policy_tick(count) {
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick5min", "5min").await;
             refresh_memory_health_for_five_min_tick().await;
+            // #2257 concern 5: sweep expired idempotency_keys rows so the
+            // table stays bounded. The endpoint defaults are 24h TTL; one
+            // 5-min sweep is plenty even under heavy use.
+            if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
+                match crate::db::idempotency::gc_expired(pool).await {
+                    Ok(0) => {}
+                    Ok(deleted) => {
+                        tracing::info!(
+                            deleted,
+                            "[policy-tick] idempotency_keys GC swept expired rows"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "[policy-tick] idempotency_keys GC failed"
+                        );
+                    }
+                }
+            }
             if let Err(error) = crate::services::api_friction::process_api_friction_patterns(
                 pg_pool.as_deref().or_else(|| engine.pg_pool()),
                 None,

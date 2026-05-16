@@ -1,7 +1,7 @@
 CREATE OR REPLACE FUNCTION json_extract(input JSONB, path TEXT)
 RETURNS TEXT
 LANGUAGE plpgsql
-IMMUTABLE
+STABLE
 AS $$
 BEGIN
     IF input IS NULL OR path IS NULL THEN
@@ -22,7 +22,16 @@ BEGIN
         -- which matches SQLite json_extract() behavior.
         RETURN jsonb_path_query_first(input, ('strict ' || path)::jsonpath) #>> '{}';
     EXCEPTION
-        WHEN OTHERS THEN
+        WHEN invalid_parameter_value
+            OR invalid_text_representation
+            OR syntax_error
+            OR invalid_sql_json_subscript
+            OR sql_json_array_not_found
+            OR sql_json_member_not_found
+            OR sql_json_number_not_found
+            OR sql_json_object_not_found
+            OR singleton_sql_json_item_required
+            OR sql_json_scalar_required THEN
             RETURN NULL;
     END;
 END;

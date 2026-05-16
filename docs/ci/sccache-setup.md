@@ -41,20 +41,31 @@ binary is absent — no hard-fail.
 
 ```toml
 [build]
-# Keep per-worktree target/ directories, but share rustc output through sccache.
-rustc-wrapper = "sccache"
-# Campaign worktrees are build-once-and-discard; disabling incremental avoids
-# multi-GB target/debug/incremental caches in every parallel worktree.
 incremental = false
 ```
 
-Every `cargo` invocation inside this repo — whether from a human shell, a
-campaign worktree, or an agent session — automatically picks this up. There is
-no way to scope this to just release builds; dev builds also use the shared
-sccache wrapper and non-incremental Cargo profile.
+`rustc-wrapper` is intentionally **not** set here. The previous value of
+`"sccache"` broke every bare `cargo` invocation on machines without sccache
+installed (Cargo errors with `No such file or directory (os error 2)`),
+forcing agents and developers to prefix every command with `RUSTC_WRAPPER=`.
+A wrapper script (`.sh`) is also not portable to native Windows Cargo
+invocations, so the supported pattern is to let callers opt in via the
+environment:
+
+- CI sets `RUSTC_WRAPPER: sccache` at the workflow `env:` level (Linux +
+  Windows lanes). The Mozilla sccache action installs the binary.
+- Release/deploy scripts call `setup_sccache_env` from `scripts/_defaults.sh`,
+  which conditionally exports `RUSTC_WRAPPER` only when sccache is found.
+- Local developers add `export RUSTC_WRAPPER=sccache` to their shell rc after
+  `brew install sccache` (or `cargo install sccache --locked` / `winget
+  install Mozilla.sccache`).
+
+`incremental = false` stays because sccache cannot cache incremental rustc
+invocations and campaign worktrees are build-once-and-discard, so the
+multi-GB `target/debug/incremental` per-worktree hit is pure waste.
 
 > **Gotcha**: `SCCACHE_CACHE_SIZE` cannot be set via `config.toml [env]` in a
-> way that reaches `sccache` itself — the wrapper reads its own env from the
+> way that reaches `sccache` itself — sccache reads its own env from the
 > process environment, not from Cargo's injected vars. Set it via shell scripts
 > (see §2.2) or the calling launcher.
 
@@ -152,16 +163,68 @@ work (this PR) lands the plumbing only.
 
 ---
 
+## 4.2 CI cache budget (GHA backend)
+
+GitHub Actions cache has a **10GB per-repo quota** with LRU eviction. The
+sccache GHA backend (`SCCACHE_GHA_ENABLED=true`) writes one cache entry per
+rustc invocation, sharded under `sccache/` keys. Anything else cached via
+`actions/cache@v4` competes for the same 10GB quota.
+
+We previously cached the entire `target/` directory alongside sccache; each
+`target/` cache key is 0.8–1.2GB and several lanes (full_non_pg, postgres,
+recovery, lint, fast-tests) created independent keys. Total cache footprint
+ballooned to ~20GB, well above the 10GB cap, and GHA's LRU started evicting
+sccache shards constantly. Observed effect: **Rust cache hit rate collapsed
+from 99.80% to 0.00% within a few hours of merges**, even though every
+workflow continued to run `mozilla-actions/sccache-action`.
+
+The fix in this repo: keep `actions/cache@v4` for `~/.cargo/registry` +
+`~/.cargo/git` only (small, low-churn). Let sccache own all compiled rustc
+output. This keeps the GHA quota dominated by small sccache shards, which is
+the documented best practice for `mozilla-actions/sccache-action`.
+
+Verification: every Rust job ends with an explicit `sccache --show-stats` step
+so the hit-rate trend is visible directly in CI logs without needing to grep
+through the action's post-step output.
+
+---
+
+### 4.3 PR vs main GHA cache scoping
+
+GitHub Actions cache scopes entries by ref. PR/feature-branch builds write to
+their own cache scope and can read from the default-branch (`main`) cache.
+PR writes therefore do not directly evict `main`'s cache shards under normal
+ref isolation — only the *global* 10GB quota matters. With `target/` removed
+from `actions/cache@v4` (§4.2), total cache usage drops by ~5–15GB, well below
+the 10GB cap, and main-branch sccache shards should remain stable.
+
+If future ops still observe `main` cache eviction under heavy PR traffic,
+the next escalation is to set `SCCACHE_GHA_VERSION` per event type (separate
+namespaces for `push to main` vs `pull_request`), or to disable
+`SCCACHE_GHA_ENABLED` on PR jobs entirely and rely on per-job runner-local
+state — at the cost of giving up cache reuse for PR builds. Do not apply that
+escalation pre-emptively; verify with the per-job `sccache --show-stats`
+output first.
+
+---
+
 ## 5. Troubleshooting
 
-- **`error: process didn't exit successfully: sccache`** — the wrapper in
-  `.cargo/config.toml` is being used but the binary is missing. Either install
-  sccache (§1) or temporarily run `RUSTC_WRAPPER= cargo build` to bypass.
+- **`error: process didn't exit successfully: rustc`** with a wrapper-related
+  message — earlier versions of this repo set `rustc-wrapper = "sccache"` in
+  `.cargo/config.toml`, which hard-fails when sccache is not installed. The
+  current `.cargo/config.toml` does not set `rustc-wrapper`, so this error
+  should no longer occur. If you still see it, check whether a stale
+  `~/.cargo/config.toml` (user-global) or an env override has reintroduced
+  the setting.
 - **No hit-rate improvement across worktrees** — confirm each worktree sees
   the same `SCCACHE_DIR`. By default it is `$HOME/.cache/sccache`, which is
   shared across worktrees.
 - **`sccache` spawns but no cache activity** — check `sccache --show-stats`
   for `Non-cacheable calls`; proc-macro crates and some build scripts are not
-  cacheable.
-- **CI cache not warming up** — the `mozilla-actions/sccache-action` requires
-  the workflow to have `actions/cache` permissions (default `read` is fine).
+  cacheable. Cargo also requires `CARGO_INCREMENTAL=0` (which `.cargo/config.toml`
+  enables via `incremental = false`) — sccache cannot cache incremental rustc
+  invocations.
+- **CI Rust hit rate stuck at 0%** — see §4.2. Most commonly the GHA cache
+  budget is being consumed by something other than sccache (e.g. `target/`
+  added back to `actions/cache@v4`).

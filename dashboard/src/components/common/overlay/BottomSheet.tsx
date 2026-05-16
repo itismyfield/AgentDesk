@@ -33,7 +33,14 @@ export function BottomSheet({
       }}
       direction="bottom"
       modal
-      dismissible={closeOnBackdrop || closeOnEsc}
+      // #2204 follow-up: keep `dismissible` always true so the header X
+      // (wrapped in <VaulDrawer.Close>) and any other programmatic
+      // VaulDrawer.Close still fire onOpenChange. Pre-fix we set
+      // dismissible={closeOnBackdrop || closeOnEsc}, which collapses both
+      // user gestures and the explicit close button when both flags were
+      // false. ESC and outside-click guards live in onEscapeKeyDown /
+      // onInteractOutside below.
+      dismissible
     >
       <VaulDrawer.Portal>
         <VaulDrawer.Overlay className="fixed inset-0 z-[70] bg-black/45 backdrop-blur-sm" />

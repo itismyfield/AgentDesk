@@ -186,6 +186,20 @@ if [ -z "$LATEST_TAG" ]; then
 
   info "Building from source (this may take a few minutes)..."
   cd "$TMPDIR_BUILD"
+  # #2301 follow-up: opt into sccache if installed so the bootstrap build
+  # doesn't pay the ~5–10 min cold-cache cost on every install. The
+  # repo's `.cargo/config.toml` deliberately sets `rustc-wrapper = ""`
+  # (so bare `cargo` works without sccache installed), so we must export
+  # the env explicitly when the helper is available. Safe to skip when
+  # sccache is missing — `setup_sccache_env` returns non-zero and the
+  # `if` guard falls through.
+  if [ -f "$TMPDIR_BUILD/scripts/_defaults.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$TMPDIR_BUILD/scripts/_defaults.sh"
+    if command -v setup_sccache_env >/dev/null 2>&1; then
+      setup_sccache_env >/dev/null 2>&1 || true
+    fi
+  fi
   cargo build --release 2>&1 | tail -3
 
   # Build dashboard if npm available

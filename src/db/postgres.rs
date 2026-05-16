@@ -1313,6 +1313,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_json_extract_0058_up_and_down_preserve_array_path_behavior() {
+        let test_db = TestDatabase::create().await;
+        let config = postgres_test_config(&test_db);
+
+        let pool =
+            connect_test_pool_and_migrate_config(&config, "db::postgres json_extract test pool")
+                .await
+                .expect("connect and migrate postgres")
+                .expect("postgres pool");
+
+        let (array_value, strict_mismatch, malformed_path, volatility): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT
+                json_extract('{\"items\":[{\"id\":\"first\"}]}'::jsonb, '$.items[0].id'),
+                json_extract('{\"phase_gate\":[{\"run_id\":\"run-array\"}]}'::jsonb, '$.phase_gate.run_id'),
+                json_extract('{}'::jsonb, '$['),
+                (SELECT provolatile::text
+                 FROM pg_proc
+                 WHERE oid = 'json_extract(jsonb,text)'::regprocedure)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("query 0058 json_extract up behavior");
+        assert_eq!(array_value.as_deref(), Some("first"));
+        assert_eq!(strict_mismatch, None);
+        assert_eq!(malformed_path, None);
+        assert_eq!(volatility, "s");
+
+        POSTGRES_MIGRATOR
+            .undo(&pool, 57)
+            .await
+            .expect("undo 0058 json_extract migration");
+
+        let (down_array_value, down_lax_value, down_malformed_path, down_volatility): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT
+                json_extract('{\"items\":[{\"id\":\"first\"}]}'::jsonb, '$.items[0].id'),
+                json_extract('{\"phase_gate\":[{\"run_id\":\"run-array\"}]}'::jsonb, '$.phase_gate.run_id'),
+                json_extract('{}'::jsonb, '$['),
+                (SELECT provolatile::text
+                 FROM pg_proc
+                 WHERE oid = 'json_extract(jsonb,text)'::regprocedure)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("query 0058 json_extract down behavior");
+        assert_eq!(down_array_value.as_deref(), Some("first"));
+        assert_eq!(down_lax_value.as_deref(), Some("run-array"));
+        assert_eq!(down_malformed_path, None);
+        assert_eq!(down_volatility, "s");
+
+        close_test_pool(pool, "db::postgres json_extract test pool")
+            .await
+            .expect("close postgres pool");
+        test_db.drop().await;
+    }
+
+    /// #2224 follow-up: the migration 0058 fix replaced `WHEN OTHERS` with
+    /// an explicit list of jsonpath SQLSTATE classes so non-JSON failure
+    /// modes (statement timeouts, cancellations, OOM) propagate to the
+    /// caller instead of being swallowed into a silent NULL. Without a
+    /// regression test the original concern — operators losing visibility
+    /// into a timed-out json_extract query — could be silently reintroduced
+    /// by a future "let's go back to WHEN OTHERS" refactor.
+    ///
+    /// We can't easily simulate OOM, but `statement_timeout` is the
+    /// canonical signal we care about and is cheap to trigger: a tight
+    /// timeout + a jsonpath against a deeply-nested payload (or a
+    /// pg_sleep wrapper) will exhaust the budget mid-evaluation.
+    #[tokio::test]
+    async fn postgres_json_extract_0058_propagates_statement_timeout_not_silent_null() {
+        let test_db = TestDatabase::create().await;
+        let config = postgres_test_config(&test_db);
+
+        let pool =
+            connect_test_pool_and_migrate_config(&config, "db::postgres json_extract timeout pool")
+                .await
+                .expect("connect and migrate postgres")
+                .expect("postgres pool");
+
+        // Tight per-statement timeout. Run the timeout-bound query in a
+        // separate `query` call so the SET LOCAL stays scoped to the
+        // dedicated statement.
+        let mut conn = pool.acquire().await.expect("acquire pg connection");
+        sqlx::query("BEGIN")
+            .execute(&mut *conn)
+            .await
+            .expect("begin");
+        sqlx::query("SET LOCAL statement_timeout = '5ms'")
+            .execute(&mut *conn)
+            .await
+            .expect("set short statement_timeout");
+
+        // Force a wait long enough to outlast the 5ms budget. We can't
+        // make `json_extract` itself slow in a deterministic way, but we
+        // can compose with `pg_sleep` inside the same statement so the
+        // post-fix code path observes the `query_canceled` SQLSTATE
+        // *during* the json_extract evaluation chain. If a future
+        // refactor reintroduces `WHEN OTHERS`, this errors becomes a
+        // silent NULL and the assertion below fails.
+        let result: Result<Option<String>, sqlx::Error> = sqlx::query_scalar(
+            "SELECT json_extract(
+                ('{\"x\":' || (SELECT pg_sleep(0.5)::text) || '}')::jsonb,
+                '$.x'
+            )",
+        )
+        .fetch_one(&mut *conn)
+        .await;
+
+        // Roll back the test tx whether or not the statement aborted so
+        // we don't leave a poisoned tx behind for `close_test_pool`.
+        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+
+        match result {
+            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("57014") => {
+                // 57014 = `query_canceled` — the SQLSTATE PostgreSQL
+                // raises for statement_timeout. This is exactly the
+                // signal the WHEN OTHERS fix was meant to preserve.
+            }
+            Err(sqlx::Error::Database(db_err)) => {
+                panic!(
+                    "expected statement_timeout (SQLSTATE 57014) to surface; got {:?} (code={:?})",
+                    db_err.message(),
+                    db_err.code()
+                );
+            }
+            Err(other) => {
+                panic!("expected DatabaseError; got {other:?}");
+            }
+            Ok(value) => {
+                panic!(
+                    "json_extract silently swallowed statement_timeout — got Ok({value:?}) instead of query_canceled. \
+                     Regression of #2224 fix: WHEN OTHERS catch-all reintroduced."
+                );
+            }
+        }
+
+        drop(conn);
+        close_test_pool(pool, "db::postgres json_extract timeout pool")
+            .await
+            .expect("close postgres pool");
+        test_db.drop().await;
+    }
+
+    #[tokio::test]
     async fn postgres_startup_reseed_migrates_legacy_openclaw_agent_ids() {
         let test_db = TestDatabase::create().await;
         let mut config = postgres_test_config(&test_db);

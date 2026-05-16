@@ -293,74 +293,351 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
     )
 }
 
+/// Max length of `failed_reason` carried into structured audit logs / JSON
+/// responses. The repair pipeline pulls this string from `task_dispatches.result`
+/// which is operator-authored — truncating bounds log volume and limits the
+/// blast radius if a reviewer ever puts something sensitive in a verdict body.
+/// #2257: rationale for the explicit cap.
+const FAILED_REASON_AUDIT_MAX_LEN: usize = 256;
+
+fn truncate_failed_reason(reason: Option<String>) -> Option<String> {
+    reason.map(|raw| {
+        if raw.len() <= FAILED_REASON_AUDIT_MAX_LEN {
+            raw
+        } else {
+            let mut clipped: String = raw.chars().take(FAILED_REASON_AUDIT_MAX_LEN).collect();
+            clipped.push_str("…[truncated]");
+            clipped
+        }
+    })
+}
+
+#[derive(Debug, Clone)]
+struct RepairCaller {
+    /// Whatever the client claimed via `x-agent-id` / `x-channel-id`
+    /// headers BEFORE the auth check. Attacker-controlled on rejection.
+    claimed: String,
+    /// `Some` only if PG resolved the headers to a real agent identity
+    /// (`resolve_requesting_agent_id_with_pg`). `None` means we accepted
+    /// the request via the bearer-token path with no PG-verified
+    /// principal — audit consumers must treat `claimed` as unverified.
+    verified: Option<String>,
+}
+
+impl RepairCaller {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        Self {
+            claimed: repair_phase_gate_caller_from_headers(headers),
+            verified: None,
+        }
+    }
+
+    fn verify(&mut self, resolved: Option<String>) {
+        self.verified = resolved;
+    }
+
+    /// For logs: prefer the verified principal; fall back to the claimed
+    /// header value with an explicit `unverified:` prefix so audit
+    /// aggregators don't confuse the two.
+    fn audit_label(&self) -> String {
+        match self.verified.as_deref() {
+            Some(label) => label.to_string(),
+            None => format!("unverified:{}", self.claimed),
+        }
+    }
+}
+
+/// Scope identifier under which phase-gate repair idempotency keys are stored.
+/// Lets the same operator-supplied UUID be reused across unrelated endpoints
+/// without aliasing in `idempotency_keys`.
+const PHASE_GATE_REPAIR_IDEMPOTENCY_SCOPE: &str = "phase-gate-repair";
+
+fn parse_idempotency_key_header(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("idempotency-key")
+        .or_else(|| headers.get("Idempotency-Key"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .map(str::to_string)
+}
+
 /// POST /api/queue/runs/{id}/phase-gates/repair
 pub async fn repair_phase_gates(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let body: RepairPhaseGateBody = match parse_json_body(body, "phase-gates/repair") {
+    let mut caller = RepairCaller::from_headers(&headers);
+    if let Err(response) =
+        crate::server::routes::kanban::require_explicit_bearer_token(&headers, "phase-gate repair")
+    {
+        // Unverified caller — explicitly mark the audit field so a spoofed
+        // `x-agent-id` doesn't masquerade as a real principal in logs.
+        audit_phase_gate_repair_rejected(&id, &caller, "unauthorized", "authorization failed");
+        return response;
+    }
+
+    let idempotency_key = parse_idempotency_key_header(&headers);
+    let request_fingerprint = idempotency_key.as_ref().map(|_| {
+        crate::db::idempotency::fingerprint_request(
+            "POST",
+            &format!("/api/queue/runs/{id}/phase-gates/repair"),
+            &body,
+        )
+    });
+
+    let parsed_body: RepairPhaseGateBody = match parse_json_body(body, "phase-gates/repair") {
         Ok(parsed) => parsed,
         Err(error) => {
+            audit_phase_gate_repair_rejected(&id, &caller, "bad_request", &error);
             return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
         }
     };
     let Some(pool) = state.pg_pool_ref() else {
+        audit_phase_gate_repair_rejected(
+            &id,
+            &caller,
+            "pg_unavailable",
+            "postgres pool unavailable",
+        );
         return pg_unavailable_response();
     };
 
-    let options = crate::db::auto_queue::PhaseGateRepairOptions {
-        phase: body.phase,
-        dispatch_id: body.dispatch_id,
+    caller.verify(
+        crate::server::routes::kanban::resolve_requesting_agent_id_with_pg(pool, &headers).await,
+    );
+
+    // #2257 concern 5: Stripe-style idempotency-key handling. When the
+    // caller passes an `Idempotency-Key` header we claim the slot and
+    // either run the work fresh, replay a prior response, or reject the
+    // request because the key is either mid-flight or being reused with
+    // a different body. Behavior without the header is unchanged.
+    let idempotency_slot = if let (Some(key), Some(fingerprint)) =
+        (idempotency_key.as_ref(), request_fingerprint.as_ref())
+    {
+        match crate::db::idempotency::claim(
+            pool,
+            PHASE_GATE_REPAIR_IDEMPOTENCY_SCOPE,
+            key,
+            fingerprint,
+            Some(&caller.audit_label()),
+            crate::db::idempotency::DEFAULT_IDEMPOTENCY_TTL,
+        )
+        .await
+        {
+            Ok(crate::db::idempotency::IdempotencyOutcome::Created) => Some(key.clone()),
+            Ok(crate::db::idempotency::IdempotencyOutcome::Replay { status, body, .. }) => {
+                audit_phase_gate_repair_rejected(
+                    &id,
+                    &caller,
+                    "idempotency_replay",
+                    "returning cached response",
+                );
+                return (
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+                    Json(body),
+                );
+            }
+            Ok(crate::db::idempotency::IdempotencyOutcome::InFlight) => {
+                audit_phase_gate_repair_rejected(
+                    &id,
+                    &caller,
+                    "idempotency_in_flight",
+                    "concurrent request with the same key is still running",
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "another request with this Idempotency-Key is still in flight",
+                    })),
+                );
+            }
+            Ok(crate::db::idempotency::IdempotencyOutcome::FingerprintMismatch { .. }) => {
+                audit_phase_gate_repair_rejected(
+                    &id,
+                    &caller,
+                    "idempotency_fingerprint_mismatch",
+                    "key reused with a different request body",
+                );
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "error": "Idempotency-Key already used with a different request body",
+                    })),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %id,
+                    key = %key,
+                    error = %error,
+                    "phase-gate repair idempotency claim failed; proceeding without dedup"
+                );
+                None
+            }
+        }
+    } else {
+        None
     };
-    match crate::db::auto_queue::repair_phase_gates_for_run_on_pg(pool, &id, options).await {
-        Ok(summary) => {
-            let outcomes: Vec<serde_json::Value> = summary
-                .outcomes
-                .into_iter()
-                .map(|outcome| {
-                    json!({
-                        "dispatch_id": outcome.dispatch_id,
-                        "phase": outcome.phase,
-                        "outcome": outcome.outcome,
-                        "run_resumed": outcome.run_resumed,
-                        "run_finalized": outcome.run_finalized,
-                        "pending_count": outcome.pending_count,
-                        "failed_reason": outcome.failed_reason,
+
+    let options = crate::db::auto_queue::PhaseGateRepairOptions {
+        phase: parsed_body.phase,
+        dispatch_id: parsed_body.dispatch_id,
+    };
+    let (status, response_body) =
+        match crate::db::auto_queue::repair_phase_gates_for_run_on_pg(pool, &id, options).await {
+            Ok(summary) => {
+                audit_phase_gate_repair_summary(&caller, &summary);
+                let outcomes: Vec<serde_json::Value> = summary
+                    .outcomes
+                    .into_iter()
+                    .map(|outcome| {
+                        json!({
+                            "dispatch_id": outcome.dispatch_id,
+                            "phase": outcome.phase,
+                            "outcome": outcome.outcome,
+                            "run_resumed": outcome.run_resumed,
+                            "run_finalized": outcome.run_finalized,
+                            "pending_count": outcome.pending_count,
+                            "failed_reason": truncate_failed_reason(outcome.failed_reason),
+                        })
                     })
-                })
-                .collect();
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "ok": true,
-                    "run_id": summary.run_id,
-                    "phase_filter": summary.phase_filter,
-                    "dispatch_id_filter": summary.dispatch_id_filter,
-                    "candidate_dispatches": summary.candidate_dispatches,
-                    "cleared_gates": summary.cleared_gates,
-                    "failed_gates": summary.failed_gates,
-                    "awaiting_siblings": summary.awaiting_siblings,
-                    "stale_dispatches": summary.stale_dispatches,
-                    "no_context_dispatches": summary.no_context_dispatches,
-                    "blocking_gates_remaining": summary.blocking_gates_remaining,
-                    "run_status": summary.run_status,
-                    "outcomes": outcomes,
-                })),
-            )
+                    .collect();
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "ok": true,
+                        "run_id": summary.run_id,
+                        "phase_filter": summary.phase_filter,
+                        "dispatch_id_filter": summary.dispatch_id_filter,
+                        "candidate_dispatches": summary.candidate_dispatches,
+                        "cleared_gates": summary.cleared_gates,
+                        "failed_gates": summary.failed_gates,
+                        "awaiting_siblings": summary.awaiting_siblings,
+                        "stale_dispatches": summary.stale_dispatches,
+                        "no_context_dispatches": summary.no_context_dispatches,
+                        "orphan_gates_skipped": summary.orphan_gates_skipped,
+                        "blocking_gates_remaining": summary.blocking_gates_remaining,
+                        "run_status": summary.run_status,
+                        "outcomes": outcomes,
+                    })),
+                )
+            }
+            Err(error @ crate::db::auto_queue::PhaseGateRepairError::InvalidRequest { .. }) => {
+                let message = error.to_string();
+                audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
+                (StatusCode::BAD_REQUEST, Json(json!({"error": message})))
+            }
+            Err(error @ crate::db::auto_queue::PhaseGateRepairError::NotFound { .. }) => {
+                let message = error.to_string();
+                audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
+                (StatusCode::NOT_FOUND, Json(json!({"error": message})))
+            }
+            Err(error) => {
+                let message = error.to_string();
+                audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": message})),
+                )
+            }
+        };
+
+    // #2257 concern 5: stamp the idempotency slot with the final response
+    // so subsequent retries with the same key replay verbatim. We do this
+    // for every terminal outcome — both success (200 OK) and the
+    // structured error paths (400 / 404 / 500) — because Stripe's
+    // contract guarantees the same response on replay regardless of
+    // whether the original request "succeeded". On the rare write
+    // failure we log and continue; the slot will eventually be GC'd.
+    if let Some(key) = idempotency_slot.as_ref() {
+        let status_u16 = status.as_u16();
+        let body_value = response_body.0.clone();
+        if let Err(error) = crate::db::idempotency::record_response(
+            pool,
+            PHASE_GATE_REPAIR_IDEMPOTENCY_SCOPE,
+            key,
+            status_u16,
+            &body_value,
+        )
+        .await
+        {
+            tracing::warn!(
+                run_id = %id,
+                key = %key,
+                error = %error,
+                "phase-gate repair idempotency record_response failed; slot will expire via GC"
+            );
         }
-        Err(error) if error.starts_with("not_found:") => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": error.trim_start_matches("not_found:")})),
-        ),
-        Err(error) if error == "run_id is required" || error == "phase must be >= 0" => {
-            (StatusCode::BAD_REQUEST, Json(json!({"error": error})))
-        }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
     }
+
+    (status, response_body)
+}
+
+fn repair_phase_gate_caller_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-agent-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("agent:{value}"))
+        .or_else(|| {
+            headers
+                .get("x-channel-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("channel:{value}"))
+        })
+        .unwrap_or_else(|| "api".to_string())
+}
+
+fn audit_phase_gate_repair_summary(
+    caller: &RepairCaller,
+    summary: &crate::db::auto_queue::PhaseGateRepairSummary,
+) {
+    let ctx = AutoQueueLogContext::new().run(&summary.run_id);
+    let span = crate::services::auto_queue::auto_queue_trace_span("phase_gate_repair", &ctx);
+    let _guard = span.enter();
+    tracing::info!(
+        caller = %caller.audit_label(),
+        caller_verified = caller.verified.is_some(),
+        caller_claimed = %caller.claimed,
+        outcome = "ok",
+        phase_filter = ?summary.phase_filter,
+        dispatch_id_filter = ?summary.dispatch_id_filter,
+        candidate_dispatches = summary.candidate_dispatches,
+        cleared_gates = summary.cleared_gates,
+        failed_gates = summary.failed_gates,
+        awaiting_siblings = summary.awaiting_siblings,
+        stale_dispatches = summary.stale_dispatches,
+        no_context_dispatches = summary.no_context_dispatches,
+        orphan_gates_skipped = summary.orphan_gates_skipped,
+        blocking_gates_remaining = summary.blocking_gates_remaining,
+        run_status = ?summary.run_status,
+        "[auto-queue] phase-gate repair completed"
+    );
+}
+
+fn audit_phase_gate_repair_rejected(
+    run_id: &str,
+    caller: &RepairCaller,
+    outcome: &str,
+    error: &str,
+) {
+    let ctx = AutoQueueLogContext::new().run(run_id);
+    let span = crate::services::auto_queue::auto_queue_trace_span("phase_gate_repair", &ctx);
+    let _guard = span.enter();
+    tracing::warn!(
+        caller = %caller.audit_label(),
+        caller_verified = caller.verified.is_some(),
+        caller_claimed = %caller.claimed,
+        outcome = %outcome,
+        error = %error,
+        "[auto-queue] phase-gate repair rejected"
+    );
 }
 
 /// POST /api/queue/cancel — cancel all active/paused runs and pending entries
@@ -419,5 +696,58 @@ pub async fn reorder(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": error})),
         ),
+    }
+}
+
+#[cfg(test)]
+mod phase_gate_repair_route_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn truncate_failed_reason_returns_none_for_none() {
+        assert!(truncate_failed_reason(None).is_none());
+    }
+
+    #[test]
+    fn truncate_failed_reason_passes_through_short_strings() {
+        let input = "short reason".to_string();
+        assert_eq!(truncate_failed_reason(Some(input.clone())), Some(input),);
+    }
+
+    #[test]
+    fn truncate_failed_reason_clips_oversized_strings_with_tag() {
+        let oversized = "x".repeat(FAILED_REASON_AUDIT_MAX_LEN + 50);
+        let truncated = truncate_failed_reason(Some(oversized)).expect("Some");
+        assert!(
+            truncated.ends_with("…[truncated]"),
+            "expected truncation marker, got: {truncated:?}"
+        );
+        let prefix_byte_len: usize = truncated
+            .chars()
+            .take(FAILED_REASON_AUDIT_MAX_LEN)
+            .map(char::len_utf8)
+            .sum();
+        let marker_byte_len: usize = "…[truncated]".len();
+        assert_eq!(truncated.len(), prefix_byte_len + marker_byte_len);
+    }
+
+    #[test]
+    fn repair_caller_audit_label_marks_unverified_when_pg_unresolved() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-id", HeaderValue::from_static("attacker-claim"));
+        let caller = RepairCaller::from_headers(&headers);
+        assert_eq!(caller.audit_label(), "unverified:agent:attacker-claim");
+        assert!(caller.verified.is_none());
+    }
+
+    #[test]
+    fn repair_caller_audit_label_uses_verified_principal_when_pg_resolved() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-id", HeaderValue::from_static("attacker-claim"));
+        let mut caller = RepairCaller::from_headers(&headers);
+        caller.verify(Some("agent:real-orchestrator".to_string()));
+        assert_eq!(caller.audit_label(), "agent:real-orchestrator");
+        assert_eq!(caller.claimed, "agent:attacker-claim");
     }
 }
