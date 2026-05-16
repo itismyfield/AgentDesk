@@ -519,11 +519,82 @@ pub fn is_readonly_tool_policy(allowed_tools: Option<&[String]>) -> bool {
     })
 }
 
+/// Coarse-grained classification of who triggered a cancellation.
+///
+/// Issue #2335 (a): downstream branches (e.g. should we still speak the
+/// partial summary?) need to distinguish "user explicitly told us to stop"
+/// from "the watchdog/timeout expired". The free-form `cancel_source` label
+/// remains for tracing, but consumers should branch on this enum to avoid
+/// brittle string matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CancelSource {
+    /// User talked over an in-flight playback / turn ("live PCM cut" or the
+    /// explicit-stop barge-in path).
+    UserBargeIn,
+    /// User explicitly asked to stop via a non-voice control surface.
+    ExplicitStop,
+    /// Foreground/background summary or ack generation timed out.
+    SummaryTimeout,
+    /// Surrounding session is being torn down (guild leave, restart, etc.).
+    SessionTeardown,
+    /// Long-running watchdog deadline elapsed.
+    WatchdogTimeout,
+    /// Cancel came in via a path that did not classify itself.
+    Other,
+}
+
+impl CancelSource {
+    /// Canonical string label used by tracing fields and downstream
+    /// systems (e.g. dispatch row `cancel_reason`).
+    pub fn as_label(self) -> &'static str {
+        match self {
+            CancelSource::UserBargeIn => "user_barge_in",
+            CancelSource::ExplicitStop => "explicit_stop",
+            CancelSource::SummaryTimeout => "summary_timeout",
+            CancelSource::SessionTeardown => "session_teardown",
+            CancelSource::WatchdogTimeout => "watchdog_timeout",
+            CancelSource::Other => "other",
+        }
+    }
+
+    /// Best-effort classification of a free-form label set via
+    /// [`CancelToken::set_cancel_source`]. Unknown labels fall back to
+    /// [`CancelSource::Other`] so consumers can still branch safely.
+    pub fn classify(label: &str) -> Self {
+        // Order matters: more specific substrings first.
+        let lower = label.to_ascii_lowercase();
+        if lower.contains("watchdog") || lower.contains("ack_timeout") {
+            return CancelSource::WatchdogTimeout;
+        }
+        if lower.contains("summary_timeout")
+            || lower.contains("text_reply_timeout")
+            || lower.contains("background_summary")
+        {
+            return CancelSource::SummaryTimeout;
+        }
+        if lower.contains("live_cut") || lower.contains("barge_in") {
+            return CancelSource::UserBargeIn;
+        }
+        if lower.contains("teardown")
+            || lower.contains("guild_teardown")
+            || lower.contains("shutdown")
+            || lower.contains("restart")
+        {
+            return CancelSource::SessionTeardown;
+        }
+        if lower.contains("explicit_stop") || lower.contains("user_cancel") {
+            return CancelSource::ExplicitStop;
+        }
+        CancelSource::Other
+    }
+}
+
 /// Cooperative cancellation token shared by provider runtimes and Discord orchestration.
 pub struct CancelToken {
     pub cancelled: AtomicBool,
     pub child_pid: Mutex<Option<u32>>,
     cancel_source: Mutex<Option<String>>,
+    cancel_source_kind: Mutex<Option<CancelSource>>,
     /// SSH cancel flag — set to true to signal remote execution to close the channel
     #[allow(dead_code)]
     pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
@@ -545,6 +616,7 @@ impl CancelToken {
             cancelled: AtomicBool::new(false),
             child_pid: Mutex::new(None),
             cancel_source: Mutex::new(None),
+            cancel_source_kind: Mutex::new(None),
             ssh_cancel: Mutex::new(None),
             tmux_session: Mutex::new(None),
             watchdog_deadline_ms: AtomicI64::new(0),
@@ -595,7 +667,37 @@ impl CancelToken {
     }
 
     pub fn set_cancel_source(&self, source: impl Into<String>) {
-        *self.cancel_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(source.into());
+        let label = source.into();
+        // Issue #2335 (a): keep the enum classification in sync with the
+        // free-form label so downstream consumers can branch on the variant
+        // without re-parsing the string. We only auto-classify when no
+        // explicit kind has been set yet so that callers using
+        // `set_cancel_source_kind` keep precedence.
+        let classified = CancelSource::classify(&label);
+        {
+            let mut kind = self
+                .cancel_source_kind
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if kind.is_none() {
+                *kind = Some(classified);
+            }
+        }
+        *self.cancel_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(label);
+    }
+
+    /// Explicitly set the structured cancel source. Also updates the
+    /// free-form label (used for tracing / dispatch reason) to the canonical
+    /// string for the variant when no label was previously recorded.
+    pub fn set_cancel_source_kind(&self, kind: CancelSource) {
+        *self
+            .cancel_source_kind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(kind);
+        let mut label = self.cancel_source.lock().unwrap_or_else(|e| e.into_inner());
+        if label.is_none() {
+            *label = Some(kind.as_label().to_string());
+        }
     }
 
     pub fn cancel_source(&self) -> Option<String> {
@@ -603,6 +705,17 @@ impl CancelToken {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Issue #2335 (a): structured classification of the cancellation
+    /// trigger. Returns `None` only if neither
+    /// [`CancelToken::set_cancel_source`] nor
+    /// [`CancelToken::set_cancel_source_kind`] has been called yet.
+    pub fn cancel_source_kind(&self) -> Option<CancelSource> {
+        *self
+            .cancel_source_kind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -1116,7 +1229,7 @@ fn codex_model_context_window(model: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod cancel_token_tests {
-    use super::{CancelToken, cancel_requested, register_child_pid};
+    use super::{CancelSource, CancelToken, cancel_requested, register_child_pid};
 
     #[test]
     fn cancel_token_helpers_register_source_and_state() {
@@ -1138,6 +1251,74 @@ mod cancel_token_tests {
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(cancel_requested(Some(&token)));
+    }
+
+    /// Issue #2335 (a): free-form labels used today by the voice paths must
+    /// classify into the new [`CancelSource`] enum so downstream branches
+    /// can distinguish timeout-vs-user-cancel without string parsing.
+    #[test]
+    fn cancel_source_classifies_known_voice_labels() {
+        assert_eq!(
+            CancelSource::classify("voice_barge_in_explicit_stop"),
+            CancelSource::UserBargeIn
+        );
+        assert_eq!(
+            CancelSource::classify("voice_barge_in_live_cut"),
+            CancelSource::UserBargeIn
+        );
+        assert_eq!(
+            CancelSource::classify("voice_background_summary_timeout"),
+            CancelSource::SummaryTimeout
+        );
+        assert_eq!(
+            CancelSource::classify("voice_channel_text_reply_timeout"),
+            CancelSource::SummaryTimeout
+        );
+        assert_eq!(
+            CancelSource::classify("voice_foreground_ack_timeout"),
+            CancelSource::WatchdogTimeout
+        );
+        assert_eq!(
+            CancelSource::classify("voice_guild_teardown"),
+            CancelSource::SessionTeardown
+        );
+        assert_eq!(
+            CancelSource::classify("watchdog_timeout"),
+            CancelSource::WatchdogTimeout
+        );
+        assert_eq!(
+            CancelSource::classify("unknown_label_xyz"),
+            CancelSource::Other
+        );
+    }
+
+    /// `set_cancel_source` must keep the structured kind in sync so that a
+    /// caller writing only the legacy free-form label still produces a
+    /// branchable enum value (#2335 a).
+    #[test]
+    fn set_cancel_source_populates_kind() {
+        let token = CancelToken::new();
+        assert_eq!(token.cancel_source_kind(), None);
+        token.set_cancel_source("voice_barge_in_explicit_stop");
+        assert_eq!(
+            token.cancel_source_kind(),
+            Some(CancelSource::UserBargeIn),
+            "set_cancel_source should auto-classify into the enum"
+        );
+
+        // Explicit kind setter overrides classification when called first.
+        let token = CancelToken::new();
+        token.set_cancel_source_kind(CancelSource::SessionTeardown);
+        token.set_cancel_source("voice_barge_in_live_cut");
+        assert_eq!(
+            token.cancel_source_kind(),
+            Some(CancelSource::SessionTeardown),
+            "explicit set_cancel_source_kind must win over later free-form auto-classification"
+        );
+        assert_eq!(
+            token.cancel_source().as_deref(),
+            Some("voice_barge_in_live_cut")
+        );
     }
 }
 

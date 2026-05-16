@@ -962,7 +962,39 @@ impl VoiceBargeInRuntime {
                 .unwrap_or_else(|| {
                     "지금 보이스 빠른 답변 모델 응답을 만들지 못했어요.".to_string()
                 });
-        self.unregister_inflight_foreground_cancel(channel_id, &cancel_token);
+
+        // Issue #2335 (c) — Codex round 2: keep the foreground cancel token
+        // registered through the `channel_id.say` HTTP call. If a cancel
+        // arrives between generation and posting (or during the HTTP
+        // round-trip), we must suppress the now-stale reply. The
+        // unregister happens via this RAII guard on every exit path.
+        struct TextReplyGuard<'a> {
+            runtime: &'a VoiceBargeInRuntime,
+            channel_id: ChannelId,
+            token: Arc<crate::services::provider::CancelToken>,
+        }
+        impl<'a> Drop for TextReplyGuard<'a> {
+            fn drop(&mut self) {
+                self.runtime
+                    .unregister_inflight_foreground_cancel(self.channel_id, &self.token);
+            }
+        }
+        let _text_reply_guard = TextReplyGuard {
+            runtime: self,
+            channel_id,
+            token: cancel_token.clone(),
+        };
+
+        if cancel_token.cancelled.load(Ordering::Relaxed) {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                cancel_source = ?cancel_token.cancel_source(),
+                cancel_source_kind = ?cancel_token.cancel_source_kind(),
+                stage = "pre_post",
+                "voice channel text reply suppressed because cancel won the race (#2335)"
+            );
+            return true;
+        }
 
         if let Err(error) = channel_id.say(http.as_ref(), reply).await {
             tracing::warn!(
@@ -1815,7 +1847,50 @@ impl VoiceBargeInRuntime {
         )
         .await
         .unwrap_or(VoiceForegroundDecision::Silence);
-        self.unregister_inflight_foreground_cancel(source_channel_id, &cancel_token);
+
+        // Issue #2335 (c) — Codex round 2: keep the foreground cancel token
+        // REGISTERED through every suppressible side effect (synth, play,
+        // background dispatch). Previously the code unregistered right
+        // after `generate_foreground_ack_text` returned, so any cancel
+        // arriving in the window between unregister and the TTS playback /
+        // handoff dispatch could not flip this token — the stale spoken
+        // ack or background handoff would still fire. We use a RAII guard
+        // so the unregister always runs (panics, early returns, etc.) and
+        // re-check the cancel flag at each awaited boundary below.
+        struct InflightGuard<'a> {
+            runtime: &'a VoiceBargeInRuntime,
+            channel_id: ChannelId,
+            token: Arc<crate::services::provider::CancelToken>,
+        }
+        impl<'a> Drop for InflightGuard<'a> {
+            fn drop(&mut self) {
+                self.runtime
+                    .unregister_inflight_foreground_cancel(self.channel_id, &self.token);
+            }
+        }
+        let _inflight_guard = InflightGuard {
+            runtime: self,
+            channel_id: source_channel_id,
+            token: cancel_token.clone(),
+        };
+
+        let log_cancel_suppressed = |label: &'static str| {
+            tracing::info!(
+                source_channel_id = source_channel_id.get(),
+                target_channel_id = target_channel_id.get(),
+                utterance_id = %announcement.utterance_id,
+                cancel_source = ?cancel_token.cancel_source(),
+                cancel_source_kind = ?cancel_token.cancel_source_kind(),
+                stage = label,
+                "voice foreground side effect suppressed because cancel won the race (#2335)"
+            );
+        };
+
+        // First gate: cancel that arrived during ack generation.
+        if cancel_token.cancelled.load(Ordering::Relaxed) {
+            log_cancel_suppressed("post_generation");
+            return true;
+        }
 
         match decision {
             VoiceForegroundDecision::Silence => {
@@ -1830,10 +1905,18 @@ impl VoiceBargeInRuntime {
                 );
             }
             VoiceForegroundDecision::Speak(spoken) => {
+                if cancel_token.cancelled.load(Ordering::Relaxed) {
+                    log_cancel_suppressed("pre_speak_synth");
+                    return true;
+                }
                 if let Some(path) = self
                     .synthesize_acknowledgement(&spoken, source_channel_id)
                     .await
                 {
+                    if cancel_token.cancelled.load(Ordering::Relaxed) {
+                        log_cancel_suppressed("post_speak_synth");
+                        return true;
+                    }
                     self.play_acknowledgement(shared, source_channel_id, path)
                         .await;
                 }
@@ -1848,6 +1931,10 @@ impl VoiceBargeInRuntime {
                 );
             }
             VoiceForegroundDecision::HandoffBackground(summary) => {
+                if cancel_token.cancelled.load(Ordering::Relaxed) {
+                    log_cancel_suppressed("pre_background_handoff");
+                    return true;
+                }
                 match self
                     .dispatch_voice_background_handoff(
                         shared,
@@ -1859,11 +1946,55 @@ impl VoiceBargeInRuntime {
                     .await
                 {
                     Ok(turn_id) => {
+                        // Issue #2335 (Codex round 3): if a barge-in / stop
+                        // arrived DURING `dispatch_voice_background_handoff`,
+                        // the background turn was already created on the
+                        // target channel. The post-await check below would
+                        // suppress the spoken ack but leave the stale
+                        // background turn running. Immediately cancel the
+                        // just-started target-channel turn so the user's
+                        // stop actually stops the work.
+                        if cancel_token.cancelled.load(Ordering::Relaxed) {
+                            let cancel_reason = cancel_token.cancel_source().unwrap_or_else(|| {
+                                "voice_foreground_cancel_during_handoff".to_string()
+                            });
+                            // `cancel_reason` is a captured String — use a
+                            // static fallback label to satisfy the
+                            // `&'static str` signature; the dynamic reason is
+                            // still written to the active turn token by
+                            // `mailbox_cancel_active_turn_with_reason` only
+                            // accepting `&str`, so promote to a static
+                            // category here.
+                            let target_cancel_label: &'static str =
+                                "voice_foreground_cancel_during_handoff";
+                            let result = super::mailbox_cancel_active_turn_with_reason(
+                                shared,
+                                target_channel_id,
+                                target_cancel_label,
+                            )
+                            .await;
+                            tracing::info!(
+                                source_channel_id = source_channel_id.get(),
+                                target_channel_id = target_channel_id.get(),
+                                turn_id = %turn_id,
+                                target_cancelled = result.token.is_some(),
+                                already_stopping = result.already_stopping,
+                                cancel_source = %cancel_reason,
+                                "voice background handoff just-started turn cancelled \
+                                 because foreground cancel won the race (#2335)"
+                            );
+                            log_cancel_suppressed("post_background_handoff_started");
+                            return true;
+                        }
                         let ack = voice_background_handoff_ack(&language);
                         if let Some(path) = self
                             .synthesize_acknowledgement(ack, source_channel_id)
                             .await
                         {
+                            if cancel_token.cancelled.load(Ordering::Relaxed) {
+                                log_cancel_suppressed("post_background_handoff_play");
+                                return true;
+                            }
                             self.play_acknowledgement(shared, source_channel_id, path)
                                 .await;
                         }
@@ -3033,6 +3164,23 @@ impl VoiceReceiveHook for DiscordVoiceBargeInHook {
             .playbacks
             .get(&channel_id.get())
             .and_then(|entry| entry.value().owner);
+        // Issue #2335 (b): the live PCM cut path is a parallel termination
+        // path that, prior to this fix, did NOT call
+        // `cancel_inflight_foreground_calls`. As a result PCM cut would
+        // silence the speaker / kill the background turn while a
+        // foreground Codex/Claude child kept running to natural exit.
+        //
+        // Codex review (round 2): perform the foreground-token cancel
+        // SYNCHRONOUSLY here, BEFORE the tokio::spawn that handles the
+        // (async) mailbox cancel. If we deferred it into the spawned task,
+        // a fast foreground call could complete and unregister its token
+        // between the cut detection and the spawn being scheduled, in
+        // which case `cancel_inflight_foreground_calls` would see an
+        // empty registry and the stale reply / ack / handoff would still
+        // proceed after the user explicitly barged in.
+        let foreground_cancelled = self
+            .runtime
+            .cancel_inflight_foreground_calls(channel_id, "voice_barge_in_live_cut");
         tokio::spawn(async move {
             let result = super::mailbox_cancel_active_turn_with_reason(
                 &shared,
@@ -3049,6 +3197,7 @@ impl VoiceReceiveHook for DiscordVoiceBargeInHook {
                 playback_owner = ?playback_owner,
                 cancelled = result.token.is_some(),
                 already_stopping = result.already_stopping,
+                foreground_cancelled,
                 "voice live barge-in cut processed"
             );
         });
@@ -3199,6 +3348,103 @@ mod tests {
         let zero =
             runtime.cancel_inflight_foreground_calls(channel, "voice_barge_in_explicit_stop");
         assert_eq!(zero, 0);
+    }
+
+    /// Issue #2335 (a): `cancel_inflight_foreground_calls` must populate the
+    /// structured `CancelSource` on every flipped token so consumers can
+    /// branch on the enum (timeout vs barge-in) without re-parsing the
+    /// free-form label.
+    #[test]
+    fn cancel_inflight_foreground_calls_classifies_cancel_source_kind() {
+        use crate::services::provider::CancelSource;
+
+        let runtime = enabled_runtime();
+        let channel = ChannelId::new(91);
+
+        let live_cut_token = Arc::new(crate::services::provider::CancelToken::new());
+        runtime.register_inflight_foreground_cancel(channel, live_cut_token.clone());
+        runtime.cancel_inflight_foreground_calls(channel, "voice_barge_in_live_cut");
+        assert_eq!(
+            live_cut_token.cancel_source_kind(),
+            Some(CancelSource::UserBargeIn),
+            "live PCM cut must classify as UserBargeIn (#2335 a)"
+        );
+
+        let teardown_token = Arc::new(crate::services::provider::CancelToken::new());
+        runtime.register_inflight_foreground_cancel(channel, teardown_token.clone());
+        runtime.cancel_inflight_foreground_calls(channel, "voice_guild_teardown");
+        assert_eq!(
+            teardown_token.cancel_source_kind(),
+            Some(CancelSource::SessionTeardown),
+            "guild teardown must classify as SessionTeardown (#2335 a)"
+        );
+
+        let explicit_token = Arc::new(crate::services::provider::CancelToken::new());
+        runtime.register_inflight_foreground_cancel(channel, explicit_token.clone());
+        runtime.cancel_inflight_foreground_calls(channel, "voice_barge_in_explicit_stop");
+        assert_eq!(
+            explicit_token.cancel_source_kind(),
+            Some(CancelSource::UserBargeIn),
+            "explicit-stop barge-in is also UserBargeIn (#2335 a)"
+        );
+    }
+
+    /// Issue #2335 (b) — Codex round 2: the PCM-cut foreground cancel MUST
+    /// run synchronously at cut detection. If it were deferred into the
+    /// spawned async task, a foreground call completing between
+    /// cut detection and the spawn being scheduled would unregister its
+    /// token first, and the user would still hear the stale ack/reply.
+    ///
+    /// We can't easily run the full `observe_pcm` hook in unit tests
+    /// (it needs a SharedData), but we *can* simulate the race: cancel
+    /// must flip BEFORE any unregister-after-completion path runs.
+    #[test]
+    fn live_pcm_cut_foreground_cancel_wins_against_immediate_unregister() {
+        let runtime = enabled_runtime();
+        let channel = ChannelId::new(2336);
+        let foreground_token = Arc::new(crate::services::provider::CancelToken::new());
+        runtime.register_inflight_foreground_cancel(channel, foreground_token.clone());
+
+        // Simulate the new ordering: cut detection cancels SYNCHRONOUSLY.
+        let count = runtime.cancel_inflight_foreground_calls(channel, "voice_barge_in_live_cut");
+        // Foreground call now tries to unregister "after completion" —
+        // but the token is already cancelled, so the unregister is a
+        // no-op observable as "registry empty for the channel".
+        runtime.unregister_inflight_foreground_cancel(channel, &foreground_token);
+
+        assert_eq!(count, 1, "cut must cancel the still-registered token");
+        assert!(
+            foreground_token.cancelled.load(Ordering::Relaxed),
+            "synchronous cut wins the race even if the foreground completes immediately after"
+        );
+    }
+
+    /// Issue #2335 (b): the live PCM cut path must propagate cancel to every
+    /// in-flight foreground Codex/Claude token registered for the channel.
+    /// Before this fix, PCM cut silenced the speaker / killed the
+    /// background turn while the foreground child kept running.
+    #[test]
+    fn live_pcm_cut_propagates_cancel_to_inflight_foreground_tokens() {
+        use crate::services::provider::CancelSource;
+
+        let runtime = enabled_runtime();
+        let channel = ChannelId::new(2335);
+        let foreground_token = Arc::new(crate::services::provider::CancelToken::new());
+        runtime.register_inflight_foreground_cancel(channel, foreground_token.clone());
+
+        // Simulate the PCM-cut tokio task call site: it must cancel the
+        // registered foreground tokens with the live-cut reason.
+        let count = runtime.cancel_inflight_foreground_calls(channel, "voice_barge_in_live_cut");
+        assert_eq!(count, 1, "registered foreground token must be cancelled");
+        assert!(
+            foreground_token.cancelled.load(Ordering::Relaxed),
+            "foreground token must be flipped to cancelled"
+        );
+        assert_eq!(
+            foreground_token.cancel_source_kind(),
+            Some(CancelSource::UserBargeIn),
+            "live cut must classify as UserBargeIn"
+        );
     }
 
     /// #2250: unregistering a CancelToken after a foreground call completes

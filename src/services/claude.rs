@@ -509,13 +509,18 @@ fn execute_command_simple_with_model_and_cancel(
         return Err("Claude request cancelled".to_string());
     }
 
+    // Issue #2335 (d): arm the mid-flight cancel watcher BEFORE writing to
+    // stdin. Previously the watcher was spawned after the (potentially
+    // blocking) `stdin.write_all`, leaving a short window where an
+    // immediate cancel arriving between `spawn` and stdin completion would
+    // not be honoured. The Codex counterpart has no stdin so it is not
+    // affected. ADR #2175.
+    let cancel_watcher =
+        crate::services::process::spawn_simple_cancel_watcher(cancel_token_arc, child_pid);
+
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(prompt.as_bytes());
     }
-
-    // ADR #2175: mid-flight cancel watcher; see codex.rs counterpart.
-    let cancel_watcher =
-        crate::services::process::spawn_simple_cancel_watcher(cancel_token_arc, child_pid);
 
     let output_result = child.wait_with_output();
     cancel_watcher.disarm();
