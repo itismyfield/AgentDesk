@@ -92,6 +92,15 @@ fn build_soft_intervention(
     reply_context: Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
+    // #2266: when the intake-gate sees a voice-transcript announcement and
+    // chooses to enqueue it (busy active turn, thread guard, dispatch
+    // collision, drain mode, reconcile gate), the per-process
+    // `voice::announce_meta` store entry can expire before the queued turn
+    // runs (30s TTL vs. arbitrary queue dwell). Carrying the announcement
+    // inside the Intervention keeps the queued payload self-contained so
+    // every queued-dispatch entrypoint can reinsert it into the store and
+    // recover the voice-transcript framing.
+    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Intervention {
     Intervention {
         author_id,
@@ -103,6 +112,7 @@ fn build_soft_intervention(
         reply_context,
         has_reply_boundary,
         merge_consecutive,
+        voice_announcement,
     }
 }
 
@@ -115,6 +125,9 @@ async fn enqueue_soft_intervention(
     reply_context: Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
+    // #2266: pass-through for the voice-transcript payload (see
+    // `build_soft_intervention` doc-comment).
+    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> super::super::MailboxEnqueueOutcome {
     mailbox_enqueue_intervention(
         &data.shared,
@@ -127,6 +140,7 @@ async fn enqueue_soft_intervention(
             reply_context,
             has_reply_boundary,
             merge_consecutive,
+            voice_announcement,
         ),
     )
     .await
@@ -144,7 +158,7 @@ pub(super) async fn enqueue_soft_intervention_for_test(
         shared,
         &ProviderKind::Codex,
         channel_id,
-        build_soft_intervention(author_id, message_id, text, None, false, false),
+        build_soft_intervention(author_id, message_id, text, None, false, false, None),
     )
     .await
     .enqueued
@@ -1190,12 +1204,31 @@ pub(in crate::services::discord) async fn handle_event(
                 .unwrap_or(channel_id);
             let settings_snapshot = { data.shared.settings.read().await.clone() };
             let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
-            let is_voice_transcript_announcement = announce_bot_id == Some(user_id.get())
-                && (crate::voice::announce_meta::global_store().contains(new_message.id)
-                    || crate::voice::prompt::parse_voice_transcript_announcement(
-                        &new_message.content,
-                    )
-                    .is_some());
+            // #2266: resolve the voice-transcript payload ONCE at the
+            // intake-gate so we can both (a) cheaply classify the message and
+            // (b) embed the full announcement in any queued Intervention we
+            // construct on the busy-channel/thread-guard/drain-mode paths
+            // below. We prefer the durable store via `peek_clone` (no consume)
+            // so the active dispatch path still finds the entry when it later
+            // calls `take()`; falls back to parsing the message content when
+            // the store has no entry but the message itself is a valid
+            // announcement (post-restart hydrate or out-of-band publish).
+            let resolved_voice_announcement: Option<
+                crate::voice::prompt::VoiceTranscriptAnnouncement,
+            > = if announce_bot_id == Some(user_id.get()) {
+                crate::voice::announce_meta::global_store()
+                    .peek_clone(new_message.id)
+                    .or_else(|| {
+                        crate::voice::prompt::parse_authorized_voice_transcript_announcement(
+                            &new_message.content,
+                            user_id.get(),
+                            announce_bot_id,
+                        )
+                    })
+            } else {
+                None
+            };
+            let is_voice_transcript_announcement = resolved_voice_announcement.is_some();
             if !is_voice_transcript_announcement
                 && validate_live_channel_routing_with_dm_hint(
                     ctx,
@@ -1547,6 +1580,11 @@ pub(in crate::services::discord) async fn handle_event(
                                 None,
                                 false,
                                 false,
+                                // #2266: thread-guard queue path — embed the
+                                // voice payload so the eventual queued
+                                // dispatch can reinsert it into the store
+                                // even if the >30s TTL expires first.
+                                resolved_voice_announcement.clone(),
                             )
                             .await;
                             add_reaction(
@@ -1599,6 +1637,10 @@ pub(in crate::services::discord) async fn handle_event(
                         None,
                         false,
                         false,
+                        // #2266: DISPATCH: collision guard — DISPATCH messages
+                        // never carry voice transcripts, so this is always
+                        // None. Explicit for clarity / future audits.
+                        None,
                     )
                     .await;
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1642,6 +1684,12 @@ pub(in crate::services::discord) async fn handle_event(
                     reply_context.clone(),
                     has_reply_boundary,
                     merge_consecutive,
+                    // #2266: main busy-active-turn queue path — voice
+                    // transcripts that arrive while a previous turn is
+                    // running flow through here. Embed the announcement
+                    // so the queued dispatch reinserts it into the store
+                    // even if the >30s in-memory TTL expires first.
+                    resolved_voice_announcement.clone(),
                 )
                 .await;
                 let is_shutting_down = data
@@ -1704,6 +1752,10 @@ pub(in crate::services::discord) async fn handle_event(
                     reply_context.clone(),
                     has_reply_boundary,
                     merge_consecutive,
+                    // #2266: reconcile gate — startup-recovery queue path.
+                    // Voice transcripts that arrive before recovery
+                    // completes need the embedded payload too.
+                    resolved_voice_announcement.clone(),
                 )
                 .await;
                 // Checkpoint: track last processed message (#2044 F12 — monotonic).
@@ -1738,6 +1790,10 @@ pub(in crate::services::discord) async fn handle_event(
                     reply_context.clone(),
                     has_reply_boundary,
                     merge_consecutive,
+                    // #2266: drain-mode queue path (restart pending) —
+                    // pass the embedded voice payload so the post-restart
+                    // dispatch path can reinsert it into the store.
+                    resolved_voice_announcement.clone(),
                 )
                 .await;
 
@@ -1809,6 +1865,11 @@ pub(in crate::services::discord) async fn handle_event(
                             reply_context.clone(),
                             has_reply_boundary,
                             merge_consecutive,
+                            // #2266: queued-behind-idle-backlog path —
+                            // FIFO ordering keeps voice transcripts behind
+                            // pre-existing queue items, so embed the
+                            // payload for the eventual dispatch reinsert.
+                            resolved_voice_announcement.clone(),
                         )
                         .await,
                     )

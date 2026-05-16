@@ -469,6 +469,7 @@ impl TestHealthHarness {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             })
             .collect::<Vec<_>>();
         super::mailbox_replace_queue(&self.shared, &provider, ChannelId::new(channel_id), queue)
@@ -572,6 +573,7 @@ impl TestHealthHarness {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             })
             .collect::<Vec<_>>();
         super::mailbox_replace_queue(
@@ -5038,6 +5040,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            voice_announcement: None,
         };
         save_channel_queue(
             &ProviderKind::Codex,
@@ -5139,6 +5142,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             },
             super::super::Intervention {
                 author_id: UserId::new(7),
@@ -5150,6 +5154,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             },
         ];
         save_channel_queue(
@@ -5238,6 +5243,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            voice_announcement: None,
         };
         save_channel_queue(
             &ProviderKind::Codex,

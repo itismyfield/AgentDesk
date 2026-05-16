@@ -305,6 +305,14 @@ pub(super) fn build_race_requeued_intervention(
     reply_context: Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
+    // #2266: when the race-lost message is a voice-transcript announcement,
+    // the per-process `voice::announce_meta` store entry was already consumed
+    // by the active `handle_text_message` call before the race-loss branch
+    // ran. Carry the announcement payload through the queued `Intervention`
+    // so the dispatch path can reinsert it into the store before re-entering
+    // `handle_text_message`, preserving voice-transcript framing instead of
+    // degrading to plain text.
+    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Intervention {
     Intervention {
         author_id: request_owner,
@@ -316,6 +324,7 @@ pub(super) fn build_race_requeued_intervention(
         reply_context,
         has_reply_boundary,
         merge_consecutive,
+        voice_announcement,
     }
 }
 

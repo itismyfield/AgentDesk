@@ -1,4 +1,9 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// #2266: Serde-serialized when carried inside a `PendingQueueItem` for the
+/// durable on-disk intervention queue. The `#[serde(default)]` annotation on
+/// every field keeps the payload optional + forward-compatible: queue files
+/// written by older binaries (which never embedded the announcement) still
+/// deserialize cleanly and yield `None` at the wrapping `Option` layer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct VoiceTranscriptAnnouncement {
     pub(crate) transcript: String,
     pub(crate) user_id: String,

@@ -2513,6 +2513,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: true,
+            voice_announcement: None,
         };
 
         // Build a minimal persistence context — mailbox actor requires it
@@ -2956,6 +2957,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: true,
+            voice_announcement: None,
         }
     }
 
