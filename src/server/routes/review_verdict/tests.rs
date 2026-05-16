@@ -1438,10 +1438,15 @@ async fn duplicate_accept_returns_conflict() {
     drop(conn);
 
     // #2200 sub-fix 1 (`stale-state`): a second accept with the SAME decision
-    // is now an idempotent no-op (200 + outcome=already_finalized) instead of
-    // 409 — the originating review-decision dispatch was consumed by the
-    // follow-up rework dispatch, but the caller's intent matches the recorded
-    // decision, so we short-circuit without firing additional side effects.
+    // and the SAME originating dispatch_id is now an idempotent no-op
+    // (200 + outcome=already_finalized) instead of 409 — the originating
+    // review-decision dispatch was consumed by the follow-up rework dispatch,
+    // but the caller's intent matches the proven decision on the dispatch
+    // row, so we short-circuit without firing additional side effects.
+    // Hardening: callers without `dispatch_id` continue to see the legacy 409
+    // (verified by the existing `dismiss_then_late_accept_does_not_reopen`
+    // and the new `stale_state_omitted_dispatch_id_returns_generic_conflict`
+    // tests below).
     let (status2, body2) = submit_review_decision(
         State(state.clone()),
         Json(ReviewDecisionBody {
@@ -1449,7 +1454,7 @@ async fn duplicate_accept_returns_conflict() {
             decision: "accept".to_string(),
             comment: None,
             commit_sha: None,
-            dispatch_id: None,
+            dispatch_id: Some("dispatch-rd".to_string()),
             out_of_scope: None,
         }),
     )
@@ -1528,7 +1533,7 @@ async fn idempotent_finalize_after_auto_accept_completed() {
             decision: "accept".to_string(),
             comment: Some("agent retrying accept".to_string()),
             commit_sha: None,
-            dispatch_id: None,
+            dispatch_id: Some("dispatch-rd-auto-c".to_string()),
         }),
     )
     .await;
@@ -1586,10 +1591,12 @@ async fn idempotent_finalize_after_auto_accept_cancelled_by_cleanup() {
              VALUES ('card-auto-x', 'Auto Accept Cancelled', 'rework_pending', 'agent-1', 'dispatch-rd-auto-x', NULL, datetime('now'), datetime('now'))",
             [],
         ).unwrap();
+        // Cleanup-cancelled dispatch row MUST itself record the consumed
+        // decision (the cleanup path that handles auto-accept records this).
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, result, title, created_at, updated_at)
              VALUES ('dispatch-rd-auto-x', 'card-auto-x', 'agent-1', 'review-decision', 'cancelled',
-                     '{\"reason\":\"auto_cancelled_on_terminal_card\",\"completion_source\":\"force_transition\"}',
+                     '{\"reason\":\"auto_cancelled_on_terminal_card\",\"completion_source\":\"force_transition\",\"decision\":\"auto_accept\"}',
                      '[Review Decision]', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
@@ -1609,7 +1616,7 @@ async fn idempotent_finalize_after_auto_accept_cancelled_by_cleanup() {
             decision: "accept".to_string(),
             comment: None,
             commit_sha: None,
-            dispatch_id: None,
+            dispatch_id: Some("dispatch-rd-auto-x".to_string()),
         }),
     )
     .await;
@@ -1663,6 +1670,8 @@ async fn stale_state_failed_dispatch_does_not_short_circuit() {
 
     let state = AppState::test_state(db.clone(), engine);
 
+    // Even when the caller correctly identifies the dispatch_id, a failed
+    // dispatch with no recorded decision MUST NOT short-circuit.
     let (status, body) = submit_review_decision(
         State(state),
         Json(ReviewDecisionBody {
@@ -1670,7 +1679,7 @@ async fn stale_state_failed_dispatch_does_not_short_circuit() {
             decision: "accept".to_string(),
             comment: None,
             commit_sha: None,
-            dispatch_id: None,
+            dispatch_id: Some("dispatch-rd-failed".to_string()),
         }),
     )
     .await;
@@ -1729,7 +1738,7 @@ async fn stale_state_arbitrary_cancellation_does_not_short_circuit() {
             decision: "accept".to_string(),
             comment: None,
             commit_sha: None,
-            dispatch_id: None,
+            dispatch_id: Some("dispatch-rd-cancel".to_string()),
         }),
     )
     .await;
@@ -1809,13 +1818,14 @@ async fn stale_state_dispatch_id_mismatch_returns_generic_conflict() {
     );
 }
 
-/// #2200 sub-fix 1 (`stale-state`): when the card exists but no review-decision
-/// dispatch has ever been created for it, /api/review-decision must return 404
-/// (not 409). This makes the route's contract explicit and lets the caller
-/// distinguish "you never had a decision to make" from "the decision was
-/// already consumed".
+/// #2200 sub-fix 1 (`stale-state`) disclosure hardening (Codex medium-severity
+/// finding): when the caller omits `dispatch_id`, the handler MUST NOT expose
+/// card-history-specific bodies (404 or 200 already_finalized) — those would
+/// let an unauthorized caller probe the card's review-decision history by
+/// rotating through accept/dispute/dismiss. Without dispatch_id, all stale
+/// paths collapse to the generic legacy 409.
 #[tokio::test]
-async fn no_originating_dispatch_returns_404() {
+async fn stale_state_omitted_dispatch_id_returns_generic_conflict() {
     let db = test_db();
     let engine = test_engine(&db);
     {
@@ -1824,10 +1834,23 @@ async fn no_originating_dispatch_returns_404() {
             "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
             [],
         ).unwrap();
-        // Card exists but has no review-decision dispatch in its history.
+        // Card has a finalized review-decision dispatch — the kind that WOULD
+        // qualify for already_finalized if dispatch_id were supplied.
         conn.execute(
-            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, review_status, created_at, updated_at)
-             VALUES ('card-noorig', 'No Originating', 'in_progress', 'agent-1', NULL, datetime('now'), datetime('now'))",
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+             VALUES ('card-nodid', 'Probe Test', 'rework_pending', 'agent-1', 'dispatch-rd-nodid', NULL, datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, result, title, created_at, updated_at)
+             VALUES ('dispatch-rd-nodid', 'card-nodid', 'agent-1', 'review-decision', 'completed',
+                     '{\"decision\":\"accept\",\"completion_source\":\"review_decision_api\"}',
+                     '[Review Decision]', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, last_decision, updated_at)
+             VALUES ('card-nodid', 'rework_pending', 'accept', datetime('now'))",
             [],
         ).unwrap();
     }
@@ -1837,39 +1860,91 @@ async fn no_originating_dispatch_returns_404() {
     let (status, body) = submit_review_decision(
         State(state),
         Json(ReviewDecisionBody {
-            card_id: "card-noorig".to_string(),
+            card_id: "card-nodid".to_string(),
             decision: "accept".to_string(),
             comment: None,
             commit_sha: None,
+            // No dispatch_id — caller does not name the originating dispatch.
             dispatch_id: None,
         }),
     )
     .await;
 
-    assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(
-        body.0["error"], "no originating review-decision dispatch for this card",
-        "404 body must carry the typed error message"
+        status,
+        StatusCode::CONFLICT,
+        "omitting dispatch_id must return generic 409, not already_finalized"
     );
+    assert_eq!(
+        body.0["error"], "no pending review-decision dispatch for this card",
+        "must use the generic 409 body — no card-history disclosure"
+    );
+    assert!(
+        body.0.get("outcome").is_none(),
+        "must not leak outcome field when dispatch_id is omitted"
+    );
+}
 
-    // No card status mutation, no new dispatch.
-    let conn = db.lock().unwrap();
-    let card_status: String = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = 'card-noorig'",
+/// #2200 sub-fix 1 (`stale-state`) hardening (Codex high-severity finding):
+/// when the latest review-decision dispatch row was completed by an unknown
+/// or third-party finalizer (no recognized `completion_source`), we must NOT
+/// treat its `result.decision` as proof. This prevents an attacker (or an
+/// unrelated finalizer race) from writing `{decision:"accept"}` into a
+/// completed row and getting `200 already_finalized` for free.
+#[tokio::test]
+async fn stale_state_unknown_completion_source_does_not_short_circuit() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
             [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(card_status, "in_progress");
-    let dispatch_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-noorig'",
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+             VALUES ('card-unkn', 'Unknown Source', 'rework_pending', 'agent-1', 'dispatch-rd-unkn', NULL, datetime('now'), datetime('now'))",
             [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(dispatch_count, 0);
+        ).unwrap();
+        // result.decision is present, but completion_source is NOT a
+        // recognized route-owned finalizer.
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, result, title, created_at, updated_at)
+             VALUES ('dispatch-rd-unkn', 'card-unkn', 'agent-1', 'review-decision', 'completed',
+                     '{\"decision\":\"accept\",\"completion_source\":\"orphan_recovery\"}',
+                     '[Review Decision]', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, last_decision, updated_at)
+             VALUES ('card-unkn', 'rework_pending', 'accept', datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-unkn".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-rd-unkn".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "unknown completion_source must NOT prove the decision: {}",
+        body.0
+    );
+    assert_eq!(
+        body.0["error"], "no pending review-decision dispatch for this card"
+    );
 }
 
 #[tokio::test]

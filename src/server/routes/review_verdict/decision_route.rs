@@ -710,38 +710,19 @@ impl FinalizedReviewDecisionInfo {
             .and_then(|raw| serde_json::from_str(raw).ok())
     }
 
-    /// Canonical decision recorded ON the latest review-decision dispatch row
-    /// itself (not card-level state). Returns `Some("accept")` for both
-    /// `accept` and `auto_accept` payloads. Returns `None` when the dispatch
-    /// `result` JSON does not record a decision at all — e.g. a brand-new
-    /// dispatch that was `cancelled`/`failed` before any decision was made.
-    fn dispatch_recorded_decision(&self) -> Option<&'static str> {
-        let result = self.parsed_result()?;
-        let raw = result
-            .get("decision")
+    /// `completion_source` from the dispatch `result`, if any. Used to gate
+    /// the idempotent-finalize path to dispatch rows that were finalized by a
+    /// trusted route-owned path. An attacker (or another finalizer) writing
+    /// `{"decision":"accept"}` into `result` is NOT sufficient on its own —
+    /// the row must also carry a recognized `completion_source`.
+    fn completion_source(&self) -> Option<String> {
+        self.parsed_result()?
+            .get("completion_source")
             .and_then(|value| value.as_str())
-            .or_else(|| {
-                // Some finalize paths only record auto-accept context, not a
-                // top-level `decision` field. Fall back to context markers.
-                result.get("context").and_then(|ctx| {
-                    if ctx.get("auto_accept").and_then(|v| v.as_bool()) == Some(true) {
-                        Some("auto_accept")
-                    } else {
-                        None
-                    }
-                })
-            })?;
-        match raw {
-            "accept" | "auto_accept" => Some("accept"),
-            "dispute" => Some("dispute"),
-            "dismiss" => Some("dismiss"),
-            _ => None,
-        }
+            .map(str::to_string)
     }
 
-    /// Cancellation reason from the dispatch `result`, if any. Used to
-    /// distinguish auto-cleanup cancellations (which consume the decision
-    /// intent) from arbitrary cancellations.
+    /// Cancellation reason from the dispatch `result`, if any.
     fn cancellation_reason(&self) -> Option<String> {
         self.parsed_result()?
             .get("reason")
@@ -749,49 +730,64 @@ impl FinalizedReviewDecisionInfo {
             .map(str::to_string)
     }
 
-    /// Set of cancellation reasons that are equivalent to the originating
-    /// review-decision dispatch having been consumed by an auto-cleanup path.
-    /// Other cancellation reasons (e.g. manual cancel mid-flight) MUST NOT
-    /// short-circuit a late accept — the caller should still see 409.
-    fn cancelled_as_consumed_cleanup(&self) -> bool {
-        match self.cancellation_reason().as_deref() {
-            Some("auto_cancelled_on_terminal_card")
-            | Some("js_terminal_cleanup")
-            | Some("superseded_by_dispute_re_review") => true,
-            _ => false,
-        }
-    }
-
     /// Returns the canonical decision that the originating review-decision
     /// dispatch was finalized with, if and only if we can prove it from the
-    /// dispatch row's own `status`+`result` (NOT from card-level state — that
-    /// would be unsafe if the latest dispatch is a fresh new round that has
-    /// not yet been decided). Returns `None` when the dispatch has no proven
-    /// decision (still pending, failed without decision, manually cancelled,
-    /// or its `result` doesn't record a decision).
+    /// dispatch row's own `status`+`result` AND a recognized
+    /// `completion_source`. Dispatch-scoped: we never derive the decision
+    /// from unscoped `card_review_state.last_decision` (which can be stale
+    /// from a prior round).
+    ///
+    /// Recognized proofs:
+    /// - status=completed, completion_source=review_decision_api, result.decision is one of accept/dispute/dismiss
+    /// - status=completed, completion_source=review_auto_accept_policy, result.decision=auto_accept (maps to accept)
+    /// - status=cancelled, completion_source=force_transition, result.reason=auto_cancelled_on_terminal_card
+    ///   AND result.decision present (auto-cleanup path that records the consumed decision)
     fn proven_finalized_decision(&self) -> Option<&'static str> {
+        let result = self.parsed_result()?;
+        let recorded_decision = result.get("decision").and_then(|v| v.as_str());
+        let source = self.completion_source();
         match self.latest_dispatch_status.as_deref() {
-            Some("completed") => self.dispatch_recorded_decision(),
+            Some("completed") => match source.as_deref() {
+                Some("review_decision_api") => match recorded_decision? {
+                    "accept" => Some("accept"),
+                    "dispute" => Some("dispute"),
+                    "dismiss" => Some("dismiss"),
+                    _ => None,
+                },
+                Some("review_auto_accept_policy") => match recorded_decision? {
+                    "auto_accept" | "accept" => Some("accept"),
+                    _ => None,
+                },
+                // Any other completion_source (e.g. orphan_recovery, unknown,
+                // or absent) does NOT prove a decision — fall through to 409
+                // so the caller can investigate.
+                _ => None,
+            },
             Some("cancelled") => {
-                // Only auto-cleanup cancellations count. In that case the
-                // canonical decision lives on card_review_state (e.g. the
-                // auto-accept policy completed via JS, then the originating
-                // dispatch was cancelled by terminal cleanup). Validate that
-                // card_review_state.last_decision is recorded AND that this
-                // cancellation reason matches a known auto-cleanup path.
-                if self.cancelled_as_consumed_cleanup() {
-                    match self.last_decision.as_deref() {
-                        Some("accept") | Some("auto_accept") => Some("accept"),
-                        Some("dispute") => Some("dispute"),
-                        Some("dismiss") => Some("dismiss"),
-                        _ => None,
-                    }
-                } else {
-                    None
+                // Cleanup-cancelled rows: we require BOTH the cleanup-source
+                // marker AND a recorded decision on this dispatch row. We do
+                // NOT consult card-level `last_decision` because that field
+                // is not dispatch-scoped — a fresh dispatch could be cancelled
+                // by terminal cleanup while an older `last_decision` remains
+                // from a previous round.
+                let reason = self.cancellation_reason();
+                let is_cleanup = matches!(
+                    source.as_deref(),
+                    Some("force_transition") | Some("js_terminal_cleanup")
+                ) && matches!(
+                    reason.as_deref(),
+                    Some("auto_cancelled_on_terminal_card") | Some("js_terminal_cleanup")
+                );
+                if !is_cleanup {
+                    return None;
+                }
+                match recorded_decision? {
+                    "accept" | "auto_accept" => Some("accept"),
+                    "dispute" => Some("dispute"),
+                    "dismiss" => Some("dismiss"),
+                    _ => None,
                 }
             }
-            // `failed` or anything else: no proof of decision; do NOT
-            // short-circuit. Caller falls through to the legacy 409.
             _ => None,
         }
     }
@@ -2567,53 +2563,45 @@ pub async fn submit_review_decision(
         // #2200 sub-fix 1 (`stale-state`): when the originating review-decision
         // dispatch is missing because a follow-up (rework/review) or the
         // auto-accept policy already consumed it, idempotently short-circuit
-        // instead of rejecting with 409 — but ONLY when the submitted decision
-        // matches a decision PROVEN on the dispatch row itself (status +
-        // result JSON). This avoids:
-        //   (a) letting a later caller flip a finalized decision by replaying
-        //       with a different verdict — preserved by matching prior decision
-        //   (b) silently no-oping when a fresh new round's dispatch
-        //       failed/cancelled before any decision was made — the older
-        //       card-level `last_decision` from a prior round MUST NOT be
-        //       treated as proof for the latest dispatch (see Codex review).
+        // instead of rejecting with 409 — but ONLY when:
+        //   1. The caller supplied a `dispatch_id` that names the most-recent
+        //      originating review-decision dispatch for this card (dispatch-
+        //      scoped — closes the probing oracle described in Codex review).
+        //      Callers without dispatch_id continue to see the legacy 409.
+        //   2. The latest dispatch carries dispatch-scoped proof of the
+        //      finalized decision (status + recognized completion_source +
+        //      recorded decision). We never trust unscoped card-level
+        //      `last_decision` alone (it can be stale from a prior round).
+        //   3. The submitted decision matches the proven prior decision (a
+        //      caller cannot flip a finalized decision by re-POSTing a
+        //      different verdict — preserves legacy 409 for that case).
+
+        // Without dispatch_id, return the generic legacy 409 — no card-
+        // history-specific body shapes, no probing oracle.
+        let Some(submitted_did) = body.dispatch_id.as_deref() else {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "no pending review-decision dispatch for this card",
+                    "card_id": body.card_id,
+                })),
+            );
+        };
+
         let finalized = finalized_review_decision_info_pg_first(&state, &body.card_id).await;
 
-        // #2200 disclosure hardening: when the caller submitted a `dispatch_id`
-        // hint, validate it against the latest originating dispatch BEFORE
-        // returning any history-specific body. If the submitted dispatch_id
-        // does not match a known review-decision dispatch for this card, do
-        // not expose card-history details — return the legacy 409 with the
-        // generic shape.
-        if let Some(ref submitted_did) = body.dispatch_id {
-            let matches_latest = finalized
-                .latest_dispatch_id
-                .as_deref()
-                .is_some_and(|id| id == submitted_did.as_str());
-            if !matches_latest {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(json!({
-                        "error": "no pending review-decision dispatch for this card",
-                        "card_id": body.card_id,
-                    })),
-                );
-            }
-        }
-
-        if !finalized.has_originating_dispatch() {
-            // Genuinely never had a review-decision dispatch — 404 with a
-            // minimal body. Card existence was confirmed above by
-            // `card_exists_pg_first`, so this does not introduce a new
-            // disclosure surface beyond what /api/review-decision already had.
-            tracing::info!(
-                card_id = %body.card_id,
-                submitted_decision = %body.decision,
-                "[review-decision] #2200 stale-state: no originating review-decision dispatch ever existed for card"
-            );
+        // dispatch_id must match the latest originating review-decision
+        // dispatch on file. Mismatch or no originating dispatch at all →
+        // return the generic legacy 409 (no history disclosure).
+        let matches_latest = finalized
+            .latest_dispatch_id
+            .as_deref()
+            .is_some_and(|id| id == submitted_did);
+        if !matches_latest {
             return (
-                StatusCode::NOT_FOUND,
+                StatusCode::CONFLICT,
                 Json(json!({
-                    "error": "no originating review-decision dispatch for this card",
+                    "error": "no pending review-decision dispatch for this card",
                     "card_id": body.card_id,
                 })),
             );
@@ -2640,9 +2628,6 @@ pub async fn submit_review_decision(
                     })),
                 );
             }
-            // Different decision proven on the dispatch row → preserve the
-            // legacy 409 so a caller cannot flip a finalized decision by
-            // re-POSTing with a different verdict.
             tracing::warn!(
                 card_id = %body.card_id,
                 submitted_decision = %body.decision,
@@ -2651,12 +2636,9 @@ pub async fn submit_review_decision(
             );
         }
 
-        // Fallback: originating dispatch exists but (a) it is not terminal in
-        // a way that proves the recorded decision (e.g. status=failed, or
-        // result JSON without a `decision` field), or (b) the proven decision
-        // does not match. Keep the legacy 409 behavior — this is the safe
-        // default and matches all pre-existing tests for late/duplicate/
-        // mismatched-decision flows.
+        // Originating dispatch matches but proof of finalization is missing
+        // (e.g. status=failed, missing completion_source, or recorded decision
+        // does not match). Return the legacy 409.
         return (
             StatusCode::CONFLICT,
             Json(json!({
