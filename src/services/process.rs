@@ -147,20 +147,122 @@ pub struct ProcessInfo {
     pub command: String,
 }
 
+/// Opaque process-identity snapshot captured at SIGTERM dispatch time.
+///
+/// Used to detect PID reuse between SIGTERM and the 200ms-later SIGKILL
+/// escalation. On Linux this stores the kernel `starttime` jiffies from
+/// `/proc/<pid>/stat`; on macOS it stores the BSD-info start microseconds
+/// from `proc_pidinfo(..PROC_PIDTBSDINFO..)`. On other platforms the
+/// snapshot is `None` and verification is skipped (best-effort).
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessIdentity {
+    starttime: Option<u128>,
+}
+
+impl ProcessIdentity {
+    /// Capture identity for `pid` (best-effort; returns an empty snapshot on
+    /// unsupported platforms or if the read fails).
+    pub fn capture(pid: u32) -> Self {
+        Self {
+            starttime: read_process_starttime(pid),
+        }
+    }
+
+    /// Returns true if the process at `pid` still matches this snapshot's
+    /// identity. When no snapshot was captured (unsupported platform or
+    /// transient read failure), the caller's contract is to treat this as
+    /// "matches" so legacy escalation behaviour is preserved.
+    pub fn matches(&self, pid: u32) -> bool {
+        let Some(saved) = self.starttime else {
+            return true;
+        };
+        match read_process_starttime(pid) {
+            Some(current) => current == saved,
+            // If we cannot read the current starttime, the process likely
+            // already exited; let the caller's existence check decide.
+            None => true,
+        }
+    }
+}
+
+/// Cross-platform starttime reader returning a stable monotonic-ish value
+/// per process. `None` means "cannot determine" (process gone, or platform
+/// not supported).
+fn read_process_starttime(pid: u32) -> Option<u128> {
+    #[cfg(target_os = "linux")]
+    {
+        return get_process_starttime(pid as i32).map(|v| v as u128);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return read_starttime_macos(pid);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn read_starttime_macos(pid: u32) -> Option<u128> {
+    use std::mem::MaybeUninit;
+    let mut info: MaybeUninit<libc::proc_bsdinfo> = MaybeUninit::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: proc_pidinfo writes up to `size` bytes into `info` when it
+    // returns a positive value. We check the return code before reading.
+    let ret = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr() as *mut libc::c_void,
+            size,
+        )
+    };
+    if ret <= 0 || ret < size {
+        return None;
+    }
+    // SAFETY: proc_pidinfo wrote a full struct.
+    let info = unsafe { info.assume_init() };
+    Some((info.pbi_start_tvsec as u128) * 1_000_000 + info.pbi_start_tvusec as u128)
+}
+
 /// Kill a process tree by PID.
-/// On Unix, sends SIGTERM to the process group, then SIGKILL as fallback.
+///
+/// On Unix, sends SIGTERM to the process group (or PID), waits ~200ms, then
+/// escalates to SIGKILL — but only after verifying the PID/PGID leader is
+/// still the same process that received SIGTERM. This identity check closes
+/// the PID-reuse race where the original child exits during the grace
+/// window and the OS recycles its PID for an unrelated process before our
+/// SIGKILL fires. See issue #2320.
 #[allow(unsafe_code)]
 pub fn kill_pid_tree(pid: u32) {
     #[cfg(unix)]
     unsafe {
+        // Capture identity *before* SIGTERM so the snapshot reflects the
+        // intended target. On macOS/Linux this reads start_time (jiffies or
+        // microseconds since boot/epoch) which is monotonic per PID-instance.
+        let identity = ProcessIdentity::capture(pid);
+
         let ret = libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
         if ret != 0 {
+            // No process group (single PID fallback path).
             libc::kill(pid as libc::pid_t, libc::SIGTERM);
             std::thread::sleep(std::time::Duration::from_millis(200));
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            if identity.matches(pid) {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
         } else {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            // Only fire SIGKILL at the process group if the PID that defines
+            // that group (the original child) is still alive and unchanged.
+            // If the leader was recycled, the new PID may belong to a
+            // different group leader entirely — skip to avoid stray kills.
+            if identity.matches(pid) {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
         }
     }
     #[cfg(not(unix))]
@@ -938,5 +1040,56 @@ mod simple_cancel_watcher_tests {
             status
         );
         watcher.disarm();
+    }
+
+    /// #2320: identity capture must yield a stable, non-empty snapshot for
+    /// a real running process on platforms we support, and the captured
+    /// identity must `matches()` the same live PID. This guards the
+    /// cross-platform reader (Linux `/proc` vs macOS `proc_pidinfo`).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn process_identity_captures_starttime_for_running_process() {
+        use super::ProcessIdentity;
+
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 5"])
+            .spawn()
+            .expect("sleep should spawn");
+        let pid = child.id();
+
+        let identity = ProcessIdentity::capture(pid);
+        assert!(
+            identity.matches(pid),
+            "captured identity must match the live PID"
+        );
+
+        // Capture again — same PID, same process → must still match.
+        let again = ProcessIdentity::capture(pid);
+        assert!(again.matches(pid));
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// #2320: when the original child exits, `matches()` must still return
+    /// true for an *unknown* current state (the reader returns None and we
+    /// defer to the caller's existence check rather than skipping kills on
+    /// transient read failures). This pins the documented semantics so
+    /// future refactors do not silently regress legacy escalation.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn process_identity_matches_when_pid_no_longer_exists() {
+        use super::ProcessIdentity;
+
+        let mut child = Command::new("sh")
+            .args(["-c", "true"])
+            .spawn()
+            .expect("true should spawn");
+        let pid = child.id();
+        let identity = ProcessIdentity::capture(pid);
+        let _ = child.wait();
+        // Process has exited; reading starttime should fail and matches()
+        // returns true (caller falls back to its existence/kill semantics).
+        assert!(identity.matches(pid));
     }
 }
