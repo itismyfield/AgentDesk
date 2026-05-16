@@ -1,14 +1,15 @@
-import { ChevronRight, Flame, Lock, Sparkles, Trophy } from "lucide-react";
+import { Flame, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import * as api from "../api/client";
 import { localeName, useI18n } from "../i18n";
 import type { Agent, CompanySettings, DashboardStats } from "../types";
-import AgentAvatar from "./AgentAvatar";
 import { getAgentLevel, getAgentTitle } from "./agent-manager/agentProgress";
-import { Drawer } from "./common/overlay";
+import { AchievementDetailDrawer } from "./achievements/AchievementDetailDrawer";
+import { AchievementAvatar } from "./achievements/AchievementCard";
+import { AchievementsHero } from "./achievements/AchievementsHero";
+import { AchievementsSections } from "./achievements/AchievementsSections";
 import {
   DailyMissions,
-  LevelRing,
   StreakCounter,
   getMissionResetCountdown,
   getMissionTotalXp,
@@ -18,17 +19,13 @@ import {
   MILESTONES,
   buildDailyMissions,
   formatAchievementDate,
-  formatCompact,
   formatExact,
-  getRarityTheme,
   nextMilestone,
   normalizeRarity,
   progressToMilestone,
-  rarityLabel,
   type AchievementCardModel,
   type LeaderboardEntry,
   type MilestoneId,
-  type Rarity,
 } from "./achievementsModel";
 
 interface AchievementsPageProps {
@@ -36,232 +33,6 @@ interface AchievementsPageProps {
   stats?: DashboardStats | null;
   agents?: Agent[];
   onSelectAgent?: (agent: Agent) => void;
-}
-
-function BadgeIcon({
-  milestoneId,
-  rarity,
-  achieved,
-}: {
-  milestoneId: string;
-  rarity: Rarity;
-  achieved: boolean;
-}) {
-  const meta = MILESTONE_BY_ID.get(milestoneId as MilestoneId);
-  const glyph = meta?.glyph ?? "?";
-  const theme = getRarityTheme(rarity);
-
-  return (
-    <div style={{ width: 48, height: 48, position: "relative", flexShrink: 0 }}>
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          background: achieved
-            ? `linear-gradient(135deg, ${theme.accent}, color-mix(in srgb, ${theme.accent} 60%, black))`
-            : "var(--bg-3)",
-          clipPath: "polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)",
-          boxShadow: achieved
-            ? `0 0 18px color-mix(in srgb, ${theme.accent} 28%, transparent)`
-            : "none",
-        }}
-      />
-      <div
-        style={{
-          position: "absolute",
-          inset: 3,
-          background: achieved
-            ? "color-mix(in srgb, var(--bg-1) 28%, transparent)"
-            : "var(--bg-2)",
-          clipPath: "polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%)",
-          display: "grid",
-          placeItems: "center",
-          color: achieved ? theme.accent : "var(--fg-faint)",
-          fontSize: glyph.length > 1 ? 11 : 18,
-          fontFamily: "var(--font-pixel)",
-          fontWeight: 700,
-        }}
-      >
-        {glyph}
-      </div>
-    </div>
-  );
-}
-
-function AchievementAvatar({
-  agent,
-  agents,
-  emoji,
-  label,
-}: {
-  agent?: Agent;
-  agents?: Agent[];
-  emoji?: string;
-  label: string;
-}) {
-  // Sprite-first: when an agent reference is available, render the canonical
-  // sprite (consistent with #1251 sprite policy). Emoji is only kept as a
-  // last-resort fallback when leaderboard rows lack a resolved Agent.
-  if (agent) {
-    return (
-      <AgentAvatar
-        agent={agent}
-        agents={agents}
-        size={28}
-        rounded="full"
-        className="border border-[color-mix(in_srgb,var(--line)_70%,transparent)]"
-      />
-    );
-  }
-  return (
-    <div
-      title={label}
-      aria-label={label}
-      style={{
-        width: 28,
-        height: 28,
-        borderRadius: 999,
-        display: "grid",
-        placeItems: "center",
-        background: "color-mix(in srgb, var(--bg-3) 88%, transparent)",
-        border: "1px solid color-mix(in srgb, var(--line) 70%, transparent)",
-        fontSize: 14,
-      }}
-    >
-      {emoji || "🤖"}
-    </div>
-  );
-}
-
-function AchievementCard({
-  item,
-  isKo,
-  progressLabel,
-  agents,
-  onOpen,
-}: {
-  item: AchievementCardModel;
-  isKo: boolean;
-  progressLabel: string;
-  agents: Agent[];
-  onOpen: (item: AchievementCardModel) => void;
-}) {
-  const theme = getRarityTheme(item.rarity);
-
-  return (
-    <button
-      type="button"
-      data-testid={`achievement-card-${item.section}-${item.id}`}
-      className="achievement-card"
-      onClick={() => onOpen(item)}
-      style={{
-        position: "relative",
-        overflow: "hidden",
-        borderRadius: 18,
-        border: `1px solid ${theme.border}`,
-        background: "color-mix(in srgb, var(--bg-2) 94%, transparent)",
-        padding: 16,
-        textAlign: "left",
-        opacity: item.section === "locked" ? 0.8 : 1,
-        transition: "transform 0.16s ease, border-color 0.16s ease, background 0.16s ease",
-      }}
-    >
-      <div
-        style={{
-          position: "absolute",
-          right: 0,
-          top: 0,
-          width: 48,
-          height: 48,
-          background: `radial-gradient(circle at top right, color-mix(in srgb, ${theme.accent} 24%, transparent), transparent 72%)`,
-        }}
-      />
-      <div className="flex items-start gap-3">
-        <BadgeIcon
-          milestoneId={item.milestoneId}
-          rarity={item.rarity}
-          achieved={item.section === "earned"}
-        />
-        <div className="min-w-0 flex-1">
-          <div className="mb-1 flex items-center gap-2">
-            <div className="truncate text-sm font-semibold" style={{ color: "var(--fg)" }}>
-              {item.name}
-            </div>
-            <span
-              className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold"
-              style={{
-                marginLeft: "auto",
-                background: theme.badgeBg,
-                color: theme.badgeText,
-              }}
-            >
-              {rarityLabel(item.rarity, isKo)}
-            </span>
-          </div>
-          <div className="text-[11.5px] leading-5" style={{ color: "var(--fg-muted)" }}>
-            {item.desc}
-          </div>
-          {item.agentName ? (
-            <div
-              className="mt-3 inline-flex items-center gap-2 text-[10.5px]"
-              style={{ color: "var(--fg-faint)" }}
-            >
-              <AchievementAvatar
-                agent={item.agent}
-                agents={agents}
-                emoji={item.avatarEmoji || "🤖"}
-                label={item.agentName}
-              />
-              <span className="truncate">{item.agentName}</span>
-            </div>
-          ) : null}
-          {item.section !== "earned" && typeof item.progress === "number" ? (
-            <div className="mt-3">
-              <div
-                className="overflow-hidden rounded-full"
-                style={{
-                  height: 4,
-                  background: "color-mix(in srgb, var(--bg-3) 90%, transparent)",
-                }}
-              >
-                <div
-                  style={{
-                    height: "100%",
-                    width: `${Math.round(item.progress * 100)}%`,
-                    background: theme.accent,
-                  }}
-                />
-              </div>
-              <div
-                className="mt-2 text-[10px]"
-                style={{ color: "var(--fg-faint)", fontFamily: "var(--font-mono)" }}
-              >
-                {Math.round(item.progress * 100)}% {progressLabel}
-              </div>
-            </div>
-          ) : null}
-          <div className="mt-3 flex items-center justify-between gap-3 text-[10.5px]">
-            <span style={{ color: theme.badgeText, fontFamily: "var(--font-mono)" }}>
-              +{item.xp} XP
-            </span>
-            <span style={{ color: "var(--fg-faint)" }}>
-              {item.section === "earned"
-                ? item.at
-                : item.section === "progress"
-                  ? item.remainingXp != null
-                    ? isKo
-                      ? `${item.remainingXp.toLocaleString()} XP 남음`
-                      : `${item.remainingXp.toLocaleString()} XP left`
-                    : null
-                  : isKo
-                    ? "세부 보기"
-                    : "View details"}
-            </span>
-          </div>
-        </div>
-      </div>
-    </button>
-  );
 }
 
 export default function AchievementsPage({
@@ -582,229 +353,51 @@ export default function AchievementsPage({
       `}</style>
 
       <div className="achievements-fidelity-page">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <div
-              className="text-[11px] font-semibold uppercase tracking-[0.16em]"
-              style={{ color: "var(--th-text-muted, var(--fg-muted))" }}
-            >
-              {isKo ? "업적 보드" : "Achievement Board"}
-            </div>
-            <h1
-              className="mt-2 text-3xl font-semibold tracking-tight sm:text-4xl"
-              style={{ color: "var(--th-text-heading, var(--fg))" }}
-            >
-              {t({ ko: "업적", en: "Achievements" })}
-            </h1>
-            <p
-              className="mt-2 max-w-2xl text-sm leading-7 sm:text-base"
-              style={{ color: "var(--th-text-secondary, var(--fg-muted))" }}
-            >
-              {t({
-                ko: "달성, 진행 중, 잠김 상태를 같은 문법으로 추적하고 XP 흐름과 데일리 미션을 함께 확인합니다.",
-                en: "Track unlocked, in-progress, and locked milestones together with XP flow and daily missions.",
-              })}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span
-              className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold"
-              style={{
-                borderColor: "color-mix(in srgb, var(--th-accent-success, var(--ok)) 26%, var(--th-border-subtle, var(--line)) 74%)",
-                background: "color-mix(in srgb, var(--th-accent-success, var(--ok)) 10%, transparent)",
-                color: "var(--th-accent-success, var(--ok))",
-              }}
-            >
-              <span
-                className="h-2 w-2 rounded-full"
-                style={{ background: "var(--th-accent-success, var(--ok))" }}
-              />
-              {earnedCards.length} / {earnedCards.length + progressCards.length + lockedCards.length}{" "}
-              {t({ ko: "달성", en: "unlocked" })}
-            </span>
-          </div>
-        </div>
+        <AchievementsHero
+          isKo={isKo}
+          locale={locale}
+          heroName={hero?.name}
+          heroXp={heroXp}
+          heroTitle={heroTitle}
+          heroNextXp={heroNextXp}
+          heroLevel={heroLevel}
+          earnedCount={earnedCards.length}
+          totalCount={earnedCards.length + progressCards.length + lockedCards.length}
+          uniqueEarners={uniqueEarners}
+          totalOrgXp={totalOrgXp}
+          title={t({ ko: "업적", en: "Achievements" })}
+          subtitle={t({
+            ko: "달성, 진행 중, 잠김 상태를 같은 문법으로 추적하고 XP 흐름과 데일리 미션을 함께 확인합니다.",
+            en: "Track unlocked, in-progress, and locked milestones together with XP flow and daily missions.",
+          })}
+          boardLabel={isKo ? "업적 보드" : "Achievement Board"}
+          unlockedLabel={t({ ko: "달성", en: "Unlocked" })}
+          agentsLabel={t({ ko: "에이전트", en: "Agents" })}
+        />
 
-        <div
-          className="rounded-[1.5rem] border p-5 sm:p-6"
-          style={{
-            borderColor: "var(--th-border-subtle, var(--line))",
-            background:
-              "linear-gradient(135deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 55%, color-mix(in srgb, var(--th-accent-primary, var(--accent)) 8%, transparent) 100%)",
-          }}
-        >
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-center">
-            <div className="relative">
-              <LevelRing
-                value={heroLevel.progress * 100}
-                size={94}
-                stroke={7}
-                color="var(--th-accent-primary, var(--accent))"
-                trackColor="color-mix(in srgb, var(--th-border-subtle, var(--line)) 70%, transparent)"
-              >
-                <div className="text-center">
-                  <div
-                    className="text-[10px] font-semibold uppercase tracking-[0.14em]"
-                    style={{ color: "var(--th-text-muted, var(--fg-muted))" }}
-                  >
-                    LEVEL
-                  </div>
-                  <div
-                    className="mt-1 text-[26px] font-semibold leading-none"
-                    style={{ color: "var(--th-text-heading, var(--fg))" }}
-                  >
-                    {heroLevel.level}
-                  </div>
-                </div>
-              </LevelRing>
-            </div>
-
-            <div className="min-w-0 flex-1">
-              <div className="text-xl font-semibold" style={{ color: "var(--th-text-heading, var(--fg))" }}>
-                {heroTitle}
-              </div>
-              <div
-                className="mt-1 text-sm"
-                style={{ color: "var(--th-text-secondary, var(--fg-muted))" }}
-              >
-                {hero
-                  ? `${hero.name} · XP ${formatExact(heroXp, locale)}`
-                  : `XP ${formatExact(heroXp, locale)}`}
-                {Number.isFinite(heroLevel.nextThreshold)
-                  ? isKo
-                    ? ` · 다음 레벨까지 ${formatExact(heroNextXp, locale)}`
-                    : ` · ${formatExact(heroNextXp, locale)} to next level`
-                  : isKo
-                    ? " · 최상위 레벨"
-                    : " · Max level"}
-              </div>
-              <div
-                className="mt-4 overflow-hidden rounded-full"
-                style={{
-                  height: 6,
-                  background: "color-mix(in srgb, var(--th-border-subtle, var(--line)) 68%, transparent)",
-                }}
-              >
-                <div
-                  style={{
-                    width: `${Math.round(heroLevel.progress * 100)}%`,
-                    height: "100%",
-                    background: "linear-gradient(90deg, var(--th-accent-primary, var(--accent)), var(--th-accent-danger, var(--codex)))",
-                  }}
-                />
-              </div>
-            </div>
-
-            <div className="grid min-w-[min(100%,340px)] grid-cols-3 gap-3">
-              {[
-                {
-                  value: earnedCards.length,
-                  label: t({ ko: "달성", en: "Unlocked" }),
-                },
-                {
-                  value: uniqueEarners,
-                  label: t({ ko: "에이전트", en: "Agents" }),
-                },
-                {
-                  value: formatCompact(totalOrgXp, locale),
-                  label: "TOTAL XP",
-                },
-              ].map((metric) => (
-                <div
-                  key={metric.label}
-                  className="rounded-2xl border px-3 py-3 text-center"
-                  style={{
-                    borderColor: "var(--th-border-subtle, var(--line))",
-                    background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
-                  }}
-                >
-                  <div
-                    className="text-[21px] font-semibold"
-                    style={{ color: "var(--th-text-heading, var(--fg))" }}
-                  >
-                    {metric.value}
-                  </div>
-                  <div
-                    className="mt-1 text-[10.5px] font-semibold uppercase tracking-[0.08em]"
-                    style={{ color: "var(--th-text-muted, var(--fg-muted))" }}
-                  >
-                    {metric.label}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {[
-          {
-            key: "earned",
-            title: t({ ko: "획득", en: "Unlocked" }),
-            items: earnedCards,
-          },
-          {
-            key: "progress",
-            title: t({ ko: "진행 중", en: "In Progress" }),
-            items: progressCards,
-          },
-          {
-            key: "locked",
-            title: t({ ko: "잠김", en: "Locked" }),
-            items: lockedCards,
-          },
-        ].map((section) => (
-          <section key={section.key} data-testid={`achievements-section-${section.key}`}>
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div
-                className="text-[13px] font-semibold"
-                style={{ color: "var(--th-text-heading, var(--fg))" }}
-              >
-                {section.title}{" "}
-                <span style={{ color: "var(--th-text-muted, var(--fg-muted))", fontWeight: 400 }}>
-                  {section.items.length}
-                </span>
-              </div>
-            </div>
-            {section.items.length === 0 ? (
-              <div
-                className="rounded-[1.15rem] border px-4 py-5 text-sm"
-                style={{
-                  borderColor: "var(--th-border-subtle, var(--line))",
-                  color: "var(--th-text-muted, var(--fg-muted))",
-                  background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-                }}
-              >
-                {section.key === "earned"
-                  ? t({
-                      ko: "아직 집계된 업적이 없습니다.",
-                      en: "No unlocked achievements have been recorded yet.",
-                    })
-                  : section.key === "progress"
-                    ? t({
-                        ko: "지금 진행 중인 업적 후보가 없습니다.",
-                        en: "No active milestone candidates right now.",
-                      })
-                    : t({
-                        ko: "현재 잠긴 업적이 없습니다.",
-                        en: "No locked milestones remain.",
-                      })}
-              </div>
-            ) : (
-              <div className="achievements-grid" data-testid={`achievements-grid-${section.key}`}>
-                {section.items.map((item) => (
-                  <AchievementCard
-                    key={item.id}
-                    item={item}
-                    isKo={isKo}
-                    progressLabel={t({ ko: "진행", en: "progress" })}
-                    agents={agents}
-                    onOpen={setSelectedCard}
-                  />
-                ))}
-              </div>
-            )}
-          </section>
-        ))}
+        <AchievementsSections
+          sections={[
+            {
+              key: "earned",
+              title: t({ ko: "획득", en: "Unlocked" }),
+              items: earnedCards,
+            },
+            {
+              key: "progress",
+              title: t({ ko: "진행 중", en: "In Progress" }),
+              items: progressCards,
+            },
+            {
+              key: "locked",
+              title: t({ ko: "잠김", en: "Locked" }),
+              items: lockedCards,
+            },
+          ]}
+          isKo={isKo}
+          progressLabel={t({ ko: "진행", en: "progress" })}
+          agents={agents}
+          onOpen={setSelectedCard}
+        />
 
         <div className="achievements-grid bottom" data-testid="achievements-grid-bottom">
           <div
@@ -983,225 +576,15 @@ export default function AchievementsPage({
         </div>
       </div>
 
-      <Drawer
-        open={Boolean(selectedCard)}
+      <AchievementDetailDrawer
+        selectedCard={selectedCard}
+        isKo={isKo}
+        locale={locale}
+        t={t}
+        agents={agents}
         onClose={() => setSelectedCard(null)}
-        title={selectedCard?.name}
-        width="min(520px, 100vw)"
-      >
-        {selectedCard ? (
-          <div className="space-y-5" data-testid="achievements-drawer">
-            <div
-              className="rounded-[1.25rem] border p-4"
-              style={{
-                borderColor: getRarityTheme(selectedCard.rarity).border,
-                background:
-                  "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-              }}
-            >
-              <div className="flex items-start gap-3">
-                <BadgeIcon
-                  milestoneId={selectedCard.milestoneId}
-                  rarity={selectedCard.rarity}
-                  achieved={selectedCard.section === "earned"}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span
-                      className="rounded-full px-2.5 py-1 text-[11px] font-semibold"
-                      style={{
-                        background: getRarityTheme(selectedCard.rarity).badgeBg,
-                        color: getRarityTheme(selectedCard.rarity).badgeText,
-                      }}
-                    >
-                      {rarityLabel(selectedCard.rarity, isKo)}
-                    </span>
-                    <span
-                      className="rounded-full px-2.5 py-1 text-[11px] font-semibold"
-                      style={{
-                        background: "var(--th-overlay-medium, var(--bg-3))",
-                        color: "var(--th-text-muted, var(--fg-muted))",
-                      }}
-                    >
-                      {selectedCard.section === "earned"
-                        ? t({ ko: "획득", en: "Unlocked" })
-                        : selectedCard.section === "progress"
-                          ? t({ ko: "진행 중", en: "In progress" })
-                          : t({ ko: "잠김", en: "Locked" })}
-                    </span>
-                  </div>
-                  <div
-                    className="mt-3 text-sm leading-6"
-                    style={{ color: "var(--th-text-secondary, var(--fg-muted))" }}
-                  >
-                    {selectedCard.desc}
-                  </div>
-                  {selectedCard.agentName ? (
-                    <button
-                      type="button"
-                      className="mt-4 inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/5"
-                      style={{
-                        borderColor: "var(--th-border-subtle, var(--line))",
-                        color: "var(--th-text-primary, var(--fg))",
-                      }}
-                      onClick={() => {
-                        if (selectedCard.agent && onSelectAgent) {
-                          onSelectAgent(selectedCard.agent);
-                        }
-                      }}
-                      disabled={!selectedCard.agent || !onSelectAgent}
-                    >
-                      <AchievementAvatar
-                        agent={selectedCard.agent}
-                        agents={agents}
-                        emoji={selectedCard.avatarEmoji || "🤖"}
-                        label={selectedCard.agentName}
-                      />
-                      <span>{selectedCard.agentName}</span>
-                      <ChevronRight size={14} />
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              {[
-                {
-                  label: t({ ko: "목표 XP", en: "Target XP" }),
-                  value: formatExact(selectedCard.xp, locale),
-                },
-                {
-                  label: t({ ko: "현재 XP", en: "Current XP" }),
-                  value:
-                    typeof selectedCard.currentXp === "number"
-                      ? formatExact(selectedCard.currentXp, locale)
-                      : "-",
-                },
-                {
-                  label: t({ ko: "남은 XP", en: "XP left" }),
-                  value:
-                    typeof selectedCard.remainingXp === "number"
-                      ? formatExact(selectedCard.remainingXp, locale)
-                      : "-",
-                },
-                {
-                  label: t({ ko: "상태", en: "Status" }),
-                  value:
-                    selectedCard.section === "earned"
-                      ? t({ ko: "획득", en: "Unlocked" })
-                      : selectedCard.section === "progress"
-                        ? t({ ko: "진행 중", en: "In progress" })
-                        : t({ ko: "잠김", en: "Locked" }),
-                },
-              ].map((metric) => (
-                <div
-                  key={metric.label}
-                  className="rounded-2xl border px-3 py-3"
-                  style={{
-                    borderColor: "var(--th-border-subtle, var(--line))",
-                    background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
-                  }}
-                >
-                  <div
-                    className="text-[10.5px] font-semibold uppercase tracking-[0.08em]"
-                    style={{ color: "var(--th-text-muted, var(--fg-muted))" }}
-                  >
-                    {metric.label}
-                  </div>
-                  <div
-                    className="mt-1 text-lg font-semibold"
-                    style={{ color: "var(--th-text-heading, var(--fg))" }}
-                  >
-                    {metric.value}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {typeof selectedCard.progress === "number" ? (
-              <div data-testid="achievements-progress">
-                <div
-                  className="mb-2 text-[12px] font-medium"
-                  style={{ color: "var(--th-text-secondary, var(--fg))" }}
-                >
-                  {t({ ko: "진행도", en: "Progress" })}
-                </div>
-                <div
-                  className="overflow-hidden rounded-full"
-                  style={{
-                    height: 6,
-                    background: "color-mix(in srgb, var(--th-border-subtle, var(--line)) 68%, transparent)",
-                  }}
-                >
-                  <div
-                    style={{
-                      width: `${Math.round(selectedCard.progress * 100)}%`,
-                      height: "100%",
-                      background: getRarityTheme(selectedCard.rarity).accent,
-                    }}
-                  />
-                </div>
-              </div>
-            ) : null}
-
-            <div className="space-y-4">
-              <div data-testid="achievements-details">
-                <div
-                  className="mb-2 text-[12px] font-medium"
-                  style={{ color: "var(--th-text-secondary, var(--fg))" }}
-                >
-                  {t({ ko: "세부", en: "Details" })}
-                </div>
-                <div className="space-y-2">
-                  {selectedCard.detailLines.map((line) => (
-                    <div
-                      key={line}
-                      className="rounded-2xl border px-3 py-3 text-sm"
-                      style={{
-                        borderColor: "var(--th-border-subtle, var(--line))",
-                        color: "var(--th-text-secondary, var(--fg-muted))",
-                        background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
-                      }}
-                    >
-                      {line}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div data-testid="achievements-timeline">
-                <div
-                  className="mb-2 text-[12px] font-medium"
-                  style={{ color: "var(--th-text-secondary, var(--fg))" }}
-                >
-                  {t({ ko: "타임라인", en: "Timeline" })}
-                </div>
-                <div className="space-y-2">
-                  {selectedCard.timelineLines.map((line, index) => (
-                    <div key={`${line}-${index}`} className="flex items-start gap-3 rounded-2xl border px-3 py-3" style={{ borderColor: "var(--th-border-subtle, var(--line))", background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)" }}>
-                      <div
-                        className="mt-1 h-2.5 w-2.5 rounded-full"
-                        style={{
-                          background: index === 0
-                            ? getRarityTheme(selectedCard.rarity).accent
-                            : "var(--th-text-muted, var(--fg-muted))",
-                        }}
-                      />
-                      <div
-                        className="text-sm"
-                        style={{ color: "var(--th-text-secondary, var(--fg-muted))" }}
-                      >
-                        {line}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : null}
-      </Drawer>
+        onSelectAgent={onSelectAgent}
+      />
     </div>
   );
 }
