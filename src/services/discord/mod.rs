@@ -2200,19 +2200,26 @@ async fn mailbox_cancel_active_turn_with_reason(
         .channel_binding(&channel_id)
         .map(|binding| binding.tmux_session_name)
         .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
-    let result = shared.mailbox(channel_id).cancel_active_turn().await;
-    // Issue #2335 (medium, Codex round 2): label the active turn's
-    // CancelToken with the voice-specific reason so downstream
-    // turn_bridge / dispatch cancel reporting carries
-    // `voice_barge_in_live_cut` etc. instead of falling back to
-    // `turn_bridge_cancelled`. The sibling helper
-    // `mailbox_cancel_active_turn_if_current_with_reason` already does
-    // this for the explicit-token path; replicate it here for the
-    // implicit cancel path so the cancel_source enum is observable on
-    // every consumer.
-    if let Some(ref token) = result.token {
+    // Issue #2335 (medium, Codex round 3): set `cancel_source` on the
+    // active turn token BEFORE the mailbox handler flips `cancelled`.
+    // Previously the order was reversed (await `cancel_active_turn` →
+    // then `set_cancel_source` on the returned token), so a running turn
+    // observing `cancelled=true` could persist the fallback
+    // `turn_bridge_cancelled` label before the voice-specific reason
+    // was written. We also do NOT overwrite an existing source when
+    // a prior cancel is still in flight (`already_stopping` case) so a
+    // later voice cancel cannot corrupt the earlier watchdog/text stop
+    // attribution.
+    let pre_cancel_token = shared.mailbox(channel_id).cancel_token().await;
+    let already_cancelled = pre_cancel_token
+        .as_ref()
+        .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    if let Some(ref token) = pre_cancel_token
+        && !already_cancelled
+    {
         token.set_cancel_source(reason);
     }
+    let result = shared.mailbox(channel_id).cancel_active_turn().await;
     #[cfg(unix)]
     if result.token.is_some() {
         // #1309: in-memory publish is synchronous (instant suppression);
@@ -2229,7 +2236,16 @@ async fn mailbox_cancel_active_turn_if_current_with_reason(
     expected_token: Arc<CancelToken>,
     reason: &str,
 ) -> CancelActiveTurnResult {
-    expected_token.set_cancel_source(reason);
+    // Issue #2335 (medium, Codex round 3): do NOT overwrite an existing
+    // cancel_source when the token is already cancelled — that would
+    // let a later voice cancel corrupt the original watchdog/text-stop
+    // attribution.
+    if !expected_token
+        .cancelled
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        expected_token.set_cancel_source(reason);
+    }
     let tmux_session_name = shared
         .tmux_watchers
         .channel_binding(&channel_id)

@@ -1946,8 +1946,44 @@ impl VoiceBargeInRuntime {
                     .await
                 {
                     Ok(turn_id) => {
+                        // Issue #2335 (Codex round 3): if a barge-in / stop
+                        // arrived DURING `dispatch_voice_background_handoff`,
+                        // the background turn was already created on the
+                        // target channel. The post-await check below would
+                        // suppress the spoken ack but leave the stale
+                        // background turn running. Immediately cancel the
+                        // just-started target-channel turn so the user's
+                        // stop actually stops the work.
                         if cancel_token.cancelled.load(Ordering::Relaxed) {
-                            log_cancel_suppressed("post_background_handoff_ack");
+                            let cancel_reason = cancel_token.cancel_source().unwrap_or_else(|| {
+                                "voice_foreground_cancel_during_handoff".to_string()
+                            });
+                            // `cancel_reason` is a captured String — use a
+                            // static fallback label to satisfy the
+                            // `&'static str` signature; the dynamic reason is
+                            // still written to the active turn token by
+                            // `mailbox_cancel_active_turn_with_reason` only
+                            // accepting `&str`, so promote to a static
+                            // category here.
+                            let target_cancel_label: &'static str =
+                                "voice_foreground_cancel_during_handoff";
+                            let result = super::mailbox_cancel_active_turn_with_reason(
+                                shared,
+                                target_channel_id,
+                                target_cancel_label,
+                            )
+                            .await;
+                            tracing::info!(
+                                source_channel_id = source_channel_id.get(),
+                                target_channel_id = target_channel_id.get(),
+                                turn_id = %turn_id,
+                                target_cancelled = result.token.is_some(),
+                                already_stopping = result.already_stopping,
+                                cancel_source = %cancel_reason,
+                                "voice background handoff just-started turn cancelled \
+                                 because foreground cancel won the race (#2335)"
+                            );
+                            log_cancel_suppressed("post_background_handoff_started");
                             return true;
                         }
                         let ack = voice_background_handoff_ack(&language);
