@@ -2198,7 +2198,7 @@ test.describe("Dashboard smoke tests", () => {
       });
     expect(navMetrics.scrollWidth).toBeGreaterThan(navMetrics.clientWidth);
     expect(navMetrics.overflowX).toMatch(/auto|scroll/);
-    expect(navMetrics.maxButtonHeight).toBeLessThan(92);
+    expect(navMetrics.maxButtonHeight).toBeLessThan(64);
 
     const before = await settingsPage.evaluate((node) => ({
       clientHeight: node.clientHeight,

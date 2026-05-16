@@ -132,7 +132,7 @@ function PanelNavButton({
       onClick={onClick}
       aria-current={active ? "page" : undefined}
       aria-controls={ariaControls}
-      className="w-full rounded-xl px-2.5 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--th-card-bg)]"
+      className="settings-nav-button min-h-[44px] w-full rounded-xl px-2.5 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--th-card-bg)]"
       style={{
         borderColor: "transparent",
         background: active
@@ -163,7 +163,7 @@ function PanelNavButton({
             </div>
             {count && (
               <span
-                className="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium"
+                className="settings-nav-count shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium"
                 style={{
                   borderColor:
                     "color-mix(in srgb, var(--th-border) 72%, transparent)",
@@ -177,7 +177,7 @@ function PanelNavButton({
             )}
           </div>
           <div
-            className="mt-1 text-[11px] leading-5"
+            className="settings-nav-detail mt-1 text-[11px] leading-5"
             style={{ color: "var(--th-text-muted)" }}
           >
             {detail}
