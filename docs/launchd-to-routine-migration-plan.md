@@ -157,43 +157,116 @@ curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
 # }'
 ```
 
+## Cross-leader prerequisite — script availability
+
+**All 12 shell entrypoints currently live only on mac-mini** under
+`/Users/itismyfield/.local/bin/*.sh`; the §3 entrypoint
+`scripts/queue-stability-batch.sh` is in this repo and is present
+wherever the workspace is deployed. Routines invoke the absolute path,
+so a routine that fires while the `routine-runtime` lease is held by a
+node missing the script will fail.
+
+Before attaching any of jobs 1–11, the operator must do **one** of:
+
+- (recommended) `rsync -av mac-mini:/Users/itismyfield/.local/bin/{agent-feedback-briefing,ai-integrated-briefing,banchan-day-reminder-prep,banchan-day-reminder-cook,cookingheart-daily-briefing,family-morning-briefing-obujang,family-morning-briefing-yohoejang,memento-daily-report,memento-hygiene,memory-merge,token-daily-report,run-claude-message-job}.sh /Users/itismyfield/.local/bin/`
+  on every node eligible to hold the `routine-runtime` lease (today:
+  mac-book), and confirm `ls -l ~/.local/bin/*.sh` matches on both
+  hosts; **or**
+- pin the `routine-runtime` worker to mac-mini for the duration of the
+  parallel-run window via cluster config (`execution_scope` /
+  preferred-leader pin) so only mac-mini ever holds the lease until the
+  scripts are mirrored.
+
+After the §1 lease-succession bug fix lands, the routine system is
+**capable** of running these jobs from either leader; the entrypoints
+just have to be present on the leader at fire time. Until the scripts
+are moved into the repo (or `~/.adk/release/bin/` and deployed via
+`adk-release`), this is a host-local dependency the operator must keep
+in sync.
+
 ## Verification window (≥24 hours)
 
-1. After attach, watch `/api/routines/runs/search?q=&limit=50` and the
-   target Discord channels for **each** of the 9 attached jobs to confirm
-   the routine fires and produces the same payload as the launchd job.
-2. For jobs 3/4 (banchan-day-reminder), verify that on a non-반찬데이 day
-   the routine returns `NO_REPLY` (the skill's calendar-driven guard is
-   intact). On the next 반찬데이, verify the message lands.
-3. For jobs 6/7 (family morning briefings), the operator must visually
-   confirm only **one** briefing reaches Discord (i.e. routine + launchd
-   are producing the same content; the recipient sees two identical
-   messages during the window). Acceptable for the verification window;
-   not acceptable post-cutover.
-4. After 24h clean parity, remove each launchd plist:
-   ```bash
-   launchctl bootout user/$(id -u)/com.itismyfield.agent-feedback-briefing
-   rm ~/Library/LaunchAgents/com.itismyfield.agent-feedback-briefing.plist
-   # repeat per label
-   ```
-   Note: the launchd plists live on **mac-mini**, not mac-book. SSH there
-   to perform removal.
-5. For job 12, the plist lives on mac-mini at
-   `~/Library/LaunchAgents/com.agentdesk.queue-stability-batch.plist`.
+Because jobs 1, 2, 5, 6, 7, 11 send Discord messages, the operator
+**must avoid true parallel-running** for those — the recipient would see
+two copies of every briefing. Use the **stage-paused → cutover**
+protocol instead:
+
+### Stage-paused → cutover protocol (jobs with Discord side effects: 1, 2, 5, 6, 7, 11)
+
+1. POST `/api/routines` to create each row (per the attach commands
+   above).
+2. Immediately `POST /api/routines/<id>/pause` so the routine is
+   registered but does not fire. The launchd plist remains the sole
+   sender.
+3. On the cutover day for each job, SSH mac-mini and run
+   `launchctl bootout user/$(id -u)/<launchd-label>` to stop launchd
+   firing **for that label only**. Do not delete the plist file yet.
+4. `POST /api/routines/<id>/resume` to enable the routine.
+5. Watch `GET /api/routines/<id>/runs?limit=10` and the Discord target
+   for the next scheduled fire to confirm the routine sends exactly one
+   message with the same payload the launchd plist used to send.
+6. After 24h clean operation, delete the plist file:
+   `rm ~/Library/LaunchAgents/<launchd-label>.plist`. Rollback is no
+   longer one-step after this; see Rollback below.
+
+### True parallel-run (idempotent jobs: 3, 4, 12)
+
+Jobs 3/4 are calendar-gated (`NO_REPLY` on non-반찬데이 days), and job
+12 is idempotent (skips if a run is active/pending/paused). These can
+parallel-run safely:
+
+1. Attach (`POST /api/routines`) — routine starts firing immediately.
+2. Watch `GET /api/routines/<id>/runs?limit=10` and the relevant
+   channel/queue for parity with the launchd job.
+3. After 24h, `launchctl bootout` + `rm` the plist on mac-mini.
+
+### Jobs 8/9/10 — TODO agent_id
+
+Do not attach these until the operator picks an `agent_id`. The launchd
+plists keep firing in the meantime. Once the owner is chosen, follow
+the stage-paused → cutover protocol (these jobs probably also write
+external state, so safer than true parallel-run).
+
+### Per-routine observability
+
+Use `GET /api/routines/<id>/runs?limit=10` for each attached routine
+(the documented `/api/routines/runs/search` endpoint requires a
+non-empty `q` parameter, so the empty-`q` listing approach does not
+work). Also use `GET /api/routines/metrics?agent_id=<id>` for
+aggregate counts.
 
 ## Rollback
 
-If a routine misbehaves or the operator wants to revert:
+The rollback path **before** plist removal is one-step. After plist
+removal, rollback requires re-loading the plist on mac-mini.
 
-1. `curl -sf "$API/api/routines/<id>" -X PATCH -H 'Content-Type: application/json' -d '{"status":"paused"}'`
-2. The launchd plist (which was never removed) continues to fire
-   uninterrupted — the system is back to launchd-only.
-3. If the routine row should be removed entirely:
-   `curl -sf "$API/api/routines/<id>/detach" -X POST`.
+### Before plist removal (rollback = single API call)
 
-The launchd plist removal step at the end of the verification window is
-the only **irreversible** action. As long as the plist is still in
-`~/Library/LaunchAgents/`, rollback is a single PATCH.
+1. `curl -sf "$API/api/routines/<id>/pause" -X POST` — the routine
+   stops firing.
+2. Verify the routine is paused: `curl -sf "$API/api/routines/<id>"`
+   and check `"status": "paused"`.
+3. The launchd plist (still loaded) continues to fire uninterrupted —
+   the system is back to launchd-only.
+4. If the routine row should be removed entirely:
+   `curl -sf "$API/api/routines/<id>/detach" -X POST` (idempotent).
+
+Note: there is **no** PATCH-status code path; do not try
+`PATCH /api/routines/<id>` with `{"status":"paused"}` — the API
+ignores unknown fields silently. Always use the dedicated
+`/pause` / `/resume` / `/detach` subroutes.
+
+### After plist removal (rollback requires re-load)
+
+1. SSH mac-mini.
+2. If the plist file was kept somewhere (recommended: move it to
+   `~/Library/LaunchAgents.disabled/` instead of `rm`), copy it back to
+   `~/Library/LaunchAgents/` and `launchctl bootstrap user/$(id -u)
+   ~/Library/LaunchAgents/<label>.plist`. Otherwise restore from this
+   repo's recorded plist content (see the issue body and this doc's
+   schedule table).
+3. `POST /api/routines/<id>/pause` so launchd is the sole sender
+   again.
 
 ## Cross-leader correctness
 
@@ -203,4 +276,5 @@ re-spawns `routine-runtime` on the new leader, so the migrated jobs fire
 regardless of which physical node (mac-mini or mac-book) is leader at
 schedule time — unlike launchd, which only fires on the node where the
 plist is loaded (currently mac-mini). This is the principal reliability
-gain of the migration.
+gain of the migration **once the entrypoint scripts are mirrored to
+every eligible leader** (see Cross-leader prerequisite above).
