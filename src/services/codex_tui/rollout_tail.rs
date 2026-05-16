@@ -95,6 +95,7 @@ pub fn tail_latest_rollout_for_cwd_with_options(
     tail_rollout_file_until_assistant_response(
         &rollout_path,
         0,
+        None,
         &sender,
         cancel_token,
         is_alive,
@@ -111,6 +112,7 @@ pub fn replay_rollout_file(
     let (result, outcome) = tail_rollout_file_until_assistant_response(
         rollout_path,
         start_offset,
+        None,
         sender,
         None,
         || false,
@@ -120,6 +122,94 @@ pub fn replay_rollout_file(
         ReadOutputResult::Completed { .. } | ReadOutputResult::SessionDied { .. } => Ok(outcome),
         ReadOutputResult::Cancelled { .. } => Err("rollout replay cancelled".to_string()),
     }
+}
+
+pub fn tail_rollout_file_from_offset(
+    rollout_path: &Path,
+    start_offset: u64,
+    session_id: Option<&str>,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+) -> Result<ReadOutputResult, String> {
+    tail_rollout_file_until_assistant_response(
+        rollout_path,
+        start_offset,
+        session_id.map(ToString::to_string),
+        &sender,
+        cancel_token,
+        is_alive,
+        RolloutTailOptions::default().terminal_drain,
+    )
+    .map(|result| result.0)
+}
+
+pub fn tail_resumed_rollout_for_session(
+    cwd: &Path,
+    session_id: &str,
+    previous_rollout_path: &Path,
+    previous_start_offset: u64,
+    modified_since: SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+) -> Result<ReadOutputResult, String> {
+    let sessions_dir = default_codex_sessions_dir()
+        .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
+    tail_resumed_rollout_for_session_with_options(
+        cwd,
+        session_id,
+        previous_rollout_path,
+        previous_start_offset,
+        modified_since,
+        &sessions_dir,
+        sender,
+        cancel_token,
+        is_alive,
+        RolloutTailOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tail_resumed_rollout_for_session_with_options(
+    cwd: &Path,
+    session_id: &str,
+    previous_rollout_path: &Path,
+    previous_start_offset: u64,
+    modified_since: SystemTime,
+    sessions_dir: &Path,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    mut is_alive: impl FnMut() -> bool,
+    options: RolloutTailOptions,
+) -> Result<ReadOutputResult, String> {
+    let rollout_path = wait_for_resumed_rollout_for_session(
+        cwd,
+        session_id,
+        previous_rollout_path,
+        previous_start_offset,
+        modified_since,
+        sessions_dir,
+        cancel_token.as_deref(),
+        &mut is_alive,
+        options.wait_for_rollout,
+    )?;
+    let start_offset = if same_path(&rollout_path, previous_rollout_path) {
+        previous_start_offset
+    } else {
+        0
+    };
+    let known_session_id = (start_offset > 0).then(|| session_id.to_string());
+    tail_rollout_file_until_assistant_response(
+        &rollout_path,
+        start_offset,
+        known_session_id,
+        &sender,
+        cancel_token,
+        is_alive,
+        options.terminal_drain,
+    )
+    .map(|result| result.0)
 }
 
 fn wait_for_latest_rollout_for_cwd(
@@ -151,6 +241,46 @@ fn wait_for_latest_rollout_for_cwd(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn wait_for_resumed_rollout_for_session(
+    cwd: &Path,
+    session_id: &str,
+    previous_rollout_path: &Path,
+    previous_start_offset: u64,
+    modified_since: SystemTime,
+    sessions_dir: &Path,
+    cancel_token: Option<&CancelToken>,
+    is_alive: &mut impl FnMut() -> bool,
+    timeout: Duration,
+) -> Result<PathBuf, String> {
+    let started = Instant::now();
+    loop {
+        if cancel_requested(cancel_token) {
+            return Err("cancelled waiting for Codex resumed rollout transcript".to_string());
+        }
+        if rollout_file_len(previous_rollout_path).is_some_and(|len| len > previous_start_offset) {
+            return Ok(previous_rollout_path.to_path_buf());
+        }
+        if let Some(path) =
+            latest_rollout_for_cwd_and_session_since(cwd, session_id, modified_since, sessions_dir)
+        {
+            return Ok(path);
+        }
+        if !is_alive() {
+            return Err(
+                "Codex TUI exited before updating a resumed rollout transcript".to_string(),
+            );
+        }
+        if started.elapsed() > timeout {
+            return Err(format!(
+                "Timeout waiting for Codex resumed rollout transcript under {}",
+                sessions_dir.display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 pub fn latest_rollout_for_cwd_since(
     cwd: &Path,
     modified_since: SystemTime,
@@ -169,6 +299,37 @@ pub fn latest_rollout_for_cwd_since(
             continue;
         }
         if !rollout_session_cwd_matches(&path, &canonical_cwd) {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(best_modified, _)| modified > *best_modified)
+        {
+            best = Some((modified, path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+fn latest_rollout_for_cwd_and_session_since(
+    cwd: &Path,
+    session_id: &str,
+    modified_since: SystemTime,
+    sessions_dir: &Path,
+) -> Option<PathBuf> {
+    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for path in rollout_files_under(sessions_dir) {
+        let Some(modified) = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+        else {
+            continue;
+        };
+        if modified < modified_since {
+            continue;
+        }
+        if !rollout_session_meta_matches(&path, &canonical_cwd, Some(session_id)) {
             continue;
         }
         if best
@@ -207,6 +368,10 @@ fn rollout_files_under(root: &Path) -> Vec<PathBuf> {
 }
 
 fn rollout_session_cwd_matches(path: &Path, cwd: &Path) -> bool {
+    rollout_session_meta_matches(path, cwd, None)
+}
+
+fn rollout_session_meta_matches(path: &Path, cwd: &Path, session_id: Option<&str>) -> bool {
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
@@ -218,11 +383,18 @@ fn rollout_session_cwd_matches(path: &Path, cwd: &Path) -> bool {
         if json.get("type").and_then(Value::as_str) != Some("session_meta") {
             continue;
         }
-        let Some(raw_cwd) = json
-            .get("payload")
-            .and_then(|payload| payload.get("cwd"))
-            .and_then(Value::as_str)
-        else {
+        let Some(payload) = json.get("payload") else {
+            continue;
+        };
+        if let Some(expected_session_id) = session_id {
+            let Some(actual_session_id) = payload.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if actual_session_id != expected_session_id {
+                continue;
+            }
+        }
+        let Some(raw_cwd) = payload.get("cwd").and_then(Value::as_str) else {
             continue;
         };
         let session_cwd = std::fs::canonicalize(raw_cwd).unwrap_or_else(|_| PathBuf::from(raw_cwd));
@@ -231,9 +403,23 @@ fn rollout_session_cwd_matches(path: &Path, cwd: &Path) -> bool {
     false
 }
 
+fn rollout_file_len(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let canonical_left = std::fs::canonicalize(left).ok();
+    let canonical_right = std::fs::canonicalize(right).ok();
+    match (canonical_left, canonical_right) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
+}
+
 fn tail_rollout_file_until_assistant_response(
     rollout_path: &Path,
     start_offset: u64,
+    initial_session_id: Option<String>,
     sender: &Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
     mut is_alive: impl FnMut() -> bool,
@@ -249,7 +435,10 @@ fn tail_rollout_file_until_assistant_response(
     file.seek(SeekFrom::Start(seek_offset))
         .map_err(|error| format!("seek Codex rollout {}: {error}", rollout_path.display()))?;
 
-    let mut state = RolloutParseState::default();
+    let mut state = RolloutParseState {
+        session_id: initial_session_id,
+        ..RolloutParseState::default()
+    };
     let mut current_offset = seek_offset;
     let mut partial_line = Vec::new();
     let mut buf = [0u8; 8192];
@@ -527,6 +716,7 @@ fn compact_json_or_string(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::sync::mpsc;
 
     fn collect_rollout(lines: &str, start_offset: u64) -> Vec<StreamMessage> {
@@ -537,6 +727,22 @@ mod tests {
         replay_rollout_file(file.path(), start_offset, &tx).unwrap();
         drop(tx);
         rx.iter().collect()
+    }
+
+    fn write_rollout(root: &Path, relative: &str, id: &str, cwd: &Path, body: &str) -> PathBuf {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\"}}}}\n{}",
+                id,
+                cwd.display(),
+                body
+            ),
+        )
+        .unwrap();
+        path
     }
 
     #[test]
@@ -611,6 +817,154 @@ mod tests {
         ));
         assert!(messages.iter().any(
             |message| matches!(message, StreamMessage::Text { content } if content == "fresh")
+        ));
+    }
+
+    #[test]
+    fn offset_tail_preserves_known_session_id_for_done() {
+        let stale = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"stale"}]}}"#,
+            "\n",
+        );
+        let fresh = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fresh"}]}}"#,
+            "\n",
+        );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), format!("{stale}{fresh}")).unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        tail_rollout_file_from_offset(
+            file.path(),
+            stale.len() as u64,
+            Some("session-1"),
+            tx,
+            None,
+            || false,
+        )
+        .unwrap();
+
+        let messages = rx.iter().collect::<Vec<_>>();
+        assert!(messages.iter().all(
+            |message| !matches!(message, StreamMessage::Text { content } if content == "stale")
+        ));
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, session_id })
+                if result == "fresh" && session_id.as_deref() == Some("session-1")
+        ));
+    }
+
+    #[test]
+    fn resumed_tail_reads_prior_rollout_append_from_known_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let stale = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"stale"}]}}"#,
+            "\n",
+        );
+        let prior = write_rollout(
+            dir.path(),
+            "rollout-old.jsonl",
+            "session-1",
+            cwd.path(),
+            stale,
+        );
+        let offset = std::fs::metadata(&prior).unwrap().len();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&prior)
+            .unwrap()
+            .write_all(
+                concat!(
+                    r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fresh append"}]}}"#,
+                    "\n",
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        tail_resumed_rollout_for_session_with_options(
+            cwd.path(),
+            "session-1",
+            &prior,
+            offset,
+            SystemTime::now(),
+            dir.path(),
+            tx,
+            None,
+            || false,
+            RolloutTailOptions {
+                wait_for_rollout: Duration::from_millis(10),
+                terminal_drain: Duration::ZERO,
+            },
+        )
+        .unwrap();
+
+        let messages = rx.iter().collect::<Vec<_>>();
+        assert!(messages.iter().all(
+            |message| !matches!(message, StreamMessage::Text { content } if content == "stale")
+        ));
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, session_id })
+                if result == "fresh append" && session_id.as_deref() == Some("session-1")
+        ));
+    }
+
+    #[test]
+    fn resumed_tail_can_follow_new_rollout_for_same_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prior = write_rollout(
+            dir.path(),
+            "old/rollout-old.jsonl",
+            "session-1",
+            cwd.path(),
+            "",
+        );
+        let offset = std::fs::metadata(&prior).unwrap().len();
+        let modified_since = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        write_rollout(
+            dir.path(),
+            "new/rollout-new.jsonl",
+            "session-1",
+            cwd.path(),
+            concat!(
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fresh new file"}]}}"#,
+                "\n",
+            ),
+        );
+        let (tx, rx) = mpsc::channel();
+
+        tail_resumed_rollout_for_session_with_options(
+            cwd.path(),
+            "session-1",
+            &prior,
+            offset,
+            modified_since,
+            dir.path(),
+            tx,
+            None,
+            || false,
+            RolloutTailOptions {
+                wait_for_rollout: Duration::from_millis(10),
+                terminal_drain: Duration::ZERO,
+            },
+        )
+        .unwrap();
+
+        let messages = rx.iter().collect::<Vec<_>>();
+        assert!(matches!(
+            messages.first(),
+            Some(StreamMessage::Init { session_id, .. }) if session_id == "session-1"
+        ));
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, session_id })
+                if result == "fresh new file" && session_id.as_deref() == Some("session-1")
         ));
     }
 
