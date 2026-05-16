@@ -2719,7 +2719,8 @@ async fn latest_completed_dispatch_commit_for_card_pg(
     }
 
     for (result_blob, context_blob) in rows {
-        if let Some(commit) = first_commit_from_blob(result_blob.as_deref(), kanban_card_id, "result")
+        if let Some(commit) =
+            first_commit_from_blob(result_blob.as_deref(), kanban_card_id, "result")
         {
             return Some(commit);
         }
@@ -3029,7 +3030,10 @@ mod review_target_context_tests {
         let mut obj = serde_json::Map::from_iter([
             ("reviewed_commit".to_string(), json!("old")),
             ("branch".to_string(), json!("stale-branch")),
-            ("worktree_branch".to_string(), json!("stale-worktree-branch")),
+            (
+                "worktree_branch".to_string(),
+                json!("stale-worktree-branch"),
+            ),
             ("worktree_path".to_string(), json!("/stale-worktree")),
             ("target_repo".to_string(), json!("/stale-repo")),
             ("unrelated".to_string(), json!("keep-me")),
