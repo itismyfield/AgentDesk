@@ -169,19 +169,43 @@ impl ProcessIdentity {
     }
 
     /// Returns true if the process at `pid` still matches this snapshot's
-    /// identity. When no snapshot was captured (unsupported platform or
-    /// transient read failure), the caller's contract is to treat this as
-    /// "matches" so legacy escalation behaviour is preserved.
+    /// identity (fail-closed for #2320).
+    ///
+    /// Three cases:
+    /// 1. No snapshot was captured at all (unsupported platform): return
+    ///    `true` so legacy escalation behaviour is preserved on platforms
+    ///    where we cannot read identity anyway.
+    /// 2. A snapshot exists and the current starttime equals it: `true`.
+    /// 3. A snapshot exists but current starttime is unreadable or differs:
+    ///    `false`. We must fail closed here — proceeding with SIGKILL on a
+    ///    PID we cannot verify is exactly the unsafe path #2320 closes. The
+    ///    target either already exited (SIGKILL is now a no-op or worse, a
+    ///    PID-reuse hit) or its identity has changed.
     pub fn matches(&self, pid: u32) -> bool {
         let Some(saved) = self.starttime else {
+            // Case 1: no baseline — defer to legacy behaviour.
             return true;
         };
         match read_process_starttime(pid) {
-            Some(current) => current == saved,
-            // If we cannot read the current starttime, the process likely
-            // already exited; let the caller's existence check decide.
-            None => true,
+            Some(current) => current == saved, // case 2/3a
+            None => false,                     // case 3b: fail closed
         }
+    }
+
+    /// Test-only inspector for the captured snapshot. Used to verify that
+    /// the identity reader actually produced a value on supported
+    /// platforms (Linux/macOS) — without this hook, regression tests cannot
+    /// distinguish "captured a real starttime" from "snapshot is empty and
+    /// guard silently disabled".
+    #[cfg(test)]
+    pub(crate) fn raw_starttime(&self) -> Option<u128> {
+        self.starttime
+    }
+
+    /// Test-only synthetic constructor used to pin the mismatch-skip path.
+    #[cfg(test)]
+    pub(crate) fn from_raw_for_test(starttime: Option<u128>) -> Self {
+        Self { starttime }
     }
 }
 
@@ -1042,13 +1066,15 @@ mod simple_cancel_watcher_tests {
         watcher.disarm();
     }
 
-    /// #2320: identity capture must yield a stable, non-empty snapshot for
-    /// a real running process on platforms we support, and the captured
-    /// identity must `matches()` the same live PID. This guards the
-    /// cross-platform reader (Linux `/proc` vs macOS `proc_pidinfo`).
+    /// #2320: identity capture must yield a *real, non-empty* snapshot on
+    /// Linux/macOS — otherwise the SIGKILL guard silently disables itself
+    /// and the fix regresses to pre-#2320 behaviour. We assert
+    /// `raw_starttime().is_some()` rather than only `matches()` because
+    /// `matches()` returns `true` on the no-baseline path, which would let
+    /// a broken reader pass the test.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn process_identity_captures_starttime_for_running_process() {
+    fn process_identity_captures_real_starttime_on_supported_platforms() {
         use super::ProcessIdentity;
 
         let mut child = Command::new("sh")
@@ -1059,26 +1085,26 @@ mod simple_cancel_watcher_tests {
 
         let identity = ProcessIdentity::capture(pid);
         assert!(
+            identity.raw_starttime().is_some(),
+            "Linux/macOS reader must produce a non-empty starttime; \
+             empty snapshot would silently disable the #2320 guard"
+        );
+        assert!(
             identity.matches(pid),
             "captured identity must match the live PID"
         );
-
-        // Capture again — same PID, same process → must still match.
-        let again = ProcessIdentity::capture(pid);
-        assert!(again.matches(pid));
 
         let _ = child.kill();
         let _ = child.wait();
     }
 
-    /// #2320: when the original child exits, `matches()` must still return
-    /// true for an *unknown* current state (the reader returns None and we
-    /// defer to the caller's existence check rather than skipping kills on
-    /// transient read failures). This pins the documented semantics so
-    /// future refactors do not silently regress legacy escalation.
+    /// #2320: when the original child has exited, an identity-bearing
+    /// snapshot must fail closed (`matches() == false`) — `kill_pid_tree`
+    /// relies on this to skip the SIGKILL that would otherwise target a
+    /// potentially recycled PID.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn process_identity_matches_when_pid_no_longer_exists() {
+    fn process_identity_fails_closed_when_pid_no_longer_exists() {
         use super::ProcessIdentity;
 
         let mut child = Command::new("sh")
@@ -1087,9 +1113,46 @@ mod simple_cancel_watcher_tests {
             .expect("true should spawn");
         let pid = child.id();
         let identity = ProcessIdentity::capture(pid);
+        // Reap the child so the kernel releases its PID slot.
         let _ = child.wait();
-        // Process has exited; reading starttime should fail and matches()
-        // returns true (caller falls back to its existence/kill semantics).
-        assert!(identity.matches(pid));
+        // Spin briefly to ensure the kernel reflects the exit.
+        for _ in 0..20 {
+            if super::read_process_starttime(pid).is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            !identity.matches(pid),
+            "after the original PID's process has gone, matches() must \
+             return false so SIGKILL is skipped"
+        );
+    }
+
+    /// #2320: a synthetic mismatch must skip the SIGKILL path. Pins the
+    /// recycled-PID safety invariant without depending on a real PID-reuse
+    /// race (which is non-deterministic to provoke in tests).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn process_identity_mismatch_returns_false_for_live_pid() {
+        use super::ProcessIdentity;
+
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 5"])
+            .spawn()
+            .expect("sleep should spawn");
+        let pid = child.id();
+
+        // Construct a snapshot whose starttime is deliberately wrong.
+        let live = ProcessIdentity::capture(pid);
+        let bogus =
+            ProcessIdentity::from_raw_for_test(live.raw_starttime().map(|s| s.wrapping_add(1)));
+        assert!(
+            !bogus.matches(pid),
+            "different starttime for same PID must be treated as PID reuse"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
