@@ -3,26 +3,25 @@
 // Schedule: 0 18 * * * (KST, 18:00 daily)
 // Agent: family-routine
 //
-// Attach this routine via POST /api/routines with:
-//   {
-//     "script_ref": "migrated-launchd/banchan-day-reminder-cook.js",
-//     "name": "banchan-day-reminder-cook",
-//     "agent_id": "family-routine",
-//     "execution_strategy": "fresh",
-//     "schedule": "0 18 * * *",
-//     "timeout_secs": 900
-//   }
+// Attach via the stage-paused sequence (verification window can land on
+// 반찬데이, where calendar gating allows a real Discord reminder; true
+// parallel-run would duplicate that reminder):
+//   1. POST /api/routines with NO schedule:
+//      { "script_ref": "migrated-launchd/banchan-day-reminder-cook.js",
+//        "name": "banchan-day-reminder-cook", "agent_id": "family-routine",
+//        "execution_strategy": "fresh", "timeout_secs": 900 }
+//   2. POST /api/routines/<id>/pause
+//   3. At cutover: launchctl bootout the launchd label, then
+//      PATCH /api/routines/<id> { "schedule": "0 18 * * *" }
+//      and POST /api/routines/<id>/resume -d '{}'
+// Do NOT POST with "schedule" included.
 //
 // NOTE: Calendar-driven — the skill returns NO_REPLY on non-반찬데이 days. The
 // 18:00 fire is intentional and matches the original launchd cadence.
 //
-// PARALLEL-RUN SAFETY: Calendar-gated. On non-반찬데이 days both launchd and
-// the routine return NO_REPLY (no Discord side effect); on 반찬데이 the
-// recipient sees two identical reminders during the verification window —
-// acceptable for this category since the message is a low-noise cook
-// reminder. After 24h parity, remove the launchd plist.
-// If duplication on 반찬데이 is unacceptable, instead use the stage-paused
-// protocol from the migration doc.
+// CUTOVER SAFETY: Calendar-gated, but the verification window could land
+// on 반찬데이 and produce duplicate Discord reminders. Use the stage-paused
+// → cutover protocol above to avoid that risk.
 agentdesk.routines.register({
   name: "banchan-day-reminder-cook",
   tick(ctx) {

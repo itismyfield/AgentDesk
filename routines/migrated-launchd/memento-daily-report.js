@@ -4,15 +4,17 @@
 // Agent: TODO — operator must set agent_id before enabling this routine.
 //        The issue marks this as "(담당자 확정 필요)".
 //
-// Attach this routine via POST /api/routines with:
-//   {
-//     "script_ref": "migrated-launchd/memento-daily-report.js",
-//     "name": "memento-daily-report",
-//     "agent_id": "<TODO: operator decides>",
-//     "execution_strategy": "fresh",
-//     "schedule": "0 9 * * *",
-//     "timeout_secs": 1800
-//   }
+// Attach via the stage-paused sequence (after agent_id is decided):
+//   1. POST /api/routines with NO schedule, NO TODO:
+//      { "script_ref": "migrated-launchd/memento-daily-report.js",
+//        "name": "memento-daily-report",
+//        "agent_id": "<decided owner>",
+//        "execution_strategy": "fresh", "timeout_secs": 1800 }
+//   2. POST /api/routines/<id>/pause
+//   3. At cutover: launchctl bootout the launchd label, then
+//      PATCH /api/routines/<id> { "schedule": "0 9 * * *" }
+//      and POST /api/routines/<id>/resume -d '{}'
+// Do NOT POST with "schedule" included.
 //
 // Do not enable this routine (status=enabled) until agent_id is set. Until
 // then, launchd continues to fire (no functional regression).

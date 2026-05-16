@@ -3,15 +3,16 @@
 // Schedule: 10 9,21 * * * (KST, 09:10 and 21:10 daily)
 // Agent: project-newsbot
 //
-// Attach this routine via POST /api/routines with:
-//   {
-//     "script_ref": "migrated-launchd/ai-integrated-briefing.js",
-//     "name": "ai-integrated-briefing",
-//     "agent_id": "project-newsbot",
-//     "execution_strategy": "fresh",
-//     "schedule": "10 9,21 * * *",
-//     "timeout_secs": 1800
-//   }
+// Attach via the stage-paused sequence (see migration plan):
+//   1. POST /api/routines with NO schedule:
+//      { "script_ref": "migrated-launchd/ai-integrated-briefing.js",
+//        "name": "ai-integrated-briefing", "agent_id": "project-newsbot",
+//        "execution_strategy": "fresh", "timeout_secs": 1800 }
+//   2. POST /api/routines/<id>/pause
+//   3. At cutover: launchctl bootout the launchd label, then
+//      PATCH /api/routines/<id> { "schedule": "10 9,21 * * *" }
+//      and POST /api/routines/<id>/resume -d '{}'
+// Do NOT POST with "schedule" included — that opens a duplicate-send race.
 //
 // CUTOVER SAFETY: This job sends to Discord. Use the stage-paused → cutover
 // protocol in docs/launchd-to-routine-migration-plan.md (attach without

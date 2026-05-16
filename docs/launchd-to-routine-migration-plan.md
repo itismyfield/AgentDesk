@@ -19,8 +19,8 @@ target Discord channel, skill path, and any side effects unchanged.
 |---|---|---|---|---|---|
 | 1 | `com.itismyfield.agent-feedback-briefing` | `migrated-launchd/agent-feedback-briefing.js` | `5 19 * * *` | `ch-pmd` | cutover (stage-paused) |
 | 2 | `com.itismyfield.ai-integrated-briefing` | `migrated-launchd/ai-integrated-briefing.js` | `10 9,21 * * *` | `project-newsbot` | cutover (stage-paused) |
-| 3 | `com.itismyfield.banchan-day-reminder.prep` | `migrated-launchd/banchan-day-reminder-prep.js` | `0 8 * * *` | `family-routine` | parallel-run (calendar-gated) |
-| 4 | `com.itismyfield.banchan-day-reminder.cook` | `migrated-launchd/banchan-day-reminder-cook.js` | `0 18 * * *` | `family-routine` | parallel-run (calendar-gated) |
+| 3 | `com.itismyfield.banchan-day-reminder.prep` | `migrated-launchd/banchan-day-reminder-prep.js` | `0 8 * * *` | `family-routine` | cutover (stage-paused) |
+| 4 | `com.itismyfield.banchan-day-reminder.cook` | `migrated-launchd/banchan-day-reminder-cook.js` | `0 18 * * *` | `family-routine` | cutover (stage-paused) |
 | 5 | `com.itismyfield.cookingheart-daily-briefing` | `migrated-launchd/cookingheart-daily-briefing.js` | `0 19 * * *` | `project-agentdesk` | cutover (stage-paused) |
 | 6 | `com.itismyfield.family-morning-briefing.obujang` | `migrated-launchd/family-morning-briefing-obujang.js` | `30 6 * * *` | `personal-obiseo` | cutover (stage-paused) |
 | 7 | `com.itismyfield.family-morning-briefing.yohoejang` | `migrated-launchd/family-morning-briefing-yohoejang.js` | `31 6 * * *` | `personal-yobiseo` | cutover (stage-paused) |
@@ -57,31 +57,15 @@ The attach commands are split into three groups: Group A
 stage-paused — attach without schedule, then PATCH schedule at cutover
 time), and Group C (do not attach until agent_id is decided).
 
-### Group A — attach with schedule (parallel-run safe: 3, 4, 12)
+### Group A — attach with schedule (parallel-run safe: only job 12)
+
+Only the queue-stability-batch script has a built-in idempotency guard
+(skip if a run is active/pending/paused), so it is safe to fire from
+both launchd and the routine during the verification window.
 
 ```bash
 REL_PORT="${AGENTDESK_REL_PORT:-8791}"
 API="http://127.0.0.1:${REL_PORT}"
-
-# Job 3 — banchan-day-reminder-prep (calendar-gated, NO_REPLY on non-반찬데이)
-curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "migrated-launchd/banchan-day-reminder-prep.js",
-  "name": "banchan-day-reminder-prep",
-  "agent_id": "family-routine",
-  "execution_strategy": "fresh",
-  "schedule": "0 8 * * *",
-  "timeout_secs": 900
-}'
-
-# Job 4 — banchan-day-reminder-cook (calendar-gated, NO_REPLY on non-반찬데이)
-curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "migrated-launchd/banchan-day-reminder-cook.js",
-  "name": "banchan-day-reminder-cook",
-  "agent_id": "family-routine",
-  "execution_strategy": "fresh",
-  "schedule": "0 18 * * *",
-  "timeout_secs": 900
-}'
 
 # Job 12 — queue-stability-batch (script has idempotency guard)
 curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
@@ -94,7 +78,12 @@ curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
 }'
 ```
 
-### Group B — stage-paused attach without schedule (cutover jobs: 1, 2, 5, 6, 7, 11)
+### Group B — stage-paused attach without schedule (cutover jobs: 1, 2, 3, 4, 5, 6, 7, 11)
+
+Jobs 3/4 (banchan reminders) are also in this group because the
+verification window can land on 반찬데이, where the skill's calendar
+guard allows a real Discord reminder; true parallel-run would
+deliver duplicate reminders to the family channel.
 
 These have user-visible side effects (Discord messages / DMs). They are
 attached **without** `schedule` so the inserted row's `next_due_at`
@@ -156,6 +145,26 @@ ID7=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -
 }' | jq -r '.routine.id')
 curl -sf "$API/api/routines/$ID7/pause" -X POST
 
+# Job 3 — banchan-day-reminder-prep (cutover schedule: 0 8 * * *)
+ID3=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/banchan-day-reminder-prep.js",
+  "name": "banchan-day-reminder-prep",
+  "agent_id": "family-routine",
+  "execution_strategy": "fresh",
+  "timeout_secs": 900
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID3/pause" -X POST
+
+# Job 4 — banchan-day-reminder-cook (cutover schedule: 0 18 * * *)
+ID4=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/banchan-day-reminder-cook.js",
+  "name": "banchan-day-reminder-cook",
+  "agent_id": "family-routine",
+  "execution_strategy": "fresh",
+  "timeout_secs": 900
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID4/pause" -X POST
+
 # Job 11 — token-daily-report (cutover schedule: 0 7 * * *)
 ID11=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
   "script_ref": "migrated-launchd/token-daily-report.js",
@@ -166,8 +175,8 @@ ID11=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' 
 }' | jq -r '.routine.id')
 curl -sf "$API/api/routines/$ID11/pause" -X POST
 
-# Verify all six are paused:
-for ID in "$ID1" "$ID2" "$ID5" "$ID6" "$ID7" "$ID11"; do
+# Verify all eight are paused:
+for ID in "$ID1" "$ID2" "$ID3" "$ID4" "$ID5" "$ID6" "$ID7" "$ID11"; do
   curl -sf "$API/api/routines/$ID" | jq -r '.routine | "\(.id) \(.status)"'
 done
 # Expected: every row reports "paused".
@@ -283,16 +292,22 @@ pause/resume curl shape against a throwaway routine to confirm both
 endpoints accept the documented body and the routine returns
 `status='enabled'` after resume.
 
-### True parallel-run (idempotent jobs: 3, 4, 12)
+### True parallel-run (job 12 only)
 
-Jobs 3/4 are calendar-gated (`NO_REPLY` on non-반찬데이 days), and job
-12 is idempotent (skips if a run is active/pending/paused). These can
-parallel-run safely:
+Only `queue-stability-batch` has an in-script idempotency guard (skips
+if a run is active/pending/paused), so it is safe to fire from both
+launchd and the routine for 24h. Jobs 3 and 4 were originally proposed
+as parallel-run-safe via calendar gating, but the verification window
+can overlap an actual 반찬데이 — duplicate reminders would land in the
+family channel. They have been moved to the Group B stage-paused
+cutover protocol.
 
 1. Attach (`POST /api/routines`) — routine starts firing immediately.
 2. Watch `GET /api/routines/<id>/runs?limit=10` and the relevant
    channel/queue for parity with the launchd job.
-3. After 24h, `launchctl bootout` + `rm` the plist on mac-mini.
+3. After 24h, `launchctl bootout` then **move (not rm)** the plist:
+   `mv ~/Library/LaunchAgents/com.agentdesk.queue-stability-batch.plist
+   ~/Library/LaunchAgents.disabled/` so Rollback C is avoidable.
 
 ### Jobs 8/9/10 — TODO agent_id
 
@@ -311,36 +326,72 @@ aggregate counts.
 
 ## Rollback
 
-The rollback path **before** plist removal is one-step. After plist
-removal, rollback requires re-loading the plist on mac-mini.
+The cutover protocol moves the system through three states. Each has a
+different correct rollback path:
 
-### Before plist removal (rollback = single API call)
-
-1. `curl -sf "$API/api/routines/<id>/pause" -X POST` — the routine
-   stops firing.
-2. Verify the routine is paused: `curl -sf "$API/api/routines/<id>"`
-   and check `"status": "paused"`.
-3. The launchd plist (still loaded) continues to fire uninterrupted —
-   the system is back to launchd-only.
-4. If the routine row should be removed entirely:
-   `curl -sf "$API/api/routines/<id>/detach" -X POST` (idempotent).
+| State | launchd plist | launchd loaded? | routine | Rollback restores |
+|---|---|---|---|---|
+| Pre-attach | on disk | loaded (firing) | n/a | nothing to do |
+| Stage-paused (attached + paused) | on disk | loaded (firing) | paused | pause/detach routine |
+| Mid-cutover (launchd bootout, routine resumed) | on disk | **not loaded** | enabled (firing) | re-bootstrap launchd, **then** pause routine |
+| Post-removal | deleted | not loaded | enabled (firing) | restore plist file, bootstrap, **then** pause routine |
 
 Note: there is **no** PATCH-status code path; do not try
 `PATCH /api/routines/<id>` with `{"status":"paused"}` — the API
 ignores unknown fields silently. Always use the dedicated
 `/pause` / `/resume` / `/detach` subroutes.
 
-### After plist removal (rollback requires re-load)
+### Rollback A — Stage-paused state (launchd still loaded)
+
+1. `curl -sf "$API/api/routines/<id>/pause" -X POST` (no-op if already
+   paused).
+2. Verify the routine is paused: `curl -sf "$API/api/routines/<id>"`
+   and check `"status": "paused"`.
+3. The launchd plist is still loaded → already firing on schedule. The
+   system is back to launchd-only.
+4. Optional: `curl -sf "$API/api/routines/<id>/detach" -X POST` to
+   remove the row entirely (idempotent).
+
+### Rollback B — Mid-cutover state (launchd booted out, routine firing)
+
+This is the **critical** failure-mode rollback. Pausing the routine
+without first reloading the plist would leave **nothing firing**
+between the rollback moment and the next schedule.
+
+Required order:
 
 1. SSH mac-mini.
-2. If the plist file was kept somewhere (recommended: move it to
-   `~/Library/LaunchAgents.disabled/` instead of `rm`), copy it back to
-   `~/Library/LaunchAgents/` and `launchctl bootstrap user/$(id -u)
-   ~/Library/LaunchAgents/<label>.plist`. Otherwise restore from this
-   repo's recorded plist content (see the issue body and this doc's
-   schedule table).
-3. `POST /api/routines/<id>/pause` so launchd is the sole sender
-   again.
+2. Re-bootstrap launchd for the affected label (the plist file is
+   still in `~/Library/LaunchAgents/` because the cutover protocol
+   explicitly does **not** `rm` it until after the 24h window):
+   ```bash
+   launchctl bootstrap user/$(id -u) ~/Library/LaunchAgents/<label>.plist
+   launchctl print user/$(id -u)/<label> | head -1  # verify it loaded
+   ```
+3. Only after the bootstrap succeeds, pause the routine:
+   ```bash
+   curl -sf "$API/api/routines/<id>/pause" -X POST
+   curl -sf "$API/api/routines/<id>" | jq '.routine.status'  # "paused"
+   ```
+4. Confirm launchd is the sole sender by waiting for the next cron
+   minute and verifying exactly one fire reaches the target channel.
+
+### Rollback C — Post-removal state (plist file deleted)
+
+1. SSH mac-mini.
+2. Recreate the plist file in `~/Library/LaunchAgents/<label>.plist`
+   from the recorded content (every plist content is captured verbatim
+   in the original issue #2202 §2 table; the schedules in this doc's
+   table at the top are the canonical source of truth for cron
+   timing).
+3. `launchctl bootstrap user/$(id -u) ~/Library/LaunchAgents/<label>.plist`.
+4. After bootstrap confirms loaded, `curl -sf "$API/api/routines/<id>/pause" -X POST`.
+
+**Recommendation to avoid Rollback C entirely:** instead of `rm` at
+the end of the 24h window, move the plist to
+`~/Library/LaunchAgents.disabled/<label>.plist`. Rollback becomes a
+copy-back + bootstrap (Rollback B equivalent) rather than recreation
+from documentation.
 
 ## Cross-leader correctness
 

@@ -3,15 +3,17 @@
 // Schedule: 30 6 * * * (KST, 06:30 daily)
 // Agent: personal-obiseo
 //
-// Attach this routine via POST /api/routines with:
-//   {
-//     "script_ref": "migrated-launchd/family-morning-briefing-obujang.js",
-//     "name": "family-morning-briefing-obujang",
-//     "agent_id": "personal-obiseo",
-//     "execution_strategy": "fresh",
-//     "schedule": "30 6 * * *",
-//     "timeout_secs": 1800
-//   }
+// Attach via the stage-paused sequence (see migration plan):
+//   1. POST /api/routines with NO schedule (no schedule means no fire):
+//      { "script_ref": "migrated-launchd/family-morning-briefing-obujang.js",
+//        "name": "family-morning-briefing-obujang",
+//        "agent_id": "personal-obiseo",
+//        "execution_strategy": "fresh", "timeout_secs": 1800 }
+//   2. POST /api/routines/<id>/pause
+//   3. At cutover: launchctl bootout the launchd label, then
+//      PATCH /api/routines/<id> { "schedule": "30 6 * * *" }
+//      and POST /api/routines/<id>/resume -d '{}'
+// Do NOT POST with "schedule" included — that opens a duplicate-send race.
 //
 // CUTOVER SAFETY: This job sends a personal morning briefing to Discord. Use
 // the stage-paused → cutover protocol in
