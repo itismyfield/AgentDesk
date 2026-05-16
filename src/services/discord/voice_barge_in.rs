@@ -2702,8 +2702,10 @@ mod tests {
         write_dummy(&sidecar_inline);
         write_dummy(&sidecar_in_dir);
 
-        let utterance =
-            build_completed_utterance(utterance_path.clone(), vec![segment_a.clone(), segment_b.clone()]);
+        let utterance = build_completed_utterance(
+            utterance_path.clone(),
+            vec![segment_a.clone(), segment_b.clone()],
+        );
 
         runtime.cleanup_utterance_artifacts(&utterance).await;
 
@@ -2732,8 +2734,7 @@ mod tests {
         write_dummy(&utterance_path);
         write_dummy(&segment);
 
-        let utterance =
-            build_completed_utterance(utterance_path.clone(), vec![segment.clone()]);
+        let utterance = build_completed_utterance(utterance_path.clone(), vec![segment.clone()]);
 
         runtime.cleanup_utterance_artifacts(&utterance).await;
 
