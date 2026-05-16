@@ -666,7 +666,10 @@ pub fn execute_command_simple_with_timeout(
                     "codex execute_command_simple_with_timeout worker did not drain within 3s; abandoning join"
                 );
             }
-            Err(format!("{label_owned} timeout after {}s", timeout.as_secs()))
+            Err(format!(
+                "{label_owned} timeout after {}s",
+                timeout.as_secs()
+            ))
         }
     }
 }
@@ -2896,17 +2899,13 @@ mod tests {
 
         let previous_codex_path = std::env::var_os("AGENTDESK_CODEX_PATH");
         let previous_pid_file = std::env::var_os("AGENTDESK_TEST_PID_FILE");
-        let previous_grandchild_pid_file =
-            std::env::var_os("AGENTDESK_TEST_GRANDCHILD_PID_FILE");
+        let previous_grandchild_pid_file = std::env::var_os("AGENTDESK_TEST_GRANDCHILD_PID_FILE");
 
         // SAFETY: env mutations are serialized by lock_test_env().
         unsafe {
             std::env::set_var("AGENTDESK_CODEX_PATH", &fake_codex);
             std::env::set_var("AGENTDESK_TEST_PID_FILE", &pid_file);
-            std::env::set_var(
-                "AGENTDESK_TEST_GRANDCHILD_PID_FILE",
-                &grandchild_pid_file,
-            );
+            std::env::set_var("AGENTDESK_TEST_GRANDCHILD_PID_FILE", &grandchild_pid_file);
         }
 
         let started = Instant::now();
@@ -2928,9 +2927,7 @@ mod tests {
                 None => std::env::remove_var("AGENTDESK_TEST_PID_FILE"),
             }
             match previous_grandchild_pid_file {
-                Some(value) => {
-                    std::env::set_var("AGENTDESK_TEST_GRANDCHILD_PID_FILE", value)
-                }
+                Some(value) => std::env::set_var("AGENTDESK_TEST_GRANDCHILD_PID_FILE", value),
                 None => std::env::remove_var("AGENTDESK_TEST_GRANDCHILD_PID_FILE"),
             }
         }
