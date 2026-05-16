@@ -2694,6 +2694,269 @@ mod manual_v3_delivery_tests {
             vec!["hello".to_string()]
         );
     }
+
+    #[tokio::test]
+    async fn voice_announce_same_utterance_and_generation_dedupes_at_health_layer() {
+        use crate::services::discord::voice_background_driver::{
+            default_voice_announce_generation, voice_announce_delivery_id,
+        };
+        use poise::serenity_prelude::{ChannelId, GuildId};
+
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let voice_id = voice_announce_delivery_id(
+            GuildId::new(7001),
+            ChannelId::new(8002),
+            "utt-2363-a",
+            default_voice_announce_generation(),
+        );
+        let delivery_id = ManualOutboundDeliveryId {
+            correlation_id: &voice_id.correlation_id,
+            semantic_event_id: &voice_id.semantic_event_id,
+        };
+
+        // Issue #2363: announce send retried with identical
+        // (guild, voice_channel, utterance, generation) must hit the dedupe
+        // path and not produce a second Discord call.
+        let first = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "voice transcript",
+            "announce",
+            None,
+            Some(delivery_id),
+        )
+        .await;
+        let second = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "voice transcript",
+            "announce",
+            None,
+            Some(delivery_id),
+        )
+        .await;
+
+        assert_eq!(
+            first,
+            ManualDeliveryOutcome::Sent {
+                message_id: "message-1".to_string(),
+                delivery: None,
+            }
+        );
+        assert_eq!(
+            second,
+            ManualDeliveryOutcome::Sent {
+                message_id: String::new(),
+                delivery: Some("duplicate"),
+            }
+        );
+        assert_eq!(client.posts.lock().unwrap().len(), 1);
+        assert_eq!(
+            voice_id.correlation_id,
+            "voice:7001:8002:utt-2363-a".to_string()
+        );
+        assert_eq!(
+            voice_id.semantic_event_id,
+            "announce:generation:1".to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_announce_new_utterance_does_not_dedupe_against_prior_send() {
+        use crate::services::discord::voice_background_driver::{
+            default_voice_announce_generation, voice_announce_delivery_id,
+        };
+        use poise::serenity_prelude::{ChannelId, GuildId};
+
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let first_id = voice_announce_delivery_id(
+            GuildId::new(7001),
+            ChannelId::new(8002),
+            "utt-A",
+            default_voice_announce_generation(),
+        );
+        let second_id = voice_announce_delivery_id(
+            GuildId::new(7001),
+            ChannelId::new(8002),
+            "utt-B",
+            default_voice_announce_generation(),
+        );
+
+        let first = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "first transcript",
+            "announce",
+            None,
+            Some(ManualOutboundDeliveryId {
+                correlation_id: &first_id.correlation_id,
+                semantic_event_id: &first_id.semantic_event_id,
+            }),
+        )
+        .await;
+        let second = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "second transcript",
+            "announce",
+            None,
+            Some(ManualOutboundDeliveryId {
+                correlation_id: &second_id.correlation_id,
+                semantic_event_id: &second_id.semantic_event_id,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            first,
+            ManualDeliveryOutcome::Sent {
+                message_id: "message-1".to_string(),
+                delivery: None,
+            }
+        );
+        assert_eq!(
+            second,
+            ManualDeliveryOutcome::Sent {
+                message_id: "message-2".to_string(),
+                delivery: None,
+            }
+        );
+        assert_eq!(client.posts.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn voice_announce_generation_bump_breaks_dedupe_for_same_utterance() {
+        use crate::services::discord::voice_background_driver::{
+            default_voice_announce_generation, voice_announce_delivery_id,
+        };
+        use poise::serenity_prelude::{ChannelId, GuildId};
+
+        // Same (guild, voice_channel, utterance) but a higher generation
+        // (e.g. a barge-in follow-up) must NOT dedupe against the original
+        // announce — different `semantic_event_id = announce:generation:{n}`.
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let gen_one = voice_announce_delivery_id(
+            GuildId::new(7001),
+            ChannelId::new(8002),
+            "utt-shared",
+            default_voice_announce_generation(),
+        );
+        let gen_two = voice_announce_delivery_id(
+            GuildId::new(7001),
+            ChannelId::new(8002),
+            "utt-shared",
+            default_voice_announce_generation() + 1,
+        );
+        assert_eq!(gen_one.correlation_id, gen_two.correlation_id);
+        assert_ne!(gen_one.semantic_event_id, gen_two.semantic_event_id);
+
+        let first = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "transcript",
+            "announce",
+            None,
+            Some(ManualOutboundDeliveryId {
+                correlation_id: &gen_one.correlation_id,
+                semantic_event_id: &gen_one.semantic_event_id,
+            }),
+        )
+        .await;
+        let second = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "transcript with barge-in follow-up",
+            "announce",
+            None,
+            Some(ManualOutboundDeliveryId {
+                correlation_id: &gen_two.correlation_id,
+                semantic_event_id: &gen_two.semantic_event_id,
+            }),
+        )
+        .await;
+
+        assert!(matches!(
+            first,
+            ManualDeliveryOutcome::Sent { delivery: None, .. }
+        ));
+        assert!(matches!(
+            second,
+            ManualDeliveryOutcome::Sent { delivery: None, .. }
+        ));
+        assert_eq!(client.posts.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn voice_announce_cross_guild_isolation_prevents_dedupe_collision() {
+        use crate::services::discord::voice_background_driver::{
+            default_voice_announce_generation, voice_announce_delivery_id,
+        };
+        use poise::serenity_prelude::{ChannelId, GuildId};
+
+        // Two different guilds happen to use the same utterance_id (they're
+        // independent generators) — must NOT dedupe against each other.
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let guild_a = voice_announce_delivery_id(
+            GuildId::new(1),
+            ChannelId::new(10),
+            "utt-collide",
+            default_voice_announce_generation(),
+        );
+        let guild_b = voice_announce_delivery_id(
+            GuildId::new(2),
+            ChannelId::new(10),
+            "utt-collide",
+            default_voice_announce_generation(),
+        );
+        assert_ne!(guild_a.correlation_id, guild_b.correlation_id);
+
+        let first = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "from guild 1",
+            "announce",
+            None,
+            Some(ManualOutboundDeliveryId {
+                correlation_id: &guild_a.correlation_id,
+                semantic_event_id: &guild_a.semantic_event_id,
+            }),
+        )
+        .await;
+        let second = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "from guild 2",
+            "announce",
+            None,
+            Some(ManualOutboundDeliveryId {
+                correlation_id: &guild_b.correlation_id,
+                semantic_event_id: &guild_b.semantic_event_id,
+            }),
+        )
+        .await;
+
+        assert!(matches!(
+            first,
+            ManualDeliveryOutcome::Sent { delivery: None, .. }
+        ));
+        assert!(matches!(
+            second,
+            ManualDeliveryOutcome::Sent { delivery: None, .. }
+        ));
+        assert_eq!(client.posts.lock().unwrap().len(), 2);
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
