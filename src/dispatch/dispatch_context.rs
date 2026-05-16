@@ -499,26 +499,29 @@ fn resolve_card_repo_dir(db: &Db, card_id: &str, purpose: &str) -> Result<Option
 /// Accepted forms (the patterns AgentDesk itself generates / observes — locked
 /// in by `commit_subject_references_issue_*` tests):
 ///   - `#N <subject>`              — leading hash reference (project convention)
-///   - `(#N)` at the end of subject — squash-merge suffix
+///   - `(#N)` at the end of subject — squash-merge suffix (e.g. `feat: bar (#N)`)
 ///   - `[#N] <subject>`            — bracketed leading reference
-///   - `<subject> ... #N` when N is the *only* `#<digits>` reference in the
-///     subject — supports trailing "refs #N" / em-dash forms
+///   - `(#N) <subject>`            — parenthesised leading reference
 ///
-/// Rejected — multi-issue subjects where N is not in a canonical position
-/// (leading or trailing-squash) are treated as ambiguous because they could
-/// originate from an unrelated commit that merely cross-references this card.
-/// Sub-fix 2 of #2200 (validator-mismatch) tightened this: previously *any*
-/// word-boundary occurrence of `#N` anywhere in the subject was accepted,
-/// which let a `fix #999, refs #523`-style subject borrowed from another
-/// issue pass through and poison the reviewed_commit fallback chain.
+/// Rejected — any subject where N is not in a canonical position is treated
+/// as ambiguous, because a delimiter-bounded `#N` anywhere else in the subject
+/// (e.g. `refs #N`, `reverts #N`, `Fix #999 in path/with/#N`) is a
+/// back-reference rather than an ownership claim. Issue #2372 (Codex follow-up
+/// to #2200 sub-fix 2): previously a *single-reference* subject like
+/// `refs #523` would pass even though the leading `refs` keyword signals a
+/// back-reference, which let poisoned reviewed_commits propagate. The
+/// canonical-position requirement now applies unconditionally — single-reference
+/// subjects no longer bypass it.
 fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
     let needle = format!("#{issue_number}");
-    // Collect all delimiter-bounded `#<digits>` references in the subject. We
-    // need both the count of distinct numeric references (to detect ambiguous
-    // multi-reference subjects) and the byte offsets of every match of our
-    // needle so we can check whether at least one occurrence sits in a
-    // canonical position.
-    let mut all_refs: Vec<&str> = Vec::new();
+    // Walk the subject once to confirm that at least one delimiter-bounded
+    // `#N` reference exists. Without this guard a subject like `#5230 …`
+    // (different issue) would fall through to the canonical-position checks,
+    // which only inspect the trimmed leading/trailing form — that form
+    // happens to begin with `#523` even though the actual reference is to
+    // a different issue number. The negative cases for boundary handling
+    // are locked in by `commit_subject_references_issue_rejects_*` tests.
+    let mut found_needle = false;
     let bytes = subject.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -541,8 +544,9 @@ fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
                     let next = bytes[j];
                     !next.is_ascii_alphanumeric() && next != b'_'
                 };
-                if after_ok {
-                    all_refs.push(&subject[i..j]);
+                if after_ok && &subject[i..j] == needle {
+                    found_needle = true;
+                    break;
                 }
             }
             i = j.max(i + 1);
@@ -550,30 +554,14 @@ fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
             i += 1;
         }
     }
-
-    let mut found_needle = false;
-    let mut competing_ref = false;
-    for value in &all_refs {
-        if *value == needle {
-            found_needle = true;
-        } else {
-            competing_ref = true;
-        }
-    }
     if !found_needle {
         return false;
     }
-    if !competing_ref {
-        // Subject references only this issue (one or many times): a
-        // delimiter-bounded `#N` is sufficient proof. Duplicate references
-        // to the same issue (e.g. `fix #523, refs #523`) are explicitly not
-        // ambiguous (Codex round-2 finding).
-        return true;
-    }
 
-    // Multi-reference subject: require N to sit in a canonical position so
-    // ambiguous cross-references can't impersonate ownership. Canonical = the
-    // leading reference or the trailing-squash `(#N)` suffix.
+    // Canonical-position check — applied unconditionally (#2372). Canonical
+    // positions are the leading hash reference (with optional `[` / `(`
+    // wrapping) or the trailing-squash `(#N)` suffix. Any other position is
+    // treated as a back-reference and rejected.
     let trimmed = subject.trim();
     if let Some(rest) = trimmed.strip_prefix(&needle) {
         if rest
@@ -3745,9 +3733,10 @@ mod issue_reference_tests {
     fn commit_subject_references_issue_accepts_squash_and_adk_prefix_forms() {
         assert!(commit_subject_references_issue("#1765 some title", 1765));
         assert!(commit_subject_references_issue("feat: foo (#1765)", 1765));
-        // A single-reference subject where N is the only `#<digits>` token
-        // is accepted regardless of position (e.g. trailing "refs #N").
-        assert!(commit_subject_references_issue(
+        // #2372: the canonical-position requirement now applies even to
+        // single-reference subjects. A trailing `refs #N` signals a
+        // back-reference, not ownership, and is rejected.
+        assert!(!commit_subject_references_issue(
             "fix bug — refs #1765",
             1765
         ));
@@ -3815,18 +3804,73 @@ mod issue_reference_tests {
             523
         ));
 
-        // Codex round-2 finding: duplicate references to *the same* issue
-        // are not ambiguous. The previous occurrence-count guard rejected
-        // these and could fail a valid reviewed_commit lookup as stale.
-        assert!(commit_subject_references_issue("fix #523, refs #523", 523));
+        // Codex round-2 finding (#2200 sub-fix 2): duplicate references to
+        // *the same* issue still need to be admissible *iff* at least one of
+        // the occurrences sits in a canonical position. The trimmed leading
+        // form `#523 …` is canonical, so the following remain accepted; but
+        // a subject whose only canonical anchor is a non-leading `#523` is
+        // now rejected (#2372 unconditional canonical-position requirement).
+        assert!(!commit_subject_references_issue("fix #523, refs #523", 523));
         assert!(commit_subject_references_issue(
+            "#523 part 1 — followup refs #523",
+            523
+        ));
+        assert!(!commit_subject_references_issue(
             "wip: #523 part 1 — followup refs #523",
             523
         ));
-        assert!(commit_subject_references_issue(
+        assert!(!commit_subject_references_issue(
             "feat: foo #523 #523 #523 done",
             523
         ));
+    }
+
+    /// #2372 (Codex follow-up): the canonical-position requirement must
+    /// apply even when the subject contains only a single `#N` reference.
+    /// Previously `refs #523` / `reverts #523` would pass because the
+    /// stricter check only ran when a competing reference existed, which
+    /// let back-reference-only commit subjects impersonate ownership of the
+    /// referenced issue and poison the reviewed_commit fallback chain.
+    #[test]
+    fn commit_subject_references_issue_friction_2372_unconditional_canonical() {
+        // Negative — single-reference back-reference forms must NOT count as
+        // ownership of #523, even though they are the only `#N` in the subject.
+        assert!(!commit_subject_references_issue("refs #523", 523));
+        assert!(!commit_subject_references_issue("reverts #523", 523));
+        assert!(!commit_subject_references_issue("fixes #523", 523));
+        assert!(!commit_subject_references_issue(
+            "follow-up — refs #523",
+            523
+        ));
+        assert!(!commit_subject_references_issue(
+            "Revert \"feat: bar\" — reverts #523",
+            523
+        ));
+        // Codex follow-up adversarial concern: emoji prefixes or commit
+        // subjects of the form `Fix #523 in path/to/file` are *leading* hash
+        // references and remain accepted. The strip_prefix matches `#523`
+        // directly at the start of the trimmed subject; what made
+        // `refs #523` a back-reference was the prefix `refs `, not the
+        // path-style suffix after the number.
+        assert!(commit_subject_references_issue("#523 in path/to/file", 523));
+        assert!(commit_subject_references_issue("#523 in the middle", 523));
+        // Squash suffix continues to be canonical.
+        assert!(commit_subject_references_issue("feat: bar (#523)", 523));
+        // Bracketed / parenthesised leading forms continue to be canonical.
+        assert!(commit_subject_references_issue("[#523] add foo", 523));
+        assert!(commit_subject_references_issue("(#523) add foo", 523));
+
+        // A subject that mentions #523 mid-string is not canonical even if
+        // it is the only reference in the subject.
+        assert!(!commit_subject_references_issue(
+            "fix something with #523 in the middle",
+            523
+        ));
+
+        // Boundary-rejection cases continue to hold (no false positive from
+        // `#5230` etc.) even though the canonical check now runs first.
+        assert!(!commit_subject_references_issue("#5230 unrelated", 523));
+        assert!(!commit_subject_references_issue("(#5230)", 523));
     }
 }
 
