@@ -165,21 +165,21 @@ export function useAgentManagerController({
       });
   }, []);
 
-  const handleSaveAgent = useCallback(async () => {
+  const handleSaveAgent = useCallback(async (values: FormData) => {
     setSaving(true);
     try {
       const payload: Record<string, unknown> = {
-        name: form.name.trim(),
-        name_ko: form.name_ko.trim() || form.name.trim(),
-        name_ja: form.name_ja.trim() || undefined,
-        name_zh: form.name_zh.trim() || undefined,
-        department_id: form.department_id || null,
-        cli_provider: form.cli_provider,
-        avatar_emoji: form.avatar_emoji,
-        sprite_number: form.sprite_number,
-        personality: form.personality.trim() || null,
-        prompt_content: form.prompt_content,
-        auto_commit: form.auto_commit,
+        name: values.name.trim(),
+        name_ko: values.name_ko.trim() || values.name.trim(),
+        name_ja: values.name_ja.trim() || undefined,
+        name_zh: values.name_zh.trim() || undefined,
+        department_id: values.department_id || null,
+        cli_provider: values.cli_provider,
+        avatar_emoji: values.avatar_emoji,
+        sprite_number: values.sprite_number,
+        personality: values.personality.trim() || null,
+        prompt_content: values.prompt_content,
+        auto_commit: values.auto_commit,
       };
 
       if (!agentModal.editAgent && officeId) {
@@ -199,7 +199,7 @@ export function useAgentManagerController({
     } finally {
       setSaving(false);
     }
-  }, [agentModal.editAgent, form, officeId, onAgentsChange]);
+  }, [agentModal.editAgent, officeId, onAgentsChange]);
 
   const handleDeleteAgent = useCallback(async (id: string) => {
     setSaving(true);
