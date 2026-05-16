@@ -6,7 +6,7 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-05-12 (against PR #2064 rebase onto current main and current maintainability audit baseline).
+> Last refreshed: 2026-05-17 (against `main` @ `cfef5b4fae6f129fa6ee7f4b6eb48588712c28c0`).
 
 ## Read This First
 
