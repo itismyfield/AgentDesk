@@ -410,12 +410,24 @@ async fn card_exists_pg_first(state: &AppState, card_id: &str) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 enum ReviewDecisionDispatchLookup {
     /// Row exists for (dispatch_id, card_id) with `dispatch_type =
-    /// 'review-decision'` and a live status (`pending` / `dispatched`).
-    Live,
+    /// 'review-decision'`, a live status (`pending` / `dispatched`), and is
+    /// the most-recent live review-decision dispatch for the card (no newer
+    /// live row exists). Safe to treat as the originating dispatch.
+    LiveAndCurrent,
+    /// Row exists for (dispatch_id, card_id) with `dispatch_type =
+    /// 'review-decision'` and a live status, BUT a newer live
+    /// review-decision dispatch exists for the same card. Treating the
+    /// submitted (older) id as authoritative would consume the wrong
+    /// dispatch — reject as stale.
+    LiveButSuperseded,
     /// Row exists for (dispatch_id, card_id) with `dispatch_type =
     /// 'review-decision'` but is in a terminal status
-    /// (`completed`/`failed`/`cancelled`).
-    Terminal { status: String },
+    /// (`completed`/`failed`/`cancelled`). This is the proven-finalized
+    /// territory that PR #2280 (sub-fix 1) handles via dispatch-result
+    /// proof; sub-fix 4 deliberately does NOT short-circuit here. Caller
+    /// falls through to the canonical "no pending" 409 (or sub-fix 1's
+    /// finalize path once merged).
+    Terminal,
     /// No row matches (dispatch_id, card_id) for `dispatch_type =
     /// 'review-decision'`. Either the id is unknown, points at a different
     /// card, or refers to a non-review-decision dispatch. Treated as 404 by
@@ -432,18 +444,29 @@ enum ReviewDecisionDispatchLookup {
 /// link rows got cleared (e.g. by a follow-up dispatch) while the originating
 /// `review-decision` dispatch row remains alive (`status = 'dispatched'`).
 ///
-/// Authorization: we always require `kanban_card_id` to match the body's
-/// `card_id` and `dispatch_type = 'review-decision'`. That keeps a caller
-/// who guesses a UUID from binding a decision to another card's dispatch or
-/// to a non-review-decision dispatch.
+/// Authorization layering:
+/// 1. `kanban_card_id` must equal the body's `card_id` and `dispatch_type`
+///    must be `'review-decision'` — blocks cross-card / cross-type binding
+///    via UUID guessing.
+/// 2. For a live (`pending`/`dispatched`) row we additionally require that
+///    no other live `review-decision` dispatch exists for the same card
+///    with a strictly newer `created_at`. This blocks the "replay an older
+///    live id from a previous review round" attack — only the most recent
+///    live row is honored.
+/// 3. Terminal rows are returned as `Terminal` and intentionally NOT
+///    short-circuited into a 409 by this routine. Idempotent-finalize of
+///    terminal dispatches is sub-fix 1's responsibility (PR #2280), and
+///    composing the two without that branch present here would either
+///    regress sub-1's 200 path or leak `dispatch_status` on what sub-1
+///    keeps as a generic conflict.
 async fn lookup_review_decision_dispatch_by_id(
     state: &AppState,
     card_id: &str,
     dispatch_id: &str,
 ) -> ReviewDecisionDispatchLookup {
     if let Some(pool) = state.pg_pool_ref() {
-        match sqlx::query_scalar::<_, String>(
-            "SELECT status
+        let row = match sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>)>(
+            "SELECT status, created_at
              FROM task_dispatches
              WHERE id = $1
                AND kanban_card_id = $2
@@ -454,13 +477,7 @@ async fn lookup_review_decision_dispatch_by_id(
         .fetch_optional(pool)
         .await
         {
-            Ok(Some(status)) => {
-                return match status.as_str() {
-                    "pending" | "dispatched" => ReviewDecisionDispatchLookup::Live,
-                    _ => ReviewDecisionDispatchLookup::Terminal { status },
-                };
-            }
-            Ok(None) => return ReviewDecisionDispatchLookup::NotFound,
+            Ok(row) => row,
             Err(error) => {
                 tracing::warn!(
                     card_id,
@@ -468,40 +485,93 @@ async fn lookup_review_decision_dispatch_by_id(
                     %error,
                     "[review-decision] failed to load postgres review-decision dispatch by id"
                 );
-                // Fall through to "NotFound" so we don't open a 200 path on
-                // a transient DB error.
                 return ReviewDecisionDispatchLookup::NotFound;
             }
-        }
-    }
-
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
-    if let Some(db) = state.legacy_db() {
-        if let Ok(conn) = db.separate_conn() {
-            let row: Option<String> = conn
-                .query_row(
-                    "SELECT status
+        };
+        let Some((status, created_at)) = row else {
+            return ReviewDecisionDispatchLookup::NotFound;
+        };
+        match status.as_str() {
+            "pending" | "dispatched" => {
+                // Authorization gate (layer 2): reject if a newer live
+                // review-decision dispatch exists for the same card.
+                match sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)
                      FROM task_dispatches
-                     WHERE id = ?1
-                       AND kanban_card_id = ?2
-                       AND dispatch_type = 'review-decision'",
-                    [dispatch_id, card_id],
-                    |row| row.get::<_, String>(0),
+                     WHERE kanban_card_id = $1
+                       AND dispatch_type = 'review-decision'
+                       AND status IN ('pending', 'dispatched')
+                       AND id <> $2
+                       AND created_at > $3",
                 )
-                .optional()
-                .ok()
-                .flatten();
-            return match row {
-                Some(status) => match status.as_str() {
-                    "pending" | "dispatched" => ReviewDecisionDispatchLookup::Live,
-                    _ => ReviewDecisionDispatchLookup::Terminal { status },
-                },
-                None => ReviewDecisionDispatchLookup::NotFound,
-            };
+                .bind(card_id)
+                .bind(dispatch_id)
+                .bind(created_at)
+                .fetch_one(pool)
+                .await
+                {
+                    Ok(0) => ReviewDecisionDispatchLookup::LiveAndCurrent,
+                    Ok(_) => ReviewDecisionDispatchLookup::LiveButSuperseded,
+                    Err(error) => {
+                        tracing::warn!(
+                            card_id,
+                            dispatch_id,
+                            %error,
+                            "[review-decision] failed to count newer live review-decision dispatches"
+                        );
+                        ReviewDecisionDispatchLookup::LiveButSuperseded
+                    }
+                }
+            }
+            _ => ReviewDecisionDispatchLookup::Terminal,
         }
+    } else {
+        #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+        if let Some(db) = state.legacy_db() {
+            if let Ok(conn) = db.separate_conn() {
+                let row: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT status, created_at
+                         FROM task_dispatches
+                         WHERE id = ?1
+                           AND kanban_card_id = ?2
+                           AND dispatch_type = 'review-decision'",
+                        [dispatch_id, card_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten();
+                let Some((status, created_at)) = row else {
+                    return ReviewDecisionDispatchLookup::NotFound;
+                };
+                return match status.as_str() {
+                    "pending" | "dispatched" => {
+                        let newer_count: i64 = conn
+                            .query_row(
+                                "SELECT COUNT(*)
+                                 FROM task_dispatches
+                                 WHERE kanban_card_id = ?1
+                                   AND dispatch_type = 'review-decision'
+                                   AND status IN ('pending', 'dispatched')
+                                   AND id <> ?2
+                                   AND created_at > ?3",
+                                [card_id, dispatch_id, created_at.as_str()],
+                                |row| row.get::<_, i64>(0),
+                            )
+                            .unwrap_or(1);
+                        if newer_count == 0 {
+                            ReviewDecisionDispatchLookup::LiveAndCurrent
+                        } else {
+                            ReviewDecisionDispatchLookup::LiveButSuperseded
+                        }
+                    }
+                    _ => ReviewDecisionDispatchLookup::Terminal,
+                };
+            }
+        }
+        ReviewDecisionDispatchLookup::NotFound
     }
-
-    ReviewDecisionDispatchLookup::NotFound
 }
 
 async fn pending_review_decision_dispatch_id_pg_first(
@@ -1961,35 +2031,42 @@ pub async fn submit_review_decision(
     // links were cleared (e.g. by a follow-up dispatch that did not finalize
     // the predecessor).
     //
-    // Authorization: `lookup_review_decision_dispatch_by_id` requires the
-    // dispatch row's `kanban_card_id` to equal `body.card_id` and the
-    // `dispatch_type` to be `'review-decision'`, so a caller cannot bind a
-    // decision to another card's dispatch or to an unrelated dispatch type
-    // by guessing a UUID.
+    // Authorization layering (see `lookup_review_decision_dispatch_by_id`):
+    //   - Cross-card / cross-type ids return `NotFound` → 404.
+    //   - Older live rows superseded by a newer live row return
+    //     `LiveButSuperseded` → 409 (blocks replay of stale same-card ids).
+    //   - Only the most-recent live row is honored (`LiveAndCurrent`).
+    //   - Terminal rows fall through to the canonical "no pending" 409,
+    //     leaving room for PR #2280 sub-fix 1's proven-finalized idempotent
+    //     path to compose without short-circuit.
     if pending_rd_id.is_none() {
         if let Some(ref submitted_did) = body.dispatch_id {
             match lookup_review_decision_dispatch_by_id(&state, &body.card_id, submitted_did).await
             {
-                ReviewDecisionDispatchLookup::Live => {
+                ReviewDecisionDispatchLookup::LiveAndCurrent => {
                     tracing::info!(
                         card_id = %body.card_id,
                         dispatch_id = %submitted_did,
-                        "[review-decision] #2200 sub-fix 4: honoring submitted dispatch_id whose link rows were cleared but dispatch is still live"
+                        "[review-decision] #2200 sub-fix 4: honoring submitted dispatch_id whose link rows were cleared but dispatch is still live and current"
                     );
                     pending_rd_id = Some(submitted_did.clone());
                 }
-                ReviewDecisionDispatchLookup::Terminal { status } => {
+                ReviewDecisionDispatchLookup::LiveButSuperseded => {
                     return (
                         StatusCode::CONFLICT,
                         Json(json!({
-                            "error": format!(
-                                "review-decision dispatch {submitted_did} is already terminal (status={status})"
-                            ),
+                            "error": "review-decision dispatch is superseded by a newer live dispatch for this card",
                             "card_id": body.card_id,
                             "dispatch_id": submitted_did,
-                            "dispatch_status": status,
                         })),
                     );
+                }
+                ReviewDecisionDispatchLookup::Terminal => {
+                    // Intentional fall-through: the row is terminal, which is
+                    // sub-fix 1's territory (PR #2280 proven-finalized).
+                    // Returning the canonical 409 here keeps the response
+                    // shape compatible with sub-1 and lets that branch
+                    // promote to 200 already_finalized once merged.
                 }
                 ReviewDecisionDispatchLookup::NotFound => {
                     return (
