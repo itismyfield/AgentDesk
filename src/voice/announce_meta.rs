@@ -55,20 +55,29 @@ pub(crate) struct VoiceBackgroundHandoffMeta {
     /// `voice_channel_for_background` to disambiguate when multiple agents
     /// map onto the same background channel.
     pub agent_id: Option<String>,
-    /// Set at dispatch time when the durable PG write failed (or no pool
-    /// was available). When `true`, terminal delivery on this node may
-    /// fall back to consuming the in-memory marker even though no PG row
-    /// exists — restoring the pre-#2274 local-only behaviour under DB
-    /// unavailability. Always `false` for markers loaded from PG, since
-    /// those rows are themselves the durable source of truth.
+    /// Set at dispatch time when the durable PG write failed with an
+    /// error that PROVES no commit reached PG (pre-query / pool errors —
+    /// see `is_definitely_pre_commit_error`). When `true`, terminal
+    /// delivery on this node may fall back to consuming the in-memory
+    /// marker even though no PG row exists — restoring the pre-#2274
+    /// local-only behaviour under DB unavailability. Always `false` for
+    /// markers loaded from PG, since those rows are themselves the
+    /// durable source of truth.
     ///
     /// Codex #2274 round-2 finding: without this flag, a transient PG
     /// outage at dispatch would silently drop the spoken summary because
     /// the PG-authoritative claim path would return `Ok(None)` and refuse
-    /// to route. The flag scopes the fallback to exactly the case it is
-    /// meant to handle (persist failed AT DISPATCH) and never to the case
-    /// PG actually consumed a real row (since `forget_handoff` clears the
-    /// local copy in that branch).
+    /// to route.
+    ///
+    /// Codex #2355 v5 finding: ambiguous SQL errors (post-send transport
+    /// drop, db-side errors) may have committed the row before failing.
+    /// Flagging local-only on those errors would let terminal delivery
+    /// consume both the durable row (later) AND the flagged local marker,
+    /// double-routing the spoken summary. Dispatch therefore only sets
+    /// the flag for unambiguously pre-commit errors; ambiguous errors
+    /// leave the marker unflagged, and the completion path refuses to
+    /// consume non-flagged local markers when the durable take itself
+    /// errors.
     pub local_only_fallback: bool,
 }
 
@@ -230,6 +239,25 @@ fn prune_expired_locked(
 pub(crate) fn global_store() -> &'static VoiceAnnouncementMetaStore {
     static STORE: OnceLock<VoiceAnnouncementMetaStore> = OnceLock::new();
     STORE.get_or_init(VoiceAnnouncementMetaStore::default)
+}
+
+/// Classify a `sqlx::Error` as "definitely pre-commit" — i.e. the
+/// statement is known to have never reached the server, so it is safe to
+/// flag the in-memory marker as `local_only_fallback = true` without
+/// risking a duplicate against a real PG row.
+///
+/// Codex #2355 v5 review: ambiguous errors (`Io`, `Database`, `Protocol`,
+/// `Tls`, `WorkerCrashed`) can occur AFTER the row was committed (e.g.
+/// transport drop on the ack), so flagging local-only on those would let
+/// terminal delivery consume both the durable row (via another node or a
+/// later retry) AND the flagged local marker, double-routing the spoken
+/// summary. We restrict the flag to errors that prove the SQL never
+/// executed.
+pub(crate) fn is_definitely_pre_commit_error(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut | sqlx::Error::Configuration(_)
+    )
 }
 
 /// Persist a voice-background handoff marker to the durable side store

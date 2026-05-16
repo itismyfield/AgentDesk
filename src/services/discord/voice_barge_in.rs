@@ -2094,24 +2094,48 @@ impl VoiceBargeInRuntime {
                     crate::voice::announce_meta::persist_handoff_durable(pool, message_id, &meta)
                         .await
                 {
+                    // #2355 v5 Codex feedback: only flag the local marker
+                    // as `local_only_fallback = true` when the error is
+                    // unambiguously pre-commit. Ambiguous SQL errors may
+                    // have already committed the row server-side, in
+                    // which case the flagged local marker could race a
+                    // later healthy claim and double-route. For ambiguous
+                    // errors we leave the marker unflagged so the
+                    // completion path's "non-flagged + Err refuse" branch
+                    // protects against duplication.
+                    let pre_commit =
+                        crate::voice::announce_meta::is_definitely_pre_commit_error(&error);
                     tracing::warn!(
                         error = %error,
                         message_id = message_id.get(),
                         source_channel_id = source_channel_id.get(),
                         target_channel_id = target_channel_id.get(),
                         utterance_id = %announcement.utterance_id,
-                        "voice background handoff durable persistence failed; falling back to local-only marker so the spoken summary is not dropped"
+                        pre_commit_error = pre_commit,
+                        "voice background handoff durable persistence failed; classifying error for fallback eligibility"
                     );
-                    if crate::voice::announce_meta::global_store()
-                        .mark_handoff_local_only_fallback(message_id)
-                    {
+                    if pre_commit {
+                        if crate::voice::announce_meta::global_store()
+                            .mark_handoff_local_only_fallback(message_id)
+                        {
+                            tracing::warn!(
+                                event = "voice_background_handoff_local_only_fallback",
+                                message_id = message_id.get(),
+                                source_channel_id = source_channel_id.get(),
+                                target_channel_id = target_channel_id.get(),
+                                utterance_id = %announcement.utterance_id,
+                                "voice background handoff marker flagged local-only fallback (pre-commit error proves no PG row); terminal delivery may consume the local marker"
+                            );
+                        }
+                    } else {
                         tracing::warn!(
-                            event = "voice_background_handoff_local_only_fallback",
+                            event = "voice_background_handoff_persist_ambiguous_error",
                             message_id = message_id.get(),
                             source_channel_id = source_channel_id.get(),
                             target_channel_id = target_channel_id.get(),
                             utterance_id = %announcement.utterance_id,
-                            "voice background handoff marker flagged local-only fallback; terminal delivery may consume the local marker without a backing PG row"
+                            error = %error,
+                            "voice background handoff durable persist returned an ambiguous error (could have committed); leaving marker unflagged — terminal delivery will refuse local fallback to avoid duplicating a possibly-live PG row"
                         );
                     }
                 }
