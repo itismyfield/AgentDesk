@@ -1698,23 +1698,6 @@ export default function AppShell({
                 </div>
               </div>
 
-              <div
-                className="rounded-2xl border px-3 py-3 text-xs"
-                style={{
-                  borderColor: "var(--th-border-subtle)",
-                  background: "var(--th-overlay-subtle)",
-                }}
-              >
-                <div style={{ color: "var(--th-text-muted)" }}>
-                  {tr("현재 페이지", "Current page")}
-                </div>
-                <div
-                  className="mt-1 font-mono"
-                  style={{ color: "var(--th-text-primary)" }}
-                >
-                  /{currentRoute?.id ?? "home"}
-                </div>
-              </div>
             </div>
           </div>
         </div>
