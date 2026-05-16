@@ -63,65 +63,116 @@ pub struct ChannelBinding {
 /// subcommand) build this from the live PG agents table or from yaml config
 /// and pass it in. The matcher itself never touches a database.
 ///
-/// `channel_id` here is the **same identifier** that gets fed into
-/// `ProviderKind::build_tmux_session_name`, i.e. the Discord channel name or
-/// stable channel identifier used at tmux-session-creation time.
+/// The directory is keyed by the **expected session name** for each
+/// `(provider, channel_id)` pair — i.e. the *exact* string that
+/// [`ProviderKind::build_tmux_session_name`] emits. Long channel ids that get
+/// sanitized + prefix-truncated to 44 bytes therefore round-trip through
+/// matching without the matcher needing the original (untruncated)
+/// `channel_id` to be reconstructible from the tmux session name. Each
+/// [`ChannelBinding`] still carries the original `channel_id` for downstream
+/// consumers.
+///
+/// Building the directory fails (returns an [`Err`]) if two distinct bindings
+/// hash to the same expected session name; that protects E2 discovery from
+/// silently adopting the wrong session when long channel ids collide after
+/// truncation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChannelDirectory {
-    by_channel: BTreeMap<String, Vec<ChannelBinding>>,
+    by_session_name: BTreeMap<String, ChannelBinding>,
 }
+
+/// Errors returned when assembling a [`ChannelDirectory`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DirectoryBuildError {
+    /// Two bindings produced the same expected session name. The second
+    /// channel id is shadowed by the first; callers must dedupe upstream
+    /// (e.g. by adding a per-channel nonce when collisions are unavoidable).
+    SessionNameCollision {
+        expected_session_name: String,
+        existing_channel_id: String,
+        conflicting_channel_id: String,
+    },
+}
+
+impl std::fmt::Display for DirectoryBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionNameCollision {
+                expected_session_name,
+                existing_channel_id,
+                conflicting_channel_id,
+            } => write!(
+                f,
+                "session-name collision on {expected_session_name}: \
+                 channel ids '{existing_channel_id}' and '{conflicting_channel_id}' \
+                 sanitize+truncate to the same tmux session name"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DirectoryBuildError {}
 
 impl ChannelDirectory {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Build a directory, rejecting expected-session-name collisions. Use this
+    /// whenever you ingest live bindings (PG agents table, yaml config, etc.).
+    pub fn try_from_bindings<I>(bindings: I) -> Result<Self, DirectoryBuildError>
+    where
+        I: IntoIterator<Item = ChannelBinding>,
+    {
+        let mut directory = Self::new();
+        for binding in bindings {
+            directory.insert(binding)?;
+        }
+        Ok(directory)
+    }
+
+    /// Lenient builder for tests / non-critical call sites. Later bindings
+    /// **overwrite** earlier ones on collision. Prefer [`Self::try_from_bindings`]
+    /// in production paths.
     pub fn from_bindings<I>(bindings: I) -> Self
     where
         I: IntoIterator<Item = ChannelBinding>,
     {
         let mut directory = Self::new();
         for binding in bindings {
-            directory.insert(binding);
+            let key = expected_session_name_for(None, &binding.provider, &binding.channel_id);
+            directory.by_session_name.insert(key, binding);
         }
         directory
     }
 
-    pub fn insert(&mut self, binding: ChannelBinding) {
-        self.by_channel
-            .entry(binding.channel_id.clone())
-            .or_default()
-            .push(binding);
+    pub fn insert(&mut self, binding: ChannelBinding) -> Result<(), DirectoryBuildError> {
+        let key = expected_session_name_for(None, &binding.provider, &binding.channel_id);
+        if let Some(existing) = self.by_session_name.get(&key) {
+            if existing.channel_id != binding.channel_id || existing.provider != binding.provider {
+                return Err(DirectoryBuildError::SessionNameCollision {
+                    expected_session_name: key,
+                    existing_channel_id: existing.channel_id.clone(),
+                    conflicting_channel_id: binding.channel_id.clone(),
+                });
+            }
+        }
+        self.by_session_name.insert(key, binding);
+        Ok(())
     }
 
-    /// All bindings for the given channel id. There can be multiple when one
-    /// channel is bound to several providers (claude + codex sibling channels
-    /// on the same agent map to *different* channel ids, but a directory may
-    /// legitimately hold both lookup keys).
-    pub fn bindings_for_channel(&self, channel_id: &str) -> &[ChannelBinding] {
-        self.by_channel
-            .get(channel_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    /// Pick the binding for a specific provider on a channel, if present.
-    pub fn binding_for_channel_provider(
-        &self,
-        channel_id: &str,
-        provider: &ProviderKind,
-    ) -> Option<&ChannelBinding> {
-        self.bindings_for_channel(channel_id)
-            .iter()
-            .find(|binding| binding.provider == *provider)
+    /// Look up a binding by the **exact** expected tmux session name. This is
+    /// what the matcher uses internally.
+    pub fn binding_for_session_name(&self, session_name: &str) -> Option<&ChannelBinding> {
+        self.by_session_name.get(session_name)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_channel.is_empty()
+        self.by_session_name.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.by_channel.values().map(Vec::len).sum()
+        self.by_session_name.len()
     }
 }
 
@@ -147,17 +198,20 @@ pub enum MatchRejection {
     NotAgentDeskNamed,
     /// Provider segment present but unknown to the registry.
     UnknownProvider(String),
-    /// Provider parsed but no binding exists for that channel id.
+    /// Provider parsed but no binding exists for that session name.
     NoChannelBinding {
-        channel_id: String,
+        session_name: String,
         provider: ProviderKind,
     },
-    /// A binding exists for the channel but for a *different* provider — i.e.
-    /// the pane was started against the wrong provider.
-    ProviderMismatch {
-        channel_id: String,
+    /// The tmux pane is running a different provider than the session name
+    /// (and binding) declares — operator-created sessions with the wrong
+    /// binary, or stale sessions where the provider has crashed back to a
+    /// shell.
+    PaneProviderMismatch {
+        session_name: String,
         expected: ProviderKind,
-        actual: ProviderKind,
+        actual_pane_command: String,
+        detected: Option<ProviderKind>,
     },
 }
 
@@ -171,13 +225,20 @@ pub enum MatchOutcome {
 
 /// Pure function: map a tmux session name to a channel binding, if any.
 ///
+/// `pane_current_command` is the string AgentDesk reads from
+/// `tmux display-message -p '#{pane_current_command}'`. Pass `None` when the
+/// pane command is not (yet) known — e.g. while doing an offline directory
+/// audit. When `Some`, it is verified against the binding's expected provider
+/// and a mismatch turns the result into [`MatchRejection::PaneProviderMismatch`].
+///
 /// `None` is returned for any rejection — call [`match_session_detailed`] when
 /// you want to know *why*.
 pub fn match_session(
     session_name: &str,
+    pane_current_command: Option<&str>,
     channels: &ChannelDirectory,
 ) -> Option<MatchedChannel> {
-    match match_session_detailed(session_name, channels) {
+    match match_session_detailed(session_name, pane_current_command, channels) {
         MatchOutcome::Matched(matched) => Some(matched),
         MatchOutcome::Rejected(_) => None,
     }
@@ -187,46 +248,54 @@ pub fn match_session(
 /// option-shaped convenience wrapper.
 pub fn match_session_detailed(
     session_name: &str,
+    pane_current_command: Option<&str>,
     channels: &ChannelDirectory,
 ) -> MatchOutcome {
-    let Some((provider, channel_id)) = parse_provider_and_channel_from_tmux_name(session_name)
+    let Some((provider, _channel_segment)) =
+        parse_provider_and_channel_from_tmux_name(session_name)
     else {
         // Either no AgentDesk- prefix, or unknown provider segment.
         let prefix = format!("{}-", TMUX_SESSION_PREFIX);
         if let Some(stripped) = session_name.strip_prefix(&prefix) {
-            // Stripped successfully but parse failed — provider segment is
-            // unknown. Extract it for the rejection variant.
             let provider_segment = stripped.split('-').next().unwrap_or("").to_string();
             return MatchOutcome::Rejected(MatchRejection::UnknownProvider(provider_segment));
         }
         return MatchOutcome::Rejected(MatchRejection::NotAgentDeskNamed);
     };
 
-    let bindings = channels.bindings_for_channel(&channel_id);
-    if bindings.is_empty() {
+    let Some(binding) = channels.binding_for_session_name(session_name) else {
         return MatchOutcome::Rejected(MatchRejection::NoChannelBinding {
-            channel_id,
+            session_name: session_name.to_string(),
             provider,
         });
-    }
+    };
 
-    match channels.binding_for_channel_provider(&channel_id, &provider) {
-        Some(binding) => MatchOutcome::Matched(MatchedChannel {
-            channel_id: binding.channel_id.clone(),
-            agent_id: binding.agent_id.clone(),
-            provider: binding.provider.clone(),
-            expected_session_name: session_name.to_string(),
-            expected_rollout_path: expected_rollout_path_for(session_name),
-        }),
-        None => {
-            let actual = bindings[0].provider.clone();
-            MatchOutcome::Rejected(MatchRejection::ProviderMismatch {
-                channel_id,
-                expected: provider,
-                actual,
-            })
+    // Provider fingerprint check — only when the caller actually has a pane
+    // command to verify. Empty / whitespace-only commands are treated as
+    // "unknown" (the pane may still be initializing); the supervisor layer
+    // is what decides whether to retry, not the matcher.
+    if let Some(pane_cmd) = pane_current_command {
+        let pane_cmd_trimmed = pane_cmd.trim();
+        if !pane_cmd_trimmed.is_empty() {
+            let detected = detect_provider_from_pane_command(pane_cmd_trimmed);
+            if detected.as_ref() != Some(&binding.provider) {
+                return MatchOutcome::Rejected(MatchRejection::PaneProviderMismatch {
+                    session_name: session_name.to_string(),
+                    expected: binding.provider.clone(),
+                    actual_pane_command: pane_cmd_trimmed.to_string(),
+                    detected,
+                });
+            }
         }
     }
+
+    MatchOutcome::Matched(MatchedChannel {
+        channel_id: binding.channel_id.clone(),
+        agent_id: binding.agent_id.clone(),
+        provider: binding.provider.clone(),
+        expected_session_name: session_name.to_string(),
+        expected_rollout_path: expected_rollout_path_for(session_name),
+    })
 }
 
 /// Reverse function: given (channel_id, provider), produce the expected tmux
@@ -344,7 +413,8 @@ mod tests {
         let session = ProviderKind::Claude.build_tmux_session_name(channel);
         let directory =
             dir_with(vec![binding(channel, "agent-a3061", ProviderKind::Claude)]);
-        let matched = match_session(&session, &directory).expect("should match");
+        let matched =
+            match_session(&session, Some("claude"), &directory).expect("should match");
         assert_eq!(matched.channel_id, channel);
         assert_eq!(matched.agent_id, "agent-a3061");
         assert_eq!(matched.provider, ProviderKind::Claude);
@@ -358,9 +428,22 @@ mod tests {
         let channel = "dev-cdx";
         let session = ProviderKind::Codex.build_tmux_session_name(channel);
         let directory = dir_with(vec![binding(channel, "td", ProviderKind::Codex)]);
-        let matched = match_session(&session, &directory).expect("should match");
+        let matched =
+            match_session(&session, Some("codex"), &directory).expect("should match");
         assert_eq!(matched.provider, ProviderKind::Codex);
         assert_eq!(matched.agent_id, "td");
+    }
+
+    #[test]
+    fn match_session_unknown_pane_command_accepts_match() {
+        // None pane_cmd → can't verify, but the matcher accepts. Supervisor
+        // is responsible for re-probing once the pane is ready.
+        let channel = "agent-warmup";
+        let session = ProviderKind::Claude.build_tmux_session_name(channel);
+        let directory = dir_with(vec![binding(channel, "td", ProviderKind::Claude)]);
+        assert!(match_session(&session, None, &directory).is_some());
+        // Empty / whitespace pane_cmd also accepted (provider still warming up).
+        assert!(match_session(&session, Some("   "), &directory).is_some());
     }
 
     #[test]
@@ -368,13 +451,13 @@ mod tests {
         let channel = "ghost-channel";
         let session = ProviderKind::Codex.build_tmux_session_name(channel);
         let directory = ChannelDirectory::new();
-        assert!(match_session(&session, &directory).is_none());
-        match match_session_detailed(&session, &directory) {
+        assert!(match_session(&session, Some("codex"), &directory).is_none());
+        match match_session_detailed(&session, Some("codex"), &directory) {
             MatchOutcome::Rejected(MatchRejection::NoChannelBinding {
-                channel_id,
+                session_name,
                 provider,
             }) => {
-                assert_eq!(channel_id, channel);
+                assert_eq!(session_name, session);
                 assert_eq!(provider, ProviderKind::Codex);
             }
             other => panic!("unexpected outcome: {other:?}"),
@@ -382,22 +465,36 @@ mod tests {
     }
 
     #[test]
-    fn match_session_provider_mismatch() {
-        // Channel is bound to Claude but the running session name encodes Codex.
-        let channel = "agent-mismatch";
-        let session = ProviderKind::Codex.build_tmux_session_name(channel);
+    fn match_session_pane_provider_mismatch() {
+        // Binding says Claude, but the pane is running bash (operator started
+        // tmux with the right name but never launched claude).
+        let channel = "agent-pane-mismatch";
+        let session = ProviderKind::Claude.build_tmux_session_name(channel);
         let directory =
-            dir_with(vec![binding(channel, "td-alt", ProviderKind::Claude)]);
-        assert!(match_session(&session, &directory).is_none());
-        match match_session_detailed(&session, &directory) {
-            MatchOutcome::Rejected(MatchRejection::ProviderMismatch {
-                channel_id,
+            dir_with(vec![binding(channel, "td", ProviderKind::Claude)]);
+        match match_session_detailed(&session, Some("bash"), &directory) {
+            MatchOutcome::Rejected(MatchRejection::PaneProviderMismatch {
+                session_name,
                 expected,
-                actual,
+                detected,
+                actual_pane_command,
             }) => {
-                assert_eq!(channel_id, channel);
-                assert_eq!(expected, ProviderKind::Codex);
-                assert_eq!(actual, ProviderKind::Claude);
+                assert_eq!(session_name, session);
+                assert_eq!(expected, ProviderKind::Claude);
+                assert_eq!(detected, None);
+                assert_eq!(actual_pane_command, "bash");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        // Wrong provider running in the pane (claude name, codex binary).
+        match match_session_detailed(&session, Some("codex"), &directory) {
+            MatchOutcome::Rejected(MatchRejection::PaneProviderMismatch {
+                detected,
+                expected,
+                ..
+            }) => {
+                assert_eq!(expected, ProviderKind::Claude);
+                assert_eq!(detected, Some(ProviderKind::Codex));
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
@@ -406,10 +503,79 @@ mod tests {
     #[test]
     fn match_session_not_agentdesk_named() {
         let directory = ChannelDirectory::new();
-        match match_session_detailed("zellij-foo", &directory) {
+        match match_session_detailed("zellij-foo", None, &directory) {
             MatchOutcome::Rejected(MatchRejection::NotAgentDeskNamed) => {}
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn match_session_with_long_truncated_channel_id() {
+        // Long channel id that gets truncated; the original (untruncated)
+        // channel id must NOT need to be reconstructible from the session
+        // name. Directory keys by expected_session_name, not by raw channel id.
+        let long_channel = "project-skillmanager-extremely-verbose-channel-cdx";
+        let session = ProviderKind::Codex.build_tmux_session_name(long_channel);
+        // build truncates; parse can't recover the original.
+        let (_, parsed_channel) =
+            parse_provider_and_channel_from_tmux_name(&session).expect("parse");
+        assert!(
+            parsed_channel != long_channel,
+            "long channel should be truncated"
+        );
+
+        let directory = dir_with(vec![binding(long_channel, "td", ProviderKind::Codex)]);
+        let matched =
+            match_session(&session, Some("codex"), &directory).expect("matched");
+        // Critically: agent_id and original (untruncated) channel_id survive.
+        assert_eq!(matched.agent_id, "td");
+        assert_eq!(matched.channel_id, long_channel);
+    }
+
+    #[test]
+    fn try_from_bindings_rejects_session_name_collision() {
+        // Two distinct long channel ids whose sanitize+truncate yields the
+        // same tmux session name. The strict builder must reject this. The
+        // truncate budget is 44 bytes; both fixtures share the same 44-byte
+        // prefix and differ only past the cut.
+        let prefix = "agent-foo-extremely-verbose-channel-suffix-A"; // exactly 44 bytes
+        assert_eq!(prefix.len(), 44, "fixture sanity: prefix must be 44 bytes");
+        let a = format!("{prefix}AAAAA-extra");
+        let b = format!("{prefix}BBBBB-different");
+        let session_a = ProviderKind::Codex.build_tmux_session_name(&a);
+        let session_b = ProviderKind::Codex.build_tmux_session_name(&b);
+        assert_eq!(session_a, session_b, "test fixture should collide");
+        let a = a.as_str();
+        let b = b.as_str();
+
+        let result = ChannelDirectory::try_from_bindings(vec![
+            binding(a, "agent-a", ProviderKind::Codex),
+            binding(b, "agent-b", ProviderKind::Codex),
+        ]);
+        match result {
+            Err(DirectoryBuildError::SessionNameCollision {
+                expected_session_name,
+                existing_channel_id,
+                conflicting_channel_id,
+            }) => {
+                assert_eq!(expected_session_name, session_a);
+                assert_eq!(existing_channel_id, a);
+                assert_eq!(conflicting_channel_id, b);
+            }
+            other => panic!("expected collision error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_from_bindings_accepts_same_channel_idempotent_insert() {
+        // Re-inserting the *same* binding is not a collision.
+        let chan = "agent-dup";
+        let directory = ChannelDirectory::try_from_bindings(vec![
+            binding(chan, "td", ProviderKind::Claude),
+            binding(chan, "td", ProviderKind::Claude),
+        ])
+        .expect("idempotent insert");
+        assert_eq!(directory.len(), 1);
     }
 
     #[test]
@@ -451,7 +617,8 @@ mod tests {
         let session = ProviderKind::Claude.build_tmux_session_name(channel);
         let directory =
             dir_with(vec![binding(channel, "agent", ProviderKind::Claude)]);
-        let matched = match_session(&session, &directory).expect("matches");
+        let matched =
+            match_session(&session, Some("claude"), &directory).expect("matches");
         // Expected path is reported even though no jsonl exists on disk.
         assert!(matched.expected_rollout_path.contains(&session));
     }
@@ -533,11 +700,11 @@ mod tests {
         let claude_session = ProviderKind::Claude.build_tmux_session_name(channel);
         let codex_session = ProviderKind::Codex.build_tmux_session_name(channel);
 
-        let m_claude = match_session(&claude_session, &directory).unwrap();
+        let m_claude = match_session(&claude_session, Some("claude"), &directory).unwrap();
         assert_eq!(m_claude.agent_id, "agent-a");
         assert_eq!(m_claude.provider, ProviderKind::Claude);
 
-        let m_codex = match_session(&codex_session, &directory).unwrap();
+        let m_codex = match_session(&codex_session, Some("codex"), &directory).unwrap();
         assert_eq!(m_codex.agent_id, "agent-b");
         assert_eq!(m_codex.provider, ProviderKind::Codex);
     }

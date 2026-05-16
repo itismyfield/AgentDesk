@@ -28,14 +28,25 @@ Examples:
 The CLI is the source of truth — never hard-code these names in scripts.
 
 ```sh
-# Print the canonical session name for a channel.
+# Suffix is recognized — provider is inferred.
 agentdesk show session-name --channel dev-cdx
 # → AgentDesk-codex-dev-cdx
 
-# Force a specific provider (when channel-suffix heuristic is ambiguous).
+# No registered suffix — pass --provider explicitly.
 agentdesk show session-name --channel my-channel --provider claude
 # → AgentDesk-claude-my-channel
+
+# Numeric Discord ids work too, but always need --provider.
+agentdesk show session-name --channel 1234567890 --provider codex
+# → AgentDesk-codex-1234567890
 ```
+
+The CLI deliberately resolves the provider from the arguments alone — it
+never reads the live agent-bindings table. Operator output must be
+reproducible from the command line; discovery / supervisor code that
+genuinely needs the binding directory should call
+`expected_session_name_for` from `services::cluster::session_matcher`
+directly.
 
 ## Convention details
 
@@ -71,6 +82,13 @@ when the tmux pane is also **running the expected provider**.
 The pure helper `detect_provider_from_pane_command(pane_cmd: &str)` maps a
 tmux pane current-command string (as reported by
 `tmux display-message -p '#{pane_current_command}'`) to a `ProviderKind`.
+It is plumbed through `match_session(session, pane_cmd, &directory)` — a
+session whose pane runs the wrong (or no) provider is rejected with
+`PaneProviderMismatch`, even when the session name and channel binding
+otherwise line up. Callers that don't yet have a pane command (e.g. while a
+session is warming up) pass `None`; the matcher accepts the binding and lets
+the supervisor layer re-probe later.
+
 Matching rules, in order:
 
 1. exact match against the provider's registry `binary_name` (`codex` → Codex),

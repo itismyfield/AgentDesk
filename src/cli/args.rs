@@ -464,8 +464,11 @@ pub(crate) enum ShowAction {
         /// AgentDesk uses when composing the tmux session name.
         #[arg(long = "channel")]
         channel: String,
-        /// Override the provider. Defaults to the channel binding's resolved
-        /// primary provider, then to the channel-suffix heuristic.
+        /// Provider to encode in the session name. Required unless the channel
+        /// name ends in a registered provider suffix (`-cc`, `-cdx`, `-gm`,
+        /// `-oc`, `-qw`). The CLI deliberately does not read live channel
+        /// bindings — operator output must be reproducible from arguments
+        /// alone.
         #[arg(long)]
         provider: Option<String>,
     },

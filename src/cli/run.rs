@@ -493,12 +493,20 @@ fn handle_show(action: ShowAction) -> std::result::Result<(), String> {
 ///
 /// Prints the deterministic tmux session name AgentDesk will use for the given
 /// channel. Operator-facing: pre-create matching sessions with
-/// `tmux new -s "$(agentdesk show session-name --channel <id>)"`.
+/// `tmux new -s "$(agentdesk show session-name --channel <id> --provider <kind>)"`.
 ///
-/// Provider resolution order:
-///   1. explicit `--provider` flag (if any),
-///   2. channel-suffix heuristic (`-cc` → claude, `-cdx` → codex, ...),
-///   3. default channel provider from the registry.
+/// Provider resolution is deliberately *offline-reproducible*:
+///   1. explicit `--provider` flag — always wins;
+///   2. channel-suffix heuristic when the channel ends in a registered
+///      provider suffix (`-cc`/`-cdx`/`-gm`/`-oc`/`-qw`);
+///   3. otherwise, error out and require the operator to pass `--provider`.
+///
+/// We do *not* consult the live agent_bindings table here. That would make
+/// the output depend on database state that operators can't see from a
+/// terminal — the whole point of the contract is determinism. Discovery /
+/// supervisor code (E2/E3) that *does* have the binding directory should call
+/// [`crate::services::cluster::session_matcher::expected_session_name_for`]
+/// directly.
 fn cmd_show_session_name(
     channel: &str,
     provider: Option<&str>,
@@ -513,8 +521,12 @@ fn cmd_show_session_name(
                 crate::services::provider::supported_provider_ids().join(", ")
             )
         })?,
-        None => ProviderKind::resolve_channel_provider(Some(channel), None).ok_or_else(|| {
-            "could not resolve provider from channel; pass --provider".to_string()
+        None => ProviderKind::from_channel_suffix(channel).ok_or_else(|| {
+            format!(
+                "could not infer provider from channel '{channel}' \
+                 (no registered suffix). pass --provider <{}>",
+                crate::services::provider::supported_provider_ids().join("|")
+            )
         })?,
     };
 
