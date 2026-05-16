@@ -298,6 +298,15 @@ pub(crate) struct PendingQueueItem {
     /// Active dispatch role override at save time (lost on restart; stored for diagnostics).
     #[serde(default)]
     pub(crate) override_channel_id: Option<u64>,
+    /// #2266: voice-transcript announcement metadata embedded in the queued
+    /// intervention so the durable on-disk queue stays in sync with the
+    /// in-memory enrichment. `#[serde(default)]` (and `skip_serializing_if`)
+    /// makes the field invisible on non-voice items and forward-compatible
+    /// with queue files written by older binaries.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_announcement:
+        Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
 fn pending_queue_root() -> Option<PathBuf> {
@@ -472,6 +481,12 @@ pub(crate) fn save_channel_queue(
             channel_id: Some(channel_id.get()),
             channel_name: None,
             override_channel_id: dispatch_role_override,
+            // #2266: persist the voice-transcript metadata alongside the
+            // queued intervention so post-restart hydrate restores the
+            // payload and the dispatch path can still reinsert it into the
+            // store. Older queue files (without this field) deserialize as
+            // `None` via the `#[serde(default)]` on the field declaration.
+            voice_announcement: i.voice_announcement.clone(),
         })
         .collect();
     if let Ok(json) = serde_json::to_string_pretty(&items) {
@@ -498,11 +513,13 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
         reply_context: item.reply_context,
         has_reply_boundary: item.has_reply_boundary,
         merge_consecutive: item.merge_consecutive,
-        // #2266: durable on-disk queue does not carry voice metadata; a
-        // cross-restart restored intervention will degrade to plain text,
-        // matching the prior behavior (the in-flight enrichment for the
-        // race-loss case lives only inside the in-memory mailbox queue).
-        voice_announcement: None,
+        // #2266: durable on-disk queue restores the voice-transcript
+        // metadata so the dispatch path on the next run can reinsert it
+        // into the per-process announce_meta store. Older queue files that
+        // predate this field deserialize as `None` (#[serde(default)]) and
+        // the queued turn degrades to plain text — same as the prior
+        // restart behavior.
+        voice_announcement: item.voice_announcement,
     }
 }
 
@@ -558,6 +575,9 @@ pub(crate) fn save_pending_queues(
                 channel_id: Some(channel_id.get()),
                 channel_name: None,
                 override_channel_id: override_id,
+                // #2266: persist voice metadata in the restart-drain
+                // bulk-save path too (matches `save_channel_queue` above).
+                voice_announcement: i.voice_announcement.clone(),
             })
             .collect();
         if let Ok(json) = serde_json::to_string_pretty(&items) {

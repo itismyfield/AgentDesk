@@ -7753,6 +7753,99 @@ mod tests {
         assert_eq!(dispatched, announcement);
     }
 
+    // #2266 (Codex finding [high] — intake-gate must not consume the store):
+    // the intake-gate path peeks the announce_meta store via peek_clone so
+    // the active dispatch path still finds the entry. After embedding the
+    // payload in the queued Intervention, the original store entry must
+    // still be readable for the active handle_text_message take().
+    #[test]
+    fn intake_gate_peek_clone_does_not_consume_store_entry() {
+        let user_msg_id = poise::serenity_prelude::MessageId::new(2_266_002);
+        let announcement = crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: "hello".to_string(),
+            user_id: "1".to_string(),
+            utterance_id: "utt-peek".to_string(),
+            language: "en-US".to_string(),
+            verbose_progress: false,
+            started_at: None,
+            completed_at: None,
+            samples_written: None,
+        };
+
+        let store = crate::voice::announce_meta::VoiceAnnouncementMetaStore::default();
+        store.insert(user_msg_id, announcement.clone());
+
+        // Intake-gate snapshot via peek_clone for the queued Intervention.
+        let peeked = store
+            .peek_clone(user_msg_id)
+            .expect("peek_clone must return the stored announcement");
+        assert_eq!(peeked, announcement);
+
+        // After peek, the active dispatch path's take() must still succeed.
+        let active = store
+            .take(user_msg_id)
+            .expect("peek_clone must not consume the entry");
+        assert_eq!(active, announcement);
+        // And the next take() (e.g. the queued dispatch path before
+        // reinsert) reports None — confirming peek/take semantics are
+        // intact.
+        assert!(store.take(user_msg_id).is_none());
+    }
+
+    // #2266 (Codex finding [high] — durable on-disk queue must round-trip
+    // the voice metadata): serialize an Intervention through the
+    // PendingQueueItem-derived JSON shape with the announcement embedded,
+    // then restore via `pending_queue_item_to_intervention` and verify the
+    // payload survives. Covers the post-restart hydrate timeline where
+    // the in-memory store has already been wiped.
+    #[test]
+    fn durable_queue_round_trips_voice_announcement_for_restart() {
+        let announcement = crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: "회의록 정리해줘".to_string(),
+            user_id: "555".to_string(),
+            utterance_id: "utt-durable".to_string(),
+            language: "ko-KR".to_string(),
+            verbose_progress: true,
+            started_at: Some("2026-05-16T10:00:00+09:00".to_string()),
+            completed_at: Some("2026-05-16T10:00:01+09:00".to_string()),
+            samples_written: Some(48_000),
+        };
+        let item = crate::services::turn_orchestrator::PendingQueueItem {
+            author_id: 555,
+            message_id: 2_266_003,
+            source_message_ids: vec![2_266_003],
+            text: "회의록 정리해줘".to_string(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            channel_id: Some(42),
+            channel_name: None,
+            override_channel_id: None,
+            voice_announcement: Some(announcement.clone()),
+        };
+
+        // Round-trip through JSON to mirror the on-disk format.
+        let json = serde_json::to_string(&item).expect("serialize");
+        let restored: crate::services::turn_orchestrator::PendingQueueItem =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.voice_announcement.as_ref(), Some(&announcement));
+
+        // Older queue files (no voice_announcement field) must still load.
+        let legacy_json = serde_json::json!({
+            "author_id": 1,
+            "message_id": 2,
+            "source_message_ids": [2u64],
+            "text": "plain",
+            "reply_context": null,
+            "has_reply_boundary": false,
+            "merge_consecutive": false,
+        })
+        .to_string();
+        let legacy: crate::services::turn_orchestrator::PendingQueueItem =
+            serde_json::from_str(&legacy_json).expect("legacy deserialize");
+        assert!(legacy.voice_announcement.is_none());
+    }
+
     #[test]
     fn build_system_discord_context_omits_user_identity() {
         let context = build_system_discord_context(

@@ -450,6 +450,7 @@ mod tests {
             channel_id: Some(42),
             channel_name: Some("test-channel".to_string()),
             override_channel_id: None,
+            voice_announcement: None,
         };
         let json = serde_json::to_string(&new_item).unwrap();
         let parsed: PendingQueueItem = serde_json::from_str(&json).unwrap();
@@ -579,6 +580,7 @@ mod tests {
             channel_id: None,
             channel_name: None,
             override_channel_id: None,
+            voice_announcement: None,
         };
         std::fs::write(&legacy_file, serde_json::to_string(&vec![item]).unwrap()).unwrap();
 

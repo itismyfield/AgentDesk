@@ -116,6 +116,25 @@ impl VoiceAnnouncementMetaStore {
         prune_handoff_expired_locked(&mut entries, now);
         entries.remove(&message_id.get()).map(|stored| stored.meta)
     }
+
+    /// #2266: non-consuming clone of the stored announcement so the intake-gate
+    /// busy-channel paths can embed the payload in the queued `Intervention`
+    /// WITHOUT draining the store. The active dispatch path still calls
+    /// `take()` to consume the entry once the queued turn finally runs and
+    /// reinserts the payload — but for the intake-time queue paths the
+    /// metadata must travel inside the Intervention because the in-memory
+    /// store TTL (30s) is shorter than typical queue dwell times.
+    pub(crate) fn peek_clone(
+        &self,
+        message_id: MessageId,
+    ) -> Option<VoiceTranscriptAnnouncement> {
+        let mut entries = self.entries.write().ok()?;
+        let now = Instant::now();
+        prune_expired_locked(&mut entries, now);
+        entries
+            .get(&message_id.get())
+            .map(|stored| stored.announcement.clone())
+    }
 }
 
 fn prune_handoff_expired_locked(

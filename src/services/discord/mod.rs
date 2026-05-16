@@ -3623,6 +3623,18 @@ pub(super) async fn kickoff_idle_queues(
             shared,
             token,
         };
+        // #2266: kickoff_idle_queues is the other queued-dispatch entrypoint
+        // alongside `DiscordGateway::dispatch_queued_turn`. It is reached by
+        // `schedule_deferred_idle_queue_kickoff` from the very same race-loss
+        // branch that embeds the voice payload into the queued Intervention,
+        // so we must reinsert the announcement into the per-process store
+        // before re-entering `handle_text_message`. Without this hook the
+        // race-loss path that takes the idle-kickoff branch would still
+        // degrade to plain text.
+        if let Some(announcement) = intervention.voice_announcement.as_ref() {
+            crate::voice::announce_meta::global_store()
+                .insert(intervention.message_id, announcement.clone());
+        }
         if let Err(e) = router::handle_text_message(
             &deps,
             channel_id,
