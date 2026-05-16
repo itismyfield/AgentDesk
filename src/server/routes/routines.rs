@@ -73,9 +73,23 @@ pub struct PatchRoutineBody {
     timeout_secs: PatchField<Option<i32>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct ResumeRoutineBody {
-    pub next_due_at: Option<DateTime<Utc>>,
+    /// PATCH semantics: only update `next_due_at` when the caller explicitly
+    /// includes the field. A missing field preserves the existing value so a
+    /// bare `{}` body never strands the routine by nulling `next_due_at`
+    /// (#2395).
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    next_due_at: PatchField<Option<DateTime<Utc>>>,
+}
+
+impl ResumeRoutineBody {
+    fn next_due_at_update(&self) -> Option<Option<DateTime<Utc>>> {
+        match &self.next_due_at {
+            PatchField::Missing => None,
+            PatchField::Present(value) => Some(*value),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,7 +336,7 @@ pub async fn resume_routine(
 ) -> AppResult<Json<Value>> {
     let store = routine_store(&state)?;
     let changed = store
-        .resume_routine(&routine_id, body.next_due_at)
+        .resume_routine(&routine_id, body.next_due_at_update())
         .await
         .map_err(store_error)?;
     if !changed {
@@ -667,7 +681,9 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::json;
 
-    use super::{PatchRoutineBody, ensure_routine_runtime_runnable, normalize_script_ref};
+    use super::{
+        PatchRoutineBody, ResumeRoutineBody, ensure_routine_runtime_runnable, normalize_script_ref,
+    };
     use crate::config::RoutinesConfig;
     use crate::error::ErrorCode;
 
@@ -752,6 +768,45 @@ mod tests {
             Some(Some("1234567890".to_string()))
         );
         assert_eq!(patch.timeout_secs, Some(Some(60)));
+    }
+
+    /// #2395 — `POST /api/routines/:id/resume` with an empty body must NOT
+    /// touch `next_due_at`. Previously a `{}` body deserialized to
+    /// `next_due_at: None` and the SQL UPDATE wrote `next_due_at = NULL`,
+    /// stranding the routine until dcserver restart.
+    #[test]
+    fn resume_body_omitted_next_due_at_is_preserved() {
+        let body: ResumeRoutineBody = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(
+            body.next_due_at_update(),
+            None,
+            "missing next_due_at must map to None (no SQL SET) so the existing column value is preserved"
+        );
+    }
+
+    /// #2395 — explicit `"next_due_at": null` is the documented way to clear
+    /// the next-fire timestamp (manual-only routines), and must still be
+    /// distinguishable from a missing field.
+    #[test]
+    fn resume_body_explicit_null_clears_next_due_at() {
+        let body: ResumeRoutineBody = serde_json::from_value(json!({
+            "next_due_at": null,
+        }))
+        .unwrap();
+        assert_eq!(body.next_due_at_update(), Some(None));
+    }
+
+    /// #2395 — present timestamp flows through to the store as
+    /// `Some(Some(ts))`, producing a real SQL `SET next_due_at = $1`.
+    #[test]
+    fn resume_body_present_next_due_at_is_applied() {
+        let body: ResumeRoutineBody = serde_json::from_value(json!({
+            "next_due_at": "2026-04-29T00:00:00Z",
+        }))
+        .unwrap();
+        let update = body.next_due_at_update().expect("field must be present");
+        let ts = update.expect("timestamp must be Some");
+        assert_eq!(ts.to_rfc3339(), "2026-04-29T00:00:00+00:00");
     }
 
     #[test]
