@@ -689,6 +689,9 @@ struct FinalizedReviewDecisionInfo {
     /// helper — `pending_review_decision_dispatch_id_pg_first` handles the
     /// live case.
     latest_dispatch_status: Option<String>,
+    /// `result` JSON column of the latest review-decision dispatch row. Parsed
+    /// lazily to discover the recorded decision and finalization source.
+    latest_dispatch_result: Option<String>,
     /// `card_review_state.last_decision` — typically one of
     /// `accept` / `dispute` / `dismiss` / `auto_accept`.
     last_decision: Option<String>,
@@ -701,25 +704,94 @@ impl FinalizedReviewDecisionInfo {
         self.latest_dispatch_id.is_some()
     }
 
-    /// Returns true when the latest originating review-decision dispatch is in
-    /// a terminal state — i.e. it has already been consumed by some downstream
-    /// path (review_decision_api, terminal auto-cleanup, or auto-accept).
-    fn is_terminal(&self) -> bool {
-        matches!(
-            self.latest_dispatch_status.as_deref(),
-            Some("completed" | "cancelled" | "failed")
-        )
+    fn parsed_result(&self) -> Option<serde_json::Value> {
+        self.latest_dispatch_result
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
     }
 
-    /// Canonicalize `last_decision` to the API decision vocabulary
-    /// (`accept` / `dispute` / `dismiss`). Maps the JS-policy variant
-    /// `auto_accept` to `accept` so an idempotent re-POST from the agent does
-    /// not falsely 409 just because the auto-accept policy completed first.
-    fn canonical_last_decision(&self) -> Option<&'static str> {
-        match self.last_decision.as_deref() {
-            Some("accept") | Some("auto_accept") => Some("accept"),
-            Some("dispute") => Some("dispute"),
-            Some("dismiss") => Some("dismiss"),
+    /// Canonical decision recorded ON the latest review-decision dispatch row
+    /// itself (not card-level state). Returns `Some("accept")` for both
+    /// `accept` and `auto_accept` payloads. Returns `None` when the dispatch
+    /// `result` JSON does not record a decision at all — e.g. a brand-new
+    /// dispatch that was `cancelled`/`failed` before any decision was made.
+    fn dispatch_recorded_decision(&self) -> Option<&'static str> {
+        let result = self.parsed_result()?;
+        let raw = result
+            .get("decision")
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                // Some finalize paths only record auto-accept context, not a
+                // top-level `decision` field. Fall back to context markers.
+                result.get("context").and_then(|ctx| {
+                    if ctx.get("auto_accept").and_then(|v| v.as_bool()) == Some(true) {
+                        Some("auto_accept")
+                    } else {
+                        None
+                    }
+                })
+            })?;
+        match raw {
+            "accept" | "auto_accept" => Some("accept"),
+            "dispute" => Some("dispute"),
+            "dismiss" => Some("dismiss"),
+            _ => None,
+        }
+    }
+
+    /// Cancellation reason from the dispatch `result`, if any. Used to
+    /// distinguish auto-cleanup cancellations (which consume the decision
+    /// intent) from arbitrary cancellations.
+    fn cancellation_reason(&self) -> Option<String> {
+        self.parsed_result()?
+            .get("reason")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    }
+
+    /// Set of cancellation reasons that are equivalent to the originating
+    /// review-decision dispatch having been consumed by an auto-cleanup path.
+    /// Other cancellation reasons (e.g. manual cancel mid-flight) MUST NOT
+    /// short-circuit a late accept — the caller should still see 409.
+    fn cancelled_as_consumed_cleanup(&self) -> bool {
+        match self.cancellation_reason().as_deref() {
+            Some("auto_cancelled_on_terminal_card")
+            | Some("js_terminal_cleanup")
+            | Some("superseded_by_dispute_re_review") => true,
+            _ => false,
+        }
+    }
+
+    /// Returns the canonical decision that the originating review-decision
+    /// dispatch was finalized with, if and only if we can prove it from the
+    /// dispatch row's own `status`+`result` (NOT from card-level state — that
+    /// would be unsafe if the latest dispatch is a fresh new round that has
+    /// not yet been decided). Returns `None` when the dispatch has no proven
+    /// decision (still pending, failed without decision, manually cancelled,
+    /// or its `result` doesn't record a decision).
+    fn proven_finalized_decision(&self) -> Option<&'static str> {
+        match self.latest_dispatch_status.as_deref() {
+            Some("completed") => self.dispatch_recorded_decision(),
+            Some("cancelled") => {
+                // Only auto-cleanup cancellations count. In that case the
+                // canonical decision lives on card_review_state (e.g. the
+                // auto-accept policy completed via JS, then the originating
+                // dispatch was cancelled by terminal cleanup). Validate that
+                // card_review_state.last_decision is recorded AND that this
+                // cancellation reason matches a known auto-cleanup path.
+                if self.cancelled_as_consumed_cleanup() {
+                    match self.last_decision.as_deref() {
+                        Some("accept") | Some("auto_accept") => Some("accept"),
+                        Some("dispute") => Some("dispute"),
+                        Some("dismiss") => Some("dismiss"),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            // `failed` or anything else: no proof of decision; do NOT
+            // short-circuit. Caller falls through to the legacy 409.
             _ => None,
         }
     }
@@ -736,8 +808,8 @@ async fn finalized_review_decision_info_pg_first(
     let mut info = FinalizedReviewDecisionInfo::default();
 
     if let Some(pool) = state.pg_pool_ref() {
-        match sqlx::query_as::<_, (String, String)>(
-            "SELECT id, status
+        match sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT id, status, result
              FROM task_dispatches
              WHERE kanban_card_id = $1
                AND dispatch_type = 'review-decision'
@@ -748,9 +820,10 @@ async fn finalized_review_decision_info_pg_first(
         .fetch_optional(pool)
         .await
         {
-            Ok(Some((id, status))) => {
+            Ok(Some((id, status, result))) => {
                 info.latest_dispatch_id = Some(id);
                 info.latest_dispatch_status = Some(status);
+                info.latest_dispatch_result = result;
             }
             Ok(None) => {}
             Err(error) => {
@@ -793,20 +866,27 @@ async fn finalized_review_decision_info_pg_first(
         if let Ok(conn) = db.separate_conn() {
             if let Ok(row) = conn
                 .query_row(
-                    "SELECT id, status
+                    "SELECT id, status, result
                      FROM task_dispatches
                      WHERE kanban_card_id = ?1
                        AND dispatch_type = 'review-decision'
                      ORDER BY created_at DESC
                      LIMIT 1",
                     [card_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
                 )
                 .optional()
             {
-                if let Some((id, status)) = row {
+                if let Some((id, status, result)) = row {
                     info.latest_dispatch_id = Some(id);
                     info.latest_dispatch_status = Some(status);
+                    info.latest_dispatch_result = result;
                 }
             }
             if let Ok(row) = conn
@@ -2488,15 +2568,43 @@ pub async fn submit_review_decision(
         // dispatch is missing because a follow-up (rework/review) or the
         // auto-accept policy already consumed it, idempotently short-circuit
         // instead of rejecting with 409 — but ONLY when the submitted decision
-        // matches the canonical `last_decision` already recorded. This avoids
-        // letting a later caller flip a finalized decision by replaying with a
-        // different verdict (the original 409 is preserved for that case).
+        // matches a decision PROVEN on the dispatch row itself (status +
+        // result JSON). This avoids:
+        //   (a) letting a later caller flip a finalized decision by replaying
+        //       with a different verdict — preserved by matching prior decision
+        //   (b) silently no-oping when a fresh new round's dispatch
+        //       failed/cancelled before any decision was made — the older
+        //       card-level `last_decision` from a prior round MUST NOT be
+        //       treated as proof for the latest dispatch (see Codex review).
         let finalized = finalized_review_decision_info_pg_first(&state, &body.card_id).await;
 
+        // #2200 disclosure hardening: when the caller submitted a `dispatch_id`
+        // hint, validate it against the latest originating dispatch BEFORE
+        // returning any history-specific body. If the submitted dispatch_id
+        // does not match a known review-decision dispatch for this card, do
+        // not expose card-history details — return the legacy 409 with the
+        // generic shape.
+        if let Some(ref submitted_did) = body.dispatch_id {
+            let matches_latest = finalized
+                .latest_dispatch_id
+                .as_deref()
+                .is_some_and(|id| id == submitted_did.as_str());
+            if !matches_latest {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "no pending review-decision dispatch for this card",
+                        "card_id": body.card_id,
+                    })),
+                );
+            }
+        }
+
         if !finalized.has_originating_dispatch() {
-            // Genuinely never had a review-decision dispatch — 404 is the
-            // correct shape for the caller. (Card existence has already been
-            // confirmed above, so this does not introduce a new disclosure.)
+            // Genuinely never had a review-decision dispatch — 404 with a
+            // minimal body. Card existence was confirmed above by
+            // `card_exists_pg_first`, so this does not introduce a new
+            // disclosure surface beyond what /api/review-decision already had.
             tracing::info!(
                 card_id = %body.card_id,
                 submitted_decision = %body.decision,
@@ -2511,51 +2619,42 @@ pub async fn submit_review_decision(
             );
         }
 
-        // The originating dispatch exists but is no longer pending. If it has
-        // been finalized AND `last_decision` is consistent with the caller's
-        // submitted decision, treat this call as an idempotent no-op.
-        if finalized.is_terminal() {
-            if let Some(prior) = finalized.canonical_last_decision() {
-                if prior == body.decision.as_str() {
-                    tracing::info!(
-                        card_id = %body.card_id,
-                        submitted_decision = %body.decision,
-                        prior_decision = ?finalized.last_decision,
-                        review_state = ?finalized.review_state,
-                        latest_dispatch_id = ?finalized.latest_dispatch_id,
-                        latest_dispatch_status = ?finalized.latest_dispatch_status,
-                        "[review-decision] #2200 stale-state: returning already_finalized for idempotent re-POST"
-                    );
-                    return (
-                        StatusCode::OK,
-                        Json(json!({
-                            "ok": true,
-                            "card_id": body.card_id,
-                            "decision": body.decision,
-                            "outcome": "already_finalized",
-                            "prior_decision": finalized.last_decision,
-                            "review_state": finalized.review_state,
-                            "originating_dispatch_id": finalized.latest_dispatch_id,
-                            "originating_dispatch_status": finalized.latest_dispatch_status,
-                            "message": "review-decision was already finalized; idempotent no-op",
-                        })),
-                    );
-                }
-                // Different decision recorded → keep the original 409 so a
-                // caller cannot flip a finalized decision by re-POSTing with a
-                // different verdict.
-                tracing::warn!(
+        if let Some(proven) = finalized.proven_finalized_decision() {
+            if proven == body.decision.as_str() {
+                tracing::info!(
                     card_id = %body.card_id,
                     submitted_decision = %body.decision,
-                    prior_decision = ?finalized.last_decision,
-                    "[review-decision] #2200 stale-state: rejecting decision-mismatch replay against finalized dispatch"
+                    latest_dispatch_id = ?finalized.latest_dispatch_id,
+                    latest_dispatch_status = ?finalized.latest_dispatch_status,
+                    review_state = ?finalized.review_state,
+                    "[review-decision] #2200 stale-state: returning already_finalized for idempotent re-POST"
+                );
+                return (
+                    StatusCode::OK,
+                    Json(json!({
+                        "ok": true,
+                        "card_id": body.card_id,
+                        "decision": body.decision,
+                        "outcome": "already_finalized",
+                        "message": "review-decision was already finalized; idempotent no-op",
+                    })),
                 );
             }
+            // Different decision proven on the dispatch row → preserve the
+            // legacy 409 so a caller cannot flip a finalized decision by
+            // re-POSTing with a different verdict.
+            tracing::warn!(
+                card_id = %body.card_id,
+                submitted_decision = %body.decision,
+                proven_decision = %proven,
+                "[review-decision] #2200 stale-state: rejecting decision-mismatch replay against finalized dispatch"
+            );
         }
 
-        // Fallback: originating dispatch exists but either (a) we cannot
-        // confirm it is terminal, or (b) the recorded decision does not match
-        // the submitted one. Keep the legacy 409 behavior — this is the safe
+        // Fallback: originating dispatch exists but (a) it is not terminal in
+        // a way that proves the recorded decision (e.g. status=failed, or
+        // result JSON without a `decision` field), or (b) the proven decision
+        // does not match. Keep the legacy 409 behavior — this is the safe
         // default and matches all pre-existing tests for late/duplicate/
         // mismatched-decision flows.
         return (
