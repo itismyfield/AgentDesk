@@ -57,6 +57,15 @@ pub(super) fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> 
         .filter(|s| !s.is_empty())
 }
 
+pub(super) fn json_map_string_field<'a>(
+    map: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    map.get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewCounterModelProviderResolution {
     pub source_provider: ProviderKind,
@@ -64,8 +73,11 @@ pub(crate) struct ReviewCounterModelProviderResolution {
     pub reason: String,
 }
 
-fn review_context_provider(context: &serde_json::Value, key: &str) -> Option<ProviderKind> {
-    json_string_field(context, key).and_then(ProviderKind::from_str)
+fn review_context_provider(
+    context: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<ProviderKind> {
+    json_map_string_field(context, key).and_then(ProviderKind::from_str)
 }
 
 fn review_main_provider(bindings: &AgentChannelBindings) -> Option<(ProviderKind, &'static str)> {
@@ -91,7 +103,7 @@ fn review_main_provider(bindings: &AgentChannelBindings) -> Option<(ProviderKind
 
 pub(crate) fn resolve_review_counter_model_provider(
     bindings: &AgentChannelBindings,
-    context: &serde_json::Value,
+    context: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<ReviewCounterModelProviderResolution> {
     let (source_provider, source_reason) =
         if let Some(provider) = review_context_provider(context, "implementer_provider") {
@@ -121,8 +133,7 @@ fn apply_review_counter_model_provider_context(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     bindings: &AgentChannelBindings,
 ) {
-    let context = serde_json::Value::Object(obj.clone());
-    let Some(resolution) = resolve_review_counter_model_provider(bindings, &context) else {
+    let Some(resolution) = resolve_review_counter_model_provider(bindings, obj) else {
         return;
     };
 
@@ -396,11 +407,16 @@ pub(crate) fn inject_review_dispatch_identifiers_sqlite_test(
     dispatch_type: &str,
     obj: &mut serde_json::Map<String, serde_json::Value>,
 ) {
-    let snapshot = serde_json::Value::Object(obj.clone());
-    let repo = json_string_field(&snapshot, "repo")
-        .or_else(|| json_string_field(&snapshot, "target_repo"))
+    let repo = json_map_string_field(obj, "repo")
+        .or_else(|| json_map_string_field(obj, "target_repo"))
         .map(str::to_string)
-        .or_else(|| resolve_card_target_repo_ref_sqlite_test(db, card_id, Some(&snapshot)));
+        .or_else(|| {
+            resolve_card_target_repo_ref_sqlite_test(
+                db,
+                card_id,
+                Some(&serde_json::Value::Object(obj.clone())),
+            )
+        });
     if let Some(repo) = repo {
         obj.entry("repo".to_string()).or_insert_with(|| json!(repo));
     }
@@ -1836,13 +1852,19 @@ pub(crate) async fn inject_review_dispatch_identifiers(
     dispatch_type: &str,
     obj: &mut serde_json::Map<String, serde_json::Value>,
 ) {
-    let snapshot = serde_json::Value::Object(obj.clone());
-    let repo = match json_string_field(&snapshot, "repo")
-        .or_else(|| json_string_field(&snapshot, "target_repo"))
+    let repo = match json_map_string_field(obj, "repo")
+        .or_else(|| json_map_string_field(obj, "target_repo"))
         .map(str::to_string)
     {
         Some(value) => Some(value),
-        None => resolve_card_target_repo_ref(pool, card_id, Some(&snapshot)).await,
+        None => {
+            resolve_card_target_repo_ref(
+                pool,
+                card_id,
+                Some(&serde_json::Value::Object(obj.clone())),
+            )
+            .await
+        }
     };
     if let Some(repo) = repo {
         obj.entry("repo".to_string()).or_insert_with(|| json!(repo));
@@ -2734,8 +2756,9 @@ mod tests {
             let bindings = bindings_with_provider(main_provider);
             let context = json!({ "implementer_provider": implementer_provider });
 
-            let resolution = resolve_review_counter_model_provider(&bindings, &context)
-                .expect("review counter-model provider resolution");
+            let resolution =
+                resolve_review_counter_model_provider(&bindings, context.as_object().unwrap())
+                    .expect("review counter-model provider resolution");
 
             assert_eq!(resolution.source_provider.as_str(), implementer_provider);
             assert_eq!(resolution.target_provider.as_str(), expected_target);
@@ -2755,8 +2778,9 @@ mod tests {
             let bindings = bindings_with_provider(main_provider);
             let context = json!({ "from_provider": from_provider });
 
-            let resolution = resolve_review_counter_model_provider(&bindings, &context)
-                .expect("review counter-model provider resolution");
+            let resolution =
+                resolve_review_counter_model_provider(&bindings, context.as_object().unwrap())
+                    .expect("review counter-model provider resolution");
 
             assert_eq!(resolution.source_provider.as_str(), from_provider);
             assert_eq!(resolution.target_provider.as_str(), expected_target);
@@ -2772,8 +2796,9 @@ mod tests {
             "from_provider": "codex"
         });
 
-        let resolution = resolve_review_counter_model_provider(&bindings, &context)
-            .expect("review counter-model provider resolution");
+        let resolution =
+            resolve_review_counter_model_provider(&bindings, context.as_object().unwrap())
+                .expect("review counter-model provider resolution");
 
         assert_eq!(resolution.source_provider.as_str(), "claude");
         assert_eq!(resolution.target_provider.as_str(), "codex");
@@ -2792,8 +2817,9 @@ mod tests {
             let bindings = bindings_with_provider(main_provider);
             let context = json!({});
 
-            let resolution = resolve_review_counter_model_provider(&bindings, &context)
-                .expect("review counter-model provider resolution");
+            let resolution =
+                resolve_review_counter_model_provider(&bindings, context.as_object().unwrap())
+                    .expect("review counter-model provider resolution");
 
             assert_eq!(resolution.source_provider.as_str(), main_provider);
             assert_eq!(resolution.target_provider.as_str(), expected_target);

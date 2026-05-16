@@ -2138,11 +2138,11 @@ fn ensure_quality_regression_schema(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS quality_regression_cooldowns (
             agent_id         TEXT NOT NULL,
             metric           TEXT NOT NULL,
-            alerted_at_ms    INTEGER NOT NULL,
+            alerted_at_ms    BIGINT NOT NULL,
             last_baseline    REAL NOT NULL,
             last_current     REAL NOT NULL,
             last_delta       REAL NOT NULL,
-            last_sample_size INTEGER NOT NULL,
+            last_sample_size BIGINT NOT NULL,
             PRIMARY KEY (agent_id, metric)
         );
         CREATE INDEX IF NOT EXISTS idx_quality_regression_cooldowns_alerted
