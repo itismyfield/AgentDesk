@@ -129,7 +129,16 @@ jobs:
     name: Fast check + non-PG tests (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.rust_or_policy == 'true'
-    runs-on: ${{ matrix.os }}
+    # Opt-in self-hosted macOS runner.
+    #
+    # When repo variable MACOS_RUNNER is set to a JSON array of labels
+    # (e.g. '["self-hosted","macOS","arm64","agentdesk-mac-mini"]'),
+    # the macos-latest matrix entry routes to that runner — UNLESS the
+    # event is a pull_request from a fork, in which case we force back
+    # to the GitHub-hosted runner to keep untrusted code off the
+    # operator's machine. Default (variable unset) is macos-latest.
+    # See docs/ci-self-hosted-runner.md.
+    runs-on: ${{ fromJSON((matrix.os == 'macos-latest' && vars.MACOS_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.MACOS_RUNNER || format('"{0}"', matrix.os)) }}
     strategy:
       fail-fast: false
       matrix:

@@ -34,7 +34,14 @@ jobs:
 
   full_macos:
     name: Full tests (macos-latest)
-    runs-on: macos-latest
+    # Opt-in self-hosted macOS runner. Set repo variable MACOS_RUNNER to
+    # a JSON array of labels (e.g.
+    # '["self-hosted","macOS","arm64","agentdesk-mac-mini"]') to route
+    # this job to a self-hosted host. Default (variable unset) is
+    # macos-latest. This workflow is schedule + workflow_dispatch only,
+    # so there is no fork-PR exposure here.
+    # See docs/ci-self-hosted-runner.md.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNNER != '' && vars.MACOS_RUNNER || '"macos-latest"') }}
     steps:
       - uses: actions/checkout@v4
 
