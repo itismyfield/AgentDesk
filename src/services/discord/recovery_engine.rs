@@ -1120,6 +1120,38 @@ pub(super) async fn restore_inflight_turns(
         }
 
         let channel_id = ChannelId::new(state.channel_id);
+
+        // #2235: silent-skip rows whose on-disk `runtime_kind` was a
+        // present-but-unknown variant string. `load_inflight_states_from_root`
+        // distinguishes this from "field absent" (legacy v7 rows) via the
+        // transient `runtime_kind_unknown_on_disk` flag, so the existing
+        // heuristic recovery path still runs for absent-field legacy rows.
+        // Belt-and-suspenders: also silent-skip when a row's persisted
+        // `version` is ahead of this binary and `runtime_kind` is missing —
+        // forward-marked rows authored by a newer binary should not be
+        // guessed at.
+        let runtime_kind_skew_detected = state.runtime_kind_unknown_on_disk
+            || (state.runtime_kind.is_none()
+                && state.version > super::inflight::inflight_state_version());
+        if runtime_kind_skew_detected {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::debug!(
+                "  [{ts}] ↩ inflight recovery silent-skip for channel {}: runtime_kind unknown/forward-marked (version={}, local={}, unknown_on_disk={})",
+                state.channel_id,
+                state.version,
+                super::inflight::inflight_state_version(),
+                state.runtime_kind_unknown_on_disk
+            );
+            finish_recovered_turn_mailbox(
+                shared,
+                provider,
+                channel_id,
+                "recovery_runtime_kind_unknown_skip",
+            )
+            .await;
+            clear_inflight_state(provider, state.channel_id);
+            continue;
+        }
         let is_dm = matches!(
             channel_id.to_channel(http).await,
             Ok(serenity::model::channel::Channel::Private(_))
@@ -2443,7 +2475,32 @@ pub(super) async fn restore_inflight_turns(
         let input_fifo_path = match recovery_input_fifo_for_runtime(runtime_kind, input_fifo_path) {
             Ok(path) => path,
             Err(reason) => {
+                // #2235: when the inflight row was written without a stamped
+                // `runtime_kind` (legacy pre-v8 row, hook-endpoint race, or a
+                // future variant this binary doesn't recognize),
+                // `runtime_kind_for_recovery` had to guess. If the guess
+                // requires a FIFO that the row never carried, surfacing a
+                // user-visible "input fifo path missing" notice misleads the
+                // operator — the right thing is to skip recovery silently and
+                // let the next turn re-establish state from scratch.
+                let runtime_kind_was_inferred = state.runtime_kind.is_none();
                 let ts = chrono::Local::now().format("%H:%M:%S");
+                if runtime_kind_was_inferred {
+                    tracing::debug!(
+                        "  [{ts}] ↩ inflight recovery silent-skip for channel {}: runtime_kind unknown/missing on-disk, inferred {} requires FIFO but row carries none",
+                        state.channel_id,
+                        runtime_kind.as_str()
+                    );
+                    finish_recovered_turn_mailbox(
+                        shared,
+                        provider,
+                        channel_id,
+                        "recovery_runtime_kind_missing_skip",
+                    )
+                    .await;
+                    clear_inflight_state(provider, state.channel_id);
+                    continue;
+                }
                 tracing::info!(
                     "  [{ts}] ⚠ clearing inflight turn for channel {}: input fifo path missing (runtime={})",
                     state.channel_id,
@@ -4486,6 +4543,7 @@ mod tests {
             output_path: Some("/tmp/agentdesk-test.jsonl".to_string()),
             input_fifo_path: Some("/tmp/agentdesk-test.input".to_string()),
             runtime_kind: None,
+            runtime_kind_unknown_on_disk: false,
             worktree_path: None,
             worktree_branch: None,
             base_commit: None,
@@ -4611,6 +4669,7 @@ mod tests {
             output_path: Some("/tmp/agentdesk-test.jsonl".to_string()),
             input_fifo_path: Some("/tmp/agentdesk-test.input".to_string()),
             runtime_kind: None,
+            runtime_kind_unknown_on_disk: false,
             worktree_path: None,
             worktree_branch: None,
             base_commit: None,

@@ -918,7 +918,14 @@ async fn claude_tui_runtime_ready_claims_watcher_without_fifo() {
         .expect("Claude TUI RuntimeReady should preserve inflight for watcher-owned relay");
     assert!(saved.watcher_owns_live_relay);
     assert_eq!(saved.runtime_kind, Some(RuntimeHandoffKind::ClaudeTui));
-    assert_eq!(saved.input_fifo_path, None);
+    // #2235 one-release compat window: ClaudeTui rows must still ship a
+    // synthesized `input_fifo_path` so an old binary rolling back over them
+    // can satisfy its FIFO-required recovery branch.
+    let expected_fifo = super::tmux_runtime_paths(&tmux_name).1;
+    assert_eq!(
+        saved.input_fifo_path.as_deref(),
+        Some(expected_fifo.as_str())
+    );
     assert_eq!(saved.last_offset, 128);
 
     crate::services::discord::clear_inflight_state(&provider, channel_id.get());

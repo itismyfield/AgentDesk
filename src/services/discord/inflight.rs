@@ -19,7 +19,15 @@ use crate::dispatch::Source;
 use crate::services::agent_protocol::{RuntimeHandoffKind, TaskNotificationKind};
 use crate::services::provider::ProviderKind;
 
-const INFLIGHT_STATE_VERSION: u32 = 7;
+// #2235 (follow-up to #2213): bump v7→v8. v7 added `runtime_kind` without a
+// version change, so rolling back from new→old binaries could read rows whose
+// FIFO synthesis was elided for ClaudeTui and reject recovery with a misleading
+// "input fifo path missing" notice. v8 marks the on-disk shape that ships the
+// compat-fixed `input_fifo_path` alongside ClaudeTui plus the silent-skip
+// recovery branch; old binaries continue to deserialize v8 rows via
+// `#[serde(default)]` and treat the new `runtime_kind` as legacy, so the
+// compat window is one release in each direction.
+const INFLIGHT_STATE_VERSION: u32 = 8;
 const INFLIGHT_MAX_AGE_SECS: u64 = 300; // 5 minutes
 const DRAIN_RESTART_MAX_AGE_SECS: u64 = 1800; // 30 minutes
 const HOT_SWAP_HANDOFF_MAX_AGE_SECS: u64 = 900; // 15 minutes
@@ -71,8 +79,24 @@ pub(super) struct InflightTurnState {
     pub tmux_session_name: Option<String>,
     pub output_path: Option<String>,
     pub input_fifo_path: Option<String>,
-    #[serde(default)]
+    /// #2235: deserializing through `deserialize_runtime_kind_tolerant` so a
+    /// future variant written by a newer binary collapses to `None` instead
+    /// of failing the whole row's parse (which would otherwise lose the
+    /// inflight to `inflight_malformed_json_graceful_skip`). Combined with
+    /// the silent-skip recovery branch this gives one release of forward
+    /// compat for new runtime kinds.
+    #[serde(default, deserialize_with = "deserialize_runtime_kind_tolerant")]
     pub runtime_kind: Option<RuntimeHandoffKind>,
+    /// #2235: transient sidecar populated by `load_inflight_states_from_root`
+    /// when the on-disk JSON had a `runtime_kind` field whose value was a
+    /// non-empty string this binary did not recognize (i.e. a future variant).
+    /// Distinct from `runtime_kind = None` for "field absent" (legacy v7
+    /// rows). Recovery uses this to silent-skip present-but-unknown rows
+    /// regardless of `version`, while still recovering legacy absent-field
+    /// rows via the normal heuristics. `#[serde(skip)]` keeps the flag
+    /// out of the on-disk shape — it is purely an in-memory annotation.
+    #[serde(skip)]
+    pub runtime_kind_unknown_on_disk: bool,
     #[serde(default)]
     pub worktree_path: Option<String>,
     #[serde(default)]
@@ -215,6 +239,7 @@ impl InflightTurnState {
             output_path,
             input_fifo_path,
             runtime_kind,
+            runtime_kind_unknown_on_disk: false,
             worktree_path: None,
             worktree_branch: None,
             base_commit: None,
@@ -298,6 +323,31 @@ impl InflightTurnState {
     }
 }
 
+/// #2235: tolerant deserializer for `runtime_kind`. A newer binary may write
+/// a `RuntimeHandoffKind` variant this binary does not know about; serde's
+/// default `deny_unknown_variants` posture would propagate a parse error and
+/// `load_inflight_states_from_root` would delete the entire row as malformed
+/// (`inflight_malformed_json_graceful_skip`). Instead we map unknown strings
+/// to `None`. The recovery engine consults this `None` together with the
+/// row-shape heuristic to decide whether to silent-skip recovery (issue
+/// #2235 DoD #3) instead of guessing a runtime and surfacing a misleading
+/// "input fifo path missing" notice.
+fn deserialize_runtime_kind_tolerant<'de, D>(
+    deserializer: D,
+) -> Result<Option<RuntimeHandoffKind>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.as_deref().and_then(|value| match value {
+        "legacy_tmux_wrapper" => Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+        "claude_tui" => Some(RuntimeHandoffKind::ClaudeTui),
+        "codex_tui" => Some(RuntimeHandoffKind::CodexTui),
+        "process_backend" => Some(RuntimeHandoffKind::ProcessBackend),
+        _ => None,
+    }))
+}
+
 fn serialize_task_notification_kind<S>(
     value: &Option<TaskNotificationKind>,
     serializer: S,
@@ -323,6 +373,14 @@ where
 
 pub(super) fn inflight_runtime_root() -> Option<PathBuf> {
     discord_inflight_root()
+}
+
+/// #2235: expose the local `INFLIGHT_STATE_VERSION` so the recovery engine
+/// can decide whether an on-disk row was authored by a newer binary (i.e.
+/// `state.version > inflight_state_version()`). Read-only accessor — the
+/// constant itself stays private so we control the single bump site.
+pub(super) fn inflight_state_version() -> u32 {
+    INFLIGHT_STATE_VERSION
 }
 
 /// Load all inflight states for a provider WITHOUT the eviction side-effect
@@ -824,7 +882,7 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
             );
             continue;
         };
-        let Ok(state) = serde_json::from_str::<InflightTurnState>(&content) else {
+        let Ok(mut state) = serde_json::from_str::<InflightTurnState>(&content) else {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ⚠ removing malformed inflight state file: {}",
@@ -833,6 +891,26 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
             let _ = fs::remove_file(&path);
             continue;
         };
+        // #2235: the tolerant `runtime_kind` deserializer collapses both
+        // "field absent" (legacy v7 rows) and "present-but-unknown variant"
+        // (rows written by a future binary) to `runtime_kind = None`.
+        // Recovery treats these two cases differently — absent legacy rows
+        // recover via heuristics; present-unknown rows silent-skip. Re-parse
+        // the JSON as a value to disambiguate and record the verdict on the
+        // transient `runtime_kind_unknown_on_disk` flag.
+        if state.runtime_kind.is_none() {
+            if let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(raw_runtime) = raw_value.get("runtime_kind")
+                && let Some(raw_str) = raw_runtime.as_str()
+                && !raw_str.is_empty()
+                && !matches!(
+                    raw_str,
+                    "legacy_tmux_wrapper" | "claude_tui" | "codex_tui" | "process_backend"
+                )
+            {
+                state.runtime_kind_unknown_on_disk = true;
+            }
+        }
         if state.provider_kind().as_ref() != Some(provider) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -1044,6 +1122,187 @@ mod stall_recovery_tests {
         );
         assert!(loaded[0].input_fifo_path.is_none());
         assert!(!loaded[0].runtime_kind_for_recovery().requires_input_fifo());
+    }
+
+    /// #2235 v8 compat shape: a ClaudeTui inflight row that carries both a
+    /// stamped `runtime_kind` and a populated `input_fifo_path` must
+    /// round-trip cleanly under `INFLIGHT_STATE_VERSION` = 8 so an old
+    /// (pre-#2213) binary rolling back over the file can still satisfy its
+    /// FIFO-required recovery branch.
+    #[test]
+    fn inflight_v8_claude_tui_round_trips_with_fifo_for_rollback_compat() {
+        let temp = TempDir::new().unwrap();
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            55,
+            Some("adk-claude".to_string()),
+            7,
+            8,
+            99,
+            "hello".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            Some("/tmp/claude-fifo.input".to_string()),
+            12,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+
+        save_inflight_state_in_root(temp.path(), &state).expect("save inflight state");
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].version, super::INFLIGHT_STATE_VERSION);
+        assert_eq!(loaded[0].version, 8);
+        assert_eq!(loaded[0].runtime_kind, Some(RuntimeHandoffKind::ClaudeTui));
+        assert_eq!(
+            loaded[0].input_fifo_path.as_deref(),
+            Some("/tmp/claude-fifo.input")
+        );
+        assert_eq!(
+            loaded[0].runtime_kind_for_recovery(),
+            RuntimeHandoffKind::ClaudeTui
+        );
+    }
+
+    /// #2235: rows written by a newer binary may serialize an unknown
+    /// `runtime_kind` string. `deserialize_runtime_kind_tolerant` must
+    /// collapse the unknown value to `None` so the whole inflight row isn't
+    /// tossed as malformed JSON. The recovery engine layers the
+    /// version-aware silent-skip on top of this.
+    #[test]
+    fn inflight_unknown_runtime_kind_string_deserializes_as_none() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join(ProviderKind::Claude.as_str());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Seed a JSON row whose `runtime_kind` is a variant string this
+        // binary does not know about (`"future_runtime"`). Without the
+        // tolerant deserializer this row would be deleted as malformed by
+        // `load_inflight_states_from_root`.
+        let valid_state = InflightTurnState::new(
+            ProviderKind::Claude,
+            444,
+            Some("adk-claude".to_string()),
+            7,
+            8,
+            99,
+            "hello".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        let mut value = serde_json::to_value(&valid_state).unwrap();
+        value["runtime_kind"] = serde_json::Value::String("future_runtime".to_string());
+        // Also bump the on-disk version to simulate a row authored by a
+        // newer binary, so the recovery-engine silent-skip guard would
+        // trigger downstream of this deserialization step.
+        value["version"] =
+            serde_json::Value::Number(serde_json::Number::from(super::INFLIGHT_STATE_VERSION + 1));
+        let path = dir.join("444.json");
+        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1, "tolerant deser must keep the row");
+        assert_eq!(loaded[0].channel_id, 444);
+        assert!(
+            loaded[0].runtime_kind.is_none(),
+            "unknown variant must collapse to None"
+        );
+        assert!(
+            loaded[0].version > super::INFLIGHT_STATE_VERSION,
+            "version stays forward-marked for the recovery silent-skip guard"
+        );
+        assert!(
+            loaded[0].runtime_kind_unknown_on_disk,
+            "present-but-unknown runtime_kind must be distinguishable from legacy absent-field None"
+        );
+    }
+
+    /// #2235: legacy v7 rows have NO `runtime_kind` field on disk at all.
+    /// These must deserialize with `runtime_kind = None` AND
+    /// `runtime_kind_unknown_on_disk = false`, so the recovery silent-skip
+    /// guard does not regress legacy recovery flows that depend on the
+    /// `runtime_kind_for_recovery` heuristic.
+    #[test]
+    fn inflight_legacy_v7_row_with_absent_runtime_kind_recovers_via_heuristic() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join(ProviderKind::Claude.as_str());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let valid_state = InflightTurnState::new(
+            ProviderKind::Claude,
+            555,
+            Some("adk-claude".to_string()),
+            7,
+            8,
+            99,
+            "hello".to_string(),
+            None,
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        let mut value = serde_json::to_value(&valid_state).unwrap();
+        // Strip the runtime_kind field entirely to mimic an on-disk legacy
+        // v7 row from before #2213.
+        value.as_object_mut().unwrap().remove("runtime_kind");
+        value["version"] = serde_json::Value::Number(serde_json::Number::from(7u32));
+        let path = dir.join("555.json");
+        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].runtime_kind.is_none());
+        assert!(
+            !loaded[0].runtime_kind_unknown_on_disk,
+            "absent-field legacy v7 rows must not look like a forward-unknown row"
+        );
+        assert_eq!(loaded[0].version, 7);
+    }
+
+    /// #2235: when an on-disk row has `runtime_kind = None` (legacy pre-v8
+    /// row or a future variant this binary doesn't know about) the
+    /// `runtime_kind_for_recovery` heuristic must still pick a deterministic
+    /// kind. The recovery engine layered on top of this then uses
+    /// `state.runtime_kind.is_none()` to switch the missing-FIFO branch to a
+    /// silent debug-skip — exercised here at the data-model layer.
+    #[test]
+    fn inflight_unknown_runtime_kind_falls_back_without_panic() {
+        let temp = TempDir::new().unwrap();
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            66,
+            Some("adk-claude".to_string()),
+            7,
+            8,
+            99,
+            "hello".to_string(),
+            None,
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        // Simulate the pre-v8 / unknown-runtime case: no stamped runtime_kind
+        // and no FIFO path. `runtime_kind_for_recovery` should fall back to
+        // ClaudeTui because tmux/output are present, allowing recovery to
+        // skip silently rather than synthesizing a missing-FIFO notice.
+        state.runtime_kind = None;
+        state.input_fifo_path = None;
+
+        save_inflight_state_in_root(temp.path(), &state).expect("save inflight state");
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].runtime_kind.is_none());
+        assert_eq!(
+            loaded[0].runtime_kind_for_recovery(),
+            RuntimeHandoffKind::ClaudeTui
+        );
     }
 
     #[test]

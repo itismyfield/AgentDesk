@@ -267,8 +267,19 @@ fn apply_prelaunch_runtime_kind(
 ) {
     if let Some(kind) = runtime_kind {
         state.runtime_kind = Some(kind);
-        if !kind.requires_input_fifo() {
-            state.input_fifo_path = None;
+        // #2235 compat window (one release): keep the synthesized
+        // `input_fifo_path` populated when stamping ClaudeTui so that an old
+        // (pre-#2213) binary rolling back over inflight rows written by this
+        // binary can still satisfy its FIFO-required recovery branch. The new
+        // recovery path treats the FIFO as optional for ClaudeTui, so leaving
+        // it set has no behavioural cost on the new code. For CodexTui and
+        // ProcessBackend we still clear, since neither legacy nor current
+        // recovery uses a FIFO for those backends.
+        match kind {
+            RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::LegacyTmuxWrapper => {}
+            RuntimeHandoffKind::CodexTui | RuntimeHandoffKind::ProcessBackend => {
+                state.input_fifo_path = None;
+            }
         }
     }
 }
