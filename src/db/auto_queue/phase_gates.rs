@@ -741,6 +741,11 @@ pub struct PhaseGateRepairSummary {
     pub awaiting_siblings: usize,
     pub stale_dispatches: usize,
     pub no_context_dispatches: usize,
+    /// #2257: gates that match the filter but have `dispatch_id IS NULL`.
+    /// The repair candidate query skips them (it requires a JOIN onto
+    /// `task_dispatches`), but operators need to see they exist so they
+    /// can decide whether to delete or hand-patch them separately.
+    pub orphan_gates_skipped: usize,
     pub blocking_gates_remaining: i64,
     pub run_status: Option<String>,
     pub outcomes: Vec<PhaseGateRepairOutcome>,
@@ -993,6 +998,27 @@ pub async fn repair_phase_gates_for_run_on_pg(
         ))
     })?;
 
+    // #2257: surface the count of orphan gates (no dispatch row) so operators
+    // know the candidate query intentionally skipped them. Without this they
+    // get no signal that hand-cleanup may still be required.
+    let orphan_gates_skipped = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM auto_queue_phase_gates
+         WHERE run_id = $1
+           AND status IN ('pending', 'failed')
+           AND dispatch_id IS NULL
+           AND ($2::BIGINT IS NULL OR phase = $2)",
+    )
+    .bind(run_id)
+    .bind(options.phase)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| {
+        PhaseGateRepairError::database(format!(
+            "count orphan phase gates for run {run_id}: {error}"
+        ))
+    })? as usize;
+
     let run_status =
         sqlx::query_scalar::<_, Option<String>>("SELECT status FROM auto_queue_runs WHERE id = $1")
             .bind(run_id)
@@ -1004,13 +1030,11 @@ pub async fn repair_phase_gates_for_run_on_pg(
                 ))
             })?;
 
-    tx.commit().await.map_err(|error| {
-        PhaseGateRepairError::database(format!(
-            "commit postgres phase-gate repair for run {run_id}: {error}"
-        ))
-    })?;
-
-    Ok(PhaseGateRepairSummary {
+    // #2257: build the summary before commit so we can emit it on
+    // commit-failure too. Without this, a commit error swallows all
+    // per-candidate context and operators see a generic 500 with no record
+    // of which gates were attempted.
+    let summary = PhaseGateRepairSummary {
         run_id: run_id.to_string(),
         phase_filter: options.phase,
         dispatch_id_filter: dispatch_id,
@@ -1020,10 +1044,32 @@ pub async fn repair_phase_gates_for_run_on_pg(
         awaiting_siblings,
         stale_dispatches,
         no_context_dispatches,
+        orphan_gates_skipped,
         blocking_gates_remaining,
         run_status,
         outcomes,
-    })
+    };
+
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(
+            run_id = %summary.run_id,
+            candidate_dispatches = summary.candidate_dispatches,
+            cleared_gates = summary.cleared_gates,
+            failed_gates = summary.failed_gates,
+            awaiting_siblings = summary.awaiting_siblings,
+            stale_dispatches = summary.stale_dispatches,
+            no_context_dispatches = summary.no_context_dispatches,
+            orphan_gates_skipped = summary.orphan_gates_skipped,
+            error = %error,
+            "[auto-queue] phase-gate repair commit failed; rolled back — reporting attempted-but-not-applied summary"
+        );
+        return Err(PhaseGateRepairError::database(format!(
+            "commit postgres phase-gate repair for run {}: {error}",
+            summary.run_id
+        )));
+    }
+
+    Ok(summary)
 }
 
 #[derive(Debug, Clone)]

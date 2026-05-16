@@ -293,6 +293,60 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
     )
 }
 
+/// Max length of `failed_reason` carried into structured audit logs / JSON
+/// responses. The repair pipeline pulls this string from `task_dispatches.result`
+/// which is operator-authored — truncating bounds log volume and limits the
+/// blast radius if a reviewer ever puts something sensitive in a verdict body.
+/// #2257: rationale for the explicit cap.
+const FAILED_REASON_AUDIT_MAX_LEN: usize = 256;
+
+fn truncate_failed_reason(reason: Option<String>) -> Option<String> {
+    reason.map(|raw| {
+        if raw.len() <= FAILED_REASON_AUDIT_MAX_LEN {
+            raw
+        } else {
+            let mut clipped: String = raw.chars().take(FAILED_REASON_AUDIT_MAX_LEN).collect();
+            clipped.push_str("…[truncated]");
+            clipped
+        }
+    })
+}
+
+#[derive(Debug, Clone)]
+struct RepairCaller {
+    /// Whatever the client claimed via `x-agent-id` / `x-channel-id`
+    /// headers BEFORE the auth check. Attacker-controlled on rejection.
+    claimed: String,
+    /// `Some` only if PG resolved the headers to a real agent identity
+    /// (`resolve_requesting_agent_id_with_pg`). `None` means we accepted
+    /// the request via the bearer-token path with no PG-verified
+    /// principal — audit consumers must treat `claimed` as unverified.
+    verified: Option<String>,
+}
+
+impl RepairCaller {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        Self {
+            claimed: repair_phase_gate_caller_from_headers(headers),
+            verified: None,
+        }
+    }
+
+    fn verify(&mut self, resolved: Option<String>) {
+        self.verified = resolved;
+    }
+
+    /// For logs: prefer the verified principal; fall back to the claimed
+    /// header value with an explicit `unverified:` prefix so audit
+    /// aggregators don't confuse the two.
+    fn audit_label(&self) -> String {
+        match self.verified.as_deref() {
+            Some(label) => label.to_string(),
+            None => format!("unverified:{}", self.claimed),
+        }
+    }
+}
+
 /// POST /api/queue/runs/{id}/phase-gates/repair
 pub async fn repair_phase_gates(
     State(state): State<AppState>,
@@ -300,10 +354,12 @@ pub async fn repair_phase_gates(
     headers: HeaderMap,
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let caller = repair_phase_gate_caller_from_headers(&headers);
+    let mut caller = RepairCaller::from_headers(&headers);
     if let Err(response) =
         crate::server::routes::kanban::require_explicit_bearer_token(&headers, "phase-gate repair")
     {
+        // Unverified caller — explicitly mark the audit field so a spoofed
+        // `x-agent-id` doesn't masquerade as a real principal in logs.
         audit_phase_gate_repair_rejected(&id, &caller, "unauthorized", "authorization failed");
         return response;
     }
@@ -325,9 +381,9 @@ pub async fn repair_phase_gates(
         return pg_unavailable_response();
     };
 
-    let caller = crate::server::routes::kanban::resolve_requesting_agent_id_with_pg(pool, &headers)
-        .await
-        .unwrap_or(caller);
+    caller.verify(
+        crate::server::routes::kanban::resolve_requesting_agent_id_with_pg(pool, &headers).await,
+    );
     let options = crate::db::auto_queue::PhaseGateRepairOptions {
         phase: body.phase,
         dispatch_id: body.dispatch_id,
@@ -346,7 +402,7 @@ pub async fn repair_phase_gates(
                         "run_resumed": outcome.run_resumed,
                         "run_finalized": outcome.run_finalized,
                         "pending_count": outcome.pending_count,
-                        "failed_reason": outcome.failed_reason,
+                        "failed_reason": truncate_failed_reason(outcome.failed_reason),
                     })
                 })
                 .collect();
@@ -363,6 +419,7 @@ pub async fn repair_phase_gates(
                     "awaiting_siblings": summary.awaiting_siblings,
                     "stale_dispatches": summary.stale_dispatches,
                     "no_context_dispatches": summary.no_context_dispatches,
+                    "orphan_gates_skipped": summary.orphan_gates_skipped,
                     "blocking_gates_remaining": summary.blocking_gates_remaining,
                     "run_status": summary.run_status,
                     "outcomes": outcomes,
@@ -409,14 +466,16 @@ fn repair_phase_gate_caller_from_headers(headers: &HeaderMap) -> String {
 }
 
 fn audit_phase_gate_repair_summary(
-    caller: &str,
+    caller: &RepairCaller,
     summary: &crate::db::auto_queue::PhaseGateRepairSummary,
 ) {
     let ctx = AutoQueueLogContext::new().run(&summary.run_id);
     let span = crate::services::auto_queue::auto_queue_trace_span("phase_gate_repair", &ctx);
     let _guard = span.enter();
     tracing::info!(
-        caller = %caller,
+        caller = %caller.audit_label(),
+        caller_verified = caller.verified.is_some(),
+        caller_claimed = %caller.claimed,
         outcome = "ok",
         phase_filter = ?summary.phase_filter,
         dispatch_id_filter = ?summary.dispatch_id_filter,
@@ -426,18 +485,26 @@ fn audit_phase_gate_repair_summary(
         awaiting_siblings = summary.awaiting_siblings,
         stale_dispatches = summary.stale_dispatches,
         no_context_dispatches = summary.no_context_dispatches,
+        orphan_gates_skipped = summary.orphan_gates_skipped,
         blocking_gates_remaining = summary.blocking_gates_remaining,
         run_status = ?summary.run_status,
         "[auto-queue] phase-gate repair completed"
     );
 }
 
-fn audit_phase_gate_repair_rejected(run_id: &str, caller: &str, outcome: &str, error: &str) {
+fn audit_phase_gate_repair_rejected(
+    run_id: &str,
+    caller: &RepairCaller,
+    outcome: &str,
+    error: &str,
+) {
     let ctx = AutoQueueLogContext::new().run(run_id);
     let span = crate::services::auto_queue::auto_queue_trace_span("phase_gate_repair", &ctx);
     let _guard = span.enter();
     tracing::warn!(
-        caller = %caller,
+        caller = %caller.audit_label(),
+        caller_verified = caller.verified.is_some(),
+        caller_claimed = %caller.claimed,
         outcome = %outcome,
         error = %error,
         "[auto-queue] phase-gate repair rejected"
@@ -500,5 +567,58 @@ pub async fn reorder(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": error})),
         ),
+    }
+}
+
+#[cfg(test)]
+mod phase_gate_repair_route_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn truncate_failed_reason_returns_none_for_none() {
+        assert!(truncate_failed_reason(None).is_none());
+    }
+
+    #[test]
+    fn truncate_failed_reason_passes_through_short_strings() {
+        let input = "short reason".to_string();
+        assert_eq!(truncate_failed_reason(Some(input.clone())), Some(input),);
+    }
+
+    #[test]
+    fn truncate_failed_reason_clips_oversized_strings_with_tag() {
+        let oversized = "x".repeat(FAILED_REASON_AUDIT_MAX_LEN + 50);
+        let truncated = truncate_failed_reason(Some(oversized)).expect("Some");
+        assert!(
+            truncated.ends_with("…[truncated]"),
+            "expected truncation marker, got: {truncated:?}"
+        );
+        let prefix_byte_len: usize = truncated
+            .chars()
+            .take(FAILED_REASON_AUDIT_MAX_LEN)
+            .map(char::len_utf8)
+            .sum();
+        let marker_byte_len: usize = "…[truncated]".len();
+        assert_eq!(truncated.len(), prefix_byte_len + marker_byte_len);
+    }
+
+    #[test]
+    fn repair_caller_audit_label_marks_unverified_when_pg_unresolved() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-id", HeaderValue::from_static("attacker-claim"));
+        let caller = RepairCaller::from_headers(&headers);
+        assert_eq!(caller.audit_label(), "unverified:agent:attacker-claim");
+        assert!(caller.verified.is_none());
+    }
+
+    #[test]
+    fn repair_caller_audit_label_uses_verified_principal_when_pg_resolved() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-id", HeaderValue::from_static("attacker-claim"));
+        let mut caller = RepairCaller::from_headers(&headers);
+        caller.verify(Some("agent:real-orchestrator".to_string()));
+        assert_eq!(caller.audit_label(), "agent:real-orchestrator");
+        assert_eq!(caller.claimed, "agent:attacker-claim");
     }
 }
