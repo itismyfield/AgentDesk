@@ -54,6 +54,7 @@ import {
 import { deriveOfficeAgentState } from "../components/office-view/officeAgentState";
 import { MiniRateLimitBar } from "../components/office-view/OfficeInsightPanel";
 import OfficeSelectorBar from "../components/OfficeSelectorBar";
+import { useFocusTrap } from "../components/common/overlay";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "./breakpoints";
 import {
   DEFAULT_ROUTE_PATH,
@@ -119,17 +120,25 @@ interface AppShellProps {
 type AgentsPageTab = "agents" | "departments" | "backlog" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
 
-const MOBILE_TABBAR_SAFE_AREA_HEIGHT = "calc(3.5rem + env(safe-area-inset-bottom))";
+const MOBILE_TABBAR_SAFE_AREA_HEIGHT = "calc(4rem + env(safe-area-inset-bottom))";
 
-const HOME_DEFAULT_WIDGETS = [
+const HOME_PRIMARY_WIDGET_IDS = [
   "m_tokens",
   "m_cost",
   "m_progress",
   "m_rate_limit",
   "kanban",
+] as const;
+const HOME_SUPPORT_WIDGET_IDS = [
   "quality",
   "missions",
+] as const;
+const HOME_DEFAULT_WIDGETS = [
+  ...HOME_PRIMARY_WIDGET_IDS,
+  ...HOME_SUPPORT_WIDGET_IDS,
 ];
+const HOME_PRIMARY_WIDGET_SET = new Set<string>(HOME_PRIMARY_WIDGET_IDS);
+const HOME_SUPPORT_WIDGET_SET = new Set<string>(HOME_SUPPORT_WIDGET_IDS);
 const MOBILE_PRIMARY_ROUTE_IDS: AppRouteId[] = [
   "home",
   "office",
@@ -323,6 +332,7 @@ export default function AppShell({
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [showTweaksPanel, setShowTweaksPanel] = useState(false);
   const [showMobileMoreMenu, setShowMobileMoreMenu] = useState(false);
+  const mobileMoreMenuRef = useFocusTrap(showMobileMoreMenu);
   const [agentsPageTab, setAgentsPageTab] = useState<AgentsPageTab>("agents");
   const [kanbanSignalFocus, setKanbanSignalFocus] =
     useState<KanbanSignalFocus | null>(null);
@@ -950,7 +960,7 @@ export default function AppShell({
                         accent="var(--th-accent-warn)"
                       />
                       <NotificationSummaryRow
-                        label={tr("최근 토스트", "Recent toasts")}
+                        label={tr("최근 알림", "Recent notifications")}
                         value={recentNotifications.length}
                         accent="var(--th-accent-info)"
                       />
@@ -1259,11 +1269,7 @@ export default function AppShell({
                 element={
                   <OpsPageView
                     wsConnected={wsConnected}
-                    offices={offices}
-                    allAgents={allAgents}
-                    selectedOfficeId={selectedOfficeId}
                     isKo={isKo}
-                    onChanged={handleOfficeChanged}
                   />
                 }
               />
@@ -1351,16 +1357,21 @@ export default function AppShell({
                   key={route.id}
                   type="button"
                   data-testid={`app-mobile-tab-${route.id}`}
+                  aria-label={tr(
+                    `${isKo ? route.labelKo : route.labelEn} 열기`,
+                    `Open ${route.labelEn}`,
+                  )}
+                  aria-current={isActive ? "page" : undefined}
                   onClick={() => navigateToRoute(route.path)}
-                  className="relative flex h-14 flex-1 flex-col items-center justify-center gap-0.5 text-[10px] font-medium"
+                  className="relative flex h-16 min-w-0 flex-1 flex-col items-center justify-center gap-1 text-[11.5px] font-medium leading-none"
                   style={{
                     color: isActive
                       ? "var(--th-accent-primary)"
                       : "var(--th-text-muted)",
                   }}
                 >
-                  <Icon size={18} />
-                  <span>{isKo ? route.labelKo : route.labelEn}</span>
+                  <Icon size={20} />
+                  <span className="max-w-full truncate px-1">{isKo ? route.labelKo : route.labelEn}</span>
                   {badge !== undefined && badge > 0 && (
                     <span className="absolute right-[28%] top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[8px] font-semibold text-white">
                       {badge > 9 ? "9+" : badge}
@@ -1372,8 +1383,11 @@ export default function AppShell({
             <button
               type="button"
               data-testid="app-mobile-more-button"
+              aria-haspopup="dialog"
+              aria-expanded={showMobileMoreMenu}
+              aria-controls={showMobileMoreMenu ? "app-mobile-more-menu" : undefined}
               onClick={() => setShowMobileMoreMenu((prev) => !prev)}
-              className="relative flex h-14 flex-1 flex-col items-center justify-center gap-0.5 text-[10px] font-medium"
+              className="relative flex h-16 min-w-0 flex-1 flex-col items-center justify-center gap-1 text-[11.5px] font-medium leading-none"
               style={{
                 color:
                   activeMobileRouteId === "more"
@@ -1381,8 +1395,8 @@ export default function AppShell({
                     : "var(--th-text-muted)",
               }}
             >
-              <Settings size={18} />
-              <span>{tr("설정", "Settings")}</span>
+              <Settings size={20} />
+              <span className="max-w-full truncate px-1">{tr("설정", "Settings")}</span>
               {(unresolvedMeetingsCount > 0 || unreadCount > 0) && (
                 <span className="absolute right-[28%] top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[8px] font-semibold text-white">
                   {unresolvedMeetingsCount + unreadCount > 9
@@ -1401,10 +1415,13 @@ export default function AppShell({
             >
               <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" />
               <div
+                ref={mobileMoreMenuRef}
+                id="app-mobile-more-menu"
                 data-testid="app-mobile-more-menu"
                 role="dialog"
                 aria-modal="true"
                 aria-label={tr("확장 메뉴", "Extensions menu")}
+                tabIndex={-1}
                 className="relative w-full max-h-[80vh] overflow-y-auto rounded-t-[2rem] border px-4 pb-4 pt-3 shadow-2xl animate-in fade-in slide-in-from-bottom-4 duration-200"
                 style={{
                   borderColor: "var(--th-border-subtle)",
@@ -1412,6 +1429,12 @@ export default function AppShell({
                     "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 98%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 95%, transparent) 100%)",
                   paddingBottom:
                     "max(1rem, calc(1rem + env(safe-area-inset-bottom)))",
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setShowMobileMoreMenu(false);
+                  }
                 }}
                 onClick={(event) => event.stopPropagation()}
               >
@@ -1684,23 +1707,6 @@ export default function AppShell({
                 </div>
               </div>
 
-              <div
-                className="rounded-2xl border px-3 py-3 text-xs"
-                style={{
-                  borderColor: "var(--th-border-subtle)",
-                  background: "var(--th-overlay-subtle)",
-                }}
-              >
-                <div style={{ color: "var(--th-text-muted)" }}>
-                  {tr("현재 페이지", "Current page")}
-                </div>
-                <div
-                  className="mt-1 font-mono"
-                  style={{ color: "var(--th-text-primary)" }}
-                >
-                  /{currentRoute?.id ?? "home"}
-                </div>
-              </div>
             </div>
           </div>
         </div>
@@ -1841,6 +1847,10 @@ function HomeOverviewPage({
   );
   const localeTag = isKo ? "ko-KR" : "en-US";
   const [editing, setEditing] = useLocalStorage<boolean>(STORAGE_KEYS.homeEditing, false);
+  const [supportOpen, setSupportOpen] = useLocalStorage<boolean>(
+    STORAGE_KEYS.homeSupportOpen,
+    false,
+  );
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
   const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(
@@ -2617,6 +2627,13 @@ function HomeOverviewPage({
       localeTag,
     ],
   );
+  const primaryWidgets = widgets.filter((widgetId) => HOME_PRIMARY_WIDGET_SET.has(widgetId));
+  const supportWidgets = widgets.filter((widgetId) => HOME_SUPPORT_WIDGET_SET.has(widgetId));
+  const visibleWidgets = editing ? widgets : primaryWidgets;
+  const supportSummary = tr(
+    `품질·미션 ${supportWidgets.length}개`,
+    `${supportWidgets.length} quality/mission widgets`,
+  );
 
   return (
     <div className="mx-auto h-full w-full max-w-[92rem] overflow-auto px-4 py-6 pb-32 sm:px-6">
@@ -2685,7 +2702,7 @@ function HomeOverviewPage({
       )}
 
       <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-12">
-        {widgets.map((widgetId, index) => {
+        {visibleWidgets.map((widgetId, index) => {
           const spec = widgetSpecs[widgetId as keyof typeof widgetSpecs];
           if (!spec) return null;
           return (
@@ -2711,13 +2728,16 @@ function HomeOverviewPage({
               onDrop={(event) => {
                 if (!editing || isMobileViewport) return;
                 event.preventDefault();
-                if (dragIndex == null || dragIndex === index) {
+                const transferredIndex = Number(event.dataTransfer.getData("text/plain"));
+                const fromIndex =
+                  dragIndex ?? (Number.isInteger(transferredIndex) ? transferredIndex : null);
+                if (fromIndex == null || fromIndex === index) {
                   setDragIndex(null);
                   setOverIndex(null);
                   return;
                 }
                 const next = [...widgets];
-                const [moved] = next.splice(dragIndex, 1);
+                const [moved] = next.splice(fromIndex, 1);
                 next.splice(index, 0, moved);
                 setWidgets(next);
                 setDragIndex(null);
@@ -2747,6 +2767,62 @@ function HomeOverviewPage({
           );
         })}
       </div>
+
+      {!editing && supportWidgets.length > 0 ? (
+        <section
+          className="mt-4 rounded-[1.15rem] border"
+          style={{
+            borderColor: "var(--th-border-subtle)",
+            background: "color-mix(in srgb, var(--th-card-bg) 86%, transparent)",
+          }}
+          data-testid="home-support-section"
+        >
+          <button
+            type="button"
+            className="flex min-h-[52px] w-full items-center justify-between gap-3 px-4 py-3 text-left sm:px-5"
+            onClick={() => setSupportOpen((value) => !value)}
+            aria-expanded={supportOpen}
+            data-testid="home-support-toggle"
+          >
+            <span className="min-w-0">
+              <span
+                className="block truncate text-sm font-medium"
+                style={{ color: "var(--th-text-secondary)" }}
+              >
+                {tr("보조 위젯", "Supporting widgets")}
+              </span>
+              <span
+                className="mt-0.5 block truncate text-[11px]"
+                style={{ color: "var(--th-text-muted)" }}
+              >
+                {supportSummary}
+              </span>
+            </span>
+            <ChevronRight
+              size={16}
+              className={supportOpen ? "shrink-0 rotate-90 transition-transform" : "shrink-0 transition-transform"}
+              style={{ color: "var(--th-text-muted)" }}
+            />
+          </button>
+          {supportOpen ? (
+            <div
+              className="grid grid-cols-1 gap-4 border-t p-4 sm:p-5 lg:grid-cols-12"
+              style={{ borderColor: "var(--th-border-subtle)" }}
+              data-testid="home-support-grid"
+            >
+              {supportWidgets.map((widgetId) => {
+                const spec = widgetSpecs[widgetId as keyof typeof widgetSpecs];
+                if (!spec) return null;
+                return (
+                  <div key={widgetId} data-testid={`home-widget-${widgetId}`} className={spec.className}>
+                    {spec.render()}
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
     </div>
   );
 }
@@ -2885,10 +2961,14 @@ function HomeWidgetShell({
     >
       <div className="flex items-start justify-between gap-3 border-b px-4 py-3 sm:px-5" style={{ borderColor: "var(--th-border-subtle)" }}>
         <div className="min-w-0">
-          <div className="text-[12.5px] font-medium" style={{ color: "var(--th-text-secondary)" }}>
+          <div className="truncate text-[12.5px] font-medium" style={{ color: "var(--th-text-secondary)" }}>
             {title}
           </div>
-          <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+          <div
+            className="mt-1 line-clamp-1 text-[11px] leading-5"
+            title={subtitle}
+            style={{ color: "var(--th-text-muted)" }}
+          >
             {subtitle}
           </div>
         </div>

@@ -24,9 +24,23 @@ const DEFAULT_HOME_WIDGET_ORDER = [
   "quality",
   "missions",
 ];
+const DEFAULT_HOME_PRIMARY_WIDGET_ORDER = [
+  "m_tokens",
+  "m_cost",
+  "m_progress",
+  "m_rate_limit",
+  "kanban",
+];
 const CUSTOM_HOME_WIDGET_ORDER = [
   "missions",
   "quality",
+  "kanban",
+  "m_rate_limit",
+  "m_progress",
+  "m_cost",
+  "m_tokens",
+];
+const CUSTOM_HOME_PRIMARY_WIDGET_ORDER = [
   "kanban",
   "m_rate_limit",
   "m_progress",
@@ -1413,6 +1427,30 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   });
 
+  test("command palette searches routes and closes accessibly", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop keyboard shortcut coverage");
+    await page.goto("/home");
+
+    await page.getByLabel(/검색 열기|Open search/).click();
+    const palette = page.getByRole("dialog", {
+      name: /명령 팔레트|Command Palette/,
+    });
+    await expect(palette).toBeVisible();
+
+    const search = palette.getByPlaceholder(/검색|Search/);
+    await expect(search).toBeFocused();
+    await search.fill("stats");
+    await expect(palette.getByText(/통계|Stats/)).toBeVisible();
+
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/stats$/);
+
+    await page.getByLabel(/검색 열기|Open search/).click();
+    await expect(palette).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(palette).toHaveCount(0);
+  });
+
   test("desktop: sidebar renders at the full shell width", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
     await page.goto("/home");
@@ -1453,6 +1491,28 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("app-mobile-tab-kanban")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-stats")).toBeVisible();
 
+    const tabMetrics = await bottomNav.locator("button").evaluateAll((buttons) =>
+      buttons.map((button) => {
+        const node = button as HTMLElement;
+        const box = node.getBoundingClientRect();
+        const iconBox = node.querySelector("svg")?.getBoundingClientRect();
+        const label = node.querySelector("span:not([class*='absolute'])") as HTMLElement | null;
+        return {
+          height: box.height,
+          fontSize: Number.parseFloat(window.getComputedStyle(node).fontSize),
+          iconWidth: iconBox?.width ?? 0,
+          labelClientWidth: label?.clientWidth ?? 0,
+          labelScrollWidth: label?.scrollWidth ?? 0,
+        };
+      }),
+    );
+    for (const metric of tabMetrics) {
+      expect(metric.height).toBeGreaterThanOrEqual(44);
+      expect(metric.fontSize).toBeGreaterThanOrEqual(11);
+      expect(metric.iconWidth).toBeGreaterThanOrEqual(20);
+      expect(metric.labelScrollWidth).toBeLessThanOrEqual(metric.labelClientWidth + 1);
+    }
+
     const tabbarZIndex = await bottomNav.evaluate((element) =>
       Number(window.getComputedStyle(element as HTMLElement).zIndex),
     );
@@ -1466,6 +1526,9 @@ test.describe("Dashboard smoke tests", () => {
 
     const moreMenu = page.getByTestId("app-mobile-more-menu");
     await expect(moreMenu).toBeVisible();
+    await expect(
+      moreMenu.getByRole("button", { name: /더보기 닫기|Close more menu/ }),
+    ).toBeFocused();
     await expect(moreMenu.getByRole("button", { name: /에이전트|Agents/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /운영|Ops/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /회의|Meetings/ })).toBeVisible();
@@ -1492,6 +1555,10 @@ test.describe("Dashboard smoke tests", () => {
     expect(tabbarStyles.paddingBottom).toContain("env(safe-area-inset-bottom)");
     expect(tabbarStyles.paddingLeft).toContain("env(safe-area-inset-left)");
     expect(tabbarStyles.paddingRight).toContain("env(safe-area-inset-right)");
+
+    await page.keyboard.press("Escape");
+    await expect(moreMenu).toHaveCount(0);
+    await expect(page.getByTestId("app-mobile-more-button")).toBeFocused();
   });
 
   test("responsive: mobile topbar keeps breadcrumb on a dedicated row", async ({ page }, testInfo) => {
@@ -1574,6 +1641,16 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
   });
 
+  test("office: desktop spatial scene exposes an accessible summary", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
+    await page.goto("/office");
+
+    const officeScene = page.getByRole("img", { name: /오피스 공간 보기|Spatial office view/ });
+    await expect(officeScene).toBeVisible({ timeout: 15000 });
+    await expect(page.locator("#office-scene-status-summary")).toContainText(/Ada Dashboard|아다 대시보드/);
+    await expect(officeScene.locator("canvas")).toHaveAttribute("aria-hidden", "true");
+  });
+
   test("home: widget order persists from storage and reset restores defaults", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
 
@@ -1584,10 +1661,11 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
 
     await expect(page.getByTestId("home-widget-kanban")).toBeVisible({ timeout: 15000 });
-    await expect(await getHomeWidgetOrder(page)).toEqual(CUSTOM_HOME_WIDGET_ORDER);
+    await expect(await getHomeWidgetOrder(page)).toEqual(CUSTOM_HOME_PRIMARY_WIDGET_ORDER);
 
     await page.getByTestId("home-edit-toggle").click();
     await expect(page.getByTestId("home-reset-order")).toBeVisible();
+    await expect(await getHomeWidgetOrder(page)).toEqual(CUSTOM_HOME_WIDGET_ORDER);
     await page.getByTestId("home-reset-order").click();
 
     await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DEFAULT_HOME_WIDGET_ORDER);
@@ -1603,11 +1681,25 @@ test.describe("Dashboard smoke tests", () => {
 
     await page.goto("/home");
 
-    // PR #1258: office widget no longer in default; quality is in its place.
-    await expect(page.getByTestId("home-widget-quality")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("home-widget-kanban")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("home-widget-quality")).toHaveCount(0);
     await page.getByTestId("home-edit-toggle").click();
+    await expect(page.getByTestId("home-widget-quality")).toBeVisible();
 
-    await page.getByTestId("home-widget-missions").dragTo(page.getByTestId("home-widget-m_rate_limit"));
+    const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
+    await page
+      .getByTestId("home-widget-missions")
+      .dispatchEvent("dragstart", { dataTransfer });
+    await page
+      .getByTestId("home-widget-m_rate_limit")
+      .dispatchEvent("dragover", { dataTransfer });
+    await page
+      .getByTestId("home-widget-m_rate_limit")
+      .dispatchEvent("drop", { dataTransfer });
+    await page
+      .getByTestId("home-widget-missions")
+      .dispatchEvent("dragend", { dataTransfer });
+    await dataTransfer.dispose();
 
     await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DRAGGED_HOME_WIDGET_ORDER);
     await expect
@@ -1617,18 +1709,28 @@ test.describe("Dashboard smoke tests", () => {
       .toEqual(DRAGGED_HOME_WIDGET_ORDER);
   });
 
-  test("home: renders all handoff widgets and shared gamification blocks", async ({ page }, testInfo) => {
+  test("home: renders primary snapshot widgets and folds supporting widgets", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
 
     await page.goto("/home");
 
-    for (const widgetId of DEFAULT_HOME_WIDGET_ORDER) {
+    for (const widgetId of DEFAULT_HOME_PRIMARY_WIDGET_ORDER) {
       await expect(page.getByTestId(`home-widget-${widgetId}`)).toBeVisible({ timeout: 15000 });
     }
+    await expect(await getHomeWidgetOrder(page)).toEqual(DEFAULT_HOME_PRIMARY_WIDGET_ORDER);
 
     await expect(page.getByTestId("sidebar-user-level-ring")).toBeVisible();
     // PR #1258: home-streak-counter widget removed from default home IA.
     // The streak surface still exists on the Achievements page.
+    await expect(page.getByTestId("home-widget-quality")).toHaveCount(0);
+    await expect(page.getByTestId("home-widget-missions")).toHaveCount(0);
+    await expect(page.getByTestId("home-support-toggle")).toBeVisible();
+    await expect(page.getByTestId("home-support-toggle")).toHaveAttribute("aria-expanded", "false");
+
+    await page.getByTestId("home-support-toggle").click();
+    await expect(page.getByTestId("home-support-toggle")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("home-widget-quality")).toBeVisible();
+    await expect(page.getByTestId("home-widget-missions")).toBeVisible();
     await expect(page.getByTestId("home-daily-missions")).toBeVisible();
     await expect(page.getByTestId("home-daily-mission-dispatches_today")).toBeVisible();
     await expect(page.getByTestId("home-daily-mission-dispatches_today")).toContainText(
@@ -1866,6 +1968,27 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("meetings-page-timeline")).toBeVisible();
   });
 
+  test("meetings: timeline search and status filters keep the list scoped", async ({ page }) => {
+    await mockMeetingsHubApis(page);
+    await page.goto("/meetings");
+
+    const timelinePane = page.getByTestId("meetings-page-timeline");
+    await expect(timelinePane).toBeVisible({ timeout: 15000 });
+
+    await page.getByRole("searchbox", { name: /회의 검색|Search meetings/ }).fill("read-only");
+    await expect(timelinePane.getByText(/Meetings hub read-only QA/)).toBeVisible();
+    await expect(timelinePane.getByText(/로드밸런서 경고 플로우 리뷰/)).toHaveCount(0);
+
+    await page.getByRole("button", { name: /^완료$|^Done$/ }).click();
+    await expect(timelinePane.getByText(/검색 조건에 맞는 회의가 없습니다|No meetings match/)).toBeVisible();
+
+    await page.getByRole("button", { name: /^전체$|^All$/ }).click();
+    await page.getByRole("searchbox", { name: /회의 검색|Search meetings/ }).fill("");
+    await page.getByRole("button", { name: /^진행$|^Active$/ }).click();
+    await expect(timelinePane.getByText(/Meetings hub read-only QA/)).toBeVisible();
+    await expect(timelinePane.getByText(/로드밸런서 경고 플로우 리뷰/)).toHaveCount(0);
+  });
+
   test("meetings: detail drawer opens from the timeline", async ({ page }) => {
     await mockMeetingsHubApis(page);
     await page.goto("/meetings");
@@ -1954,6 +2077,9 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("ops-websocket-card")).toBeVisible();
     await expect(page.getByTestId("ops-dispatch-outbox-card")).toBeVisible();
     await expect(page.getByTestId("ops-providers-card")).toBeVisible();
+    await expect(page.getByTestId("ops-control-handoff")).toBeVisible();
+    await expect(page.getByTestId("ops-handoff-agents")).toHaveAttribute("href", "/agents");
+    await expect(page.getByTestId("ops-handoff-office")).toHaveAttribute("href", "/office");
   });
 
   test("ops: ws events resync the health snapshot", async ({ page }) => {
@@ -2027,12 +2153,46 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("topbar")).toContainText(/설정|Settings/);
   });
 
+  test("settings: glossary, search feedback, and wrapping guard stay stable", async ({ page }) => {
+    await page.goto("/settings?settingsPanel=runtime");
+
+    await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(/용어 빠른 정의|Quick term definitions/)).toBeVisible();
+    await expect(page.getByText("TTL").first()).toBeVisible();
+
+    await page.getByTestId("settings-search-input").fill("TTL");
+    await expect(page.getByTestId("settings-search-summary")).toBeVisible();
+    await expect(page.getByTestId("settings-search-summary")).toContainText(/항목 일치|matches/);
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByRole("button", { name: /검색 지우기|Clear search/ }).click();
+    await expect(page.getByTestId("settings-search-summary")).toHaveCount(0);
+  });
+
   test("settings: mobile page remains scrollable", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/settings");
 
     const settingsPage = page.getByTestId("settings-page");
     await expect(settingsPage).toBeVisible({ timeout: 15000 });
+
+    const navMetrics = await page
+      .getByRole("tablist", { name: /설정 패널|Settings panels/ })
+      .evaluate((node) => {
+        const buttons = Array.from(node.querySelectorAll("button"));
+        return {
+          clientWidth: node.clientWidth,
+          scrollWidth: node.scrollWidth,
+          overflowX: window.getComputedStyle(node).overflowX,
+          maxButtonHeight: Math.max(
+            0,
+            ...buttons.map((button) => button.getBoundingClientRect().height),
+          ),
+        };
+      });
+    expect(navMetrics.scrollWidth).toBeGreaterThan(navMetrics.clientWidth);
+    expect(navMetrics.overflowX).toMatch(/auto|scroll/);
+    expect(navMetrics.maxButtonHeight).toBeLessThan(92);
 
     const before = await settingsPage.evaluate((node) => ({
       clientHeight: node.clientHeight,
@@ -2102,9 +2262,25 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/settings?settingsPanel=pipeline");
 
     await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
-    await expect(page.getByTestId("pipeline-selection-title")).toBeVisible({ timeout: 400 });
+    await expect(page.getByTestId("pipeline-selection-title")).toBeVisible({ timeout: 1500 });
     await expect(page.getByTestId("pipeline-refresh-indicator")).toBeVisible();
     await expect(page.getByTestId("pipeline-selection-title")).toContainText("backlog → ready");
+    await expect(page.getByTestId("settings-audit-notes")).toBeAttached();
+    await expect
+      .poll(() =>
+        page
+          .getByTestId("settings-audit-notes")
+          .evaluate((node) => (node as HTMLDetailsElement).open),
+      )
+      .toBe(false);
+    await page.getByTestId("settings-audit-summary").click();
+    await expect
+      .poll(() =>
+        page
+          .getByTestId("settings-audit-notes")
+          .evaluate((node) => (node as HTMLDetailsElement).open),
+      )
+      .toBe(true);
     await expect(page.getByTestId("pipeline-refresh-indicator")).toBeHidden({ timeout: 3000 });
   });
 

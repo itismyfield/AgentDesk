@@ -4,6 +4,11 @@ import type { DispatchDeliveryEvent, GitHubIssue, GitHubRepoOption, KanbanRepoSo
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { useLocalStorage } from "../../lib/useLocalStorage";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "../../app/breakpoints";
+import {
+  KANBAN_STATUS_TONES,
+  TIMELINE_KIND_TONES,
+  TIMELINE_STATUS_TONES,
+} from "../../theme/statusTokens";
 import AutoQueuePanel from "./AutoQueuePanel";
 import CardTimeline from "./CardTimeline";
 import MarkdownContent from "../common/MarkdownContent";
@@ -113,12 +118,8 @@ interface KanbanTabProps {
   onClearSignalFocus?: () => void;
 }
 
-const TIMELINE_KIND_STYLE: Record<string, { bg: string; text: string }> = {
-  review: { bg: "rgba(20,184,166,0.16)", text: "#5eead4" },
-  pm: { bg: "rgba(249,115,22,0.16)", text: "#fdba74" },
-  work: { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" },
-  general: { bg: "rgba(148,163,184,0.10)", text: "#94a3b8" },
-};
+const TIMELINE_KIND_STYLE: Record<string, { bg: string; text: string }> =
+  TIMELINE_KIND_TONES;
 
 const STALE_IN_PROGRESS_MS = 100 * 60_000;
 
@@ -565,20 +566,7 @@ export default function KanbanTab({
   };
 
   const getTimelineStatusStyle = (status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed" | "comment") => {
-    switch (status) {
-      case "reviewing":
-        return { bg: "rgba(20,184,166,0.16)", text: "#5eead4" };
-      case "changes_requested":
-        return { bg: "rgba(251,113,133,0.16)", text: "#fda4af" };
-      case "passed":
-        return { bg: "rgba(34,197,94,0.18)", text: "#86efac" };
-      case "decision":
-        return { bg: "rgba(249,115,22,0.16)", text: "#fdba74" };
-      case "completed":
-        return { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" };
-      case "comment":
-        return { bg: "rgba(148,163,184,0.12)", text: "#94a3b8" };
-    }
+    return TIMELINE_STATUS_TONES[status];
   };
 
   const repoCards = useMemo(() => {
@@ -3775,9 +3763,9 @@ export default function KanbanTab({
                     </SurfaceCard>
                   )}
                   {parsed.dodItems.length > 0 && (
-                    <SurfaceCard className="space-y-3" style={{ ...SURFACE_PANEL_STYLE, borderColor: "rgba(20,184,166,0.3)" }}>
+                    <SurfaceCard className="space-y-3" style={{ ...SURFACE_PANEL_STYLE, borderColor: `${KANBAN_STATUS_TONES.review.accent}4d` }}>
                       <div className="flex items-center justify-between gap-3">
-                        <div className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "#2dd4bf" }}>
+                        <div className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: KANBAN_STATUS_TONES.review.text }}>
                           DoD (Definition of Done)
                         </div>
                         <SurfaceMetricPill

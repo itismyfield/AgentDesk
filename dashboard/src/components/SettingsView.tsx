@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Eye, Info, Search } from "lucide-react";
+import { Check, ChevronDown, Eye, Info, Search, X } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type {
   Agent,
@@ -23,6 +23,7 @@ import {
   SurfaceSection as SettingsSection,
   SurfaceSubsection as SettingsSubsection,
 } from "./common/SurfacePrimitives";
+import { SettingsAuditNotes, SettingsGlossary } from "./settings/SettingsKnowledge";
 
 const OnboardingWizard = lazy(() => import("./OnboardingWizard"));
 const FsmEditor = lazy(() => import("./agent-manager/FsmEditor"));
@@ -63,18 +64,7 @@ type ConfigEntry = {
 
 type ConfigEditValue = string | boolean;
 type SettingsPanel = "general" | "runtime" | "pipeline" | "onboarding" | "voice";
-type AuditNoteStatus = "read-only" | "managed-elsewhere" | "backend-contract" | "typed-only" | "backend-followup";
 type SettingsNotificationType = "info" | "success" | "warning" | "error";
-
-interface AuditNote {
-  id: string;
-  titleKo: string;
-  titleEn: string;
-  descriptionKo: string;
-  descriptionEn: string;
-  keys: string[];
-  status: AuditNoteStatus;
-}
 
 /**
  * Source of a setting (where the value lives + governance).
@@ -498,107 +488,6 @@ const SYSTEM_CATEGORY_META = {
 
 const PRIMARY_PIPELINE_CATEGORIES: Array<keyof typeof SYSTEM_CATEGORY_META> = ["pipeline", "review", "timeout", "dispatch"];
 const ADVANCED_PIPELINE_CATEGORIES: Array<keyof typeof SYSTEM_CATEGORY_META> = ["context", "system"];
-const AUDIT_NOTES: AuditNote[] = [
-  {
-    id: "settings-json-merge",
-    titleKo: "회사 설정 JSON은 전체 덮어쓰기 모델",
-    titleEn: "Company settings JSON uses full replacement",
-    descriptionKo: "`/api/settings`는 patch merge가 아니라 body 전체를 저장합니다. 현재 UI는 기존 `settings` JSON과 병합해 hidden key 손실을 막아야 합니다.",
-    descriptionEn: "`/api/settings` stores the full body instead of merging patches. The UI must merge with the existing `settings` JSON to avoid losing hidden keys.",
-    keys: ["settings"],
-    status: "backend-followup",
-  },
-  {
-    id: "server-port-readonly",
-    titleKo: "`server_port`는 사실상 읽기 전용",
-    titleEn: "`server_port` is effectively read-only",
-    descriptionKo: "`src/server/mod.rs`에서 서버 부팅 시 `config.server.port` 값으로 다시 기록합니다. 편집 가능한 값처럼 보이면 운영 오해를 만듭니다.",
-    descriptionEn: "`src/server/mod.rs` rewrites it from `config.server.port` on boot. Presenting it as editable is misleading.",
-    keys: ["server_port"],
-    status: "read-only",
-  },
-  {
-    id: "context-clear-gap",
-    titleKo: "`context_clear_*`는 설명은 있지만 settings API에 없음",
-    titleEn: "`context_clear_*` is described but not exposed by settings API",
-    descriptionKo: "UI 설명에는 등장하지만 `/api/settings/config` whitelist에는 없습니다. dead config인지 빠진 API 항목인지 본체 정리가 필요합니다.",
-    descriptionEn: "The UI descriptions mention it, but `/api/settings/config` does not expose it. ADK core should decide whether it is dead config or a missing API field.",
-    keys: ["context_clear_percent", "context_clear_idle_minutes"],
-    status: "backend-followup",
-  },
-  {
-    id: "onboarding-secrets",
-    titleKo: "온보딩 관련 설정은 별도 API/DB 전용",
-    titleEn: "Onboarding settings are managed through a dedicated API/DB path",
-    descriptionKo: "봇 토큰, guild/owner/provider, 보조 command token은 `/api/onboarding/*`와 개별 `kv_meta` 키로 관리됩니다. 일반 설정창보다 위저드가 안전합니다.",
-    descriptionEn: "Bot tokens, guild/owner/provider, and secondary command tokens are managed via `/api/onboarding/*` and dedicated `kv_meta` keys. A wizard is safer than the general settings form.",
-    keys: [
-      "onboarding_bot_token",
-      "onboarding_guild_id",
-      "onboarding_owner_id",
-      "onboarding_announce_token",
-      "onboarding_notify_token",
-      "onboarding_command_token_2",
-      "onboarding_provider",
-      "onboarding_command_provider_2",
-    ],
-    status: "managed-elsewhere",
-  },
-  {
-    id: "room-theme-multipath",
-    titleKo: "`roomThemes`는 단일 정본이 아님",
-    titleEn: "`roomThemes` is not a single-source setting",
-    descriptionKo: "`dashboard/src/app/office-workflow-pack.ts`에서 preset room theme와 custom room theme를 합쳐 사용합니다. 일반 설정 필드보다 office/visual 편집 흐름에서 관리하는 편이 맞습니다.",
-    descriptionEn: "`dashboard/src/app/office-workflow-pack.ts` merges preset room themes with custom room themes. It fits office/visual editing better than a generic settings form.",
-    keys: ["roomThemes"],
-    status: "managed-elsewhere",
-  },
-  {
-    id: "typed-only-company-settings",
-    titleKo: "타입에는 있지만 현재 소비/편집 경로가 확인되지 않은 회사 설정",
-    titleEn: "Company settings with no confirmed editor or runtime consumer",
-    descriptionKo: "현재 audit 기준으로 일부 `CompanySettings` 필드는 타입에는 있지만 실제 편집 화면이나 소비처가 확인되지 않았습니다. 제거/활성화/문서화 중 하나가 필요합니다.",
-    descriptionEn: "In the current audit, some `CompanySettings` fields exist in types but have no confirmed editor or runtime consumer. They should be removed, activated, or documented.",
-    keys: [
-      "autoUpdateEnabled",
-      "autoUpdateNoticePending",
-      "oauthAutoSwap",
-      "officeWorkflowPack",
-      "providerModelConfig",
-      "messengerChannels",
-      "officePackProfiles",
-      "officePackHydratedPacks",
-    ],
-    status: "typed-only",
-  },
-  {
-    id: "merge-automation-gap",
-    titleKo: "merge automation 설정은 policy에서 읽지만 UI/API에는 없음",
-    titleEn: "Merge automation settings are consumed by policy but absent from UI/API",
-    descriptionKo: "`merge_automation_enabled`, `merge_strategy`, `merge_allowed_authors`는 policy에서 실제 사용되지만 현재 settings API whitelist와 UI에는 없습니다.",
-    descriptionEn: "`merge_automation_enabled`, `merge_strategy`, and `merge_allowed_authors` are consumed by policy, but they are absent from the current settings API whitelist and UI.",
-    keys: ["merge_automation_enabled", "merge_strategy", "merge_allowed_authors"],
-    status: "backend-followup",
-  },
-  {
-    id: "workspace-fallback-gap",
-    titleKo: "`workspace`는 policy fallback에서 읽지만 정본이 아님",
-    titleEn: "`workspace` is read as a policy fallback but is not canonical",
-    descriptionKo: "`agentdesk.config.get('workspace')`는 `kv_meta` fallback일 뿐이고 실제 정본은 agent/session/runtime에 퍼져 있습니다. 일반 설정값처럼 설명하면 오해가 생깁니다.",
-    descriptionEn: "`agentdesk.config.get('workspace')` is only a `kv_meta` fallback. The real source of truth is spread across agent, session, and runtime surfaces.",
-    keys: ["workspace"],
-    status: "backend-followup",
-  },
-  {
-    id: "max-chain-depth-consumer-gap",
-    titleKo: "`max_chain_depth`는 노출되지만 실제 소비처가 확인되지 않음",
-    titleEn: "`max_chain_depth` is exposed but has no confirmed runtime consumer",
-    descriptionKo: "`/api/settings/config` whitelist에는 있지만 현재 코드 검색 기준으로 확실한 런타임 소비처가 보이지 않습니다. dead config인지 누락 연결인지 본체 정리가 필요합니다.",
-    descriptionEn: "It is in the `/api/settings/config` whitelist, but the current code audit did not find a confirmed runtime consumer. ADK core should decide whether it is dead config or a missing integration.",
-    keys: ["max_chain_depth"],
-    status: "backend-followup",
-  },
-];
 
 function isSettingsPanel(value: string | null): value is SettingsPanel {
   return value === "general" || value === "runtime" || value === "pipeline" || value === "onboarding" || value === "voice";
@@ -862,25 +751,6 @@ function formatUnit(value: number, unit: string): string {
     return m > 0 ? `${h}h${m}m` : `${h}h`;
   }
   return unit ? `${value}${unit}` : `${value}`;
-}
-
-function auditStatusLabel(status: AuditNoteStatus, isKo: boolean): string {
-  if (isKo) {
-    if (status === "read-only") return "읽기 전용";
-    if (status === "managed-elsewhere") return "별도 관리";
-    if (status === "typed-only") return "타입 전용 후보";
-    return "본체 정리 필요";
-  }
-  if (status === "read-only") return "Read-only";
-  if (status === "managed-elsewhere") return "Managed elsewhere";
-  if (status === "typed-only") return "Typed-only candidate";
-  return "Core cleanup needed";
-}
-
-function auditStatusClass(status: AuditNoteStatus): string {
-  if (status === "read-only") return "border-slate-400/30 bg-slate-400/10 text-slate-200";
-  if (status === "managed-elsewhere") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
-  return "border-sky-400/30 bg-sky-400/10 text-sky-100";
 }
 
 function configLayerLabel(overrideActive: boolean, isKo: boolean): string {
@@ -1308,7 +1178,7 @@ function SettingRow({
       <div className="setting-row-grid items-center gap-3 px-2 py-3 sm:gap-4 sm:px-3 sm:py-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
+            <span className="setting-row-label text-sm font-medium" style={{ color: "var(--th-text)" }}>
               {labelText}
             </span>
             {meta.flags.map((flag) => {
@@ -1325,12 +1195,13 @@ function SettingRow({
             })}
           </div>
           {hintText ? (
-            <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+            <div className="setting-row-hint mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
               {hintText}
             </div>
           ) : null}
           <code
-            className="mt-1 inline-block rounded px-1 py-px text-[10px]"
+            className="setting-key-token mt-1 inline-block rounded px-1 py-px text-[10px]"
+            title={meta.key}
             style={{
               background: "color-mix(in srgb, var(--th-overlay-medium) 80%, transparent)",
               color: "var(--th-text-muted)",
@@ -1629,47 +1500,6 @@ function StorageSurfaceCard({
       </p>
       <div className="mt-3 text-[11px] font-medium uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
         {footer}
-      </div>
-    </SettingsCard>
-  );
-}
-
-function AuditNoteCard({ note, isKo }: { note: AuditNote; isKo: boolean }) {
-  return (
-    <SettingsCard
-      className="rounded-2xl p-4"
-      style={{
-        borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-        background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-      }}
-    >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
-            {isKo ? note.titleKo : note.titleEn}
-          </div>
-          <p className="mt-2 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-            {isKo ? note.descriptionKo : note.descriptionEn}
-          </p>
-        </div>
-        <span className={`inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[11px] font-medium ${auditStatusClass(note.status)}`}>
-          {auditStatusLabel(note.status, isKo)}
-        </span>
-      </div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {note.keys.map((key) => (
-          <span
-            key={key}
-            className="inline-flex items-center rounded-full border px-2.5 py-1 text-[11px]"
-            style={{
-              borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-              background: "color-mix(in srgb, var(--th-overlay-medium) 84%, transparent)",
-              color: "var(--th-text-muted)",
-            }}
-          >
-            {key}
-          </span>
-        ))}
       </div>
     </SettingsCard>
   );
@@ -2519,15 +2349,15 @@ export default function SettingsView({
     border: "1px solid var(--th-border)",
     color: "var(--th-text)",
   };
-  const primaryActionClass = "inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50";
+  const primaryActionClass = "inline-flex min-h-[44px] shrink-0 items-center justify-center whitespace-nowrap rounded-2xl px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50";
   const primaryActionStyle: CSSProperties = { background: "var(--th-accent-primary)" };
-  const secondaryActionClass = "inline-flex min-h-[44px] items-center justify-center rounded-2xl border px-5 py-2.5 text-sm font-medium transition-[opacity,color,border-color] hover:opacity-100";
+  const secondaryActionClass = "inline-flex min-h-[44px] items-center justify-center whitespace-nowrap rounded-2xl border px-5 py-2.5 text-sm font-medium transition-[opacity,color,border-color] hover:opacity-100";
   const secondaryActionStyle: CSSProperties = {
     borderColor: "rgba(148,163,184,0.28)",
     color: "var(--th-text-secondary)",
     background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
   };
-  const subtleButtonClass = "inline-flex items-center justify-center rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors";
+  const subtleButtonClass = "inline-flex items-center justify-center whitespace-nowrap rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors";
   const subtleButtonStyle: CSSProperties = {
     borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
     color: "var(--th-text-muted)",
@@ -2743,6 +2573,9 @@ export default function SettingsView({
       },
     ) => {
       const filteredRows = args.rows.filter(Boolean);
+      const countLabel = panelQueryNormalized
+        ? `${filteredRows.length}/${args.totalCount}`
+        : tr(`${args.totalCount}개`, `${args.totalCount} items`);
       return (
         <div
           className="setting-group-card overflow-hidden rounded-[20px] border"
@@ -2756,22 +2589,22 @@ export default function SettingsView({
             style={{ borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)" }}
           >
             <div className="min-w-0">
-              <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+              <div className="settings-section-title text-sm font-semibold" style={{ color: "var(--th-text)" }}>
                 {tr(args.titleKo, args.titleEn)}
               </div>
-              <div className="mt-1 text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+              <div className="settings-copy mt-1 text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
                 {tr(args.descriptionKo, args.descriptionEn)}
               </div>
             </div>
             <span
-              className="inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
+              className="settings-count-chip inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
               style={{
                 borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
                 background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
                 color: "var(--th-text-muted)",
               }}
             >
-              {`${args.totalCount} items`}
+              {countLabel}
             </span>
           </div>
           <div className="px-2 pb-1 pt-1 sm:px-3">
@@ -2786,7 +2619,7 @@ export default function SettingsView({
         </div>
       );
     },
-    [tr],
+    [panelQueryNormalized, tr],
   );
 
   const renderGeneralPanel = () => (
@@ -3173,21 +3006,7 @@ export default function SettingsView({
             {ADVANCED_PIPELINE_CATEGORIES.map(renderPipelineCategory)}
           </div>
 
-          <div id="settings-audit-notes">
-            <SettingsSubsection
-              title={tr("감사 노트", "Audit notes")}
-              description={tr(
-                "일반 폼에 바로 넣으면 거짓말이 되거나, 프론트만으로는 정본을 보장할 수 없는 항목입니다. 운영자에게 현재 한계를 숨기지 않기 위해 그대로 노출합니다.",
-                "These items would become misleading in the regular form or cannot be made truthful from the frontend alone. They stay visible so operators can see the current limits.",
-              )}
-            >
-              <div className="grid gap-3 md:grid-cols-2">
-                {AUDIT_NOTES.map((note) => (
-                  <AuditNoteCard key={note.id} note={note} isKo={isKo} />
-                ))}
-              </div>
-            </SettingsSubsection>
-          </div>
+          <SettingsAuditNotes isKo={isKo} />
         </div>
       )}
     </div>
@@ -3725,11 +3544,40 @@ export default function SettingsView({
               value={panelQuery}
               onChange={(event) => setPanelQuery(event.target.value)}
               placeholder={tr("설정 검색", "Search settings")}
+              aria-label={tr("설정 검색", "Search settings")}
               className="w-full rounded-xl py-2.5 pl-9 pr-3 text-sm"
               style={inputStyle}
               data-testid="settings-search-input"
             />
+            {panelQuery ? (
+              <button
+                type="button"
+                onClick={() => setPanelQuery("")}
+                className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-lg"
+                style={{ color: "var(--th-text-muted)" }}
+                aria-label={tr("검색 지우기", "Clear search")}
+              >
+                <X size={13} />
+              </button>
+            ) : null}
           </div>
+
+          {panelQueryNormalized ? (
+            <div
+              className="settings-search-summary mb-3 rounded-xl border px-3 py-2 text-[11px] leading-5"
+              style={{
+                borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+                background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
+                color: "var(--th-text-muted)",
+              }}
+              data-testid="settings-search-summary"
+            >
+              {tr(
+                `현재 패널 ${matchingKeysInActivePanel.size}개 항목 일치`,
+                `${matchingKeysInActivePanel.size} matches in this panel`,
+              )}
+            </div>
+          ) : null}
 
           <div
             role="tablist"
@@ -3759,6 +3607,7 @@ export default function SettingsView({
 
         <div className="min-w-0 space-y-4">
           {settingsInfoNotice}
+          <SettingsGlossary isKo={isKo} />
 
           <SettingsCard
             id="settings-panel-content"

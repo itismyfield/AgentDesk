@@ -6,8 +6,12 @@ import {
   removeLocalStorageValue,
   writeLocalStorageValue,
 } from "../lib/useLocalStorage";
+import {
+  getMeetingIssueResult,
+  getMeetingIssueState,
+  getProposedIssueKey,
+} from "../lib/meetingHelpers";
 import type {
-  IssueCreationResult,
   ProposedIssue,
   RoundTableMeeting,
   RoundTableMeetingChannelOption,
@@ -26,12 +30,16 @@ import {
   type GitHubRepoOption,
 } from "../api/client";
 import {
+  Ban,
+  CheckCircle2,
+  CircleDashed,
   FileText,
   Plus,
   Trash2,
   ChevronDown,
   ChevronUp,
   Settings2,
+  TriangleAlert,
 } from "lucide-react";
 import MeetingDetailModal from "./MeetingDetailModal";
 import MeetingProviderFlow, {
@@ -127,32 +135,6 @@ function filterReposForViewer(
   return repos.filter((repo) =>
     repo.nameWithOwner.startsWith(`${viewerLogin}/`),
   );
-}
-
-function getProposedIssueKey(issue: ProposedIssue): string {
-  return JSON.stringify([
-    issue.title.trim(),
-    issue.body.trim(),
-    issue.assignee.trim(),
-  ]);
-}
-
-function getMeetingIssueResult(
-  meeting: RoundTableMeeting,
-  issue: ProposedIssue,
-): IssueCreationResult | null {
-  const key = getProposedIssueKey(issue);
-  return (
-    meeting.issue_creation_results?.find((result) => result.key === key) ?? null
-  );
-}
-
-function getMeetingIssueState(
-  result: IssueCreationResult | null,
-): "created" | "failed" | "discarded" | "pending" {
-  if (!result) return "pending";
-  if (result.discarded) return "discarded";
-  return result.ok ? "created" : "failed";
 }
 
 function normalizeSelectionReason(reason: string | null | undefined): string {
@@ -1409,6 +1391,7 @@ export default function MeetingMinutesView({
                           issueState === "created"
                             ? {
                                 label: t({ ko: "생성됨", en: "Created" }),
+                                icon: CheckCircle2,
                                 color: "#34d399",
                                 bg: "rgba(16,185,129,0.12)",
                                 border: "rgba(16,185,129,0.18)",
@@ -1416,16 +1399,27 @@ export default function MeetingMinutesView({
                             : issueState === "discarded"
                               ? {
                                   label: t({ ko: "폐기됨", en: "Discarded" }),
+                                  icon: Ban,
                                   color: "#94a3b8",
                                   bg: "rgba(148,163,184,0.12)",
                                   border: "rgba(148,163,184,0.18)",
                                 }
-                              : {
-                                  label: t({ ko: "대기", en: "Pending" }),
-                                  color: "#60a5fa",
-                                  bg: "rgba(96,165,250,0.12)",
-                                  border: "rgba(96,165,250,0.18)",
-                                };
+                              : issueState === "failed"
+                                ? {
+                                    label: t({ ko: "실패", en: "Failed" }),
+                                    icon: TriangleAlert,
+                                    color: "#fbbf24",
+                                    bg: "rgba(245,158,11,0.12)",
+                                    border: "rgba(245,158,11,0.18)",
+                                  }
+                                : {
+                                    label: t({ ko: "대기", en: "Pending" }),
+                                    icon: CircleDashed,
+                                    color: "#60a5fa",
+                                    bg: "rgba(96,165,250,0.12)",
+                                    border: "rgba(96,165,250,0.18)",
+                                  };
+                        const StatusIcon = statusMeta.icon;
                         const issueTone = issueState === "created"
                           ? "success"
                           : issueState === "discarded"
@@ -1504,9 +1498,18 @@ export default function MeetingMinutesView({
                             </div>
                             <div className="mt-2">
                               <span
-                                className="rounded-full px-2 py-0.5 text-xs font-semibold"
-                                style={{ background: statusMeta.bg, color: statusMeta.color }}
+                                className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold"
+                                style={{
+                                  background: statusMeta.bg,
+                                  borderColor: statusMeta.border,
+                                  color: statusMeta.color,
+                                }}
+                                aria-label={t({
+                                  ko: `후속 일감 상태: ${statusMeta.label}`,
+                                  en: `Follow-up issue status: ${statusMeta.label}`,
+                                })}
                               >
+                                <StatusIcon size={12} aria-hidden="true" />
                                 {statusMeta.label}
                               </span>
                             </div>

@@ -5,6 +5,7 @@ import {
   Clock3,
   Minus,
   Plus,
+  Search,
   Users,
   Workflow,
 } from "lucide-react";
@@ -14,6 +15,13 @@ import {
   summarizeMeetings,
 } from "../app/meetingSummary";
 import { useI18n } from "../i18n";
+import {
+  getMeetingIssueResult,
+  getMeetingIssueState,
+  getMeetingIssueTone,
+  getProposedIssueKey,
+  type MeetingIssueState,
+} from "../lib/meetingHelpers";
 import type {
   RoundTableMeeting,
   RoundTableMeetingChannelOption,
@@ -32,6 +40,7 @@ type MeetingNotificationUpdater = (
   type?: MeetingNotificationType,
 ) => void;
 type MobilePane = "meetings" | "skills";
+type MeetingStatusFilter = "all" | RoundTableMeeting["status"] | "open_issues";
 
 const DESKTOP_SPLIT_QUERY = "(min-width: 1024px)";
 const MEETING_TOGGLE_PATTERNS = [
@@ -191,53 +200,31 @@ function getMeetingStatusTone(
   return "err";
 }
 
-function getProposedIssueKey(issue: {
-  title: string;
-  body: string;
-  assignee: string;
-}): string {
-  return JSON.stringify([issue.title.trim(), issue.body.trim(), issue.assignee.trim()]);
-}
-
-function getMeetingIssueResult(
-  meeting: RoundTableMeeting,
-  issue: {
-    title: string;
-    body: string;
-    assignee: string;
-  },
-): { ok: boolean; discarded?: boolean; error?: string | null } | null {
-  const key = getProposedIssueKey(issue);
-  return (
-    meeting.issue_creation_results?.find((result) => result.key === key) ?? null
-  );
-}
-
-function getMeetingIssueState(
-  result: { ok: boolean; discarded?: boolean; error?: string | null } | null,
-): "created" | "failed" | "discarded" | "pending" {
-  if (!result) return "pending";
-  if (result.discarded) return "discarded";
-  return result.ok ? "created" : "failed";
-}
-
-function getMeetingIssueTone(
-  state: "created" | "failed" | "discarded" | "pending",
-): "ok" | "warn" | "err" | "neutral" {
-  if (state === "created") return "ok";
-  if (state === "failed") return "err";
-  if (state === "discarded") return "neutral";
-  return "warn";
-}
-
 function getMeetingIssueStateLabel(
-  state: "created" | "failed" | "discarded" | "pending",
+  state: MeetingIssueState,
   t: ReturnType<typeof useI18n>["t"],
 ): string {
   if (state === "created") return t({ ko: "생성됨", en: "Created" });
   if (state === "failed") return t({ ko: "실패", en: "Failed" });
   if (state === "discarded") return t({ ko: "폐기", en: "Discarded" });
   return t({ ko: "대기", en: "Pending" });
+}
+
+function meetingSearchText(meeting: RoundTableMeeting): string {
+  return [
+    meeting.agenda,
+    meeting.summary,
+    meeting.status,
+    meeting.primary_provider,
+    meeting.reviewer_provider,
+    meeting.participant_names.join(" "),
+    meeting.proposed_issues
+      ?.map((issue) => `${issue.title} ${issue.assignee ?? ""}`)
+      .join(" "),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLocaleLowerCase();
 }
 
 export default function MeetingsAndSkillsPage({
@@ -252,6 +239,8 @@ export default function MeetingsAndSkillsPage({
   const { t, language, locale } = useI18n();
   const [selectedMeetingId, setSelectedMeetingId] = useState("");
   const [mobilePane, setMobilePane] = useState<MobilePane>("meetings");
+  const [meetingQuery, setMeetingQuery] = useState("");
+  const [meetingStatusFilter, setMeetingStatusFilter] = useState<MeetingStatusFilter>("all");
   const isDesktopSplit = useDesktopSplitLayout();
   const meetingShellRef = useRef<HTMLDivElement | null>(null);
 
@@ -260,13 +249,26 @@ export default function MeetingsAndSkillsPage({
     () => [...meetings].sort((left, right) => right.started_at - left.started_at),
     [meetings],
   );
+  const filteredMeetings = useMemo(() => {
+    const normalizedQuery = meetingQuery.trim().toLocaleLowerCase();
+    return sortedMeetings.filter((meeting) => {
+      const statusMatches =
+        meetingStatusFilter === "all"
+        || (meetingStatusFilter === "open_issues"
+          ? countOpenMeetingIssues(meeting) > 0
+          : meeting.status === meetingStatusFilter);
+      if (!statusMatches) return false;
+      if (!normalizedQuery) return true;
+      return meetingSearchText(meeting).includes(normalizedQuery);
+    });
+  }, [meetingQuery, meetingStatusFilter, sortedMeetings]);
   const selectedMeeting = useMemo(() => {
-    if (sortedMeetings.length === 0) return null;
+    if (filteredMeetings.length === 0) return null;
     return (
-      sortedMeetings.find((meeting) => meeting.id === selectedMeetingId) ??
-      sortedMeetings[0]
+      filteredMeetings.find((meeting) => meeting.id === selectedMeetingId) ??
+      filteredMeetings[0]
     );
-  }, [selectedMeetingId, sortedMeetings]);
+  }, [filteredMeetings, selectedMeetingId]);
   const totalParticipants = meetings.reduce(
     (sum, meeting) => sum + meeting.participant_names.length,
     0,
@@ -295,18 +297,18 @@ export default function MeetingsAndSkillsPage({
     .slice(0, 4);
 
   useEffect(() => {
-    if (!sortedMeetings.length) {
+    if (!filteredMeetings.length) {
       if (selectedMeetingId) setSelectedMeetingId("");
       return;
     }
 
     if (
       !selectedMeetingId ||
-      !sortedMeetings.some((meeting) => meeting.id === selectedMeetingId)
+      !filteredMeetings.some((meeting) => meeting.id === selectedMeetingId)
     ) {
-      setSelectedMeetingId(sortedMeetings[0].id);
+      setSelectedMeetingId(filteredMeetings[0].id);
     }
-  }, [selectedMeetingId, sortedMeetings]);
+  }, [filteredMeetings, selectedMeetingId]);
 
   const handleLaunchMeeting = () => {
     if (!isDesktopSplit) {
@@ -323,8 +325,46 @@ export default function MeetingsAndSkillsPage({
     meetingShellRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
+  const meetingStatusOptions: Array<{ id: MeetingStatusFilter; label: string }> = [
+    { id: "all", label: t({ ko: "전체", en: "All" }) },
+    { id: "in_progress", label: t({ ko: "진행", en: "Active" }) },
+    { id: "completed", label: t({ ko: "완료", en: "Done" }) },
+    { id: "open_issues", label: t({ ko: "미완료 액션", en: "Open actions" }) },
+  ];
+
   const meetingListCard = (
     <div data-testid="meetings-page-timeline" className="meetings-list card">
+      <div className="meeting-list-toolbar">
+        <label className="meeting-search">
+          <Search size={14} />
+          <input
+            type="search"
+            aria-label={t({ ko: "회의 검색", en: "Search meetings" })}
+            value={meetingQuery}
+            onChange={(event) => setMeetingQuery(event.target.value)}
+            placeholder={t({ ko: "회의, 참석자, 후속 액션 검색", en: "Search meetings, people, actions" })}
+          />
+        </label>
+        <div className="meeting-filter-tabs" aria-label={t({ ko: "회의 상태 필터", en: "Meeting status filter" })}>
+          {meetingStatusOptions.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={meetingStatusFilter === option.id ? "active" : ""}
+              aria-pressed={meetingStatusFilter === option.id}
+              onClick={() => setMeetingStatusFilter(option.id)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <div className="meeting-result-count">
+          {t({
+            ko: `${filteredMeetings.length}/${sortedMeetings.length}건`,
+            en: `${filteredMeetings.length}/${sortedMeetings.length} shown`,
+          })}
+        </div>
+      </div>
       {sortedMeetings.length === 0 ? (
         <div className="empty-state">
           {t({
@@ -332,8 +372,15 @@ export default function MeetingsAndSkillsPage({
             en: "No meetings have been recorded yet.",
           })}
         </div>
+      ) : filteredMeetings.length === 0 ? (
+        <div className="empty-state">
+          {t({
+            ko: "검색 조건에 맞는 회의가 없습니다.",
+            en: "No meetings match the current filters.",
+          })}
+        </div>
       ) : (
-        sortedMeetings.map((meeting) => {
+        filteredMeetings.map((meeting) => {
           const issueTotal = meeting.proposed_issues?.length ?? 0;
           const issueTone =
             issueTotal === 0 || meeting.issues_created === issueTotal
@@ -351,14 +398,22 @@ export default function MeetingsAndSkillsPage({
               className={`meeting-item ${
                 selectedMeeting?.id === meeting.id ? "active" : ""
               }`}
+              aria-label={t({
+                ko: `${meeting.agenda} 회의 선택`,
+                en: `Select meeting: ${meeting.agenda}`,
+              })}
+              aria-pressed={selectedMeeting?.id === meeting.id}
               onClick={() => setSelectedMeetingId(meeting.id)}
             >
               <div className="mi-head">
                 <div className="min-w-0">
                   <div className="mi-title">{meeting.agenda}</div>
                   <div className="mi-meta">
-                    <span className="mono">
-                      {formatMeetingDate(meeting.started_at, locale)}
+                    <span
+                      className="mono"
+                      title={formatMeetingDate(meeting.started_at, locale)}
+                    >
+                      {formatRelativeTime(meeting.started_at, language, locale)}
                     </span>
                     <span>· {durationLabel}</span>
                     <span>
@@ -411,7 +466,7 @@ export default function MeetingsAndSkillsPage({
                 {getMeetingStatusLabel(selectedMeeting, t)}
               </span>
               <span className="md-status-copy">
-                {formatRelativeTime(selectedMeeting.started_at, language, locale)}
+                {formatMeetingDate(selectedMeeting.started_at, locale)}
               </span>
             </div>
           ) : null}
@@ -653,15 +708,15 @@ export default function MeetingsAndSkillsPage({
       <div className="section-head">
         <div className="min-w-0">
           <div className="section-kicker">
-            {t({ ko: "스킬 카탈로그", en: "Skill Catalog" })}
+            {t({ ko: "관련 스킬", en: "Related Skills" })}
           </div>
           <div className="section-title">
-            {t({ ko: "자동화 스킬", en: "Automation Skills" })}
+            {t({ ko: "회의 후속 자동화", en: "Meeting follow-up automation" })}
           </div>
           <div className="section-copy">
             {t({
-              ko: "시안엔 없던 기존 기능이지만, 회의 상세 아래에 같은 톤의 확장 카드로 붙입니다.",
-              en: "This is an original dashboard extension, attached under the reference detail card in the same visual tone.",
+              ko: "회의에서 나온 후속 액션을 실행·정리할 때 연결되는 스킬만 한곳에 모았습니다.",
+              en: "Skills connected to meeting follow-up actions stay close to the meeting detail.",
             })}
           </div>
         </div>
@@ -881,6 +936,93 @@ export default function MeetingsAndSkillsPage({
 
         .meetings-page-shell .meetings-list {
           padding: 0;
+        }
+
+        .meetings-page-shell .meeting-list-toolbar {
+          display: grid;
+          gap: 10px;
+          padding: 14px;
+          border-bottom: 1px solid color-mix(
+            in srgb,
+            var(--th-border) 62%,
+            transparent
+          );
+        }
+
+        .meetings-page-shell .meeting-search {
+          display: flex;
+          min-height: 42px;
+          align-items: center;
+          gap: 9px;
+          min-width: 0;
+          border-radius: 12px;
+          border: 1px solid color-mix(in srgb, var(--th-border) 70%, transparent);
+          background: color-mix(in srgb, var(--th-bg-surface) 90%, transparent);
+          padding: 0 12px;
+          color: var(--th-text-muted);
+        }
+
+        .meetings-page-shell .meeting-search input {
+          min-width: 0;
+          width: 100%;
+          border: 0;
+          outline: none;
+          background: transparent;
+          color: var(--th-text);
+          font-size: 13px;
+          line-height: 1.4;
+        }
+
+        .meetings-page-shell .meeting-search input::placeholder {
+          color: var(--th-text-muted);
+        }
+
+        .meetings-page-shell .meeting-filter-tabs {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+
+        .meetings-page-shell .meeting-filter-tabs button {
+          min-height: 34px;
+          border: 1px solid color-mix(in srgb, var(--th-border) 70%, transparent);
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--th-bg-surface) 88%, transparent);
+          color: var(--th-text-muted);
+          padding: 0 11px;
+          font-size: 11.5px;
+          font-weight: 600;
+        }
+
+        .meetings-page-shell .meeting-filter-tabs button.active {
+          border-color: color-mix(
+            in srgb,
+            var(--th-accent-primary) 30%,
+            var(--th-border) 70%
+          );
+          background: color-mix(in srgb, var(--th-accent-primary-soft) 58%, transparent);
+          color: var(--th-text);
+        }
+
+        .meetings-page-shell .meeting-result-count {
+          font-size: 11px;
+          color: var(--th-text-muted);
+          font-variant-numeric: tabular-nums;
+        }
+
+        @media (min-width: 680px) {
+          .meetings-page-shell .meeting-list-toolbar {
+            grid-template-columns: minmax(220px, 1fr) auto;
+            align-items: center;
+          }
+
+          .meetings-page-shell .meeting-filter-tabs {
+            justify-content: flex-end;
+          }
+
+          .meetings-page-shell .meeting-result-count {
+            grid-column: 1 / -1;
+          }
         }
 
         .meetings-page-shell .empty-state {

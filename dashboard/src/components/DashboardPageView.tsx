@@ -673,8 +673,11 @@ export default function DashboardPageView({
     (index: number) => (event: ReactDragEvent<HTMLDivElement>) => {
       if (!editingWidgets) return;
       event.preventDefault();
-      if (dragIndex == null) return;
-      setWidgetOrder((current) => moveHomeWidget(current, dragIndex, index));
+      const transferredIndex = Number(event.dataTransfer.getData("text/plain"));
+      const fromIndex =
+        dragIndex ?? (Number.isInteger(transferredIndex) ? transferredIndex : null);
+      if (fromIndex == null) return;
+      setWidgetOrder((current) => moveHomeWidget(current, fromIndex, index));
       setDragIndex(null);
       setOverIndex(null);
     },

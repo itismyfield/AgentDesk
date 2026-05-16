@@ -32,7 +32,7 @@
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-display: "Inter", "Avenir Next", "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
-  --font-pixel: "Silkscreen", "Press Start 2P", "Inter", "Segoe UI", sans-serif;
+  --font-pixel: "Silkscreen", "Inter", "Segoe UI", sans-serif;
   --r-sm: 0.625rem;
   --r-md: 0.875rem;
   --r-lg: 1rem;
@@ -227,6 +227,20 @@ textarea {
   font: inherit;
 }
 
+:where(
+  a[href],
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  [role="button"],
+  [tabindex]:not([tabindex="-1"])
+):focus-visible {
+  outline: 2px solid var(--th-focus-ring, var(--th-accent-primary, var(--accent)));
+  outline-offset: 2px;
+}
+
 @media (max-width: 899px) {
   body { overflow-x: hidden; overflow-y: auto; }
 }
@@ -349,6 +363,54 @@ textarea {
 .dash-btn:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--dash-btn-color, #93c5fd) 60%, white 40%);
   outline-offset: 2px;
+}
+
+.agentdesk-toast {
+  border-radius: var(--r-md) !important;
+  border-width: 1px !important;
+  box-shadow: var(--shadow-md) !important;
+}
+
+.agentdesk-toast-title {
+  font-size: 0.8125rem !important;
+  line-height: 1.45 !important;
+}
+
+.agentdesk-toast-close {
+  border-color: color-mix(in srgb, var(--th-border) 64%, transparent) !important;
+  background: color-mix(in srgb, var(--th-card-bg) 92%, transparent) !important;
+  color: var(--th-text-muted) !important;
+}
+
+[cmdk-group-heading] {
+  padding: 0.625rem 1rem 0.25rem;
+  color: var(--th-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.command-palette-item {
+  display: flex;
+  width: 100%;
+  min-height: 2.75rem;
+  cursor: pointer;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  color: var(--th-text);
+  font-size: 0.875rem;
+  text-align: left;
+}
+
+.command-palette-item[data-selected="true"] {
+  background: var(--th-accent-primary-soft);
+}
+
+.command-palette-item-kind,
+.command-palette-item-meta {
+  color: var(--th-text-muted);
 }
 
 .dash-btn:disabled {
@@ -699,9 +761,60 @@ textarea {
 /* === Settings page (issue #1257) === */
 .setting-row-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px auto;
+  grid-template-columns: minmax(18rem, 1fr) minmax(16rem, 280px) auto;
   align-items: center;
 }
+
+.settings-copy,
+.setting-row-hint {
+  text-wrap: pretty;
+}
+
+.settings-section-title,
+.setting-row-label {
+  text-wrap: balance;
+}
+
+.settings-term,
+.settings-count-chip {
+  white-space: nowrap;
+}
+
+.setting-key-token {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+.settings-search-summary {
+  text-wrap: pretty;
+}
+
+.settings-audit-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-audit-disclosure summary::after {
+  align-self: center;
+  color: var(--th-text-muted);
+  content: "+";
+  flex-shrink: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.settings-audit-disclosure[open] summary::after {
+  content: "-";
+}
+
+@media (max-width: 1180px) {
+  .setting-row-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(14rem, 260px) auto;
+  }
+}
+
 /* Desktop default: 2-col grid (220px nav + 1fr content). On <768px the nav
    collapses into a horizontal scroll tab bar and SettingRow becomes a 1-col
    stack. The Tailwind classes already drive desktop layout; these media
@@ -719,12 +832,20 @@ textarea {
     flex-direction: row !important;
     display: flex !important;
     overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
     gap: 0.5rem;
     padding-bottom: 0.25rem;
+    -webkit-overflow-scrolling: touch;
+  }
+  .settings-nav .settings-nav-items::-webkit-scrollbar {
+    display: none;
   }
   .settings-nav .settings-nav-items > * {
     flex: 0 0 auto;
-    min-width: 12rem;
+    min-width: min(11rem, 74vw);
+    scroll-snap-align: start;
   }
   .setting-row .setting-row-grid {
     grid-template-columns: 1fr !important;

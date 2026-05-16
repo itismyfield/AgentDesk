@@ -106,6 +106,7 @@ export function useOfficePixiRuntime({
       const canvas = app.canvas as HTMLCanvasElement;
       canvas.style.imageRendering = "pixelated";
       canvas.style.touchAction = "manipulation";
+      canvas.setAttribute("aria-hidden", "true");
       element.innerHTML = "";
       element.appendChild(canvas);
 

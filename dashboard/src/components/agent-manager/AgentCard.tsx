@@ -1,5 +1,6 @@
 import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
+import { getCurrentTaskSummary } from "../../lib/agentHelpers";
 import { getFontFamilyForText } from "../../lib/fonts";
 import { getProviderMeta } from "../../app/providerTheme";
 import AgentAvatar from "../AgentAvatar";
@@ -28,40 +29,6 @@ interface AgentCardProps {
   viewMode: AgentCardViewMode;
 }
 
-function currentTaskSummary(
-  agent: Agent,
-  tr: Translator,
-): { label: string; value: string } {
-  if (agent.current_task_id) {
-    return {
-      label: tr("현재 작업", "Current Task"),
-      value: agent.current_task_id,
-    };
-  }
-  if (agent.workflow_pack_key) {
-    return {
-      label: tr("워크플로우", "Workflow"),
-      value: agent.workflow_pack_key,
-    };
-  }
-  if (agent.session_info) {
-    return {
-      label: tr("세션", "Session"),
-      value: agent.session_info,
-    };
-  }
-  if (agent.personality) {
-    return {
-      label: tr("메모", "Notes"),
-      value: agent.personality,
-    };
-  }
-  return {
-    label: tr("상태", "Status"),
-    value: tr("대기 중", "Standing by"),
-  };
-}
-
 export default function AgentCard({
   agent,
   spriteMap,
@@ -85,7 +52,7 @@ export default function AgentCard({
   const providerMeta = getProviderMeta(agent.cli_provider);
   const levelInfo = getAgentLevel(agent.stats_xp);
   const levelTitle = getAgentTitle(agent.stats_xp, isKo);
-  const task = currentTaskSummary(agent, tr);
+  const task = getCurrentTaskSummary(agent, tr);
   const contentFont = getFontFamilyForText(task.value, "sans");
 
   return (
