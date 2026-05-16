@@ -4,7 +4,7 @@ import * as api from "../api/client";
 import { localeName, useI18n } from "../i18n";
 import type { Agent, CompanySettings, DashboardStats } from "../types";
 import AgentAvatar from "./AgentAvatar";
-import { getAgentLevel, getAgentTitle } from "./agent-manager/AgentInfoCard";
+import { getAgentLevel, getAgentTitle } from "./agent-manager/agentProgress";
 import { Drawer } from "./common/overlay";
 import {
   DailyMissions,

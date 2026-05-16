@@ -34,7 +34,7 @@ import {
   describeDispatchedSession,
   formatDiscordSummary,
 } from "../agent-manager/discord-routing";
-import { getAgentLevel, getAgentTitle } from "../agent-manager/AgentInfoCard";
+import { getAgentLevel, getAgentTitle } from "../agent-manager/agentProgress";
 import type { OfficeManualIntervention } from "./officeAgentState";
 
 interface OfficeAgentDrawerProps {
@@ -776,4 +776,3 @@ export default function OfficeAgentDrawer({
     </Drawer>
   );
 }
-

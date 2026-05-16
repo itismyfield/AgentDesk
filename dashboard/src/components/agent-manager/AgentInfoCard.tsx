@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   formatElapsedCompact,
   getAgentWarnings,
@@ -22,7 +22,6 @@ import {
   SurfaceSubsection,
 } from "../common/SurfacePrimitives";
 import { STATUS_DOT } from "./constants";
-import TurnTranscriptPanel from "./TurnTranscriptPanel";
 import type { Translator } from "./types";
 import * as api from "../../api";
 import type {
@@ -32,6 +31,12 @@ import type {
   AgentOfficeMembership,
 } from "../../api/client";
 import { getProviderMeta } from "../../app/providerTheme";
+import { getAgentLevel, getAgentTitle } from "./agentProgress";
+import {
+  DetailAccordion,
+  DiscordDeepLinkChip,
+  DiscordSummaryLabel,
+} from "./AgentInfoCardSections";
 import {
   describeDiscordBinding,
   describeDiscordTarget,
@@ -39,6 +44,8 @@ import {
   formatDiscordSummary,
   isDiscordSnowflake,
 } from "./discord-routing";
+
+export { getAgentLevel, getAgentTitle } from "./agentProgress";
 
 interface AgentInfoCardProps {
   agent: Agent;
@@ -85,64 +92,6 @@ function timeAgo(ms: number, isKo: boolean): string {
   return isKo ? `${days}일 전` : `${days}d ago`;
 }
 
-// Gamification: XP-based level system
-const LEVEL_THRESHOLDS = [
-  0, 100, 300, 600, 1000, 1600, 2500, 4000, 6000, 10000,
-];
-const LEVEL_TITLES_KO = [
-  "신입",
-  "수습",
-  "사원",
-  "주임",
-  "대리",
-  "과장",
-  "차장",
-  "부장",
-  "이사",
-  "사장",
-];
-const LEVEL_TITLES_EN = [
-  "Newbie",
-  "Trainee",
-  "Staff",
-  "Associate",
-  "Sr. Associate",
-  "Manager",
-  "Asst. Dir.",
-  "Director",
-  "VP",
-  "President",
-];
-
-export function getAgentLevel(xp: number) {
-  let level = 1;
-  for (let i = LEVEL_THRESHOLDS.length - 1; i >= 0; i--) {
-    if (xp >= LEVEL_THRESHOLDS[i]) {
-      level = i + 1;
-      break;
-    }
-  }
-  const nextThreshold =
-    LEVEL_THRESHOLDS[Math.min(level, LEVEL_THRESHOLDS.length - 1)] ?? Infinity;
-  const currentThreshold = LEVEL_THRESHOLDS[level - 1] ?? 0;
-  const progress =
-    nextThreshold === Infinity
-      ? 1
-      : (xp - currentThreshold) / (nextThreshold - currentThreshold);
-  return {
-    level,
-    progress: Math.min(1, progress),
-    nextThreshold,
-    currentThreshold,
-  };
-}
-
-export function getAgentTitle(xp: number, isKo: boolean) {
-  const { level } = getAgentLevel(xp);
-  const idx = Math.min(level - 1, LEVEL_TITLES_KO.length - 1);
-  return isKo ? LEVEL_TITLES_KO[idx] : LEVEL_TITLES_EN[idx];
-}
-
 const ACTIVITY_SOURCE_COLORS: Record<string, string> = {
   agentdesk: "#10b981",
   idle: "#64748b",
@@ -174,135 +123,6 @@ function bindingSourceLabel(source: string): string {
 function compactToken(value: string, head = 8, tail = 4): string {
   if (value.length <= head + tail + 3) return value;
   return `${value.slice(0, head)}...${value.slice(-tail)}`;
-}
-
-function DiscordSummaryLabel({
-  summary,
-}: {
-  summary: {
-    title: string;
-    subtitle: string | null;
-    webUrl: string | null;
-    deepLink: string | null;
-  };
-}) {
-  const href = summary.deepLink ?? summary.webUrl;
-  const label = formatDiscordSummary(summary);
-
-  if (!href) {
-    return (
-      <span
-        className="block min-w-0 flex-1 truncate text-xs font-medium"
-        style={{ color: "var(--th-text-primary)" }}
-        title={label}
-      >
-        {label}
-      </span>
-    );
-  }
-
-  return (
-    <a
-      href={href}
-      className="block min-w-0 flex-1 truncate text-xs font-medium hover:underline"
-      style={{ color: "var(--th-text-primary)" }}
-      title={summary.deepLink ?? summary.webUrl ?? label}
-    >
-      {label}
-    </a>
-  );
-}
-
-function DiscordDeepLinkChip({
-  deepLink,
-  label,
-}: {
-  deepLink: string | null;
-  label: string;
-}) {
-  if (!deepLink) return null;
-  return (
-    <a
-      href={deepLink}
-      className="shrink-0 rounded px-1.5 py-0.5 text-xs"
-      style={{ background: "rgba(88,101,242,0.15)", color: "#7289da" }}
-      title={deepLink}
-    >
-      {label}
-    </a>
-  );
-}
-
-interface DetailAccordionProps {
-  title: string;
-  subtitle?: string | null;
-  badge?: string | null;
-  open: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-}
-
-function DetailAccordion({
-  title,
-  subtitle,
-  badge,
-  open,
-  onToggle,
-  children,
-}: DetailAccordionProps) {
-  return (
-    <div
-      className="px-5 py-3"
-      style={{ borderBottom: "1px solid var(--th-card-border)" }}
-    >
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-start justify-between gap-3 text-left"
-        aria-expanded={open}
-      >
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <div
-              className="text-xs font-semibold uppercase tracking-widest"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {title}
-            </div>
-            {badge && (
-              <span
-                className="rounded-full px-2 py-0.5 text-[11px] font-medium"
-                style={{
-                  background: "rgba(96,165,250,0.12)",
-                  color: "#93c5fd",
-                }}
-              >
-                {badge}
-              </span>
-            )}
-          </div>
-          {subtitle && (
-            <div
-              className="mt-1 text-xs leading-relaxed"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {subtitle}
-            </div>
-          )}
-        </div>
-        <span
-          className="rounded-full px-2 py-1 text-xs font-medium"
-          style={{
-            background: "rgba(148,163,184,0.12)",
-            color: "var(--th-text-muted)",
-          }}
-        >
-          {open ? "▲" : "▼"}
-        </span>
-      </button>
-      {open && <div className="mt-3">{children}</div>}
-    </div>
-  );
 }
 
 export default function AgentInfoCard({
@@ -352,7 +172,6 @@ export default function AgentInfoCard({
   const [timeline, setTimeline] = useState<api.TimelineEvent[]>([]);
   const [loadingTimeline, setLoadingTimeline] = useState(true);
   const [timelineOpen, setTimelineOpen] = useState(false);
-  const [transcriptOpen, setTranscriptOpen] = useState(true);
   const [sessionsOpen, setSessionsOpen] = useState(true);
   const [routingOpen, setRoutingOpen] = useState(false);
   const [idleSessionsOpen, setIdleSessionsOpen] = useState(false);
@@ -380,7 +199,6 @@ export default function AgentInfoCard({
     setAliasValue(agent.alias ?? "");
     setSelectedDeptId(agent.department_id ?? "");
     setSelectedProvider(agent.cli_provider ?? "claude");
-    setTranscriptOpen(true);
     setSessionsOpen(true);
     setRoutingOpen(false);
     setIdleSessionsOpen(false);

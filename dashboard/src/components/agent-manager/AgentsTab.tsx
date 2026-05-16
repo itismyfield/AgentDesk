@@ -13,7 +13,7 @@ import {
   SurfaceSegmentButton,
 } from "../common/SurfacePrimitives";
 import AgentCard from "./AgentCard";
-import { getAgentLevel, getAgentTitle } from "./AgentInfoCard";
+import { getAgentLevel, getAgentTitle } from "./agentProgress";
 import type { Translator } from "./types";
 import type { AgentSortMode } from "./useAgentManagerController";
 import {
