@@ -1755,6 +1755,32 @@ impl VoiceBargeInRuntime {
                 message_content: &prompt,
             })
             .await?;
+        // #2236: stamp a typed marker keyed by the posted message id so the
+        // turn bridge can route the background turn's spoken summary back to
+        // the foreground voice channel WITHOUT inspecting the prompt body.
+        // The previous design matched a hardcoded Korean prefix on
+        // `user_text`, which any user could type to hijack routing.
+        if let Some(message_id) = outcome.message_id {
+            let agent_id = self
+                .active_voice_routes
+                .get(&source_channel_id.get())
+                .map(|entry| entry.agent_id.clone());
+            crate::voice::announce_meta::global_store().insert_handoff(
+                message_id,
+                crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                    voice_channel_id: source_channel_id.get(),
+                    background_channel_id: target_channel_id.get(),
+                    agent_id,
+                },
+            );
+        } else {
+            tracing::warn!(
+                source_channel_id = source_channel_id.get(),
+                target_channel_id = target_channel_id.get(),
+                utterance_id = %announcement.utterance_id,
+                "voice background handoff dispatch returned no message_id; spoken summary routing will fall back to legacy prefix detection"
+            );
+        }
         Ok(outcome.turn_id)
     }
 
@@ -1961,22 +1987,119 @@ impl VoiceBargeInRuntime {
             .find_map(|agent| agent_voice_background_channel_for(agent, source_channel_id))
     }
 
+    /// Reverse lookup: given a background text channel, find the foreground
+    /// voice channel that should hear the spoken summary.
+    ///
+    /// #2236: in multi-agent setups, multiple `AgentDef` entries can map the
+    /// same background channel (either intentionally — shared workspace — or
+    /// by misconfiguration). The previous implementation silently picked the
+    /// FIRST matching agent. This is a fail-closed reverse lookup:
+    ///
+    /// 1. If a current active voice route matches the background channel,
+    ///    that route wins (runtime state is always more specific than
+    ///    config). When `expected_agent_id` is provided, prefer an active
+    ///    route whose agent matches.
+    /// 2. Otherwise, scan the config for agents whose
+    ///    `agent_voice_channel_for_background` resolves the background
+    ///    channel. If exactly one matches, return it. If multiple match,
+    ///    require `expected_agent_id` to disambiguate; if absent or no
+    ///    config agent matches by id, log a warn and return None
+    ///    (fail-closed — rather than speak into the wrong agent's voice
+    ///    channel).
     pub(in crate::services::discord) async fn voice_channel_for_background(
         &self,
         background_channel_id: ChannelId,
+        expected_agent_id: Option<&str>,
     ) -> Option<ChannelId> {
-        if let Some(entry) = self
+        let active_matches: Vec<(u64, String)> = self
             .active_voice_routes
             .iter()
-            .find(|entry| entry.value().channel_id == background_channel_id)
-        {
-            return Some(ChannelId::new(*entry.key()));
+            .filter(|entry| entry.value().channel_id == background_channel_id)
+            .map(|entry| (*entry.key(), entry.value().agent_id.clone()))
+            .collect();
+        match active_matches.len() {
+            0 => {}
+            1 => return Some(ChannelId::new(active_matches[0].0)),
+            _ => {
+                if let Some(agent_id) = expected_agent_id {
+                    if let Some((source, _)) = active_matches
+                        .iter()
+                        .find(|(_, route_agent)| route_agent == agent_id)
+                    {
+                        return Some(ChannelId::new(*source));
+                    }
+                    tracing::warn!(
+                        event = "voice_background_active_route_agent_mismatch",
+                        background_channel_id = background_channel_id.get(),
+                        expected_agent_id = %agent_id,
+                        candidate_agents = ?active_matches
+                            .iter()
+                            .map(|(_, agent)| agent.as_str())
+                            .collect::<Vec<_>>(),
+                        "multiple active voice routes share the same background channel but none match the expected agent_id; refusing to pick silently"
+                    );
+                    return None;
+                }
+                tracing::warn!(
+                    event = "voice_background_multi_active_route_no_disambiguator",
+                    background_channel_id = background_channel_id.get(),
+                    candidate_agents = ?active_matches
+                        .iter()
+                        .map(|(_, agent)| agent.as_str())
+                        .collect::<Vec<_>>(),
+                    "multiple active voice routes share the same background channel and dispatch carried no agent_id; refusing to pick silently"
+                );
+                return None;
+            }
         }
         let config = self.cached_config().await;
-        config
+        let mut matches: Vec<(String, ChannelId)> = config
             .agents
             .iter()
-            .find_map(|agent| agent_voice_channel_for_background(agent, background_channel_id))
+            .filter_map(|agent| {
+                agent_voice_channel_for_background(agent, background_channel_id)
+                    .map(|voice_channel| (agent.id.clone(), voice_channel))
+            })
+            .collect();
+        match matches.len() {
+            0 => None,
+            1 => Some(matches.remove(0).1),
+            _ => {
+                let candidate_agents: Vec<&str> =
+                    matches.iter().map(|(agent_id, _)| agent_id.as_str()).collect();
+                if let Some(expected) = expected_agent_id {
+                    if let Some((_, voice_channel)) = matches
+                        .iter()
+                        .find(|(agent_id, _)| agent_id == expected)
+                    {
+                        tracing::warn!(
+                            event = "voice_background_multi_agent_disambiguated",
+                            background_channel_id = background_channel_id.get(),
+                            expected_agent_id = %expected,
+                            candidate_agents = ?candidate_agents,
+                            "multiple config agents share the same background channel; disambiguated by dispatch agent_id"
+                        );
+                        return Some(*voice_channel);
+                    }
+                    tracing::warn!(
+                        event = "voice_background_multi_agent_unknown_id",
+                        background_channel_id = background_channel_id.get(),
+                        expected_agent_id = %expected,
+                        candidate_agents = ?candidate_agents,
+                        "dispatch agent_id does not match any config agent claiming this background channel; refusing to pick silently"
+                    );
+                    None
+                } else {
+                    tracing::warn!(
+                        event = "voice_background_multi_agent_no_disambiguator",
+                        background_channel_id = background_channel_id.get(),
+                        candidate_agents = ?candidate_agents,
+                        "multiple config agents claim the same background channel and dispatch carried no agent_id; refusing to pick silently (#2236 fail-closed)"
+                    );
+                    None
+                }
+            }
+        }
     }
 
     async fn resolve_voice_turn_target(
@@ -2995,7 +3118,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .voice_channel_for_background(ChannelId::new(201))
+                .voice_channel_for_background(ChannelId::new(201), None)
                 .await,
             Some(ChannelId::new(301))
         );
@@ -3010,9 +3133,126 @@ mod tests {
 
         assert_eq!(
             runtime
-                .voice_channel_for_background(ChannelId::new(200))
+                .voice_channel_for_background(ChannelId::new(200), None)
                 .await,
             Some(ChannelId::new(300))
+        );
+    }
+
+    /// #2236: when two config agents map the same background channel and the
+    /// dispatch carries no agent_id, fail closed instead of silently picking
+    /// the first match.
+    #[tokio::test]
+    async fn voice_channel_for_background_fail_closed_on_multi_agent_without_disambiguator() {
+        let runtime = enabled_runtime();
+        let mut config = crate::config::Config::default();
+        // Two agents that both claim background channel 200, but different voice channels.
+        let mut agent_a = test_agent("codex");
+        agent_a.id = "agent-a".to_string();
+        agent_a.voice.channel_id = Some("300".to_string());
+        let mut agent_b = test_agent("codex");
+        agent_b.id = "agent-b".to_string();
+        agent_b.voice.channel_id = Some("400".to_string());
+        config.agents = vec![agent_a, agent_b];
+        *runtime.config_cache.lock().unwrap() = Some((Instant::now(), Arc::new(config)));
+
+        assert_eq!(
+            runtime
+                .voice_channel_for_background(ChannelId::new(200), None)
+                .await,
+            None,
+            "multi-agent background channel collision with no agent_id must fail closed"
+        );
+    }
+
+    /// #2236: dispatch carrying an explicit agent_id resolves to that agent's
+    /// voice channel, even when multiple config agents claim the same
+    /// background channel.
+    #[tokio::test]
+    async fn voice_channel_for_background_disambiguates_multi_agent_by_explicit_agent_id() {
+        let runtime = enabled_runtime();
+        let mut config = crate::config::Config::default();
+        let mut agent_a = test_agent("codex");
+        agent_a.id = "agent-a".to_string();
+        agent_a.voice.channel_id = Some("300".to_string());
+        let mut agent_b = test_agent("codex");
+        agent_b.id = "agent-b".to_string();
+        agent_b.voice.channel_id = Some("400".to_string());
+        config.agents = vec![agent_a, agent_b];
+        *runtime.config_cache.lock().unwrap() = Some((Instant::now(), Arc::new(config)));
+
+        assert_eq!(
+            runtime
+                .voice_channel_for_background(ChannelId::new(200), Some("agent-b"))
+                .await,
+            Some(ChannelId::new(400))
+        );
+        assert_eq!(
+            runtime
+                .voice_channel_for_background(ChannelId::new(200), Some("agent-a"))
+                .await,
+            Some(ChannelId::new(300))
+        );
+    }
+
+    /// #2236: dispatch carrying an agent_id that does not match any agent
+    /// claiming the channel must fail closed, not silently pick.
+    #[tokio::test]
+    async fn voice_channel_for_background_fail_closed_on_multi_agent_unknown_id() {
+        let runtime = enabled_runtime();
+        let mut config = crate::config::Config::default();
+        let mut agent_a = test_agent("codex");
+        agent_a.id = "agent-a".to_string();
+        agent_a.voice.channel_id = Some("300".to_string());
+        let mut agent_b = test_agent("codex");
+        agent_b.id = "agent-b".to_string();
+        agent_b.voice.channel_id = Some("400".to_string());
+        config.agents = vec![agent_a, agent_b];
+        *runtime.config_cache.lock().unwrap() = Some((Instant::now(), Arc::new(config)));
+
+        assert_eq!(
+            runtime
+                .voice_channel_for_background(ChannelId::new(200), Some("agent-not-here"))
+                .await,
+            None
+        );
+    }
+
+    /// #2236: when multiple active voice routes share the same background
+    /// channel (e.g. two voice sessions in different guilds routed to the
+    /// same workspace text channel), fail closed without an agent_id.
+    #[tokio::test]
+    async fn voice_channel_for_background_fail_closed_on_multi_active_route_without_disambiguator(
+    ) {
+        let runtime = enabled_runtime();
+        runtime.active_voice_routes.insert(
+            301,
+            ActiveVoiceRoute {
+                agent_id: "agent-a".to_string(),
+                channel_id: ChannelId::new(201),
+                updated_at: Instant::now(),
+            },
+        );
+        runtime.active_voice_routes.insert(
+            401,
+            ActiveVoiceRoute {
+                agent_id: "agent-b".to_string(),
+                channel_id: ChannelId::new(201),
+                updated_at: Instant::now(),
+            },
+        );
+
+        assert_eq!(
+            runtime
+                .voice_channel_for_background(ChannelId::new(201), None)
+                .await,
+            None
+        );
+        assert_eq!(
+            runtime
+                .voice_channel_for_background(ChannelId::new(201), Some("agent-b"))
+                .await,
+            Some(ChannelId::new(401))
         );
     }
 

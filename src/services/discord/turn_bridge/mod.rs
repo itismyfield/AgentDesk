@@ -92,7 +92,21 @@ fn json_any_true_flag(value: &serde_json::Value, key: &str) -> bool {
     false
 }
 
-fn is_voice_background_handoff_prompt(text: &str) -> bool {
+/// Returns true when the prompt body literally begins with the Korean or
+/// English voice-foreground→background marker line.
+///
+/// DEPRECATED legacy fallback for #2236: this user-controllable substring
+/// match was the sole discriminator for voice-background routing. Any user
+/// whose first line matched this string could get their spoken summary
+/// routed into a voice channel they may not be in. Production routing now
+/// consults a typed metadata marker keyed by `user_msg_id`
+/// (`VoiceBackgroundHandoffMeta`) stamped at the foreground→background
+/// dispatch site. This prefix check is retained as a one-release-cycle
+/// fallback (target removal: after 2026-06-15 release) so dispatches whose
+/// metadata insert was lost across a restart still complete spoken summary
+/// playback. Each fallback hit logs `voice_background_legacy_prefix_routing`
+/// once per process so operators can confirm migration is complete.
+fn legacy_prompt_prefix_matches_voice_background_handoff(text: &str) -> bool {
     let Some(first_line) = text.lines().map(str::trim).find(|line| !line.is_empty()) else {
         return false;
     };
@@ -100,12 +114,59 @@ fn is_voice_background_handoff_prompt(text: &str) -> bool {
         || first_line.starts_with("보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.")
 }
 
+static LEGACY_PREFIX_ROUTING_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+fn warn_legacy_prefix_routing_once(user_msg_id: MessageId, channel_id: ChannelId) {
+    if LEGACY_PREFIX_ROUTING_WARNED.set(()).is_ok() {
+        tracing::warn!(
+            event = "voice_background_legacy_prefix_routing",
+            user_msg_id = user_msg_id.get(),
+            channel_id = channel_id.get(),
+            "voice background routing decided via legacy prompt-prefix match because no typed handoff marker was found for this user_msg_id; this fallback is scheduled for removal after the 2026-06-15 release — investigate why the dispatch did not stamp a marker (process restart between dispatch and turn completion, or untracked dispatch site)"
+        );
+    }
+}
+
+/// Decides whether the spoken summary of a finished turn should be routed
+/// back to a foreground voice channel.
+///
+/// Production path: the foreground→background dispatch
+/// (`dispatch_voice_background_handoff`) stamps a typed
+/// `VoiceBackgroundHandoffMeta` keyed by the posted `user_msg_id` (#2236).
+/// `mapped_voice_channel_id` is the result of
+/// `voice_channel_for_background` for the same `user_msg_id`.
+///
+/// Returns the foreground voice channel only when both the typed metadata
+/// flag is set for this message AND a mapped voice channel was resolved.
+/// Falls back to the legacy prompt-prefix check during the deprecation
+/// window so in-flight turns started before the marker code shipped still
+/// route correctly. Removal target: after the 2026-06-15 release.
+fn is_voice_background_handoff_prompt(user_msg_id: MessageId, text: &str) -> bool {
+    if crate::voice::announce_meta::global_store()
+        .get_handoff(user_msg_id)
+        .is_some()
+    {
+        return true;
+    }
+    legacy_prompt_prefix_matches_voice_background_handoff(text)
+}
+
 fn voice_background_completion_target(
     mapped_voice_channel_id: Option<ChannelId>,
+    user_msg_id: MessageId,
     user_text: &str,
+    channel_id: ChannelId,
 ) -> Option<ChannelId> {
     let voice_channel_id = mapped_voice_channel_id?;
-    is_voice_background_handoff_prompt(user_text).then_some(voice_channel_id)
+    let store = crate::voice::announce_meta::global_store();
+    if store.take_handoff(user_msg_id).is_some() {
+        return Some(voice_channel_id);
+    }
+    if legacy_prompt_prefix_matches_voice_background_handoff(user_text) {
+        warn_legacy_prefix_routing_once(user_msg_id, channel_id);
+        return Some(voice_channel_id);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -114,7 +175,7 @@ mod dispatch_kind_tests {
         classify_turn_finished_dispatch_kind, is_voice_background_handoff_prompt,
         voice_background_completion_target,
     };
-    use poise::serenity_prelude::ChannelId;
+    use poise::serenity_prelude::{ChannelId, MessageId};
 
     #[test]
     fn marks_auto_queue_context() {
@@ -167,31 +228,111 @@ mod dispatch_kind_tests {
     }
 
     #[test]
-    fn recognizes_voice_background_handoff_prompt() {
+    fn recognizes_voice_background_handoff_prompt_via_legacy_prefix_fallback() {
+        // No typed marker present → falls through to legacy prefix check
+        // during the deprecation window.
+        let user_msg_id = MessageId::new(7_000_001);
         assert!(is_voice_background_handoff_prompt(
+            user_msg_id,
             "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.\n\n이관 요약: 로그 확인"
         ));
         assert!(is_voice_background_handoff_prompt(
+            MessageId::new(7_000_002),
             "Voice foreground handed this request to the background agent.\n\nHandoff summary: check logs"
         ));
-        assert!(!is_voice_background_handoff_prompt("일반 텍스트 요청"));
+        assert!(!is_voice_background_handoff_prompt(
+            MessageId::new(7_000_003),
+            "일반 텍스트 요청"
+        ));
     }
 
     #[test]
-    fn background_completion_target_requires_mapping_and_handoff_prompt() {
+    fn recognizes_voice_background_handoff_via_typed_marker() {
+        // Stamping a typed marker is sufficient — body text is irrelevant.
+        let user_msg_id = MessageId::new(7_100_001);
+        crate::voice::announce_meta::global_store().insert_handoff(
+            user_msg_id,
+            crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: 300,
+                background_channel_id: 200,
+                agent_id: Some("project-agentdesk".to_string()),
+            },
+        );
+        assert!(is_voice_background_handoff_prompt(
+            user_msg_id,
+            "user-controlled body that does not match any prefix",
+        ));
+        // Clean up so other tests do not see the marker (get_handoff does not consume).
+        let _ =
+            crate::voice::announce_meta::global_store().take_handoff(user_msg_id);
+    }
+
+    #[test]
+    fn background_completion_target_requires_mapping_and_handoff_marker_or_legacy_prefix() {
         let mapped = Some(ChannelId::new(300));
-        assert_eq!(voice_background_completion_target(mapped, "plain"), None);
+        let channel = ChannelId::new(200);
+        // No marker, no prefix → None.
         assert_eq!(
             voice_background_completion_target(
                 mapped,
-                "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다."
+                MessageId::new(7_200_001),
+                "plain",
+                channel,
+            ),
+            None
+        );
+        // Legacy prefix fallback still works during the deprecation window.
+        assert_eq!(
+            voice_background_completion_target(
+                mapped,
+                MessageId::new(7_200_002),
+                "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.",
+                channel,
             ),
             Some(ChannelId::new(300))
         );
+        // No mapped voice channel → None even with prefix match.
         assert_eq!(
             voice_background_completion_target(
                 None,
-                "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다."
+                MessageId::new(7_200_003),
+                "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.",
+                channel,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn background_completion_target_consumes_typed_marker() {
+        let user_msg_id = MessageId::new(7_300_001);
+        crate::voice::announce_meta::global_store().insert_handoff(
+            user_msg_id,
+            crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: 301,
+                background_channel_id: 201,
+                agent_id: None,
+            },
+        );
+        let mapped = Some(ChannelId::new(301));
+        let channel = ChannelId::new(201);
+        // Body does NOT contain any legacy prefix — only the typed marker decides.
+        assert_eq!(
+            voice_background_completion_target(
+                mapped,
+                user_msg_id,
+                "free-form user-controlled text",
+                channel,
+            ),
+            Some(ChannelId::new(301))
+        );
+        // Marker is consumed exactly once.
+        assert_eq!(
+            voice_background_completion_target(
+                mapped,
+                user_msg_id,
+                "free-form user-controlled text",
+                channel,
             ),
             None
         );
@@ -4141,13 +4282,24 @@ pub(super) fn spawn_turn_bridge(
             }
 
             if terminal_delivery_committed {
+                // #2236: look up the typed handoff marker stamped at dispatch
+                // time so multi-agent setups with overlapping background
+                // channels can be disambiguated by the stored agent_id. The
+                // marker is consumed inside voice_background_completion_target
+                // below; passing the stored agent_id (cloned, not taken) here
+                // keeps both lookups consistent for this single dispatch.
+                let stored_handoff_agent_id = crate::voice::announce_meta::global_store()
+                    .get_handoff(user_msg_id)
+                    .and_then(|meta| meta.agent_id);
                 let mapped_voice_channel_id = shared_owned
                     .voice_barge_in
-                    .voice_channel_for_background(channel_id)
+                    .voice_channel_for_background(channel_id, stored_handoff_agent_id.as_deref())
                     .await;
                 if let Some(voice_channel_id) = voice_background_completion_target(
                     mapped_voice_channel_id,
+                    user_msg_id,
                     &user_text_owned,
+                    channel_id,
                 ) {
                     if !inflight_state.silent_turn {
                         let voice_barge_in = shared_owned.voice_barge_in.clone();
