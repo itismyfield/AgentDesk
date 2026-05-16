@@ -87,11 +87,7 @@ impl VoiceAnnouncementMetaStore {
         entries.contains_key(&message_id.get())
     }
 
-    pub(crate) fn insert_handoff(
-        &self,
-        message_id: MessageId,
-        meta: VoiceBackgroundHandoffMeta,
-    ) {
+    pub(crate) fn insert_handoff(&self, message_id: MessageId, meta: VoiceBackgroundHandoffMeta) {
         if let Ok(mut entries) = self.handoff_entries.write() {
             let now = Instant::now();
             prune_handoff_expired_locked(&mut entries, now);
@@ -114,10 +110,7 @@ impl VoiceAnnouncementMetaStore {
             .map(|stored| stored.meta.clone())
     }
 
-    pub(crate) fn take_handoff(
-        &self,
-        message_id: MessageId,
-    ) -> Option<VoiceBackgroundHandoffMeta> {
+    pub(crate) fn take_handoff(&self, message_id: MessageId) -> Option<VoiceBackgroundHandoffMeta> {
         let mut entries = self.handoff_entries.write().ok()?;
         let now = Instant::now();
         prune_handoff_expired_locked(&mut entries, now);

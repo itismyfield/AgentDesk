@@ -264,8 +264,7 @@ mod dispatch_kind_tests {
             "user-controlled body that does not match any prefix",
         ));
         // get_handoff does not consume; clean up to keep test isolated.
-        let _ =
-            crate::voice::announce_meta::global_store().take_handoff(user_msg_id);
+        let _ = crate::voice::announce_meta::global_store().take_handoff(user_msg_id);
     }
 
     /// #2236: delivery is bound to the marker's recorded voice channel.

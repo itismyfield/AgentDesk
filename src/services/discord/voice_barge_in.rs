@@ -2065,12 +2065,13 @@ impl VoiceBargeInRuntime {
             0 => None,
             1 => Some(matches.remove(0).1),
             _ => {
-                let candidate_agents: Vec<&str> =
-                    matches.iter().map(|(agent_id, _)| agent_id.as_str()).collect();
+                let candidate_agents: Vec<&str> = matches
+                    .iter()
+                    .map(|(agent_id, _)| agent_id.as_str())
+                    .collect();
                 if let Some(expected) = expected_agent_id {
-                    if let Some((_, voice_channel)) = matches
-                        .iter()
-                        .find(|(agent_id, _)| agent_id == expected)
+                    if let Some((_, voice_channel)) =
+                        matches.iter().find(|(agent_id, _)| agent_id == expected)
                     {
                         tracing::warn!(
                             event = "voice_background_multi_agent_disambiguated",
@@ -3222,8 +3223,8 @@ mod tests {
     /// channel (e.g. two voice sessions in different guilds routed to the
     /// same workspace text channel), fail closed without an agent_id.
     #[tokio::test]
-    async fn voice_channel_for_background_fail_closed_on_multi_active_route_without_disambiguator(
-    ) {
+    async fn voice_channel_for_background_fail_closed_on_multi_active_route_without_disambiguator()
+    {
         let runtime = enabled_runtime();
         runtime.active_voice_routes.insert(
             301,
