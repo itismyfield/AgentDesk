@@ -128,7 +128,16 @@ fn is_voice_background_handoff_prompt(user_msg_id: MessageId, _text: &str) -> bo
 /// terminal delivery lands on a different cluster node than the dispatch
 /// node) the durable PG side store is consulted as a fallback. The atomic
 /// `UPDATE … SET consumed_at = NOW() RETURNING …` claim there guarantees
-/// exactly-once consumption across nodes.
+/// exactly-once consumption across nodes when PG is reachable.
+///
+/// #2355 Option C — eventual consistency: PG durability is treated as
+/// best-effort. When `take_handoff_durable` returns `Err` (transport /
+/// pool error), this path falls back to the local marker the same way it
+/// does for `Ok(None)`, after emitting a
+/// `voice_background_handoff_durable_take_failed` warn. The rare
+/// commit-then-transport-error race against a multi-node concurrent take
+/// can in principle produce a duplicate spoken summary; that is accepted
+/// as the documented cost of best-effort durability for this feature.
 ///
 /// - Returns `None` when no marker exists for this `user_msg_id` (this
 ///   turn was not a voice-background handoff).
@@ -158,36 +167,94 @@ async fn voice_background_completion_target(
     // summaries. The local store is treated as a hot cache, never as the
     // routing gate.
     let meta = if let Some(pool) = pool {
-        match crate::voice::announce_meta::take_handoff_durable(pool, user_msg_id).await {
+        // #2355 Option C — eventual consistency / best-effort durability:
+        //
+        //   - `Ok(Some(meta))`   → durable PG row consumed, normal path.
+        //   - `Ok(None)`         → no durable row (either never persisted,
+        //                          already-consumed, or expired); fall
+        //                          through to local-marker inspection.
+        //   - `Err(error)`       → PG transport / pool error; treat as the
+        //                          target degraded-DB scenario for the
+        //                          fallback. The original v3 implementation
+        //                          only fired the fallback on `Ok(None)`, so
+        //                          in the exact PG-down case the fallback
+        //                          was designed for, it never engaged
+        //                          (issue #2355, HIGH-2). We now map `Err`
+        //                          into the same local-fallback path and
+        //                          emit `voice_background_handoff_durable_take_failed`
+        //                          so operators see PG is unhealthy.
+        //
+        // Documented tolerance: if `persist_handoff_durable` returned an
+        // error AFTER PG actually committed (transport error after commit)
+        // the local marker carries `local_only_fallback = true` AND a real
+        // durable row exists. A subsequent terminal-delivery `take` on this
+        // node will normally consume the PG row (winning branch above);
+        // only if PG is STILL erroring at completion time will the local
+        // marker also be consumed. In the rare commit-then-transport-error
+        // case combined with a multi-node take race this can theoretically
+        // produce a duplicate spoken summary. We accept this as the cost of
+        // best-effort durability under Option C — the alternative (Strict)
+        // surfaces a user-visible error on every transient PG hiccup, which
+        // is a worse outcome for the spoken-summary feature.
+        let durable_result =
+            crate::voice::announce_meta::take_handoff_durable(pool, user_msg_id).await;
+        let durable_failed = matches!(&durable_result, Err(_));
+        match durable_result {
             Ok(Some(meta)) => {
                 // Drop any local copy so a parallel caller cannot see it.
                 store.forget_handoff(user_msg_id);
                 meta
             }
-            Ok(None) => {
-                // #2274 Codex round-2 finding: a dispatch whose durable
-                // PG write failed will have flipped `local_only_fallback`
-                // on the in-memory marker. In that case the local marker
-                // is the only record of the handoff — refusing to route
-                // would silently drop the spoken summary, regressing
-                // pre-#2274 behaviour under DB unavailability. We
-                // consume the local marker (one-shot, take_handoff) and
-                // emit a `voice_background_handoff_local_only_fallback`
-                // warn so operators see persistence is failing.
-                //
-                // If the marker is present without the flag, we still
-                // refuse — that case (PG row gone but local copy lives)
-                // matches the round-1 duplicate-routing prevention.
+            Ok(None) | Err(_) => {
+                if let Err(error) = &durable_result {
+                    tracing::warn!(
+                        event = "voice_background_handoff_durable_take_failed",
+                        error = %error,
+                        user_msg_id = user_msg_id.get(),
+                        channel_id = channel_id.get(),
+                        "voice_background_handoff durable claim returned PG error; falling back to local marker (#2355 Option C eventual consistency)"
+                    );
+                }
+                // Local-marker inspection. Two cases:
+                //  (a) `local_only_fallback = true` — dispatch flagged this
+                //      because PG persist failed. Always consume.
+                //  (b) `local_only_fallback = false` — under Option C, if
+                //      the durable claim itself errored, we still treat the
+                //      local marker as last-resort (the row may exist but
+                //      we cannot read it). If the durable claim returned
+                //      `Ok(None)`, the row is genuinely gone/consumed, so
+                //      a non-flagged local marker is a stale-cache case and
+                //      we refuse to route (round-1 duplicate-routing
+                //      prevention still applies).
                 if let Some(local) = store.get_handoff(user_msg_id) {
-                    if local.local_only_fallback {
+                    let use_local = local.local_only_fallback || durable_failed;
+                    if use_local {
                         if let Some(consumed) = store.take_handoff(user_msg_id) {
+                            let reason = if consumed.local_only_fallback {
+                                "dispatch-time persist failure"
+                            } else {
+                                "durable take returned PG error"
+                            };
+                            tracing::info!(
+                                event = "voice_background_handoff_durable_fallback_engaged",
+                                user_msg_id = user_msg_id.get(),
+                                channel_id = channel_id.get(),
+                                marker_voice_channel_id = consumed.voice_channel_id,
+                                marker_background_channel_id = consumed.background_channel_id,
+                                local_only_fallback = consumed.local_only_fallback,
+                                durable_take_errored = durable_failed,
+                                reason = reason,
+                                "routing spoken summary from in-memory marker as last-resort fallback (#2355 Option C)"
+                            );
                             tracing::warn!(
                                 event = "voice_background_handoff_local_only_fallback",
                                 user_msg_id = user_msg_id.get(),
                                 channel_id = channel_id.get(),
                                 marker_voice_channel_id = consumed.voice_channel_id,
                                 marker_background_channel_id = consumed.background_channel_id,
-                                "durable PG row absent but local marker is flagged local-only fallback (dispatch-time persist failure); routing spoken summary from in-memory marker"
+                                local_only_fallback = consumed.local_only_fallback,
+                                durable_take_errored = durable_failed,
+                                "durable PG path unavailable; spoken summary routed from in-memory marker"
                             );
                             // Re-bind the surviving meta so the downstream
                             // channel-match / reverse-lookup checks below
@@ -211,14 +278,6 @@ async fn voice_background_completion_target(
                 } else {
                     return None;
                 }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    user_msg_id = user_msg_id.get(),
-                    "voice_background_handoff durable claim failed; refusing to route spoken summary"
-                );
-                return None;
             }
         }
     } else {
@@ -762,6 +821,124 @@ mod dispatch_kind_tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    /// #2355 Option C — eventual consistency: when `take_handoff_durable`
+    /// returns `Err` (PG transport / pool error — the exact degraded-DB
+    /// scenario the fallback was designed for), the v3 implementation only
+    /// fired the fallback on `Ok(None)` so the spoken summary still
+    /// dropped. This test exercises the Err→fallback mapping by closing
+    /// the PG pool before the call, which causes `take_handoff_durable` to
+    /// return `sqlx::Error::PoolClosed`. The local marker must be consulted
+    /// and consumed, and `voice_background_handoff_durable_take_failed`
+    /// must be emitted so operators see PG is unhealthy.
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_completion_target_falls_back_to_local_when_durable_take_errors() {
+        use std::{
+            io::{self, Write},
+            sync::{Arc, Mutex},
+        };
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone)]
+        struct CapturingWriter {
+            buffer: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Write for CapturingWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.buffer.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for CapturingWriter {
+            type Writer = CapturingWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let user_msg_id = MessageId::new(7_960_001);
+
+        // Populate the local store as a non-flagged marker (e.g.
+        // rehydrated from PG before the outage), to exercise the
+        // durable_failed branch of the fallback. We deliberately do NOT
+        // set `local_only_fallback = true` — Option C says even a
+        // non-flagged local marker is consulted when the durable read
+        // path errors.
+        let store = crate::voice::announce_meta::global_store();
+        store.insert_handoff(
+            user_msg_id,
+            crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: 351,
+                background_channel_id: 251,
+                agent_id: Some("project-agentdesk".to_string()),
+                local_only_fallback: false,
+            },
+        );
+
+        // Close the pool so `take_handoff_durable` returns `Err`
+        // (`sqlx::Error::PoolClosed` from the pool acquire).
+        pool.close().await;
+        pg_db.drop().await;
+
+        let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturingWriter {
+            buffer: buffer.clone(),
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(writer)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let resolved = voice_background_completion_target(
+            None,
+            user_msg_id,
+            "irrelevant body",
+            ChannelId::new(251),
+            Some(&pool),
+        )
+        .await;
+        assert_eq!(
+            resolved,
+            Some(ChannelId::new(351)),
+            "Err from durable take must fall through to local marker (Option C)"
+        );
+
+        // Marker is one-shot — second call still hits the closed pool and
+        // therefore still errors; with no local marker left it must
+        // return None.
+        let again = voice_background_completion_target(
+            None,
+            user_msg_id,
+            "irrelevant body",
+            ChannelId::new(251),
+            Some(&pool),
+        )
+        .await;
+        assert_eq!(
+            again, None,
+            "local marker must be consumed exactly once even under repeated PG errors"
+        );
+
+        drop(_guard);
+
+        let captured = String::from_utf8_lossy(&buffer.lock().unwrap().clone()).into_owned();
+        assert!(
+            captured.contains("voice_background_handoff_durable_take_failed"),
+            "expected durable-take-failed warn in captured logs, got: {captured}"
+        );
+        assert!(
+            captured.contains("voice_background_handoff_durable_fallback_engaged"),
+            "expected durable-fallback-engaged info in captured logs, got: {captured}"
+        );
     }
 }
 
