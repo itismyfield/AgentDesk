@@ -103,7 +103,10 @@ const FOOTER_HINT_BOTTOM_WINDOW: usize = 5;
 /// Composer edge and footer hint must co-occur within this many lines
 /// of each other so a screenshot of the TUI in assistant prose cannot
 /// pair with a real footer further down the buffer.
-const COMPOSER_FOOTER_ADJACENCY_LINES: usize = 6;
+///
+/// Kept strictly tighter than [`COMPOSER_EDGE_BOTTOM_WINDOW`] so the
+/// adjacency gate is not redundant with the bottom-anchor windows.
+const COMPOSER_FOOTER_ADJACENCY_LINES: usize = 3;
 
 pub const FRESH_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const FOLLOWUP_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
@@ -265,18 +268,40 @@ pub fn wait_until_codex_tui_input_ready(
     let start = Instant::now();
     let mut wait_interval = Duration::from_millis(100);
     let token_ref = cancel_token.map(Arc::as_ref);
-    loop {
+    // Cancel-takes-precedence helper: any error path must consult the
+    // token first so a /stop arriving during the capture or between
+    // checks gets reported as cancellation, not timeout/session-dead.
+    // This matches the cancel-boundary contract in PR #2284 (user
+    // cancel > deadline > session death).
+    let cancel_check = || -> Option<String> {
         if cancel_requested(token_ref) {
-            return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
+            Some(PROMPT_READY_CANCELLED_ERROR.to_string())
+        } else {
+            None
+        }
+    };
+
+    loop {
+        if let Some(err) = cancel_check() {
+            return Err(err);
         }
         let snapshot = prompt_readiness_snapshot(session_name);
+        if let Some(err) = cancel_check() {
+            return Err(err);
+        }
         if snapshot.composer_marker_detected {
             return Ok(());
         }
         if !snapshot.tmux_pane_alive {
+            if let Some(err) = cancel_check() {
+                return Err(err);
+            }
             return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
         }
         if start.elapsed() >= timeout {
+            if let Some(err) = cancel_check() {
+                return Err(err);
+            }
             log_prompt_ready_timeout(session_name, readiness, timeout, &snapshot);
             return Err(format!(
                 "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason=composer_not_detected; previous_tui_turn_still_running=true; capture_available={}",
@@ -286,8 +311,8 @@ pub fn wait_until_codex_tui_input_ready(
             ));
         }
         std::thread::sleep(wait_interval);
-        if cancel_requested(token_ref) {
-            return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
+        if let Some(err) = cancel_check() {
+            return Err(err);
         }
         wait_interval = std::cmp::min(wait_interval * 2, Duration::from_millis(1000));
     }
@@ -359,23 +384,31 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
 /// Pane-capture classifier: returns true when the recent tail looks
 /// like the Codex composer waiting for input.
 ///
-/// Three independent gates, all required:
+/// Four independent gates, all required:
 ///
-/// 1. **Bottom-anchored composer edge** — a mostly box-drawing line
-///    within the last [`COMPOSER_EDGE_BOTTOM_WINDOW`] non-empty lines.
-/// 2. **Bottom-anchored footer hint** — a footer phrase line within
+/// 1. **Bottom-anchored footer hint** — a footer phrase line within
 ///    the last [`FOOTER_HINT_BOTTOM_WINDOW`] non-empty lines.
-/// 3. **Adjacency** — the composer edge and the footer hint co-occur
-///    within [`COMPOSER_FOOTER_ADJACENCY_LINES`] of each other.
+/// 2. **Bottom-anchored composer edge** — a mostly box-drawing line
+///    within the last [`COMPOSER_EDGE_BOTTOM_WINDOW`] non-empty lines.
+/// 3. **Footer-below-edge ordering** — the footer must sit *below*
+///    the composer edge in the pane, matching the Codex TUI layout
+///    (the composer is drawn first, the hint row underneath).
+/// 4. **Tight adjacency** — the composer edge and the footer hint
+///    co-occur within [`COMPOSER_FOOTER_ADJACENCY_LINES`] of each
+///    other, which is strictly smaller than either bottom window.
 ///
 /// These together reject:
 /// - stale composer frames scrolled deep into pane history;
 /// - assistant prose that happens to mention `Esc to interrupt`;
 /// - assistant output rendering a box-drawing table separately from
 ///   the live footer;
-/// - a screenshot of a Codex TUI frame quoted inside model output.
+/// - a screenshot of a Codex TUI frame quoted inside model output;
+/// - any bottom-of-pane snippet where a box-drawing line and a
+///   footer phrase appear together but in the wrong order or with
+///   visible status output between them.
 pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
-    // recent[0] is the bottom-most non-empty line.
+    // recent[0] is the bottom-most non-empty line; index increases
+    // moving upward (away from the live composer).
     let recent: Vec<&str> = pane
         .lines()
         .map(str::trim_end)
@@ -396,10 +429,19 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
         .take(COMPOSER_EDGE_BOTTOM_WINDOW)
         .position(|line| line_is_codex_composer_edge(line));
 
-    match (footer_idx, edge_idx) {
-        (Some(f), Some(e)) => f.abs_diff(e) <= COMPOSER_FOOTER_ADJACENCY_LINES,
-        _ => false,
+    let (Some(f), Some(e)) = (footer_idx, edge_idx) else {
+        return false;
+    };
+    // Footer must be at or below the composer edge in pane coords.
+    // Because we indexed from the bottom (recent[0] = bottom-most),
+    // "below the edge" means a smaller index.
+    if f > e {
+        return false;
     }
+    // Strict adjacency: composer and footer must be within a few rows
+    // of each other. This is the actual gate — the bottom windows are
+    // just outer search bounds.
+    e - f <= COMPOSER_FOOTER_ADJACENCY_LINES
 }
 
 /// Codex TUI footer hints printed below the composer box. Matching any
@@ -798,6 +840,30 @@ The diagram shows ╭ here.\n\
         )
         .expect_err("cancelled wait must return Err");
         assert!(is_prompt_ready_cancelled_error(&error), "got: {error}");
+    }
+
+    #[test]
+    fn wait_reports_cancel_not_session_dead_when_token_is_set_before_first_probe() {
+        // Same dead-session setup as above but stressing the priority
+        // contract: a /stop arriving before the first probe MUST be
+        // reported as cancelled, not as session-dead, so callers do
+        // not recreate a tmux session for a user-cancelled turn.
+        let token = Arc::new(CancelToken::new());
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let error = wait_until_codex_tui_input_ready(
+            "agentdesk-codex-tui-input-test-cancel-beats-session-dead",
+            PromptReadinessKind::Followup,
+            Some(&token),
+        )
+        .expect_err("cancelled wait must return Err");
+        assert!(
+            is_prompt_ready_cancelled_error(&error),
+            "cancel must beat session-dead and timeout, got: {error}"
+        );
+        assert!(!is_session_dead_error(&error));
+        assert!(!is_prompt_ready_timeout_error(&error));
     }
 
     // ------------------------------------------------------------------
