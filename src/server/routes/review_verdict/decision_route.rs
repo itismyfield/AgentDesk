@@ -401,6 +401,109 @@ async fn card_exists_pg_first(state: &AppState, card_id: &str) -> bool {
     false
 }
 
+/// #2200 sub-fix 4 (`stale-dispatch-mismatch`):
+/// Outcome of a by-id review-decision dispatch lookup. Used when the caller
+/// submits an explicit `dispatch_id` and the canonical "pending" lookup
+/// (linked via `card_review_state.pending_dispatch_id` /
+/// `kanban_cards.latest_dispatch_id`) misses it because those link rows were
+/// cleared while the dispatch row itself is still `dispatched`.
+#[derive(Debug, PartialEq, Eq)]
+enum ReviewDecisionDispatchLookup {
+    /// Row exists for (dispatch_id, card_id) with `dispatch_type =
+    /// 'review-decision'` and a live status (`pending` / `dispatched`).
+    Live,
+    /// Row exists for (dispatch_id, card_id) with `dispatch_type =
+    /// 'review-decision'` but is in a terminal status
+    /// (`completed`/`failed`/`cancelled`).
+    Terminal { status: String },
+    /// No row matches (dispatch_id, card_id) for `dispatch_type =
+    /// 'review-decision'`. Either the id is unknown, points at a different
+    /// card, or refers to a non-review-decision dispatch. Treated as 404 by
+    /// the caller (no cross-card / cross-type confusion).
+    NotFound,
+}
+
+/// Look up a `review-decision` dispatch by id, restricted to the given card.
+///
+/// This intentionally bypasses the `card_review_state.pending_dispatch_id` /
+/// `kanban_cards.latest_dispatch_id` link tables that
+/// [`pending_review_decision_dispatch_id_pg_first`] joins through, because the
+/// `stale-dispatch-mismatch` symptom (#2200 sub-fix 4) is exactly that those
+/// link rows got cleared (e.g. by a follow-up dispatch) while the originating
+/// `review-decision` dispatch row remains alive (`status = 'dispatched'`).
+///
+/// Authorization: we always require `kanban_card_id` to match the body's
+/// `card_id` and `dispatch_type = 'review-decision'`. That keeps a caller
+/// who guesses a UUID from binding a decision to another card's dispatch or
+/// to a non-review-decision dispatch.
+async fn lookup_review_decision_dispatch_by_id(
+    state: &AppState,
+    card_id: &str,
+    dispatch_id: &str,
+) -> ReviewDecisionDispatchLookup {
+    if let Some(pool) = state.pg_pool_ref() {
+        match sqlx::query_scalar::<_, String>(
+            "SELECT status
+             FROM task_dispatches
+             WHERE id = $1
+               AND kanban_card_id = $2
+               AND dispatch_type = 'review-decision'",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(status)) => {
+                return match status.as_str() {
+                    "pending" | "dispatched" => ReviewDecisionDispatchLookup::Live,
+                    _ => ReviewDecisionDispatchLookup::Terminal { status },
+                };
+            }
+            Ok(None) => return ReviewDecisionDispatchLookup::NotFound,
+            Err(error) => {
+                tracing::warn!(
+                    card_id,
+                    dispatch_id,
+                    %error,
+                    "[review-decision] failed to load postgres review-decision dispatch by id"
+                );
+                // Fall through to "NotFound" so we don't open a 200 path on
+                // a transient DB error.
+                return ReviewDecisionDispatchLookup::NotFound;
+            }
+        }
+    }
+
+    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+    if let Some(db) = state.legacy_db() {
+        if let Ok(conn) = db.separate_conn() {
+            let row: Option<String> = conn
+                .query_row(
+                    "SELECT status
+                     FROM task_dispatches
+                     WHERE id = ?1
+                       AND kanban_card_id = ?2
+                       AND dispatch_type = 'review-decision'",
+                    [dispatch_id, card_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            return match row {
+                Some(status) => match status.as_str() {
+                    "pending" | "dispatched" => ReviewDecisionDispatchLookup::Live,
+                    _ => ReviewDecisionDispatchLookup::Terminal { status },
+                },
+                None => ReviewDecisionDispatchLookup::NotFound,
+            };
+        }
+    }
+
+    ReviewDecisionDispatchLookup::NotFound
+}
+
 async fn pending_review_decision_dispatch_id_pg_first(
     state: &AppState,
     card_id: &str,
@@ -1846,7 +1949,61 @@ pub async fn submit_review_decision(
         );
     }
 
-    let pending_rd_id = pending_review_decision_dispatch_id_pg_first(&state, &body.card_id).await;
+    let mut pending_rd_id =
+        pending_review_decision_dispatch_id_pg_first(&state, &body.card_id).await;
+
+    // #2200 sub-fix 4 (`stale-dispatch-mismatch`):
+    // If the caller submitted an explicit `dispatch_id` and the canonical
+    // pending lookup missed it, fall back to a by-id lookup scoped to the
+    // same card and `dispatch_type = 'review-decision'`. This recovers the
+    // case where the originating dispatch row is still `dispatched` but the
+    // `card_review_state.pending_dispatch_id` / `kanban_cards.latest_dispatch_id`
+    // links were cleared (e.g. by a follow-up dispatch that did not finalize
+    // the predecessor).
+    //
+    // Authorization: `lookup_review_decision_dispatch_by_id` requires the
+    // dispatch row's `kanban_card_id` to equal `body.card_id` and the
+    // `dispatch_type` to be `'review-decision'`, so a caller cannot bind a
+    // decision to another card's dispatch or to an unrelated dispatch type
+    // by guessing a UUID.
+    if pending_rd_id.is_none() {
+        if let Some(ref submitted_did) = body.dispatch_id {
+            match lookup_review_decision_dispatch_by_id(&state, &body.card_id, submitted_did).await
+            {
+                ReviewDecisionDispatchLookup::Live => {
+                    tracing::info!(
+                        card_id = %body.card_id,
+                        dispatch_id = %submitted_did,
+                        "[review-decision] #2200 sub-fix 4: honoring submitted dispatch_id whose link rows were cleared but dispatch is still live"
+                    );
+                    pending_rd_id = Some(submitted_did.clone());
+                }
+                ReviewDecisionDispatchLookup::Terminal { status } => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "error": format!(
+                                "review-decision dispatch {submitted_did} is already terminal (status={status})"
+                            ),
+                            "card_id": body.card_id,
+                            "dispatch_id": submitted_did,
+                            "dispatch_status": status,
+                        })),
+                    );
+                }
+                ReviewDecisionDispatchLookup::NotFound => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({
+                            "error": "review-decision dispatch not found for this card",
+                            "card_id": body.card_id,
+                            "dispatch_id": submitted_did,
+                        })),
+                    );
+                }
+            }
+        }
+    }
 
     if pending_rd_id.is_none() {
         // #2341 / #2200 sub-3 idempotent resume: a prior dispute+out_of_scope
@@ -2076,7 +2233,8 @@ pub async fn submit_review_decision(
                 );
             }
         }
-        // No pending review-decision dispatch → stale or duplicate call
+        // No pending review-decision dispatch → stale or duplicate call.
+        // No dispatch_id to disambiguate either.
         return (
             StatusCode::CONFLICT,
             Json(json!({
@@ -2089,6 +2247,11 @@ pub async fn submit_review_decision(
     // #109: When dispatch_id is provided, validate it matches the pending
     // review-decision dispatch. This prevents replayed or stale decisions from
     // consuming a different dispatch than the one they were issued for.
+    //
+    // After #2200 sub-fix 4: if we just recovered `pending_rd_id` from the
+    // submitted `dispatch_id` via `lookup_review_decision_dispatch_by_id`,
+    // they are guaranteed equal — this branch is a no-op in that case but is
+    // kept for the canonical "pending lookup populated it" path.
     if let Some(ref submitted_did) = body.dispatch_id {
         if pending_rd_id.as_deref() != Some(submitted_did.as_str()) {
             return (
