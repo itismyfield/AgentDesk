@@ -110,6 +110,11 @@ jobs:
               # defaults.json is embedded into the Rust binary via
               # `include_str!("../defaults.json")` in src/config.rs.
               - 'defaults.json'
+              # routines/** is enumerated and executed by the
+              # `bundled_sample_routines_load_and_validate` Rust test
+              # (src/services/routines/loader.rs); adding/removing/renaming
+              # a routine script can break the asserted file list.
+              - 'routines/**'
             # rust_compile is a narrower subset of rust_or_policy: only paths
             # whose change can plausibly alter Rust binary output (and therefore
             # require cross-OS verification on macOS/Windows). Pure JS policy,
@@ -134,6 +139,11 @@ jobs:
               # defaults.json is embedded into the Rust binary via
               # `include_str!("../defaults.json")` in src/config.rs.
               - 'defaults.json'
+              # routines/** is enumerated and executed by the
+              # `bundled_sample_routines_load_and_validate` Rust test
+              # (src/services/routines/loader.rs); a routine asset change
+              # can fail the test on any OS.
+              - 'routines/**'
 
   dashboard:
     name: Dashboard (Node 22)
