@@ -1521,7 +1521,8 @@ async fn idempotent_finalize_after_auto_accept_completed() {
             "INSERT INTO card_review_state (card_id, state, last_decision, updated_at)
              VALUES ('card-auto-c', 'rework_pending', 'auto_accept', datetime('now'))",
             [],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let state = AppState::test_state(db.clone(), engine);
@@ -1604,7 +1605,8 @@ async fn idempotent_finalize_after_auto_accept_cancelled_by_cleanup() {
             "INSERT INTO card_review_state (card_id, state, last_decision, updated_at)
              VALUES ('card-auto-x', 'rework_pending', 'auto_accept', datetime('now'))",
             [],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let state = AppState::test_state(db.clone(), engine);
@@ -1665,7 +1667,8 @@ async fn stale_state_failed_dispatch_does_not_short_circuit() {
             "INSERT INTO card_review_state (card_id, state, last_decision, updated_at)
              VALUES ('card-failed', 'reviewing', 'accept', datetime('now', '-1 hour'))",
             [],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let state = AppState::test_state(db.clone(), engine);
@@ -1726,7 +1729,8 @@ async fn stale_state_arbitrary_cancellation_does_not_short_circuit() {
             "INSERT INTO card_review_state (card_id, state, last_decision, updated_at)
              VALUES ('card-cancel', 'reviewing', 'accept', datetime('now', '-1 hour'))",
             [],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let state = AppState::test_state(db.clone(), engine);
@@ -1784,7 +1788,8 @@ async fn stale_state_dispatch_id_mismatch_returns_generic_conflict() {
             "INSERT INTO card_review_state (card_id, state, last_decision, updated_at)
              VALUES ('card-iddisc', 'rework_pending', 'accept', datetime('now'))",
             [],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let state = AppState::test_state(db.clone(), engine);
@@ -1852,7 +1857,8 @@ async fn stale_state_omitted_dispatch_id_returns_generic_conflict() {
             "INSERT INTO card_review_state (card_id, state, last_decision, updated_at)
              VALUES ('card-nodid', 'rework_pending', 'accept', datetime('now'))",
             [],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let state = AppState::test_state(db.clone(), engine);
@@ -1919,7 +1925,8 @@ async fn stale_state_unknown_completion_source_does_not_short_circuit() {
             "INSERT INTO card_review_state (card_id, state, last_decision, updated_at)
              VALUES ('card-unkn', 'rework_pending', 'accept', datetime('now'))",
             [],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let state = AppState::test_state(db.clone(), engine);
@@ -1943,7 +1950,8 @@ async fn stale_state_unknown_completion_source_does_not_short_circuit() {
         body.0
     );
     assert_eq!(
-        body.0["error"], "no pending review-decision dispatch for this card"
+        body.0["error"],
+        "no pending review-decision dispatch for this card"
     );
 }
 
