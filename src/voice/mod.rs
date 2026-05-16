@@ -1,3 +1,4 @@
+pub(crate) mod announce_meta;
 pub(crate) mod barge_in;
 pub(crate) mod commands;
 pub(crate) mod config;

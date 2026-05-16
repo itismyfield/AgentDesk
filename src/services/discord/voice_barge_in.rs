@@ -1396,6 +1396,16 @@ impl VoiceBargeInRuntime {
             &utterance.completed_at,
             utterance.samples_written,
         );
+        let announcement_meta = crate::voice::prompt::voice_transcript_announcement_meta(
+            transcript,
+            utterance.user_id,
+            &utterance.utterance_id,
+            &language,
+            verbose_progress,
+            &utterance.started_at,
+            &utterance.completed_at,
+            utterance.samples_written,
+        );
         match driver
             .start(VoiceBackgroundStartRequest {
                 channel_id: target_channel_id,
@@ -1405,6 +1415,10 @@ impl VoiceBargeInRuntime {
             .await
         {
             Ok(outcome) => {
+                if let Some(message_id) = outcome.message_id {
+                    crate::voice::announce_meta::global_store()
+                        .insert(message_id, announcement_meta);
+                }
                 self.spawn_foreground_acknowledgement(
                     shared.clone(),
                     source_channel_id,

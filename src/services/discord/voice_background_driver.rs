@@ -1,7 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::services::provider::ProviderKind;
-use poise::serenity_prelude::ChannelId;
+use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::SharedData;
 
@@ -74,6 +74,7 @@ pub(in crate::services::discord) struct VoiceBackgroundStartRequest<'a> {
 pub(in crate::services::discord) struct VoiceBackgroundStartOutcome {
     pub turn_id: String,
     pub driver_kind: VoiceBackgroundDriverKind,
+    pub message_id: Option<MessageId>,
 }
 
 pub(in crate::services::discord) trait VoiceBackgroundTurnDriver {
@@ -128,12 +129,15 @@ impl VoiceBackgroundTurnDriver for AnnounceBotTranscriptDriver {
             let message_id = value
                 .get("message_id")
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-                .filter(|value| !value.trim().is_empty())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(MessageId::new)
                 .ok_or_else(|| "announce send response missing message_id".to_string())?;
             Ok(VoiceBackgroundStartOutcome {
-                turn_id: format!("voice-announce:{message_id}"),
+                turn_id: format!("voice-announce:{}", message_id.get()),
                 driver_kind: self.kind(),
+                message_id: Some(message_id),
             })
         })
     }
