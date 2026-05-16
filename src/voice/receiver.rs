@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -38,6 +38,8 @@ const TEST_SEGMENT_BOUNDARY_GAP: Duration = Duration::from_millis(50);
 /// Wait that exceeds `TEST_UTTERANCE_IDLE` (100ms) so the utterance flushes.
 #[cfg(test)]
 const TEST_UTTERANCE_FLUSH_WAIT: Duration = Duration::from_millis(130);
+const PENDING_IO_FLUSH_POLL: Duration = Duration::from_millis(1);
+const PENDING_IO_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 type WavFileWriter = WavWriter<std::io::BufWriter<std::fs::File>>;
 
@@ -61,6 +63,8 @@ pub(crate) struct VoiceReceiverConfig {
     pub(crate) allowed_user_ids: HashSet<u64>,
     /// `false` 면 시작 시 누적된 utterance/segment wav 를 GC 한다 (#2156).
     pub(crate) keep_recordings: bool,
+    #[cfg(test)]
+    pub(crate) blocking_io_delay: Duration,
 }
 
 impl VoiceReceiverConfig {
@@ -81,6 +85,8 @@ impl VoiceReceiverConfig {
             utterance_idle: Duration::from_millis(config.idle.utterance_idle_ms),
             allowed_user_ids,
             keep_recordings: config.keep_voice_recordings(),
+            #[cfg(test)]
+            blocking_io_delay: Duration::ZERO,
         }
     }
 }
@@ -154,6 +160,17 @@ impl VoiceReceiver {
 
     pub(crate) async fn register_speaking(&self, ssrc: u32, user_id: u64) {
         self.inner.register_speaking(ssrc, user_id).await;
+    }
+
+    pub(crate) async fn register_speaking_for_control_channel(
+        &self,
+        control_channel_id: u64,
+        ssrc: u32,
+        user_id: u64,
+    ) {
+        self.inner
+            .register_speaking_for_control_channel(control_channel_id, ssrc, user_id)
+            .await;
     }
 
     pub(crate) async fn queue_pcm(
@@ -244,7 +261,13 @@ impl EventHandler for VoiceReceiverEventHandler {
                 if let Some(user_id) = update.user_id {
                     let user_id = user_id.0;
                     if user_id != 0 {
-                        self.receiver.register_speaking(update.ssrc, user_id).await;
+                        self.receiver
+                            .register_speaking_for_control_channel(
+                                self.control_channel_id,
+                                update.ssrc,
+                                user_id,
+                            )
+                            .await;
                     }
                 }
             }
@@ -277,10 +300,22 @@ impl EventHandler for VoiceReceiverEventHandler {
 struct ReceiverState {
     config: VoiceReceiverConfig,
     hook: Option<Arc<dyn VoiceReceiveHook>>,
-    ssrc_users: RwLock<HashMap<u32, u64>>,
-    users: Mutex<HashMap<u64, UserAudioState>>,
+    ssrc_users: RwLock<HashMap<VoiceSsrcKey, u64>>,
+    users: Mutex<HashMap<VoiceAudioKey, UserAudioState>>,
     pending: Mutex<Vec<CompletedUtterance>>,
     sequence: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct VoiceAudioKey {
+    control_channel_id: Option<u64>,
+    user_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct VoiceSsrcKey {
+    control_channel_id: Option<u64>,
+    ssrc: u32,
 }
 
 impl ReceiverState {
@@ -296,7 +331,28 @@ impl ReceiverState {
     }
 
     async fn register_speaking(&self, ssrc: u32, user_id: u64) {
-        self.ssrc_users.write().await.insert(ssrc, user_id);
+        self.ssrc_users.write().await.insert(
+            VoiceSsrcKey {
+                control_channel_id: None,
+                ssrc,
+            },
+            user_id,
+        );
+    }
+
+    async fn register_speaking_for_control_channel(
+        &self,
+        control_channel_id: u64,
+        ssrc: u32,
+        user_id: u64,
+    ) {
+        self.ssrc_users.write().await.insert(
+            VoiceSsrcKey {
+                control_channel_id: Some(control_channel_id),
+                ssrc,
+            },
+            user_id,
+        );
     }
 
     async fn queue_pcm(
@@ -305,41 +361,63 @@ impl ReceiverState {
         samples: &[i16],
         control_channel_id: Option<u64>,
     ) -> Result<bool, VoiceReceiverError> {
-        let Some(user_id) = self.ssrc_users.read().await.get(&ssrc).copied() else {
+        let Some(user_id) = self.lookup_user_id(ssrc, control_channel_id).await else {
             return Err(VoiceReceiverError::UnknownSsrc(ssrc));
         };
         if !self.user_allowed(user_id) {
             return Ok(false);
         }
+        let key = VoiceAudioKey {
+            control_channel_id,
+            user_id,
+        };
 
         // F3 (#2046): tokio Mutex(`users`)를 잡은 채로 동기 WAV/디스크 I/O를 수행하면
         // executor 워커 스레드가 차단되고 모든 user의 PCM tick이 직렬화된다.
         // 짧은 메타데이터 갱신만 락 안에서 처리하고, 실제 WAV writer 생성/샘플 쓰기는
         // 락을 풀고 spawn_blocking으로 옮긴 뒤 다시 락을 잡아 active를 복귀시킨다.
-        let mut active_opt: Option<ActiveUtterance> = {
-            let mut users = self.users.lock().await;
-            let user_state = users.entry(user_id).or_default();
-            user_state.active.take()
+        let active_opt: Option<ActiveUtterance> = loop {
+            let active = {
+                let mut users = self.users.lock().await;
+                let user_state = users.entry(key).or_default();
+                if user_state.pending_io {
+                    None
+                } else {
+                    user_state.pending_io = true;
+                    Some(user_state.active.take())
+                }
+            };
+            if let Some(active) = active {
+                break active;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
         };
 
-        if active_opt.is_none() {
+        let mut active = if let Some(active) = active_opt {
+            active
+        } else {
             // create_active_utterance는 create_dir_all + WavWriter::create(동기 syscall).
             let receiver = self.clone();
-            active_opt = Some(
-                tokio::task::spawn_blocking(move || {
-                    receiver.create_active_utterance(user_id, control_channel_id)
-                })
-                .await
-                .map_err(|join_err| VoiceReceiverError::CreateDir {
-                    path: PathBuf::new(),
-                    source: std::io::Error::other(format!(
-                        "create_active_utterance blocking task join failed: {join_err}"
-                    )),
-                })??,
-            );
-        }
+            match tokio::task::spawn_blocking(move || {
+                receiver.create_active_utterance(user_id, control_channel_id)
+            })
+            .await
+            .map_err(|join_err| VoiceReceiverError::CreateDir {
+                path: PathBuf::new(),
+                source: std::io::Error::other(format!(
+                    "create_active_utterance blocking task join failed: {join_err}"
+                )),
+            })
+            .and_then(|result| result)
+            {
+                Ok(active) => active,
+                Err(error) => {
+                    self.clear_pending_io_after_error(key).await;
+                    return Err(error);
+                }
+            }
+        };
 
-        let mut active = active_opt.expect("active utterance present");
         if active.control_channel_id.is_none() {
             active.control_channel_id = control_channel_id;
         }
@@ -348,7 +426,11 @@ impl ReceiverState {
 
         // 디스크 I/O가 발생할 수 있는 ensure_segment_writer + write_samples도 spawn_blocking.
         let samples_owned: Vec<i16> = samples.to_vec();
+        let blocking_io_delay = self.blocking_io_delay();
         let io_result = tokio::task::spawn_blocking(move || {
+            if blocking_io_delay > Duration::ZERO {
+                std::thread::sleep(blocking_io_delay);
+            }
             active.ensure_segment_writer()?;
             active.write_samples(&samples_owned)?;
             Ok::<ActiveUtterance, VoiceReceiverError>(active)
@@ -359,7 +441,8 @@ impl ReceiverState {
             source: hound::Error::IoError(std::io::Error::other(format!(
                 "voice WAV write blocking task join failed: {join_err}"
             ))),
-        })?;
+        })
+        .and_then(|result| result);
 
         let active = match io_result {
             Ok(active) => active,
@@ -367,6 +450,7 @@ impl ReceiverState {
                 // 디스크 I/O 실패 시 active를 잃지 않도록 복귀하지 않고(이미 동기 함수에서 partial state),
                 // user_state는 깨끗하게 두어 다음 PCM에서 새 utterance가 시작되도록 한다.
                 // 단 timers는 비활성 상태로 유지된다.
+                self.clear_pending_io_after_error(key).await;
                 return Err(err);
             }
         };
@@ -374,22 +458,89 @@ impl ReceiverState {
         // active 복귀 + 타이머 재설정.
         {
             let mut users = self.users.lock().await;
-            let user_state = users.entry(user_id).or_default();
+            let user_state = users.entry(key).or_default();
             user_state.active = Some(active);
-            self.arm_timers(user_id, utterance_id, user_state);
+            user_state.pending_io = false;
+            self.arm_timers(key, utterance_id, user_state);
         }
 
         self.notify_pcm(notify_control_channel_id, user_id, samples);
         Ok(true)
     }
 
+    async fn lookup_user_id(&self, ssrc: u32, control_channel_id: Option<u64>) -> Option<u64> {
+        let ssrc_users = self.ssrc_users.read().await;
+        if let Some(control_channel_id) = control_channel_id {
+            if let Some(user_id) = ssrc_users
+                .get(&VoiceSsrcKey {
+                    control_channel_id: Some(control_channel_id),
+                    ssrc,
+                })
+                .copied()
+            {
+                return Some(user_id);
+            }
+        }
+        ssrc_users
+            .get(&VoiceSsrcKey {
+                control_channel_id: None,
+                ssrc,
+            })
+            .copied()
+    }
+
+    async fn clear_pending_io_after_error(&self, key: VoiceAudioKey) {
+        let mut users = self.users.lock().await;
+        if let Some(mut user_state) = users.remove(&key) {
+            abort_timer(user_state.segment_timer.take());
+            abort_timer(user_state.utterance_timer.take());
+        }
+    }
+
+    async fn wait_for_pending_io_to_clear<F>(&self, mut matches: F) -> usize
+    where
+        F: FnMut(VoiceAudioKey, &UserAudioState) -> bool,
+    {
+        let started = Instant::now();
+        loop {
+            let pending_count = {
+                let users = self.users.lock().await;
+                users
+                    .iter()
+                    .filter(|(key, state)| matches(**key, state) && state.pending_io)
+                    .count()
+            };
+            if pending_count == 0 {
+                return 0;
+            }
+            if started.elapsed() >= PENDING_IO_FLUSH_TIMEOUT {
+                return pending_count;
+            }
+            tokio::time::sleep(PENDING_IO_FLUSH_POLL).await;
+        }
+    }
+
+    fn blocking_io_delay(&self) -> Duration {
+        #[cfg(test)]
+        {
+            self.config.blocking_io_delay
+        }
+        #[cfg(not(test))]
+        {
+            Duration::ZERO
+        }
+    }
+
     async fn finish_segment(
         self: &Arc<Self>,
-        user_id: u64,
+        key: VoiceAudioKey,
         utterance_id: &str,
     ) -> Result<(), VoiceReceiverError> {
         let mut users = self.users.lock().await;
-        let Some(user_state) = users.get_mut(&user_id) else {
+        let Some(user_state) = users.get_mut(&key) else {
+            return Ok(());
+        };
+        if user_state.pending_io {
             return Ok(());
         };
         let Some(active) = user_state.active.as_mut() else {
@@ -404,13 +555,16 @@ impl ReceiverState {
 
     async fn flush_utterance(
         self: &Arc<Self>,
-        user_id: u64,
+        key: VoiceAudioKey,
         utterance_id: &str,
         abort_utterance_timer: bool,
     ) -> Result<Option<CompletedUtterance>, VoiceReceiverError> {
         let active = {
             let mut users = self.users.lock().await;
-            let Some(user_state) = users.get_mut(&user_id) else {
+            let Some(user_state) = users.get_mut(&key) else {
+                return Ok(None);
+            };
+            if user_state.pending_io {
                 return Ok(None);
             };
             if user_state
@@ -427,7 +581,7 @@ impl ReceiverState {
                 user_state.utterance_timer.take();
             }
             let active = user_state.active.take();
-            users.remove(&user_id);
+            users.remove(&key);
             active
         };
 
@@ -445,18 +599,33 @@ impl ReceiverState {
     }
 
     async fn flush_all(self: &Arc<Self>) -> Vec<CompletedUtterance> {
+        let pending_after_wait = self.wait_for_pending_io_to_clear(|_, _| true).await;
+        if pending_after_wait > 0 {
+            tracing::warn!(
+                pending_after_wait,
+                "timed out waiting for pending voice receiver I/O before flush_all"
+            );
+        }
         let active = {
             let mut users = self.users.lock().await;
-            users
-                .drain()
-                .filter_map(|(_, mut user_state)| {
+            let keys = users
+                .iter()
+                .filter_map(|(key, state)| {
+                    (!state.pending_io && state.active.is_some()).then_some(*key)
+                })
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| {
+                    let mut user_state = users.remove(&key)?;
                     abort_timer(user_state.segment_timer.take());
                     abort_timer(user_state.utterance_timer.take());
                     user_state.active.take()
                 })
                 .collect::<Vec<_>>()
         };
-        self.ssrc_users.write().await.clear();
+        if pending_after_wait == 0 {
+            self.ssrc_users.write().await.clear();
+        }
 
         let mut completed = Vec::new();
         for active in active {
@@ -481,30 +650,43 @@ impl ReceiverState {
         self: &Arc<Self>,
         control_channel_id: u64,
     ) -> Vec<CompletedUtterance> {
+        let pending_after_wait = self
+            .wait_for_pending_io_to_clear(|key, _| {
+                key.control_channel_id == Some(control_channel_id)
+            })
+            .await;
+        if pending_after_wait > 0 {
+            tracing::warn!(
+                pending_after_wait,
+                control_channel_id,
+                "timed out waiting for pending voice receiver I/O before channel flush"
+            );
+        }
         let (active, drained_user_ids) = {
             let mut users = self.users.lock().await;
-            // active.control_channel_id == 지정한 채널인 사용자만 골라 제거.
-            let matching_user_ids: Vec<u64> = users
+            // VoiceAudioKey.control_channel_id == 지정한 채널인 사용자만 골라 제거.
+            let matching_keys: Vec<VoiceAudioKey> = users
                 .iter()
-                .filter_map(|(user_id, state)| {
-                    state.active.as_ref().and_then(|active| {
-                        if active.control_channel_id == Some(control_channel_id) {
-                            Some(*user_id)
-                        } else {
-                            None
-                        }
-                    })
+                .filter_map(|(key, state)| {
+                    if key.control_channel_id == Some(control_channel_id)
+                        && !state.pending_io
+                        && state.active.is_some()
+                    {
+                        Some(*key)
+                    } else {
+                        None
+                    }
                 })
                 .collect();
             let mut drained = Vec::new();
             let mut drained_user_ids: Vec<u64> = Vec::new();
-            for user_id in matching_user_ids {
-                if let Some(mut user_state) = users.remove(&user_id) {
+            for key in matching_keys {
+                if let Some(mut user_state) = users.remove(&key) {
                     abort_timer(user_state.segment_timer.take());
                     abort_timer(user_state.utterance_timer.take());
                     if let Some(active) = user_state.active.take() {
                         drained.push(active);
-                        drained_user_ids.push(user_id);
+                        drained_user_ids.push(key.user_id);
                     }
                 }
             }
@@ -512,9 +694,12 @@ impl ReceiverState {
         };
 
         if !drained_user_ids.is_empty() {
-            // 해당 user들의 SSRC 매핑만 제거 (다른 길드 SSRC 보존).
+            // 해당 control channel 의 SSRC 매핑만 제거 (다른 길드/채널 SSRC 보존).
             let mut ssrc_users = self.ssrc_users.write().await;
-            ssrc_users.retain(|_, user_id| !drained_user_ids.contains(user_id));
+            ssrc_users.retain(|ssrc_key, user_id| {
+                ssrc_key.control_channel_id != Some(control_channel_id)
+                    || !drained_user_ids.contains(user_id)
+            });
         }
 
         let mut completed = Vec::new();
@@ -599,7 +784,7 @@ impl ReceiverState {
 
     fn arm_timers(
         self: &Arc<Self>,
-        user_id: u64,
+        key: VoiceAudioKey,
         utterance_id: String,
         user_state: &mut UserAudioState,
     ) {
@@ -612,10 +797,10 @@ impl ReceiverState {
         user_state.segment_timer = Some(tokio::spawn(async move {
             tokio::time::sleep(segment_idle).await;
             if let Err(error) = segment_state
-                .finish_segment(user_id, &segment_utterance_id)
+                .finish_segment(key, &segment_utterance_id)
                 .await
             {
-                tracing::warn!(error = %error, user_id, "failed to finish voice segment");
+                tracing::warn!(error = %error, user_id = key.user_id, "failed to finish voice segment");
             }
         }));
 
@@ -624,7 +809,7 @@ impl ReceiverState {
         user_state.utterance_timer = Some(tokio::spawn(async move {
             tokio::time::sleep(utterance_idle).await;
             match utterance_state
-                .flush_utterance(user_id, &utterance_id, false)
+                .flush_utterance(key, &utterance_id, false)
                 .await
             {
                 Ok(Some(completed)) => {
@@ -636,7 +821,7 @@ impl ReceiverState {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    tracing::warn!(error = %error, user_id, "failed to flush voice utterance")
+                    tracing::warn!(error = %error, user_id = key.user_id, "failed to flush voice utterance")
                 }
             }
         }));
@@ -646,6 +831,7 @@ impl ReceiverState {
 #[derive(Default)]
 struct UserAudioState {
     active: Option<ActiveUtterance>,
+    pending_io: bool,
     segment_timer: Option<JoinHandle<()>>,
     utterance_timer: Option<JoinHandle<()>>,
 }
@@ -874,6 +1060,7 @@ mod tests {
             // GC 그 자체와 무관. 다만 keep_recordings=true 로 두면 시작 시
             // wav 삭제가 일어나지 않아 결정적이다.
             keep_recordings: true,
+            blocking_io_delay: Duration::ZERO,
         }
     }
 
@@ -982,6 +1169,188 @@ mod tests {
         assert_eq!(hook.pcm_frames.load(Ordering::SeqCst), 1);
         assert_eq!(hook.completions.load(Ordering::SeqCst), 1);
         assert_eq!(*hook.control_channels.lock().unwrap(), vec![123, 123]);
+    }
+
+    #[tokio::test]
+    async fn same_user_in_distinct_control_channels_has_independent_utterances() {
+        let temp = tempfile::tempdir().unwrap();
+        let receiver = VoiceReceiver::new(test_config(temp.path().to_path_buf()));
+        receiver
+            .register_speaking_for_control_channel(101, 42, 7)
+            .await;
+        receiver
+            .register_speaking_for_control_channel(202, 42, 7)
+            .await;
+
+        receiver
+            .queue_pcm_for_control_channel(101, 42, &[1; 480])
+            .await
+            .unwrap();
+        receiver
+            .queue_pcm_for_control_channel(202, 42, &[2; 960])
+            .await
+            .unwrap();
+        tokio::time::sleep(TEST_UTTERANCE_FLUSH_WAIT).await;
+
+        let mut pending = receiver.take_pending().await;
+        pending.sort_by_key(|utterance| utterance.control_channel_id);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].user_id, 7);
+        assert_eq!(pending[0].control_channel_id, Some(101));
+        assert_eq!(pending[0].samples_written, 480);
+        assert_eq!(pending[1].user_id, 7);
+        assert_eq!(pending[1].control_channel_id, Some(202));
+        assert_eq!(pending[1].samples_written, 960);
+        assert_ne!(pending[0].utterance_id, pending[1].utterance_id);
+    }
+
+    #[tokio::test]
+    async fn pending_io_gap_blocks_timers_and_serializes_later_pcm() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.blocking_io_delay = Duration::from_millis(150);
+        let receiver = VoiceReceiver::new(config);
+        receiver
+            .register_speaking_for_control_channel(123, 42, 7)
+            .await;
+
+        receiver
+            .queue_pcm_for_control_channel(123, 42, &[1; 480])
+            .await
+            .unwrap();
+
+        let second_receiver = receiver.clone();
+        let second = tokio::spawn(async move {
+            let samples = vec![2; 480];
+            second_receiver
+                .queue_pcm_for_control_channel(123, 42, &samples)
+                .await
+                .unwrap();
+        });
+
+        let key = VoiceAudioKey {
+            control_channel_id: Some(123),
+            user_id: 7,
+        };
+        assert!(
+            wait_for_pending_io(&receiver, key).await,
+            "second PCM write must expose the pending-I/O guard while active is out for blocking I/O"
+        );
+
+        let third_receiver = receiver.clone();
+        let third = tokio::spawn(async move {
+            let samples = vec![3; 480];
+            third_receiver
+                .queue_pcm_for_control_channel(123, 42, &samples)
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(TEST_UTTERANCE_FLUSH_WAIT).await;
+        assert!(
+            receiver.take_pending().await.is_empty(),
+            "utterance timer must not finalize while active is temporarily pending I/O"
+        );
+
+        second.await.unwrap();
+        third.await.unwrap();
+        tokio::time::sleep(TEST_UTTERANCE_FLUSH_WAIT).await;
+
+        let pending = receiver.take_pending().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].control_channel_id, Some(123));
+        assert_eq!(pending[0].samples_written, 1_440);
+    }
+
+    #[tokio::test]
+    async fn flush_for_control_channel_waits_for_pending_io() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.blocking_io_delay = Duration::from_millis(150);
+        let receiver = VoiceReceiver::new(config);
+        receiver
+            .register_speaking_for_control_channel(123, 42, 7)
+            .await;
+
+        receiver
+            .queue_pcm_for_control_channel(123, 42, &[1; 480])
+            .await
+            .unwrap();
+
+        let second_receiver = receiver.clone();
+        let second = tokio::spawn(async move {
+            let samples = vec![2; 480];
+            second_receiver
+                .queue_pcm_for_control_channel(123, 42, &samples)
+                .await
+                .unwrap();
+        });
+
+        let key = VoiceAudioKey {
+            control_channel_id: Some(123),
+            user_id: 7,
+        };
+        assert!(wait_for_pending_io(&receiver, key).await);
+
+        let flushed = receiver.flush_for_control_channel(123).await;
+        second.await.unwrap();
+
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].control_channel_id, Some(123));
+        assert_eq!(flushed[0].samples_written, 960);
+        assert_eq!(receiver.take_pending().await.len(), 1);
+        let err = receiver
+            .queue_pcm_for_control_channel(123, 42, &[3; 480])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VoiceReceiverError::UnknownSsrc(42)));
+    }
+
+    #[tokio::test]
+    async fn flush_all_waits_for_pending_io_before_draining() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.blocking_io_delay = Duration::from_millis(150);
+        let receiver = VoiceReceiver::new(config);
+        receiver.register_speaking(42, 7).await;
+
+        receiver.queue_pcm(42, &[1; 480]).await.unwrap();
+        let second_receiver = receiver.clone();
+        let second = tokio::spawn(async move {
+            let samples = vec![2; 480];
+            second_receiver.queue_pcm(42, &samples).await.unwrap();
+        });
+
+        let key = VoiceAudioKey {
+            control_channel_id: None,
+            user_id: 7,
+        };
+        assert!(wait_for_pending_io(&receiver, key).await);
+
+        let flushed = receiver.flush_all().await;
+        second.await.unwrap();
+
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].control_channel_id, None);
+        assert_eq!(flushed[0].samples_written, 960);
+        assert_eq!(receiver.take_pending().await.len(), 1);
+    }
+
+    async fn wait_for_pending_io(receiver: &VoiceReceiver, key: VoiceAudioKey) -> bool {
+        for _ in 0..50 {
+            let pending = {
+                let users = receiver.inner.users.lock().await;
+                users
+                    .get(&key)
+                    .map(|state| state.pending_io && state.active.is_none())
+                    .unwrap_or(false)
+            };
+            if pending {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        false
     }
 
     /// #2156: 시작 시 recordings_dir 의 누적 wav 가 모두 사라지고, 디렉토리는
