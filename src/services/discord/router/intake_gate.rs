@@ -103,6 +103,7 @@ fn build_soft_intervention(
         reply_context,
         has_reply_boundary,
         merge_consecutive,
+        voice_announcement: None,
     }
 }
 

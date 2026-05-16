@@ -542,6 +542,19 @@ impl TurnGateway for DiscordGateway {
                 shared: &self.shared,
                 token: &live_turn.token,
             };
+            // #2266: if the queued intervention carries a voice-transcript
+            // announcement (race-loss enqueue from `handle_text_message`),
+            // reinsert it into the per-process `voice::announce_meta` store
+            // keyed by the intervention's HEAD `message_id` so the
+            // downstream `handle_text_message` `take()` (line ~2261)
+            // recovers the full transcript framing instead of degrading to
+            // plain text. The original entry was consumed by the active
+            // turn that won the race; this in-flight handoff is what makes
+            // the queued path self-contained against the 30s in-memory TTL.
+            if let Some(announcement) = intervention.voice_announcement.as_ref() {
+                crate::voice::announce_meta::global_store()
+                    .insert(intervention.message_id, announcement.clone());
+            }
             handle_text_message(
                 &deps,
                 channel_id,

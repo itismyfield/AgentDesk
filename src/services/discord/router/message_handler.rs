@@ -3315,6 +3315,14 @@ pub(in crate::services::discord) async fn handle_text_message(
                 reply_context.clone(),
                 has_reply_boundary,
                 merge_consecutive,
+                // #2266: the per-process `voice::announce_meta` store entry
+                // was already consumed at the top of `handle_text_message`
+                // (line ~2261). Embed the in-memory announcement payload in
+                // the queued `Intervention` so `dispatch_queued_turn` can
+                // reinsert it before re-entering `handle_text_message`, which
+                // restores the voice-transcript framing instead of degrading
+                // the queued reply to plain text.
+                voice_announcement.clone(),
             ),
         )
         .await;
@@ -7612,11 +7620,13 @@ mod tests {
             None,
             true,
             true,
+            None,
         );
 
         assert!(queued.has_reply_boundary);
         assert!(queued.reply_context.is_none());
         assert!(queued.merge_consecutive);
+        assert!(queued.voice_announcement.is_none());
     }
 
     #[test]
@@ -7628,10 +7638,119 @@ mod tests {
             None,
             false,
             false,
+            None,
         );
 
         assert!(!queued.has_reply_boundary);
         assert!(!queued.merge_consecutive);
+        assert!(queued.voice_announcement.is_none());
+    }
+
+    // #2266: when a voice-transcript announcement loses the
+    // `mailbox_try_start_turn` race, the queued `Intervention` must carry
+    // the full `VoiceTranscriptAnnouncement` payload so the dispatch path
+    // can reinsert it into the per-process store before re-entering
+    // `handle_text_message`. Without this the dispatch path sees the entry
+    // missing (already taken by the active turn) and degrades to plain text.
+    #[test]
+    fn race_requeue_carries_voice_announcement_payload() {
+        let announcement = crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: "상태 알려줘".to_string(),
+            user_id: "42".to_string(),
+            utterance_id: "utt-2266".to_string(),
+            language: "ko-KR".to_string(),
+            verbose_progress: true,
+            started_at: Some("2026-05-16T10:00:00+09:00".to_string()),
+            completed_at: Some("2026-05-16T10:00:01+09:00".to_string()),
+            samples_written: Some(48_000),
+        };
+        let queued = build_race_requeued_intervention(
+            UserId::new(7),
+            MessageId::new(8),
+            "상태 알려줘",
+            None,
+            false,
+            false,
+            Some(announcement.clone()),
+        );
+
+        let carried = queued
+            .voice_announcement
+            .as_ref()
+            .expect("voice announcement must be carried through the queued intervention");
+        assert_eq!(carried.utterance_id, "utt-2266");
+        assert_eq!(carried.transcript, "상태 알려줘");
+        assert_eq!(carried.language, "ko-KR");
+        assert!(carried.verbose_progress);
+        assert_eq!(carried.samples_written, Some(48_000));
+        assert_eq!(*carried, announcement);
+    }
+
+    // #2266: simulate the busy-channel timeline end-to-end at the
+    // mailbox/announce-meta seam:
+    //   1. The active `handle_text_message` consumes the announce-meta
+    //      store entry (line ~2261).
+    //   2. `mailbox_try_start_turn` returns false → the queued
+    //      `Intervention` is built via `build_race_requeued_intervention`
+    //      with the in-memory announcement payload carried through.
+    //   3. The dispatch path (which would re-enter `handle_text_message`)
+    //      reinserts the announcement into the store keyed by the queued
+    //      `intervention.message_id`.
+    //   4. The next `handle_text_message` `take()` recovers the full voice
+    //      transcript framing instead of degrading to plain text.
+    #[test]
+    fn busy_channel_queued_voice_announcement_is_restored_for_dispatch() {
+        let user_msg_id = poise::serenity_prelude::MessageId::new(2_266_001);
+        let announcement = crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: "회의록 정리해줘".to_string(),
+            user_id: "555".to_string(),
+            utterance_id: "utt-busy-race".to_string(),
+            language: "ko-KR".to_string(),
+            verbose_progress: false,
+            started_at: None,
+            completed_at: None,
+            samples_written: None,
+        };
+
+        // Step 1: active turn consumes the store entry (mirroring
+        // `handle_text_message` line ~2261).
+        let store = crate::voice::announce_meta::VoiceAnnouncementMetaStore::default();
+        store.insert(user_msg_id, announcement.clone());
+        let active_take = store
+            .take(user_msg_id)
+            .expect("active turn must consume the announcement first");
+        assert_eq!(active_take.utterance_id, "utt-busy-race");
+        assert!(
+            store.take(user_msg_id).is_none(),
+            "store entry must be drained after the active take()"
+        );
+
+        // Step 2: mailbox_try_start_turn==false → race-loss enqueue carries
+        // the announcement through the Intervention payload.
+        let queued = build_race_requeued_intervention(
+            UserId::new(555),
+            user_msg_id,
+            "회의록 정리해줘",
+            None,
+            false,
+            false,
+            Some(active_take.clone()),
+        );
+        assert!(queued.voice_announcement.is_some());
+
+        // Step 3: dispatch path reinserts before re-entering
+        // handle_text_message. (The production hook lives in
+        // `gateway::dispatch_queued_turn` and writes to the global store;
+        // here we drive the same store directly to validate the contract.)
+        if let Some(payload) = queued.voice_announcement.as_ref() {
+            store.insert(queued.message_id, payload.clone());
+        }
+
+        // Step 4: dispatched handle_text_message recovers the full payload.
+        let dispatched = store
+            .take(queued.message_id)
+            .expect("dispatched take() must recover the voice announcement");
+        assert_eq!(dispatched, announcement);
     }
 
     #[test]
@@ -7952,6 +8071,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             },
         )
         .await;
@@ -8109,6 +8229,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             },
         )
         .await;

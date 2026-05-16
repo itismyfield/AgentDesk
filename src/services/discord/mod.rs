@@ -2711,6 +2711,7 @@ async fn enqueue_internal_followup(
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            voice_announcement: None,
         },
     )
     .await;
@@ -3296,6 +3297,7 @@ async fn catch_up_missed_messages_inner(
                         && !text.starts_with('!')
                         && !text.starts_with('/')
                         && !text.starts_with("DISPATCH:"),
+                    voice_announcement: None,
                 },
             )
             .await;
@@ -3491,6 +3493,7 @@ async fn catch_up_missed_messages_inner(
                         && !text.starts_with('!')
                         && !text.starts_with('/')
                         && !text.starts_with("DISPATCH:"),
+                    voice_announcement: None,
                 },
             )
             .await;
@@ -4604,6 +4607,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             }],
             ..Default::default()
         };
@@ -4691,6 +4695,7 @@ mod tests {
                     reply_context: None,
                     has_reply_boundary: false,
                     merge_consecutive: false,
+                    voice_announcement: None,
                 },
             )
             .await;
@@ -4897,6 +4902,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             }],
             ..Default::default()
         };
@@ -4937,6 +4943,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             },
         )
         .await;
@@ -5340,6 +5347,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             },
             kind: QueueExitKind::Cancelled,
         };
@@ -5406,6 +5414,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: false,
+                voice_announcement: None,
             },
             kind,
         };
@@ -5501,6 +5510,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: true,
+                voice_announcement: None,
             },
             kind: QueueExitKind::Superseded,
         };
@@ -5586,6 +5596,7 @@ mod tests {
                 reply_context: None,
                 has_reply_boundary: false,
                 merge_consecutive: true,
+                voice_announcement: None,
             },
             kind: QueueExitKind::Cancelled,
         };

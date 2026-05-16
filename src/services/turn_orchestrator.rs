@@ -33,6 +33,17 @@ pub(crate) struct Intervention {
     pub(crate) reply_context: Option<String>,
     pub(crate) has_reply_boundary: bool,
     pub(crate) merge_consecutive: bool,
+    /// #2266: when a voice-transcript announcement loses the
+    /// `mailbox_try_start_turn` race and is enqueued for later dispatch, the
+    /// per-process `voice::announce_meta` store entry is consumed by the
+    /// original `handle_text_message` call before the race-loss branch runs.
+    /// Embedding the full announcement here keeps the queued payload
+    /// self-contained so the dispatch path (which reinserts the entry into
+    /// the store before re-entering `handle_text_message`) can reconstruct
+    /// the voice-transcript framing instead of falling back to plain text.
+    /// `None` for non-voice paths.
+    pub(crate) voice_announcement:
+        Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,6 +173,12 @@ pub(crate) fn enqueue_intervention(
                 intervention.source_message_ids.into_iter(),
             );
             last.created_at = intervention.created_at;
+            // #2266: on merge, the incoming voice announcement (if any)
+            // matches the new HEAD `message_id`; the dispatch path reinserts
+            // by the HEAD id, so the latest metadata is what we keep.
+            if intervention.voice_announcement.is_some() {
+                last.voice_announcement = intervention.voice_announcement;
+            }
             return EnqueueInterventionResult {
                 enqueued: true,
                 merged: true,
@@ -481,6 +498,11 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
         reply_context: item.reply_context,
         has_reply_boundary: item.has_reply_boundary,
         merge_consecutive: item.merge_consecutive,
+        // #2266: durable on-disk queue does not carry voice metadata; a
+        // cross-restart restored intervention will degrade to plain text,
+        // matching the prior behavior (the in-flight enrichment for the
+        // race-loss case lives only inside the in-memory mailbox queue).
+        voice_announcement: None,
     }
 }
 
@@ -1806,6 +1828,7 @@ mod actor_hydrate_regression_tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            voice_announcement: None,
         }
     }
 
@@ -1994,6 +2017,7 @@ mod tests {
             reply_context: None,
             has_reply_boundary: false,
             merge_consecutive: false,
+            voice_announcement: None,
         }
     }
 
