@@ -67,6 +67,7 @@ impl MaintenanceJobRegistry {
             Arc::new(QualityRegressionAlerterJob),
             Arc::new(CancelTombstonePruneJob),
             Arc::new(PromptManifestRetentionJob::new(prompt_manifest_retention)),
+            Arc::new(VoiceBackgroundHandoffMetaGcJob),
         ])
     }
 
@@ -230,6 +231,50 @@ impl MaintenanceJob for PromptManifestRetentionJob {
                     trimmed = report.trimmed_full_content,
                     horizon_at = ?report.horizon_at,
                     "[maintenance] prompt_manifest_retention trimmed full content"
+                );
+            }
+            Ok(())
+        })
+    }
+}
+
+/// #2274 — leader-only GC for `voice_background_handoff_meta`. Cleans
+/// rows whose `created_at` is older than the durable handoff TTL (~1
+/// hour). Consumed rows are also removed by the same age-based filter
+/// since terminal-delivery rows are consumed within minutes; anything
+/// older almost certainly represents a turn that crashed before terminal
+/// delivery and never claimed the row. Conservative 75-second stagger
+/// keeps it sequenced after the announce-meta GC at boot.
+struct VoiceBackgroundHandoffMetaGcJob;
+
+impl MaintenanceJob for VoiceBackgroundHandoffMetaGcJob {
+    fn name(&self) -> &'static str {
+        "storage.voice_background_handoff_meta_gc"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        // 15-minute cadence matches the announce-meta GC pattern; the
+        // stagger is a touch longer so the two storage GCs do not race
+        // for the same connection on the same tick.
+        MaintenanceSchedule::every(Duration::from_secs(15 * 60), Duration::from_secs(75))
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let ttl = Duration::from_secs(
+                crate::voice::announce_meta::DURABLE_HANDOFF_META_TTL_SECS as u64,
+            );
+            let deleted =
+                crate::voice::announce_meta::gc_expired_voice_background_handoff_meta_pg(pool, ttl)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("voice_background_handoff_meta_gc failed: {error}")
+                    })?;
+            if deleted > 0 {
+                tracing::info!(
+                    job = self.name(),
+                    deleted,
+                    "[maintenance] voice_background_handoff_meta_gc removed expired rows"
                 );
             }
             Ok(())

@@ -929,6 +929,34 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         &voice_config,
     ));
 
+    // #2274: rehydrate the process-local voice-background handoff store
+    // from the durable PG side table. Long background turns may have been
+    // in flight when this process last exited; their markers will live in
+    // PG and need to be reinstated in memory before terminal-delivery
+    // callbacks consult the hot path. Best-effort — a PG error here is
+    // logged and the terminal-delivery path falls back to a per-call
+    // `load_handoff_durable` lookup.
+    if let Some(pool) = pg_pool.as_ref() {
+        match crate::voice::announce_meta::rehydrate_handoffs_from_pg(pool).await {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(
+                        rehydrated = count,
+                        "voice_background_handoff_meta rehydrated from durable PG store"
+                    );
+                } else {
+                    tracing::debug!("voice_background_handoff_meta rehydrate found no live rows");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "voice_background_handoff_meta rehydrate failed; terminal-delivery will fall back to per-call durable load"
+                );
+            }
+        }
+    }
+
     // Cleanup stale Discord uploads on process start
     cleanup_old_uploads(UPLOAD_MAX_AGE);
 

@@ -2058,19 +2058,105 @@ impl VoiceBargeInRuntime {
         // the foreground voice channel WITHOUT inspecting the prompt body.
         // The previous design matched a hardcoded Korean prefix on
         // `user_text`, which any user could type to hijack routing.
+        //
+        // #2274: also write through to the durable PG side store so the
+        // marker survives a dcserver restart while the background turn is
+        // still running. The in-memory store remains the hot read path; PG
+        // is the durable source of truth and is consulted as a fallback by
+        // terminal-delivery callers when the in-memory store misses.
         if let Some(message_id) = outcome.message_id {
             let agent_id = self
                 .active_voice_routes
                 .get(&source_channel_id.get())
                 .map(|entry| entry.agent_id.clone());
-            crate::voice::announce_meta::global_store().insert_handoff(
-                message_id,
-                crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
-                    voice_channel_id: source_channel_id.get(),
-                    background_channel_id: target_channel_id.get(),
-                    agent_id,
-                },
-            );
+            let base_meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: source_channel_id.get(),
+                background_channel_id: target_channel_id.get(),
+                agent_id,
+                local_only_fallback: false,
+            };
+            // #2355 v7 Codex finding: previously the local marker was
+            // inserted BEFORE awaiting `persist_handoff_durable`. A fast
+            // background turn could reach terminal delivery while persist
+            // was still in flight; `take_handoff_durable` would return
+            // `Ok(None)` (row not yet committed), the completion path
+            // would treat the unflagged local marker as already-consumed,
+            // forget it, and refuse to route. The delayed persist would
+            // then leave an orphan PG row behind.
+            //
+            // Fix: do the durable persist FIRST, classify its outcome,
+            // and insert the local marker with the correctly-typed flag
+            // exactly once. Now the local marker is visible only AFTER
+            // the durable state is known, so terminal delivery cannot
+            // observe an inconsistent pair.
+            let local_only_fallback = if let Some(pool) = shared.pg_pool.as_ref() {
+                match crate::voice::announce_meta::persist_handoff_durable(
+                    pool, message_id, &base_meta,
+                )
+                .await
+                {
+                    Ok(()) => false,
+                    Err(error) => {
+                        // #2355 v5 Codex feedback: only flag the local
+                        // marker as `local_only_fallback = true` when the
+                        // error is unambiguously pre-commit. Ambiguous
+                        // SQL errors may have already committed the row
+                        // server-side; flagging local-only on those
+                        // would let terminal delivery consume both the
+                        // durable row AND the flagged local marker. For
+                        // ambiguous errors we leave the marker unflagged
+                        // so the completion path's "non-flagged + Err
+                        // refuse" branch protects against duplication.
+                        let pre_commit =
+                            crate::voice::announce_meta::is_definitely_pre_commit_error(&error);
+                        tracing::warn!(
+                            error = %error,
+                            message_id = message_id.get(),
+                            source_channel_id = source_channel_id.get(),
+                            target_channel_id = target_channel_id.get(),
+                            utterance_id = %announcement.utterance_id,
+                            pre_commit_error = pre_commit,
+                            "voice background handoff durable persistence failed; classifying error for fallback eligibility"
+                        );
+                        if pre_commit {
+                            tracing::warn!(
+                                event = "voice_background_handoff_local_only_fallback",
+                                message_id = message_id.get(),
+                                source_channel_id = source_channel_id.get(),
+                                target_channel_id = target_channel_id.get(),
+                                utterance_id = %announcement.utterance_id,
+                                "voice background handoff marker flagged local-only fallback (pre-commit error proves no PG row); terminal delivery may consume the local marker"
+                            );
+                            true
+                        } else {
+                            tracing::warn!(
+                                event = "voice_background_handoff_persist_ambiguous_error",
+                                message_id = message_id.get(),
+                                source_channel_id = source_channel_id.get(),
+                                target_channel_id = target_channel_id.get(),
+                                utterance_id = %announcement.utterance_id,
+                                error = %error,
+                                "voice background handoff durable persist returned an ambiguous error (could have committed); leaving marker unflagged — terminal delivery will refuse local fallback to avoid duplicating a possibly-live PG row"
+                            );
+                            false
+                        }
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    message_id = message_id.get(),
+                    "voice background handoff durable persistence skipped — postgres pool unavailable"
+                );
+                // No pool: legacy local-only path. Flag as such so
+                // terminal delivery is willing to consume the local
+                // marker.
+                true
+            };
+            let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                local_only_fallback,
+                ..base_meta
+            };
+            crate::voice::announce_meta::global_store().insert_handoff(message_id, meta);
         } else {
             tracing::warn!(
                 source_channel_id = source_channel_id.get(),
