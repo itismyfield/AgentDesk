@@ -1367,10 +1367,14 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("query 0058 json_extract down behavior");
-        assert_eq!(down_array_value.as_deref(), Some("first"));
-        assert_eq!(down_lax_value.as_deref(), Some("run-array"));
+        // After `down`, json_extract is restored verbatim from
+        // 0002_sqlite_compat_functions.sql: literal-key navigation only
+        // (the path regex `^\$((\.[A-Za-z0-9_]+)*)$` rejects anything with
+        // brackets), no jsonpath operators, and IMMUTABLE volatility.
+        assert_eq!(down_array_value, None);
+        assert_eq!(down_lax_value, None);
         assert_eq!(down_malformed_path, None);
-        assert_eq!(down_volatility, "s");
+        assert_eq!(down_volatility, "i");
 
         close_test_pool(pool, "db::postgres json_extract test pool")
             .await
