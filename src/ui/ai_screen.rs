@@ -70,27 +70,23 @@ pub fn sanitize_user_input(input: &str) -> String {
         "---end",
     ];
 
-    let lower_input = sanitized.to_lowercase();
-    for pattern in dangerous_patterns {
-        if lower_input.contains(pattern) {
-            sanitized = sanitized.replace(pattern, "[filtered]");
-            let pattern_lower = pattern.to_lowercase();
-            let pattern_upper = pattern.to_uppercase();
-            let pattern_title: String = pattern
-                .chars()
-                .enumerate()
-                .map(|(i, c)| {
-                    if i == 0 {
-                        c.to_uppercase().next().unwrap_or(c)
-                    } else {
-                        c
-                    }
-                })
-                .collect();
-            sanitized = sanitized.replace(&pattern_lower, "[filtered]");
-            sanitized = sanitized.replace(&pattern_upper, "[filtered]");
-            sanitized = sanitized.replace(&pattern_title, "[filtered]");
-        }
+    // Optimization: compile regexes once statically to avoid per-call performance penalty
+    static SANITIZERS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
+    let sanitizers = SANITIZERS.get_or_init(|| {
+        dangerous_patterns
+            .iter()
+            .filter_map(|pattern| {
+                let escaped = regex::escape(pattern);
+                regex::RegexBuilder::new(&escaped)
+                    .case_insensitive(true)
+                    .build()
+                    .ok()
+            })
+            .collect()
+    });
+
+    for re in sanitizers {
+        sanitized = re.replace_all(&sanitized, "[filtered]").to_string();
     }
 
     const MAX_INPUT_LENGTH: usize = 4000;
