@@ -244,12 +244,15 @@ export default function KanbanCardDetail({
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-0 sm:p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={onClose}>
       <div
+        data-testid="kanban-card-drawer"
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-3xl max-h-[88svh] overflow-y-auto rounded-t-3xl border p-5 sm:max-h-[90vh] sm:rounded-3xl sm:p-6 space-y-4"
+        className="mb-[-20px] w-full max-w-3xl min-h-[calc(100svh-5.25rem)] max-h-[90svh] overflow-y-auto rounded-t-3xl border p-5 sm:mb-0 sm:min-h-0 sm:max-h-[90vh] sm:rounded-3xl sm:p-6 space-y-4"
         style={{
           background:
             "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+          minHeight: "calc(100svh - 5.25rem)",
+          maxHeight: "90svh",
           paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
         }}
         role="dialog" aria-modal="true" aria-label="Card details"

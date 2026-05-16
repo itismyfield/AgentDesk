@@ -68,7 +68,7 @@ export default function KanbanCardActivitySections({
   return (
     <>
       {hasAnyDispatch ? (
-        <SurfaceCard className="space-y-3">
+        <SurfaceCard className="space-y-3" data-testid="kanban-execution-trace">
           <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
             {tr("Dispatch 이력", "Dispatch history")}
             {cardDispatches.length > 0 && (
@@ -158,7 +158,7 @@ export default function KanbanCardActivitySections({
       ) : null}
 
       {auditLog.length > 0 && (
-        <SurfaceCard className="space-y-3">
+        <SurfaceCard className="space-y-3" data-testid="kanban-state-history">
           <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
             {tr("상태 전환 이력", "State Transition History")}
             <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
