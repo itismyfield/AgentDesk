@@ -10,6 +10,16 @@ export const PIPELINE_VISUAL_EDITOR_MOBILE_BREAKPOINT = MOBILE_LAYOUT_BREAKPOINT
 
 export type StageTrigger = "ready" | "review_pass";
 
+export type Selection =
+  | { kind: "state"; stateId: string }
+  | { kind: "transition"; index: number }
+  | { kind: "phase_gate" }
+  | null;
+
+export interface FsmEdgeBinding {
+  event: string;
+}
+
 export interface StageDraft {
   stage_name: string;
   entry_skill: string;
@@ -282,6 +292,36 @@ export function createNewStateId(states: PipelineConfigFull["states"]) {
 
 export function createNewStateLabel(states: PipelineConfigFull["states"]) {
   return `State ${states.length + 1}`;
+}
+
+export function buildFsmEdgeBindingKey(from: string, to: string) {
+  return `${from}->${to}`;
+}
+
+export function inferFsmEventName(from: string, to: string) {
+  const key = `${from}->${to}`;
+  switch (key) {
+    case "backlog->ready":
+      return "on_enqueue";
+    case "ready->requested":
+    case "ready->in_progress":
+    case "requested->in_progress":
+      return "on_dispatch";
+    case "in_progress->review":
+      return "on_submit";
+    case "review->done":
+      return "on_approve";
+    case "review->in_progress":
+      return "on_changes_request";
+    default:
+      if (to === "failed") {
+        return "on_error";
+      }
+      if (from === "failed") {
+        return "on_recover";
+      }
+      return `on_${from}_to_${to}`.replace(/[^a-zA-Z0-9_]/g, "_");
+  }
 }
 
 export function getGraphColumnCount(stateCount: number, compact: boolean) {

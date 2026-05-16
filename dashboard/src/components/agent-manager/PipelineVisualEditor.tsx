@@ -13,6 +13,7 @@ import type {
 import {
   PIPELINE_VISUAL_EDITOR_MOBILE_BREAKPOINT,
   buildOverridePayload,
+  buildFsmEdgeBindingKey,
   buildPipelineGraph,
   buildStageSavePayload,
   clonePipelineConfig,
@@ -22,9 +23,14 @@ import {
   extractOverrideExtras,
   filterVisibleStages,
   hasRawOverride,
+  inferFsmEventName,
   stageDraftFromApi,
+  type FsmEdgeBinding,
+  type Selection,
   type StageDraft,
 } from "./pipeline-visual-editor-model";
+import { fsmStateTone, transitionAccent } from "./pipeline-visual-editor-styles";
+import PipelineFlowCanvas from "./PipelineFlowCanvas";
 import { SurfaceCard } from "../common/SurfacePrimitives";
 import AgentAvatar from "../AgentAvatar";
 
@@ -38,12 +44,6 @@ interface Props {
 }
 
 type EditLevel = "repo" | "agent";
-
-type Selection =
-  | { kind: "state"; stateId: string }
-  | { kind: "transition"; index: number }
-  | { kind: "phase_gate" }
-  | null;
 
 interface EditorSnapshot {
   pipeline: PipelineConfigFull;
@@ -79,10 +79,6 @@ interface PersistedPipelineSnapshotEntry {
 interface PersistedPipelineSnapshotStore {
   version: 1;
   entries: Record<string, PersistedPipelineSnapshotEntry>;
-}
-
-interface FsmEdgeBinding {
-  event: string;
 }
 
 const INPUT_CLASS =
@@ -127,12 +123,6 @@ const EMPTY_PANEL_STYLE: CSSProperties = {
   borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
   background: "color-mix(in srgb, var(--th-overlay-subtle) 92%, transparent)",
   color: "var(--th-text-muted)",
-};
-
-const CANVAS_SHELL_STYLE: CSSProperties = {
-  borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-  background:
-    "radial-gradient(circle at top left, color-mix(in srgb, var(--th-accent-primary-soft) 74%, transparent) 0%, transparent 42%), radial-gradient(circle at bottom right, color-mix(in srgb, var(--th-badge-sky-bg) 64%, transparent) 0%, transparent 34%), color-mix(in srgb, var(--th-card-bg) 95%, transparent)",
 };
 
 const STATUS_INFO_STYLE: CSSProperties = {
@@ -185,11 +175,6 @@ const FSM_PANEL_STYLE: CSSProperties = {
     "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 97%, #090b0f 3%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, #05070a 2%) 100%)",
 };
 
-const FSM_CANVAS_SHELL_STYLE: CSSProperties = {
-  borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
-  background: "#0e1014",
-};
-
 const FSM_INSPECTOR_STYLE: CSSProperties = {
   borderColor: "color-mix(in srgb, var(--th-accent-primary) 40%, var(--th-border) 60%)",
   background:
@@ -210,13 +195,6 @@ const EMPTY_PIPELINE_SNAPSHOT_STORE: PersistedPipelineSnapshotStore = {
   version: 1,
   entries: {},
 };
-
-const FSM_VIEWBOX = {
-  width: 1100,
-  height: 420,
-} as const;
-
-const FSM_MOBILE_CANVAS_MIN_WIDTH = 820;
 
 const FSM_EDGE_BINDINGS_KEY = "fsm_edge_bindings";
 
@@ -462,10 +440,6 @@ function downloadTextFile(filename: string, content: string) {
   URL.revokeObjectURL(href);
 }
 
-function buildFsmEdgeBindingKey(from: string, to: string) {
-  return `${from}->${to}`;
-}
-
 function normalizeFsmEdgeBindings(value: unknown): Record<string, FsmEdgeBinding> {
   if (!value || typeof value !== "object") {
     return {};
@@ -479,32 +453,6 @@ function normalizeFsmEdgeBindings(value: unknown): Record<string, FsmEdgeBinding
       return [[key, { event: (entry as FsmEdgeBinding).event }]];
     }),
   );
-}
-
-function inferFsmEventName(from: string, to: string) {
-  const key = `${from}->${to}`;
-  switch (key) {
-    case "backlog->ready":
-      return "on_enqueue";
-    case "ready->requested":
-    case "ready->in_progress":
-    case "requested->in_progress":
-      return "on_dispatch";
-    case "in_progress->review":
-      return "on_submit";
-    case "review->done":
-      return "on_approve";
-    case "review->in_progress":
-      return "on_changes_request";
-    default:
-      if (to === "failed") {
-        return "on_error";
-      }
-      if (from === "failed") {
-        return "on_recover";
-      }
-      return `on_${from}_to_${to}`.replace(/[^a-zA-Z0-9_]/g, "_");
-  }
 }
 
 function formatSelectionTitle(
@@ -526,45 +474,6 @@ function formatSelectionTitle(
     return `${transition.from} → ${transition.to}`;
   }
   return tr("Phase Gate", "Phase Gate");
-}
-
-function transitionAccent(type: PipelineConfigFull["transitions"][number]["type"]) {
-  if (type === "free") {
-    return {
-      stroke: "var(--th-accent-info)",
-      background: "color-mix(in srgb, var(--th-badge-sky-bg) 82%, var(--th-card-bg) 18%)",
-      text: "var(--th-accent-info)",
-    };
-  }
-  if (type === "gated") {
-    return {
-      stroke: "var(--th-accent-warn)",
-      background: "color-mix(in srgb, var(--th-badge-amber-bg) 84%, var(--th-card-bg) 16%)",
-      text: "var(--th-accent-warn)",
-    };
-  }
-  return {
-    stroke: "var(--th-accent-danger)",
-    background: "color-mix(in srgb, rgba(255, 107, 107, 0.18) 84%, var(--th-card-bg) 16%)",
-    text: "var(--th-accent-danger)",
-  };
-}
-
-function fsmStateTone(stateId: string) {
-  switch (stateId) {
-    case "ready":
-      return { stroke: "oklch(0.72 0.14 220)", glow: "rgba(56, 189, 248, 0.16)" };
-    case "in_progress":
-      return { stroke: "#fb923c", glow: "rgba(251, 146, 60, 0.16)" };
-    case "review":
-      return { stroke: "#facc15", glow: "rgba(250, 204, 21, 0.14)" };
-    case "done":
-      return { stroke: "#86efac", glow: "rgba(134, 239, 172, 0.15)" };
-    case "failed":
-      return { stroke: "#f87171", glow: "rgba(248, 113, 113, 0.14)" };
-    default:
-      return { stroke: "rgba(148, 163, 184, 0.72)", glow: "rgba(148, 163, 184, 0.08)" };
-  }
 }
 
 function selectedAgentInfo(
@@ -621,7 +530,6 @@ export default function PipelineVisualEditor({
       EMPTY_PIPELINE_SNAPSHOT_STORE,
     );
 
-  const svgRef = useRef<SVGSVGElement>(null);
   const persistedFsmDraftStore = useMemo(
     () => normalizePersistedFsmDraftStore(rawPersistedFsmDraftStore),
     [rawPersistedFsmDraftStore],
@@ -632,14 +540,6 @@ export default function PipelineVisualEditor({
     [rawPersistedPipelineSnapshotStore],
   );
   const persistedPipelineSnapshotStoreRef = useRef(persistedPipelineSnapshotStore);
-  const [dragConnect, setDragConnect] = useState<{
-    fromId: string;
-    fromCx: number;
-    fromCy: number;
-    cursorX: number;
-    cursorY: number;
-    hoverId: string | null;
-  } | null>(null);
   const buildScopeKey = useCallback(
     (nextLevel: EditLevel) => (repo ? buildFsmDraftScopeKey(repo, nextLevel, selectedAgentId) : null),
     [repo, selectedAgentId],
@@ -886,40 +786,6 @@ export default function PipelineVisualEditor({
         : null),
     [compactGraph, isFsmVariant, pipelineDraft],
   );
-  const graphViewport = useMemo(() => {
-    if (!graph || !isFsmVariant) {
-      return null;
-    }
-    if (useScrollableMobileFsmCanvas) {
-      const paddingX = 28;
-      const paddingY = 24;
-      return {
-        width: Math.max(
-          FSM_MOBILE_CANVAS_MIN_WIDTH,
-          Math.ceil(graph.width + paddingX * 2),
-        ),
-        height: Math.ceil(graph.height + paddingY * 2),
-        scale: 1,
-        translateX: paddingX,
-        translateY: paddingY,
-        scrollable: true,
-      };
-    }
-    const scale = Math.min(
-      FSM_VIEWBOX.width / Math.max(graph.width, 1),
-      FSM_VIEWBOX.height / Math.max(graph.height, 1),
-    );
-    const scaledWidth = graph.width * scale;
-    const scaledHeight = graph.height * scale;
-    return {
-      width: FSM_VIEWBOX.width,
-      height: FSM_VIEWBOX.height,
-      scale,
-      translateX: (FSM_VIEWBOX.width - scaledWidth) / 2,
-      translateY: (FSM_VIEWBOX.height - scaledHeight) / 2,
-      scrollable: false,
-    };
-  }, [graph, isFsmVariant, useScrollableMobileFsmCanvas]);
   const selectedState =
     selection?.kind === "state" && pipelineDraft
       ? pipelineDraft.states.find((state) => state.id === selection.stateId) ?? null
@@ -1342,21 +1208,6 @@ export default function PipelineVisualEditor({
       setSelection({ kind: "transition", index: nextIndex });
     }
   }
-
-  const svgPointFromEvent = useCallback(
-    (event: React.MouseEvent | MouseEvent): { x: number; y: number } | null => {
-      const svg = svgRef.current;
-      if (!svg) return null;
-      const pt = svg.createSVGPoint();
-      pt.x = event.clientX;
-      pt.y = event.clientY;
-      const ctm = svg.getScreenCTM();
-      if (!ctm) return null;
-      const svgPt = pt.matrixTransform(ctm.inverse());
-      return { x: svgPt.x, y: svgPt.y };
-    },
-    [],
-  );
 
   function updateTransition(
     index: number,
@@ -2108,449 +1959,18 @@ export default function PipelineVisualEditor({
                 </div>
               )}
 
-              <div
-                className={`${useScrollableMobileFsmCanvas ? "rounded-[24px] border p-3 sm:p-4" : "overflow-hidden rounded-[24px] border p-3 sm:p-4"} ${isFsmVariant ? "fsm-graph-desktop" : ""}`}
-                style={isFsmVariant ? FSM_CANVAS_SHELL_STYLE : CANVAS_SHELL_STYLE}
-              >
-                <div
-                  className={useScrollableMobileFsmCanvas ? "-mx-1 overflow-x-auto overflow-y-hidden px-1 pb-2" : undefined}
-                  data-testid={useScrollableMobileFsmCanvas ? "fsm-canvas-scroll" : undefined}
-                >
-                  <svg
-                    ref={svgRef}
-                    viewBox={
-                      isFsmVariant
-                        ? `0 0 ${graphViewport?.width ?? FSM_VIEWBOX.width} ${graphViewport?.height ?? FSM_VIEWBOX.height}`
-                        : `0 0 ${graph.width} ${graph.height}`
-                    }
-                    className={useScrollableMobileFsmCanvas ? "block h-auto max-w-none select-none" : "h-auto w-full select-none"}
-                    style={
-                      useScrollableMobileFsmCanvas && graphViewport
-                        ? { width: `${graphViewport.width}px`, minWidth: `${graphViewport.width}px` }
-                        : undefined
-                    }
-                    preserveAspectRatio={isFsmVariant ? "xMidYMid meet" : undefined}
-                    role="img"
-                    aria-label={tr(
-                      "파이프라인 상태와 전환 그래프",
-                      "Pipeline state and transition graph",
-                    )}
-                    onMouseDown={(event) => { if (event.target === svgRef.current) event.preventDefault(); }}
-                    onMouseMove={(event) => {
-                      if (isFsmVariant) return;
-                      if (!dragConnect) return;
-                      const pt = svgPointFromEvent(event);
-                      if (!pt) return;
-                      const hovered = graph.nodes.find(
-                        (n) => n.id !== dragConnect.fromId
-                          && pt.x >= n.x && pt.x <= n.x + n.width
-                          && pt.y >= n.y && pt.y <= n.y + n.height,
-                      );
-                      setDragConnect((prev) => prev ? { ...prev, cursorX: pt.x, cursorY: pt.y, hoverId: hovered?.id ?? null } : null);
-                    }}
-                    onMouseUp={() => {
-                      if (isFsmVariant) return;
-                      if (dragConnect?.hoverId) {
-                        addTransitionBetween(dragConnect.fromId, dragConnect.hoverId);
-                      }
-                      setDragConnect(null);
-                    }}
-                    onMouseLeave={() => {
-                      if (!isFsmVariant) {
-                        setDragConnect(null);
-                      }
-                    }}
-                  >
-                  <defs>
-                    {isFsmVariant && (
-                      <>
-                        <pattern
-                          id="pipeline-grid-fsm"
-                          width="24"
-                          height="24"
-                          patternUnits="userSpaceOnUse"
-                        >
-                          <circle cx="1" cy="1" r="1" fill="rgba(148, 163, 184, 0.22)" />
-                        </pattern>
-                        <marker
-                          id="pipeline-arrow-fsm"
-                          viewBox="0 0 12 12"
-                          refX="9"
-                          refY="6"
-                          markerWidth="8"
-                          markerHeight="8"
-                          orient="auto"
-                        >
-                          <path d="M 0 0 L 12 6 L 0 12 z" fill="rgba(148, 163, 184, 0.58)" />
-                        </marker>
-                        <marker
-                          id="pipeline-arrow-fsm-active"
-                          viewBox="0 0 12 12"
-                          refX="9"
-                          refY="6"
-                          markerWidth="8"
-                          markerHeight="8"
-                          orient="auto"
-                        >
-                          <path d="M 0 0 L 12 6 L 0 12 z" fill="var(--th-accent-primary)" />
-                        </marker>
-                      </>
-                    )}
-                    <marker
-                      id="pipeline-arrow"
-                      viewBox="0 0 12 12"
-                      refX="9"
-                      refY="6"
-                      markerWidth="8"
-                      markerHeight="8"
-                      orient="auto"
-                    >
-                      <path d="M 0 0 L 12 6 L 0 12 z" fill="currentColor" />
-                    </marker>
-                  </defs>
-
-                  {isFsmVariant && (
-                    <>
-                      <rect
-                        width={graphViewport?.width ?? FSM_VIEWBOX.width}
-                        height={graphViewport?.height ?? FSM_VIEWBOX.height}
-                        fill="#0d1016"
-                      />
-                      <rect
-                        width={graphViewport?.width ?? FSM_VIEWBOX.width}
-                        height={graphViewport?.height ?? FSM_VIEWBOX.height}
-                        fill="url(#pipeline-grid-fsm)"
-                      />
-                    </>
-                  )}
-
-                  <g
-                    transform={
-                      graphViewport
-                        ? `translate(${graphViewport.translateX} ${graphViewport.translateY}) scale(${graphViewport.scale})`
-                        : undefined
-                    }
-                  >
-                  {graph.edges.map((edge) => {
-                    const accent = transitionAccent(edge.type);
-                    const isSelected =
-                      selection?.kind === "transition" && selection.index === edge.index;
-                    const bindingKey = buildFsmEdgeBindingKey(edge.from, edge.to);
-                    const fsmEventLabel =
-                      fsmEdgeBindings[bindingKey]?.event
-                      ?? inferFsmEventName(edge.from, edge.to);
-                    const edgeStroke = isFsmVariant
-                      ? isSelected
-                        ? "var(--th-accent-primary)"
-                        : "rgba(148, 163, 184, 0.58)"
-                      : accent.stroke;
-                    return (
-                      <g key={edge.key}>
-                        <path
-                          d={edge.path}
-                          fill="none"
-                          stroke={edgeStroke}
-                          strokeOpacity={isSelected ? 0.95 : isFsmVariant ? 0.8 : 0.65}
-                          strokeWidth={isSelected ? (isFsmVariant ? 2.4 : 3.5) : isFsmVariant ? 1.6 : 2.25}
-                          markerEnd={
-                            isFsmVariant
-                              ? isSelected
-                                ? "url(#pipeline-arrow-fsm-active)"
-                                : "url(#pipeline-arrow-fsm)"
-                              : "url(#pipeline-arrow)"
-                          }
-                          strokeLinecap={isFsmVariant ? "round" : undefined}
-                          strokeLinejoin={isFsmVariant ? "round" : undefined}
-                          style={{ color: edgeStroke }}
-                        />
-                        <path
-                          d={edge.path}
-                          fill="none"
-                          stroke="transparent"
-                          strokeWidth={16}
-                          onClick={() => setSelection({ kind: "transition", index: edge.index })}
-                          className="cursor-pointer"
-                        />
-                        {(() => {
-                          const typeLabel = edge.type === "free"
-                            ? tr("자동", "auto")
-                            : edge.type === "gated"
-                              ? edge.gates.length > 0 ? tr(`조건${edge.gates.length}`, `cond${edge.gates.length}`) : tr("조건부", "cond")
-                              : String(edge.type);
-                          const label = isFsmVariant ? fsmEventLabel : typeLabel;
-                          if (edge.labelRotated && !isFsmVariant) {
-                            const labelLen = Math.max(44, label.length * 7 + 14);
-                          return (
-                            <g
-                              transform={`translate(${edge.labelX}, ${edge.labelY}) rotate(-90)`}
-                                onClick={() => setSelection({ kind: "transition", index: edge.index })}
-                                className="cursor-pointer"
-                              >
-                                <rect
-                                  x={-labelLen / 2}
-                                  y={-11}
-                                  width={labelLen}
-                                  height={22}
-                                  rx={11}
-                                  fill={
-                                    isSelected
-                                      ? "color-mix(in srgb, var(--th-accent-primary-soft) 74%, var(--th-card-bg) 26%)"
-                                      : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)"
-                                  }
-                                  stroke={accent.stroke}
-                                  strokeOpacity={isSelected ? 1 : 0.5}
-                                  strokeWidth={1.5}
-                                />
-                                <text
-                                  x="0"
-                                  y="4"
-                                  textAnchor="middle"
-                                  fontSize="10"
-                                  fontWeight="700"
-                                  fill="var(--th-text-primary)"
-                                >
-                                  {label}
-                                </text>
-                              </g>
-                            );
-                          }
-                          const labelWidth = Math.max(isFsmVariant ? 64 : 48, label.length * (isFsmVariant ? 6.8 : 7) + (isFsmVariant ? 18 : 16));
-                          return (
-                            <g
-                              transform={`translate(${edge.labelX}, ${edge.labelY})`}
-                              onClick={() => setSelection({ kind: "transition", index: edge.index })}
-                              className="cursor-pointer"
-                            >
-                              <rect
-                                x={-labelWidth / 2}
-                                y={-11}
-                                width={labelWidth}
-                                height={22}
-                                rx={11}
-                                fill={
-                                  isFsmVariant
-                                    ? isSelected
-                                      ? "color-mix(in srgb, var(--th-accent-primary-soft) 44%, #151922 56%)"
-                                      : "#141821"
-                                    : isSelected
-                                      ? "color-mix(in srgb, var(--th-accent-primary-soft) 74%, var(--th-card-bg) 26%)"
-                                      : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)"
-                                }
-                                stroke={isFsmVariant ? edgeStroke : accent.stroke}
-                                strokeOpacity={isSelected ? 1 : isFsmVariant ? 0.76 : 0.55}
-                                strokeWidth={isFsmVariant ? 1 : undefined}
-                              />
-                              <text
-                                x="0"
-                                y="4"
-                                textAnchor="middle"
-                                fontSize="10"
-                                fontWeight={isFsmVariant ? "700" : "600"}
-                                fill={isFsmVariant ? edgeStroke : "var(--th-text-primary)"}
-                                fontFamily={
-                                  isFsmVariant
-                                    ? "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace"
-                                    : undefined
-                                }
-                              >
-                                {label}
-                              </text>
-                            </g>
-                          );
-                        })()}
-                      </g>
-                    );
-                  })}
-
-                  {graph.nodes.map((node) => {
-                    const isSelected =
-                      selection?.kind === "state" && selection.stateId === node.id;
-                    const isDropTarget = dragConnect?.hoverId === node.id;
-                    const isDragSource = dragConnect?.fromId === node.id;
-                    const tone = fsmStateTone(node.id);
-                    return (
-                      <g
-                        key={node.id}
-                        transform={`translate(${node.x}, ${node.y})`}
-                        onClick={() => {
-                          if (!dragConnect && !isFsmVariant) {
-                            setSelection({ kind: "state", stateId: node.id });
-                          }
-                        }}
-                        onMouseDown={(event) => {
-                          if (isFsmVariant) return;
-                          if (event.button !== 0) return;
-                          event.preventDefault();
-                          const pt = svgPointFromEvent(event);
-                          if (!pt) return;
-                          event.stopPropagation();
-                          setDragConnect({
-                            fromId: node.id,
-                            fromCx: node.x + node.width / 2,
-                            fromCy: node.y + node.height / 2,
-                            cursorX: pt.x,
-                            cursorY: pt.y,
-                            hoverId: null,
-                          });
-                        }}
-                        className={dragConnect ? "cursor-crosshair" : "cursor-pointer"}
-                      >
-                        <rect
-                          width={node.width}
-                          height={node.height}
-                          rx={18}
-                          fill={
-                            isFsmVariant
-                              ? "#141821"
-                              : isDropTarget
-                                ? "color-mix(in srgb, var(--th-accent-primary-soft) 74%, var(--th-card-bg) 26%)"
-                                : isDragSource
-                                  ? "color-mix(in srgb, var(--th-accent-primary-soft) 56%, var(--th-card-bg) 44%)"
-                                  : node.terminal
-                                    ? "color-mix(in srgb, var(--th-badge-emerald-bg) 82%, var(--th-card-bg) 18%)"
-                                    : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)"
-                          }
-                          stroke={
-                            isFsmVariant
-                              ? tone.stroke
-                              : isDropTarget
-                                ? "var(--th-accent-primary)"
-                                : isDragSource
-                                  ? "color-mix(in srgb, var(--th-accent-primary) 74%, var(--th-accent-info) 26%)"
-                                  : isSelected
-                                    ? "var(--th-accent-primary)"
-                                    : node.terminal
-                                      ? "color-mix(in srgb, var(--th-accent-primary) 52%, #16a34a 48%)"
-                                      : "color-mix(in srgb, var(--th-border) 88%, transparent)"
-                          }
-                          strokeOpacity={
-                            isFsmVariant
-                              ? isSelected ? 1 : 0.92
-                              : isDropTarget ? 0.95 : isDragSource ? 0.8 : isSelected ? 0.95 : 0.55
-                          }
-                          strokeWidth={isFsmVariant ? (isSelected ? 2.2 : 1.6) : isDropTarget ? 3 : isSelected ? 2.5 : 1.5}
-                        />
-                        {isFsmVariant && (
-                          <rect width={node.width} height={3} rx={1.5} fill={tone.stroke} />
-                        )}
-                        <text
-                          x="12"
-                          y={compactGraph && !isFsmVariant ? 20 : 24}
-                          fontSize={compactGraph && !isFsmVariant ? 10 : 11}
-                          fontFamily="ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace"
-                          fill={
-                            isFsmVariant
-                              ? "rgba(148, 163, 184, 0.78)"
-                              : isSelected ? "var(--th-accent-primary)" : "var(--th-text-muted)"
-                          }
-                        >
-                          {node.id}
-                        </text>
-                        <text
-                          x="12"
-                          y={compactGraph && !isFsmVariant ? 38 : 45}
-                          fontSize={compactGraph && !isFsmVariant ? 13 : 14}
-                          fontWeight="700"
-                          fill={
-                            isFsmVariant
-                              ? "var(--th-text-primary)"
-                              : node.terminal
-                                ? "color-mix(in srgb, var(--th-accent-primary) 58%, #166534 42%)"
-                                : "var(--th-text-primary)"
-                          }
-                        >
-                          {node.label}
-                        </text>
-                        <text
-                          x="12"
-                          y={compactGraph && !isFsmVariant ? 54 : 66}
-                          fontSize={compactGraph && !isFsmVariant ? 9 : 11}
-                          fill={isFsmVariant ? "rgba(148, 163, 184, 0.74)" : "var(--th-text-muted)"}
-                        >
-                          {isFsmVariant
-                            ? `n=${node.index + 1}`
-                            : [
-                                node.hookCount > 0 ? `${node.hookCount}h` : null,
-                                node.hasClock ? "clock" : null,
-                                node.hasTimeout ? "timeout" : null,
-                              ]
-                                .filter(Boolean)
-                                .join(" · ") || tr("속성 없음", "No extras")}
-                        </text>
-                      </g>
-                    );
-                  })}
-
-                  {dragConnect && (
-                    <line
-                      x1={dragConnect.fromCx}
-                      y1={dragConnect.fromCy}
-                      x2={dragConnect.cursorX}
-                      y2={dragConnect.cursorY}
-                      stroke={dragConnect.hoverId ? "var(--th-accent-info)" : "var(--th-accent-primary)"}
-                      strokeWidth={2.5}
-                      strokeDasharray={dragConnect.hoverId ? "none" : "6 4"}
-                      strokeOpacity={0.8}
-                      markerEnd="url(#pipeline-arrow)"
-                      style={{
-                        color: dragConnect.hoverId ? "var(--th-accent-info)" : "var(--th-accent-primary)",
-                        pointerEvents: "none",
-                      }}
-                    />
-                  )}
-                  </g>
-                  </svg>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-3 text-xs" style={MUTED_TEXT_STYLE}>
-                {isFsmVariant ? (
-                  <>
-                    <span className="inline-flex items-center gap-2">
-                      <span
-                        className="inline-block h-px w-5"
-                        style={{ background: "rgba(148, 163, 184, 0.7)" }}
-                      />
-                      <span
-                        style={{
-                          fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-                          textTransform: "uppercase",
-                          letterSpacing: "0.12em",
-                        }}
-                      >
-                        {tr("전환", "edge")}
-                      </span>
-                    </span>
-                    <span className="inline-flex items-center gap-2">
-                      <span
-                        className="inline-block h-px w-5"
-                        style={{ background: "var(--th-accent-primary)" }}
-                      />
-                      <span
-                        style={{
-                          fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-                          textTransform: "uppercase",
-                          letterSpacing: "0.12em",
-                        }}
-                      >
-                        {tr("선택됨", "selected")}
-                      </span>
-                    </span>
-                    <span
-                      className="ml-auto"
-                      style={{
-                        fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-                        textTransform: "uppercase",
-                        letterSpacing: "0.12em",
-                      }}
-                    >
-                      {`states:${pipelineDraft.states.length} · transitions:${pipelineDraft.transitions.length}`}
-                    </span>
-                  </>
-                ) : (
-                  <span>{graphPanelNote}</span>
-                )}
-              </div>
+              <PipelineFlowCanvas
+                compactGraph={compactGraph}
+                fsmEdgeBindings={fsmEdgeBindings}
+                graph={graph}
+                graphPanelNote={graphPanelNote}
+                isFsmVariant={isFsmVariant}
+                onConnectTransition={addTransitionBetween}
+                onSelectionChange={setSelection}
+                selection={selection}
+                tr={tr}
+                useScrollableMobileFsmCanvas={useScrollableMobileFsmCanvas}
+              />
             </div>
 
             <div
