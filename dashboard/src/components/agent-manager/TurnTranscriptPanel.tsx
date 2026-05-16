@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { formatElapsedCompact } from "../../agent-insights";
 import * as api from "../../api";
 import {
@@ -357,6 +358,14 @@ export default function TurnTranscriptPanel({
   const selectedTranscript =
     transcripts.find((item) => item.turn_id === selectedTurnId) ?? transcripts[0] ?? null;
   const events = transcriptEvents(selectedTranscript);
+  const eventRailRef = useRef<HTMLDivElement | null>(null);
+  const eventRailVirtualizer = useVirtualizer({
+    count: events.length,
+    getScrollElement: () => eventRailRef.current,
+    estimateSize: () => 44,
+    horizontal: true,
+    overscan: 8,
+  });
   const selectedEvent =
     activeEventIndex == null ? null : events[activeEventIndex] ?? null;
   const toolCount = events.filter((event) => event.kind === "tool_use").length;
@@ -371,6 +380,11 @@ export default function TurnTranscriptPanel({
   useEffect(() => {
     setActiveEventIndex((prev) => normalizeActiveEventIndex(prev, events.length));
   }, [events.length]);
+
+  useEffect(() => {
+    if (activeEventIndex == null) return;
+    eventRailVirtualizer.scrollToIndex(activeEventIndex, { align: "center" });
+  }, [activeEventIndex, eventRailVirtualizer]);
 
   const handleCopyAll = async () => {
     if (!selectedTranscript) return;
@@ -650,34 +664,44 @@ export default function TurnTranscriptPanel({
                   </div>
                 ) : (
                   <div
-                    className="mt-2 grid gap-1"
-                    style={{ gridTemplateColumns: `repeat(${events.length}, minmax(0, 1fr))` }}
+                    ref={eventRailRef}
+                    className="mt-2 overflow-x-auto overscroll-x-contain pb-1"
+                    data-testid="turn-transcript-event-rail"
                   >
-                    {events.map((event, index) => {
-                      const tone = eventTone(event);
-                      return (
-                        <button
-                          key={`${selectedTranscript.turn_id}-${index}`}
-                          type="button"
-                          onClick={() => handleSelectEvent(index)}
-                          className="h-10 min-w-0 rounded-lg border transition-transform hover:-translate-y-0.5"
-                          style={{
-                            backgroundColor: TONE_STYLE[tone].bar,
-                            borderColor:
-                              activeEventIndex === index
-                                ? "#ffffff"
-                                : "rgba(255,255,255,0.14)",
-                            boxShadow:
-                              activeEventIndex === index
-                                ? "0 0 0 2px rgba(255,255,255,0.18)"
-                                : "none",
-                          }}
-                          title={`${index + 1}. ${eventTitle(event, tr)}`}
-                          aria-label={`${index + 1}. ${eventTitle(event, tr)}`}
-                          aria-pressed={activeEventIndex === index}
-                        />
-                      );
-                    })}
+                    <div
+                      className="relative h-10"
+                      style={{ width: `${eventRailVirtualizer.getTotalSize()}px` }}
+                    >
+                      {eventRailVirtualizer.getVirtualItems().map((virtualItem) => {
+                        const index = virtualItem.index;
+                        const event = events[index];
+                        const tone = eventTone(event);
+                        return (
+                          <button
+                            key={`${selectedTranscript.turn_id}-${index}`}
+                            type="button"
+                            onClick={() => handleSelectEvent(index)}
+                            className="absolute top-0 h-10 rounded-lg border transition-transform hover:-translate-y-0.5"
+                            style={{
+                              width: 36,
+                              transform: `translateX(${virtualItem.start}px)`,
+                              backgroundColor: TONE_STYLE[tone].bar,
+                              borderColor:
+                                activeEventIndex === index
+                                  ? "#ffffff"
+                                  : "rgba(255,255,255,0.14)",
+                              boxShadow:
+                                activeEventIndex === index
+                                  ? "0 0 0 2px rgba(255,255,255,0.18)"
+                                  : "none",
+                            }}
+                            title={`${index + 1}. ${eventTitle(event, tr)}`}
+                            aria-label={`${index + 1}. ${eventTitle(event, tr)}`}
+                            aria-pressed={activeEventIndex === index}
+                          />
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
               </div>
