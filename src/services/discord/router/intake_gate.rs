@@ -158,10 +158,9 @@ async fn probe_durable_voice_transcript_announcement(
 
 /// #2209 + #2266: Convenience wrapper used by the intake-gate to hydrate the
 /// typed `VoiceTranscriptAnnouncement` from the durable side store. Returns
-/// the announcement on `Found`, `None` on `Miss` / `Unavailable`. Callers
-/// that need to distinguish `Miss` (drop + warn) from `Unavailable` (fall
-/// through silently) should use [`probe_durable_voice_transcript_announcement`]
-/// directly.
+/// the announcement on `Found`, `None` on `Miss` / `NoPool` / `QueryError`.
+/// Callers that need to fail-closed on `Miss` and `QueryError` should use
+/// [`probe_durable_voice_transcript_announcement`] directly.
 async fn load_durable_voice_transcript_announcement(
     pg_pool: Option<&sqlx::PgPool>,
     message_id: serenity::MessageId,
@@ -169,7 +168,9 @@ async fn load_durable_voice_transcript_announcement(
 ) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
     match probe_durable_voice_transcript_announcement(pg_pool, message_id, channel_id).await {
         DurableAnnounceProbe::Found(announcement) => Some(*announcement),
-        DurableAnnounceProbe::Miss | DurableAnnounceProbe::Unavailable => None,
+        DurableAnnounceProbe::Miss
+        | DurableAnnounceProbe::NoPool
+        | DurableAnnounceProbe::QueryError => None,
     }
 }
 
@@ -1391,40 +1392,46 @@ pub(in crate::services::discord) async fn handle_event(
             // mention guard, dispatch-thread guard, mailbox-queue,
             // reconcile, drain, and idle-backlog gates downstream would
             // mis-route or re-queue it as a plain bot text message.
-            match durable_probe {
-                DurableAnnounceProbe::Miss => {
-                    tracing::warn!(
-                        event = "voice_announce_durable_miss",
-                        channel_id = channel_id.get(),
-                        effective_channel_id = effective_channel_id.get(),
-                        message_id = new_message.id.get(),
-                        author_id = user_id.get(),
-                        "announce-bot voice transcript message had no durable metadata after probe cap — dropping rather than routing as ordinary text"
-                    );
-                    return Ok(());
-                }
-                DurableAnnounceProbe::QueryError => {
-                    tracing::warn!(
-                        event = "voice_announce_durable_probe_query_error",
-                        channel_id = channel_id.get(),
-                        effective_channel_id = effective_channel_id.get(),
-                        message_id = new_message.id.get(),
-                        author_id = user_id.get(),
-                        "durable announce-meta probe query errored on a visible voice-announce candidate — failing closed, dropping rather than routing as ordinary text"
-                    );
-                    return Ok(());
-                }
-                DurableAnnounceProbe::Found | DurableAnnounceProbe::NoPool => {}
-            }
+            //
+            // #2266: when the probe finds the durable row we also lift the
+            // typed announcement out of the Found variant so downstream
+            // queue paths can embed it into the `Intervention` payload —
+            // keeping the queued-dispatch self-contained across cross-
+            // process intake workers, dcserver restart, and the 30s
+            // in-memory `voice::announce_meta` TTL.
+            let durable_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement> =
+                match durable_probe {
+                    DurableAnnounceProbe::Miss => {
+                        tracing::warn!(
+                            event = "voice_announce_durable_miss",
+                            channel_id = channel_id.get(),
+                            effective_channel_id = effective_channel_id.get(),
+                            message_id = new_message.id.get(),
+                            author_id = user_id.get(),
+                            "announce-bot voice transcript message had no durable metadata after probe cap — dropping rather than routing as ordinary text"
+                        );
+                        return Ok(());
+                    }
+                    DurableAnnounceProbe::QueryError => {
+                        tracing::warn!(
+                            event = "voice_announce_durable_probe_query_error",
+                            channel_id = channel_id.get(),
+                            effective_channel_id = effective_channel_id.get(),
+                            message_id = new_message.id.get(),
+                            author_id = user_id.get(),
+                            "durable announce-meta probe query errored on a visible voice-announce candidate — failing closed, dropping rather than routing as ordinary text"
+                        );
+                        return Ok(());
+                    }
+                    DurableAnnounceProbe::Found(announcement) => Some(*announcement),
+                    DurableAnnounceProbe::NoPool => None,
+                };
             // #2266 + #2209: feed downstream queue paths the typed payload
             // resolved from whichever layer hit (local store → body parse →
             // durable PG side store).
             let resolved_voice_announcement: Option<
                 crate::voice::prompt::VoiceTranscriptAnnouncement,
-            > = local_or_body_announcement.or_else(|| match durable_probe {
-                DurableAnnounceProbe::Found(announcement) => Some(*announcement),
-                DurableAnnounceProbe::Miss | DurableAnnounceProbe::Unavailable => None,
-            });
+            > = local_or_body_announcement.or(durable_announcement);
             let is_voice_transcript_announcement = resolved_voice_announcement.is_some();
             if !is_voice_transcript_announcement
                 && validate_live_channel_routing_with_dm_hint(
