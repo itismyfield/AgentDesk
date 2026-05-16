@@ -512,16 +512,28 @@ const BACK_REFERENCE_VERBS: &[&str] = &[
     "followup",
 ];
 
-/// Extract the lowercase token immediately preceding the `#N` reference at
-/// byte offset `hash_pos` in `subject`. Returns `None` if `#N` is at the
-/// start of the subject (no preceding token) or if only whitespace precedes
-/// it. Used to distinguish back-reference verbs (`refs #N`) from ownership
-/// subjects whose description simply ends with `#N` (`Harden foo #N`).
-fn token_before(subject: &str, hash_pos: usize) -> Option<String> {
+/// Extract the lowercase word token preceding byte offset `end_pos` in
+/// `subject`, skipping any intervening whitespace and ASCII punctuation.
+/// Returns `None` only when the preceding context contains no word
+/// characters at all (i.e. the reference is effectively the first
+/// meaningful token in the subject).
+///
+/// Why skip punctuation: real commits use forms like `cf. #523`,
+/// `refs: #523`, and `see (#523)` where the back-reference verb is
+/// separated from the reference by punctuation. Treating punctuation as a
+/// hard boundary would silently re-admit those subjects as ownership
+/// claims — exactly the false-positive Codex flagged in round-4 review of
+/// #2372.
+fn word_token_before(subject: &str, end_pos: usize) -> Option<String> {
     let bytes = subject.as_bytes();
-    // Walk backwards over whitespace.
-    let mut end = hash_pos;
-    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+    // Walk backwards over non-word characters (whitespace + ASCII
+    // punctuation, including `(`, `[`, `:`, `.`, `,`, `;`, `—`, etc.).
+    let mut end = end_pos;
+    while end > 0 {
+        let ch = bytes[end - 1];
+        if ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'_' {
+            break;
+        }
         end -= 1;
     }
     if end == 0 {
@@ -541,6 +553,17 @@ fn token_before(subject: &str, hash_pos: usize) -> Option<String> {
         return None;
     }
     Some(subject[start..end].to_ascii_lowercase())
+}
+
+/// Returns `true` when the word token preceding `pos` (skipping whitespace
+/// and punctuation) is a known back-reference verb. Used both for raw
+/// `#N` occurrences and for parenthesised forms — e.g. `see (#N)` must be
+/// rejected because the verb sits before the opening `(`.
+fn preceded_by_back_reference_verb(subject: &str, pos: usize) -> bool {
+    match word_token_before(subject, pos) {
+        Some(prev) => BACK_REFERENCE_VERBS.iter().any(|v| *v == prev),
+        None => false,
+    }
 }
 
 /// Check whether a commit message references the given card's GitHub issue number.
@@ -620,10 +643,10 @@ fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
 
     let competing_ref = all_refs.iter().any(|r| *r != needle);
     let trimmed = subject.trim();
-
-    // Canonical positions are always accepted: leading hash reference (with
-    // optional `[` / `(` wrapping) or trailing-squash `(#N)` suffix.
     let canonical_squash = format!("({})", needle);
+
+    // Canonical leading reference: trimmed subject starts with `#N`
+    // directly followed by a non-word character (or end-of-string).
     let canonical_leading = if let Some(rest) = trimmed.strip_prefix(&needle) {
         rest.chars()
             .next()
@@ -632,9 +655,31 @@ fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
     } else {
         false
     };
-    let canonical_brackets = trimmed.starts_with(&format!("[{}]", needle))
-        || trimmed.starts_with(&format!("({})", needle));
-    let canonical_trailing_squash = trimmed.ends_with(&canonical_squash);
+    // Canonical bracketed leading reference: `[#N]` or `(#N)` at the start
+    // of the trimmed subject. We require the immediately preceding context
+    // (in the *full* subject, not trimmed) to not be a back-reference verb
+    // — otherwise `see (#523)` and similar would slip through this branch.
+    let leading_bracket_pos = if trimmed.starts_with(&format!("[{}]", needle)) {
+        subject.find(&format!("[{}]", needle))
+    } else if trimmed.starts_with(&canonical_squash) {
+        subject.find(&canonical_squash)
+    } else {
+        None
+    };
+    let canonical_brackets = match leading_bracket_pos {
+        Some(pos) => !preceded_by_back_reference_verb(subject, pos),
+        None => false,
+    };
+    // Canonical trailing-squash reference: subject ends with `(#N)`. This
+    // is the GitHub squash-merge form — but ONLY when the preceding word
+    // is not a back-reference verb. `see (#N)` / `cf (#N)` / `refs (#N)`
+    // are back-references and must be rejected (Codex round-4 finding).
+    let canonical_trailing_squash = if trimmed.ends_with(&canonical_squash) {
+        let suffix_pos = subject.rfind(&canonical_squash).unwrap_or(0);
+        !preceded_by_back_reference_verb(subject, suffix_pos)
+    } else {
+        false
+    };
     if canonical_leading || canonical_brackets || canonical_trailing_squash {
         return true;
     }
@@ -644,22 +689,15 @@ fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
         return false;
     }
 
-    // Single-reference, non-canonical position: accept iff the token
-    // immediately preceding `#N` is not a known back-reference verb. This
-    // is the #2372 distinction — `Harden foo #N` (ownership) passes, while
-    // `refs #N` / `reverts #N` (back-reference) fail.
+    // Single-reference, non-canonical position: accept iff the word token
+    // preceding `#N` (skipping whitespace + punctuation) is not a known
+    // back-reference verb. Covers `cf. #N` / `refs: #N` / `see — #N` and
+    // similar punctuated forms (Codex round-4 finding for #2372).
     for pos in &needle_positions {
-        if let Some(prev) = token_before(subject, *pos) {
-            if !BACK_REFERENCE_VERBS.iter().any(|v| *v == prev) {
-                return true;
-            }
-        } else {
-            // No token precedes this occurrence (it's preceded by start of
-            // string or pure whitespace). That can only happen if `#N` is
-            // also the leading token, which means the canonical-leading
-            // branch above should have matched; reaching here is defensive.
-            return true;
+        if preceded_by_back_reference_verb(subject, *pos) {
+            continue;
         }
+        return true;
     }
     false
 }
@@ -3976,6 +4014,45 @@ mod issue_reference_tests {
         // Boundary-rejection cases continue to hold.
         assert!(!commit_subject_references_issue("#5230 unrelated", 523));
         assert!(!commit_subject_references_issue("(#5230)", 523));
+    }
+
+    /// #2372 round-4 (Codex follow-up): the back-reference verb check must
+    /// see *through* intervening whitespace and punctuation, and the
+    /// trailing-squash canonical form must also be invalidated when the
+    /// `(#N)` group is itself preceded by a back-reference verb.
+    /// Regressions for the exact subjects Codex flagged.
+    #[test]
+    fn commit_subject_references_issue_friction_2372_punctuated_back_references() {
+        // Punctuated back-references — the verb is followed by `.`, `:`,
+        // `—`, etc. before the `#N` token. Must all reject.
+        assert!(!commit_subject_references_issue("cf. #523", 523));
+        assert!(!commit_subject_references_issue("refs: #523", 523));
+        assert!(!commit_subject_references_issue("see — #523", 523));
+        assert!(!commit_subject_references_issue("re, #523", 523));
+        assert!(!commit_subject_references_issue("relates: #523", 523));
+
+        // Parenthesised back-references — the trailing `(#N)` *looks* like
+        // a squash suffix but the preceding word is a back-reference verb.
+        // Must reject; previously these slipped through the trailing-squash
+        // canonical branch.
+        assert!(!commit_subject_references_issue("see (#523)", 523));
+        assert!(!commit_subject_references_issue("refs (#523)", 523));
+        assert!(!commit_subject_references_issue("cf (#523)", 523));
+        assert!(!commit_subject_references_issue("cf. (#523)", 523));
+
+        // …but a genuine squash suffix where the preceding word is just a
+        // description noun (not a back-reference verb) continues to be
+        // ownership. Confirms the new check doesn't over-reject.
+        assert!(commit_subject_references_issue("feat: bar (#523)", 523));
+        assert!(commit_subject_references_issue(
+            "chore: cleanup foo (#523)",
+            523
+        ));
+
+        // Positive — closing verbs followed by punctuation remain ownership.
+        assert!(commit_subject_references_issue("fixes: #523", 523));
+        assert!(commit_subject_references_issue("closes — #523", 523));
+        assert!(commit_subject_references_issue("resolves (#523)", 523));
     }
 }
 
