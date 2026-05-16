@@ -697,11 +697,9 @@ pub fn execute_command_streaming(
                     "refusing Codex remote tmux dispatch: remote tmux is a \
                      policy non-goal and requires a separate ADR (#2193)"
                 );
-                return Err(
-                    "Remote tmux execution is a policy non-goal (#2193). \
+                return Err("Remote tmux execution is a policy non-goal (#2193). \
                      See docs/codex-remote-ssh-policy.md (non-goals)."
-                        .to_string(),
-                );
+                    .to_string());
             }
         }
         // Issue #2193 — gate enforcement on the actual dispatch path.
@@ -725,11 +723,9 @@ pub fn execute_command_streaming(
                 "refusing Codex remote SSH dispatch: gate disabled or \
                  prerequisites not satisfied (#2193)"
             );
-            return Err(
-                "Remote SSH execution is disabled by policy (#2193). \
+            return Err("Remote SSH execution is disabled by policy (#2193). \
                  See docs/codex-remote-ssh-policy.md."
-                    .to_string(),
-            );
+                .to_string());
         }
         log_codex_runtime_kind(
             "codex.execute_command_streaming",
