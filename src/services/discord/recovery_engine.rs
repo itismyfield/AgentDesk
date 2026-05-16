@@ -6,7 +6,9 @@ use super::settings::{
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 use crate::db::turns::TurnTokenUsage;
-use crate::services::agent_protocol::{StatusEvent, StreamMessage};
+use crate::services::agent_protocol::{
+    RuntimeHandoff, RuntimeHandoffKind, StatusEvent, StreamMessage,
+};
 use crate::services::git::GitCommand;
 #[cfg(unix)]
 use crate::services::platform::binary_resolver;
@@ -62,6 +64,54 @@ impl RecoveryPhase {
 
 fn canonical_recovery_phase(phase: RecoveryPhase) -> RecoveryPhase {
     RecoveryPhase::from_optional_str(Some(phase.as_str())).unwrap_or(phase)
+}
+
+fn recovery_input_fifo_for_runtime(
+    runtime_kind: RuntimeHandoffKind,
+    input_fifo_path: Option<String>,
+) -> Result<Option<String>, &'static str> {
+    if runtime_kind.requires_input_fifo() {
+        input_fifo_path
+            .filter(|path| !path.is_empty())
+            .map(Some)
+            .ok_or("input fifo path missing during recovery")
+    } else {
+        Ok(input_fifo_path.filter(|path| !path.is_empty()))
+    }
+}
+
+fn runtime_handoff_for_recovery(
+    runtime_kind: RuntimeHandoffKind,
+    output_path: String,
+    input_fifo_path: Option<String>,
+    tmux_session_name: String,
+    session_id: Option<String>,
+    last_offset: u64,
+) -> RuntimeHandoff {
+    match runtime_kind {
+        RuntimeHandoffKind::LegacyTmuxWrapper => RuntimeHandoff::LegacyTmuxWrapper {
+            output_path,
+            input_fifo_path: input_fifo_path.unwrap_or_default(),
+            tmux_session_name,
+            last_offset,
+        },
+        RuntimeHandoffKind::ClaudeTui => RuntimeHandoff::ClaudeTui {
+            transcript_path: output_path,
+            tmux_session_name,
+            last_offset,
+        },
+        RuntimeHandoffKind::CodexTui => RuntimeHandoff::CodexTui {
+            rollout_path: output_path,
+            thread_id: session_id,
+            tmux_session_name,
+            last_offset,
+        },
+        RuntimeHandoffKind::ProcessBackend => RuntimeHandoff::ProcessBackend {
+            output_path,
+            session_name: tmux_session_name,
+            last_offset,
+        },
+    }
 }
 
 fn emit_recovery_quality_event(
@@ -1683,6 +1733,7 @@ pub(super) async fn restore_inflight_turns(
             .as_deref()
             .map(tmux_runtime_paths)
             .unwrap_or_else(|| (String::new(), String::new()));
+        let runtime_kind = state.runtime_kind_for_recovery();
         let output_path = state
             .output_path
             .clone()
@@ -1694,17 +1745,21 @@ pub(super) async fn restore_inflight_turns(
                     None
                 }
             });
-        let input_fifo_path = state
-            .input_fifo_path
-            .clone()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                if !fallback_input.is_empty() {
-                    Some(fallback_input.clone())
-                } else {
-                    None
-                }
-            });
+        let input_fifo_path = if runtime_kind.requires_input_fifo() {
+            state
+                .input_fifo_path
+                .clone()
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    if !fallback_input.is_empty() {
+                        Some(fallback_input.clone())
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            state.input_fifo_path.clone().filter(|s| !s.is_empty())
+        };
         // Check exit reason file for post-mortem diagnostics
         if let Some(ref op) = output_path {
             let exit_reason_path = format!("{}.exit_reason", op);
@@ -2366,28 +2421,32 @@ pub(super) async fn restore_inflight_turns(
             }
             continue;
         };
-        let Some(input_fifo_path) = input_fifo_path else {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⚠ clearing inflight turn for channel {}: input fifo path missing",
-                state.channel_id
-            );
-            let text = stale_inflight_message("input fifo path missing during recovery");
-            if relay_recovery_terminal_notice(http, shared, &state, &text).await {
-                finish_recovered_turn_mailbox(
-                    shared,
-                    provider,
-                    channel_id,
-                    "recovery_missing_input_fifo",
-                )
-                .await;
-                clear_inflight_state(provider, state.channel_id);
-            } else {
-                tracing::warn!(
-                    "  [{ts}] ⚠ recovery: missing-input-fifo notice failed — preserving inflight for retry"
+        let input_fifo_path = match recovery_input_fifo_for_runtime(runtime_kind, input_fifo_path) {
+            Ok(path) => path,
+            Err(reason) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ⚠ clearing inflight turn for channel {}: input fifo path missing (runtime={})",
+                    state.channel_id,
+                    runtime_kind.as_str()
                 );
+                let text = stale_inflight_message(reason);
+                if relay_recovery_terminal_notice(http, shared, &state, &text).await {
+                    finish_recovered_turn_mailbox(
+                        shared,
+                        provider,
+                        channel_id,
+                        "recovery_missing_input_fifo",
+                    )
+                    .await;
+                    clear_inflight_state(provider, state.channel_id);
+                } else {
+                    tracing::warn!(
+                        "  [{ts}] ⚠ recovery: missing-input-fifo notice failed — preserving inflight for retry"
+                    );
+                }
+                continue;
             }
-            continue;
         };
 
         // If tmux pane is alive, skip recovery reader entirely.
@@ -2773,6 +2832,7 @@ pub(super) async fn restore_inflight_turns(
         let tmux_for_reader = tmux_session_name.clone();
         let start_offset = state.last_offset;
         let recovery_session_id = state.session_id.clone();
+        let runtime_kind_for_reader = runtime_kind;
         let retry_channel_id = channel_id.get();
         std::thread::spawn(move || {
             match crate::services::session_backend::read_output_file_until_result(
@@ -2784,11 +2844,15 @@ pub(super) async fn restore_inflight_turns(
             ) {
                 Ok(ReadOutputResult::Completed { offset })
                 | Ok(ReadOutputResult::Cancelled { offset }) => {
-                    let _ = tx.send(StreamMessage::TmuxReady {
-                        output_path: output_for_reader,
-                        input_fifo_path: input_for_reader,
-                        tmux_session_name: tmux_for_reader,
-                        last_offset: offset,
+                    let _ = tx.send(StreamMessage::RuntimeReady {
+                        handoff: runtime_handoff_for_recovery(
+                            runtime_kind_for_reader,
+                            output_for_reader,
+                            input_for_reader,
+                            tmux_for_reader,
+                            recovery_session_id,
+                            offset,
+                        ),
                     });
                 }
                 Ok(ReadOutputResult::SessionDied { offset }) => {
@@ -2803,11 +2867,15 @@ pub(super) async fn restore_inflight_turns(
                             "  [{ts}] ↻ Recovery: session idle but pane alive — handing off to watcher (channel {})",
                             retry_channel_id
                         );
-                        let _ = tx.send(StreamMessage::TmuxReady {
-                            output_path: output_for_reader,
-                            input_fifo_path: input_for_reader,
-                            tmux_session_name: tmux_for_reader,
-                            last_offset: offset,
+                        let _ = tx.send(StreamMessage::RuntimeReady {
+                            handoff: runtime_handoff_for_recovery(
+                                runtime_kind_for_reader,
+                                output_for_reader,
+                                input_for_reader,
+                                tmux_for_reader,
+                                recovery_session_id,
+                                offset,
+                            ),
                         });
                     } else {
                         // Session truly died during restart recovery. Fall back
@@ -3313,6 +3381,54 @@ pub(crate) async fn rebind_inflight_for_channel(
 mod post_work_evidence_tests {
     use super::*;
     use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn recovery_input_fifo_requirement_is_runtime_specific() {
+        assert_eq!(
+            recovery_input_fifo_for_runtime(RuntimeHandoffKind::ClaudeTui, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            recovery_input_fifo_for_runtime(RuntimeHandoffKind::CodexTui, None).unwrap(),
+            None
+        );
+        assert!(
+            recovery_input_fifo_for_runtime(RuntimeHandoffKind::LegacyTmuxWrapper, None).is_err()
+        );
+        assert_eq!(
+            recovery_input_fifo_for_runtime(
+                RuntimeHandoffKind::LegacyTmuxWrapper,
+                Some("/tmp/session.input".to_string())
+            )
+            .unwrap(),
+            Some("/tmp/session.input".to_string())
+        );
+    }
+
+    #[test]
+    fn recovery_handoff_preserves_runtime_kind() {
+        let handoff = runtime_handoff_for_recovery(
+            RuntimeHandoffKind::ClaudeTui,
+            "/tmp/claude-transcript.jsonl".to_string(),
+            None,
+            "AgentDesk-claude-adk".to_string(),
+            Some("session-1".to_string()),
+            42,
+        );
+
+        match handoff {
+            RuntimeHandoff::ClaudeTui {
+                transcript_path,
+                tmux_session_name,
+                last_offset,
+            } => {
+                assert_eq!(transcript_path, "/tmp/claude-transcript.jsonl");
+                assert_eq!(tmux_session_name, "AgentDesk-claude-adk");
+                assert_eq!(last_offset, 42);
+            }
+            other => panic!("expected ClaudeTui handoff, got {other:?}"),
+        }
+    }
 
     #[test]
     fn tmux_ready_completion_requires_current_turn_work_evidence() {
@@ -4350,6 +4466,7 @@ mod tests {
             tmux_session_name: Some("AgentDesk-codex-adk-cdx-t1486333430516945008".to_string()),
             output_path: Some("/tmp/agentdesk-test.jsonl".to_string()),
             input_fifo_path: Some("/tmp/agentdesk-test.input".to_string()),
+            runtime_kind: None,
             worktree_path: None,
             worktree_branch: None,
             base_commit: None,
@@ -4474,6 +4591,7 @@ mod tests {
             tmux_session_name: Some("AgentDesk-codex-adk-cdx-t1486333430516945008".to_string()),
             output_path: Some("/tmp/agentdesk-test.jsonl".to_string()),
             input_fifo_path: Some("/tmp/agentdesk-test.input".to_string()),
+            runtime_kind: None,
             worktree_path: None,
             worktree_branch: None,
             base_commit: None,

@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 #[cfg(unix)]
 use std::time::Duration;
 
-use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
+use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage, is_valid_session_id};
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
@@ -1116,8 +1116,12 @@ IMPORTANT: Format your responses using Markdown for better readability:
                             model, cost_usd, total_cost_usd, cache_create_tokens, cache_read_tokens
                         ));
                     }
-                    StreamMessage::TmuxReady { .. } | StreamMessage::ProcessReady { .. } => {
-                        debug_log("  >>> TmuxReady/ProcessReady (ignored in direct execution)");
+                    StreamMessage::TmuxReady { .. }
+                    | StreamMessage::RuntimeReady { .. }
+                    | StreamMessage::ProcessReady { .. } => {
+                        debug_log(
+                            "  >>> TmuxReady/RuntimeReady/ProcessReady (ignored in direct execution)",
+                        );
                     }
                     StreamMessage::OutputOffset { offset } => {
                         debug_log(&format!("  >>> OutputOffset: {offset}"));
@@ -1909,11 +1913,12 @@ fn emit_claude_tui_watcher_handoff(
     let last_offset = std::fs::metadata(transcript_path)
         .map(|meta| meta.len())
         .unwrap_or(0);
-    let _ = sender.send(StreamMessage::TmuxReady {
-        output_path: transcript_path_string.to_string(),
-        input_fifo_path: String::new(),
-        tmux_session_name: tmux_session_name.to_string(),
-        last_offset,
+    let _ = sender.send(StreamMessage::RuntimeReady {
+        handoff: RuntimeHandoff::ClaudeTui {
+            transcript_path: transcript_path_string.to_string(),
+            tmux_session_name: tmux_session_name.to_string(),
+            last_offset,
+        },
     });
 }
 
@@ -2850,6 +2855,37 @@ mod local_tmux_lifecycle_tests {
             }
             other => panic!("expected TmuxReady, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn claude_tui_handoff_uses_runtime_ready_without_fifo() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), b"{\"type\":\"assistant\"}\n").unwrap();
+        let transcript_path = temp.path().display().to_string();
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        emit_claude_tui_watcher_handoff(&sender, &transcript_path, "claude-tui-test", temp.path());
+
+        let message = receiver.recv().unwrap();
+        match message {
+            StreamMessage::RuntimeReady {
+                handoff:
+                    RuntimeHandoff::ClaudeTui {
+                        transcript_path: actual_path,
+                        tmux_session_name,
+                        last_offset,
+                    },
+            } => {
+                assert_eq!(actual_path, transcript_path);
+                assert_eq!(tmux_session_name, "claude-tui-test");
+                assert_eq!(last_offset, std::fs::metadata(temp.path()).unwrap().len());
+            }
+            other => panic!("expected RuntimeReady ClaudeTui, got {other:?}"),
+        }
+        assert!(
+            receiver.try_recv().is_err(),
+            "Claude direct TUI handoff must not emit legacy TmuxReady with an empty FIFO"
+        );
     }
 
     #[test]
