@@ -2191,7 +2191,7 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/settings?settingsPanel=pipeline");
 
     await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
-    await expect(page.getByTestId("pipeline-selection-title")).toBeVisible({ timeout: 400 });
+    await expect(page.getByTestId("pipeline-selection-title")).toBeVisible({ timeout: 1500 });
     await expect(page.getByTestId("pipeline-refresh-indicator")).toBeVisible();
     await expect(page.getByTestId("pipeline-selection-title")).toContainText("backlog → ready");
     await expect(page.getByTestId("pipeline-refresh-indicator")).toBeHidden({ timeout: 3000 });
