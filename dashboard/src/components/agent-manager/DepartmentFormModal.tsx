@@ -1,15 +1,49 @@
+import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useRef, useState } from "react";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
 import type { Department } from "../../types";
 import { useI18n } from "../../i18n";
 import * as api from "../../api";
 import { DEPT_BLANK, DEPT_COLORS } from "./constants";
 import EmojiPicker from "./EmojiPicker";
-import type { DeptForm, Translator } from "./types";
+import type { Translator } from "./types";
 import {
   SurfaceActionButton,
   SurfaceNotice,
   SurfaceSubsection,
 } from "../common/SurfacePrimitives";
+
+const departmentFormSchema = z.object({
+  id: z.string(),
+  name: z.string().trim().min(1, "required"),
+  name_ko: z.string(),
+  name_ja: z.string(),
+  name_zh: z.string(),
+  icon: z.string().trim().min(1, "required"),
+  color: z.string().trim().min(1, "required"),
+  description: z.string(),
+  prompt: z.string(),
+});
+
+type DepartmentFormValues = z.infer<typeof departmentFormSchema>;
+
+function getDepartmentFormDefaults(department: Department | null): DepartmentFormValues {
+  if (department) {
+    return {
+      id: department.id,
+      name: department.name,
+      name_ko: department.name_ko || "",
+      name_ja: department.name_ja || "",
+      name_zh: department.name_zh || "",
+      icon: department.icon,
+      color: department.color,
+      description: department.description || "",
+      prompt: department.prompt || "",
+    };
+  }
+  return { ...DEPT_BLANK };
+}
 
 export default function DepartmentFormModal({
   locale,
@@ -48,22 +82,18 @@ export default function DepartmentFormModal({
 }) {
   const { t } = useI18n();
   const isEdit = !!department;
-  const [form, setForm] = useState<DeptForm>(() => {
-    if (department) {
-      return {
-        id: department.id,
-        name: department.name,
-        name_ko: department.name_ko || "",
-        name_ja: department.name_ja || "",
-        name_zh: department.name_zh || "",
-        icon: department.icon,
-        color: department.color,
-        description: department.description || "",
-        prompt: department.prompt || "",
-      };
-    }
-    return { ...DEPT_BLANK };
+  const {
+    register,
+    handleSubmit,
+    setValue,
+    watch,
+    formState: { errors },
+  } = useForm<DepartmentFormValues>({
+    resolver: zodResolver(departmentFormSchema),
+    defaultValues: getDepartmentFormDefaults(department),
+    mode: "onChange",
   });
+  const form = watch();
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -82,19 +112,18 @@ export default function DepartmentFormModal({
     return () => window.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  const handleSave = async () => {
-    if (!form.name.trim()) return;
+  const handleSave = handleSubmit(async (values) => {
     setSaving(true);
     try {
       const payload = {
-        name: form.name.trim(),
-        name_ko: form.name_ko.trim(),
-        name_ja: form.name_ja.trim() || null,
-        name_zh: form.name_zh.trim() || null,
-        icon: form.icon,
-        color: form.color,
-        description: form.description.trim() || null,
-        prompt: form.prompt.trim() || null,
+        name: values.name,
+        name_ko: values.name_ko.trim(),
+        name_ja: values.name_ja.trim() || null,
+        name_zh: values.name_zh.trim() || null,
+        icon: values.icon,
+        color: values.color,
+        description: values.description.trim() || null,
+        prompt: values.prompt.trim() || null,
         sort_order: department?.sort_order ?? nextSortOrder,
       };
       if (isEdit) {
@@ -118,8 +147,7 @@ export default function DepartmentFormModal({
         }
       } else {
         // name 기반 slug 생성, 비라틴 문자만인 경우 dept-N fallback
-        const slug = form.name
-          .trim()
+        const slug = values.name
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/^-+|-+$/g, "");
@@ -168,7 +196,7 @@ export default function DepartmentFormModal({
     } finally {
       setSaving(false);
     }
-  };
+  });
 
   const handleDelete = async () => {
     setSaving(true);
@@ -214,7 +242,7 @@ export default function DepartmentFormModal({
         if (e.target === overlayRef.current) onClose();
       }}
     >
-      <div
+      <form
         role="dialog"
         aria-modal="true"
         aria-label={isEdit ? tr("부서 정보 수정", "Edit Department") : tr("신규 부서 추가", "Add Department")}
@@ -254,20 +282,34 @@ export default function DepartmentFormModal({
                   <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                     {tr("아이콘", "Icon")}
                   </label>
-                  <EmojiPicker value={form.icon} onChange={(emoji) => setForm({ ...form, icon: emoji })} />
+                  <EmojiPicker
+                    value={form.icon}
+                    onChange={(emoji) => setValue("icon", emoji, { shouldDirty: true, shouldValidate: true })}
+                  />
                 </div>
                 <div className="flex-1">
-                  <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                  <label
+                    htmlFor="department-name"
+                    className="block text-xs mb-1.5 font-medium"
+                    style={{ color: "var(--th-text-secondary)" }}
+                  >
                     {tr("영문 이름", "Name")} <span className="text-red-400">*</span>
                   </label>
                   <input
+                    id="department-name"
                     type="text"
-                    value={form.name}
-                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    {...register("name")}
                     placeholder="Development"
+                    aria-invalid={errors.name ? "true" : "false"}
+                    aria-describedby={errors.name ? "department-name-error" : undefined}
                     className={inputCls}
                     style={inputStyle}
                   />
+                  {errors.name && (
+                    <p id="department-name-error" className="mt-1 text-xs text-red-400">
+                      {tr("영문 이름을 입력해주세요.", "Enter a department name.")}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -282,7 +324,7 @@ export default function DepartmentFormModal({
                       type="button"
                       aria-label={`Color ${c}`}
                       aria-pressed={form.color === c}
-                      onClick={() => setForm({ ...form, color: c })}
+                      onClick={() => setValue("color", c, { shouldDirty: true, shouldValidate: true })}
                       className="w-11 h-11 rounded-full transition-all hover:scale-110"
                       style={{
                         background: c,
@@ -301,8 +343,7 @@ export default function DepartmentFormModal({
                   </label>
                   <input
                     type="text"
-                    value={form.name_ko}
-                    onChange={(e) => setForm({ ...form, name_ko: e.target.value })}
+                    {...register("name_ko")}
                     placeholder="개발팀"
                     className={inputCls}
                     style={inputStyle}
@@ -316,8 +357,7 @@ export default function DepartmentFormModal({
                   </label>
                   <input
                     type="text"
-                    value={form.name_ja}
-                    onChange={(e) => setForm({ ...form, name_ja: e.target.value })}
+                    {...register("name_ja")}
                     placeholder="開発チーム"
                     className={inputCls}
                     style={inputStyle}
@@ -331,8 +371,7 @@ export default function DepartmentFormModal({
                   </label>
                   <input
                     type="text"
-                    value={form.name_zh}
-                    onChange={(e) => setForm({ ...form, name_zh: e.target.value })}
+                    {...register("name_zh")}
                     placeholder="开发部"
                     className={inputCls}
                     style={inputStyle}
@@ -346,8 +385,7 @@ export default function DepartmentFormModal({
                 </label>
                 <input
                   type="text"
-                  value={form.description}
-                  onChange={(e) => setForm({ ...form, description: e.target.value })}
+                  {...register("description")}
                   placeholder={tr("부서의 역할 간단 설명", "Brief description of the department")}
                   className={inputCls}
                   style={inputStyle}
@@ -362,8 +400,7 @@ export default function DepartmentFormModal({
           >
             <div className="space-y-3">
               <textarea
-                value={form.prompt}
-                onChange={(e) => setForm({ ...form, prompt: e.target.value })}
+                {...register("prompt")}
                 rows={4}
                 placeholder={tr(
                   "이 부서 소속 에이전트의 공통 시스템 프롬프트...",
@@ -385,7 +422,7 @@ export default function DepartmentFormModal({
         {/* Actions */}
         <div className="flex items-center gap-2 mt-5 pt-4" style={{ borderTop: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)" }}>
           <SurfaceActionButton
-            onClick={handleSave}
+            type="submit"
             disabled={saving || !form.name.trim()}
             tone="accent"
             className="flex-1 text-sm"
@@ -430,7 +467,7 @@ export default function DepartmentFormModal({
             {tr("취소", "Cancel")}
           </SurfaceActionButton>
         </div>
-      </div>
+      </form>
     </div>
   );
 }
