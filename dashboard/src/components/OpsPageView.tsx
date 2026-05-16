@@ -1,23 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Database, RefreshCw, Wifi } from "lucide-react";
+import { Link } from "react-router-dom";
 import {
   getHealth,
   getPromptManifestRetention,
   type HealthResponse,
   type PromptManifestRetentionStatus,
 } from "../api";
-import type { Agent, Office, WSEvent } from "../types";
-import OfficeManagerView from "./OfficeManagerView";
+import type { WSEvent } from "../types";
 import { describeDegradedReason } from "./dashboard/HealthWidget";
 import { SurfaceEmptyState } from "./common/SurfacePrimitives";
 
 interface OpsPageViewProps {
   wsConnected: boolean;
-  offices: Office[];
-  allAgents: Agent[];
-  selectedOfficeId?: string | null;
   isKo: boolean;
-  onChanged: () => void;
 }
 
 type SignalSeverity = "normal" | "warning" | "danger";
@@ -251,6 +247,36 @@ const OPS_SHELL_STYLES = `
     background: color-mix(in srgb, var(--th-bg-surface) 92%, transparent);
   }
 
+  .ops-shell .ops-handoff-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ops-shell .ops-handoff-link {
+    display: flex;
+    min-height: 88px;
+    min-width: 0;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 10px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--th-border-subtle) 88%, transparent);
+    background: color-mix(in srgb, var(--th-bg-surface) 92%, transparent);
+    padding: 13px;
+    color: var(--th-text-primary);
+    transition: border-color 0.14s ease, background 0.14s ease;
+  }
+
+  .ops-shell .ops-handoff-link:hover {
+    border-color: var(--th-border);
+    background: color-mix(in srgb, var(--th-surface-alt) 92%, transparent);
+  }
+
+  .ops-shell .ops-copy {
+    text-wrap: pretty;
+  }
+
   .ops-shell .metric-label {
     display: flex;
     align-items: center;
@@ -311,6 +337,10 @@ const OPS_SHELL_STYLES = `
 
   @media (max-width: 520px) {
     .ops-shell .grid-4 {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .ops-shell .ops-handoff-grid {
       grid-template-columns: minmax(0, 1fr);
     }
   }
@@ -576,11 +606,7 @@ function errorMessage(error: unknown): string {
 
 export default function OpsPageView({
   wsConnected,
-  offices,
-  allAgents,
-  selectedOfficeId,
   isKo,
-  onChanged,
 }: OpsPageViewProps) {
   const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
   const localeTag = isKo ? "ko-KR" : "en-US";
@@ -1181,27 +1207,44 @@ export default function OpsPageView({
           </div>
         </div>
 
-        <div className="card mt-4">
+        <div className="card mt-4" data-testid="ops-control-handoff">
           <div className="card-head">
             <div className="min-w-0">
-              <div className="card-title">{tr("오피스 운영", "Office Operations")}</div>
-              <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+              <div className="card-title">{tr("관리 표면", "Management surfaces")}</div>
+              <div className="ops-copy mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
                 {tr(
-                  "오피스 공간, 좌석, 배치를 한곳에서 관리합니다.",
-                  "Manage spaces, seats, and layouts in one place.",
+                  "조직 편집은 전용 화면으로 보내고, 이 페이지는 health와 전달 상태만 유지합니다.",
+                  "Organization edits move to dedicated screens so this page stays focused on health and delivery.",
                 )}
               </div>
             </div>
           </div>
           <div className="card-body">
-            <div className="-mx-4 sm:-mx-5">
-              <OfficeManagerView
-                offices={offices}
-                allAgents={allAgents}
-                selectedOfficeId={selectedOfficeId}
-                isKo={isKo}
-                onChanged={onChanged}
-              />
+            <div className="ops-handoff-grid">
+              <Link
+                to="/agents"
+                className="ops-handoff-link"
+                data-testid="ops-handoff-agents"
+              >
+                <span className="block truncate text-sm font-semibold">
+                  {tr("에이전트·부서", "Agents & departments")}
+                </span>
+                <span className="ops-copy block text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+                  {tr("조직 구조와 파견 세션 관리", "Organization and dispatch-session management")}
+                </span>
+              </Link>
+              <Link
+                to="/office"
+                className="ops-handoff-link"
+                data-testid="ops-handoff-office"
+              >
+                <span className="block truncate text-sm font-semibold">
+                  {tr("오피스", "Office")}
+                </span>
+                <span className="ops-copy block text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+                  {tr("공간, 좌석, 실시간 에이전트 보기", "Space, seats, and live agent view")}
+                </span>
+              </Link>
             </div>
           </div>
         </div>

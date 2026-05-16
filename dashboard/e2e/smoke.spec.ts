@@ -2024,6 +2024,9 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("ops-websocket-card")).toBeVisible();
     await expect(page.getByTestId("ops-dispatch-outbox-card")).toBeVisible();
     await expect(page.getByTestId("ops-providers-card")).toBeVisible();
+    await expect(page.getByTestId("ops-control-handoff")).toBeVisible();
+    await expect(page.getByTestId("ops-handoff-agents")).toHaveAttribute("href", "/agents");
+    await expect(page.getByTestId("ops-handoff-office")).toHaveAttribute("href", "/office");
   });
 
   test("ops: ws events resync the health snapshot", async ({ page }) => {

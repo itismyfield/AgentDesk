@@ -1269,11 +1269,7 @@ export default function AppShell({
                 element={
                   <OpsPageView
                     wsConnected={wsConnected}
-                    offices={offices}
-                    allAgents={allAgents}
-                    selectedOfficeId={selectedOfficeId}
                     isKo={isKo}
-                    onChanged={handleOfficeChanged}
                   />
                 }
               />
