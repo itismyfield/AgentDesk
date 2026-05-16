@@ -10347,6 +10347,170 @@ async fn resume_run_skips_phase_gate_blocked_runs_pg_path() {
     pg_db.drop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_phase_gate_reevaluates_failed_terminal_dispatch_pg_path() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+
+    sqlx::query("INSERT INTO github_repos (id, display_name) VALUES ($1, $1)")
+        .bind("test-repo")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id, discord_channel_alt)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind("agent-repair-gate-pg")
+    .bind("Agent Repair Gate PG")
+    .bind("claude")
+    .bind("111")
+    .bind("222")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, priority, assigned_agent_id, github_issue_number
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7
+         )",
+    )
+    .bind("card-repair-gate-pg")
+    .bind("test-repo")
+    .bind("Repair gate PG")
+    .bind("review")
+    .bind("medium")
+    .bind("agent-repair-gate-pg")
+    .bind(64385_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind("run-repair-gate-pg")
+    .bind("test-repo")
+    .bind("agent-repair-gate-pg")
+    .bind("paused")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, priority_rank, batch_phase
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7
+         )",
+    )
+    .bind("entry-repair-gate-pg")
+    .bind("run-repair-gate-pg")
+    .bind("card-repair-gate-pg")
+    .bind("agent-repair-gate-pg")
+    .bind("pending")
+    .bind(0_i64)
+    .bind(2_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, CAST($7 AS jsonb), CAST($8 AS jsonb)
+         )",
+    )
+    .bind("dispatch-repair-gate-pg")
+    .bind("card-repair-gate-pg")
+    .bind("agent-repair-gate-pg")
+    .bind("phase-gate")
+    .bind("completed")
+    .bind("Repair phase gate PG")
+    .bind(
+        json!({
+            "phase_gate": {
+                "run_id": "run-repair-gate-pg",
+                "batch_phase": 1,
+                "pass_verdict": "phase_gate_passed",
+                "next_phase": 2,
+                "final_phase": false
+            }
+        })
+        .to_string(),
+    )
+    .bind(json!({"verdict": "phase_gate_passed"}).to_string())
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_phase_gates (
+            run_id, phase, status, verdict, dispatch_id, pass_verdict, failure_reason
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7
+         )",
+    )
+    .bind("run-repair-gate-pg")
+    .bind(1_i64)
+    .bind("failed")
+    .bind("phase_gate_failed")
+    .bind("dispatch-repair-gate-pg")
+    .bind("phase_gate_passed")
+    .bind("operator patched result after failure")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/queue/runs/run-repair-gate-pg/phase-gates/repair")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"phase":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["candidate_dispatches"], 1);
+    assert_eq!(json["cleared_gates"], 1);
+    assert_eq!(json["blocking_gates_remaining"], 0);
+    assert_eq!(json["run_status"], "active");
+    assert_eq!(json["outcomes"][0]["outcome"], "cleared");
+    assert_eq!(json["outcomes"][0]["run_resumed"], true);
+
+    let remaining_gates = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM auto_queue_phase_gates
+         WHERE run_id = $1",
+    )
+    .bind("run-repair-gate-pg")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining_gates, 0);
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
 /// Regression test for #191: onTick1min recovery must reset stuck auto-queue
 /// entries that are 'dispatched' but have orphan (NULL), phantom (missing row),
 /// or cancelled/failed dispatch_ids — while leaving valid dispatches untouched.

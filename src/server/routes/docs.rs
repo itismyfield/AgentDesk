@@ -271,6 +271,7 @@ pub(crate) const TOP_40_PAIRED_PATHS: &[(&str, &str)] = &[
     ("GET", "/api/queue/status"),
     ("POST", "/api/queue/pause"),
     ("POST", "/api/queue/resume"),
+    ("POST", "/api/queue/runs/{id}/phase-gates/repair"),
     ("POST", "/api/queue/cancel"),
     ("PATCH", "/api/queue/reorder"),
     ("GET", "/api/queue/phase-gates/catalog"),
@@ -4345,6 +4346,48 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"ok": true, "resumed_runs": 0, "blocked_runs": 1, "message": "No resumable runs"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/queue/resume"),
+        ep(
+            "POST",
+            "/api/queue/runs/{id}/phase-gates/repair",
+            "auto-queue",
+            "Re-evaluate terminal phase-gate dispatch results for a paused run, including gates already marked failed. Use this before /api/queue/resume when blocked_runs indicates a pending/failed phase gate and the dispatch result has been repaired or persisted late.",
+        )
+        .with_params([
+            ("id", path_param("Auto-queue run ID")),
+            (
+                "phase",
+                body_param("number", false, "Restrict repair to one batch phase"),
+            ),
+            (
+                "dispatch_id",
+                body_param(
+                    "string",
+                    false,
+                    "Restrict repair to one terminal phase-gate dispatch",
+                ),
+            ),
+        ])
+        .with_example(
+            json!({"path": {"id": "run-1"}, "body": {"phase": 1}}),
+            json!({
+                "ok": true,
+                "run_id": "run-1",
+                "phase_filter": 1,
+                "dispatch_id_filter": null,
+                "candidate_dispatches": 1,
+                "cleared_gates": 1,
+                "failed_gates": 0,
+                "blocking_gates_remaining": 0,
+                "run_status": "active",
+                "outcomes": [{"dispatch_id": "dispatch-gate-1", "phase": 1, "outcome": "cleared", "run_resumed": true, "run_finalized": false}]
+            }),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"id": "run-ghost"}}),
+            json!({"error": "auto-queue run not found: run-ghost"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/queue/runs/run-1/phase-gates/repair -H 'Content-Type: application/json' -d '{\"phase\":1}'"),
         ep(
             "POST",
             "/api/queue/runs/{id}/restore",

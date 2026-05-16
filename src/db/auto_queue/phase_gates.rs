@@ -480,6 +480,43 @@ pub(crate) async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
     dispatch_context_json: Option<&str>,
     dispatch_result_json: Option<&str>,
 ) -> Result<PhaseGateReconciliation, String> {
+    reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
+        tx,
+        dispatch_id,
+        dispatch_status,
+        dispatch_context_json,
+        dispatch_result_json,
+        false,
+    )
+    .await
+}
+
+async fn repair_phase_gate_for_terminal_dispatch_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    dispatch_status: &str,
+    dispatch_context_json: Option<&str>,
+    dispatch_result_json: Option<&str>,
+) -> Result<PhaseGateReconciliation, String> {
+    reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
+        tx,
+        dispatch_id,
+        dispatch_status,
+        dispatch_context_json,
+        dispatch_result_json,
+        true,
+    )
+    .await
+}
+
+async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    dispatch_status: &str,
+    dispatch_context_json: Option<&str>,
+    dispatch_result_json: Option<&str>,
+    allow_failed_repair: bool,
+) -> Result<PhaseGateReconciliation, String> {
     let Some(gate) = parse_phase_gate_context(dispatch_context_json) else {
         return Ok(PhaseGateReconciliation::NoContext);
     };
@@ -493,7 +530,7 @@ pub(crate) async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
         return Ok(PhaseGateReconciliation::StaleRow);
     };
 
-    if gate_row.status == "failed" {
+    if gate_row.status == "failed" && !allow_failed_repair {
         return Ok(PhaseGateReconciliation::AlreadyFailed);
     }
 
@@ -628,6 +665,221 @@ pub(crate) async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
         run_resumed,
         run_finalized,
     })
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhaseGateRepairOptions {
+    pub phase: Option<i64>,
+    pub dispatch_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhaseGateRepairSummary {
+    pub run_id: String,
+    pub phase_filter: Option<i64>,
+    pub dispatch_id_filter: Option<String>,
+    pub candidate_dispatches: usize,
+    pub cleared_gates: usize,
+    pub failed_gates: usize,
+    pub awaiting_siblings: usize,
+    pub stale_dispatches: usize,
+    pub no_context_dispatches: usize,
+    pub blocking_gates_remaining: i64,
+    pub run_status: Option<String>,
+    pub outcomes: Vec<PhaseGateRepairOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhaseGateRepairOutcome {
+    pub dispatch_id: String,
+    pub phase: i64,
+    pub outcome: String,
+    pub run_resumed: bool,
+    pub run_finalized: bool,
+    pub pending_count: Option<i64>,
+    pub failed_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PhaseGateRepairCandidate {
+    phase: i64,
+    dispatch_id: String,
+    dispatch_status: String,
+    dispatch_context: Option<String>,
+    dispatch_result: Option<String>,
+}
+
+/// Re-evaluate terminal phase-gate dispatches for one run, including rows
+/// already marked `failed`. This is an operator repair path for cases where a
+/// dispatch result was patched or persisted after the normal completion hook
+/// already marked the gate failed.
+pub async fn repair_phase_gates_for_run_on_pg(
+    pool: &PgPool,
+    run_id: &str,
+    options: PhaseGateRepairOptions,
+) -> Result<PhaseGateRepairSummary, String> {
+    let run_id = run_id.trim();
+    if run_id.is_empty() {
+        return Err("run_id is required".to_string());
+    }
+    if let Some(phase) = options.phase
+        && phase < 0
+    {
+        return Err("phase must be >= 0".to_string());
+    }
+    let dispatch_id = normalize_optional_text(options.dispatch_id.as_deref());
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres phase-gate repair for run {run_id}: {error}"))?;
+
+    let run_exists =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM auto_queue_runs WHERE id = $1)")
+            .bind(run_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("check postgres auto-queue run {run_id}: {error}"))?;
+    if !run_exists {
+        return Err(format!("not_found:auto-queue run not found: {run_id}"));
+    }
+
+    let candidate_rows = sqlx::query(
+        "SELECT pg.phase,
+                pg.dispatch_id,
+                td.status        AS dispatch_status,
+                td.context::TEXT AS dispatch_context,
+                td.result::TEXT  AS dispatch_result
+         FROM auto_queue_phase_gates pg
+         JOIN task_dispatches td ON td.id = pg.dispatch_id
+         WHERE pg.run_id = $1
+           AND pg.status IN ('pending', 'failed')
+           AND pg.dispatch_id IS NOT NULL
+           AND td.status NOT IN ('pending', 'dispatched')
+           AND ($2::BIGINT IS NULL OR pg.phase = $2)
+           AND ($3::TEXT IS NULL OR pg.dispatch_id = $3)
+         ORDER BY pg.phase, pg.dispatch_id",
+    )
+    .bind(run_id)
+    .bind(options.phase)
+    .bind(dispatch_id.as_deref())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("load phase-gate repair candidates for run {run_id}: {error}"))?;
+
+    let candidates: Vec<PhaseGateRepairCandidate> = candidate_rows
+        .into_iter()
+        .map(|row| {
+            Ok(PhaseGateRepairCandidate {
+                phase: row
+                    .try_get("phase")
+                    .map_err(|error| format!("decode repair candidate phase: {error}"))?,
+                dispatch_id: row
+                    .try_get("dispatch_id")
+                    .map_err(|error| format!("decode repair candidate dispatch_id: {error}"))?,
+                dispatch_status: row
+                    .try_get("dispatch_status")
+                    .map_err(|error| format!("decode repair candidate status: {error}"))?,
+                dispatch_context: row
+                    .try_get("dispatch_context")
+                    .map_err(|error| format!("decode repair candidate context: {error}"))?,
+                dispatch_result: row
+                    .try_get("dispatch_result")
+                    .map_err(|error| format!("decode repair candidate result: {error}"))?,
+            })
+        })
+        .collect::<Result<_, String>>()?;
+
+    let mut summary = PhaseGateRepairSummary {
+        run_id: run_id.to_string(),
+        phase_filter: options.phase,
+        dispatch_id_filter: dispatch_id.clone(),
+        candidate_dispatches: candidates.len(),
+        ..PhaseGateRepairSummary::default()
+    };
+
+    for candidate in candidates {
+        let outcome = repair_phase_gate_for_terminal_dispatch_on_pg_tx(
+            &mut tx,
+            &candidate.dispatch_id,
+            &candidate.dispatch_status,
+            candidate.dispatch_context.as_deref(),
+            candidate.dispatch_result.as_deref(),
+        )
+        .await?;
+        let mut repair_outcome = PhaseGateRepairOutcome {
+            dispatch_id: candidate.dispatch_id,
+            phase: candidate.phase,
+            outcome: "unknown".to_string(),
+            run_resumed: false,
+            run_finalized: false,
+            pending_count: None,
+            failed_reason: None,
+        };
+        match outcome {
+            PhaseGateReconciliation::NoContext => {
+                summary.no_context_dispatches += 1;
+                repair_outcome.outcome = "no_context".to_string();
+            }
+            PhaseGateReconciliation::AlreadyFailed => {
+                summary.failed_gates += 1;
+                repair_outcome.outcome = "already_failed".to_string();
+            }
+            PhaseGateReconciliation::StaleRow => {
+                summary.stale_dispatches += 1;
+                repair_outcome.outcome = "stale".to_string();
+            }
+            PhaseGateReconciliation::MarkedFailed { failed_reason, .. } => {
+                summary.failed_gates += 1;
+                repair_outcome.outcome = "failed".to_string();
+                repair_outcome.failed_reason = Some(failed_reason);
+            }
+            PhaseGateReconciliation::AwaitingSiblings { pending_count, .. } => {
+                summary.awaiting_siblings += 1;
+                repair_outcome.outcome = "awaiting_siblings".to_string();
+                repair_outcome.pending_count = Some(pending_count);
+            }
+            PhaseGateReconciliation::Cleared {
+                run_resumed,
+                run_finalized,
+                ..
+            } => {
+                summary.cleared_gates += 1;
+                repair_outcome.outcome = "cleared".to_string();
+                repair_outcome.run_resumed = run_resumed;
+                repair_outcome.run_finalized = run_finalized;
+            }
+        }
+        summary.outcomes.push(repair_outcome);
+    }
+
+    summary.blocking_gates_remaining = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM auto_queue_phase_gates
+         WHERE run_id = $1
+           AND status IN ('pending', 'failed')
+           AND ($2::BIGINT IS NULL OR phase = $2)
+           AND ($3::TEXT IS NULL OR dispatch_id = $3)",
+    )
+    .bind(run_id)
+    .bind(options.phase)
+    .bind(dispatch_id.as_deref())
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| format!("count remaining blocking phase gates for run {run_id}: {error}"))?;
+
+    summary.run_status =
+        sqlx::query_scalar::<_, Option<String>>("SELECT status FROM auto_queue_runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("load repaired run status for {run_id}: {error}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres phase-gate repair for run {run_id}: {error}"))?;
+
+    Ok(summary)
 }
 
 #[derive(Debug, Clone)]

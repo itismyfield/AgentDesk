@@ -258,6 +258,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/queue/history", get(auto_queue::history))
             .route("/queue/entries/{id}", patch(auto_queue::update_entry))
             .route("/queue/runs/{id}/restore", post(auto_queue::restore_run))
+            .route(
+                "/queue/runs/{id}/phase-gates/repair",
+                post(auto_queue::repair_phase_gates),
+            )
             .route("/queue/runs/{id}/entries", post(auto_queue::add_run_entry))
             .route("/queue/entries/{id}/skip", patch(auto_queue::skip_entry))
             .route("/queue/runs/{id}", patch(auto_queue::update_run))

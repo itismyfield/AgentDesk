@@ -11,8 +11,8 @@ use crate::services::auto_queue::route;
 #[allow(unused_imports)]
 pub use route::{
     ActivateBody, AddRunEntryBody, CancelQuery, GenerateBody, GenerateEntryBody, HistoryQuery,
-    OrderBody, PauseBody, RebindSlotBody, ReorderBody, ResetBody, ResetGlobalBody, StatusQuery,
-    UpdateEntryBody, UpdateRunBody,
+    OrderBody, PauseBody, RebindSlotBody, ReorderBody, RepairPhaseGateBody, ResetBody,
+    ResetGlobalBody, StatusQuery, UpdateEntryBody, UpdateRunBody,
 };
 
 #[allow(unused_imports)]
@@ -125,6 +125,14 @@ pub async fn pause(state: State<AppState>, body: Bytes) -> (StatusCode, Json<ser
 
 pub async fn resume_run(state: State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     route::resume_run(state).await
+}
+
+pub async fn repair_phase_gates(
+    state: State<AppState>,
+    id: Path<String>,
+    body: Bytes,
+) -> (StatusCode, Json<serde_json::Value>) {
+    route::repair_phase_gates(state, id, body).await
 }
 
 pub async fn cancel(

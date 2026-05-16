@@ -546,6 +546,26 @@ async fn api_docs_category_exposes_auto_queue_params_and_examples() {
     assert_eq!(pause["example"]["response"]["cancelled_dispatches"], 0);
     assert_eq!(pause["example"]["response"]["released_slots"], 0);
     assert_eq!(pause["example"]["response"]["cleared_slot_sessions"], 0);
+
+    let repair = endpoints
+        .iter()
+        .find(|ep| {
+            ep["method"] == "POST" && ep["path"] == "/api/queue/runs/{id}/phase-gates/repair"
+        })
+        .expect("phase-gate repair endpoint must be documented");
+    let repair_description = repair["description"]
+        .as_str()
+        .expect("phase-gate repair docs description must be a string");
+    assert!(
+        repair_description.contains("Re-evaluate terminal phase-gate dispatch results")
+            && repair_description.contains("/api/queue/resume"),
+        "phase-gate repair docs must explain the blocked resume workflow: {repair_description}"
+    );
+    assert_eq!(repair["params"]["id"]["location"], "path");
+    assert_eq!(repair["params"]["phase"]["required"], false);
+    assert_eq!(repair["params"]["dispatch_id"]["required"], false);
+    assert_eq!(repair["example"]["response"]["cleared_gates"], 1);
+    assert_eq!(repair["error_example"]["status"], 404);
 }
 
 #[tokio::test]

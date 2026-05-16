@@ -90,6 +90,12 @@ pub struct RebindSlotBody {
     pub thread_group: i64,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct RepairPhaseGateBody {
+    pub phase: Option<i64>,
+    pub dispatch_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AddRunEntryBody {
     pub issue_number: i64,
