@@ -1,4 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Silkscreen:wght@400;700&display=swap");
 @import "tailwindcss";
 
 /* ── Tailwind v4 semantic color tokens ── */
@@ -29,10 +28,10 @@
 }
 
 :root {
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --font-display: "Inter", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Inter", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
-  --font-pixel: "Silkscreen", "Inter", "Segoe UI", sans-serif;
+  --font-pixel: "Silkscreen", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", system-ui, sans-serif;
   --r-sm: 0.625rem;
   --r-md: 0.875rem;
   --r-lg: 1rem;
