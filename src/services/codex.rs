@@ -1136,19 +1136,31 @@ fn execute_streaming_local_tui_tmux(
             // #2172 cancel boundary: a user /stop that arrives before the
             // rollout file is discovered surfaces as an Err from the
             // wait_for_* helpers ("cancelled waiting for Codex rollout
-            // transcript"). Killing the tmux session in that path
-            // contradicts the PreserveSession default for /stop — the
-            // pane teardown is owned by stop_active_turn's
-            // TmuxCleanupPolicy, not by the launch error handler. Skip
-            // the local cleanup when cancel is observed and let the
-            // turn_bridge cancel path drive session lifecycle.
+            // transcript").
+            //
+            // Two consequences must be suppressed:
+            //   (a) Killing the tmux session here contradicts the
+            //       PreserveSession default for /stop — the pane
+            //       teardown is owned by stop_active_turn's
+            //       TmuxCleanupPolicy.
+            //   (b) Returning Err is converted into
+            //       `StreamMessage::Error` by the streaming-launch
+            //       caller (router/message_handler.rs spawn_blocking
+            //       wrapper) and would reach the bridge as a transport
+            //       error instead of a cancelled turn — letting the
+            //       bridge run its error-finalisation path on a
+            //       cancelled turn.
+            //
+            // Return Ok(()) with no StreamMessage emitted: the producer
+            // is silent post-cancel and the bridge's cancel arm drives
+            // finalisation.
             if cancel_observed() {
                 tracing::info!(
                     tmux_session = tmux_session_name,
                     error = %error,
-                    "Codex rollout tail cancelled before transcript; tmux cleanup deferred to cancel path"
+                    "Codex rollout tail cancelled before transcript; suppressing tail Err and deferring tmux cleanup to cancel path"
                 );
-                return Err(error);
+                return Ok(());
             }
             // #2182 follow-up: rollout wait / tail failures used to leak the
             // tmux session because `?` propagated Err without cleaning the

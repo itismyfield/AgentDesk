@@ -148,11 +148,32 @@ handoff/inflight state on behalf of a cancelled turn.
 The cancel-before-rollout path (the rollout-wait helpers return an
 `Err("cancelled waiting for Codex rollout transcript")`) is also
 short-circuited: instead of tearing down the tmux session via
-`kill_session_with_reason`, the launch returns the error and lets
-`turn_bridge::stop_active_turn` apply the configured
+`kill_session_with_reason` and returning that `Err` up to the
+streaming-launch caller (which would translate it into
+`StreamMessage::Error`), the launch returns `Ok(())` with no
+`StreamMessage` emitted. The producer is silent post-cancel, the
+bridge's cancel arm drives finalisation, and
+`turn_bridge::stop_active_turn` applies the configured
 `TmuxCleanupPolicy`. This preserves the documented `/stop` default of
 "do not kill the pane" and lets follow-up turns reuse the session if
 the cancel policy is `PreserveSession*`.
+
+### Bridge rx-drain is cancel-aware
+
+The bridge loop's inner `loop { match rx.try_recv() }` would otherwise
+drain every queued `StreamMessage` to completion once it entered, even
+if the cancel flag flipped mid-drain. That race is dangerous: a queued
+`Done` consumed mid-drain sets `done = true` before the outer
+cancel-arm runs, and the `!done` gate then suppresses the cancel-arm,
+silently completing what the user just stopped.
+
+The drain therefore re-checks `cancel_requested` at the top of every
+iteration. When `!done && cancel_requested` is true, the drain breaks
+out and the outer cancel-arm runs first, finalising the turn as
+cancelled. Frames already pulled from `rx` before cancel was observed
+have been processed (acceptable: they happened before the user pressed
+stop); subsequent frames stay in `rx` and are dropped on bridge
+shutdown.
 
 ### Exactly-once finalisation
 
