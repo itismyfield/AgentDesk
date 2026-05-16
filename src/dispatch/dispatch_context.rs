@@ -594,6 +594,42 @@ fn git_commit_exists(dir: &str, commit_sha: &str) -> bool {
         .is_ok()
 }
 
+/// Codex round-4: determine whether `worktree_path` and `repo_dir` describe
+/// the same underlying git repository (same object store / common dir).
+///
+/// Used to refuse `pr_tracking.worktree_path` values that point at a
+/// completely different checkout, even when `pr_tracking.repo_id` matches
+/// the card's scope. A foreign `worktree_path` recorded against the same
+/// `repo_id` would otherwise be treated as a valid review surface.
+fn worktree_path_belongs_to_repo(worktree_path: &str, repo_dir: &str) -> bool {
+    if worktree_path.is_empty() || repo_dir.is_empty() {
+        return false;
+    }
+    let common_dir = |dir: &str| -> Option<std::path::PathBuf> {
+        let output = GitCommand::new()
+            .repo(dir)
+            .args(["rev-parse", "--git-common-dir"])
+            .run_output()
+            .ok()?;
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if raw.is_empty() {
+            return None;
+        }
+        let pb = std::path::PathBuf::from(&raw);
+        let absolute = if pb.is_absolute() {
+            pb
+        } else {
+            std::path::PathBuf::from(dir).join(pb)
+        };
+        Some(std::fs::canonicalize(&absolute).unwrap_or(absolute))
+    };
+    match (common_dir(worktree_path), common_dir(repo_dir)) {
+        (Some(a), Some(b)) => a == b,
+        // If either side cannot answer, fail-closed.
+        _ => false,
+    }
+}
+
 /// #682: Exact-HEAD check — returns true only when the worktree's current
 /// HEAD resolves to `commit_sha`. Git's object store is shared across
 /// worktrees of the same repo, so `git cat-file -e` (git_commit_exists)
@@ -2545,7 +2581,31 @@ const REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY: std::time::Duration =
 const REREVIEW_STABILITY_PROBE_GAP: std::time::Duration =
     std::time::Duration::from_millis(80);
 
-/// Probe a candidate worktree once, optionally retrying once on
+/// Helper: a single "stable-clean" probe that requires two consecutive
+/// clean observations separated by [`REREVIEW_STABILITY_PROBE_GAP`] before
+/// returning the path. Used both as the initial check and on the
+/// post-transient-dirty retry.
+///
+/// Codex round-4: even the first observation must pass stability — a writer
+/// that briefly clean-flips between bursts could otherwise be accepted on
+/// the very first sample.
+async fn stable_clean_probe(
+    card_id: &str,
+    source: &str,
+    path: &str,
+    commit: &str,
+) -> ReviewWorktreeProbe {
+    let first = probe_clean_exact_review_worktree(card_id, source, path, commit).await;
+    match &first {
+        ReviewWorktreeProbe::Clean(_) => {}
+        // Non-clean outcomes propagate unchanged.
+        _ => return first,
+    }
+    tokio::time::sleep(REREVIEW_STABILITY_PROBE_GAP).await;
+    probe_clean_exact_review_worktree(card_id, source, path, commit).await
+}
+
+/// Probe a candidate worktree with stability check, retrying once on
 /// `DirtyTransient` after [`REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY`].
 ///
 /// #2254 item 4: short-lived dirty state during a parallel implementation
@@ -2556,30 +2616,22 @@ const REREVIEW_STABILITY_PROBE_GAP: std::time::Duration =
 /// HEAD diverges), so a retry can never accept an unrelated commit that
 /// happens to land on the same path mid-window.
 ///
-/// Codex round-3: a single post-backoff clean observation is insufficient —
+/// Codex round-3 & round-4: a single clean observation is insufficient —
 /// a concurrent writer could re-dirty the tree right after our probe. We
 /// require TWO consecutive clean probes separated by
-/// [`REREVIEW_STABILITY_PROBE_GAP`] before emitting `worktree_path`. If
-/// stability cannot be confirmed, fall through to commit-only review.
+/// [`REREVIEW_STABILITY_PROBE_GAP`] before emitting `worktree_path`. This
+/// applies to both the initial sample and the post-backoff retry.
 async fn probe_clean_worktree_with_transient_retry(
     card_id: &str,
     source: &str,
     path: &str,
     commit: &str,
 ) -> Option<String> {
-    match probe_clean_exact_review_worktree(card_id, source, path, commit).await {
+    match stable_clean_probe(card_id, source, path, commit).await {
         ReviewWorktreeProbe::Clean(p) => Some(p),
         ReviewWorktreeProbe::DirtyTransient => {
             tokio::time::sleep(REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY).await;
-            // Stability check: BOTH probes must report clean. Otherwise an
-            // active writer briefly between two dirty bursts could fool a
-            // single-sample retry.
-            let first = probe_clean_exact_review_worktree(card_id, source, path, commit).await;
-            if !matches!(first, ReviewWorktreeProbe::Clean(_)) {
-                return None;
-            }
-            tokio::time::sleep(REREVIEW_STABILITY_PROBE_GAP).await;
-            match probe_clean_exact_review_worktree(card_id, source, path, commit).await {
+            match stable_clean_probe(card_id, source, path, commit).await {
                 ReviewWorktreeProbe::Clean(p) => {
                     tracing::info!(
                         "[dispatch] Review dispatch for card {}: {} worktree '{}' settled stable-clean after transient-dirty retry (commit {})",
@@ -2740,32 +2792,72 @@ async fn resolve_pr_tracking_review_target_pg(
     let mut branch = tracked_branch
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let mut commit_lookup_dir = None;
+    // Codex round-4: anchor the commit in the *verified* card-scope repo
+    // before trusting any other lookup. A pr_tracking row could carry a
+    // matching `repo_id` (so the round-3 cross-check passes) but still
+    // record a `worktree_path` pointing at an unrelated checkout. Without
+    // requiring the commit to be present in the card-scope `repo_dir`, we
+    // would happily use the foreign worktree as `commit_lookup_dir` and
+    // emit a target that points the reviewer at unrelated code.
+    let commit_lookup_dir;
     let mut worktree_path = None;
 
-    if let Some(path) = tracked_worktree_path.as_deref() {
-        if git_commit_exists(path, &reviewed_commit) {
-            commit_lookup_dir = Some(path.to_string());
+    if let Some(card_repo_dir) = repo_dir.as_deref() {
+        if git_commit_exists(card_repo_dir, &reviewed_commit) {
+            commit_lookup_dir = Some(card_repo_dir.to_string());
+        } else {
+            tracing::warn!(
+                "[dispatch] Review dispatch for card {}: pr_tracking head_sha {} is not present in card-scope repo '{}' — refusing to recover from external worktree (#2254 round-4)",
+                card_id,
+                &reviewed_commit[..8.min(reviewed_commit.len())],
+                card_repo_dir
+            );
+            return Ok(None);
         }
-        // #2254 item 4: retry once on transient-dirty before falling back.
-        worktree_path = probe_clean_worktree_with_transient_retry(
+    } else {
+        // No verifiable card-scope repo at all — we cannot anchor the
+        // commit's repo identity.
+        tracing::warn!(
+            "[dispatch] Review dispatch for card {}: pr_tracking head_sha {} has no card-scope repo to verify against — refusing",
             card_id,
-            "pr_tracking",
-            path,
-            &reviewed_commit,
-        )
-        .await;
+            &reviewed_commit[..8.min(reviewed_commit.len())]
+        );
+        return Ok(None);
     }
 
-    if let Some(repo_dir) = repo_dir.as_deref() {
-        if commit_lookup_dir.is_none() && git_commit_exists(repo_dir, &reviewed_commit) {
-            commit_lookup_dir = Some(repo_dir.to_string());
+    // Now `repo_dir` is verified to contain the reviewed commit. The
+    // tracked worktree (if any) may emit `worktree_path` only when (a) it
+    // lies inside the verified card-scope repo (same git common dir) and
+    // (b) it currently has the commit checked out with a stable-clean
+    // tree.
+    if let Some(path) = tracked_worktree_path.as_deref() {
+        if worktree_path_belongs_to_repo(path, repo_dir.as_deref().unwrap_or(""))
+            && git_commit_exists(path, &reviewed_commit)
+        {
+            // #2254 item 4: retry once on transient-dirty before falling back.
+            worktree_path = probe_clean_worktree_with_transient_retry(
+                card_id,
+                "pr_tracking",
+                path,
+                &reviewed_commit,
+            )
+            .await;
+        } else {
+            tracing::warn!(
+                "[dispatch] Review dispatch for card {}: pr_tracking worktree_path '{}' does not belong to card-scope repo '{}' — ignoring as worktree source",
+                card_id,
+                path,
+                repo_dir.as_deref().unwrap_or("<unknown>")
+            );
         }
+    }
+
+    if let Some(card_repo_dir) = repo_dir.as_deref() {
         if worktree_path.is_none() {
             worktree_path = probe_clean_worktree_with_transient_retry(
                 card_id,
                 "pr_tracking repo",
-                repo_dir,
+                card_repo_dir,
                 &reviewed_commit,
             )
             .await;
@@ -2815,18 +2907,32 @@ async fn resolve_repo_head_fallback_target_pg(
         return Ok(None);
     };
 
-    // #1563 RC9: when the card already has a completed implementation
-    // dispatch with a recorded completed_commit, prefer that commit over
-    // repo HEAD and skip the dirty-state check entirely. Concurrent
-    // sub-issues can leave the main worktree contaminated, but the review
-    // target is the implementation commit — not whatever HEAD currently
-    // points at — so dirty paths in the worktree do not threaten review
+    // #1563 RC9 (refined #2254 Codex round-4): when the card already has a
+    // completed implementation dispatch with a recorded completed_commit,
+    // prefer that commit over repo HEAD. Concurrent sub-issues can leave
+    // the main worktree contaminated, but the review target is the
+    // implementation commit — not whatever HEAD currently points at — so
+    // dirty paths in the worktree do not threaten *commit-level* review
     // correctness when we have a stable commit pin.
+    //
+    // HOWEVER, emitting `worktree_path = repo_dir` without verifying that
+    // HEAD actually matches the pinned commit AND the worktree is clean
+    // would point the reviewer at potentially unrelated on-disk state
+    // (different HEAD, dirty tracked changes). Codex round-4: gate the
+    // worktree_path emission behind the stable-clean exact-HEAD probe;
+    // fall back to commit-only review when the probe fails.
     if let Some(commit) = latest_completed_dispatch_commit_for_card_pg(pool, kanban_card_id).await {
+        let probed = probe_clean_worktree_with_transient_retry(
+            kanban_card_id,
+            "repo-head completed_commit",
+            &repo_dir,
+            &commit,
+        )
+        .await;
         let mut target = DispatchExecutionTarget {
             reviewed_commit: commit,
             branch: crate::services::platform::shell::git_branch_name(&repo_dir),
-            worktree_path: Some(repo_dir.clone()),
+            worktree_path: probed,
             target_repo: None,
         };
         target.target_repo = resolve_card_target_repo_ref(pool, kanban_card_id, context).await;
@@ -3834,6 +3940,106 @@ mod pg_rereview_tests {
         assert!(
             parsed.get("worktree_path").is_none(),
             "flapping dirty must not be accepted by the retry — got {parsed}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Codex round-4 #1: a pr_tracking row with the *correct* `repo_id` but
+    /// a foreign `worktree_path` and head_sha must not silently use that
+    /// foreign worktree as the commit-lookup source. The resolver must
+    /// anchor against the card-scope `repo_dir` first.
+    #[tokio::test]
+    async fn pg_rereview_rejects_foreign_worktree_path_with_matching_repo_id() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let card_id = "card-pg-rereview-foreign-worktree";
+        let card_repo = init_test_repo();
+        let card_repo_dir = card_repo.path().to_str().unwrap().to_string();
+        // Card-scope repo has its OWN commit history. The foreign repo has
+        // a head_sha that does not exist in the card-scope repo.
+        let _card_commit = git_commit(&card_repo_dir, "fix: card-side commit");
+        let foreign_repo = init_test_repo();
+        let foreign_repo_dir = foreign_repo.path().to_str().unwrap().to_string();
+        let foreign_commit = git_commit(&foreign_repo_dir, "fix: foreign commit not in card repo");
+
+        pg_seed_card(&pool, card_id, Some(11_777), Some(&card_repo_dir)).await;
+        pg_seed_agent(&pool, "agent-fw", Some("fwd"), Some("fwa")).await;
+        // repo_id matches the card, but worktree_path + head_sha live in a
+        // foreign repo (e.g. mis-routed integration write into the same
+        // row, or a stale path left over from an old checkout).
+        sqlx::query(
+            "INSERT INTO pr_tracking (card_id, repo_id, worktree_path, branch, head_sha, state)
+             VALUES ($1, $2, $3, 'main', $4, 'wait-ci')",
+        )
+        .bind(card_id)
+        .bind(&card_repo_dir)
+        .bind(&foreign_repo_dir)
+        .bind(&foreign_commit)
+        .execute(&pool)
+        .await
+        .expect("seed pr_tracking");
+
+        let target = resolve_pr_tracking_review_target_pg(&pool, card_id, None)
+            .await
+            .expect("resolver must succeed");
+        assert!(
+            target.is_none(),
+            "foreign head_sha not present in card-scope repo must reject: {target:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Codex round-4 #3: the `latest_completed_dispatch_commit` early return
+    /// in `resolve_repo_head_fallback_target_pg` must not emit `repo_dir`
+    /// as `worktree_path` when the repo is dirty / HEAD doesn't match.
+    /// Falls back to commit-only review.
+    #[tokio::test]
+    async fn pg_repo_head_fallback_omits_worktree_path_when_completed_commit_repo_is_dirty() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let card_id = "card-pg-fallback-completed-dirty";
+        let repo = init_test_repo();
+        let repo_dir = repo.path().to_str().unwrap().to_string();
+        let tracked = repo.path().join("tracked.rs");
+        std::fs::write(&tracked, "clean\n").unwrap();
+        run_git(&repo_dir, &["add", "tracked.rs"]);
+        let completed_commit = git_commit(&repo_dir, "fix: completed");
+        // Dirty the worktree AFTER the commit. HEAD still matches, but the
+        // worktree is contaminated. Pre-round-4 the resolver would emit
+        // `worktree_path = repo_dir` here.
+        std::fs::write(&tracked, "post-commit contamination\n").unwrap();
+
+        pg_seed_card(&pool, card_id, Some(11_888), Some(&repo_dir)).await;
+        pg_seed_agent(&pool, "agent-cd", Some("cdd"), Some("cda")).await;
+        // Seed a completed implementation dispatch carrying the commit.
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, dispatch_type, status, title, context, result, updated_at)
+             VALUES
+                ($1, $2, 'implementation', 'completed', 'Done', $3, $4, NOW())",
+        )
+        .bind("dispatch-cd-1")
+        .bind(card_id)
+        .bind(json!({}).to_string())
+        .bind(json!({ "completed_commit": completed_commit }).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed completed dispatch");
+
+        let target = resolve_repo_head_fallback_target_pg(&pool, card_id, None)
+            .await
+            .expect("resolver must succeed")
+            .expect("completed_commit must still produce a commit-only target");
+        assert_eq!(target.reviewed_commit, completed_commit);
+        assert!(
+            target.worktree_path.is_none(),
+            "dirty repo must not be emitted as worktree_path: {target:?}"
         );
 
         pool.close().await;
