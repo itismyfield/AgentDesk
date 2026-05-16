@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
+import { Suspense, lazy, type CSSProperties, type ReactNode } from "react";
 import { BarChart3, Cpu, Gauge, Info, Users } from "lucide-react";
 import type { Agent, TokenAnalyticsDailyPoint, TokenAnalyticsResponse } from "../../types";
 import type { TFunction } from "../dashboard/model";
@@ -22,6 +22,8 @@ import {
   type ShareSegment,
   type SkillUsageRow,
 } from "./statsModel";
+
+const DailyTokenCompositionChart = lazy(() => import("./DailyTokenCompositionChart"));
 
 const NUMERIC_STYLE: CSSProperties = {
   fontFamily: "var(--font-mono)",
@@ -267,9 +269,6 @@ export function DailyTokenCompositionCard({
   daily: TokenAnalyticsDailyPoint[];
   series: DailySeriesDescriptor[];
 }) {
-  const maxTotal = Math.max(1, ...daily.map((day) => day.total_tokens));
-  const labelStride = Math.max(1, Math.ceil(Math.max(daily.length, 1) / 7));
-
   return (
     <article className="card">
       <CardHead
@@ -322,82 +321,21 @@ export function DailyTokenCompositionCard({
             }
           />
         ) : (
-          <div className="overflow-x-auto overflow-y-hidden">
-            <div
-              className="flex items-end gap-1 pb-1"
-              style={{ minWidth: `${Math.max(360, daily.length * 24)}px` }}
-            >
-              {daily.map((day, index) => {
-                const height =
-                  day.total_tokens > 0
-                    ? Math.max(
-                        12,
-                        Math.round((day.total_tokens / maxTotal) * 184),
-                      )
-                    : 12;
-                const compactLabel =
-                  index === 0 ||
-                  index === daily.length - 1 ||
-                  index % labelStride === 0;
-                const tooltip = [
-                  formatDateLabel(day.date, localeTag),
-                  `${formatTokens(day.total_tokens)} tokens`,
-                  `${series[0].label}: ${formatTokens(day.cache_read_tokens)}`,
-                  `${series[1].label}: ${formatTokens(day.cache_creation_tokens)}`,
-                  `${series[2].label}: ${formatTokens(day.input_tokens)}`,
-                  `${series[3].label}: ${formatTokens(day.output_tokens)}`,
-                ].join("\n");
-
-                return (
-                  <div
-                    key={day.date}
-                    className="group flex min-w-[18px] flex-1 cursor-help flex-col items-center gap-2 transition-colors hover:bg-[color-mix(in_srgb,var(--th-overlay-subtle)_70%,transparent)]"
-                    title={tooltip}
-                    aria-label={tooltip}
-                  >
-                    <div className="flex h-[188px] items-end">
-                      <div
-                        className="flex w-[16px] flex-col-reverse overflow-hidden rounded-t-[6px] border sm:w-[18px]"
-                        title={tooltip}
-                        style={{
-                          height,
-                          borderColor: "var(--th-border-subtle)",
-                          background: "var(--th-overlay-subtle)",
-                        }}
-                      >
-                        {day.total_tokens > 0 ? (
-                          series.map((item) => {
-                            const value = day[item.key];
-                            if (value <= 0) return null;
-                            return (
-                              <div
-                                key={`${day.date}-${item.key}`}
-                                style={{
-                                  height: `${(value / day.total_tokens) * 100}%`,
-                                  background: item.color,
-                                }}
-                              />
-                            );
-                          })
-                        ) : (
-                          <div
-                            className="h-full w-full"
-                            style={{ background: "var(--th-overlay-light)" }}
-                          />
-                        )}
-                      </div>
-                    </div>
-                    <span
-                      className="min-h-[1.8rem] whitespace-nowrap text-center text-[10px] leading-4"
-                      style={{ color: "var(--th-text-muted)" }}
-                    >
-                      {compactLabel ? formatCompactDate(day.date) : ""}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+          <Suspense
+            fallback={
+              <div
+                className="h-[246px] rounded-xl"
+                style={{ background: "var(--th-overlay-subtle)" }}
+              />
+            }
+          >
+            <DailyTokenCompositionChart
+              t={t}
+              daily={daily}
+              localeTag={localeTag}
+              series={series}
+            />
+          </Suspense>
         )}
       </div>
     </article>
