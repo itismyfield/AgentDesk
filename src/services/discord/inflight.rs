@@ -19,7 +19,15 @@ use crate::dispatch::Source;
 use crate::services::agent_protocol::{RuntimeHandoffKind, TaskNotificationKind};
 use crate::services::provider::ProviderKind;
 
-const INFLIGHT_STATE_VERSION: u32 = 7;
+// #2235 (follow-up to #2213): bump v7→v8. v7 added `runtime_kind` without a
+// version change, so rolling back from new→old binaries could read rows whose
+// FIFO synthesis was elided for ClaudeTui and reject recovery with a misleading
+// "input fifo path missing" notice. v8 marks the on-disk shape that ships the
+// compat-fixed `input_fifo_path` alongside ClaudeTui plus the silent-skip
+// recovery branch; old binaries continue to deserialize v8 rows via
+// `#[serde(default)]` and treat the new `runtime_kind` as legacy, so the
+// compat window is one release in each direction.
+const INFLIGHT_STATE_VERSION: u32 = 8;
 const INFLIGHT_MAX_AGE_SECS: u64 = 300; // 5 minutes
 const DRAIN_RESTART_MAX_AGE_SECS: u64 = 1800; // 30 minutes
 const HOT_SWAP_HANDOFF_MAX_AGE_SECS: u64 = 900; // 15 minutes
@@ -1044,6 +1052,88 @@ mod stall_recovery_tests {
         );
         assert!(loaded[0].input_fifo_path.is_none());
         assert!(!loaded[0].runtime_kind_for_recovery().requires_input_fifo());
+    }
+
+    /// #2235 v8 compat shape: a ClaudeTui inflight row that carries both a
+    /// stamped `runtime_kind` and a populated `input_fifo_path` must
+    /// round-trip cleanly under `INFLIGHT_STATE_VERSION` = 8 so an old
+    /// (pre-#2213) binary rolling back over the file can still satisfy its
+    /// FIFO-required recovery branch.
+    #[test]
+    fn inflight_v8_claude_tui_round_trips_with_fifo_for_rollback_compat() {
+        let temp = TempDir::new().unwrap();
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            55,
+            Some("adk-claude".to_string()),
+            7,
+            8,
+            99,
+            "hello".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            Some("/tmp/claude-fifo.input".to_string()),
+            12,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+
+        save_inflight_state_in_root(temp.path(), &state).expect("save inflight state");
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].version, super::INFLIGHT_STATE_VERSION);
+        assert_eq!(loaded[0].version, 8);
+        assert_eq!(loaded[0].runtime_kind, Some(RuntimeHandoffKind::ClaudeTui));
+        assert_eq!(
+            loaded[0].input_fifo_path.as_deref(),
+            Some("/tmp/claude-fifo.input")
+        );
+        assert_eq!(
+            loaded[0].runtime_kind_for_recovery(),
+            RuntimeHandoffKind::ClaudeTui
+        );
+    }
+
+    /// #2235: when an on-disk row has `runtime_kind = None` (legacy pre-v8
+    /// row or a future variant this binary doesn't know about) the
+    /// `runtime_kind_for_recovery` heuristic must still pick a deterministic
+    /// kind. The recovery engine layered on top of this then uses
+    /// `state.runtime_kind.is_none()` to switch the missing-FIFO branch to a
+    /// silent debug-skip — exercised here at the data-model layer.
+    #[test]
+    fn inflight_unknown_runtime_kind_falls_back_without_panic() {
+        let temp = TempDir::new().unwrap();
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            66,
+            Some("adk-claude".to_string()),
+            7,
+            8,
+            99,
+            "hello".to_string(),
+            None,
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        // Simulate the pre-v8 / unknown-runtime case: no stamped runtime_kind
+        // and no FIFO path. `runtime_kind_for_recovery` should fall back to
+        // ClaudeTui because tmux/output are present, allowing recovery to
+        // skip silently rather than synthesizing a missing-FIFO notice.
+        state.runtime_kind = None;
+        state.input_fifo_path = None;
+
+        save_inflight_state_in_root(temp.path(), &state).expect("save inflight state");
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].runtime_kind.is_none());
+        assert_eq!(
+            loaded[0].runtime_kind_for_recovery(),
+            RuntimeHandoffKind::ClaudeTui
+        );
     }
 
     #[test]

@@ -1224,7 +1224,18 @@ fn handle_watcher_runtime_handoff(
     inflight_state.runtime_kind = Some(runtime_kind);
     inflight_state.tmux_session_name = Some(tmux_session_name.clone());
     inflight_state.output_path = Some(output_path.clone());
-    inflight_state.input_fifo_path = input_fifo_path.filter(|path| !path.is_empty());
+    let mut fifo_path = input_fifo_path.filter(|path| !path.is_empty());
+    // #2235 one-release compat window: ClaudeTui rows must still ship a
+    // populated `input_fifo_path` so a rollback to an old binary can satisfy
+    // its FIFO-required recovery branch. Synthesize from the canonical
+    // per-session tmux path when the caller didn't supply one.
+    if matches!(runtime_kind, RuntimeHandoffKind::ClaudeTui) && fifo_path.is_none() {
+        let (_, synthesized_fifo) = tmux_runtime_paths(&tmux_session_name);
+        if !synthesized_fifo.is_empty() {
+            fifo_path = Some(synthesized_fifo);
+        }
+    }
+    inflight_state.input_fifo_path = fifo_path;
     inflight_state.last_offset = last_offset;
 
     // #226: Atomic claim via try_claim_watcher
@@ -2864,6 +2875,13 @@ pub(super) fn spawn_turn_bridge(
                                 }
                                 inflight_state.last_offset = last_offset;
                                 state_dirty = true;
+                                // #2235: persist immediately after stamping
+                                // runtime_kind so a bridge crash between this
+                                // assignment and the centralized state_dirty
+                                // flush cannot leave a row whose runtime_kind
+                                // contradicts its other fields (e.g. CodexTui
+                                // semantics with a stale FIFO path).
+                                let _ = save_inflight_state(&inflight_state);
                                 if done {
                                     terminal_control_drain_until = None;
                                 }
@@ -2881,6 +2899,9 @@ pub(super) fn spawn_turn_bridge(
                                 inflight_state.input_fifo_path = None;
                                 inflight_state.last_offset = last_offset;
                                 state_dirty = true;
+                                // #2235: see CodexTui arm — durable stamp of
+                                // runtime_kind across a bridge-crash window.
+                                let _ = save_inflight_state(&inflight_state);
                                 if done {
                                     terminal_control_drain_until = None;
                                 }
@@ -2904,6 +2925,11 @@ pub(super) fn spawn_turn_bridge(
                             inflight_state.input_fifo_path = None;
                             inflight_state.last_offset = last_offset;
                             state_dirty = true;
+                            // #2235: persist runtime_kind stamp immediately —
+                            // ProcessBackend has no watcher so we want the
+                            // on-disk row to reflect the new backend before
+                            // any potential bridge crash.
+                            let _ = save_inflight_state(&inflight_state);
                             if done {
                                 terminal_control_drain_until = None;
                             }

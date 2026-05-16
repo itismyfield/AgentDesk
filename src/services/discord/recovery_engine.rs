@@ -2443,7 +2443,32 @@ pub(super) async fn restore_inflight_turns(
         let input_fifo_path = match recovery_input_fifo_for_runtime(runtime_kind, input_fifo_path) {
             Ok(path) => path,
             Err(reason) => {
+                // #2235: when the inflight row was written without a stamped
+                // `runtime_kind` (legacy pre-v8 row, hook-endpoint race, or a
+                // future variant this binary doesn't recognize),
+                // `runtime_kind_for_recovery` had to guess. If the guess
+                // requires a FIFO that the row never carried, surfacing a
+                // user-visible "input fifo path missing" notice misleads the
+                // operator — the right thing is to skip recovery silently and
+                // let the next turn re-establish state from scratch.
+                let runtime_kind_was_inferred = state.runtime_kind.is_none();
                 let ts = chrono::Local::now().format("%H:%M:%S");
+                if runtime_kind_was_inferred {
+                    tracing::debug!(
+                        "  [{ts}] ↩ inflight recovery silent-skip for channel {}: runtime_kind unknown/missing on-disk, inferred {} requires FIFO but row carries none",
+                        state.channel_id,
+                        runtime_kind.as_str()
+                    );
+                    finish_recovered_turn_mailbox(
+                        shared,
+                        provider,
+                        channel_id,
+                        "recovery_runtime_kind_missing_skip",
+                    )
+                    .await;
+                    clear_inflight_state(provider, state.channel_id);
+                    continue;
+                }
                 tracing::info!(
                     "  [{ts}] ⚠ clearing inflight turn for channel {}: input fifo path missing (runtime={})",
                     state.channel_id,
