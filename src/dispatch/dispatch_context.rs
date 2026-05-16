@@ -2207,11 +2207,34 @@ async fn refresh_review_target_worktree_pg(
     context: &serde_json::Value,
     target: &DispatchExecutionTarget,
 ) -> Result<Option<DispatchExecutionTarget>> {
+    // Codex round-4 followup: every `worktree_path: Some(...)` emission
+    // below must go through the stable-clean probe. A HEAD-match alone is
+    // not enough — a later rework or concurrent writer could have dirtied
+    // the same checkout. Returning `Some(target.clone())` here used to
+    // accept a stale dirty worktree.
     if let Some(recorded) = target.worktree_path.as_deref() {
         if std::path::Path::new(recorded).is_dir()
             && worktree_head_matches_commit(recorded, &target.reviewed_commit)
         {
-            return Ok(Some(target.clone()));
+            if let Some(clean_path) = probe_clean_worktree_with_transient_retry(
+                card_id,
+                "refresh recorded",
+                recorded,
+                &target.reviewed_commit,
+            )
+            .await
+            {
+                return Ok(Some(DispatchExecutionTarget {
+                    reviewed_commit: target.reviewed_commit.clone(),
+                    branch: target.branch.clone(),
+                    worktree_path: Some(clean_path),
+                    target_repo: target.target_repo.clone(),
+                }));
+            }
+            // Recorded path is HEAD-matching but unstable / dirty. Don't
+            // accept it; let the issue-worktree / repo-dir fallbacks run
+            // (they will themselves probe). If they also fail we emit a
+            // commit-only target below.
         }
     }
 
@@ -2238,6 +2261,18 @@ async fn refresh_review_target_worktree_pg(
         resolve_card_worktree(pool, card_id, Some(resolve_context.as_ref())).await?
     {
         if worktree_head_matches_commit(&wt_path, &target.reviewed_commit) {
+            // Codex round-4 followup: gate this worktree_path emission
+            // behind the same stable-clean probe used by the pr_tracking
+            // resolver. HEAD-match without a cleanliness check would let
+            // a parallel writer's dirty state leak into the review.
+            let clean_wt =
+                probe_clean_worktree_with_transient_retry(
+                    card_id,
+                    "refresh active worktree",
+                    &wt_path,
+                    &target.reviewed_commit,
+                )
+                .await;
             let branch = resolve_review_target_branch_pg(
                 pool,
                 card_id,
@@ -2247,16 +2282,25 @@ async fn refresh_review_target_worktree_pg(
             )
             .await
             .or(Some(wt_branch));
-            tracing::info!(
-                "[dispatch] Review dispatch for card {}: refreshed worktree path to active issue worktree '{}' for commit {}",
-                card_id,
-                wt_path,
-                &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
-            );
+            if clean_wt.is_some() {
+                tracing::info!(
+                    "[dispatch] Review dispatch for card {}: refreshed worktree path to active issue worktree '{}' for commit {}",
+                    card_id,
+                    wt_path,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                );
+            } else {
+                tracing::warn!(
+                    "[dispatch] Review dispatch for card {}: active issue worktree '{}' failed stable-clean probe — emitting commit-only target for {}",
+                    card_id,
+                    wt_path,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                );
+            }
             return Ok(Some(DispatchExecutionTarget {
                 reviewed_commit: target.reviewed_commit.clone(),
                 branch,
-                worktree_path: Some(wt_path),
+                worktree_path: clean_wt,
                 target_repo: target.target_repo.clone(),
             }));
         }
@@ -2290,6 +2334,15 @@ async fn refresh_review_target_worktree_pg(
 
     if let Some(repo_dir) = fallback_repo_dir {
         if worktree_head_matches_commit(&repo_dir, &target.reviewed_commit) {
+            // Codex round-4 followup: probe before emitting the repo dir
+            // as worktree_path.
+            let clean_repo = probe_clean_worktree_with_transient_retry(
+                card_id,
+                "refresh fallback repo_dir",
+                &repo_dir,
+                &target.reviewed_commit,
+            )
+            .await;
             let branch = resolve_review_target_branch_pg(
                 pool,
                 card_id,
@@ -2298,16 +2351,25 @@ async fn refresh_review_target_worktree_pg(
                 target.branch.as_deref(),
             )
             .await;
-            tracing::info!(
-                "[dispatch] Review dispatch for card {}: falling back to repo dir '{}' for commit {} after stale worktree cleanup",
-                card_id,
-                repo_dir,
-                &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
-            );
+            if clean_repo.is_some() {
+                tracing::info!(
+                    "[dispatch] Review dispatch for card {}: falling back to repo dir '{}' for commit {} after stale worktree cleanup",
+                    card_id,
+                    repo_dir,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                );
+            } else {
+                tracing::warn!(
+                    "[dispatch] Review dispatch for card {}: fallback repo dir '{}' failed stable-clean probe — emitting commit-only target for {}",
+                    card_id,
+                    repo_dir,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                );
+            }
             return Ok(Some(DispatchExecutionTarget {
                 reviewed_commit: target.reviewed_commit.clone(),
                 branch,
-                worktree_path: Some(repo_dir),
+                worktree_path: clean_repo,
                 target_repo: target.target_repo.clone(),
             }));
         }
@@ -3988,6 +4050,76 @@ mod pg_rereview_tests {
         assert!(
             target.is_none(),
             "foreign head_sha not present in card-scope repo must reject: {target:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Codex round-4 followup: `refresh_review_target_worktree_pg` must
+    /// also gate every `worktree_path: Some(...)` emission behind the
+    /// stable-clean probe. A latest-work target with HEAD-match but dirty
+    /// tracked files used to be accepted as-is, exposing the reviewer to
+    /// uncommitted state.
+    #[tokio::test]
+    async fn pg_refresh_review_target_omits_worktree_path_when_recorded_path_is_dirty() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let card_id = "card-pg-refresh-dirty-recorded";
+        let repo = init_test_repo();
+        let repo_dir = repo.path().to_str().unwrap().to_string();
+        let tracked = repo.path().join("tracked.rs");
+        std::fs::write(&tracked, "clean\n").unwrap();
+        run_git(&repo_dir, &["add", "tracked.rs"]);
+        // Subject must reference the card issue so commit_belongs_to_card_issue_pg accepts it.
+        let work_commit = git_commit(&repo_dir, "fix: latest work (#11999)");
+        // Dirty AFTER the commit — HEAD still matches, tree contaminated.
+        std::fs::write(&tracked, "post-commit drift\n").unwrap();
+
+        pg_seed_card(&pool, card_id, Some(11_999), Some(&repo_dir)).await;
+        pg_seed_agent(&pool, "agent-rd", Some("rdd"), Some("rda")).await;
+        // Seed a completed implementation dispatch with worktree_path set
+        // to the dirty repo.
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, dispatch_type, status, title, context, result, updated_at)
+             VALUES
+                ($1, $2, 'implementation', 'completed', 'Done', $3, $4, NOW())",
+        )
+        .bind("dispatch-refresh-1")
+        .bind(card_id)
+        .bind(json!({}).to_string())
+        .bind(
+            json!({
+                "completed_commit": work_commit,
+                "worktree_path": repo_dir,
+                "target_repo": repo_dir,
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .expect("seed completed dispatch");
+
+        // Build review context with rereview=false so the latest-work
+        // path (with `refresh_review_target_worktree_pg`) is the one
+        // exercised.
+        let pg_context = build_review_context(
+            &pool,
+            card_id,
+            "agent-rd",
+            &json!({}),
+            ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
+        )
+        .await
+        .expect("review context build must succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&pg_context).unwrap();
+        assert_eq!(parsed["reviewed_commit"], work_commit);
+        assert!(
+            parsed.get("worktree_path").is_none(),
+            "dirty recorded worktree must not be re-emitted: {parsed}"
         );
 
         pool.close().await;
