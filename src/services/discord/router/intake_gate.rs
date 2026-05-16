@@ -103,9 +103,14 @@ pub(super) enum DurableAnnounceProbe {
     /// drop the message and emit `voice_announce_durable_miss` instead
     /// of falling through to ordinary text intake.
     Miss,
-    /// Pool unavailable or query error — treat as "not a voice
-    /// announce" and let the rest of the gate decide.
-    Unavailable,
+    /// No pg pool configured at all (single-node dev). Caller may
+    /// fall through to ordinary intake — there is no durable backing
+    /// to fail closed on.
+    NoPool,
+    /// Pg pool IS configured but the probe query errored. Caller MUST
+    /// fail closed and drop the message — proceeding to non-voice
+    /// gates would mis-route a voice announce as ordinary text.
+    QueryError,
 }
 
 async fn probe_durable_voice_transcript_announcement(
@@ -114,7 +119,7 @@ async fn probe_durable_voice_transcript_announcement(
     channel_id: serenity::ChannelId,
 ) -> DurableAnnounceProbe {
     let Some(pool) = pg_pool else {
-        return DurableAnnounceProbe::Unavailable;
+        return DurableAnnounceProbe::NoPool;
     };
 
     // Discord can dispatch the create event before the producing
@@ -142,9 +147,9 @@ async fn probe_durable_voice_transcript_announcement(
                     error = %error,
                     channel_id = channel_id.get(),
                     message_id = message_id.get(),
-                    "failed to load durable voice transcript announcement metadata"
+                    "failed to load durable voice transcript announcement metadata — failing closed"
                 );
-                return DurableAnnounceProbe::Unavailable;
+                return DurableAnnounceProbe::QueryError;
             }
         }
     }
@@ -1377,24 +1382,39 @@ pub(in crate::services::discord) async fn handle_event(
                 )
                 .await
             } else {
-                DurableAnnounceProbe::Unavailable
+                DurableAnnounceProbe::NoPool
             };
-            // #2209 finding #1: when the durable probe expires without finding
-            // a row on a high-confidence candidate, do NOT silently fall
-            // through to ordinary text intake — the regression would otherwise
-            // surface as the bot replying to its own announce message. Drop
-            // the message and emit a structured warn so the producer-side
-            // failure is observable.
-            if matches!(durable_probe, DurableAnnounceProbe::Miss) {
-                tracing::warn!(
-                    event = "voice_announce_durable_miss",
-                    channel_id = channel_id.get(),
-                    effective_channel_id = effective_channel_id.get(),
-                    message_id = new_message.id.get(),
-                    author_id = user_id.get(),
-                    "announce-bot voice transcript message had no durable metadata after probe cap — dropping rather than routing as ordinary text"
-                );
-                return Ok(());
+            // #2209 finding #1 + v5 review: for a high-confidence visible
+            // voice-announce candidate, both `Miss` (probe expired) and
+            // `QueryError` (DB probe failed) must drop the message rather
+            // than fall through to ordinary text intake. Otherwise the
+            // mention guard, dispatch-thread guard, mailbox-queue,
+            // reconcile, drain, and idle-backlog gates downstream would
+            // mis-route or re-queue it as a plain bot text message.
+            match durable_probe {
+                DurableAnnounceProbe::Miss => {
+                    tracing::warn!(
+                        event = "voice_announce_durable_miss",
+                        channel_id = channel_id.get(),
+                        effective_channel_id = effective_channel_id.get(),
+                        message_id = new_message.id.get(),
+                        author_id = user_id.get(),
+                        "announce-bot voice transcript message had no durable metadata after probe cap — dropping rather than routing as ordinary text"
+                    );
+                    return Ok(());
+                }
+                DurableAnnounceProbe::QueryError => {
+                    tracing::warn!(
+                        event = "voice_announce_durable_probe_query_error",
+                        channel_id = channel_id.get(),
+                        effective_channel_id = effective_channel_id.get(),
+                        message_id = new_message.id.get(),
+                        author_id = user_id.get(),
+                        "durable announce-meta probe query errored on a visible voice-announce candidate — failing closed, dropping rather than routing as ordinary text"
+                    );
+                    return Ok(());
+                }
+                DurableAnnounceProbe::Found | DurableAnnounceProbe::NoPool => {}
             }
             // #2266 + #2209: feed downstream queue paths the typed payload
             // resolved from whichever layer hit (local store → body parse →

@@ -2439,6 +2439,35 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
     }
     let is_voice_announcement = voice_announcement.is_some();
+    // KNOWN GAP (#2209 follow-up — Codex v6 finding):
+    // The atomic durable claim below runs BEFORE
+    // `mailbox_try_start_turn_with_terminal_marker_cleanup`. When the
+    // channel is busy and the race-loss path enqueues this turn as a
+    // plain `Intervention` (see `build_race_requeued_intervention`),
+    // the queued payload carries only the rewritten transcript text —
+    // not the full `VoiceTranscriptAnnouncement` (utterance_id,
+    // language, verbose_progress, started_at, samples_written) or
+    // `Source::Voice`. By the time the queued message dispatches, the
+    // durable row is already consumed, so the dispatched turn runs as
+    // ordinary text without voice metadata.
+    //
+    // Resolving this cleanly requires either:
+    //   (a) re-INSERTing the announcement into the durable table when
+    //       `mailbox_try_start_turn` returns `false`, restoring the
+    //       row so the requeued dispatch can peek+claim again, OR
+    //   (b) embedding the serialized `VoiceTranscriptAnnouncement` in
+    //       the queued `Intervention` payload so requeued dispatch
+    //       can re-hydrate metadata without touching the durable table.
+    //
+    // (a) is the smaller change but creates a transient window where a
+    // peer worker could re-claim before our requeue dispatches. (b)
+    // touches the `Intervention` struct and several encoders. Tracking
+    // as a follow-up to keep this PR scoped to the three original
+    // adversarial-review findings + the directly induced fail-closed
+    // and ordering corrections. The current behavior is a graceful
+    // degradation (voice turn runs as plain text on a busy channel),
+    // not a correctness violation or duplicate-dispatch race.
+    //
     // #2209 v3 review — the atomic durable claim is the FIRST
     // side-effectful gate for voice-announce intake. We claim
     // unconditionally for any voice-announce intake (durable peek
