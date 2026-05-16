@@ -586,6 +586,106 @@ pub(crate) fn commit_belongs_to_card_issue(
     false
 }
 
+/// #2341 / #2200 sub-3 (carried forward from PR #2336 HIGH 1): tri-state
+/// scope verification. The bool helper above collapses three distinct
+/// outcomes into a single `false`, which is safe for the in-scope dispute
+/// path (where `false` means "fall back to a stricter check") but unsafe for
+/// the out-of-scope close path — there, `false` was being treated as "proven
+/// out-of-scope, allow close". The `Unknown` arm covers transient repo/git
+/// failures, missing repo_dir, and unreachable commits. Out-of-scope close
+/// must fail-closed on `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeCheck {
+    /// The commit's subject references this card's issue number, or no
+    /// issue number is recorded for the card (historical default-true).
+    InScope,
+    /// The commit was successfully inspected and its subject does NOT
+    /// reference this card's issue. The only outcome that affirmatively
+    /// proves out-of-scope.
+    OutOfScope,
+    /// Scope verification could not complete (repo dir unavailable, git log
+    /// failed, commit not reachable, etc.). Callers on the out-of-scope
+    /// close path MUST treat this as a refusal.
+    Unknown,
+}
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(crate) fn commit_belongs_to_card_issue_tri(
+    db: &Db,
+    card_id: &str,
+    commit_sha: &str,
+    target_repo: Option<&str>,
+) -> ScopeCheck {
+    let issue_number = load_card_issue_repo(db, card_id).and_then(|(issue_number, _)| issue_number);
+    let Some(issue_number) = issue_number else {
+        return ScopeCheck::InScope;
+    };
+    let repo_dir = match crate::services::platform::shell::resolve_repo_dir_for_target(target_repo)
+        .or_else(|_| {
+            resolve_card_repo_dir(db, card_id, "validate reviewed commit")
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(Some(repo_dir)) => repo_dir,
+        Ok(None) => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue_tri: repo dir unavailable for card {} — Unknown",
+                card_id
+            );
+            return ScopeCheck::Unknown;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue_tri: {} — Unknown",
+                err
+            );
+            return ScopeCheck::Unknown;
+        }
+    };
+    let output = match GitCommand::new()
+        .repo(&repo_dir)
+        .args(["log", "--format=%s", "-n", "1", commit_sha])
+        .run_output()
+    {
+        Ok(output) => output,
+        Err(err) if err.status_code().is_some() => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue_tri: commit {} not reachable: {} — Unknown",
+                &commit_sha[..8.min(commit_sha.len())],
+                err
+            );
+            return ScopeCheck::Unknown;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue_tri: git log failed: {} — Unknown",
+                err
+            );
+            return ScopeCheck::Unknown;
+        }
+    };
+    let subject = String::from_utf8_lossy(&output.stdout);
+    if commit_subject_references_issue(&subject, issue_number) {
+        ScopeCheck::InScope
+    } else {
+        ScopeCheck::OutOfScope
+    }
+}
+
+#[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+pub(crate) fn commit_belongs_to_card_issue_tri(
+    _db: &Db,
+    card_id: &str,
+    commit_sha: &str,
+    _target_repo: Option<&str>,
+) -> ScopeCheck {
+    tracing::warn!(
+        "[dispatch] sqlite tri-state scope check disabled for card {} commit {}; postgres pool required — Unknown",
+        card_id,
+        &commit_sha[..8.min(commit_sha.len())]
+    );
+    ScopeCheck::Unknown
+}
+
 fn git_commit_exists(dir: &str, commit_sha: &str) -> bool {
     GitCommand::new()
         .repo(dir)
@@ -2032,6 +2132,84 @@ pub(crate) async fn commit_belongs_to_card_issue_pg(
     };
     let subject = String::from_utf8_lossy(&output.stdout);
     commit_subject_references_issue(&subject, issue_number)
+}
+
+/// #2341 / #2200 sub-3 (carried forward from PR #2336 HIGH 1): tri-state
+/// scope verification (Postgres). Caller on the out-of-scope close path MUST
+/// treat `Unknown` as a refusal (503) — a transient repo/git failure must
+/// never terminalize a card.
+pub(crate) async fn commit_belongs_to_card_issue_pg_tri(
+    pool: &PgPool,
+    card_id: &str,
+    commit_sha: &str,
+    target_repo: Option<&str>,
+) -> ScopeCheck {
+    let issue_number = load_card_issue_repo_pg(pool, card_id)
+        .await
+        .and_then(|(issue_number, _)| issue_number);
+    let Some(issue_number) = issue_number else {
+        // Preserve historical semantic: no issue to verify against → InScope
+        // (the bool helper returns true here). We cannot affirm out-of-scope
+        // without an issue number to compare against.
+        return ScopeCheck::InScope;
+    };
+    let repo_dir_result =
+        match crate::services::platform::shell::resolve_repo_dir_for_target(target_repo) {
+            Ok(value) => Ok(value),
+            Err(_) => resolve_card_repo_dir_with_context_pg(
+                pool,
+                card_id,
+                None,
+                "validate reviewed commit",
+            )
+            .await
+            .map_err(|e| e.to_string()),
+        };
+    let repo_dir = match repo_dir_result {
+        Ok(Some(repo_dir)) => repo_dir,
+        Ok(None) => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue_tri: repo dir unavailable for card {} — Unknown",
+                card_id
+            );
+            return ScopeCheck::Unknown;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue_tri: {} — Unknown",
+                err
+            );
+            return ScopeCheck::Unknown;
+        }
+    };
+    let output = match GitCommand::new()
+        .repo(&repo_dir)
+        .args(["log", "--format=%s", "-n", "1", commit_sha])
+        .run_output()
+    {
+        Ok(output) => output,
+        Err(err) if err.status_code().is_some() => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue_tri: commit {} not reachable: {} — Unknown",
+                &commit_sha[..8.min(commit_sha.len())],
+                err
+            );
+            return ScopeCheck::Unknown;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue_tri: git log failed: {} — Unknown",
+                err
+            );
+            return ScopeCheck::Unknown;
+        }
+    };
+    let subject = String::from_utf8_lossy(&output.stdout);
+    if commit_subject_references_issue(&subject, issue_number) {
+        ScopeCheck::InScope
+    } else {
+        ScopeCheck::OutOfScope
+    }
 }
 
 async fn refresh_review_target_worktree_pg(

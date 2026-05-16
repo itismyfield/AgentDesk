@@ -6946,6 +6946,7 @@ mod tests {
                 comment: None,
                 commit_sha: None,
                 dispatch_id: Some("rd-195".to_string()),
+                out_of_scope: None,
             }),
         )
         .await;
@@ -7072,6 +7073,7 @@ mod tests {
                 comment: None,
                 commit_sha: None,
                 dispatch_id: Some("rd-339-skip".to_string()),
+                out_of_scope: None,
             }),
         )
         .await;
@@ -7152,6 +7154,7 @@ mod tests {
                 comment: None,
                 commit_sha: None,
                 dispatch_id: Some("rd-339-no-agent".to_string()),
+                out_of_scope: None,
             }),
         )
         .await;
