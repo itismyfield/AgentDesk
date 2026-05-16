@@ -90,9 +90,29 @@ fn json_any_true_flag(value: &serde_json::Value, key: &str) -> bool {
     false
 }
 
+fn is_voice_background_handoff_prompt(text: &str) -> bool {
+    let Some(first_line) = text.lines().map(str::trim).find(|line| !line.is_empty()) else {
+        return false;
+    };
+    first_line.starts_with("Voice foreground handed this request to the background agent.")
+        || first_line.starts_with("보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.")
+}
+
+fn voice_background_completion_target(
+    mapped_voice_channel_id: Option<ChannelId>,
+    user_text: &str,
+) -> Option<ChannelId> {
+    let voice_channel_id = mapped_voice_channel_id?;
+    is_voice_background_handoff_prompt(user_text).then_some(voice_channel_id)
+}
+
 #[cfg(test)]
 mod dispatch_kind_tests {
-    use super::classify_turn_finished_dispatch_kind;
+    use super::{
+        classify_turn_finished_dispatch_kind, is_voice_background_handoff_prompt,
+        voice_background_completion_target,
+    };
+    use poise::serenity_prelude::ChannelId;
 
     #[test]
     fn marks_auto_queue_context() {
@@ -140,6 +160,37 @@ mod dispatch_kind_tests {
         assert_eq!(classify_turn_finished_dispatch_kind(None, None), None);
         assert_eq!(
             classify_turn_finished_dispatch_kind(Some(r#"{"auto_queue":false}"#), Some("review")),
+            None
+        );
+    }
+
+    #[test]
+    fn recognizes_voice_background_handoff_prompt() {
+        assert!(is_voice_background_handoff_prompt(
+            "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.\n\n이관 요약: 로그 확인"
+        ));
+        assert!(is_voice_background_handoff_prompt(
+            "Voice foreground handed this request to the background agent.\n\nHandoff summary: check logs"
+        ));
+        assert!(!is_voice_background_handoff_prompt("일반 텍스트 요청"));
+    }
+
+    #[test]
+    fn background_completion_target_requires_mapping_and_handoff_prompt() {
+        let mapped = Some(ChannelId::new(300));
+        assert_eq!(voice_background_completion_target(mapped, "plain"), None);
+        assert_eq!(
+            voice_background_completion_target(
+                mapped,
+                "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다."
+            ),
+            Some(ChannelId::new(300))
+        );
+        assert_eq!(
+            voice_background_completion_target(
+                None,
+                "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다."
+            ),
             None
         );
     }
@@ -3799,21 +3850,57 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
-            if terminal_delivery_committed && inflight_state.source == crate::dispatch::Source::Voice
-            {
-                if !inflight_state.silent_turn {
+            if terminal_delivery_committed {
+                let mapped_voice_channel_id = shared_owned
+                    .voice_barge_in
+                    .voice_channel_for_background(channel_id)
+                    .await;
+                if let Some(voice_channel_id) = voice_background_completion_target(
+                    mapped_voice_channel_id,
+                    &user_text_owned,
+                ) {
+                    if !inflight_state.silent_turn {
+                        let voice_barge_in = shared_owned.voice_barge_in.clone();
+                        let shared_for_voice = shared_owned.clone();
+                        let summary_source = spoken_delivery_response.clone();
+                        let background_channel_id = channel_id;
+                        let failed = cancelled
+                            || is_prompt_too_long
+                            || transport_error
+                            || recovery_retry
+                            || resume_failure_detected;
+                        tokio::spawn(async move {
+                            voice_barge_in
+                                .speak_voice_background_completion_summary(
+                                    &shared_for_voice,
+                                    voice_channel_id,
+                                    background_channel_id,
+                                    &summary_source,
+                                    failed,
+                                )
+                                .await;
+                            voice_barge_in.publish_progress(voice_channel_id, "agent:done");
+                        });
+                    } else {
+                        shared_owned
+                            .voice_barge_in
+                            .publish_progress(voice_channel_id, "agent:done");
+                    }
+                } else if inflight_state.source == crate::dispatch::Source::Voice {
+                    if !inflight_state.silent_turn {
+                        shared_owned
+                            .voice_barge_in
+                            .spawn_spoken_result_playback(
+                                &shared_owned,
+                                channel_id,
+                                &spoken_delivery_response,
+                            )
+                            .await;
+                    }
                     shared_owned
                         .voice_barge_in
-                        .spawn_spoken_result_playback(
-                            &shared_owned,
-                            channel_id,
-                            &spoken_delivery_response,
-                        )
-                        .await;
+                        .publish_progress(channel_id, "agent:done");
                 }
-                shared_owned
-                    .voice_barge_in
-                    .publish_progress(channel_id, "agent:done");
             }
 
             if should_complete_work_dispatch_after_terminal_delivery(
