@@ -1504,10 +1504,7 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
             .and_then(|ctx| ctx.get("target_repo"))
             .and_then(|value| value.as_str())
         {
-            decision_context.insert(
-                "target_repo".to_string(),
-                serde_json::json!(target_repo),
-            );
+            decision_context.insert("target_repo".to_string(), serde_json::json!(target_repo));
         }
 
         return match create_review_decision_followup_dispatch(

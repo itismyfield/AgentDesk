@@ -2233,11 +2233,12 @@ async fn redesign_dispute_oos_with_completed_review_closes_scope_mismatch() {
     assert_eq!(review_status, None);
     assert_eq!(rd_status, "completed");
     let rd_result_json: serde_json::Value = serde_json::from_str(&rd_result).unwrap();
-    assert_eq!(rd_result_json["outcome"].as_str().unwrap(), "scope_mismatch_closed");
+    assert_eq!(
+        rd_result_json["outcome"].as_str().unwrap(),
+        "scope_mismatch_closed"
+    );
     assert!(
-        rd_result_json
-            .get("lifecycle_generation")
-            .is_some(),
+        rd_result_json.get("lifecycle_generation").is_some(),
         "lifecycle generation must be embedded in result for idempotent retry"
     );
     assert_eq!(
@@ -2496,14 +2497,23 @@ async fn redesign_dispute_oos_idempotent_retry_returns_200_already_finalized() {
         "idempotent retry must return 200 already_finalized; body = {:?}",
         body2.0
     );
-    assert_eq!(body2.0["outcome"].as_str().unwrap(), "scope_mismatch_closed");
+    assert_eq!(
+        body2.0["outcome"].as_str().unwrap(),
+        "scope_mismatch_closed"
+    );
     assert_eq!(
         body2.0["pending_dispatch_id"].as_str().unwrap(),
         "rd-2341-idem-pending"
     );
     assert!(
-        body2.0["message"].as_str().unwrap().contains("already finalized")
-            || body2.0["message"].as_str().unwrap().contains("already_finalized")
+        body2.0["message"]
+            .as_str()
+            .unwrap()
+            .contains("already finalized")
+            || body2.0["message"]
+                .as_str()
+                .unwrap()
+                .contains("already_finalized")
             || body2.0["message"].as_str().unwrap().contains("idempotent"),
         "must indicate idempotent already-finalized response; got: {}",
         body2.0["message"].as_str().unwrap_or("(missing message)")
@@ -2757,9 +2767,8 @@ async fn redesign_dispute_oos_unresolved_source_id_fails_closed() {
         // commit_sha. This is what latest-completed-fallback would bind to.
         // If we silently fell back, the close would proceed (commit is
         // out-of-scope). Failing closed prevents that.
-        let context_json = format!(
-            r#"{{"reviewed_commit":"{commit_sha}","target_repo":"{repo_dir_path}"}}"#
-        );
+        let context_json =
+            format!(r#"{{"reviewed_commit":"{commit_sha}","target_repo":"{repo_dir_path}"}}"#);
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, \
              title, context, completed_at, created_at, updated_at) \
@@ -2823,6 +2832,12 @@ async fn redesign_dispute_oos_unresolved_source_id_fails_closed() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(card_status, "review", "card must be unchanged on fail-closed");
-    assert_eq!(rd_status, "pending", "dispatch must be unchanged on fail-closed");
+    assert_eq!(
+        card_status, "review",
+        "card must be unchanged on fail-closed"
+    );
+    assert_eq!(
+        rd_status, "pending",
+        "dispatch must be unchanged on fail-closed"
+    );
 }

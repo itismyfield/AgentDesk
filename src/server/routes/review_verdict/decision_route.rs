@@ -1936,8 +1936,7 @@ pub async fn submit_review_decision(
                     // dispatch-scope authorization; lifecycle proves the
                     // card is the same generation we closed against.
                     if let Some(expected) = prior.lifecycle_generation.clone() {
-                        let actual =
-                            card_lifecycle_snapshot_pg_first(&state, &body.card_id).await;
+                        let actual = card_lifecycle_snapshot_pg_first(&state, &body.card_id).await;
                         if actual != expected {
                             tracing::warn!(
                                 card_id = %body.card_id,
@@ -1971,8 +1970,7 @@ pub async fn submit_review_decision(
                         "[review-decision] #2341 resuming partial-close: dispatch was scope_mismatch_closed but card never reached terminal"
                     );
 
-                    let stale_ids =
-                        stale_review_dispatch_ids_pg_first(&state, &body.card_id).await;
+                    let stale_ids = stale_review_dispatch_ids_pg_first(&state, &body.card_id).await;
                     let mut cancelled_stale = 0usize;
                     for stale_id in &stale_ids {
                         if cancel_dispatch_pg_first(
@@ -2025,8 +2023,7 @@ pub async fn submit_review_decision(
                         }
                     }
 
-                    if let Err(error) =
-                        dismiss_review_cleanup_pg_first(&state, &body.card_id).await
+                    if let Err(error) = dismiss_review_cleanup_pg_first(&state, &body.card_id).await
                     {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2640,7 +2637,9 @@ pub async fn submit_review_decision(
                 // 1. Caller must prove ownership of the pending review-decision
                 //    dispatch via `dispatch_id` matching `pending_rd_id`.
                 let rd_id = match (body.dispatch_id.as_deref(), pending_rd_id.as_deref()) {
-                    (Some(submitted), Some(pending)) if submitted == pending => submitted.to_string(),
+                    (Some(submitted), Some(pending)) if submitted == pending => {
+                        submitted.to_string()
+                    }
                     (Some(submitted), Some(pending)) => {
                         return (
                             StatusCode::CONFLICT,
@@ -2894,8 +2893,7 @@ pub async fn submit_review_decision(
                 //    cancel touches multiple rows + may dispatch outbox
                 //    messages. Safe to run now: the post-tx lifecycle
                 //    re-check above guaranteed no fresh generation exists.
-                let stale_ids =
-                    stale_review_dispatch_ids_pg_first(&state, &body.card_id).await;
+                let stale_ids = stale_review_dispatch_ids_pg_first(&state, &body.card_id).await;
                 let mut cancelled_stale = 0usize;
                 for stale_id in &stale_ids {
                     if cancel_dispatch_pg_first(&state, stale_id, Some("scope_mismatch_closed"))
