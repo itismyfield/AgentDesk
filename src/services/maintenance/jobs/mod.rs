@@ -27,6 +27,11 @@
 //!   * `reconcile.zombie_resources` — hourly (#1076 / 905-7). Sweeps stale
 //!     inflight state files, unrelocated `discord_uploads/*`, and any other
 //!     zombie resources (see `crate::reconcile::reconcile_zombie_resources`).
+//!   * `voice.turn_link_gc` — hourly (#2362 / #2164 Voice A). Deletes
+//!     terminal `voice_turn_link` rows older than 24h. Postgres-only;
+//!     skipped if no pool. Active and cancelled rows are intentionally
+//!     preserved so long-lived background turns retain reverse-lookup
+//!     tombstones until they themselves transition to terminal.
 //!
 //! Log rotation for `dcserver.stdout.log` / `dcserver.stderr.log` is intentionally
 //! deferred to a follow-up — it requires wiring `tracing-appender::rolling` into
@@ -95,11 +100,19 @@ pub fn spawn_storage_maintenance_jobs(pg_pool: Option<PgPool>) {
     // so it runs through the production `worker_registry::MaintenanceScheduler`
     // path that owns persistent state in PG; no dynamic registration needed.
     match pg_pool {
-        Some(pool) => register_db_retention(pool),
+        Some(pool) => {
+            register_db_retention(pool.clone());
+            // Hourly voice_turn_link terminal-row GC (#2362 / #2164 Voice A).
+            // Postgres-only; active and cancelled rows are intentionally
+            // preserved so long-lived background turns (24h+ runs) keep
+            // their reverse-lookup tombstones until they finish.
+            register_voice_turn_link_gc(pool);
+        }
         None => {
             tracing::info!(
                 "[maintenance] storage.db_retention skipped (postgres pool unavailable)"
             );
+            tracing::info!("[maintenance] voice.turn_link_gc skipped (postgres pool unavailable)");
         }
     }
 
@@ -126,6 +139,43 @@ pub fn spawn_storage_maintenance_jobs(pg_pool: Option<PgPool>) {
         || {
             Box::pin(async {
                 let _stats = crate::reconcile::reconcile_zombie_resources().await;
+                Ok(())
+            })
+        },
+    );
+}
+
+/// Retention horizon for `voice_turn_link` terminal rows. 24h is long
+/// enough that any reasonable late-arriving barge-in / cancel / completion
+/// signal still finds the row; anything older is firmly past the
+/// observability window. Active and cancelled rows are *not* swept on
+/// this cadence — they survive until they themselves transition to
+/// terminal, which protects long-lived background turns (24h+).
+pub const VOICE_TURN_LINK_GC_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Cadence for the `voice_turn_link` GC sweep. Hourly mirrors the
+/// existing zombie/reconcile cadence and is cheap because the sweep is a
+/// single indexed DELETE.
+pub const VOICE_TURN_LINK_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+fn register_voice_turn_link_gc(pool: PgPool) {
+    register_maintenance_job(
+        "voice.turn_link_gc",
+        VOICE_TURN_LINK_GC_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            Box::pin(async move {
+                let retention_seconds = VOICE_TURN_LINK_GC_RETENTION.as_secs() as i64;
+                let cutoff = chrono::Utc::now() - chrono::Duration::seconds(retention_seconds);
+                let deleted =
+                    crate::voice::turn_link::gc_terminal_voice_turn_links_pg(&pool, cutoff).await?;
+                if deleted > 0 {
+                    tracing::info!(
+                        deleted,
+                        retention_secs = retention_seconds,
+                        "[maintenance] voice.turn_link_gc swept terminal rows"
+                    );
+                }
                 Ok(())
             })
         },
