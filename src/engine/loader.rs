@@ -848,8 +848,8 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let guard = start_hot_reload(tmp.path().to_path_buf(), ctx, store)
-            .expect("start hot reload");
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
 
         // Dropping the guard must:
         //   1. signal stop,
@@ -879,8 +879,8 @@ mod tests {
 
         // start_hot_reload installs the interrupt handler tied to its stop
         // flag. We extract `stop` indirectly by exercising `shutdown`.
-        let mut guard = start_hot_reload(tmp.path().to_path_buf(), ctx, store)
-            .expect("start hot reload");
+        let mut guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
 
         // Trigger shutdown so the interrupt handler returns true.
         guard.shutdown();
@@ -925,8 +925,8 @@ mod tests {
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        let mut guard = start_hot_reload(tmp.path().to_path_buf(), ctx, store)
-            .expect("start hot reload");
+        let mut guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
 
         // Calling shutdown explicitly then dropping must not panic, even
         // when the implicit Drop runs a second shutdown.

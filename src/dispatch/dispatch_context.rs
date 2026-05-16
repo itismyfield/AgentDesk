@@ -585,7 +585,8 @@ fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
             return true;
         }
     }
-    if trimmed.starts_with(&format!("[{}]", needle)) || trimmed.starts_with(&format!("({})", needle))
+    if trimmed.starts_with(&format!("[{}]", needle))
+        || trimmed.starts_with(&format!("({})", needle))
     {
         return true;
     }
@@ -2995,7 +2996,10 @@ mod issue_reference_tests {
         assert!(commit_subject_references_issue("feat: foo (#1765)", 1765));
         // A single-reference subject where N is the only `#<digits>` token
         // is accepted regardless of position (e.g. trailing "refs #N").
-        assert!(commit_subject_references_issue("fix bug — refs #1765", 1765));
+        assert!(commit_subject_references_issue(
+            "fix bug — refs #1765",
+            1765
+        ));
     }
 
     #[test]
@@ -3039,16 +3043,16 @@ mod issue_reference_tests {
         assert!(!commit_subject_references_issue("#5230 unrelated", 523));
         assert!(!commit_subject_references_issue("foo#523 noboundary", 523));
         assert!(!commit_subject_references_issue("#523_unrelated body", 523));
-        assert!(!commit_subject_references_issue("issue_#523 still bad", 523));
+        assert!(!commit_subject_references_issue(
+            "issue_#523 still bad",
+            523
+        ));
 
         // Negative — Codex round-1 finding: a multi-reference subject where
         // 523 is NOT in a canonical position must NOT be treated as proof of
         // ownership. The leading `#999` makes it ambiguous; another issue's
         // commit could borrow this subject when fixing both.
-        assert!(!commit_subject_references_issue(
-            "fix #999, refs #523",
-            523
-        ));
+        assert!(!commit_subject_references_issue("fix #999, refs #523", 523));
         assert!(!commit_subject_references_issue(
             "chore: #100 #200 #523 #999 done",
             523
