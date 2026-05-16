@@ -838,6 +838,63 @@ mod simple_cancel_watcher_tests {
         watcher.disarm();
     }
 
+    /// Issue #2335 (d): the Claude simple-cancel path now arms the watcher
+    /// BEFORE writing to stdin. This regression test mirrors the new
+    /// ordering: spawn a child that blocks reading stdin, arm the watcher
+    /// immediately, then trigger cancel BEFORE writing/closing stdin. The
+    /// watcher must reap the child even though stdin never finished — i.e.
+    /// the previous ordering (stdin-then-watcher) would have stalled the
+    /// caller until stdin completion.
+    #[test]
+    fn watcher_armed_before_stdin_write_honours_immediate_cancel() {
+        use std::process::Stdio;
+
+        // `cat` blocks reading stdin and exits on EOF. We never close stdin
+        // here; the watcher must kill the process instead.
+        let mut command = Command::new("sh");
+        command.args(["-c", "cat > /dev/null"]);
+        configure_child_process_group(&mut command);
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cat should spawn");
+        let pid = child.id();
+
+        // ORDERING UNDER TEST: arm the watcher BEFORE the (would-be) stdin
+        // write. Then keep stdin open and cancel; the watcher must reap.
+        let token = Arc::new(CancelToken::new());
+        let watcher = spawn_simple_cancel_watcher(Some(token.clone()), pid);
+
+        // Hold stdin to simulate the window where the caller has not yet
+        // written or closed the pipe. With the old ordering the watcher
+        // would not exist yet and an immediate cancel would not propagate.
+        let _stdin = child.stdin.take();
+        let cancel_at = Instant::now();
+        token.cancelled.store(true, Ordering::Relaxed);
+
+        let status = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                break status;
+            }
+            if cancel_at.elapsed() > Duration::from_secs(2) {
+                let _ = child.kill();
+                panic!(
+                    "watcher armed pre-stdin did not kill child within 2s; elapsed {:?}",
+                    cancel_at.elapsed()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(
+            !status.success(),
+            "expected non-zero exit because watcher killed the child, got {:?}",
+            status
+        );
+        watcher.disarm();
+    }
+
     /// #2250 (Codex review follow-up): when the spawned child has its own
     /// process group (as codex/claude simple calls now do), the watcher's
     /// `kill_pid_tree` must reap a grandchild that outlives the direct
