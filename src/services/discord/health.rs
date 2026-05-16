@@ -1975,12 +1975,15 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
 ) -> ManualDeliveryOutcome {
     // Issue #2363: the manual dedupe key must include the resolved target
-    // channel. Voice announce delivery ids encode (guild, voice_channel,
-    // utterance, generation) in correlation+semantic, but the routed
-    // **target** channel can still differ (e.g. transcript vs handoff).
-    // Without the channel in the key, a legitimate send to a different
-    // target would be silently suppressed as a duplicate.
-    let dedup_key = delivery_id.map(|delivery_id| manual_dedup_key(channel_id, delivery_id));
+    // channel AND the sending `bot` identity. Voice announce delivery ids
+    // encode (guild, voice_channel, utterance, generation) in
+    // correlation+semantic, but the routed **target** channel and the
+    // producer bot can still differ (announce vs notify), and external
+    // `/api/discord/send` callers can set delivery ids freely — so without
+    // bot+target scoping a notify send could poison a later announce
+    // send and report "duplicate" while the announce bot never actually
+    // delivered the voice transcript trigger.
+    let dedup_key = delivery_id.map(|delivery_id| manual_dedup_key(bot, channel_id, delivery_id));
     if let Some(key) = dedup_key.as_deref() {
         if let Some(existing_message_id) = dedup.lookup(key) {
             // Return the previously delivered message id so callers that
@@ -2030,6 +2033,7 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
         dedup,
         OutboundTarget::Channel(target_channel),
         channel_id,
+        bot,
         content,
         summary,
         delivery_id,
@@ -2049,10 +2053,12 @@ async fn deliver_manual_dm_notification<C: ManualOutboundClient>(
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
 ) -> ManualDeliveryOutcome {
-    // Issue #2363: scope the dedupe key by the DM target so the same
-    // delivery id can't be silently suppressed across different recipients.
+    // Issue #2363: scope the dedupe key by sending bot + DM target so the
+    // same delivery id can't be silently suppressed across different
+    // recipients or across producer bots.
     let dm_target_label = format!("dm:{user_id}");
-    let dedup_key = delivery_id.map(|delivery_id| manual_dedup_key(&dm_target_label, delivery_id));
+    let dedup_key =
+        delivery_id.map(|delivery_id| manual_dedup_key(bot, &dm_target_label, delivery_id));
     if let Some(key) = dedup_key.as_deref() {
         if let Some(existing_message_id) = dedup.lookup(key) {
             return ManualDeliveryOutcome::Sent {
@@ -2099,6 +2105,7 @@ async fn deliver_manual_dm_notification<C: ManualOutboundClient>(
         dedup,
         OutboundTarget::DmUser(serenity::UserId::new(user_id)),
         &format!("dm:{user_id}"),
+        bot,
         content,
         summary,
         delivery_id,
@@ -2114,6 +2121,7 @@ async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
     dedup: &OutboundDeduper,
     target: OutboundTarget,
     target_label: &str,
+    bot: &str,
     content: &str,
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
@@ -2129,14 +2137,20 @@ async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
     }
     let (correlation_id, semantic_event_id) = delivery_id
         .map(|delivery_id| {
+            // Issue #2363: prefix the v3 correlation_id with the bot
+            // identity so structurally-equal external delivery ids cannot
+            // poison sends across different producer bots. The v3 dedup
+            // key already includes target, but not bot, and external
+            // `/api/discord/send` callers can supply arbitrary
+            // (correlation_id, semantic_event_id) pairs.
             (
-                delivery_id.correlation_id.to_string(),
+                format!("bot:{bot}::{}", delivery_id.correlation_id),
                 delivery_id.semantic_event_id.to_string(),
             )
         })
         .unwrap_or_else(|| {
             (
-                format!("manual:no-idempotency:{target_label}"),
+                format!("manual:no-idempotency:bot:{bot}:{target_label}"),
                 "manual:no-idempotency".to_string(),
             )
         });
@@ -2210,13 +2224,21 @@ fn record_manual_delivery_success(
     }
 }
 
-/// Build a manual-delivery dedupe key scoped to the resolved target so that
-/// the same (correlation_id, semantic_event_id) cannot collide across
-/// different Discord channels or DM recipients.
-fn manual_dedup_key(target_label: &str, delivery_id: ManualOutboundDeliveryId<'_>) -> String {
+/// Build a manual-delivery dedupe key scoped to the producer bot and the
+/// resolved target so that the same (correlation_id, semantic_event_id)
+/// cannot collide across different Discord channels, DM recipients, or
+/// producer bots. External callers of `/api/discord/send` may supply
+/// arbitrary `correlation_id` / `semantic_event_id`; scoping by `bot`
+/// blocks a notify-bot send from poisoning a later announce-bot send to
+/// the same target.
+fn manual_dedup_key(
+    bot: &str,
+    target_label: &str,
+    delivery_id: ManualOutboundDeliveryId<'_>,
+) -> String {
     format!(
-        "manual::{}::{}::{}",
-        target_label, delivery_id.correlation_id, delivery_id.semantic_event_id
+        "manual::{}::{}::{}::{}",
+        bot, target_label, delivery_id.correlation_id, delivery_id.semantic_event_id
     )
 }
 
@@ -3050,6 +3072,69 @@ mod manual_v3_delivery_tests {
             client.post_targets.lock().unwrap().clone(),
             vec!["9000".to_string(), "9001".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn voice_announce_different_bot_does_not_dedupe_against_announce() {
+        use crate::services::discord::voice_background_driver::{
+            default_voice_announce_generation, voice_announce_delivery_id,
+        };
+        use poise::serenity_prelude::{ChannelId, GuildId};
+
+        // Issue #2363 (Codex high-severity finding round 2): scoping must
+        // also include the producer `bot`. Without this an external
+        // `/api/discord/send` caller could send through `notify` with a
+        // crafted `voice:{guild}:{voice_channel}:{utterance}` delivery id
+        // and silently poison the voice announce path.
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let voice_id = voice_announce_delivery_id(
+            GuildId::new(7001),
+            ChannelId::new(8002),
+            "utt-cross-bot",
+            default_voice_announce_generation(),
+        );
+        let delivery_id = ManualOutboundDeliveryId {
+            correlation_id: &voice_id.correlation_id,
+            semantic_event_id: &voice_id.semantic_event_id,
+        };
+
+        let from_notify = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "notify payload",
+            "notify",
+            None,
+            Some(delivery_id),
+        )
+        .await;
+        let from_announce = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "voice transcript",
+            "announce",
+            None,
+            Some(delivery_id),
+        )
+        .await;
+
+        assert_eq!(
+            from_notify,
+            ManualDeliveryOutcome::Sent {
+                message_id: "message-1".to_string(),
+                delivery: None,
+            }
+        );
+        assert_eq!(
+            from_announce,
+            ManualDeliveryOutcome::Sent {
+                message_id: "message-2".to_string(),
+                delivery: None,
+            }
+        );
+        assert_eq!(client.posts.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
