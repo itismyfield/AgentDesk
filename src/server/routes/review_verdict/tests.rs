@@ -2841,3 +2841,593 @@ async fn redesign_dispute_oos_unresolved_source_id_fails_closed() {
         "dispatch must be unchanged on fail-closed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #2200 sub-fix 4 (`stale-dispatch-mismatch`) regression tests.
+//
+// Symptom: POST /api/review-decision returned 409 'no pending review-decision
+// dispatch' even though the originating review-decision dispatch row was
+// still status='dispatched'. The pending-lookup joins through
+// card_review_state.pending_dispatch_id / kanban_cards.latest_dispatch_id; if
+// those link rows were cleared while the dispatch row itself stayed alive,
+// the lookup missed it. These tests pin the by-id fallback that recovers
+// that case (and the negative paths that must stay 409 / 404).
+// ---------------------------------------------------------------------------
+
+/// Setup: insert a card whose `latest_dispatch_id` is `None`, plus a
+/// review-decision dispatch row in status `dispatched` that points at the
+/// card. Mirrors the stale-dispatch-mismatch production state: the dispatch
+/// row is alive but neither `latest_dispatch_id` nor `card_review_state`
+/// links to it any more.
+fn seed_unlinked_dispatched_review_decision(
+    db: &Db,
+    card_id: &str,
+    dispatch_id: &str,
+    dispatch_status: &str,
+) {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+         VALUES ('agent-1', 'Agent 1', '123', '456')",
+        [],
+    )
+    .unwrap();
+    // Card has NO latest_dispatch_id link → canonical pending lookup will miss.
+    conn.execute(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at) \
+         VALUES (?1, 'Stale Dispatch Card', 'review', 'agent-1', NULL, 'suggestion_pending', datetime('now'), datetime('now'))",
+        sqlite_params![card_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+         VALUES (?1, ?2, 'agent-1', 'review-decision', ?3, '[Review Decision]', datetime('now'), datetime('now'))",
+        sqlite_params![dispatch_id, card_id, dispatch_status],
+    )
+    .unwrap();
+}
+
+/// #2200 sub-fix 4: submitted dispatch_id matching a still-dispatched row
+/// must be honored even when the canonical pending lookup misses it
+/// (link rows cleared but dispatch row alive).
+#[tokio::test]
+async fn stale_dispatch_mismatch_dispatch_id_recovers_live_dispatched_row() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_unlinked_dispatched_review_decision(
+        &db,
+        "card-stale-dd",
+        "051cbf56-8e95-4bee-97d4-18268a3802e3",
+        "dispatched",
+    );
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-stale-dd".to_string(),
+            decision: "accept".to_string(),
+            comment: Some("recovered via dispatch_id".to_string()),
+            commit_sha: None,
+            dispatch_id: Some("051cbf56-8e95-4bee-97d4-18268a3802e3".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "by-id fallback must turn the 409 stale-dispatch-mismatch into a 200 accept: {}",
+        body.0
+    );
+
+    // Originating review-decision dispatch must end up completed.
+    let conn = db.lock().unwrap();
+    let rd_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = ?1",
+            ["051cbf56-8e95-4bee-97d4-18268a3802e3"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rd_status, "completed",
+        "the recovered review-decision dispatch must be finalized by accept"
+    );
+}
+
+/// Negative: caller supplies a dispatch_id that does not exist (or points at
+/// a different card / non-review-decision type). Must be 404, not 200 / 409.
+#[tokio::test]
+async fn stale_dispatch_mismatch_unknown_dispatch_id_returns_not_found() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        // Card exists but has no live review-decision dispatch at all.
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at) \
+             VALUES ('card-stale-nf', 'No Dispatch Card', 'review', 'agent-1', NULL, NULL, datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-stale-nf".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("00000000-0000-0000-0000-000000000000".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "unknown dispatch_id must be 404, not 409 or 200: {}",
+        body.0
+    );
+}
+
+/// Negative: caller supplies a dispatch_id that points at a different card's
+/// review-decision dispatch. Authorization gate must reject as 404 (we don't
+/// confirm "exists but belongs to another card" — that would leak whether a
+/// UUID is bound).
+#[tokio::test]
+async fn stale_dispatch_mismatch_cross_card_dispatch_id_returns_not_found() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        // Two cards. Dispatch belongs to card A; caller submits decision for
+        // card B with card A's dispatch_id.
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at) \
+             VALUES ('card-stale-A', 'A', 'review', 'agent-1', NULL, NULL, datetime('now'), datetime('now')), \
+                    ('card-stale-B', 'B', 'review', 'agent-1', NULL, NULL, datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-A', 'card-stale-A', 'agent-1', 'review-decision', 'dispatched', '[Review Decision]', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-stale-B".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-A".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "dispatch_id belonging to another card must be rejected as 404: {}",
+        body.0
+    );
+
+    // Critically: dispatch-A must remain `dispatched`, not silently consumed.
+    let conn = db.lock().unwrap();
+    let rd_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-A'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rd_status, "dispatched",
+        "cross-card binding attempt must NOT alter the other card's dispatch"
+    );
+}
+
+/// Negative: caller supplies a dispatch_id pointing at a row that is already
+/// terminal (completed/failed/cancelled). Sub-fix 4 deliberately falls
+/// through to the canonical "no pending" 409 here rather than emitting a
+/// terminal-specific 409, so PR #2280 sub-fix 1 can compose on top without
+/// shape conflicts (its proven-finalized check promotes this same state to
+/// 200 already_finalized when the dispatch carries a recognized completion
+/// proof). Without sub-1 merged, the response must remain the canonical
+/// generic 409.
+#[tokio::test]
+async fn stale_dispatch_mismatch_terminal_dispatch_id_falls_through_to_generic_conflict() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_unlinked_dispatched_review_decision(&db, "card-stale-term", "dispatch-term", "completed");
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-stale-term".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-term".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "terminal dispatch_id must fall through to canonical 409: {}",
+        body.0
+    );
+    let body_str = body.0.to_string();
+    assert!(
+        body_str.contains("no pending review-decision dispatch"),
+        "expected canonical 'no pending' 409 (sub-1 compose-safe), got: {body_str}"
+    );
+    assert!(
+        !body_str.contains("dispatch_status"),
+        "terminal fall-through must NOT leak dispatch_status (sub-1 keeps body generic): {body_str}"
+    );
+}
+
+/// Negative (Codex round 1): caller supplies an OLDER live same-card
+/// dispatch_id while a NEWER live review-decision dispatch exists for the
+/// same card. Honoring the older id would consume the wrong dispatch.
+/// Must return 409 with a clear "superseded" message.
+///
+/// Note: production schema enforces a partial unique index
+/// (`idx_single_active_review_decision`, src/db/schema.rs:478) preventing
+/// two concurrently-live review-decision rows per card — this should be
+/// unreachable under normal operation. The runtime check + this test exist
+/// as defense-in-depth against schema drift / race windows / migration
+/// gaps. We temporarily drop the unique index for this test so the seed
+/// can construct the adversarial state.
+#[tokio::test]
+async fn stale_dispatch_mismatch_superseded_live_dispatch_id_returns_conflict() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        // Drop the protective unique index so we can stage the adversarial
+        // two-live-rows state that the runtime check defends against.
+        conn.execute_batch("DROP INDEX IF EXISTS idx_single_active_review_decision;")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        // Card with NO latest_dispatch_id link → canonical pending misses.
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at) \
+             VALUES ('card-superseded', 'Superseded Card', 'review', 'agent-1', NULL, 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        // Older live dispatch (caller will submit this id).
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-old', 'card-superseded', 'agent-1', 'review-decision', 'dispatched', '[Review Decision R1]', datetime('now', '-1 hour'), datetime('now', '-1 hour'))",
+            [],
+        )
+        .unwrap();
+        // Newer live dispatch — the actual current originating dispatch.
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-new', 'card-superseded', 'agent-1', 'review-decision', 'dispatched', '[Review Decision R2]', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-superseded".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-old".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "older live same-card dispatch_id must be rejected as superseded: {}",
+        body.0
+    );
+    let body_str = body.0.to_string();
+    assert!(
+        body_str.contains("superseded"),
+        "expected 'superseded' message, got: {body_str}"
+    );
+
+    // Critically: neither dispatch must have been mutated.
+    let conn = db.lock().unwrap();
+    let (old_status, new_status): (String, String) = conn
+        .query_row(
+            "SELECT (SELECT status FROM task_dispatches WHERE id = 'dispatch-old'), \
+                    (SELECT status FROM task_dispatches WHERE id = 'dispatch-new')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(old_status, "dispatched", "stale older dispatch must remain");
+    assert_eq!(
+        new_status, "dispatched",
+        "newer dispatch must NOT be consumed by the stale id"
+    );
+}
+
+/// Codex round-2 [medium]: equal-timestamp ties must also fail closed.
+/// When two live same-card review-decision rows share `created_at`, neither
+/// id is uniquely "latest" — both should be rejected as superseded.
+#[tokio::test]
+async fn stale_dispatch_mismatch_equal_timestamp_tie_rejected() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute_batch("DROP INDEX IF EXISTS idx_single_active_review_decision;")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at) \
+             VALUES ('card-tie', 'Tie Card', 'review', 'agent-1', NULL, 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        // Two live dispatches with identical created_at — neither is
+        // strictly latest, so honoring either would be a 50/50 gamble.
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-tie-a', 'card-tie', 'agent-1', 'review-decision', 'dispatched', '[Review Decision A]', '2026-01-01 00:00:00', '2026-01-01 00:00:00'), \
+                    ('dispatch-tie-b', 'card-tie', 'agent-1', 'review-decision', 'dispatched', '[Review Decision B]', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+            [],
+        )
+        .unwrap();
+    }
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-tie".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-tie-a".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "equal-timestamp tie must fail closed (no unique latest): {}",
+        body.0
+    );
+    let body_str = body.0.to_string();
+    assert!(
+        body_str.contains("superseded"),
+        "expected 'superseded' message for tie, got: {body_str}"
+    );
+
+    // Neither dispatch may have been consumed.
+    let conn = db.lock().unwrap();
+    let (a, b): (String, String) = conn
+        .query_row(
+            "SELECT (SELECT status FROM task_dispatches WHERE id = 'dispatch-tie-a'), \
+                    (SELECT status FROM task_dispatches WHERE id = 'dispatch-tie-b')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(a, "dispatched");
+    assert_eq!(b, "dispatched");
+}
+
+/// Codex round-2 [medium]: equal-timestamp ties must also fail closed.
+/// When two live same-card review-decision rows share `created_at`, neither
+/// id is uniquely "latest" — both should be rejected as superseded.
+#[tokio::test]
+async fn stale_dispatch_mismatch_equal_timestamp_tie_rejected() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute_batch("DROP INDEX IF EXISTS idx_single_active_review_decision;")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at) \
+             VALUES ('card-tie', 'Tie Card', 'review', 'agent-1', NULL, 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        // Two live dispatches with identical created_at — neither is
+        // strictly latest, so honoring either would be a 50/50 gamble.
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-tie-a', 'card-tie', 'agent-1', 'review-decision', 'dispatched', '[Review Decision A]', '2026-01-01 00:00:00', '2026-01-01 00:00:00'), \
+                    ('dispatch-tie-b', 'card-tie', 'agent-1', 'review-decision', 'dispatched', '[Review Decision B]', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+            [],
+        )
+        .unwrap();
+    }
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-tie".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-tie-a".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "equal-timestamp tie must fail closed (no unique latest): {}",
+        body.0
+    );
+    let body_str = body.0.to_string();
+    assert!(
+        body_str.contains("superseded"),
+        "expected 'superseded' message for tie, got: {body_str}"
+    );
+
+    // Neither dispatch may have been consumed.
+    let conn = db.lock().unwrap();
+    let (a, b): (String, String) = conn
+        .query_row(
+            "SELECT (SELECT status FROM task_dispatches WHERE id = 'dispatch-tie-a'), \
+                    (SELECT status FROM task_dispatches WHERE id = 'dispatch-tie-b')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(a, "dispatched");
+    assert_eq!(b, "dispatched");
+}
+
+/// Regression: caller did NOT submit a dispatch_id AND there is no pending
+/// review-decision dispatch via the canonical link tables. Must stay 409
+/// with the original generic message (the by-id fallback only triggers when
+/// a dispatch_id is explicitly provided).
+#[tokio::test]
+async fn stale_dispatch_mismatch_no_dispatch_id_no_pending_still_returns_conflict() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    // Seed an unlinked-but-still-dispatched row so we can prove the by-id
+    // path is gated on `dispatch_id` being present — without dispatch_id we
+    // must NOT silently pick it up.
+    seed_unlinked_dispatched_review_decision(&db, "card-stale-ndi", "dispatch-ndi", "dispatched");
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-stale-ndi".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "without dispatch_id, an unlinked dispatched row must NOT be auto-bound: {}",
+        body.0
+    );
+    let body_str = body.0.to_string();
+    assert!(
+        body_str.contains("no pending review-decision dispatch"),
+        "expected canonical 409 message, got: {body_str}"
+    );
+
+    // And the unlinked dispatch row must still be dispatched (not consumed).
+    let conn = db.lock().unwrap();
+    let rd_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-ndi'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rd_status, "dispatched");
+}
+
+/// Regression / happy path: canonical pending lookup hits, and caller does
+/// not supply `dispatch_id`. Must remain 200 (no behavior change relative to
+/// existing `duplicate_accept_returns_conflict` happy path; this nails it
+/// down as part of the sub-fix 4 contract).
+#[tokio::test]
+async fn stale_dispatch_mismatch_happy_path_pending_dispatch_still_accepts() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at) \
+             VALUES ('card-stale-hp', 'HP', 'review', 'agent-1', 'dispatch-hp', 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-hp', 'card-stale-hp', 'agent-1', 'review-decision', 'pending', '[Review Decision]', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-stale-hp".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "canonical pending path must still 200 after sub-fix 4: {}",
+        body.0
+    );
+}
