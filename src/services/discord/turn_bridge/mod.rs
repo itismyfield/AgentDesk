@@ -2003,23 +2003,40 @@ pub(super) fn spawn_turn_bridge(
                 match rx.try_recv() {
                     Ok(msg) => {
                         // #2289 cancel boundary: re-sample `cancel_requested`
-                        // AFTER `try_recv` returns. The pre-recv guard above
-                        // only samples before the receive call; if `/stop`
-                        // flips the token between that guard and `try_recv`
-                        // returning a terminal frame (`Done`/`Disconnected`),
-                        // letting the frame run would set `done = true` and
-                        // suppress the outer cancel arm — recording the turn
-                        // as completed when the user actually stopped it.
-                        // Drop the frame and jump to cancel-finalize so the
-                        // cancel claims the outcome. The dropped frame is not
-                        // a data loss: provider output that arrived after
-                        // the user pressed stop is, by contract, discarded
-                        // (the cancel path closes background children and
-                        // tears the turn down).
-                        if should_finalize_cancel_after_recv(
-                            done,
-                            cancel_requested(Some(cancel_token.as_ref())),
-                        ) {
+                        // AFTER `try_recv` returns, but ONLY for terminal
+                        // frames (`Done`). The pre-recv guard above samples
+                        // before the receive call; if `/stop` flips the token
+                        // between that guard and `try_recv` returning a
+                        // terminal frame, letting it run would set
+                        // `done = true` and suppress the outer cancel arm —
+                        // recording the turn as completed when the user
+                        // actually stopped it. Drop the terminal frame and
+                        // jump to cancel-finalize so the cancel claims the
+                        // outcome.
+                        //
+                        // The check is scoped to terminal frames so non-
+                        // terminal control/output frames (`RuntimeReady`,
+                        // `TmuxReady`, `ProcessReady`, `OutputOffset`,
+                        // `Text`, `Error`, …) are still processed: they may
+                        // carry handoff paths, offsets, watcher debt, or
+                        // session-reset decisions that the cancel path
+                        // expects to be applied. None of those variants
+                        // flip `done = true`, so the next iteration's
+                        // pre-recv cancel guard at the top of the outer
+                        // loop will finalize cancel cleanly on the very
+                        // next pass.
+                        if matches!(msg, StreamMessage::Done { .. })
+                            && should_finalize_cancel_after_recv(
+                                done,
+                                cancel_requested(Some(cancel_token.as_ref())),
+                            )
+                        {
+                            // The dropped Done's bookkeeping (full_response
+                            // resolution, transcript Result, placeholder
+                            // close) is intentionally skipped: the cancel
+                            // path is the authoritative finalizer for the
+                            // turn outcome and runs its own placeholder
+                            // teardown.
                             finalize_cancel_inner!();
                             break 'outer;
                         }
@@ -4002,17 +4019,38 @@ pub(super) fn spawn_turn_bridge(
             // into Aborted before the rest of the cleanup machinery runs. The
             // controller's idempotent terminal transition guarantees this is
             // safe even if the ToolResult event already fired Completed.
-            if let Some((key, _, _, _)) = long_running_placeholder_active.take() {
-                let _ = shared_owned
+            // #2289 (Codex review): mirror the Done/stream-end outcome handling
+            // — only clear the persisted flag when the transition actually
+            // committed (Edited / Coalesced / AlreadyTerminal). On
+            // `EditFailed`, leave the controller entry Active and the
+            // persisted flag set so a later retry path or the placeholder
+            // sweeper can finish the teardown. Without this, dropping a
+            // raced `Done` here would silently leak a non-evictable Active
+            // controller row and clobber the sweeper's repair signal.
+            if let Some((key, snapshot, close_trigger, ack_consumed)) =
+                long_running_placeholder_active.take()
+            {
+                let outcome = shared_owned
                     .placeholder_controller
                     .transition(
                         gateway.as_ref(),
-                        key,
+                        key.clone(),
                         super::placeholder_controller::PlaceholderLifecycle::Aborted,
                     )
                     .await;
-                inflight_state.long_running_placeholder_active = false;
-                let _ = save_inflight_state(&inflight_state);
+                use super::placeholder_controller::PlaceholderControllerOutcome::*;
+                if matches!(outcome, Edited | Coalesced | AlreadyTerminal) {
+                    inflight_state.long_running_placeholder_active = false;
+                    let _ = save_inflight_state(&inflight_state);
+                } else {
+                    // EditFailed (or any non-committed outcome): leave the
+                    // persisted flag set so the placeholder sweeper can pick
+                    // up the repair on the next pass. The local tuple is
+                    // dropped (the cancel cleanup path does not retry the
+                    // edit itself); the persisted flag and the inflight
+                    // file are the durable repair signal.
+                    let _ = (key, snapshot, close_trigger, ack_consumed);
+                }
             }
 
             let cleanup_policy = match cancel_token.restart_mode() {
@@ -5587,6 +5625,51 @@ mod cancel_recv_toctou_tests {
         assert!(
             !done,
             "Disconnected branch must NOT run when cancel won the race"
+        );
+    }
+
+    /// #2289 Codex review follow-up: the post-recv re-sample is gated on
+    /// `StreamMessage::Done` only. Non-terminal `Ok(msg)` variants
+    /// (RuntimeReady, TmuxReady, ProcessReady, OutputOffset, Text, Error,
+    /// …) must NOT trigger the cancel finalize even when the token is
+    /// flagged, because their data (handoff paths, offsets, watcher debt,
+    /// session-reset decisions) needs to be applied before cancel runs.
+    /// The next outer-loop iteration's pre-recv cancel guard will then
+    /// finalize cleanly — none of those variants set `done = true`.
+    #[test]
+    fn cancel_after_non_terminal_ok_does_not_drop_frame_directly() {
+        let token = CancelToken::new();
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Production sites gate the post-recv re-sample on
+        // `matches!(msg, StreamMessage::Done { .. })` BEFORE calling the
+        // helper. Model that here: only `Done` proceeds to the priority
+        // check; everything else short-circuits and is processed.
+        let non_terminal = StreamMessage::Text {
+            content: "partial output".to_string(),
+        };
+        let must_finalize_now = matches!(non_terminal, StreamMessage::Done { .. })
+            && should_finalize_cancel_after_recv(false, cancel_requested(Some(&token)));
+        assert!(
+            !must_finalize_now,
+            "non-terminal Ok variants must NOT be dropped by the post-recv \
+             re-sample; their payload (handoff/offset/watcher debt) must be \
+             applied before cancel finalizes on the next iteration"
+        );
+
+        // For comparison, the same scenario with a Done frame DOES finalize.
+        let terminal = StreamMessage::Done {
+            result: "completed".to_string(),
+            session_id: None,
+        };
+        let must_finalize_terminal = matches!(terminal, StreamMessage::Done { .. })
+            && should_finalize_cancel_after_recv(false, cancel_requested(Some(&token)));
+        assert!(
+            must_finalize_terminal,
+            "Done MUST finalize: it would otherwise set done = true and \
+             suppress the outer cancel arm"
         );
     }
 
