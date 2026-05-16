@@ -1857,28 +1857,49 @@ impl RoutineStore {
         Ok(result.rows_affected() == 1)
     }
 
-    /// Resume a paused routine. `next_due_at` is authoritative; pass `None`
-    /// for manual-only routines.
+    /// Resume a paused routine.
+    ///
+    /// `next_due_at` follows PATCH semantics (#2395):
+    /// - `None` → leave the existing `next_due_at` column untouched (callers
+    ///   that POST `{}` no longer accidentally null the next-fire timestamp
+    ///   and strand the routine).
+    /// - `Some(Some(ts))` → set `next_due_at = ts`.
+    /// - `Some(None)` → explicitly clear `next_due_at` (manual-only routines).
     pub async fn resume_routine(
         &self,
         routine_id: &str,
-        next_due_at: Option<DateTime<Utc>>,
+        next_due_at: Option<Option<DateTime<Utc>>>,
     ) -> Result<bool> {
-        let result = sqlx::query(
-            r#"
-            UPDATE routines
-            SET status = 'enabled',
-                next_due_at = $2,
-                updated_at = NOW()
-            WHERE id = $1
-              AND status = 'paused'
-            "#,
-        )
-        .bind(routine_id)
-        .bind(next_due_at)
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| anyhow!("resume routine {routine_id}: {e}"))?;
+        let result = match next_due_at {
+            None => sqlx::query(
+                r#"
+                UPDATE routines
+                SET status = 'enabled',
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status = 'paused'
+                "#,
+            )
+            .bind(routine_id)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| anyhow!("resume routine {routine_id}: {e}"))?,
+            Some(value) => sqlx::query(
+                r#"
+                UPDATE routines
+                SET status = 'enabled',
+                    next_due_at = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status = 'paused'
+                "#,
+            )
+            .bind(routine_id)
+            .bind(value)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| anyhow!("resume routine {routine_id}: {e}"))?,
+        };
 
         Ok(result.rows_affected() == 1)
     }
