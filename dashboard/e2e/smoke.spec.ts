@@ -48,13 +48,13 @@ const CUSTOM_HOME_PRIMARY_WIDGET_ORDER = [
   "m_tokens",
 ];
 const DRAGGED_HOME_WIDGET_ORDER = [
+  "kanban",
   "m_tokens",
   "m_cost",
   "m_progress",
-  "missions",
   "m_rate_limit",
-  "kanban",
   "quality",
+  "missions",
 ];
 const PIPELINE_VISUAL_CACHE_KEY = "agentdesk.settings.pipeline.visual-cache.v1";
 
@@ -1686,20 +1686,21 @@ test.describe("Dashboard smoke tests", () => {
     await page.getByTestId("home-edit-toggle").click();
     await expect(page.getByTestId("home-widget-quality")).toBeVisible();
 
-    const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
-    await page
-      .getByTestId("home-widget-missions")
-      .dispatchEvent("dragstart", { dataTransfer });
-    await page
-      .getByTestId("home-widget-m_rate_limit")
-      .dispatchEvent("dragover", { dataTransfer });
-    await page
-      .getByTestId("home-widget-m_rate_limit")
-      .dispatchEvent("drop", { dataTransfer });
-    await page
-      .getByTestId("home-widget-missions")
-      .dispatchEvent("dragend", { dataTransfer });
-    await dataTransfer.dispose();
+    const sourceBox = await page.getByTestId("home-drag-handle-kanban").boundingBox();
+    const targetBox = await page.getByTestId("home-widget-m_tokens").boundingBox();
+    expect(sourceBox).not.toBeNull();
+    expect(targetBox).not.toBeNull();
+
+    const sourceX = sourceBox!.x + sourceBox!.width / 2;
+    const sourceY = sourceBox!.y + sourceBox!.height / 2;
+    const targetX = targetBox!.x + targetBox!.width / 2;
+    const targetY = targetBox!.y + targetBox!.height / 2;
+
+    await page.mouse.move(sourceX, sourceY);
+    await page.mouse.down();
+    await page.mouse.move(sourceX, sourceY - 32, { steps: 6 });
+    await page.mouse.move(targetX, targetY, { steps: 24 });
+    await page.mouse.up();
 
     await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DRAGGED_HOME_WIDGET_ORDER);
     await expect

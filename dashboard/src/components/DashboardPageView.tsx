@@ -8,11 +8,29 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type DragEvent as ReactDragEvent,
   type ErrorInfo,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
+import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  MouseSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  rectSortingStrategy,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { GripVertical } from "lucide-react";
 import { getSkillRanking, type SkillRankingResponse } from "../api";
 import {
@@ -220,15 +238,6 @@ function getLocalizedAgentName(
   return agent.name_ko || agent.name;
 }
 
-function moveHomeWidget(items: HomeWidgetId[], fromIndex: number, toIndex: number): HomeWidgetId[] {
-  if (fromIndex === toIndex) return items;
-  const next = [...items];
-  const [moved] = next.splice(fromIndex, 1);
-  const targetIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
-  next.splice(targetIndex, 0, moved);
-  return next;
-}
-
 export default function DashboardPageView({
   stats,
   agents,
@@ -426,8 +435,12 @@ export default function DashboardPageView({
   );
   const [editingWidgets, setEditingWidgets] = useState(false);
   const [widgetOrder, setWidgetOrder] = useState<HomeWidgetId[]>(() => readStoredHomeWidgetOrder());
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [overIndex, setOverIndex] = useState<number | null>(null);
+  const [activeWidgetId, setActiveWidgetId] = useState<HomeWidgetId | null>(null);
+  const [overWidgetId, setOverWidgetId] = useState<HomeWidgetId | null>(null);
+  const widgetDragSensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
   const activeSessions = useMemo(
     () => sessions.filter((session) => session.status !== "disconnected"),
     [sessions],
@@ -647,46 +660,43 @@ export default function DashboardPageView({
   }, [widgetOrder]);
 
   const handleWidgetDragStart = useCallback(
-    (index: number) => (event: ReactDragEvent<HTMLDivElement>) => {
+    (event: DragStartEvent) => {
       if (!editingWidgets) return;
-      setDragIndex(index);
-      event.dataTransfer.effectAllowed = "move";
-      try {
-        event.dataTransfer.setData("text/plain", String(index));
-      } catch {
-        // ignore browser-specific dnd errors
-      }
+      setActiveWidgetId(event.active.id as HomeWidgetId);
+      setOverWidgetId(null);
     },
     [editingWidgets],
   );
 
   const handleWidgetDragOver = useCallback(
-    (index: number) => (event: ReactDragEvent<HTMLDivElement>) => {
+    (event: DragOverEvent) => {
       if (!editingWidgets) return;
-      event.preventDefault();
-      if (overIndex !== index) setOverIndex(index);
+      setOverWidgetId(event.over ? (event.over.id as HomeWidgetId) : null);
     },
-    [editingWidgets, overIndex],
+    [editingWidgets],
   );
 
-  const handleWidgetDrop = useCallback(
-    (index: number) => (event: ReactDragEvent<HTMLDivElement>) => {
-      if (!editingWidgets) return;
-      event.preventDefault();
-      const transferredIndex = Number(event.dataTransfer.getData("text/plain"));
-      const fromIndex =
-        dragIndex ?? (Number.isInteger(transferredIndex) ? transferredIndex : null);
-      if (fromIndex == null) return;
-      setWidgetOrder((current) => moveHomeWidget(current, fromIndex, index));
-      setDragIndex(null);
-      setOverIndex(null);
+  const handleWidgetDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const activeId = event.active.id as HomeWidgetId;
+      const overId = event.over ? (event.over.id as HomeWidgetId) : null;
+      setActiveWidgetId(null);
+      setOverWidgetId(null);
+      if (!editingWidgets || !overId || activeId === overId) return;
+
+      setWidgetOrder((current) => {
+        const fromIndex = current.indexOf(activeId);
+        const toIndex = current.indexOf(overId);
+        if (fromIndex === -1 || toIndex === -1) return current;
+        return arrayMove(current, fromIndex, toIndex);
+      });
     },
-    [dragIndex, editingWidgets],
+    [editingWidgets],
   );
 
-  const handleWidgetDragEnd = useCallback(() => {
-    setDragIndex(null);
-    setOverIndex(null);
+  const handleWidgetDragCancel = useCallback(() => {
+    setActiveWidgetId(null);
+    setOverWidgetId(null);
   }, []);
 
   const homeWidgetSpecs: Record<HomeWidgetId, { className: string; render: () => ReactNode }> = {
@@ -901,44 +911,40 @@ export default function DashboardPageView({
         ) : null}
       </div>
 
-      <div className="grid grid-cols-12 gap-4">
-        {widgetOrder.map((widgetId, index) => {
-          const spec = homeWidgetSpecs[widgetId];
-          return (
-            <div
-              key={widgetId}
-              draggable={editingWidgets}
-              onDragStart={editingWidgets ? handleWidgetDragStart(index) : undefined}
-              onDragOver={editingWidgets ? handleWidgetDragOver(index) : undefined}
-              onDrop={editingWidgets ? handleWidgetDrop(index) : undefined}
-              onDragEnd={handleWidgetDragEnd}
-              className={spec.className}
-              style={{
-                opacity: dragIndex === index ? 0.55 : 1,
-                transform: overIndex === index && dragIndex !== index ? "translateY(-2px)" : undefined,
-                transition: "opacity 160ms ease, transform 160ms ease",
-              }}
-            >
-              <div className="relative h-full">
-                {editingWidgets ? (
-                  <div
-                    className="pointer-events-none absolute right-3 top-3 z-10 inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px]"
-                    style={{
-                      borderColor: "rgba(148,163,184,0.18)",
-                      background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
-                      color: "var(--th-text-muted)",
-                    }}
-                  >
-                    <GripVertical size={12} />
-                    drag
-                  </div>
-                ) : null}
-                {spec.render()}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      <DndContext
+        sensors={widgetDragSensors}
+        collisionDetection={closestCenter}
+        onDragStart={handleWidgetDragStart}
+        onDragOver={handleWidgetDragOver}
+        onDragEnd={handleWidgetDragEnd}
+        onDragCancel={handleWidgetDragCancel}
+      >
+        <SortableContext items={widgetOrder} strategy={rectSortingStrategy}>
+          <div className="grid grid-cols-12 gap-4">
+            {widgetOrder.map((widgetId) => {
+              const spec = homeWidgetSpecs[widgetId];
+              return (
+                <DashboardSortableWidget
+                  key={widgetId}
+                  widgetId={widgetId}
+                  className={spec.className}
+                  editing={editingWidgets}
+                  activeWidgetId={activeWidgetId}
+                  overWidgetId={overWidgetId}
+                  handleLabel={t({
+                    ko: "위젯 순서 변경",
+                    en: "Reorder widget",
+                    ja: "ウィジェットの順序を変更",
+                    zh: "调整组件顺序",
+                  })}
+                >
+                  {spec.render()}
+                </DashboardSortableWidget>
+              );
+            })}
+          </div>
+        </SortableContext>
+      </DndContext>
 
       <DashboardHomeSectionNavigatorWidget
         tabDefinitions={tabDefinitions}
@@ -1729,6 +1735,76 @@ function DashboardTabButton({
         {detail}
       </div>
     </button>
+  );
+}
+
+function DashboardSortableWidget({
+  widgetId,
+  className,
+  editing,
+  activeWidgetId,
+  overWidgetId,
+  handleLabel,
+  children,
+}: {
+  widgetId: HomeWidgetId;
+  className: string;
+  editing: boolean;
+  activeWidgetId: HomeWidgetId | null;
+  overWidgetId: HomeWidgetId | null;
+  handleLabel: string;
+  children: ReactNode;
+}) {
+  const {
+    attributes,
+    isDragging,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+  } = useSortable({ id: widgetId, disabled: !editing });
+  const isOver = overWidgetId === widgetId && activeWidgetId !== widgetId;
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={[
+        className,
+        isDragging ? "opacity-60" : "",
+        isOver
+          ? "rounded-[18px] ring-2 ring-[color:var(--th-accent-primary)] ring-offset-2 ring-offset-transparent"
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition: transition ?? "opacity 160ms ease, transform 160ms ease",
+      }}
+    >
+      <div className="relative h-full">
+        {editing ? (
+          <button
+            ref={setActivatorNodeRef}
+            type="button"
+            aria-label={handleLabel}
+            className="absolute right-3 top-3 z-10 inline-flex h-8 w-8 cursor-grab items-center justify-center rounded-lg border transition-colors hover:bg-white/10 active:cursor-grabbing"
+            style={{
+              borderColor: "rgba(148,163,184,0.18)",
+              background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
+              color: "var(--th-text-muted)",
+              touchAction: "none",
+            }}
+            {...attributes}
+            {...listeners}
+          >
+            <GripVertical size={13} />
+          </button>
+        ) : null}
+        {children}
+      </div>
+    </div>
   );
 }
 

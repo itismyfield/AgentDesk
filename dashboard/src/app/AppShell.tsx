@@ -1,4 +1,23 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  MouseSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  rectSortingStrategy,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import {
   Bell,
   Building2,
@@ -1072,8 +1091,8 @@ function HomeOverviewPage({
     STORAGE_KEYS.homeSupportOpen,
     false,
   );
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [overIndex, setOverIndex] = useState<number | null>(null);
+  const [activeWidgetId, setActiveWidgetId] = useState<string | null>(null);
+  const [overWidgetId, setOverWidgetId] = useState<string | null>(null);
   const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(
     () => api.getCachedTokenAnalytics("7d")?.data ?? null,
   );
@@ -1090,6 +1109,10 @@ function HomeOverviewPage({
   const [widgets, setWidgets] = useLocalStorage<string[]>(
     STORAGE_KEYS.homeOrder,
     () => [...HOME_DEFAULT_WIDGETS],
+  );
+  const widgetDragSensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
   const outstandingMeetings = meetings.filter(hasUnresolvedMeetingIssues).length;
   const liveNotifications = notifications.filter(
@@ -1851,6 +1874,41 @@ function HomeOverviewPage({
   const primaryWidgets = widgets.filter((widgetId) => HOME_PRIMARY_WIDGET_SET.has(widgetId));
   const supportWidgets = widgets.filter((widgetId) => HOME_SUPPORT_WIDGET_SET.has(widgetId));
   const visibleWidgets = editing ? widgets : primaryWidgets;
+  const homeWidgetDragEnabled = editing && !isMobileViewport;
+  const handleHomeWidgetDragStart = useCallback(
+    (event: DragStartEvent) => {
+      if (!homeWidgetDragEnabled) return;
+      setActiveWidgetId(String(event.active.id));
+      setOverWidgetId(null);
+    },
+    [homeWidgetDragEnabled],
+  );
+  const handleHomeWidgetDragOver = useCallback(
+    (event: DragOverEvent) => {
+      if (!homeWidgetDragEnabled) return;
+      setOverWidgetId(event.over ? String(event.over.id) : null);
+    },
+    [homeWidgetDragEnabled],
+  );
+  const handleHomeWidgetDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const activeId = String(event.active.id);
+      const overId = event.over ? String(event.over.id) : null;
+      setActiveWidgetId(null);
+      setOverWidgetId(null);
+      if (!homeWidgetDragEnabled || !overId || activeId === overId) return;
+
+      const fromIndex = widgets.indexOf(activeId);
+      const toIndex = widgets.indexOf(overId);
+      if (fromIndex === -1 || toIndex === -1) return;
+      setWidgets(arrayMove(widgets, fromIndex, toIndex));
+    },
+    [homeWidgetDragEnabled, setWidgets, widgets],
+  );
+  const handleHomeWidgetDragCancel = useCallback(() => {
+    setActiveWidgetId(null);
+    setOverWidgetId(null);
+  }, []);
   const supportSummary = tr(
     `품질·미션 ${supportWidgets.length}개`,
     `${supportWidgets.length} quality/mission widgets`,
@@ -1922,72 +1980,37 @@ function HomeOverviewPage({
         </div>
       )}
 
-      <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-12">
-        {visibleWidgets.map((widgetId, index) => {
-          const spec = widgetSpecs[widgetId as keyof typeof widgetSpecs];
-          if (!spec) return null;
-          return (
-            <div
-              key={widgetId}
-              data-testid={`home-widget-${widgetId}`}
-              draggable={editing && !isMobileViewport}
-              onDragStart={(event) => {
-                if (!editing || isMobileViewport) return;
-                setDragIndex(index);
-                event.dataTransfer.effectAllowed = "move";
-                try {
-                  event.dataTransfer.setData("text/plain", String(index));
-                } catch {
-                  // no-op
-                }
-              }}
-              onDragOver={(event) => {
-                if (!editing || isMobileViewport) return;
-                event.preventDefault();
-                if (overIndex !== index) setOverIndex(index);
-              }}
-              onDrop={(event) => {
-                if (!editing || isMobileViewport) return;
-                event.preventDefault();
-                const transferredIndex = Number(event.dataTransfer.getData("text/plain"));
-                const fromIndex =
-                  dragIndex ?? (Number.isInteger(transferredIndex) ? transferredIndex : null);
-                if (fromIndex == null || fromIndex === index) {
-                  setDragIndex(null);
-                  setOverIndex(null);
-                  return;
-                }
-                const next = [...widgets];
-                const [moved] = next.splice(fromIndex, 1);
-                next.splice(index, 0, moved);
-                setWidgets(next);
-                setDragIndex(null);
-                setOverIndex(null);
-              }}
-              onDragEnd={() => {
-                setDragIndex(null);
-                setOverIndex(null);
-              }}
-              className={[
-                spec.className,
-                dragIndex === index ? "opacity-70" : "",
-                overIndex === index && dragIndex !== index ? "rounded-[2rem] ring-2 ring-[color:var(--th-accent-primary)] ring-offset-2 ring-offset-transparent" : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-            >
-              <div className="relative h-full">
-                {editing && (
-                  <div className="pointer-events-none absolute right-4 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-full border" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)", color: "var(--th-text-muted)" }}>
-                    <GripVertical size={14} />
-                  </div>
-                )}
-                {spec.render()}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      <DndContext
+        sensors={widgetDragSensors}
+        collisionDetection={closestCenter}
+        onDragStart={handleHomeWidgetDragStart}
+        onDragOver={handleHomeWidgetDragOver}
+        onDragEnd={handleHomeWidgetDragEnd}
+        onDragCancel={handleHomeWidgetDragCancel}
+      >
+        <SortableContext items={visibleWidgets} strategy={rectSortingStrategy}>
+          <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-12">
+            {visibleWidgets.map((widgetId) => {
+              const spec = widgetSpecs[widgetId as keyof typeof widgetSpecs];
+              if (!spec) return null;
+              return (
+                <HomeSortableWidget
+                  key={widgetId}
+                  widgetId={widgetId}
+                  className={spec.className}
+                  disabled={!homeWidgetDragEnabled}
+                  showHandle={homeWidgetDragEnabled}
+                  activeWidgetId={activeWidgetId}
+                  overWidgetId={overWidgetId}
+                  handleLabel={tr("위젯 순서 변경", "Reorder widget")}
+                >
+                  {spec.render()}
+                </HomeSortableWidget>
+              );
+            })}
+          </div>
+        </SortableContext>
+      </DndContext>
 
       {!editing && supportWidgets.length > 0 ? (
         <section
@@ -2196,6 +2219,80 @@ function HomeWidgetShell({
         {action}
       </div>
       <div className="px-4 py-4 sm:px-5">{children}</div>
+    </div>
+  );
+}
+
+function HomeSortableWidget({
+  widgetId,
+  className,
+  disabled,
+  showHandle,
+  activeWidgetId,
+  overWidgetId,
+  handleLabel,
+  children,
+}: {
+  widgetId: string;
+  className: string;
+  disabled: boolean;
+  showHandle: boolean;
+  activeWidgetId: string | null;
+  overWidgetId: string | null;
+  handleLabel: string;
+  children: ReactNode;
+}) {
+  const {
+    attributes,
+    isDragging,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+  } = useSortable({ id: widgetId, disabled });
+  const isOver = overWidgetId === widgetId && activeWidgetId !== widgetId;
+
+  return (
+    <div
+      ref={setNodeRef}
+      data-testid={`home-widget-${widgetId}`}
+      className={[
+        className,
+        isDragging ? "opacity-70" : "",
+        isOver
+          ? "rounded-[2rem] ring-2 ring-[color:var(--th-accent-primary)] ring-offset-2 ring-offset-transparent"
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition: transition ?? undefined,
+      }}
+    >
+      <div className="relative h-full">
+        {showHandle ? (
+          <button
+            ref={setActivatorNodeRef}
+            type="button"
+            data-testid={`home-drag-handle-${widgetId}`}
+            aria-label={handleLabel}
+            className="absolute right-4 top-4 z-10 flex h-8 w-8 cursor-grab items-center justify-center rounded-full border transition-colors hover:bg-white/10 active:cursor-grabbing"
+            style={{
+              borderColor: "var(--th-border-subtle)",
+              background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
+              color: "var(--th-text-muted)",
+              touchAction: "none",
+            }}
+            {...attributes}
+            {...listeners}
+          >
+            <GripVertical size={14} />
+          </button>
+        ) : null}
+        {children}
+      </div>
     </div>
   );
 }
