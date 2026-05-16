@@ -65,5 +65,27 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     crate::db::prompt_manifests::install_retention_config(config.prompt_manifest_retention.clone());
     crate::services::provider_hosting::install_provider_hosting_config(&config);
 
+    // Issue #2193 — Codex remote SSH runtime gate.
+    //
+    // The ADR (`docs/codex-remote-ssh-policy.md`) lands the gate now but
+    // leaves the implementation follow-ups (real `services::remote`,
+    // `providers.codex.remote_hosts` allow-list, PTY-bound cancel path,
+    // integration test) explicitly out of this change. If an operator
+    // flips the gate before those land, they get a loud warning at
+    // startup so the misconfiguration is visible — the dispatcher still
+    // refuses to route to the stubbed `execute_streaming_remote_*`
+    // helpers because they unconditionally return Err.
+    if config.codex_remote_ssh_enabled() {
+        tracing::warn!(
+            issue = 2193,
+            doc = "docs/codex-remote-ssh-policy.md",
+            "providers.codex.remote_ssh_enabled is true but the ADR follow-ups \
+             (services::remote SSH implementation, providers.codex.remote_hosts \
+             allow-list, PTY-bound cancel path, and the cancel integration test) \
+             are not in place yet. Remote Codex turns will still fail; flip this \
+             gate back to false until the follow-ups land."
+        );
+    }
+
     Ok(BootstrapState { config })
 }
