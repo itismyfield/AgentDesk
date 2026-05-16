@@ -447,7 +447,12 @@ pub fn execute_command_simple_cancellable_with_model(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
 ) -> Result<String, String> {
     let borrow = cancel_token.as_deref();
-    execute_command_simple_with_model_and_cancel(prompt, model_override, borrow, cancel_token.clone())
+    execute_command_simple_with_model_and_cancel(
+        prompt,
+        model_override,
+        borrow,
+        cancel_token.clone(),
+    )
 }
 
 fn execute_command_simple_with_model_and_cancel(

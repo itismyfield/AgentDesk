@@ -675,8 +675,7 @@ fn execute_command_simple_inner(
     let output_result = child.wait_with_output();
     cancel_watcher.disarm();
     let was_cancelled = cancel_requested(cancel_token);
-    let output = output_result
-        .map_err(|e| format!("Failed to read Codex output: {}", e))?;
+    let output = output_result.map_err(|e| format!("Failed to read Codex output: {}", e))?;
 
     if was_cancelled {
         return Err("Codex request cancelled".to_string());

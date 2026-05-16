@@ -330,7 +330,9 @@ async fn generate_foreground_ack_text(
             // natural exit. Without this, dropping the JoinHandle has no
             // effect on the running blocking task.
             cancel_token.set_cancel_source("voice_foreground_ack_timeout");
-            cancel_token.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            cancel_token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
@@ -483,7 +485,9 @@ async fn generate_voice_channel_text_reply(
             // #2250: see comment in `generate_foreground_ack_text` —
             // signal cancel so the detached blocking child is killed.
             cancel_token.set_cancel_source("voice_channel_text_reply_timeout");
-            cancel_token.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            cancel_token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
@@ -573,7 +577,9 @@ async fn generate_voice_background_result_summary(
             // #2250: see comment in `generate_foreground_ack_text` —
             // signal cancel so the detached blocking child is killed.
             cancel_token.set_cancel_source("voice_background_summary_timeout");
-            cancel_token.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            cancel_token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
@@ -953,7 +959,9 @@ impl VoiceBargeInRuntime {
         let reply =
             generate_voice_channel_text_reply(text, &language, &foreground, cancel_token.clone())
                 .await
-                .unwrap_or_else(|| "지금 보이스 빠른 답변 모델 응답을 만들지 못했어요.".to_string());
+                .unwrap_or_else(|| {
+                    "지금 보이스 빠른 답변 모델 응답을 만들지 못했어요.".to_string()
+                });
         self.unregister_inflight_foreground_cancel(channel_id, &cancel_token);
 
         if let Err(error) = channel_id.say(http.as_ref(), reply).await {
