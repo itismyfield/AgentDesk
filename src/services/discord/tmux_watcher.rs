@@ -2538,44 +2538,48 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
 
-        if terminal_output_committed {
-            // #2161 TUI completion gate: ClaudeTui sessions can land a
-            // `result` JSONL event before the interactive pane is actually
-            // quiescent. Without this gate the user sees `응답 완료` on
-            // Discord while the tmux pane still shows `almost done thinking`
-            // and subsequent relay messages continue past the completion
-            // marker. Gate only this user-visible status event — relay text
-            // already committed above, and downstream watermark / mailbox
-            // bookkeeping below intentionally proceeds regardless.
-            //
-            // On gate timeout (Codex H2) we deliberately do NOT emit
-            // `TurnCompleted` — the placeholder sweeper / next-turn intake
-            // will close the lingering Active panel rather than mark a hung
-            // pane as completed.
-            let gate_outcome = run_tui_completion_gate(
+        // #2161 TUI completion gate: ClaudeTui sessions can land a
+        // `result` JSONL event before the interactive pane is actually
+        // quiescent. Without this gate the user sees `응답 완료` on
+        // Discord while the tmux pane still shows `almost done thinking`
+        // and subsequent relay messages continue past the completion
+        // marker.
+        //
+        // On gate timeout (Codex H2) we deliberately do NOT emit
+        // `TurnCompleted` — the placeholder sweeper / next-turn intake
+        // will close the lingering Active panel rather than mark a hung
+        // pane as completed.
+        //
+        // Codex round-2 H1: the gate outcome is now also threaded into the
+        // dispatch finalization step below so a still-busy ClaudeTui pane
+        // does not drain queued turns into a busy-followup notice.
+        let watcher_tui_gate_outcome = if terminal_output_committed {
+            run_tui_completion_gate(
                 &watcher_provider,
                 channel_id,
                 &tmux_session_name,
                 task_notification_kind,
             )
-            .await;
+            .await
+        } else {
+            TuiCompletionGateOutcome::NotGated
+        };
 
-            if gate_outcome.should_emit_completion() {
-                complete_watcher_status_panel_v2(
-                    &http,
-                    &shared,
-                    channel_id,
-                    status_panel_msg_id,
-                    &watcher_provider,
-                    status_panel_started_at,
-                    &mut last_status_panel_text,
-                    matches!(
-                        task_notification_kind,
-                        Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
-                    ),
-                )
-                .await;
-            }
+        if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
+            complete_watcher_status_panel_v2(
+                &http,
+                &shared,
+                channel_id,
+                status_panel_msg_id,
+                &watcher_provider,
+                status_panel_started_at,
+                &mut last_status_panel_text,
+                matches!(
+                    task_notification_kind,
+                    Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
+                ),
+            )
+            .await;
         }
 
         // Advance the shared confirmed-delivery watermark on any committed
@@ -2766,7 +2770,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .and_then(|session| session.validated_path(channel_id.get()))
         };
 
-        let dispatch_ok = if let Some(did) = resolved_did.as_deref() {
+        // #2161 (Codex round-2 H1): if the TUI quiescence gate timed out
+        // above, treat the watcher dispatch finalization as "preserved":
+        // don't complete the dispatch, don't kick off queued work, and
+        // leave inflight alone so the next watcher pass / placeholder
+        // sweeper observes the still-busy pane and reconciles.
+        let dispatch_ok = if matches!(
+            watcher_tui_gate_outcome,
+            TuiCompletionGateOutcome::TimedOut
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %watcher_provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                "[{ts}] ⚠ watcher: dispatch finalization deferred — TUI quiescence gate timed out (#2161)"
+            );
+            false
+        } else if let Some(did) = resolved_did.as_deref() {
             let finalization =
                 crate::services::discord::streaming_finalizer::finalize_watcher_streaming_dispatch(
                     crate::services::discord::streaming_finalizer::WatcherStreamingFinalRequest {
