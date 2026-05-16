@@ -1,3 +1,4 @@
+import * as Accordion from "@radix-ui/react-accordion";
 import { Check, ChevronDown, Eye, Info } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type {
@@ -1765,8 +1766,6 @@ export default function SettingsView({
     [visibleConfigEntries],
   );
 
-  const activeRuntimeCategory = CATEGORIES.find((category) => category.id === activeRuntimeCategoryId) ?? CATEGORIES[0];
-
   const handlePanelChange = useCallback((panel: SettingsPanel, mode: "push" | "replace" = "push") => {
     setActivePanel((current) => {
       if (typeof window !== "undefined" && !(current === panel && mode === "push")) {
@@ -2638,48 +2637,25 @@ export default function SettingsView({
         </SettingsEmptyState>
       ) : (
         <div className="space-y-4">
-          <div className="flex flex-wrap gap-2">
-            {CATEGORIES.map((category) => (
-              <button
-                key={category.id}
-                type="button"
-                onClick={() => setActiveRuntimeCategoryId(category.id)}
-                className={subtleButtonClass}
-                style={{
-                  ...subtleButtonStyle,
-                  borderColor: activeRuntimeCategoryId === category.id
-                    ? "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)"
-                    : subtleButtonStyle.borderColor,
-                  color: activeRuntimeCategoryId === category.id ? "var(--th-text)" : subtleButtonStyle.color,
-                  background: activeRuntimeCategoryId === category.id
-                    ? "color-mix(in srgb, var(--th-accent-primary-soft) 68%, transparent)"
-                    : subtleButtonStyle.background,
-                }}
-              >
-                {tr(category.titleKo, category.titleEn)}{" "}
-                <span className="ml-1 opacity-60">{category.fields.length}</span>
-              </button>
-            ))}
-          </div>
-
-          {activeRuntimeCategory &&
-            (() => {
+          <Accordion.Root
+            type="single"
+            value={activeRuntimeCategoryId}
+            onValueChange={(value) => {
+              if (value) setActiveRuntimeCategoryId(value);
+            }}
+            className="space-y-3"
+          >
+            {CATEGORIES.map((category) => {
               const categoryMetas = runtimeMetas.filter((meta) =>
-                activeRuntimeCategory.fields.some((f) => f.key === meta.key),
+                category.fields.some((field) => field.key === meta.key),
               );
-              return renderSettingGroupCard({
-                titleKo: activeRuntimeCategory.titleKo,
-                titleEn: activeRuntimeCategory.titleEn,
-                descriptionKo: activeRuntimeCategory.descriptionKo,
-                descriptionEn: activeRuntimeCategory.descriptionEn,
-                totalCount: categoryMetas.length,
-                rows: categoryMetas.map((meta) => {
-                  const field = activeRuntimeCategory.fields.find((f) => f.key === meta.key);
+              const rows = categoryMetas
+                .map((meta) => {
+                  const field = category.fields.find((item) => item.key === meta.key);
                   if (!field) return renderSettingRow(meta);
                   const value = Number(meta.effectiveValue) || 0;
                   const defaultValue = Number(meta.defaultValue) || 0;
                   const isDefault = value === defaultValue;
-                  // Use a custom control: range slider + numeric input + reset.
                   const controlOverlay = (
                     <div className="flex items-center gap-2">
                       <input
@@ -2688,9 +2664,7 @@ export default function SettingsView({
                         max={field.max}
                         step={field.step}
                         value={value}
-                        onChange={(event) =>
-                          handleRcChange(field.key, Number(event.target.value))
-                        }
+                        onChange={(event) => handleRcChange(field.key, Number(event.target.value))}
                         className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
                         style={{ accentColor: "var(--th-accent-primary)" }}
                       />
@@ -2709,8 +2683,7 @@ export default function SettingsView({
                         className="w-20 rounded-xl px-2 py-1.5 text-right text-xs"
                         style={{
                           ...inputStyle,
-                          fontFamily:
-                            "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                          fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
                         }}
                       />
                     </div>
@@ -2726,9 +2699,78 @@ export default function SettingsView({
                     </button>
                   ) : null;
                   return renderSettingRow(meta, { controlOverlay, trailingMeta });
-                }),
-              });
-            })()}
+                })
+                .filter(Boolean);
+              const countLabel = panelQueryNormalized
+                ? `${rows.length}/${categoryMetas.length}`
+                : tr(`${categoryMetas.length}개`, `${categoryMetas.length} items`);
+              const isOpen = activeRuntimeCategoryId === category.id;
+
+              return (
+                <Accordion.Item
+                  key={category.id}
+                  value={category.id}
+                  className="overflow-hidden rounded-[20px] border"
+                  style={{
+                    borderColor: isOpen
+                      ? "color-mix(in srgb, var(--th-accent-primary) 32%, var(--th-border) 68%)"
+                      : "color-mix(in srgb, var(--th-border) 70%, transparent)",
+                    background: isOpen
+                      ? "color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-primary-soft) 18%)"
+                      : "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+                  }}
+                >
+                  <Accordion.Header>
+                    <Accordion.Trigger
+                      className="flex w-full items-start justify-between gap-3 px-4 py-4 text-left sm:px-5"
+                      style={{ color: "var(--th-text)" }}
+                    >
+                      <span className="min-w-0">
+                        <span className="settings-section-title block text-sm font-semibold">
+                          {tr(category.titleKo, category.titleEn)}
+                        </span>
+                        <span className="settings-copy mt-1 block text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+                          {tr(category.descriptionKo, category.descriptionEn)}
+                        </span>
+                      </span>
+                      <span className="flex shrink-0 items-center gap-2">
+                        <span
+                          className="settings-count-chip inline-flex rounded-full border px-2.5 py-1 text-[10px] font-medium"
+                          style={{
+                            borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+                            background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
+                            color: "var(--th-text-muted)",
+                          }}
+                        >
+                          {countLabel}
+                        </span>
+                        <ChevronDown
+                          size={16}
+                          style={{
+                            color: "var(--th-text-muted)",
+                            transform: isOpen ? "rotate(180deg)" : "none",
+                            transition: "transform 0.2s",
+                          }}
+                        />
+                      </span>
+                    </Accordion.Trigger>
+                  </Accordion.Header>
+                  <Accordion.Content
+                    className="px-2 pb-2 sm:px-3"
+                    style={{ borderTop: "1px solid color-mix(in srgb, var(--th-border) 60%, transparent)" }}
+                  >
+                    {rows.length > 0 ? (
+                      <div className="pt-1">{rows}</div>
+                    ) : (
+                      <SettingsEmptyState className="my-2 text-sm">
+                        {tr("검색 결과가 없습니다.", "No matching settings.")}
+                      </SettingsEmptyState>
+                    )}
+                  </Accordion.Content>
+                </Accordion.Item>
+              );
+            })}
+          </Accordion.Root>
 
           <SettingsCallout
             className="mt-0"
