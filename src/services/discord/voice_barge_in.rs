@@ -2142,8 +2142,13 @@ impl VoiceBargeInRuntime {
         {
             Ok(outcome) => {
                 if let Some(message_id) = outcome.message_id {
-                    crate::voice::announce_meta::global_store()
-                        .insert(message_id, announcement_meta.clone());
+                    // #2209 follow-up review — publish to the durable
+                    // table BEFORE the in-process local store. Otherwise
+                    // a same-process MESSAGE_CREATE handler could pull
+                    // the local entry, run consume_durable (which sees
+                    // no row), dispatch, and THEN the durable INSERT
+                    // lands, leaving an orphaned replayable row until
+                    // the next GC sweep.
                     if let Some(pool) = shared.pg_pool.as_ref() {
                         if let Err(error) = crate::voice::announce_meta::persist_durable(
                             pool,
@@ -2162,6 +2167,8 @@ impl VoiceBargeInRuntime {
                             );
                         }
                     }
+                    crate::voice::announce_meta::global_store()
+                        .insert(message_id, announcement_meta.clone());
                 }
                 tracing::info!(
                     source_channel_id = source_channel_id.get(),

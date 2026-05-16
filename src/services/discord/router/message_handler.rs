@@ -2268,17 +2268,40 @@ async fn peek_durable_voice_announcement_for_intake(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableConsumeOutcome {
+    /// This worker successfully claimed the row and may proceed
+    /// with dispatch.
+    Claimed,
+    /// A peer worker already claimed the row, or the row TTL'd
+    /// between peek and claim. Caller MUST abort dispatch.
+    AlreadyClaimedOrExpired,
+    /// Pool unavailable or query error. The caller has nothing
+    /// durable to consume; treat as benign (the in-process local
+    /// store is the source of truth in this case).
+    Skipped,
+}
+
+/// Atomic ownership claim at the dispatch commit point. See
+/// `crate::voice::announce_meta::consume_durable` for the contract.
 async fn consume_durable_voice_announcement_after_handoff(
     pg_pool: Option<&sqlx::PgPool>,
     message_id: MessageId,
-) {
-    let Some(pool) = pg_pool else { return };
-    if let Err(error) = crate::voice::announce_meta::consume_durable(pool, message_id).await {
-        tracing::warn!(
-            error = %error,
-            message_id = message_id.get(),
-            "failed to consume durable voice transcript announcement metadata after handoff"
-        );
+) -> DurableConsumeOutcome {
+    let Some(pool) = pg_pool else {
+        return DurableConsumeOutcome::Skipped;
+    };
+    match crate::voice::announce_meta::consume_durable(pool, message_id).await {
+        Ok(Some(_)) => DurableConsumeOutcome::Claimed,
+        Ok(None) => DurableConsumeOutcome::AlreadyClaimedOrExpired,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                message_id = message_id.get(),
+                "failed to consume durable voice transcript announcement metadata after handoff"
+            );
+            DurableConsumeOutcome::Skipped
+        }
     }
 }
 
@@ -2288,8 +2311,10 @@ async fn take_durable_voice_announcement_for_intake(
     message_id: MessageId,
 ) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
     let announcement = peek_durable_voice_announcement_for_intake(pg_pool, message_id).await?;
-    consume_durable_voice_announcement_after_handoff(pg_pool, message_id).await;
-    Some(announcement)
+    match consume_durable_voice_announcement_after_handoff(pg_pool, message_id).await {
+        DurableConsumeOutcome::Claimed => Some(announcement),
+        _ => None,
+    }
 }
 
 pub(in crate::services::discord) async fn handle_text_message(
@@ -2432,13 +2457,23 @@ pub(in crate::services::discord) async fn handle_text_message(
             .await
     {
         // Barge-in successfully absorbed the announcement — this counts
-        // as a successful hand-off, so the durable row may be deleted.
+        // as a successful hand-off, so the durable row may be claimed.
+        // The atomic claim guards against a sibling worker that already
+        // routed this turn (#2209 finding #1, ship-blocker review).
         if durable_pending_consume {
-            consume_durable_voice_announcement_after_handoff(
+            let outcome = consume_durable_voice_announcement_after_handoff(
                 shared.pg_pool.as_ref(),
                 user_msg_id,
             )
             .await;
+            if matches!(outcome, DurableConsumeOutcome::AlreadyClaimedOrExpired) {
+                tracing::warn!(
+                    event = "voice_announce_durable_claim_lost",
+                    channel_id = channel_id.get(),
+                    message_id = user_msg_id.get(),
+                    "barge-in absorbed announcement but durable claim was lost — peer worker likely already routed; not retrying"
+                );
+            }
         }
         return Ok(());
     }
@@ -4662,13 +4697,26 @@ pub(in crate::services::discord) async fn handle_text_message(
         tracing::info!("  [{ts}]   ⚠ inflight state save failed: {e}");
     }
 
-    // #2209 finding #2 — durable announce metadata is owned by intake
-    // until we've successfully reached the dispatch commit point (inflight
-    // state saved, about to spawn the provider). Consume it here so a
-    // crash earlier in the path leaves the row recoverable for a retry.
+    // #2209 finding #2 + post-v2 review — atomic ownership claim at the
+    // dispatch commit point. The durable row was peeked (non-destructive)
+    // at intake; here we claim it via UPDATE … RETURNING. If the claim
+    // is lost (peer worker already claimed, or TTL expired between peek
+    // and now), abort dispatch rather than risk duplicating the turn.
     if durable_pending_consume {
-        consume_durable_voice_announcement_after_handoff(shared.pg_pool.as_ref(), user_msg_id)
-            .await;
+        let outcome = consume_durable_voice_announcement_after_handoff(
+            shared.pg_pool.as_ref(),
+            user_msg_id,
+        )
+        .await;
+        if matches!(outcome, DurableConsumeOutcome::AlreadyClaimedOrExpired) {
+            tracing::warn!(
+                event = "voice_announce_durable_claim_lost",
+                channel_id = channel_id.get(),
+                message_id = user_msg_id.get(),
+                "aborting dispatch — peer worker already claimed this voice announce (or TTL expired between peek and consume)"
+            );
+            return Ok(());
+        }
     }
 
     // Create channel for streaming
@@ -6440,14 +6488,19 @@ mod voice_announce_meta_reconstruction_tests {
             .expect("row should survive a peek-without-consume");
         assert_eq!(retry_peeked, expected);
 
-        // Successful retry: consume removes the row.
-        consume_durable_voice_announcement_after_handoff(Some(&pool), message_id).await;
+        // Successful retry: atomic claim succeeds.
+        let outcome =
+            consume_durable_voice_announcement_after_handoff(Some(&pool), message_id).await;
+        assert_eq!(outcome, DurableConsumeOutcome::Claimed);
         assert!(
             peek_durable_voice_announcement_for_intake(Some(&pool), message_id)
                 .await
                 .is_none(),
-            "consume should delete the durable row"
+            "consumed row must be invisible to subsequent peeks"
         );
+        // Sibling/duplicate consume sees the lost-claim outcome.
+        let dup = consume_durable_voice_announcement_after_handoff(Some(&pool), message_id).await;
+        assert_eq!(dup, DurableConsumeOutcome::AlreadyClaimedOrExpired);
 
         pool.close().await;
         pg_db.drop().await;

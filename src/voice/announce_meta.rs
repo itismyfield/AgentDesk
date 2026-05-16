@@ -227,20 +227,43 @@ pub(crate) async fn peek_durable(
     load_durable(pool, message_id).await
 }
 
-/// Delete the durable row after the announcement has been handed off to
-/// the provider. Idempotent: returns `Ok(false)` if no row matched.
+/// Atomic claim used to commit a voice-announce intake to dispatch.
+///
+/// Returns `Ok(Some(announcement))` exactly once per row — the winning
+/// caller. Concurrent callers (e.g. two intake handlers that both
+/// `peek_durable` the same row before either claims) receive
+/// `Ok(None)` and MUST abort dispatch with a structured warn.
+///
+/// Implemented as `UPDATE … SET consumed_at = NOW() WHERE
+/// consumed_at IS NULL RETURNING announcement`, which Postgres treats
+/// as an atomic compare-and-swap on the row. Rows older than
+/// `DURABLE_ANNOUNCE_META_TTL_SECS` are not claimable.
+///
+/// Note on crash semantics: the row is not deleted, only marked
+/// `consumed_at`. The GC sweep deletes any row whose `created_at`
+/// is older than TTL. If a worker crashes after a successful claim
+/// but before dispatch, the turn is lost — that is the conservative
+/// choice: dispatching a turn twice is worse than dropping it.
 pub(crate) async fn consume_durable(
     pool: &PgPool,
     message_id: MessageId,
-) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        "DELETE FROM voice_transcript_announce_meta
-         WHERE message_id = $1",
+) -> Result<Option<VoiceTranscriptAnnouncement>, sqlx::Error> {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
+        "UPDATE voice_transcript_announce_meta
+         SET consumed_at = NOW()
+         WHERE message_id = $1
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $2)
+         RETURNING announcement",
     )
     .bind(message_id.get().to_string())
-    .execute(pool)
+    .bind(DURABLE_ANNOUNCE_META_TTL_SECS as f64)
+    .fetch_optional(pool)
     .await?;
-    Ok(result.rows_affected() > 0)
+    value
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
 }
 
 /// Legacy destructive read retained for tests and any caller that
@@ -420,24 +443,68 @@ mod tests {
             .expect("row should survive a peek-without-consume");
         assert_eq!(peeked_again, expected);
 
-        // After a successful retry, consume removes the row exactly once.
-        assert!(
-            consume_durable(&pool, message_id)
-                .await
-                .expect("consume durable metadata")
-        );
+        // After a successful retry, consume returns the announcement
+        // exactly once.
+        let claimed = consume_durable(&pool, message_id)
+            .await
+            .expect("consume durable metadata")
+            .expect("claim should succeed");
+        assert_eq!(claimed, expected);
         assert!(
             peek_durable(&pool, message_id)
                 .await
                 .expect("peek after consume")
-                .is_none()
+                .is_none(),
+            "consumed row must not be visible to subsequent peeks"
         );
         assert!(
-            !consume_durable(&pool, message_id)
+            consume_durable(&pool, message_id)
                 .await
-                .expect("second consume"),
-            "consume is idempotent — second call reports no row"
+                .expect("second consume")
+                .is_none(),
+            "second consume must report no row — claim is one-shot"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Two concurrent intakes peek the same row, then both race to
+    /// claim. Exactly one must win (Some(announcement)); the other
+    /// must observe `None` and abort dispatch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_consumers_yield_exactly_one_claim() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(98_301);
+        let expected = announcement();
+
+        persist_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable metadata");
+
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let task_a = tokio::spawn(async move {
+            let _peek = peek_durable(&pool_a, message_id).await.unwrap();
+            consume_durable(&pool_a, message_id).await.unwrap()
+        });
+        let task_b = tokio::spawn(async move {
+            let _peek = peek_durable(&pool_b, message_id).await.unwrap();
+            consume_durable(&pool_b, message_id).await.unwrap()
+        });
+        let (result_a, result_b) =
+            tokio::try_join!(task_a, task_b).expect("join concurrent consumers");
+        let winners = [&result_a, &result_b]
+            .iter()
+            .filter(|r| r.is_some())
+            .count();
+        assert_eq!(
+            winners, 1,
+            "exactly one consumer must win the atomic claim"
+        );
+        let winner = result_a.as_ref().or(result_b.as_ref()).unwrap();
+        assert_eq!(winner, &expected);
 
         pool.close().await;
         pg_db.drop().await;
