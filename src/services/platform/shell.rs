@@ -12,7 +12,8 @@ pub(crate) use crate::services::git::{
     find_latest_commit_for_issue, find_worktree_for_issue, git_best_commit_for_dispatch,
     git_branch_containing_commit, git_branch_name, git_dispatch_baseline_commit, git_head_commit,
     git_latest_commit_for_issue, git_mainline_commit_for_issue_since, git_mainline_head_commit,
-    git_mainline_issue_numbers, git_merge_base, git_tracked_change_paths, is_mainlike_branch,
+    git_mainline_issue_numbers, git_merge_base, git_tracked_change_paths,
+    git_tracked_change_paths_strict, is_mainlike_branch,
     parse_github_repo_from_remote, resolve_repo_dir, resolve_repo_dir_for_id,
     resolve_repo_dir_for_target,
 };

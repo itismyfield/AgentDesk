@@ -117,13 +117,45 @@ pub fn git_mainline_commit_for_issue_since(
 ///
 /// Untracked files are ignored because they do not participate in commit
 /// resolution until they are added.
+///
+/// **Fail-open semantics**: returns `None` if git is unavailable or the command
+/// fails (index lock, permission denied, corrupt repo state). Callers that use
+/// this for *informational* purposes (e.g. a tracked-change preview in the
+/// completion-guard summary) can safely treat `None` as "unknown".
+///
+/// **Do NOT** use this for safety-critical dirty-state checks — an index lock
+/// or permission error would silently look like a clean worktree. Use
+/// [`git_tracked_change_paths_strict`] instead, which surfaces the git failure
+/// so callers can fail-closed.
 pub fn git_tracked_change_paths(repo_dir: &str) -> Option<Vec<String>> {
+    git_tracked_change_paths_strict(repo_dir).ok()
+}
+
+/// Strict (fail-closed) variant of [`git_tracked_change_paths`].
+///
+/// Returns `Err(String)` when the git invocation could not produce a reliable
+/// answer (executable missing, permission denied, non-zero exit, etc.). Use
+/// this in safety-critical decisions where treating an opaque git failure as
+/// "clean worktree" would silently bypass a dirty-state guard.
+///
+/// Issue #2254 (bonus, from #2253 round-2 review): the previous
+/// `Option`-only API meant `clean_exact_review_worktree_path` and
+/// `resolve_repo_head_fallback_target_pg` accepted any git-failure as "no
+/// tracked changes" via `unwrap_or_default()`. This variant lets those sites
+/// distinguish the two outcomes.
+pub fn git_tracked_change_paths_strict(repo_dir: &str) -> Result<Vec<String>, String> {
     let output = git_command()
         .args(["status", "--porcelain", "--untracked-files=no"])
         .current_dir(repo_dir)
         .output()
-        .ok()
-        .filter(|o| o.status.success())?;
+        .map_err(|err| format!("git status spawn failed for {repo_dir}: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git status --porcelain exited with status {:?} in {repo_dir}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
     let paths = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
@@ -139,7 +171,7 @@ pub fn git_tracked_change_paths(repo_dir: &str) -> Option<Vec<String>> {
             (!path.is_empty()).then(|| path.to_string())
         })
         .collect::<Vec<_>>();
-    Some(paths)
+    Ok(paths)
 }
 
 /// Find the most recent commit whose subject references `#issue_number`.
@@ -504,5 +536,27 @@ mod tests {
 
         let paths = git_tracked_change_paths(repo_dir).unwrap();
         assert_eq!(paths, vec!["tracked.txt".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod fail_closed_tests {
+    use super::*;
+
+    /// #2254 bonus: the strict variant must surface a non-repo directory as
+    /// `Err`, not silently return an empty "clean" list (the old fail-open
+    /// behavior of `git_tracked_change_paths`).
+    #[test]
+    fn git_tracked_change_paths_strict_fails_closed_on_non_repo_dir() {
+        let not_a_repo = tempfile::tempdir().unwrap();
+        let repo_dir = not_a_repo.path().to_str().unwrap();
+        let result = git_tracked_change_paths_strict(repo_dir);
+        assert!(
+            result.is_err(),
+            "non-repo dir must surface a git failure to the caller, got {result:?}"
+        );
+        // The fail-open wrapper still maps that to None for legacy info-only
+        // callers (e.g. completion_guard's tracked-change summary).
+        assert!(git_tracked_change_paths(repo_dir).is_none());
     }
 }

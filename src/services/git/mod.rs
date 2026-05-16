@@ -13,6 +13,7 @@ pub use commit_resolver::{
     find_latest_commit_for_issue, git_best_commit_for_dispatch, git_dispatch_baseline_commit,
     git_head_commit, git_latest_commit_for_issue, git_mainline_commit_for_issue_since,
     git_mainline_head_commit, git_mainline_issue_numbers, git_tracked_change_paths,
+    git_tracked_change_paths_strict,
 };
 pub(crate) use remote::parse_github_repo_from_remote;
 pub use repo_resolver::{resolve_repo_dir, resolve_repo_dir_for_id, resolve_repo_dir_for_target};
