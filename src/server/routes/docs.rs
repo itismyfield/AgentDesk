@@ -2691,7 +2691,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "PATCH",
             "/api/dispatches/{id}",
             "dispatches",
-            "Update dispatch lifecycle state or result. Allowed status values are pending, dispatched, completed, cancelled, and failed. status=completed uses the dispatch completion finalizer; review dispatches require a verdict and callers should use POST /api/reviews/verdict. Non-completed status changes and result-only updates refresh updated_at. Completed responses include result_summary and completed_at; legacy completed rows without completed_at mirror updated_at in the response.",
+            "Update dispatch lifecycle state or result. Allowed status values are pending, dispatched, completed, cancelled, and failed. status=completed uses the dispatch completion finalizer and is allowed only from pending or dispatched; already-terminal dispatches return 409 instead of a silent no-op. review dispatches require a verdict and callers should use POST /api/reviews/verdict. allowed_from is a status precondition; when the dispatch exists but its current status is outside this set, the request returns 409. Non-completed status changes and result-only updates refresh updated_at. Completed responses include result_summary and completed_at; legacy completed rows without completed_at mirror updated_at in the response.",
         )
         .with_params([
             ("id", path_param("Dispatch ID")),
@@ -2718,7 +2718,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 body_param(
                     "array<string>",
                     false,
-                    "Optional status precondition for non-completed lifecycle updates; when the dispatch exists but its current status is outside this set, the request is a no-op and returns the current dispatch",
+                    "Optional status precondition; when the dispatch exists but its current status is outside this set, the request returns 409 and does not mutate the dispatch",
                 ),
             ),
         ])
@@ -2727,9 +2727,9 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"dispatch": {"id": "dispatch-1", "status": "completed", "result": {"summary": "done"}, "result_summary": "done", "updated_at": "2026-05-03 01:23:45+00", "completed_at": "2026-05-03 01:23:45+00"}}),
         )
         .with_error_example(
-            400,
-            json!({"path": {"id": "dispatch-1"}, "body": {"status": "done"}}),
-            json!({"error": "invalid dispatch status 'done' — allowed values: pending, dispatched, completed, cancelled, failed"}),
+            409,
+            json!({"path": {"id": "dispatch-1"}, "body": {"status": "completed"}}),
+            json!({"error": "dispatch dispatch-1 is in status 'completed' and cannot be completed; completion is allowed only from pending or dispatched", "dispatch_id": "dispatch-1"}),
         )
         .with_curl("curl -X PATCH http://localhost:8787/api/dispatches/dispatch-1 -H 'Content-Type: application/json' -d '{\"status\":\"completed\"}'"),
         ep(
@@ -5669,6 +5669,12 @@ mod tests {
             .expect("PATCH /api/dispatches/{id} must be documented");
         assert!(
             patch.description.contains("Allowed status values")
+                && patch
+                    .description
+                    .contains("already-terminal dispatches return 409")
+                && patch
+                    .description
+                    .contains("allowed_from is a status precondition")
                 && patch.description.contains("result_summary")
                 && patch.description.contains("completed_at"),
             "PATCH dispatch docs must describe lifecycle response semantics: {}",
@@ -5696,7 +5702,19 @@ mod tests {
                 .error_example
                 .as_ref()
                 .and_then(|example| example.status),
-            Some(400)
+            Some(409)
+        );
+        let error_response = &patch
+            .error_example
+            .as_ref()
+            .expect("PATCH dispatch docs must include an error response example")
+            .response;
+        assert_eq!(error_response["dispatch_id"], "dispatch-1");
+        assert!(
+            error_response["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("cannot be completed")),
+            "PATCH dispatch docs must show terminal completion conflict: {error_response}"
         );
 
         let cancel = endpoints

@@ -1477,6 +1477,84 @@ async fn dispatch_pg_complete() {
     pg_db.drop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn patch_dispatch_pg_completed_terminal_returns_conflict() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+         VALUES ('agent-terminal-complete', 'Terminal Complete', '111', '222')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at)
+         VALUES ('card-terminal-complete', 'Terminal Complete Card', 'review', 'medium', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at, completed_at
+         ) VALUES (
+            'dispatch-terminal-complete', 'card-terminal-complete', 'agent-terminal-complete',
+            'implementation', 'completed', 'Already done', '{\"summary\":\"done\"}'::jsonb, NOW(), NOW(), NOW()
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/dispatches/dispatch-terminal-complete")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"status":"completed","result":{"agent_response_present":true}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["dispatch_id"], "dispatch-terminal-complete");
+    assert!(
+        json["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("cannot be completed")),
+        "terminal completion conflict must explain the lifecycle precondition: {json}"
+    );
+
+    let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+        .bind("dispatch-terminal-complete")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "completed");
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
 #[tokio::test]
 async fn dispatch_pg_get_not_found() {
     let pg_db = TestPostgresDb::create().await;
