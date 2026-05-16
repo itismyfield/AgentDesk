@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Eye, Info, Search } from "lucide-react";
+import { Check, ChevronDown, Eye, Info, Search, X } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type {
   Agent,
@@ -142,6 +142,45 @@ const SETTINGS_PANEL_QUERY_KEY = "settingsPanel";
 const GENERAL_FIELD_KEYS = ["companyName", "ceoName", "language", "theme"] as const;
 const PIPELINE_SELECTOR_REFRESH_TIMEOUT_MS = 5_000;
 const PIPELINE_SELECTOR_CACHE_MAX_AGE_MS = 60_000;
+
+const SETTINGS_GLOSSARY = [
+  {
+    termKo: "Dispatch",
+    termEn: "Dispatch",
+    definitionKo: "에이전트에게 작업을 전달하고 상태를 추적하는 실행 단위입니다.",
+    definitionEn: "A unit of work handed to an agent and tracked through execution.",
+  },
+  {
+    termKo: "Triage",
+    termEn: "Triage",
+    definitionKo: "새 이슈나 요청을 분류해 backlog, queue, review 중 어디로 보낼지 정하는 단계입니다.",
+    definitionEn: "Classifies new issues or requests into backlog, queue, review, or another path.",
+  },
+  {
+    termKo: "TTL",
+    termEn: "TTL",
+    definitionKo: "값이나 캐시가 신뢰 가능한 것으로 간주되는 유효 시간입니다.",
+    definitionEn: "The time window where a value or cache entry is considered fresh.",
+  },
+  {
+    termKo: "Context compact",
+    termEn: "Context compact",
+    definitionKo: "긴 대화나 로그를 요약해 다음 실행에 넘기는 컨텍스트 절약 단계입니다.",
+    definitionEn: "Compacts long conversations or logs before handing them to the next run.",
+  },
+  {
+    termKo: "Barge-in",
+    termEn: "Barge-in",
+    definitionKo: "음성 응답 중 사용자가 끼어들어 새 명령을 말하는 동작입니다.",
+    definitionEn: "A user interruption while a voice response is still being spoken.",
+  },
+  {
+    termKo: "NFC normalization",
+    termEn: "NFC normalization",
+    definitionKo: "한글과 유니코드 문자를 비교 가능한 조합형으로 정리하는 처리입니다.",
+    definitionEn: "Normalizes Unicode text so Korean and other composed characters compare reliably.",
+  },
+] as const;
 
 interface PipelineRepoCacheEntry {
   viewerLogin: string;
@@ -1308,7 +1347,7 @@ function SettingRow({
       <div className="setting-row-grid items-center gap-3 px-2 py-3 sm:gap-4 sm:px-3 sm:py-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
+            <span className="setting-row-label text-sm font-medium" style={{ color: "var(--th-text)" }}>
               {labelText}
             </span>
             {meta.flags.map((flag) => {
@@ -1325,12 +1364,13 @@ function SettingRow({
             })}
           </div>
           {hintText ? (
-            <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+            <div className="setting-row-hint mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
               {hintText}
             </div>
           ) : null}
           <code
-            className="mt-1 inline-block rounded px-1 py-px text-[10px]"
+            className="setting-key-token mt-1 inline-block rounded px-1 py-px text-[10px]"
+            title={meta.key}
             style={{
               background: "color-mix(in srgb, var(--th-overlay-medium) 80%, transparent)",
               color: "var(--th-text-muted)",
@@ -1630,6 +1670,62 @@ function StorageSurfaceCard({
       <div className="mt-3 text-[11px] font-medium uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
         {footer}
       </div>
+    </SettingsCard>
+  );
+}
+
+function SettingsGlossary({ isKo }: { isKo: boolean }) {
+  const tr = (ko: string, en: string) => (isKo ? ko : en);
+  return (
+    <SettingsCard
+      className="settings-glossary rounded-[18px] border px-4 py-4 sm:px-5"
+      style={{
+        borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+        background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
+      }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+            {tr("용어 빠른 정의", "Quick term definitions")}
+          </div>
+          <p className="settings-copy mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+            {tr(
+              "설정값을 바꾸기 전에 화면에 자주 나오는 운영 용어를 먼저 맞춥니다.",
+              "Align on common operations terms before changing values.",
+            )}
+          </p>
+        </div>
+        <span
+          className="settings-count-chip inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
+          style={{
+            borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+            background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
+            color: "var(--th-text-muted)",
+          }}
+        >
+          {tr("핵심 6개", "6 core terms")}
+        </span>
+      </div>
+      <dl className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {SETTINGS_GLOSSARY.map((item) => (
+          <div
+            key={item.termEn}
+            className="rounded-2xl border px-3 py-3"
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+              background: "color-mix(in srgb, var(--th-bg-surface) 88%, transparent)",
+            }}
+          >
+            <dt className="settings-term text-xs font-semibold" style={{ color: "var(--th-text)" }}>
+              {tr(item.termKo, item.termEn)}
+            </dt>
+            <dd className="settings-copy mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+              {tr(item.definitionKo, item.definitionEn)}
+            </dd>
+          </div>
+        ))}
+      </dl>
     </SettingsCard>
   );
 }
@@ -2519,15 +2615,15 @@ export default function SettingsView({
     border: "1px solid var(--th-border)",
     color: "var(--th-text)",
   };
-  const primaryActionClass = "inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50";
+  const primaryActionClass = "inline-flex min-h-[44px] shrink-0 items-center justify-center whitespace-nowrap rounded-2xl px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50";
   const primaryActionStyle: CSSProperties = { background: "var(--th-accent-primary)" };
-  const secondaryActionClass = "inline-flex min-h-[44px] items-center justify-center rounded-2xl border px-5 py-2.5 text-sm font-medium transition-[opacity,color,border-color] hover:opacity-100";
+  const secondaryActionClass = "inline-flex min-h-[44px] items-center justify-center whitespace-nowrap rounded-2xl border px-5 py-2.5 text-sm font-medium transition-[opacity,color,border-color] hover:opacity-100";
   const secondaryActionStyle: CSSProperties = {
     borderColor: "rgba(148,163,184,0.28)",
     color: "var(--th-text-secondary)",
     background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
   };
-  const subtleButtonClass = "inline-flex items-center justify-center rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors";
+  const subtleButtonClass = "inline-flex items-center justify-center whitespace-nowrap rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors";
   const subtleButtonStyle: CSSProperties = {
     borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
     color: "var(--th-text-muted)",
@@ -2743,6 +2839,9 @@ export default function SettingsView({
       },
     ) => {
       const filteredRows = args.rows.filter(Boolean);
+      const countLabel = panelQueryNormalized
+        ? `${filteredRows.length}/${args.totalCount}`
+        : tr(`${args.totalCount}개`, `${args.totalCount} items`);
       return (
         <div
           className="setting-group-card overflow-hidden rounded-[20px] border"
@@ -2756,22 +2855,22 @@ export default function SettingsView({
             style={{ borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)" }}
           >
             <div className="min-w-0">
-              <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+              <div className="settings-section-title text-sm font-semibold" style={{ color: "var(--th-text)" }}>
                 {tr(args.titleKo, args.titleEn)}
               </div>
-              <div className="mt-1 text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+              <div className="settings-copy mt-1 text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
                 {tr(args.descriptionKo, args.descriptionEn)}
               </div>
             </div>
             <span
-              className="inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
+              className="settings-count-chip inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
               style={{
                 borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
                 background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
                 color: "var(--th-text-muted)",
               }}
             >
-              {`${args.totalCount} items`}
+              {countLabel}
             </span>
           </div>
           <div className="px-2 pb-1 pt-1 sm:px-3">
@@ -2786,7 +2885,7 @@ export default function SettingsView({
         </div>
       );
     },
-    [tr],
+    [panelQueryNormalized, tr],
   );
 
   const renderGeneralPanel = () => (
@@ -3725,11 +3824,40 @@ export default function SettingsView({
               value={panelQuery}
               onChange={(event) => setPanelQuery(event.target.value)}
               placeholder={tr("설정 검색", "Search settings")}
+              aria-label={tr("설정 검색", "Search settings")}
               className="w-full rounded-xl py-2.5 pl-9 pr-3 text-sm"
               style={inputStyle}
               data-testid="settings-search-input"
             />
+            {panelQuery ? (
+              <button
+                type="button"
+                onClick={() => setPanelQuery("")}
+                className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-lg"
+                style={{ color: "var(--th-text-muted)" }}
+                aria-label={tr("검색 지우기", "Clear search")}
+              >
+                <X size={13} />
+              </button>
+            ) : null}
           </div>
+
+          {panelQueryNormalized ? (
+            <div
+              className="settings-search-summary mb-3 rounded-xl border px-3 py-2 text-[11px] leading-5"
+              style={{
+                borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+                background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
+                color: "var(--th-text-muted)",
+              }}
+              data-testid="settings-search-summary"
+            >
+              {tr(
+                `현재 패널 ${matchingKeysInActivePanel.size}개 항목 일치`,
+                `${matchingKeysInActivePanel.size} matches in this panel`,
+              )}
+            </div>
+          ) : null}
 
           <div
             role="tablist"
@@ -3759,6 +3887,7 @@ export default function SettingsView({
 
         <div className="min-w-0 space-y-4">
           {settingsInfoNotice}
+          <SettingsGlossary isKo={isKo} />
 
           <SettingsCard
             id="settings-panel-content"

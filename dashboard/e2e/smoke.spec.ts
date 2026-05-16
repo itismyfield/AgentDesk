@@ -2071,6 +2071,22 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("topbar")).toContainText(/설정|Settings/);
   });
 
+  test("settings: glossary, search feedback, and wrapping guard stay stable", async ({ page }) => {
+    await page.goto("/settings?settingsPanel=runtime");
+
+    await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(/용어 빠른 정의|Quick term definitions/)).toBeVisible();
+    await expect(page.getByText("TTL").first()).toBeVisible();
+
+    await page.getByTestId("settings-search-input").fill("TTL");
+    await expect(page.getByTestId("settings-search-summary")).toBeVisible();
+    await expect(page.getByTestId("settings-search-summary")).toContainText(/항목 일치|matches/);
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByRole("button", { name: /검색 지우기|Clear search/ }).click();
+    await expect(page.getByTestId("settings-search-summary")).toHaveCount(0);
+  });
+
   test("settings: mobile page remains scrollable", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/settings");

@@ -761,9 +761,43 @@ textarea {
 /* === Settings page (issue #1257) === */
 .setting-row-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px auto;
+  grid-template-columns: minmax(18rem, 1fr) minmax(16rem, 280px) auto;
   align-items: center;
 }
+
+.settings-copy,
+.setting-row-hint {
+  text-wrap: pretty;
+}
+
+.settings-section-title,
+.setting-row-label {
+  text-wrap: balance;
+}
+
+.settings-term,
+.settings-count-chip {
+  white-space: nowrap;
+}
+
+.setting-key-token {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+.settings-search-summary {
+  text-wrap: pretty;
+}
+
+@media (max-width: 1180px) {
+  .setting-row-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(14rem, 260px) auto;
+  }
+}
+
 /* Desktop default: 2-col grid (220px nav + 1fr content). On <768px the nav
    collapses into a horizontal scroll tab bar and SettingRow becomes a 1-col
    stack. The Tailwind classes already drive desktop layout; these media
