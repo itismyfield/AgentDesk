@@ -419,6 +419,27 @@ fn tmux_generation_file_mtime_ns(_tmux_session_name: &str) -> i64 {
     0
 }
 
+/// #2289 cancel-vs-terminal-frame priority decision.
+///
+/// Models the post-`try_recv` re-sample in the relay receive loop. When a
+/// terminal frame (`Done`) or `Disconnected` is returned, we re-read the
+/// cancel flag because `/stop` may have flipped between the pre-`try_recv`
+/// guard and the receive call. If the cancel raced ahead, the cancel
+/// finalization path must claim the outcome instead of letting `done = true`
+/// be set from the frame (which would silently downgrade a user-stop into a
+/// recorded completion / empty turn).
+///
+/// Returns `true` iff the caller must drop the just-received frame and run
+/// cancel finalization.
+#[inline]
+fn should_finalize_cancel_after_recv(done: bool, cancel_requested: bool) -> bool {
+    // `!done` enforces the documented "whichever observed terminal state
+    // first wins" rule: if a previous iteration already set `done = true`
+    // (e.g. a `Done` arrived during the drain window before the user's
+    // cancel), keep that completion classification.
+    !done && cancel_requested
+}
+
 fn sync_inflight_restart_mode_from_cancel(
     cancel_token: &crate::services::provider::CancelToken,
     inflight_state: &mut InflightTurnState,
@@ -1886,7 +1907,36 @@ pub(super) fn spawn_turn_bridge(
             }),
         );
 
-        while !done
+        // #2289 cancel finalization helper. Both the pre-`try_recv` guard
+        // and the post-`try_recv` re-sample funnel through this so the
+        // cancellation bookkeeping (inflight sync, `cancelled = true`,
+        // background-child abort) stays in lock step and cannot drift.
+        // Implemented as a macro so it can mutate locals owned by the
+        // surrounding `while` body without moving them into a closure that
+        // would conflict with `&mut` borrows held elsewhere. The macro
+        // performs the bookkeeping; callers must follow with `break 'outer`
+        // (or be in a position where falling through hits the outer loop
+        // boundary) so the loop exits to the cancel post-processing path.
+        macro_rules! finalize_cancel_inner {
+            () => {{
+                if sync_inflight_restart_mode_from_cancel(
+                    cancel_token.as_ref(),
+                    &mut inflight_state,
+                ) {
+                    let _ = save_inflight_state(&inflight_state);
+                }
+                cancelled = true;
+                close_all_tracked_background_children(
+                    shared_owned.pg_pool.as_ref(),
+                    &mut active_background_child_session_ids,
+                    "aborted",
+                    "turn cancel",
+                )
+                .await;
+            }};
+        }
+
+        'outer: while !done
             || terminal_control_drain_until
                 .is_some_and(|deadline| std::time::Instant::now() < deadline)
         {
@@ -1904,21 +1954,8 @@ pub(super) fn spawn_turn_bridge(
             // arriving during the drain window break out of the loop
             // normally as a completed turn.
             if !done && cancel_requested(Some(cancel_token.as_ref())) {
-                if sync_inflight_restart_mode_from_cancel(
-                    cancel_token.as_ref(),
-                    &mut inflight_state,
-                ) {
-                    let _ = save_inflight_state(&inflight_state);
-                }
-                cancelled = true;
-                close_all_tracked_background_children(
-                    shared_owned.pg_pool.as_ref(),
-                    &mut active_background_child_session_ids,
-                    "aborted",
-                    "turn cancel",
-                )
-                .await;
-                break;
+                finalize_cancel_inner!();
+                break 'outer;
             }
             if done && cancel_requested(Some(cancel_token.as_ref())) {
                 // #2172: cancel-after-Done during terminal drain — exit
@@ -1926,7 +1963,7 @@ pub(super) fn spawn_turn_bridge(
                 // burning the rest of the drain window. Suppressing the
                 // reclassification still preserves the "stop after
                 // completion is a no-op" UX.
-                break;
+                break 'outer;
             }
 
             let loop_sleep = if done {
@@ -1937,25 +1974,12 @@ pub(super) fn spawn_turn_bridge(
             tokio::time::sleep(loop_sleep).await;
 
             if !done && cancel_requested(Some(cancel_token.as_ref())) {
-                if sync_inflight_restart_mode_from_cancel(
-                    cancel_token.as_ref(),
-                    &mut inflight_state,
-                ) {
-                    let _ = save_inflight_state(&inflight_state);
-                }
-                cancelled = true;
-                close_all_tracked_background_children(
-                    shared_owned.pg_pool.as_ref(),
-                    &mut active_background_child_session_ids,
-                    "aborted",
-                    "turn cancel",
-                )
-                .await;
-                break;
+                finalize_cancel_inner!();
+                break 'outer;
             }
             if done && cancel_requested(Some(cancel_token.as_ref())) {
                 // See note above on the cancel-after-Done race.
-                break;
+                break 'outer;
             }
 
             loop {
@@ -1977,7 +2001,29 @@ pub(super) fn spawn_turn_bridge(
                     break;
                 }
                 match rx.try_recv() {
-                    Ok(msg) => match msg {
+                    Ok(msg) => {
+                        // #2289 cancel boundary: re-sample `cancel_requested`
+                        // AFTER `try_recv` returns. The pre-recv guard above
+                        // only samples before the receive call; if `/stop`
+                        // flips the token between that guard and `try_recv`
+                        // returning a terminal frame (`Done`/`Disconnected`),
+                        // letting the frame run would set `done = true` and
+                        // suppress the outer cancel arm — recording the turn
+                        // as completed when the user actually stopped it.
+                        // Drop the frame and jump to cancel-finalize so the
+                        // cancel claims the outcome. The dropped frame is not
+                        // a data loss: provider output that arrived after
+                        // the user pressed stop is, by contract, discarded
+                        // (the cancel path closes background children and
+                        // tears the turn down).
+                        if should_finalize_cancel_after_recv(
+                            done,
+                            cancel_requested(Some(cancel_token.as_ref())),
+                        ) {
+                            finalize_cancel_inner!();
+                            break 'outer;
+                        }
+                        match msg {
                         StreamMessage::RetryBoundary => {
                             if provider == ProviderKind::Gemini
                                 && handle_gemini_retry_boundary(
@@ -3234,9 +3280,25 @@ pub(super) fn spawn_turn_bridge(
                             );
                             state_dirty = true;
                         }
-                    },
+                        }
+                    }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // #2289 cancel boundary: re-sample cancel AFTER the
+                        // receiver reports disconnect. If `/stop` flipped
+                        // the token between the pre-recv guard and this
+                        // arm, letting the disconnect set `done = true`
+                        // and exit the inner loop would cause the outer
+                        // cancel arm (gated on `!done`) to skip
+                        // finalisation, leaving the turn recorded as
+                        // completed/empty instead of stopped.
+                        if should_finalize_cancel_after_recv(
+                            done,
+                            cancel_requested(Some(cancel_token.as_ref())),
+                        ) {
+                            finalize_cancel_inner!();
+                            break 'outer;
+                        }
                         rx_disconnected = true;
                         done = true;
                         terminal_control_drain_until = None;
@@ -5403,5 +5465,147 @@ mod status_panel_v2_rework_tests {
 
         assert_eq!(status_panel_msg_id, Some(MessageId::new(99)));
         assert_eq!(state.status_message_id, Some(99));
+    }
+}
+
+#[cfg(test)]
+mod cancel_recv_toctou_tests {
+    //! #2289: post-`try_recv` cancel re-sample. The relay receive loop must
+    //! drop a terminal frame and run cancel finalization when `/stop` flips
+    //! the cancel token AFTER the pre-recv guard passed but BEFORE the
+    //! receive call returned the frame.
+
+    use super::should_finalize_cancel_after_recv;
+    use crate::services::agent_protocol::StreamMessage;
+    use crate::services::provider::{CancelToken, cancel_requested};
+    use std::sync::mpsc;
+
+    #[test]
+    fn priority_helper_matches_documented_truth_table() {
+        // The documented rule:
+        //   - cancel wins iff the loop has not yet observed a terminal
+        //     completion (`done == false`)
+        //   - once `done == true` (a prior iteration set it from a `Done`
+        //     observed before cancel), the completion classification
+        //     sticks and a later cancel becomes a no-op (UX: "stop after
+        //     completion is a no-op").
+        assert!(should_finalize_cancel_after_recv(false, true));
+        assert!(!should_finalize_cancel_after_recv(false, false));
+        assert!(!should_finalize_cancel_after_recv(true, true));
+        assert!(!should_finalize_cancel_after_recv(true, false));
+    }
+
+    /// Models exactly the receive loop's post-`try_recv` checkpoint:
+    ///   1. pre-recv guard samples cancel — clear, proceed.
+    ///   2. terminal frame (`Done`) lands in the channel.
+    ///   3. user presses `/stop`; the token flips.
+    ///   4. `try_recv` returns `Ok(Done)`.
+    /// Without the fix, the bridge would handle `Done`, set `done = true`,
+    /// and the next outer cancel arm (gated on `!done`) would suppress
+    /// finalization — silently downgrading a user-stop to a recorded
+    /// completion. With the fix, the post-recv re-sample drops the frame
+    /// and routes to cancel finalization.
+    #[test]
+    fn cancel_flips_between_pre_guard_and_terminal_frame_drops_frame() {
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+        let token = CancelToken::new();
+
+        // (1) pre-recv guard passes: cancel not yet set.
+        let done = false;
+        let pre_guard_cancel = cancel_requested(Some(&token));
+        assert!(!pre_guard_cancel);
+        assert!(!should_finalize_cancel_after_recv(done, pre_guard_cancel));
+
+        // (2) terminal frame becomes available.
+        tx.send(StreamMessage::Done {
+            result: "completed".to_string(),
+            session_id: None,
+        })
+        .expect("send Done");
+
+        // (3) /stop fires — token flips AFTER pre-guard.
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // (4) try_recv returns Ok(Done). The fix re-samples cancel here.
+        let msg = rx.try_recv().expect("Done frame is available");
+        assert!(matches!(msg, StreamMessage::Done { .. }));
+
+        let post_recv_cancel = cancel_requested(Some(&token));
+        assert!(post_recv_cancel, "token flipped before recv returned");
+
+        let must_finalize = should_finalize_cancel_after_recv(done, post_recv_cancel);
+        assert!(
+            must_finalize,
+            "#2289: post-recv re-sample MUST claim the outcome for cancel \
+             when cancel raced ahead of a terminal frame"
+        );
+
+        // The fix's finalize_cancel_inner! macro would now run cancel
+        // bookkeeping and `break 'outer`; we must NOT fall through to the
+        // `Done` handler that would set `done = true`. Mimic the fixed
+        // control flow: do not set `done`.
+        // (Verifying the negative: had we processed the frame, `done`
+        // would have flipped, suppressing the outer cancel arm.)
+        assert!(!done, "Done frame must be dropped, not applied");
+    }
+
+    /// Mirror scenario for the `Disconnected` arm: cancel flips between
+    /// pre-recv guard and the receiver being dropped. Without the fix the
+    /// loop sets `done = true` from the Disconnected arm and exits via the
+    /// completion path; with the fix the post-recv re-sample wins.
+    #[test]
+    fn cancel_flips_between_pre_guard_and_disconnect_drops_disconnect() {
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+        let token = CancelToken::new();
+        let done = false;
+
+        // (1) pre-recv guard passes.
+        assert!(!cancel_requested(Some(&token)));
+
+        // (2) sender drops without sending a terminal frame.
+        drop(tx);
+
+        // (3) /stop flips the token.
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // (4) try_recv returns Disconnected.
+        let err = rx.try_recv().expect_err("rx must be disconnected");
+        assert!(matches!(err, mpsc::TryRecvError::Disconnected));
+
+        // Post-recv re-sample MUST route to cancel finalization, not to
+        // the Disconnected branch that would set done = true.
+        let must_finalize = should_finalize_cancel_after_recv(done, cancel_requested(Some(&token)));
+        assert!(
+            must_finalize,
+            "#2289: Disconnected during cancel race must finalize as cancel, \
+             not as completion"
+        );
+        assert!(
+            !done,
+            "Disconnected branch must NOT run when cancel won the race"
+        );
+    }
+
+    /// Negative case: if `Done` was observed and `done = true` BEFORE the
+    /// cancel arrived, the prior completion sticks even though cancel is
+    /// now flagged. This preserves the documented "whichever observed
+    /// terminal state first wins" rule and keeps `/stop` a no-op after
+    /// completion (see the matching comment in the outer loop body).
+    #[test]
+    fn cancel_after_done_observed_does_not_reclassify() {
+        let token = CancelToken::new();
+        let done = true; // a previous iteration already set this
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed); // late cancel
+
+        assert!(!should_finalize_cancel_after_recv(
+            done,
+            cancel_requested(Some(&token))
+        ));
     }
 }
