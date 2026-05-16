@@ -2143,7 +2143,25 @@ impl VoiceBargeInRuntime {
             Ok(outcome) => {
                 if let Some(message_id) = outcome.message_id {
                     crate::voice::announce_meta::global_store()
-                        .insert(message_id, announcement_meta);
+                        .insert(message_id, announcement_meta.clone());
+                    if let Some(pool) = shared.pg_pool.as_ref() {
+                        if let Err(error) = crate::voice::announce_meta::persist_durable(
+                            pool,
+                            message_id,
+                            &announcement_meta,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                error = %error,
+                                source_channel_id = source_channel_id.get(),
+                                target_channel_id = target_channel_id.get(),
+                                message_id = message_id.get(),
+                                utterance_id = %utterance.utterance_id,
+                                "failed to persist voice transcript announcement metadata"
+                            );
+                        }
+                    }
                 }
                 tracing::info!(
                     source_channel_id = source_channel_id.get(),

@@ -69,6 +69,59 @@ async fn can_route_unbound_direct_session(
     has_direct_runtime_session(data, channel_id, effective_channel_id).await
 }
 
+/// #2209: Probe the durable Postgres side-store for an announce-bot message,
+/// with a short retry to absorb the gateway race (Discord can dispatch the
+/// MESSAGE_CREATE event before the announcer's `channel.send` future resolves
+/// the new message id back to the publisher and persists the row).
+///
+/// Returns the full announcement when found — used by the intake-gate to
+/// hydrate the typed `VoiceTranscriptAnnouncement` payload (#2266) that gets
+/// embedded into any queued `Intervention`, so cross-process intake workers
+/// and post-restart dispatchers can reconstruct the framing even after the
+/// short in-memory `voice::announce_meta` TTL (30s) evicts the entry.
+async fn load_durable_voice_transcript_announcement(
+    pg_pool: Option<&sqlx::PgPool>,
+    message_id: serenity::MessageId,
+    channel_id: serenity::ChannelId,
+) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
+    let pool = pg_pool?;
+
+    // Discord can dispatch the create event before the send call returns
+    // the message_id to the announcer. Briefly retry only for announce-bot
+    // messages so ordinary intake is not delayed.
+    for delay_ms in [0_u64, 25, 75, 150, 300] {
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        match crate::voice::announce_meta::load_durable(pool, message_id).await {
+            Ok(Some(announcement)) => return Some(announcement),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    channel_id = channel_id.get(),
+                    message_id = message_id.get(),
+                    "failed to load durable voice transcript announcement metadata"
+                );
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// Thin predicate wrapper retained for tests + call-sites that only need a
+/// boolean signal that the durable side-store has the announcement.
+async fn has_durable_voice_transcript_announcement(
+    pg_pool: Option<&sqlx::PgPool>,
+    message_id: serenity::MessageId,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    load_durable_voice_transcript_announcement(pg_pool, message_id, channel_id)
+        .await
+        .is_some()
+}
+
 fn should_skip_human_slash_message(
     content: &str,
     known_slash_commands: Option<&std::collections::HashSet<String>>,
@@ -1204,27 +1257,53 @@ pub(in crate::services::discord) async fn handle_event(
                 .unwrap_or(channel_id);
             let settings_snapshot = { data.shared.settings.read().await.clone() };
             let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
-            // #2266: resolve the voice-transcript payload ONCE at the
+            // #2266 + #2209: resolve the voice-transcript payload ONCE at the
             // intake-gate so we can both (a) cheaply classify the message and
             // (b) embed the full announcement in any queued Intervention we
             // construct on the busy-channel/thread-guard/drain-mode paths
-            // below. We prefer the durable store via `peek_clone` (no consume)
-            // so the active dispatch path still finds the entry when it later
-            // calls `take()`; falls back to parsing the message content when
-            // the store has no entry but the message itself is a valid
-            // announcement (post-restart hydrate or out-of-band publish).
+            // below. Resolution chain, in order of preference:
+            //   1. `peek_clone` from the per-process in-memory store (no
+            //      consume — the active dispatch path still finds the entry
+            //      when it later calls `take()`).
+            //   2. Parse the announce-bot message body when the store has no
+            //      entry but the content itself is a valid authorized
+            //      announcement (post-restart hydrate / out-of-band publish).
+            //   3. Probe the durable Postgres `voice_transcript_announce_meta`
+            //      side store with a short retry (#2209). This guards against
+            //      the gateway race (Discord MESSAGE_CREATE arrives before
+            //      the announcer's send future resolved the id), cross-process
+            //      intake workers, dcserver restart, and TTL eviction of the
+            //      in-memory store. The probe is only attempted when the
+            //      visible announce-marker is present so ordinary intake is
+            //      not delayed.
+            let is_announce_bot_message = announce_bot_id == Some(user_id.get());
             let resolved_voice_announcement: Option<
                 crate::voice::prompt::VoiceTranscriptAnnouncement,
-            > = if announce_bot_id == Some(user_id.get()) {
-                crate::voice::announce_meta::global_store()
-                    .peek_clone(new_message.id)
-                    .or_else(|| {
-                        crate::voice::prompt::parse_authorized_voice_transcript_announcement(
-                            &new_message.content,
-                            user_id.get(),
-                            announce_bot_id,
-                        )
-                    })
+            > = if is_announce_bot_message {
+                match crate::voice::announce_meta::global_store().peek_clone(new_message.id) {
+                    Some(announcement) => Some(announcement),
+                    None => match crate::voice::prompt::parse_authorized_voice_transcript_announcement(
+                        &new_message.content,
+                        user_id.get(),
+                        announce_bot_id,
+                    ) {
+                        Some(announcement) => Some(announcement),
+                        None => {
+                            if crate::voice::prompt::is_visible_voice_transcript_announcement(
+                                &new_message.content,
+                            ) {
+                                load_durable_voice_transcript_announcement(
+                                    data.shared.pg_pool.as_ref(),
+                                    new_message.id,
+                                    channel_id,
+                                )
+                                .await
+                            } else {
+                                None
+                            }
+                        }
+                    },
+                }
             } else {
                 None
             };
@@ -2094,6 +2173,49 @@ pub(in crate::services::discord) async fn handle_event(
 }
 
 use super::super::model_picker_interaction::handle_model_picker_interaction;
+
+#[cfg(test)]
+mod voice_announce_meta_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use poise::serenity_prelude::{ChannelId, MessageId};
+
+    fn announcement() -> crate::voice::prompt::VoiceTranscriptAnnouncement {
+        crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: "status please".to_string(),
+            user_id: "42".to_string(),
+            utterance_id: "utt-gate".to_string(),
+            language: "en-US".to_string(),
+            verbose_progress: false,
+            started_at: None,
+            completed_at: None,
+            samples_written: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_metadata_marks_announce_message_as_voice_intake() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(44_001);
+
+        crate::voice::announce_meta::persist_durable(&pool, message_id, &announcement())
+            .await
+            .expect("persist durable voice announcement metadata");
+
+        assert!(
+            has_durable_voice_transcript_announcement(
+                Some(&pool),
+                message_id,
+                ChannelId::new(55_001)
+            )
+            .await
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
 
 /// #1446 Layer 2 — `thread_guard_inflight_is_stale` reads inflight files
 /// via the runtime root override, so we keep the always-on slice that

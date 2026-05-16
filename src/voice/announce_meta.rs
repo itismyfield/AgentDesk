@@ -5,6 +5,7 @@ use std::{
 };
 
 use poise::serenity_prelude::MessageId;
+use sqlx::PgPool;
 
 use super::prompt::VoiceTranscriptAnnouncement;
 
@@ -55,17 +56,26 @@ pub(crate) struct VoiceAnnouncementMetaStore {
 
 impl VoiceAnnouncementMetaStore {
     pub(crate) fn insert(&self, message_id: MessageId, announcement: VoiceTranscriptAnnouncement) {
-        if let Ok(mut entries) = self.entries.write() {
-            let now = Instant::now();
-            prune_expired_locked(&mut entries, now);
-            entries.insert(
-                message_id.get(),
-                StoredVoiceTranscriptAnnouncement {
-                    announcement,
-                    expires_at: now + ANNOUNCEMENT_META_TTL,
-                },
-            );
-        }
+        let mut entries = match self.entries.write() {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    message_id = message_id.get(),
+                    error = %error,
+                    "failed to insert voice transcript announcement metadata; local store lock is poisoned"
+                );
+                return;
+            }
+        };
+        let now = Instant::now();
+        prune_expired_locked(&mut entries, now);
+        entries.insert(
+            message_id.get(),
+            StoredVoiceTranscriptAnnouncement {
+                announcement,
+                expires_at: now + ANNOUNCEMENT_META_TTL,
+            },
+        );
     }
 
     pub(crate) fn take(&self, message_id: MessageId) -> Option<VoiceTranscriptAnnouncement> {
@@ -153,9 +163,70 @@ pub(crate) fn global_store() -> &'static VoiceAnnouncementMetaStore {
     STORE.get_or_init(VoiceAnnouncementMetaStore::default)
 }
 
+pub(crate) async fn persist_durable(
+    pool: &PgPool,
+    message_id: MessageId,
+    announcement: &VoiceTranscriptAnnouncement,
+) -> Result<(), sqlx::Error> {
+    let announcement =
+        serde_json::to_value(announcement).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+    sqlx::query(
+        "INSERT INTO voice_transcript_announce_meta (message_id, announcement)
+         VALUES ($1, $2)
+         ON CONFLICT (message_id) DO UPDATE
+         SET announcement = EXCLUDED.announcement,
+             consumed_at = NULL",
+    )
+    .bind(message_id.get().to_string())
+    .bind(announcement)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn load_durable(
+    pool: &PgPool,
+    message_id: MessageId,
+) -> Result<Option<VoiceTranscriptAnnouncement>, sqlx::Error> {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT announcement
+         FROM voice_transcript_announce_meta
+         WHERE message_id = $1
+           AND consumed_at IS NULL",
+    )
+    .bind(message_id.get().to_string())
+    .fetch_optional(pool)
+    .await?;
+    value
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+}
+
+pub(crate) async fn take_durable(
+    pool: &PgPool,
+    message_id: MessageId,
+) -> Result<Option<VoiceTranscriptAnnouncement>, sqlx::Error> {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
+        "UPDATE voice_transcript_announce_meta
+         SET consumed_at = NOW()
+         WHERE message_id = $1
+           AND consumed_at IS NULL
+         RETURNING announcement",
+    )
+    .bind(message_id.get().to_string())
+    .fetch_optional(pool)
+    .await?;
+    value
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
 
     fn announcement() -> VoiceTranscriptAnnouncement {
         VoiceTranscriptAnnouncement {
@@ -213,5 +284,44 @@ mod tests {
         let store = VoiceAnnouncementMetaStore::default();
         assert!(store.get_handoff(MessageId::new(999)).is_none());
         assert!(store.take_handoff(MessageId::new(999)).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_store_reconstructs_and_consumes_announcement() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(12_345);
+        let expected = announcement();
+
+        persist_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable metadata");
+
+        let loaded = load_durable(&pool, message_id)
+            .await
+            .expect("load durable metadata")
+            .expect("metadata present before consumption");
+        assert_eq!(loaded, expected);
+
+        let taken = take_durable(&pool, message_id)
+            .await
+            .expect("take durable metadata")
+            .expect("metadata consumed exactly once");
+        assert_eq!(taken, expected);
+        assert!(
+            load_durable(&pool, message_id)
+                .await
+                .expect("load after consumption")
+                .is_none()
+        );
+        assert!(
+            take_durable(&pool, message_id)
+                .await
+                .expect("second take")
+                .is_none()
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }

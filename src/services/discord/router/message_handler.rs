@@ -2245,6 +2245,24 @@ pub(crate) async fn execute_intake_turn_core(
     .await
 }
 
+async fn take_durable_voice_announcement_for_intake(
+    pg_pool: Option<&sqlx::PgPool>,
+    message_id: MessageId,
+) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
+    let pool = pg_pool?;
+    match crate::voice::announce_meta::take_durable(pool, message_id).await {
+        Ok(announcement) => announcement,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                message_id = message_id.get(),
+                "failed to reconstruct durable voice transcript announcement metadata"
+            );
+            None
+        }
+    }
+}
+
 pub(in crate::services::discord) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     channel_id: ChannelId,
@@ -2270,39 +2288,41 @@ pub(in crate::services::discord) async fn handle_text_message(
     } = *deps;
     let original_channel_id = channel_id;
     let stored_voice_announcement = crate::voice::announce_meta::global_store().take(user_msg_id);
-    let has_stored_voice_announcement = stored_voice_announcement.is_some();
     let parsed_voice_announcement =
         if crate::voice::prompt::is_voice_transcript_announcement_candidate(user_text) {
             crate::voice::prompt::parse_voice_transcript_announcement(user_text)
         } else {
             None
         };
-    let announce_bot_id = if has_stored_voice_announcement || parsed_voice_announcement.is_some() {
+    let has_parsed_voice_announcement = parsed_voice_announcement.is_some();
+    let durable_voice_announcement = if stored_voice_announcement.is_none()
+        && !has_parsed_voice_announcement
+        && crate::voice::prompt::is_visible_voice_transcript_announcement(user_text)
+    {
+        take_durable_voice_announcement_for_intake(shared.pg_pool.as_ref(), user_msg_id).await
+    } else {
+        None
+    };
+    let reconstructed_voice_announcement = stored_voice_announcement.or(durable_voice_announcement);
+    let has_reconstructed_voice_announcement = reconstructed_voice_announcement.is_some();
+    let announce_bot_id = if has_reconstructed_voice_announcement || has_parsed_voice_announcement {
         super::super::resolve_announce_bot_user_id(shared).await
     } else {
         None
     };
     let voice_announcement = if announce_bot_id == Some(request_owner.get()) {
-        if has_stored_voice_announcement {
-            stored_voice_announcement
-        } else {
-            crate::voice::prompt::parse_authorized_voice_transcript_announcement(
-                user_text,
-                request_owner.get(),
-                announce_bot_id,
-            )
-        }
+        reconstructed_voice_announcement.or(parsed_voice_announcement)
     } else {
         None
     };
-    if has_stored_voice_announcement && announce_bot_id.is_none() {
+    if has_reconstructed_voice_announcement && announce_bot_id.is_none() {
         tracing::warn!(
             channel_id = channel_id.get(),
             message_id = user_msg_id.get(),
             author_id = request_owner.get(),
-            "dropping stored voice transcript announcement because announce bot user id is unavailable"
+            "dropping reconstructed voice transcript announcement because announce bot user id is unavailable"
         );
-    } else if (has_stored_voice_announcement || parsed_voice_announcement.is_some())
+    } else if (has_reconstructed_voice_announcement || has_parsed_voice_announcement)
         && voice_announcement.is_none()
     {
         tracing::warn!(
@@ -6282,6 +6302,51 @@ Any other message is sent to {p}.
         Ok(false)
     */
     super::super::commands::handle_text_command(ctx, msg, data, channel_id, text).await
+}
+
+#[cfg(test)]
+mod voice_announce_meta_reconstruction_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
+    fn announcement() -> crate::voice::prompt::VoiceTranscriptAnnouncement {
+        crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: "clustered worker should reconstruct this".to_string(),
+            user_id: "42".to_string(),
+            utterance_id: "utt-worker".to_string(),
+            language: "en-US".to_string(),
+            verbose_progress: true,
+            started_at: Some("2026-05-16T10:00:00+09:00".to_string()),
+            completed_at: Some("2026-05-16T10:00:01+09:00".to_string()),
+            samples_written: Some(48_000),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_reconstruction_consumes_durable_metadata_without_local_store() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(77_001);
+        let expected = announcement();
+
+        crate::voice::announce_meta::persist_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable voice announcement metadata");
+
+        let reconstructed = take_durable_voice_announcement_for_intake(Some(&pool), message_id)
+            .await
+            .expect("metadata should reconstruct across process-local stores");
+        assert_eq!(reconstructed, expected);
+        assert!(
+            take_durable_voice_announcement_for_intake(Some(&pool), message_id)
+                .await
+                .is_none(),
+            "durable metadata is one-shot once intake consumes it"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 #[cfg(test)]
