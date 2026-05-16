@@ -419,6 +419,26 @@ fn tmux_generation_file_mtime_ns(_tmux_session_name: &str) -> i64 {
     0
 }
 
+/// #2289: classifies a stream frame as one that — if processed — would set
+/// `done = true` and so could suppress the outer cancel arm (which is
+/// gated on `!done`).
+///
+/// Currently `Done` and `Error` are the only `Ok(msg)` arms that flip
+/// `done = true` in the receive-loop body. `Disconnected` is handled
+/// separately via the `TryRecvError::Disconnected` branch and has its own
+/// re-sample.
+///
+/// IMPORTANT: when adding a new variant that sets `done = true` in the
+/// receive loop, add it here too so the post-`try_recv` cancel re-sample
+/// keeps closing the full TOCTOU window. The compiler cannot catch the
+/// miss because the loop body uses field destructuring rather than a
+/// shared classifier.
+#[inline]
+fn is_done_setting_terminal_frame(msg: &crate::services::agent_protocol::StreamMessage) -> bool {
+    use crate::services::agent_protocol::StreamMessage::*;
+    matches!(msg, Done { .. } | Error { .. })
+}
+
 /// #2289 cancel-vs-terminal-frame priority decision.
 ///
 /// Models the post-`try_recv` re-sample in the relay receive loop. When a
@@ -2003,38 +2023,43 @@ pub(super) fn spawn_turn_bridge(
                 match rx.try_recv() {
                     Ok(msg) => {
                         // #2289 cancel boundary: re-sample `cancel_requested`
-                        // AFTER `try_recv` returns, but ONLY for terminal
-                        // frames (`Done`). The pre-recv guard above samples
-                        // before the receive call; if `/stop` flips the token
-                        // between that guard and `try_recv` returning a
-                        // terminal frame, letting it run would set
-                        // `done = true` and suppress the outer cancel arm —
-                        // recording the turn as completed when the user
-                        // actually stopped it. Drop the terminal frame and
-                        // jump to cancel-finalize so the cancel claims the
-                        // outcome.
+                        // AFTER `try_recv` returns, but ONLY for variants
+                        // that would flip `done = true` (`Done` and
+                        // `Error` today). The pre-recv guard above samples
+                        // before the receive call; if `/stop` flips the
+                        // token between that guard and `try_recv`
+                        // returning a terminal frame, letting that arm
+                        // run sets `done = true` and suppresses the outer
+                        // cancel arm — recording the turn as completed,
+                        // failed, or transport-errored when the user
+                        // actually stopped it. Drop the terminal frame
+                        // and jump to cancel-finalize so the cancel claims
+                        // the outcome.
                         //
-                        // The check is scoped to terminal frames so non-
-                        // terminal control/output frames (`RuntimeReady`,
-                        // `TmuxReady`, `ProcessReady`, `OutputOffset`,
-                        // `Text`, `Error`, …) are still processed: they may
-                        // carry handoff paths, offsets, watcher debt, or
-                        // session-reset decisions that the cancel path
-                        // expects to be applied. None of those variants
-                        // flip `done = true`, so the next iteration's
-                        // pre-recv cancel guard at the top of the outer
-                        // loop will finalize cancel cleanly on the very
-                        // next pass.
-                        if matches!(msg, StreamMessage::Done { .. })
+                        // The gate is scoped to variants that set
+                        // `done = true` so non-terminal control/output
+                        // frames (`RuntimeReady`, `TmuxReady`,
+                        // `ProcessReady`, `OutputOffset`, `Text`,
+                        // `RetryBoundary`, …) are still processed: they
+                        // may carry handoff paths, offsets, watcher debt,
+                        // or session-reset decisions that the cancel
+                        // path expects to be applied. None of those
+                        // variants flip `done = true`, so the next outer
+                        // iteration's pre-recv cancel guard finalizes
+                        // cancel cleanly on the very next pass. When a
+                        // new terminal variant is added, it MUST be added
+                        // here too — see `is_done_setting_terminal_frame`.
+                        if is_done_setting_terminal_frame(&msg)
                             && should_finalize_cancel_after_recv(
                                 done,
                                 cancel_requested(Some(cancel_token.as_ref())),
                             )
                         {
-                            // The dropped Done's bookkeeping (full_response
-                            // resolution, transcript Result, placeholder
-                            // close) is intentionally skipped: the cancel
-                            // path is the authoritative finalizer for the
+                            // The dropped frame's bookkeeping (full_response
+                            // resolution, transcript Result/Error,
+                            // placeholder close, transport_error edge)
+                            // is intentionally skipped: the cancel path
+                            // is the authoritative finalizer for the
                             // turn outcome and runs its own placeholder
                             // teardown.
                             finalize_cancel_inner!();
@@ -4044,12 +4069,17 @@ pub(super) fn spawn_turn_bridge(
                     let _ = save_inflight_state(&inflight_state);
                 } else {
                     // EditFailed (or any non-committed outcome): leave the
-                    // persisted flag set so the placeholder sweeper can pick
-                    // up the repair on the next pass. The local tuple is
-                    // dropped (the cancel cleanup path does not retry the
-                    // edit itself); the persisted flag and the inflight
-                    // file are the durable repair signal.
+                    // persisted flag set AND preserve the inflight file for
+                    // cleanup retry. The placeholder sweeper relies on the
+                    // inflight file existing to discover the stuck row; if
+                    // we let the normal cancel cleanup delete it, the
+                    // sweeper would lose its repair signal and the
+                    // controller entry would stay Active forever. Force
+                    // the inflight to be preserved so the next sweeper
+                    // pass can finish the teardown.
                     let _ = (key, snapshot, close_trigger, ack_consumed);
+                    let _ = save_inflight_state(&inflight_state);
+                    preserve_inflight_for_cleanup_retry = true;
                 }
             }
 
@@ -5626,6 +5656,63 @@ mod cancel_recv_toctou_tests {
             !done,
             "Disconnected branch must NOT run when cancel won the race"
         );
+    }
+
+    /// #2289 round-2 Codex finding: `StreamMessage::Error` also sets
+    /// `done = true` in the receive loop, so the same TOCTOU class
+    /// applies. If `/stop` flips between the pre-recv guard and `Error`
+    /// returning, the Error arm would mark the turn as a transport
+    /// failure instead of a user stop. The gate uses
+    /// `is_done_setting_terminal_frame` so both `Done` and `Error` are
+    /// covered.
+    #[test]
+    fn cancel_flips_between_pre_guard_and_terminal_error_drops_frame() {
+        use super::is_done_setting_terminal_frame;
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+        let token = CancelToken::new();
+        let done = false;
+
+        assert!(!cancel_requested(Some(&token)));
+        tx.send(StreamMessage::Error {
+            message: "provider rpc failed".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+        .expect("send Error");
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let msg = rx.try_recv().expect("Error frame is available");
+        assert!(is_done_setting_terminal_frame(&msg));
+        assert!(should_finalize_cancel_after_recv(
+            done,
+            cancel_requested(Some(&token))
+        ));
+        assert!(!done, "Error frame must be dropped, not applied");
+    }
+
+    /// The classifier must list every Ok variant that flips `done = true`.
+    #[test]
+    fn terminal_frame_classifier_matches_loop_done_assignments() {
+        use super::is_done_setting_terminal_frame;
+        // These two are the Ok arms that set done = true today.
+        assert!(is_done_setting_terminal_frame(&StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        }));
+        assert!(is_done_setting_terminal_frame(&StreamMessage::Error {
+            message: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // Sample of non-terminal variants that must NOT trip the gate.
+        assert!(!is_done_setting_terminal_frame(&StreamMessage::Text {
+            content: "hi".to_string(),
+        }));
+        assert!(!is_done_setting_terminal_frame(&StreamMessage::OutputOffset {
+            offset: 42,
+        }));
     }
 
     /// #2289 Codex review follow-up: the post-recv re-sample is gated on
