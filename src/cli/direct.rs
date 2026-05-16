@@ -216,6 +216,14 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     }
     crate::pipeline::refresh_override_health_report(pg_pool.as_ref()).await;
     crate::services::termination_audit::init_audit_db(pg_pool.clone());
+    // One-shot CLI invocations don't benefit from filesystem-watch policy
+    // hot-reload: the process is gone before any reload could matter. Keep
+    // it disabled so we don't spawn a background watcher thread that holds
+    // a QuickJS Context clone — the lifecycle of which previously triggered
+    // a QuickJS assert during review-decision CLI shutdown (#2200 sub-fix 2).
+    // The engine drop path is now leak-safe regardless, but keeping this off
+    // for the CLI removes an entire class of teardown-ordering hazards.
+    config.policies.hot_reload = false;
     let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())
         .map_err(|e| format!("init policy engine: {e}"))?;
     let broadcast_tx = crate::server::ws::new_broadcast();

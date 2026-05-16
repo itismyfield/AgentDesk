@@ -2926,6 +2926,36 @@ mod issue_reference_tests {
             1765
         ));
     }
+
+    /// #2200 sub-fix 2 (`validator-mismatch`): the original friction case had a
+    /// commit subject of the form `'#523 …'` while the validator was only
+    /// recognising the parenthesised squash form `'… (#523)'`. Both shapes
+    /// must now be accepted; we additionally pin a handful of less-obvious
+    /// forms (leading reference, trailing reference, multi-issue references)
+    /// so a future regex tightening can't silently regress the accepted set.
+    #[test]
+    fn commit_subject_references_issue_friction_2200_validator_mismatch() {
+        // Exact friction symptom: hash-prefix subject must be accepted.
+        assert!(commit_subject_references_issue("#523 add foo", 523));
+        // Parenthesised squash form continues to be accepted.
+        assert!(commit_subject_references_issue("feat: bar (#523)", 523));
+        // Bracketed form (some templates use square brackets).
+        assert!(commit_subject_references_issue("[#523] do thing", 523));
+        // Trailing hash reference (Conventional Commits "refs #N" style).
+        assert!(commit_subject_references_issue("fix bug — #523", 523));
+        // Multi-issue subject: only one of the references needs to match.
+        assert!(commit_subject_references_issue(
+            "chore: #100 #200 #523 #999 done",
+            523
+        ));
+        // Negative: alphanumeric/underscore boundary blocks false positives so
+        // the relaxed validator does not accept unrelated card numbers that
+        // happen to contain `523` as a substring.
+        assert!(!commit_subject_references_issue("#5230 unrelated", 523));
+        assert!(!commit_subject_references_issue("foo#523 noboundary", 523));
+        assert!(!commit_subject_references_issue("#523_unrelated body", 523));
+        assert!(!commit_subject_references_issue("issue_#523 still bad", 523));
+    }
 }
 
 #[cfg(test)]

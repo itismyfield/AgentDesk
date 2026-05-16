@@ -642,14 +642,58 @@ pub(crate) fn install_policy_module_loader(
 // ── Hot reload via notify ────────────────────────────────────────
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Guard for the hot-reload subsystem.
+///
+/// Owns both the filesystem watcher and the background thread join handle.
+/// Dropping the guard:
+///   1. Sets `stop` so the worker exits its next iteration even if no event
+///      arrives.
+///   2. Drops the watcher (closes its event channel → worker returns from
+///      `recv_timeout` with `Disconnected`).
+///   3. Joins the worker thread so its captured `Context` (a clone sharing
+///      the same QuickJS `Runtime`) is dropped *before* the engine drops
+///      the `Runtime`. This prevents a stale `Context` from outliving the
+///      runtime — a sequence that previously triggered a QuickJS C-level
+///      assert when a CLI invocation (review-decision dispute → rework)
+///      shut down while the bg thread was still alive (#2200 sub-fix 2).
+pub struct HotReloadGuard {
+    watcher: Option<RecommendedWatcher>,
+    join: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl HotReloadGuard {
+    /// Explicit shutdown — useful for tests and for engine drop sequences that
+    /// want deterministic teardown before the runtime is dropped.
+    pub fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        // Drop the watcher first so the worker's mpsc channel disconnects.
+        self.watcher.take();
+        if let Some(handle) = self.join.take() {
+            // Best-effort join. If the worker panicked we still want to make
+            // sure its `Context` clone has been dropped before we return so
+            // the engine can safely drop the runtime next.
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for HotReloadGuard {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
 
 /// Start watching the policies directory for changes.
-/// Returns a watcher handle that must be kept alive.
+/// Returns a guard that must be kept alive for the lifetime of the engine
+/// and that joins the worker thread on drop.
 pub fn start_hot_reload(
     policies_dir: PathBuf,
     ctx: Context,
     store: PolicyStore,
-) -> Result<RecommendedWatcher> {
+) -> Result<HotReloadGuard> {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -673,19 +717,33 @@ pub fn start_hot_reload(
         );
     }
 
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_worker = stop.clone();
     // Spawn a background thread to process file-change events
     let dir = policies_dir.clone();
-    std::thread::Builder::new()
+    let join = std::thread::Builder::new()
         .name("policy-hot-reload".into())
         .spawn(move || {
+            // Move `ctx` into a scope we control so we can drop it *before*
+            // the thread returns. The HotReloadGuard joins this thread on
+            // drop, which means when join() returns the captured `Context`
+            // has already been dropped — making it safe for the engine to
+            // drop the QuickJS runtime next.
+            let ctx = ctx;
             // Debounce: wait for events to settle
             use std::time::{Duration, Instant};
             let debounce = Duration::from_millis(500);
             let mut last_reload = Instant::now() - debounce;
 
             loop {
-                match rx.recv_timeout(Duration::from_secs(1)) {
+                if stop_worker.load(Ordering::Acquire) {
+                    break;
+                }
+                match rx.recv_timeout(Duration::from_millis(250)) {
                     Ok(_event) => {
+                        if stop_worker.load(Ordering::Acquire) {
+                            break;
+                        }
                         // Debounce: skip if we reloaded recently
                         if last_reload.elapsed() < debounce {
                             // Drain remaining events in the debounce window
@@ -725,13 +783,68 @@ pub fn start_hot_reload(
                     }
                 }
             }
+            // `ctx` is dropped here as the closure returns; the join() in
+            // HotReloadGuard::shutdown is what guarantees this completes
+            // before the engine drops the underlying QuickJS runtime.
+            drop(ctx);
         })?;
 
-    Ok(watcher)
+    Ok(HotReloadGuard {
+        watcher: Some(watcher),
+        join: Some(join),
+        stop,
+    })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rquickjs::Runtime;
+
+    /// #2200 sub-fix 2: dropping `HotReloadGuard` must join the worker
+    /// thread, which releases the worker's `Context` clone *before* the
+    /// engine drops the QuickJS `Runtime`. We model the runtime here, hand
+    /// the worker a `Context::full(&runtime)`, drop the guard, and then
+    /// assert that the runtime can be dropped without panicking — which it
+    /// cannot if any `Context` referencing it is still alive in another
+    /// thread.
+    #[test]
+    fn hot_reload_guard_joins_worker_before_drop() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let guard = start_hot_reload(tmp.path().to_path_buf(), ctx, store)
+            .expect("start hot reload");
+
+        // Dropping the guard must:
+        //   1. signal stop,
+        //   2. drop the watcher (closes the mpsc),
+        //   3. join the worker thread so its captured Context drops first.
+        drop(guard);
+
+        // If the worker's Context was still alive at this point, dropping
+        // the runtime here would either deadlock or trip a QuickJS-level
+        // assertion. Reaching this line cleanly is the assertion.
+        drop(runtime);
+    }
+
+    #[test]
+    fn hot_reload_guard_explicit_shutdown_is_idempotent() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let mut guard = start_hot_reload(tmp.path().to_path_buf(), ctx, store)
+            .expect("start hot reload");
+
+        // Calling shutdown explicitly then dropping must not panic, even
+        // when the implicit Drop runs a second shutdown.
+        guard.shutdown();
+        drop(guard);
+        drop(runtime);
+    }
 
     #[test]
     fn test_compute_policy_version() {
