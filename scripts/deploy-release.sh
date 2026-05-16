@@ -991,6 +991,19 @@ STAGED_BINARY=""
 # Lock binary to prevent unsigned overwrites
 chflags uchg "$ADK_REL/bin/agentdesk"
 
+if [ "$PLIST_REL" = "com.agentdesk.release" ]; then
+    echo "▸ Regenerating release launchd plist..."
+    mkdir -p "$HOME/Library/LaunchAgents"
+    "$ADK_REL/bin/agentdesk" emit-launchd-plist \
+        --flavor release \
+        --home "$HOME" \
+        --root-dir "$ADK_REL" \
+        --agentdesk-bin "$ADK_REL/bin/agentdesk" \
+        --output "$HOME/Library/LaunchAgents/$PLIST_REL.plist"
+else
+    echo "⚠ Skipping launchd plist regeneration for custom label: $PLIST_REL"
+fi
+
 # Atomic swap: old → .old, staged → dist, cleanup
 if [ ! -d "$DIST_STAGED" ]; then
     echo "⚠ Dashboard staging dir missing ($DIST_STAGED) — re-staging from source"

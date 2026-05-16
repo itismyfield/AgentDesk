@@ -393,6 +393,50 @@ fn default_launchd_root_dir(home: &Path, flavor: LaunchdPlistFlavorArg) -> PathB
 }
 
 #[cfg(target_os = "macos")]
+const LAUNCHD_NOFILE_SOFT_LIMIT_TARGET: u64 = 16_384;
+
+#[cfg(target_os = "macos")]
+fn clamp_launchd_nofile_soft_limit(hard_limit: u64) -> Option<u64> {
+    if hard_limit == 0 {
+        return None;
+    }
+
+    if hard_limit == libc::RLIM_INFINITY as u64 {
+        return Some(LAUNCHD_NOFILE_SOFT_LIMIT_TARGET);
+    }
+
+    Some(LAUNCHD_NOFILE_SOFT_LIMIT_TARGET.min(hard_limit))
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_nofile_soft_limit() -> Option<u64> {
+    let mut limits = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    let result = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limits.as_mut_ptr()) };
+    if result != 0 {
+        return None;
+    }
+
+    let limits = unsafe { limits.assume_init() };
+    clamp_launchd_nofile_soft_limit(limits.rlim_max as u64)
+}
+
+#[cfg(target_os = "macos")]
+fn render_launchd_nofile_resource_limit_xml() -> String {
+    let Some(nofile_soft) = launchd_nofile_soft_limit() else {
+        return String::new();
+    };
+
+    format!(
+        r#"  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>{nofile_soft}</integer>
+  </dict>
+"#
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn generate_launchd_plist(home: &Path, agentdesk_bin: &Path) -> String {
     let root_dir = default_launchd_root_dir(home, LaunchdPlistFlavorArg::Release);
     generate_launchd_plist_for_flavor_with_root(
@@ -419,6 +463,7 @@ fn generate_launchd_plist_for_flavor_with_root(
     let path_env = launchd_path_env(home);
     let extra_env_xml =
         render_launchd_env_entries_xml(&root_dir.join("config").join("launchd.env"));
+    let nofile_resource_limit_xml = render_launchd_nofile_resource_limit_xml();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -437,7 +482,7 @@ fn generate_launchd_plist_for_flavor_with_root(
   <true/>
   <key>ThrottleInterval</key>
   <integer>5</integer>
-  <key>WorkingDirectory</key>
+{nofile_resource_limit_xml}  <key>WorkingDirectory</key>
   <string>{root_str}</string>
   <key>EnvironmentVariables</key>
   <dict>
@@ -454,7 +499,7 @@ fn generate_launchd_plist_for_flavor_with_root(
   <key>StandardErrorPath</key>
   <string>{logs_str}/dcserver.stderr.log</string>
 </dict>
-</plist>"#
+</plist>"#,
     )
 }
 
@@ -1362,6 +1407,59 @@ mod tests {
         assert!(config.contains("dbname: agentdesk_dev"));
         assert!(config.contains("user: agentdesk_app"));
         assert!(config.contains("pool_max: 16"));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod launchd_plist_tests {
+    use super::*;
+
+    fn assert_plist_xml_valid(plist: &str) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plist_path = temp_dir.path().join("agentdesk.plist");
+        fs::write(&plist_path, plist).unwrap();
+        let status = std::process::Command::new("plutil")
+            .args(["-lint", plist_path.to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(status.success(), "plist should pass plutil validation");
+    }
+
+    #[test]
+    fn clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit() {
+        assert_eq!(
+            clamp_launchd_nofile_soft_limit(LAUNCHD_NOFILE_SOFT_LIMIT_TARGET * 2),
+            Some(LAUNCHD_NOFILE_SOFT_LIMIT_TARGET)
+        );
+        assert_eq!(
+            clamp_launchd_nofile_soft_limit(LAUNCHD_NOFILE_SOFT_LIMIT_TARGET - 1),
+            Some(LAUNCHD_NOFILE_SOFT_LIMIT_TARGET - 1)
+        );
+        assert_eq!(clamp_launchd_nofile_soft_limit(0), None);
+    }
+
+    #[test]
+    fn generate_launchd_plist_release_sets_clamped_soft_number_of_files_limit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let root_dir = home.join(".adk").join("release");
+        let plist = generate_launchd_plist_for_flavor_with_root(
+            LaunchdPlistFlavorArg::Release,
+            &home,
+            &root_dir.join("bin").join("agentdesk"),
+            &root_dir,
+        );
+
+        assert!(!plist.contains("<key>HardResourceLimits</key>"));
+        if let Some(expected_soft_limit) = launchd_nofile_soft_limit() {
+            assert!(plist.contains("<key>SoftResourceLimits</key>"));
+            assert_eq!(plist.matches("<key>NumberOfFiles</key>").count(), 1);
+            assert!(plist.contains(&format!("<integer>{expected_soft_limit}</integer>")));
+        } else {
+            assert!(!plist.contains("<key>SoftResourceLimits</key>"));
+            assert_eq!(plist.matches("<key>NumberOfFiles</key>").count(), 0);
+        }
+        assert_plist_xml_valid(&plist);
     }
 }
 
