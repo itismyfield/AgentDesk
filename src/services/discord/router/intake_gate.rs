@@ -69,32 +69,73 @@ async fn can_route_unbound_direct_session(
     has_direct_runtime_session(data, channel_id, effective_channel_id).await
 }
 
-/// #2209: Probe the durable Postgres side-store for an announce-bot message,
-/// with a short retry to absorb the gateway race (Discord can dispatch the
-/// MESSAGE_CREATE event before the announcer's `channel.send` future resolves
-/// the new message id back to the publisher and persists the row).
+/// Upper bound on the durable-probe window. The MESSAGE_CREATE event can
+/// outrace the producing announcer's `INSERT … voice_transcript_announce_meta`
+/// commit. Worst-case staleness in practice is well under a second, but
+/// under load / DB contention we want a generous cap before the gate
+/// gives up and emits `voice_announce_durable_miss` (#2209 finding #1).
 ///
-/// Returns the full announcement when found — used by the intake-gate to
-/// hydrate the typed `VoiceTranscriptAnnouncement` payload (#2266) that gets
-/// embedded into any queued `Intervention`, so cross-process intake workers
-/// and post-restart dispatchers can reconstruct the framing even after the
-/// short in-memory `voice::announce_meta` TTL (30s) evicts the entry.
-async fn load_durable_voice_transcript_announcement(
+/// Configurable via `VOICE_ANNOUNCE_DURABLE_PROBE_CAP_MS`. Clamped to
+/// `[100ms, 5s]` so a misconfiguration cannot starve ordinary intake.
+const VOICE_ANNOUNCE_DURABLE_PROBE_DEFAULT_MS: u64 = 2_000;
+const VOICE_ANNOUNCE_DURABLE_PROBE_FLOOR_MS: u64 = 100;
+const VOICE_ANNOUNCE_DURABLE_PROBE_CEIL_MS: u64 = 5_000;
+
+fn resolve_durable_probe_cap_ms() -> u64 {
+    let raw = std::env::var("VOICE_ANNOUNCE_DURABLE_PROBE_CAP_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(VOICE_ANNOUNCE_DURABLE_PROBE_DEFAULT_MS);
+    raw.clamp(
+        VOICE_ANNOUNCE_DURABLE_PROBE_FLOOR_MS,
+        VOICE_ANNOUNCE_DURABLE_PROBE_CEIL_MS,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DurableAnnounceProbe {
+    /// Row found inside the probe window. Carries the full announcement
+    /// so callers can both classify the message AND hydrate the typed
+    /// `VoiceTranscriptAnnouncement` payload (#2266) for any queued
+    /// `Intervention`.
+    Found(Box<crate::voice::prompt::VoiceTranscriptAnnouncement>),
+    /// Probe window expired without finding the row. Caller should
+    /// drop the message and emit `voice_announce_durable_miss` instead
+    /// of falling through to ordinary text intake.
+    Miss,
+    /// Pool unavailable or query error — treat as "not a voice
+    /// announce" and let the rest of the gate decide.
+    Unavailable,
+}
+
+async fn probe_durable_voice_transcript_announcement(
     pg_pool: Option<&sqlx::PgPool>,
     message_id: serenity::MessageId,
     channel_id: serenity::ChannelId,
-) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
-    let pool = pg_pool?;
+) -> DurableAnnounceProbe {
+    let Some(pool) = pg_pool else {
+        return DurableAnnounceProbe::Unavailable;
+    };
 
-    // Discord can dispatch the create event before the send call returns
-    // the message_id to the announcer. Briefly retry only for announce-bot
-    // messages so ordinary intake is not delayed.
-    for delay_ms in [0_u64, 25, 75, 150, 300] {
+    // Discord can dispatch the create event before the producing
+    // announcer's INSERT commits. Use an exponentially-spaced probe
+    // ladder capped at `resolve_durable_probe_cap_ms()` so ordinary
+    // intake is not delayed but a slow durable write still resolves.
+    let cap_ms = resolve_durable_probe_cap_ms();
+    let mut delays_ms: Vec<u64> = vec![0, 25, 75, 150, 300, 600, 1_200, 2_400];
+    delays_ms.retain(|d| *d <= cap_ms);
+    if !delays_ms.contains(&cap_ms) {
+        delays_ms.push(cap_ms);
+    }
+    delays_ms.sort_unstable();
+    delays_ms.dedup();
+
+    for delay_ms in delays_ms {
         if delay_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
         match crate::voice::announce_meta::load_durable(pool, message_id).await {
-            Ok(Some(announcement)) => return Some(announcement),
+            Ok(Some(announcement)) => return DurableAnnounceProbe::Found(Box::new(announcement)),
             Ok(None) => {}
             Err(error) => {
                 tracing::warn!(
@@ -103,23 +144,44 @@ async fn load_durable_voice_transcript_announcement(
                     message_id = message_id.get(),
                     "failed to load durable voice transcript announcement metadata"
                 );
-                return None;
+                return DurableAnnounceProbe::Unavailable;
             }
         }
     }
-    None
+    DurableAnnounceProbe::Miss
 }
 
-/// Thin predicate wrapper retained for tests + call-sites that only need a
-/// boolean signal that the durable side-store has the announcement.
+/// #2209 + #2266: Convenience wrapper used by the intake-gate to hydrate the
+/// typed `VoiceTranscriptAnnouncement` from the durable side store. Returns
+/// the announcement on `Found`, `None` on `Miss` / `Unavailable`. Callers
+/// that need to distinguish `Miss` (drop + warn) from `Unavailable` (fall
+/// through silently) should use [`probe_durable_voice_transcript_announcement`]
+/// directly.
+async fn load_durable_voice_transcript_announcement(
+    pg_pool: Option<&sqlx::PgPool>,
+    message_id: serenity::MessageId,
+    channel_id: serenity::ChannelId,
+) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
+    match probe_durable_voice_transcript_announcement(pg_pool, message_id, channel_id).await {
+        DurableAnnounceProbe::Found(announcement) => Some(*announcement),
+        DurableAnnounceProbe::Miss | DurableAnnounceProbe::Unavailable => None,
+    }
+}
+
+/// Back-compat thin wrapper for callers that only care about the
+/// found/not-found bit. New call sites should use
+/// [`probe_durable_voice_transcript_announcement`] so they can react
+/// to the `Miss` state with a structured warn instead of silently
+/// falling through to ordinary text intake.
 async fn has_durable_voice_transcript_announcement(
     pg_pool: Option<&sqlx::PgPool>,
     message_id: serenity::MessageId,
     channel_id: serenity::ChannelId,
 ) -> bool {
-    load_durable_voice_transcript_announcement(pg_pool, message_id, channel_id)
-        .await
-        .is_some()
+    matches!(
+        probe_durable_voice_transcript_announcement(pg_pool, message_id, channel_id).await,
+        DurableAnnounceProbe::Found(_)
+    )
 }
 
 fn should_skip_human_slash_message(
@@ -1277,36 +1339,72 @@ pub(in crate::services::discord) async fn handle_event(
             //      visible announce-marker is present so ordinary intake is
             //      not delayed.
             let is_announce_bot_message = announce_bot_id == Some(user_id.get());
-            let resolved_voice_announcement: Option<
+            // Local + body resolution (cheap, no async). `peek_clone` returns
+            // the typed announcement without consuming the entry so the
+            // active dispatch path still finds it. Body parse covers
+            // post-restart hydrate / out-of-band publish.
+            let local_or_body_announcement: Option<
                 crate::voice::prompt::VoiceTranscriptAnnouncement,
             > = if is_announce_bot_message {
-                match crate::voice::announce_meta::global_store().peek_clone(new_message.id) {
-                    Some(announcement) => Some(announcement),
-                    None => match crate::voice::prompt::parse_authorized_voice_transcript_announcement(
-                        &new_message.content,
-                        user_id.get(),
-                        announce_bot_id,
-                    ) {
-                        Some(announcement) => Some(announcement),
-                        None => {
-                            if crate::voice::prompt::is_visible_voice_transcript_announcement(
-                                &new_message.content,
-                            ) {
-                                load_durable_voice_transcript_announcement(
-                                    data.shared.pg_pool.as_ref(),
-                                    new_message.id,
-                                    channel_id,
-                                )
-                                .await
-                            } else {
-                                None
-                            }
-                        }
-                    },
-                }
+                crate::voice::announce_meta::global_store()
+                    .peek_clone(new_message.id)
+                    .or_else(|| {
+                        crate::voice::prompt::parse_authorized_voice_transcript_announcement(
+                            &new_message.content,
+                            user_id.get(),
+                            announce_bot_id,
+                        )
+                    })
             } else {
                 None
             };
+            // High-confidence voice-announce candidate: announce-bot author
+            // produced a visible transcript message but neither the in-process
+            // store nor the legacy hidden-metadata body parser has it. Probe
+            // the durable table so cross-process intakes can recover (#2209)
+            // AND obtain the typed payload for downstream Intervention
+            // embedding (#2266).
+            let visible_announce_candidate = is_announce_bot_message
+                && local_or_body_announcement.is_none()
+                && crate::voice::prompt::is_visible_voice_transcript_announcement(
+                    &new_message.content,
+                );
+            let durable_probe = if visible_announce_candidate {
+                probe_durable_voice_transcript_announcement(
+                    data.shared.pg_pool.as_ref(),
+                    new_message.id,
+                    channel_id,
+                )
+                .await
+            } else {
+                DurableAnnounceProbe::Unavailable
+            };
+            // #2209 finding #1: when the durable probe expires without finding
+            // a row on a high-confidence candidate, do NOT silently fall
+            // through to ordinary text intake — the regression would otherwise
+            // surface as the bot replying to its own announce message. Drop
+            // the message and emit a structured warn so the producer-side
+            // failure is observable.
+            if matches!(durable_probe, DurableAnnounceProbe::Miss) {
+                tracing::warn!(
+                    event = "voice_announce_durable_miss",
+                    channel_id = channel_id.get(),
+                    effective_channel_id = effective_channel_id.get(),
+                    message_id = new_message.id.get(),
+                    author_id = user_id.get(),
+                    "announce-bot voice transcript message had no durable metadata after probe cap — dropping rather than routing as ordinary text"
+                );
+                return Ok(());
+            }
+            // #2266 + #2209: feed downstream queue paths the typed payload
+            // resolved from whichever layer hit (local store → body parse →
+            // durable PG side store).
+            let resolved_voice_announcement: Option<
+                crate::voice::prompt::VoiceTranscriptAnnouncement,
+            > = local_or_body_announcement.or_else(|| match durable_probe {
+                DurableAnnounceProbe::Found(announcement) => Some(*announcement),
+                DurableAnnounceProbe::Miss | DurableAnnounceProbe::Unavailable => None,
+            });
             let is_voice_transcript_announcement = resolved_voice_announcement.is_some();
             if !is_voice_transcript_announcement
                 && validate_live_channel_routing_with_dm_hint(

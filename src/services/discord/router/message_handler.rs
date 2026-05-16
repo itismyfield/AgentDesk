@@ -2245,22 +2245,51 @@ pub(crate) async fn execute_intake_turn_core(
     .await
 }
 
-async fn take_durable_voice_announcement_for_intake(
+/// #2209 finding #2 — peek (non-destructive) durable metadata for intake.
+/// The durable row is only deleted via [`consume_durable_voice_announcement_after_handoff`]
+/// once the announcement has been successfully handed to the provider
+/// (after validation, barge-in, and inflight-state save). A worker crash
+/// between peek and consume leaves the row intact for the next retry.
+async fn peek_durable_voice_announcement_for_intake(
     pg_pool: Option<&sqlx::PgPool>,
     message_id: MessageId,
 ) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
     let pool = pg_pool?;
-    match crate::voice::announce_meta::take_durable(pool, message_id).await {
+    match crate::voice::announce_meta::peek_durable(pool, message_id).await {
         Ok(announcement) => announcement,
         Err(error) => {
             tracing::warn!(
                 error = %error,
                 message_id = message_id.get(),
-                "failed to reconstruct durable voice transcript announcement metadata"
+                "failed to peek durable voice transcript announcement metadata"
             );
             None
         }
     }
+}
+
+async fn consume_durable_voice_announcement_after_handoff(
+    pg_pool: Option<&sqlx::PgPool>,
+    message_id: MessageId,
+) {
+    let Some(pool) = pg_pool else { return };
+    if let Err(error) = crate::voice::announce_meta::consume_durable(pool, message_id).await {
+        tracing::warn!(
+            error = %error,
+            message_id = message_id.get(),
+            "failed to consume durable voice transcript announcement metadata after handoff"
+        );
+    }
+}
+
+#[cfg(test)]
+async fn take_durable_voice_announcement_for_intake(
+    pg_pool: Option<&sqlx::PgPool>,
+    message_id: MessageId,
+) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
+    let announcement = peek_durable_voice_announcement_for_intake(pg_pool, message_id).await?;
+    consume_durable_voice_announcement_after_handoff(pg_pool, message_id).await;
+    Some(announcement)
 }
 
 pub(in crate::services::discord) async fn handle_text_message(
@@ -2295,14 +2324,26 @@ pub(in crate::services::discord) async fn handle_text_message(
             None
         };
     let has_parsed_voice_announcement = parsed_voice_announcement.is_some();
+    // #2209 finding #2: peek only — durable row stays in place until the
+    // announcement has been successfully handed off to the provider below.
     let durable_voice_announcement = if stored_voice_announcement.is_none()
         && !has_parsed_voice_announcement
         && crate::voice::prompt::is_visible_voice_transcript_announcement(user_text)
     {
-        take_durable_voice_announcement_for_intake(shared.pg_pool.as_ref(), user_msg_id).await
+        peek_durable_voice_announcement_for_intake(shared.pg_pool.as_ref(), user_msg_id).await
     } else {
         None
     };
+    // Whether we should delete the durable row after handoff. We
+    // consume whenever this intake actually routes a voice announcement
+    // — including the local-store fast path — so the row cannot be
+    // re-picked-up by a peer worker after a Discord shard failover
+    // re-delivers the message_create event.
+    //
+    // We capture this before later branches null out
+    // `durable_voice_announcement` (e.g. announce-bot id mismatch);
+    // we only set it once we know we'll actually proceed with intake.
+    let mut durable_pending_consume = false;
     let reconstructed_voice_announcement = stored_voice_announcement.or(durable_voice_announcement);
     let has_reconstructed_voice_announcement = reconstructed_voice_announcement.is_some();
     let announce_bot_id = if has_reconstructed_voice_announcement || has_parsed_voice_announcement {
@@ -2334,6 +2375,11 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
     }
     let is_voice_announcement = voice_announcement.is_some();
+    // Now that author validation has accepted (or rejected) the announcement,
+    // mark the durable row for consumption iff we are about to route it.
+    if is_voice_announcement {
+        durable_pending_consume = true;
+    }
     let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
         let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
         if let Some(started_at) = announcement.started_at.as_deref() {
@@ -2385,6 +2431,15 @@ pub(in crate::services::discord) async fn handle_text_message(
             .try_handle_voice_transcript_announcement(shared, channel_id, announcement)
             .await
     {
+        // Barge-in successfully absorbed the announcement — this counts
+        // as a successful hand-off, so the durable row may be deleted.
+        if durable_pending_consume {
+            consume_durable_voice_announcement_after_handoff(
+                shared.pg_pool.as_ref(),
+                user_msg_id,
+            )
+            .await;
+        }
         return Ok(());
     }
     if !is_voice_announcement
@@ -4607,6 +4662,15 @@ pub(in crate::services::discord) async fn handle_text_message(
         tracing::info!("  [{ts}]   ⚠ inflight state save failed: {e}");
     }
 
+    // #2209 finding #2 — durable announce metadata is owned by intake
+    // until we've successfully reached the dispatch commit point (inflight
+    // state saved, about to spawn the provider). Consume it here so a
+    // crash earlier in the path leaves the row recoverable for a retry.
+    if durable_pending_consume {
+        consume_durable_voice_announcement_after_handoff(shared.pg_pool.as_ref(), user_msg_id)
+            .await;
+    }
+
     // Create channel for streaming
     let (tx, rx) = mpsc::channel();
     let (completion_tx, completion_rx) = if wait_for_completion {
@@ -6342,6 +6406,47 @@ mod voice_announce_meta_reconstruction_tests {
                 .await
                 .is_none(),
             "durable metadata is one-shot once intake consumes it"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2209 finding #2 — peek must not delete; consume must.
+    /// Simulates the worker-crash window: intake peeks the row, then
+    /// the handler returns (worker crash) before consume runs. The
+    /// row must survive so a retry can recover.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peek_then_crash_before_consume_leaves_durable_row_intact() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(77_101);
+        let expected = announcement();
+
+        crate::voice::announce_meta::persist_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable voice announcement metadata");
+
+        let peeked = peek_durable_voice_announcement_for_intake(Some(&pool), message_id)
+            .await
+            .expect("peek should observe the row");
+        assert_eq!(peeked, expected);
+
+        // Simulate crash: consume never runs.
+
+        // Retry peek must still see the row.
+        let retry_peeked = peek_durable_voice_announcement_for_intake(Some(&pool), message_id)
+            .await
+            .expect("row should survive a peek-without-consume");
+        assert_eq!(retry_peeked, expected);
+
+        // Successful retry: consume removes the row.
+        consume_durable_voice_announcement_after_handoff(Some(&pool), message_id).await;
+        assert!(
+            peek_durable_voice_announcement_for_intake(Some(&pool), message_id)
+                .await
+                .is_none(),
+            "consume should delete the durable row"
         );
 
         pool.close().await;
