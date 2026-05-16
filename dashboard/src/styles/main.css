@@ -832,12 +832,20 @@ textarea {
     flex-direction: row !important;
     display: flex !important;
     overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
     gap: 0.5rem;
     padding-bottom: 0.25rem;
+    -webkit-overflow-scrolling: touch;
+  }
+  .settings-nav .settings-nav-items::-webkit-scrollbar {
+    display: none;
   }
   .settings-nav .settings-nav-items > * {
     flex: 0 0 auto;
-    min-width: 12rem;
+    min-width: min(11rem, 74vw);
+    scroll-snap-align: start;
   }
   .setting-row .setting-row-grid {
     grid-template-columns: 1fr !important;

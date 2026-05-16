@@ -2176,6 +2176,24 @@ test.describe("Dashboard smoke tests", () => {
     const settingsPage = page.getByTestId("settings-page");
     await expect(settingsPage).toBeVisible({ timeout: 15000 });
 
+    const navMetrics = await page
+      .getByRole("tablist", { name: /설정 패널|Settings panels/ })
+      .evaluate((node) => {
+        const buttons = Array.from(node.querySelectorAll("button"));
+        return {
+          clientWidth: node.clientWidth,
+          scrollWidth: node.scrollWidth,
+          overflowX: window.getComputedStyle(node).overflowX,
+          maxButtonHeight: Math.max(
+            0,
+            ...buttons.map((button) => button.getBoundingClientRect().height),
+          ),
+        };
+      });
+    expect(navMetrics.scrollWidth).toBeGreaterThan(navMetrics.clientWidth);
+    expect(navMetrics.overflowX).toMatch(/auto|scroll/);
+    expect(navMetrics.maxButtonHeight).toBeLessThan(92);
+
     const before = await settingsPage.evaluate((node) => ({
       clientHeight: node.clientHeight,
       scrollHeight: node.scrollHeight,
