@@ -41,25 +41,31 @@ binary is absent — no hard-fail.
 
 ```toml
 [build]
-rustc-wrapper = "./scripts/rustc-wrapper-sccache.sh"
 incremental = false
 ```
 
-Every `cargo` invocation inside this repo — whether from a human shell, a
-campaign worktree, or an agent session — picks up the wrapper automatically.
+`rustc-wrapper` is intentionally **not** set here. The previous value of
+`"sccache"` broke every bare `cargo` invocation on machines without sccache
+installed (Cargo errors with `No such file or directory (os error 2)`),
+forcing agents and developers to prefix every command with `RUSTC_WRAPPER=`.
+A wrapper script (`.sh`) is also not portable to native Windows Cargo
+invocations, so the supported pattern is to let callers opt in via the
+environment:
 
-The wrapper (`scripts/rustc-wrapper-sccache.sh`) prefers an explicit `SCCACHE_BIN`
-override, then falls back to `command -v sccache`, then `/opt/homebrew/bin/sccache`,
-then a plain `rustc` exec. This is the key fix for the historical
-"`No such file or directory` for `sccache`" failure that forced agents and
-developers to prefix every cargo call with `RUSTC_WRAPPER=`. Bare
-`cargo build`/`cargo check`/`cargo test` now Just Works regardless of whether
-sccache is installed.
+- CI sets `RUSTC_WRAPPER: sccache` at the workflow `env:` level (Linux +
+  Windows lanes). The Mozilla sccache action installs the binary.
+- Release/deploy scripts call `setup_sccache_env` from `scripts/_defaults.sh`,
+  which conditionally exports `RUSTC_WRAPPER` only when sccache is found.
+- Local developers add `export RUSTC_WRAPPER=sccache` to their shell rc after
+  `brew install sccache` (or `cargo install sccache --locked` / `winget
+  install Mozilla.sccache`).
 
-Escape hatch: `RUSTC_WRAPPER_DISABLE=1 cargo build` skips the wrapper entirely.
+`incremental = false` stays because sccache cannot cache incremental rustc
+invocations and campaign worktrees are build-once-and-discard, so the
+multi-GB `target/debug/incremental` per-worktree hit is pure waste.
 
 > **Gotcha**: `SCCACHE_CACHE_SIZE` cannot be set via `config.toml [env]` in a
-> way that reaches `sccache` itself — the wrapper reads its own env from the
+> way that reaches `sccache` itself — sccache reads its own env from the
 > process environment, not from Cargo's injected vars. Set it via shell scripts
 > (see §2.2) or the calling launcher.
 
@@ -183,14 +189,34 @@ through the action's post-step output.
 
 ---
 
+### 4.3 PR vs main GHA cache scoping
+
+GitHub Actions cache scopes entries by ref. PR/feature-branch builds write to
+their own cache scope and can read from the default-branch (`main`) cache.
+PR writes therefore do not directly evict `main`'s cache shards under normal
+ref isolation — only the *global* 10GB quota matters. With `target/` removed
+from `actions/cache@v4` (§4.2), total cache usage drops by ~5–15GB, well below
+the 10GB cap, and main-branch sccache shards should remain stable.
+
+If future ops still observe `main` cache eviction under heavy PR traffic,
+the next escalation is to set `SCCACHE_GHA_VERSION` per event type (separate
+namespaces for `push to main` vs `pull_request`), or to disable
+`SCCACHE_GHA_ENABLED` on PR jobs entirely and rely on per-job runner-local
+state — at the cost of giving up cache reuse for PR builds. Do not apply that
+escalation pre-emptively; verify with the per-job `sccache --show-stats`
+output first.
+
+---
+
 ## 5. Troubleshooting
 
-- **`error: process didn't exit successfully` for the rustc wrapper** — the
-  wrapper script (`scripts/rustc-wrapper-sccache.sh`) should never hard-fail
-  on a missing sccache binary; it falls back to a plain rustc exec. If you
-  hit this anyway, confirm the script is executable
-  (`chmod +x scripts/rustc-wrapper-sccache.sh`) and run with
-  `RUSTC_WRAPPER_DISABLE=1 cargo …` to confirm the wrapper is the culprit.
+- **`error: process didn't exit successfully: rustc`** with a wrapper-related
+  message — earlier versions of this repo set `rustc-wrapper = "sccache"` in
+  `.cargo/config.toml`, which hard-fails when sccache is not installed. The
+  current `.cargo/config.toml` does not set `rustc-wrapper`, so this error
+  should no longer occur. If you still see it, check whether a stale
+  `~/.cargo/config.toml` (user-global) or an env override has reintroduced
+  the setting.
 - **No hit-rate improvement across worktrees** — confirm each worktree sees
   the same `SCCACHE_DIR`. By default it is `$HOME/.cache/sccache`, which is
   shared across worktrees.

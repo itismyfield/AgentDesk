@@ -47,10 +47,11 @@ cargo build --release
 
 AgentDesk intentionally keeps a separate `target/` directory per worktree. Sharing `CARGO_TARGET_DIR` across always-parallel worktrees causes Cargo lock contention, so the supported acceleration path is a shared `sccache` rustc cache instead.
 
-- `.cargo/config.toml` points `build.rustc-wrapper` at `scripts/rustc-wrapper-sccache.sh`
-- the wrapper transparently uses `sccache` when it is on `PATH` and falls back to a plain `rustc` exec when it is not — bare `cargo build`/`cargo test` works on every machine without a `RUSTC_WRAPPER=` override
-- worktree builds use the documented env default `SCCACHE_CACHE_SIZE=10G`; export another value before building to override it
-- set `RUSTC_WRAPPER_DISABLE=1` to bypass the wrapper entirely (rare; debugging only)
+- `.cargo/config.toml` no longer hard-codes `rustc-wrapper`, so bare `cargo build` / `cargo test` / `cargo check` works on every machine regardless of whether `sccache` is installed. No more `RUSTC_WRAPPER=` workaround for agents or subagents.
+- to actually get caching, opt in via the environment: `export RUSTC_WRAPPER=sccache` (e.g. in `~/.zshrc` / `~/.bashrc` / PowerShell profile) after installing `sccache`.
+- release/deploy scripts (`scripts/build-release.sh`, `scripts/deploy-release.sh`) call `setup_sccache_env` from `scripts/_defaults.sh`, which conditionally exports `RUSTC_WRAPPER` only when `sccache` is found — those scripts always do the right thing automatically.
+- CI exports `RUSTC_WRAPPER: sccache` at the workflow `env:` level and the `mozilla-actions/sccache-action` installs the binary, so no per-developer setup is needed for CI builds.
+- worktree builds use the documented env default `SCCACHE_CACHE_SIZE=10G`; export another value before building to override it.
 
 Install `sccache` to actually engage caching:
 
@@ -58,10 +59,12 @@ Install `sccache` to actually engage caching:
 brew install sccache
 # or, if a package manager is unavailable:
 cargo install sccache --locked
+export RUSTC_WRAPPER=sccache   # add to shell rc for persistence
 ```
 
 ```powershell
 winget install Mozilla.sccache
+$env:RUSTC_WRAPPER = "sccache"   # add to PowerShell profile for persistence
 ```
 
 Quick verification / troubleshooting:
@@ -69,11 +72,11 @@ Quick verification / troubleshooting:
 ```bash
 sccache --stop-server || true
 sccache --zero-stats || true
-cargo build --bin agentdesk
+RUSTC_WRAPPER=sccache cargo build --bin agentdesk
 sccache --show-stats
 ```
 
-The historical `No such file or directory (os error 2)` failure mode no longer applies — Cargo invokes the wrapper script, which gracefully degrades when sccache is missing.
+The historical `No such file or directory (os error 2)` failure mode no longer applies because `.cargo/config.toml` does not force the wrapper.
 
 ### Dawn LaunchDaemon Operations (macOS)
 
