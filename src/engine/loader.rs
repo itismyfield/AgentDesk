@@ -207,18 +207,25 @@ pub(crate) fn load_single_policy_with_deadline(
         // #2372 round-3: arm the deadline ONLY here, after `ctx.with` has
         // acquired the runtime lock. The interrupt handler installed by
         // `start_hot_reload` checks the deadline on every bytecode tick,
-        // and dropping `_deadline_guard` immediately after eval clears the
-        // slot back to 0. This guarantees the deadline can never expire
-        // while an unrelated live hook is the currently-running JS on the
-        // runtime — the only JS that can be executing between arm and
-        // disarm is *this* eval, because we hold the lock.
+        // and dropping `_deadline_guard` clears the slot back to 0. This
+        // guarantees the deadline can never expire while an unrelated live
+        // hook is the currently-running JS on the runtime — the only JS
+        // that can be executing between arm and disarm is *this* policy
+        // file's pre-validation, because we hold the lock.
+        //
+        // #2378 (Codex follow-up): the guard's scope extends through ALL
+        // subsequent `policy_obj.get(...)` / `keys()` calls below. Property
+        // access on the captured object can invoke user-defined getters or
+        // Proxy traps that re-enter JS (`while(true){}`, `agentdesk.exec`,
+        // etc.), and without coverage those re-entries would run completely
+        // unbounded. The guard is therefore dropped only after all
+        // user-controlled property reads have completed.
         let _deadline_guard =
             eval_deadline.map(|slot| ArmedDeadline::new(slot, HOT_RELOAD_EVAL_BUDGET));
         let mut eval_opts = rquickjs::context::EvalOptions::default();
         eval_opts.strict = false;
         let eval_result: rquickjs::Result<rquickjs::Value> =
             ctx.eval_with_options(source.as_bytes().to_vec(), eval_opts);
-        drop(_deadline_guard);
 
         if let Err(e) = eval_result {
             return Err(anyhow::anyhow!("JS eval error in {}: {e}", path.display()));
@@ -243,31 +250,84 @@ pub(crate) fn load_single_policy_with_deadline(
             .into_object()
             .ok_or_else(|| anyhow::anyhow!("registerPolicy argument is not an object"))?;
 
-        // Extract name
-        let name: String = policy_obj
-            .get::<_, rquickjs::Value>("name")
-            .ok()
-            .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()))
-            .unwrap_or_else(|| file_name.clone());
+        // #2378 (Codex round-2): every `policy_obj.get(...)` call below can
+        // execute user-defined JS via getters / Proxy traps. We must NOT
+        // silently swallow `Err` returns — a deadline-interrupted getter
+        // would otherwise fall through to default values (file-stem name,
+        // priority 100, missing hooks) and the hot-reload validator would
+        // accept the file. Use `contains_key` to distinguish "property
+        // absent (use default)" from "property present (read must
+        // succeed)", and propagate any read error as a load failure so
+        // the previous policy set is preserved.
 
-        // Extract priority
-        let priority: i32 = policy_obj
-            .get::<_, rquickjs::Value>("priority")
-            .ok()
-            .and_then(|v| v.as_int())
-            .unwrap_or(100);
+        // Extract name (optional; falls back to file stem when absent).
+        let name: String = if policy_obj.contains_key("name").map_err(|e| {
+            anyhow::anyhow!("policy {}: contains_key(name) failed: {e}", path.display())
+        })? {
+            let value: rquickjs::Value = policy_obj
+                .get("name")
+                .map_err(|e| anyhow::anyhow!("policy {}: read name: {e}", path.display()))?;
+            if value.is_undefined() || value.is_null() {
+                file_name.clone()
+            } else {
+                value
+                    .as_string()
+                    .and_then(|s| s.to_string().ok())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("policy {}: name must be a string", path.display())
+                    })?
+            }
+        } else {
+            file_name.clone()
+        };
 
-        // Extract known hooks (Hook enum variants)
+        // Extract priority (optional; defaults to 100).
+        let priority: i32 = if policy_obj.contains_key("priority").map_err(|e| {
+            anyhow::anyhow!(
+                "policy {}: contains_key(priority) failed: {e}",
+                path.display()
+            )
+        })? {
+            let value: rquickjs::Value = policy_obj
+                .get("priority")
+                .map_err(|e| anyhow::anyhow!("policy {}: read priority: {e}", path.display()))?;
+            if value.is_undefined() || value.is_null() {
+                100
+            } else {
+                value.as_int().ok_or_else(|| {
+                    anyhow::anyhow!("policy {}: priority must be an integer", path.display())
+                })?
+            }
+        } else {
+            100
+        };
+
+        // Extract known hooks (Hook enum variants). Reads that raise a JS
+        // error (e.g. deadline-interrupted getter) propagate as a load
+        // failure rather than silently being treated as "hook absent".
         let mut hooks = HashMap::new();
         let known_js_names: Vec<&str> = Hook::all().iter().map(|h| h.js_name()).collect();
         for hook in Hook::all() {
-            let hook_val: rquickjs::Result<rquickjs::Value> = policy_obj.get(hook.js_name());
-            if let Ok(val) = hook_val {
-                if val.is_function() {
-                    let func = val.into_function().unwrap();
-                    let persistent = Persistent::save(&ctx, func);
-                    hooks.insert(*hook, persistent);
-                }
+            if !policy_obj.contains_key(hook.js_name()).map_err(|e| {
+                anyhow::anyhow!(
+                    "policy {}: contains_key({}) failed: {e}",
+                    path.display(),
+                    hook.js_name()
+                )
+            })? {
+                continue;
+            }
+            let val: rquickjs::Value = policy_obj.get(hook.js_name()).map_err(|e| {
+                anyhow::anyhow!(
+                    "policy {}: read hook {}: {e}",
+                    path.display(),
+                    hook.js_name()
+                )
+            })?;
+            if val.is_function() {
+                let func = val.into_function().unwrap();
+                let persistent = Persistent::save(&ctx, func);
+                hooks.insert(*hook, persistent);
             }
         }
 
@@ -276,25 +336,26 @@ pub(crate) fn load_single_policy_with_deadline(
         let skip_keys = ["name", "priority", "after", "before"];
         let props = policy_obj.keys::<String>();
         for key_result in props {
-            if let Ok(key) = key_result {
-                if skip_keys.contains(&key.as_str()) || known_js_names.contains(&key.as_str()) {
-                    continue;
-                }
-                if let Ok(val) = policy_obj.get::<_, rquickjs::Value>(&key) {
-                    if val.is_function() {
-                        let func = val.into_function().unwrap();
-                        let persistent = Persistent::save(&ctx, func);
-                        dynamic_hooks.insert(key, persistent);
-                    }
-                }
+            let key = key_result
+                .map_err(|e| anyhow::anyhow!("policy {}: enumerate keys: {e}", path.display()))?;
+            if skip_keys.contains(&key.as_str()) || known_js_names.contains(&key.as_str()) {
+                continue;
+            }
+            let val: rquickjs::Value = policy_obj.get(&key).map_err(|e| {
+                anyhow::anyhow!("policy {}: read dynamic hook {}: {e}", path.display(), key)
+            })?;
+            if val.is_function() {
+                let func = val.into_function().unwrap();
+                let persistent = Persistent::save(&ctx, func);
+                dynamic_hooks.insert(key, persistent);
             }
         }
 
         // Extract optional ordering annotations: `after: ["policy-name", ...]`
         // and `before: [...]`. These provide an explicit DAG override for
         // policies that must register the same hook at similar priorities.
-        let after = extract_string_array(&policy_obj, "after");
-        let before = extract_string_array(&policy_obj, "before");
+        let after = extract_string_array_strict(&policy_obj, "after", path)?;
+        let before = extract_string_array_strict(&policy_obj, "before", path)?;
 
         Ok(LoadedPolicy {
             name,
@@ -313,6 +374,7 @@ pub(crate) fn load_single_policy_with_deadline(
 
 /// Read an optional `string[]` property from a JS object. Missing or wrongly
 /// typed values return an empty Vec (permissive — annotations are optional).
+#[allow(dead_code)]
 fn extract_string_array(obj: &rquickjs::Object<'_>, key: &str) -> Vec<String> {
     let Ok(val) = obj.get::<_, rquickjs::Value>(key) else {
         return Vec::new();
@@ -329,6 +391,50 @@ fn extract_string_array(obj: &rquickjs::Object<'_>, key: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Strict variant of `extract_string_array`: any `Err` from a property
+/// access or array element read (e.g. a deadline-interrupted JS getter or
+/// Proxy trap) propagates as a load failure rather than being treated as
+/// an empty annotation list (#2378). Missing properties and wrong-type
+/// values still return `Ok(Vec::new())` — annotations remain optional, we
+/// only tighten the error-propagation path.
+fn extract_string_array_strict(
+    obj: &rquickjs::Object<'_>,
+    key: &str,
+    path: &Path,
+) -> Result<Vec<String>> {
+    if !obj.contains_key(key).map_err(|e| {
+        anyhow::anyhow!(
+            "policy {}: contains_key({}) failed: {e}",
+            path.display(),
+            key
+        )
+    })? {
+        return Ok(Vec::new());
+    }
+    let val: rquickjs::Value = obj
+        .get(key)
+        .map_err(|e| anyhow::anyhow!("policy {}: read annotation {}: {e}", path.display(), key))?;
+    let Some(arr) = val.into_array() else {
+        // Wrong-type values stay tolerant — annotations are optional.
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for i in 0..arr.len() {
+        let item: rquickjs::Value = arr.get(i).map_err(|e| {
+            anyhow::anyhow!(
+                "policy {}: read annotation {}[{}]: {e}",
+                path.display(),
+                key,
+                i
+            )
+        })?;
+        if let Some(s) = item.as_string().and_then(|s| s.to_string().ok()) {
+            out.push(s);
+        }
+    }
+    Ok(out)
 }
 
 /// Detect `(priority, hook)` collisions and missing `after/before` referents.
@@ -948,21 +1054,97 @@ pub fn start_hot_reload(
 /// aborts the eval once the encoded deadline passes; the guard clears the
 /// deadline back to `0` on drop so subsequent (potentially long-running)
 /// evals on the same runtime are not affected.
+///
+/// In addition to the AtomicU64 (which the QuickJS interrupt handler reads
+/// on every bytecode tick), the guard also installs the deadline into a
+/// thread-local so synchronous native bridge ops invoked by JS on this
+/// thread can observe it. This is required because the interrupt handler
+/// only fires between bytecode instructions — a Rust function called from
+/// JS holds the runtime lock for its entire duration and can otherwise
+/// blow past the deadline (#2378).
 struct ArmedDeadline<'a> {
     slot: &'a Arc<AtomicU64>,
+    previous_thread_local: Option<Instant>,
 }
 
 impl<'a> ArmedDeadline<'a> {
     fn new(slot: &'a Arc<AtomicU64>, budget: Duration) -> Self {
         let deadline = Instant::now() + budget;
         slot.store(encode_deadline(deadline), Ordering::Release);
-        Self { slot }
+        let previous_thread_local =
+            CURRENT_BRIDGE_DEADLINE.with(|cell| cell.replace(Some(deadline)));
+        Self {
+            slot,
+            previous_thread_local,
+        }
     }
 }
 
 impl<'a> Drop for ArmedDeadline<'a> {
     fn drop(&mut self) {
         self.slot.store(0, Ordering::Release);
+        let previous = self.previous_thread_local.take();
+        CURRENT_BRIDGE_DEADLINE.with(|cell| cell.set(previous));
+    }
+}
+
+thread_local! {
+    /// Per-thread deadline for synchronous native bridge ops. Set by
+    /// `ArmedDeadline::new` when a bounded JS eval is in flight on this
+    /// thread, cleared (or restored to the previous nested value) on drop.
+    /// Bridge ops read this via [`bridge_op_deadline`] to bound their own
+    /// internal timeouts and to fail fast when the deadline has passed —
+    /// the QuickJS interrupt handler can't fire while Rust is running, so
+    /// bridge ops must enforce the deadline themselves (#2378).
+    static CURRENT_BRIDGE_DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Returns the current thread's bridge-op deadline, if a bounded JS eval is
+/// in flight on this thread. Bridge ops should call this before performing
+/// long synchronous work and either:
+///   1. Return an error immediately if the deadline has already passed.
+///   2. Shorten their internal timeout to fit within the remaining budget.
+///
+/// Returns `None` if no deadline is armed — bridge ops should retain their
+/// default timeout behaviour in that case (e.g. live-engine policy hooks
+/// invoked outside of hot-reload pre-validation).
+pub(crate) fn bridge_op_deadline() -> Option<Instant> {
+    CURRENT_BRIDGE_DEADLINE.with(|cell| cell.get())
+}
+
+/// Returns the remaining bridge-op budget, or `Some(Duration::ZERO)` if the
+/// deadline has already passed. Returns `None` if no deadline is armed.
+pub(crate) fn bridge_op_deadline_remaining() -> Option<Duration> {
+    bridge_op_deadline().map(|deadline| {
+        deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO)
+    })
+}
+
+/// Test-only RAII helper that installs a thread-local bridge-op deadline so
+/// `engine::ops::*` modules can exercise their deadline-clamping paths
+/// without spinning up a full `HotReloadGuard`. Restores any previously
+/// installed deadline on drop.
+#[cfg(test)]
+pub(crate) struct ScopedBridgeDeadline {
+    previous: Option<Instant>,
+}
+
+#[cfg(test)]
+impl ScopedBridgeDeadline {
+    pub(crate) fn new(budget: Duration) -> Self {
+        let deadline = Instant::now() + budget;
+        let previous = CURRENT_BRIDGE_DEADLINE.with(|cell| cell.replace(Some(deadline)));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedBridgeDeadline {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        CURRENT_BRIDGE_DEADLINE.with(|cell| cell.set(previous));
     }
 }
 
@@ -1297,6 +1479,166 @@ mod tests {
         // Calling shutdown explicitly then dropping must not panic, even
         // when the implicit Drop runs a second shutdown.
         guard.shutdown();
+        drop(guard);
+        drop(runtime);
+    }
+
+    /// #2378: synchronous native bridge ops must observe the bridge-op
+    /// deadline that's armed for the currently-running JS eval. The
+    /// QuickJS interrupt handler can't fire while Rust is running, so we
+    /// rely on bridge ops to consult `bridge_op_deadline_remaining()` and
+    /// either short-circuit or clamp their own internal timeout.
+    ///
+    /// This test verifies the load-bearing contract directly: while an
+    /// `ArmedDeadline` is in scope on this thread, the public
+    /// `bridge_op_deadline_remaining()` helper returns a budget that
+    /// shrinks monotonically and becomes zero once the deadline passes.
+    /// After the guard drops, the helper returns `None` again so live
+    /// engine bridge ops are not affected.
+    #[test]
+    fn bridge_op_deadline_visible_to_native_ops_while_armed() {
+        assert!(
+            bridge_op_deadline_remaining().is_none(),
+            "no deadline should be armed at test start"
+        );
+
+        let slot = Arc::new(AtomicU64::new(0));
+        {
+            let _armed = ArmedDeadline::new(&slot, Duration::from_millis(200));
+
+            // Immediately after arming, the remaining budget must be positive
+            // and bounded by the original budget. Use a generous upper bound
+            // (the requested budget) since `Instant::now()` may advance
+            // between `ArmedDeadline::new` and this read.
+            let initial = bridge_op_deadline_remaining()
+                .expect("deadline should be visible to bridge ops while armed");
+            assert!(
+                initial > Duration::ZERO && initial <= Duration::from_millis(200),
+                "initial bridge-op budget out of range: {initial:?}"
+            );
+
+            // Sleep past the deadline; the helper must now report a zero
+            // remaining budget so synchronous bridge ops short-circuit.
+            std::thread::sleep(Duration::from_millis(250));
+            let after_deadline = bridge_op_deadline_remaining()
+                .expect("deadline should still be visible after it has passed");
+            assert!(
+                after_deadline.is_zero(),
+                "bridge-op deadline should report zero remaining after expiry, got {after_deadline:?}"
+            );
+        }
+
+        assert!(
+            bridge_op_deadline_remaining().is_none(),
+            "deadline must clear once ArmedDeadline drops so live ops are unaffected"
+        );
+        // The shared AtomicU64 slot must also be cleared so the interrupt
+        // handler sees `0` (no deadline armed) on subsequent ticks.
+        assert_eq!(
+            slot.load(Ordering::Acquire),
+            0,
+            "ArmedDeadline drop must reset the shared deadline slot"
+        );
+    }
+
+    /// #2378 (Codex follow-up): a policy whose `name` getter contains an
+    /// infinite loop must be interrupted by the deadline AND that
+    /// interrupt must propagate as a load failure rather than being
+    /// silently swallowed into a fallback name.
+    ///
+    /// The probe context registers a minimal `agentdesk.registerPolicy`
+    /// so the policy eval itself succeeds — the runaway then triggers
+    /// only inside `policy_obj.get("name")`, which is exactly the path
+    /// Codex round-2 flagged as both unbounded AND error-swallowing.
+    #[test]
+    fn load_single_policy_deadline_covers_user_property_getters() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let deadline_slot = guard.eval_deadline.clone();
+
+        // Policy whose `name` accessor spins forever. The eval itself
+        // returns immediately (registerPolicy completes), so the deadline
+        // must remain armed through the subsequent `policy_obj.get("name")`
+        // for the spin to be interrupted — and the interrupted read must
+        // propagate as a load failure.
+        let policy_file = tmp.path().join("runaway_getter.js");
+        std::fs::write(
+            &policy_file,
+            r#"
+                agentdesk.registerPolicy({
+                    get name() {
+                        while (true) {}
+                    }
+                });
+            "#,
+        )
+        .expect("write runaway-getter policy");
+
+        let runtime_for_thread = runtime.clone();
+        let load_thread = std::thread::spawn(move || {
+            let probe_ctx = Context::full(&runtime_for_thread).expect("probe context");
+            // Bootstrap the bare-minimum agentdesk surface so the policy
+            // eval reaches `registerPolicy` and produces a real captured
+            // object whose getter exercises the deadline path. Without
+            // this the eval would fail with `agentdesk is not defined`
+            // *before* reaching the getter — masking the regression we
+            // are guarding against (Codex round-2 finding).
+            probe_ctx.with(|ctx| {
+                let _: rquickjs::Value = ctx
+                    .eval(
+                        r#"
+                        globalThis.agentdesk = globalThis.agentdesk || {};
+                        agentdesk.registerPolicy = function() {};
+                        "#,
+                    )
+                    .expect("bootstrap agentdesk surface");
+            });
+
+            let start = Instant::now();
+            let result =
+                load_single_policy_with_deadline(&probe_ctx, &policy_file, Some(&deadline_slot));
+            let elapsed = start.elapsed();
+            let err_message = result.as_ref().err().map(|e| e.to_string());
+            drop(probe_ctx);
+            (result.is_err(), elapsed, err_message)
+        });
+
+        let join_deadline = Instant::now() + HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3);
+        loop {
+            if load_thread.is_finished() {
+                break;
+            }
+            assert!(
+                Instant::now() < join_deadline,
+                "deadline did not cover user-controlled property getter within budget+3s"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (is_err, elapsed, err_message) = load_thread.join().expect("load thread join");
+        assert!(
+            is_err,
+            "runaway getter should propagate as a load error (deadline interrupt expected); \
+             message={err_message:?}"
+        );
+        // The error must originate from the `name` read path — i.e. the
+        // deadline interrupt must NOT have been swallowed by `.ok()` and
+        // fallen through to the file-stem default.
+        assert!(
+            err_message
+                .as_deref()
+                .is_some_and(|m| m.contains("read name") || m.contains("contains_key(name)")),
+            "expected name-read failure, got: {err_message:?}"
+        );
+        assert!(
+            elapsed < HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(1),
+            "deadline fired too late on getter: {elapsed:?} (budget {HOT_RELOAD_EVAL_BUDGET:?})"
+        );
+
         drop(guard);
         drop(runtime);
     }
