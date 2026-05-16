@@ -130,9 +130,10 @@ pub async fn resume_run(state: State<AppState>) -> (StatusCode, Json<serde_json:
 pub async fn repair_phase_gates(
     state: State<AppState>,
     id: Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    route::repair_phase_gates(state, id, body).await
+    route::repair_phase_gates(state, id, headers, body).await
 }
 
 pub async fn cancel(

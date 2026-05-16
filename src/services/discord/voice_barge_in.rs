@@ -177,6 +177,17 @@ fn agent_voice_matches_channel(agent: &crate::config::AgentDef, channel_id: Chan
         == Some(channel_id.get())
 }
 
+fn agent_voice_channel(agent: &crate::config::AgentDef) -> Option<ChannelId> {
+    agent
+        .voice
+        .channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(ChannelId::new)
+}
+
 fn agent_voice_background_channel(agent: &crate::config::AgentDef) -> Option<ChannelId> {
     let preferred_provider = agent.provider.trim();
     if !preferred_provider.is_empty()
@@ -203,6 +214,24 @@ fn agent_voice_background_channel(agent: &crate::config::AgentDef) -> Option<Cha
                 .and_then(|value| value.parse::<u64>().ok())
                 .map(ChannelId::new)
         })
+}
+
+fn agent_voice_background_channel_for(
+    agent: &crate::config::AgentDef,
+    voice_channel_id: ChannelId,
+) -> Option<ChannelId> {
+    agent_voice_matches_channel(agent, voice_channel_id)
+        .then(|| agent_voice_background_channel(agent))
+        .flatten()
+}
+
+fn agent_voice_channel_for_background(
+    agent: &crate::config::AgentDef,
+    background_channel_id: ChannelId,
+) -> Option<ChannelId> {
+    let voice_channel_id = agent_voice_channel(agent)?;
+    (agent_voice_background_channel(agent) == Some(background_channel_id))
+        .then_some(voice_channel_id)
 }
 
 fn agent_text_channel_matches(agent: &crate::config::AgentDef, channel_id: ChannelId) -> bool {
@@ -441,6 +470,106 @@ async fn generate_voice_channel_text_reply(
         None
     } else {
         Some(reply)
+    }
+}
+
+async fn generate_voice_background_result_summary(
+    background_result: &str,
+    language: &str,
+    foreground: &EffectiveVoiceForegroundConfig,
+) -> Option<String> {
+    let max_chars = foreground.max_chars.max(120);
+    let prompt = crate::voice::prompt::voice_background_result_summary_prompt(
+        background_result,
+        language,
+        max_chars,
+    );
+    let provider = foreground.provider.clone();
+    let model = foreground.model.clone();
+    let timeout = Duration::from_millis(foreground.timeout_ms);
+    let result = tokio::time::timeout(
+        timeout + Duration::from_millis(250),
+        tokio::task::spawn_blocking(move || {
+            let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
+            match provider_kind {
+                ProviderKind::Claude => crate::services::claude::execute_command_simple_with_model(
+                    &prompt,
+                    Some(&model),
+                ),
+                ProviderKind::Codex => {
+                    crate::services::codex::execute_command_simple_with_model(&prompt, Some(&model))
+                }
+                ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
+                    "voice background summary provider {} does not support model-scoped instant call yet",
+                    provider_kind.as_str()
+                )),
+                ProviderKind::Unsupported(value) => {
+                    Err(format!("unsupported voice background summary provider: {value}"))
+                }
+            }
+        }),
+    )
+    .await;
+
+    let text = match result {
+        Ok(Ok(Ok(text))) => text,
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(
+                error = %error,
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice background summary model call failed"
+            );
+            return None;
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %error,
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice background summary model task failed"
+            );
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = foreground.timeout_ms,
+                foreground_provider = %foreground.provider,
+                foreground_model = %foreground.model,
+                "voice background summary model timed out"
+            );
+            return None;
+        }
+    };
+
+    let summary = foreground_spoken_only_with_limit(&text, language, max_chars);
+    if summary.trim().is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
+fn fallback_voice_background_result_summary(
+    background_result: &str,
+    language: &str,
+    max_chars: usize,
+    failed: bool,
+) -> String {
+    let spoken = foreground_spoken_only_with_limit(background_result, language, max_chars.max(120));
+    if !spoken.trim().is_empty() {
+        return spoken;
+    }
+    if language.trim().to_ascii_lowercase().starts_with("en") {
+        if failed {
+            "The background task failed. I left the error details in the text channel.".to_string()
+        } else {
+            "The background task is done. I left the full result in the text channel.".to_string()
+        }
+    } else if failed {
+        "백그라운드 작업이 실패했어요. 자세한 오류는 텍스트 채널에 남겨뒀어요.".to_string()
+    } else {
+        "백그라운드 작업이 끝났어요. 전체 결과는 텍스트 채널에 남겨뒀어요.".to_string()
     }
 }
 
@@ -1197,6 +1326,53 @@ impl VoiceBargeInRuntime {
             .await;
     }
 
+    pub(in crate::services::discord) async fn speak_voice_background_completion_summary(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        voice_channel_id: ChannelId,
+        background_channel_id: ChannelId,
+        background_result: &str,
+        failed: bool,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let language = self.spoken_result_language().await;
+        let foreground = self
+            .resolve_effective_foreground_config(voice_channel_id, background_channel_id)
+            .await;
+        let summary =
+            generate_voice_background_result_summary(background_result, &language, &foreground)
+                .await
+                .unwrap_or_else(|| {
+                    fallback_voice_background_result_summary(
+                        background_result,
+                        &language,
+                        foreground.max_chars,
+                        failed,
+                    )
+                });
+        if summary.trim().is_empty() {
+            return;
+        }
+        tracing::info!(
+            voice_channel_id = voice_channel_id.get(),
+            background_channel_id = background_channel_id.get(),
+            foreground_provider = %foreground.provider,
+            foreground_model = %foreground.model,
+            failed,
+            summary_chars = summary.chars().count(),
+            "voice background completion summary queued"
+        );
+        self.speak_progress_text(
+            shared,
+            voice_channel_id,
+            &summary,
+            "voice background result summary",
+        )
+        .await;
+    }
+
     async fn play_processing_chime(
         self: &Arc<Self>,
         shared: &Arc<SharedData>,
@@ -1779,11 +1955,28 @@ impl VoiceBargeInRuntime {
             return Some(route.channel_id);
         }
         let config = self.cached_config().await;
-        config.agents.iter().find_map(|agent| {
-            agent_voice_matches_channel(agent, source_channel_id)
-                .then(|| agent_voice_background_channel(agent))
-                .flatten()
-        })
+        config
+            .agents
+            .iter()
+            .find_map(|agent| agent_voice_background_channel_for(agent, source_channel_id))
+    }
+
+    pub(in crate::services::discord) async fn voice_channel_for_background(
+        &self,
+        background_channel_id: ChannelId,
+    ) -> Option<ChannelId> {
+        if let Some(entry) = self
+            .active_voice_routes
+            .iter()
+            .find(|entry| entry.value().channel_id == background_channel_id)
+        {
+            return Some(ChannelId::new(*entry.key()));
+        }
+        let config = self.cached_config().await;
+        config
+            .agents
+            .iter()
+            .find_map(|agent| agent_voice_channel_for_background(agent, background_channel_id))
     }
 
     async fn resolve_voice_turn_target(
@@ -1794,12 +1987,8 @@ impl VoiceBargeInRuntime {
     ) -> VoiceTurnTargetResolution {
         let config = self.cached_config().await;
         if let Some((agent_id, target_channel_id)) = config.agents.iter().find_map(|agent| {
-            if agent_voice_matches_channel(agent, source_channel_id) {
-                agent_voice_background_channel(agent)
-                    .map(|channel_id| (agent.id.clone(), channel_id))
-            } else {
-                None
-            }
+            agent_voice_background_channel_for(agent, source_channel_id)
+                .map(|channel_id| (agent.id.clone(), channel_id))
         }) {
             self.bind_routed_voice_context(source_channel_id, target_channel_id);
             self.active_voice_routes.insert(
@@ -2760,6 +2949,10 @@ mod tests {
         let agent = test_agent("codex");
         assert!(agent_voice_matches_channel(&agent, ChannelId::new(300)));
         assert_eq!(
+            agent_voice_background_channel_for(&agent, ChannelId::new(300)),
+            Some(ChannelId::new(200))
+        );
+        assert_eq!(
             agent_voice_background_channel(&agent),
             Some(ChannelId::new(200))
         );
@@ -2771,6 +2964,63 @@ mod tests {
         assert_eq!(
             agent_voice_background_channel(&agent),
             Some(ChannelId::new(100))
+        );
+    }
+
+    #[test]
+    fn agent_voice_reverse_lookup_maps_background_to_voice_channel() {
+        let agent = test_agent("codex");
+
+        assert_eq!(
+            agent_voice_channel_for_background(&agent, ChannelId::new(200)),
+            Some(ChannelId::new(300))
+        );
+        assert_eq!(
+            agent_voice_channel_for_background(&agent, ChannelId::new(100)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_channel_for_background_prefers_active_runtime_route() {
+        let runtime = enabled_runtime();
+        runtime.active_voice_routes.insert(
+            301,
+            ActiveVoiceRoute {
+                agent_id: "project-agentdesk".to_string(),
+                channel_id: ChannelId::new(201),
+                updated_at: Instant::now(),
+            },
+        );
+
+        assert_eq!(
+            runtime
+                .voice_channel_for_background(ChannelId::new(201))
+                .await,
+            Some(ChannelId::new(301))
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_channel_for_background_uses_config_fallback_without_active_route() {
+        let runtime = enabled_runtime();
+        let mut config = crate::config::Config::default();
+        config.agents = vec![test_agent("codex")];
+        *runtime.config_cache.lock().unwrap() = Some((Instant::now(), Arc::new(config)));
+
+        assert_eq!(
+            runtime
+                .voice_channel_for_background(ChannelId::new(200))
+                .await,
+            Some(ChannelId::new(300))
+        );
+    }
+
+    #[test]
+    fn fallback_background_summary_handles_empty_failure() {
+        assert_eq!(
+            fallback_voice_background_result_summary("", "ko-KR", 180, true),
+            "백그라운드 작업이 실패했어요. 자세한 오류는 텍스트 채널에 남겨뒀어요."
         );
     }
 

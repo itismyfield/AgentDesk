@@ -1769,10 +1769,15 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("achievements-streak")).toBeVisible();
     await expect(page.getByTestId("achievements-ranking")).toBeVisible();
 
-    await page.getByTestId("achievement-card-earned-achievement-first-task-ada").click();
+    const earnedCard = page.getByTestId("achievement-card-earned-achievement-first-task-ada");
+    await earnedCard.click();
     await expect(page.getByTestId("achievements-drawer")).toBeVisible();
     await expect(page.getByTestId("achievements-details")).toBeVisible();
     await expect(page.getByTestId("achievements-timeline")).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("achievements-drawer")).toHaveCount(0);
+    await expect(earnedCard).toBeFocused();
   });
 
   test("achievements: mobile keeps the badge grid in two columns", async ({ page }, testInfo) => {

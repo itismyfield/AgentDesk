@@ -1,10 +1,9 @@
-import { useEffect, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-import { Backdrop } from "./Backdrop";
-import { useFocusTrap } from "./useFocusTrap";
-import { useIsMobile } from "./useBreakpoint";
+import type { ReactNode } from "react";
 import { BottomSheet } from "./BottomSheet";
+import { useIsMobile } from "./useBreakpoint";
+import { useReturnFocus } from "./useReturnFocus";
 
 export interface DrawerProps {
   open: boolean;
@@ -30,28 +29,8 @@ export function Drawer({
   ariaLabel,
 }: DrawerProps) {
   const isMobile = useIsMobile();
-  const containerRef = useFocusTrap(open && !isMobile);
-
-  useEffect(() => {
-    if (!open || !closeOnEsc || isMobile) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, closeOnEsc, onClose, isMobile]);
-
-  useEffect(() => {
-    if (!open || isMobile) return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  }, [open, isMobile]);
+  const accessibleTitle = title ?? ariaLabel ?? "Drawer";
+  const returnFocus = useReturnFocus(open);
 
   if (isMobile) {
     return (
@@ -68,48 +47,57 @@ export function Drawer({
     );
   }
 
-  if (!open || typeof document === "undefined") return null;
-
-  return createPortal(
-    <>
-      <Backdrop onClick={closeOnBackdrop ? onClose : undefined} zIndex={70} />
-      <div
-        className={`fixed inset-y-0 z-[80] flex ${side === "right" ? "right-0" : "left-0"}`}
-        role="dialog"
-        aria-modal="true"
-        aria-label={ariaLabel ?? title ?? "Drawer"}
-      >
-        <div
-          ref={containerRef}
-          tabIndex={-1}
-          className={`flex h-full flex-col border-l bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] shadow-2xl outline-none ${side === "left" ? "border-l-0 border-r" : ""}`}
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onClose();
+      }}
+      modal
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-[70] bg-black/45 backdrop-blur-sm" />
+        <Dialog.Content
+          aria-label={ariaLabel}
+          aria-describedby={undefined}
+          onEscapeKeyDown={(event) => {
+            if (!closeOnEsc) event.preventDefault();
+          }}
+          onInteractOutside={(event) => {
+            if (!closeOnBackdrop) event.preventDefault();
+          }}
+          onCloseAutoFocus={returnFocus}
+          className={`fixed inset-y-0 z-[80] flex flex-col bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] shadow-2xl outline-none ${side === "right" ? "right-0 border-l" : "left-0 border-r"}`}
           style={{
             width,
             borderColor: "var(--th-border, rgba(148,163,184,0.18))",
           }}
-          onClick={(event) => event.stopPropagation()}
         >
-          {title && (
+          {title ? (
             <div
               className="flex items-center justify-between gap-3 border-b px-5 py-4"
               style={{ borderColor: "var(--th-border, rgba(148,163,184,0.12))" }}
             >
-              <h2 className="text-base font-semibold">{title}</h2>
-              <button
-                type="button"
-                onClick={onClose}
-                className="flex h-8 w-8 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5"
-                style={{ borderColor: "var(--th-border, rgba(148,163,184,0.16))" }}
-                aria-label="Close"
-              >
-                <X size={14} />
-              </button>
+              <Dialog.Title className="text-base font-semibold">
+                {title}
+              </Dialog.Title>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="flex h-8 w-8 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5"
+                  style={{ borderColor: "var(--th-border, rgba(148,163,184,0.16))" }}
+                  aria-label="Close"
+                >
+                  <X size={14} />
+                </button>
+              </Dialog.Close>
             </div>
+          ) : (
+            <Dialog.Title className="sr-only">{accessibleTitle}</Dialog.Title>
           )}
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
-        </div>
-      </div>
-    </>,
-    document.body,
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
