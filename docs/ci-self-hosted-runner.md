@@ -73,21 +73,30 @@ tar xzf "./actions-runner-osx-arm64-${RUNNER_VERSION}.tar.gz"
   --url    https://github.com/itismyfield-org/agentdesk \
   --token  <REG_TOKEN> \
   --name   agentdesk-mac-mini \
-  --labels self-hosted,macOS,arm64,agentdesk-mac-mini \
+  --labels self-hosted,macOS,arm64,agentdesk-macos,agentdesk-mac-mini \
   --work   _work \
   --unattended \
   --replace
 ```
 
 The labels are deliberate — the workflow toggle (§4) targets the *full label
-set* so we can add `mac-book` later without changing the workflow:
+set* so we can add `mac-book` later without changing the workflow. Note that
+both a **fleet** label (`agentdesk-macos`) and a **host** label
+(`agentdesk-mac-mini`) are applied; the workflow variable picks which one
+matters for routing:
 
 | Label | Purpose |
 |-------|---------|
 | `self-hosted` | Default GitHub category. |
 | `macOS` | OS family. |
-| `arm64` | Architecture (mac-mini M-series). |
-| `agentdesk-mac-mini` | Host-specific. A future `mac-book` runner adds `agentdesk-mac-book` and keeps the first three. |
+| `arm64` | Architecture (Apple Silicon). |
+| `agentdesk-macos` | **Fleet** label. Apply to every AgentDesk macOS runner. Use this in `MACOS_RUNNER` when you want either host to be eligible. |
+| `agentdesk-mac-mini` | **Host** label. Use in `MACOS_RUNNER` to pin a job to this specific machine. |
+
+Update the `--labels` flag in §3.1 above to match:
+`self-hosted,macOS,arm64,agentdesk-macos,agentdesk-mac-mini`. The
+`config.sh` invocation in this doc has been written with both labels for
+exactly this reason.
 
 > **Two label formats — don't confuse them.** `config.sh --labels` takes a
 > comma-delimited string (shown above). `runs-on: ${{ fromJSON(...) }}` in
@@ -171,13 +180,21 @@ the `check_fast` macOS entry stays on `macos-latest` when the event is a
 To opt in *after* the runner is live and `Idle`:
 
 1. GitHub → **Settings → Secrets and variables → Actions → Variables**.
-2. Add repo variable `MACOS_RUNNER` with value (JSON array, exact format):
-   ```json
-   ["self-hosted","macOS","arm64","agentdesk-mac-mini"]
-   ```
+2. Add repo variable `MACOS_RUNNER`. Two recommended values:
+   - **Pinned to mac-mini** (only this host can pick up the job):
+     ```json
+     ["self-hosted","macOS","arm64","agentdesk-mac-mini"]
+     ```
+   - **Any AgentDesk macOS runner** (recommended once mac-book exists too):
+     ```json
+     ["self-hosted","macOS","arm64","agentdesk-macos"]
+     ```
    The double quotes and brackets are required — `runs-on` selects a runner
-   that matches **all** labels in the array. A bare string like
-   `"macos-latest"` (quotes included) is also valid for GitHub-hosted images.
+   that matches **all** labels in the array (intersection). A bare string
+   like `"macos-latest"` (quotes included) is also valid for GitHub-hosted
+   images. Do **not** use `["self-hosted","macOS","arm64"]` alone — without
+   a project label that pattern would match any visible self-hosted macOS
+   ARM64 runner, including ones registered for other purposes later.
 3. Re-run a PR from a same-repo branch (or `workflow_dispatch`). The macOS
    lane should pick up the self-hosted runner. If it doesn't, see
    [§7 Failure modes](#7-failure-modes).
@@ -220,13 +237,34 @@ canonical compromise vector and is called out in
 
 **Policy for this repo:**
 
-1. **Forks stay on GH-hosted runners — enforced in the workflow.** The
-   `runs-on` expression in `check_fast` evaluates
-   `github.event.pull_request.head.repo.full_name == github.repository` and
-   falls back to `macos-latest` when the head repo differs. This means
-   setting `MACOS_RUNNER` is safe with respect to fork PRs: their macOS jobs
-   route to GitHub-hosted runners regardless of the variable. `ci-nightly.yml`
-   has no fork exposure (triggers are `schedule` + `workflow_dispatch` only).
+1. **Forks stay on GH-hosted runners — defence in depth, not a single
+   workflow-level check.** The `runs-on` expression in `check_fast`
+   evaluates `github.event.pull_request.head.repo.full_name == github.repository`
+   and falls back to `macos-latest` when the head repo differs. This is
+   only *one* layer. Because `pull_request` from a fork uses the workflow
+   file *from the PR head*, a malicious fork PR could in principle modify
+   `ci-pr.yml` itself to bypass the expression. The required additional
+   controls — to be confirmed by the operator **before** setting
+   `MACOS_RUNNER` — are:
+
+   a. **Settings → Actions → General → "Approval for outside collaborators"**:
+      set to **"Require approval for all outside collaborators"** (or
+      stricter, e.g. "first-time contributors who are new to GitHub"). A
+      maintainer must click "Approve and run" on every fork PR's first run,
+      which surfaces any workflow-file edits for human review before any
+      runner is dispatched.
+
+   b. **Settings → Actions → Runners → Runner groups** (org plans) or, at a
+      minimum, ensure this runner is only registered against this single
+      repo (`config.sh --url https://github.com/<owner>/<repo>`).
+
+   c. Treat the workflow `runs-on` expression as a *secondary* guard for
+      well-behaved PRs, not as the primary trust boundary.
+
+   `ci-nightly.yml` has no fork exposure (triggers are `schedule` +
+   `workflow_dispatch` only) and is not subject to this concern.
+
+   **Until (a) and (b) are confirmed, do not set `MACOS_RUNNER`.**
 2. Acceptable triggers for the self-hosted runner: `push` to branches owned
    by this repo, same-repo `pull_request`, `schedule`, `workflow_dispatch`.
    Do **not** add `pull_request_target` without re-reviewing this section —
@@ -284,8 +322,8 @@ d. **Monitoring.** Polling `gh api /repos/{owner}/{repo}/actions/runners`
    to the operator's Discord channel.
 
 e. **`mac-book` as a second runner.** Repeat §3 with
-   `--name agentdesk-mac-book --labels self-hosted,macOS,arm64,agentdesk-mac-book`.
-   The workflow toggle continues to work — set
-   `MACOS_RUNNER='["self-hosted","macOS","arm64"]'` to let either host pick
-   up the job, or keep host pinning by including the host label in the JSON
-   array.
+   `--name agentdesk-mac-book --labels self-hosted,macOS,arm64,agentdesk-macos,agentdesk-mac-book`.
+   Apply the same shared **fleet** label `agentdesk-macos` so the workflow
+   variable `MACOS_RUNNER=["self-hosted","macOS","arm64","agentdesk-macos"]`
+   lets either host pick up the job. To pin to one host, swap the fleet
+   label for the host label (`agentdesk-mac-mini` or `agentdesk-mac-book`).
