@@ -1,6 +1,6 @@
 import { ChevronDown } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import type { SettingFlag, SettingRowMeta, SettingSource } from "../SettingsView";
+import type { SettingFlag, SettingRowMeta, SettingSource } from "./SettingsModel";
 import { SurfaceCard as SettingsCard } from "../common/SurfacePrimitives";
 
 function flagTone(flag: SettingFlag): { bg: string; fg: string; border: string } {
