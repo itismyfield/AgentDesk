@@ -285,6 +285,7 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             fast_mode_state,
             goals_state,
             cwd,
+            add_dirs,
             input_mode,
             compact_token_limit,
         } => {
@@ -313,6 +314,7 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 goals_override,
                 mode,
                 compact_token_limit,
+                &add_dirs,
             );
             Ok(())
         }
