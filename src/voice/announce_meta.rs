@@ -265,8 +265,18 @@ pub(crate) fn is_definitely_pre_commit_error(error: &sqlx::Error) -> bool {
 /// this PG row is the durable source of truth that survives a dcserver
 /// restart partway through a long background turn.
 ///
-/// `ON CONFLICT … DO UPDATE` resets `consumed_at` to NULL so retries from
-/// a re-dispatched handoff path can reuse the same `message_id`.
+/// `ON CONFLICT … DO UPDATE` updates the row IFF it has not been consumed
+/// yet. This preserves the one-shot claim invariant across re-dispatches
+/// that reuse the same `message_id` (e.g. announce-driver delivery
+/// idempotency returning the prior message id): a row whose `consumed_at`
+/// is already set cannot be resurrected — `WHERE consumed_at IS NULL` in
+/// the conflict update means the re-dispatch becomes a no-op for that
+/// row, and the subsequent terminal-delivery `take_handoff_durable` will
+/// return `Ok(None)` (matching the already-consumed semantics).
+///
+/// Codex #2355 v6 finding: without this guard, a replayed dispatch after
+/// consumption would reset `consumed_at = NULL` and let a later
+/// terminal-delivery double-route the spoken summary.
 pub(crate) async fn persist_handoff_durable(
     pool: &PgPool,
     message_id: MessageId,
@@ -279,8 +289,8 @@ pub(crate) async fn persist_handoff_durable(
          ON CONFLICT (message_id) DO UPDATE
          SET voice_channel_id = EXCLUDED.voice_channel_id,
              background_channel_id = EXCLUDED.background_channel_id,
-             agent_id = EXCLUDED.agent_id,
-             consumed_at = NULL",
+             agent_id = EXCLUDED.agent_id
+         WHERE voice_background_handoff_meta.consumed_at IS NULL",
     )
     .bind(message_id.get().to_string())
     .bind(meta.voice_channel_id.to_string())
@@ -591,6 +601,51 @@ mod tests {
                 .expect("second take")
                 .is_none(),
             "second take must report None — claim is one-shot"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2355 v6 Codex finding: a duplicate dispatch reusing the same
+    /// `message_id` after consumption must NOT resurrect the consumed
+    /// row. Announce-driver delivery idempotency can return the prior
+    /// message id on replay, and previously `ON CONFLICT … DO UPDATE`
+    /// reset `consumed_at = NULL` unconditionally — a replayed terminal
+    /// delivery could then claim the resurrected row and double-route.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persist_handoff_durable_does_not_resurrect_consumed_row() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(81_301);
+        let original = handoff_meta(703, 603, Some("project-agentdesk"));
+
+        persist_handoff_durable(&pool, message_id, &original)
+            .await
+            .expect("persist durable handoff");
+        // Consume the row (terminal delivery wins).
+        let taken = take_handoff_durable(&pool, message_id)
+            .await
+            .expect("first take")
+            .expect("row exists");
+        assert_eq!(taken, original);
+
+        // Re-dispatch reusing the SAME message_id (e.g. via announce
+        // delivery idempotency replay). Persist must succeed (no error)
+        // but must NOT resurrect the consumed row.
+        let replay_meta = handoff_meta(999, 999, Some("replay-impersonation"));
+        persist_handoff_durable(&pool, message_id, &replay_meta)
+            .await
+            .expect("replay persist tolerates conflict");
+
+        // A second `take_handoff_durable` must still return None — the
+        // row stays consumed.
+        assert!(
+            take_handoff_durable(&pool, message_id)
+                .await
+                .expect("second take")
+                .is_none(),
+            "consumed row must remain consumed after a replay persist (one-shot invariant preserved)"
         );
 
         pool.close().await;
