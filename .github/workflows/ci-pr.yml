@@ -129,7 +129,11 @@ jobs:
     name: Fast check + non-PG tests (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.rust_or_policy == 'true'
-    runs-on: ${{ matrix.os }}
+    # Opt-in self-hosted macOS runner: set repo variable MACOS_RUNNER
+    # (e.g. "self-hosted,macOS,arm64,agentdesk-mac-mini") to route the
+    # macos-latest matrix entry to a self-hosted host. Default remains
+    # macos-latest. See docs/ci-self-hosted-runner.md.
+    runs-on: ${{ matrix.os == 'macos-latest' && (vars.MACOS_RUNNER || 'macos-latest') || matrix.os }}
     strategy:
       fail-fast: false
       matrix:

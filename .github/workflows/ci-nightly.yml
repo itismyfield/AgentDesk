@@ -34,7 +34,10 @@ jobs:
 
   full_macos:
     name: Full tests (macos-latest)
-    runs-on: macos-latest
+    # Opt-in self-hosted macOS runner: set repo variable MACOS_RUNNER
+    # (e.g. "self-hosted,macOS,arm64,agentdesk-mac-mini") to route this
+    # job. Default remains macos-latest. See docs/ci-self-hosted-runner.md.
+    runs-on: ${{ vars.MACOS_RUNNER || 'macos-latest' }}
     steps:
       - uses: actions/checkout@v4
 
