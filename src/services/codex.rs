@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage};
 use crate::services::claude;
 use crate::services::claude_tui::hook_bundle::{
-    HookBundleConfig, codex_hook_config_overrides, run_codex_hook_launch_self_check,
+    HookBundleConfig, codex_hook_config_overrides, run_codex_hook_launch_self_check_with_exec_path,
 };
 use crate::services::claude_tui::hook_server::current_hook_endpoint;
 use crate::services::discord::restart_report::{
@@ -418,6 +418,7 @@ fn prepare_codex_tui_hook_overrides(
     tmux_session_name: &str,
     session_id: Option<&str>,
     codex_bin: &str,
+    exec_path: Option<&str>,
 ) -> Vec<String> {
     let Some(endpoint) = current_hook_endpoint() else {
         tracing::debug!(
@@ -431,8 +432,10 @@ fn prepare_codex_tui_hook_overrides(
     // actually selected for this session. The startup-time check in
     // `server/mod.rs` only sees `resolve_codex_path()`; per-agent registry
     // channels / env overrides can resolve to a different binary here. The
-    // launch-time check is deduped by (path, version) so it doesn't spam.
-    let _ = run_codex_hook_launch_self_check(codex_bin);
+    // launch-time check is deduped by (canonical_path, version-or-mtime) so
+    // an in-place upgrade is still observed, and probes run with the same
+    // PATH augmentation the launch will use so npm-shim installs probe ok.
+    let _ = run_codex_hook_launch_self_check_with_exec_path(codex_bin, exec_path);
 
     let hook_session_id = session_id
         .map(str::trim)
@@ -995,8 +998,12 @@ fn execute_streaming_local_tui_tmux(
         report_provider,
     );
     let mut args = build_codex_tui_args(&launch_options);
-    let codex_hook_overrides =
-        prepare_codex_tui_hook_overrides(tmux_session_name, session_id, &codex_bin);
+    let codex_hook_overrides = prepare_codex_tui_hook_overrides(
+        tmux_session_name,
+        session_id,
+        &codex_bin,
+        resolution.exec_path.as_deref(),
+    );
     if !codex_hook_overrides.is_empty() {
         append_codex_config_overrides(&mut args, codex_hook_overrides);
     }

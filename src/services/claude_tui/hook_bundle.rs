@@ -561,23 +561,49 @@ static LAUNCH_SELF_CHECK_SEEN: std::sync::LazyLock<std::sync::Mutex<std::collect
 /// version AgentDesk has been audited against. Dedupes across the dcserver
 /// lifetime so it never spams logs on repeated launches of the same binary.
 ///
+/// `exec_path` is the optional PATH augmentation the TUI launch path injects
+/// (e.g. for npm-shim Codex installs that need `node` on PATH to print
+/// `--version`). When provided, the version probe runs with that PATH so the
+/// probe sees what the launch will see.
+///
+/// The dedupe cache key uses (canonical_path, version, mtime_nanos) so an
+/// in-place upgrade at the same path emits a fresh warning. When version
+/// probing fails the mtime still distinguishes binaries, avoiding the
+/// "all-failures-collapse-to-unknown" hole flagged in #2210 review.
+///
 /// Returns `true` if the launch binary passed the check (or was already
 /// reported in this process); `false` if a warning was logged.
 pub fn run_codex_hook_launch_self_check(codex_bin_path: &str) -> bool {
-    let version = probe_codex_cli_version(codex_bin_path);
-    let cache_key = (
-        codex_bin_path.to_string(),
-        version.clone().unwrap_or_else(|| "<unknown>".to_string()),
-    );
+    run_codex_hook_launch_self_check_with_exec_path(codex_bin_path, None)
+}
+
+pub fn run_codex_hook_launch_self_check_with_exec_path(
+    codex_bin_path: &str,
+    exec_path: Option<&str>,
+) -> bool {
+    let version = probe_codex_cli_version_with_path(codex_bin_path, exec_path);
+    let canonical_path = std::fs::canonicalize(codex_bin_path)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| codex_bin_path.to_string());
+    let mtime_nanos = std::fs::metadata(codex_bin_path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos().to_string())
+        .unwrap_or_else(|| "<no-mtime>".to_string());
+    let version_or_mtime = version
+        .clone()
+        .unwrap_or_else(|| format!("<unknown>@mtime={mtime_nanos}"));
+    let cache_key = (canonical_path.clone(), version_or_mtime);
     {
         let mut seen = LAUNCH_SELF_CHECK_SEEN
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if !seen.insert(cache_key.clone()) {
-            return true; // already reported in this process
+            return true; // already reported in this process for this binary identity
         }
     }
-    run_codex_hook_startup_self_check(true, version.as_deref(), Some(codex_bin_path))
+    run_codex_hook_startup_self_check(true, version.as_deref(), Some(&canonical_path))
 }
 
 /// Test-only seam to drain the launch self-check dedupe cache so tests
@@ -596,17 +622,34 @@ pub fn reset_launch_self_check_cache_for_tests() {
 /// and never blocks startup for long: a 2-second hard timeout guards against
 /// a hanging CLI subprocess.
 pub fn probe_codex_cli_version(codex_path: &str) -> Option<String> {
+    probe_codex_cli_version_with_path(codex_path, None)
+}
+
+/// Same as [`probe_codex_cli_version`] but with an optional PATH override.
+/// The launch self-check passes the `BinaryResolution::exec_path` here so
+/// npm-shim Codex installs (which need `node` on PATH to print `--version`)
+/// produce the same version string the launch will observe.
+pub fn probe_codex_cli_version_with_path(
+    codex_path: &str,
+    exec_path: Option<&str>,
+) -> Option<String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    let mut child = Command::new(codex_path)
+    let mut command = Command::new(codex_path);
+    command
         .arg("--version")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stdin(Stdio::null());
+    if let Some(exec_path_value) = exec_path {
+        let trimmed = exec_path_value.trim();
+        if !trimmed.is_empty() {
+            command.env("PATH", trimmed);
+        }
+    }
+    let mut child = command.spawn().ok()?;
 
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -837,17 +880,48 @@ mod tests {
 
     #[test]
     fn run_codex_hook_launch_self_check_dedupes_repeated_calls() {
-        // Per-launch check warns once per (path, version) combo and then
-        // returns true on subsequent invocations for the same binary.
+        // Per-launch check warns once per (canonical_path, version-or-mtime)
+        // combo and returns true on subsequent invocations for the same binary
+        // identity.
         reset_launch_self_check_cache_for_tests();
-        let fake_path = "/nonexistent/codex-stub-fake-for-test";
-        // First call: probe fails (binary missing), version is `<unknown>`.
-        // First-time-seen returns whatever run_codex_hook_startup_self_check
-        // returns (false for unknown version). What matters: second call is
-        // deduped → returns true and emits no log.
-        let _first = run_codex_hook_launch_self_check(fake_path);
-        let second = run_codex_hook_launch_self_check(fake_path);
+        let dir = tempfile::tempdir().unwrap();
+        let fake_path = dir.path().join("codex-stub-fake-for-test");
+        std::fs::write(&fake_path, b"#!/bin/sh\nexit 0\n").unwrap();
+        let path_str = fake_path.to_string_lossy().into_owned();
+        // First call: probe fails (binary not executable for --version), so the
+        // cache key uses the mtime fallback. Second call for the same file
+        // hits the cache.
+        let _first = run_codex_hook_launch_self_check(&path_str);
+        let second = run_codex_hook_launch_self_check(&path_str);
         assert!(second, "second call for same binary must be deduped");
+        reset_launch_self_check_cache_for_tests();
+    }
+
+    #[test]
+    fn run_codex_hook_launch_self_check_redetects_after_in_place_upgrade() {
+        // Same path, different mtime → different cache key → fresh warning.
+        reset_launch_self_check_cache_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let fake_path = dir.path().join("codex-stub-upgradable");
+        std::fs::write(&fake_path, b"#!/bin/sh\nexit 0\n").unwrap();
+        let path_str = fake_path.to_string_lossy().into_owned();
+        let _first = run_codex_hook_launch_self_check(&path_str);
+        // Force the mtime forward by rewriting + sleeping briefly.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&fake_path, b"#!/bin/sh\nexit 1\n").unwrap();
+        let cache_before = LAUNCH_SELF_CHECK_SEEN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        let _second = run_codex_hook_launch_self_check(&path_str);
+        let cache_after = LAUNCH_SELF_CHECK_SEEN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert!(
+            cache_after > cache_before,
+            "in-place upgrade should produce a distinct cache entry: before={cache_before}, after={cache_after}"
+        );
         reset_launch_self_check_cache_for_tests();
     }
 
