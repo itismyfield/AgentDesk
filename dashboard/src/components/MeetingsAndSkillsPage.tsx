@@ -52,6 +52,53 @@ interface MeetingsAndSkillsPageProps {
   initialChannelId?: string;
 }
 
+type MeetingPageTranslator = ReturnType<typeof useI18n>["t"];
+
+function MeetingIssueCountChip({
+  created,
+  total,
+  tone,
+  t,
+}: {
+  created: number;
+  total: number;
+  tone: "ok" | "warn" | "err";
+  t: MeetingPageTranslator;
+}) {
+  const Icon = tone === "ok" ? Check : AlertTriangle;
+  const label = total > 0 ? `${created}/${total}` : "0/0";
+  return (
+    <span
+      className={`chip ${tone}`}
+      aria-label={t({ ko: `후속 액션 ${label}`, en: `Follow-up actions ${label}` })}
+    >
+      <Icon size={10} aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
+function MeetingStatusChip({
+  meeting,
+  t,
+}: {
+  meeting: RoundTableMeeting;
+  t: MeetingPageTranslator;
+}) {
+  const label = getMeetingStatusLabel(meeting, t);
+  const tone = getMeetingStatusTone(meeting);
+  const Icon = meeting.status === "completed" ? Check : Clock3;
+  return (
+    <span
+      className={`chip ${tone}`}
+      aria-label={t({ ko: `회의 상태: ${label}`, en: `Meeting status: ${label}` })}
+    >
+      <Icon size={10} aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
 export default function MeetingsAndSkillsPage({
   meetings,
   onRefresh,
@@ -196,7 +243,6 @@ export default function MeetingsAndSkillsPage({
               : meeting.issues_created > 0
                 ? "warn"
                 : "err";
-          const statusTone = getMeetingStatusTone(meeting);
           const durationLabel = formatMeetingDuration(meeting, language, t);
 
           return (
@@ -233,10 +279,12 @@ export default function MeetingsAndSkillsPage({
                     </span>
                   </div>
                 </div>
-                <span className={`chip ${issueTone}`}>
-                  <span className="dot" />
-                  {issueTotal > 0 ? `${meeting.issues_created}/${issueTotal}` : "0/0"}
-                </span>
+                <MeetingIssueCountChip
+                  created={meeting.issues_created}
+                  total={issueTotal}
+                  tone={issueTone}
+                  t={t}
+                />
               </div>
               <div className="mi-summary">
                 {meeting.summary ??
@@ -246,10 +294,7 @@ export default function MeetingsAndSkillsPage({
                   })}
               </div>
               <div className="mi-foot">
-                <span className={`chip ${statusTone}`}>
-                  <span className="dot" />
-                  {getMeetingStatusLabel(meeting, t)}
-                </span>
+                <MeetingStatusChip meeting={meeting} t={t} />
                 <span className="chip">
                   <span className="dot" />
                   {formatProvider(meeting.primary_provider)}
@@ -269,10 +314,7 @@ export default function MeetingsAndSkillsPage({
           <div className="section-kicker">{t({ ko: "회의록", en: "Meeting" })}</div>
           {selectedMeeting ? (
             <div className="md-status-row">
-              <span className={`chip ${getMeetingStatusTone(selectedMeeting)}`}>
-                <span className="dot" />
-                {getMeetingStatusLabel(selectedMeeting, t)}
-              </span>
+              <MeetingStatusChip meeting={selectedMeeting} t={t} />
               <span className="md-status-copy">
                 {formatMeetingDate(selectedMeeting.started_at, locale)}
               </span>
