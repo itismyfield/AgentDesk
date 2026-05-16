@@ -725,6 +725,30 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl http://localhost:8787/api/cluster/nodes"),
         ep(
             "GET",
+            "/api/cluster/sessions",
+            "cluster",
+            "Protected diagnostic readout of the in-memory SessionRegistry populated by SessionDiscovery (Epic #2285 / E2 / #2344).",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "count": 1,
+                "sessions": [{
+                    "matched": {
+                        "channel_id": "1234",
+                        "agent_id": "td",
+                        "provider": "codex",
+                        "expected_session_name": "AgentDesk-codex-1234",
+                        "expected_rollout_path": "/tmp/agentdesk-AgentDesk-codex-1234.jsonl"
+                    },
+                    "first_seen_at": "2026-05-17T03:00:00Z",
+                    "last_seen_at": "2026-05-17T03:01:10Z"
+                }]
+            }),
+        )
+        .with_curl("curl http://localhost:8787/api/cluster/sessions"),
+        ep(
+            "GET",
             "/api/cluster/routing-diagnostics",
             "cluster",
             "Explain which multinode workers satisfy a required capability set and why excluded workers do not match.",
