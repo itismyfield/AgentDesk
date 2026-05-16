@@ -629,6 +629,7 @@ async fn dismiss_clears_review_status_and_cancels_pending_dispatches() {
             comment: None,
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1073,6 +1074,7 @@ async fn accept_on_done_card_fails_closed_without_stranding() {
             comment: None,
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1159,6 +1161,7 @@ async fn accept_skip_rework_auto_approves_when_direct_review_has_no_alternate_re
             comment: None,
             commit_sha: Some("bbb2222".to_string()),
             dispatch_id: Some("rd-skip-fallback".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1268,6 +1271,7 @@ async fn accept_rework_failure_keeps_review_decision_pending() {
             comment: None,
             commit_sha: None,
             dispatch_id: Some("rd-no-agent".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1343,6 +1347,7 @@ async fn dismiss_then_late_accept_does_not_reopen() {
             comment: Some("late accept after dismiss".to_string()),
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1397,6 +1402,7 @@ async fn duplicate_accept_returns_conflict() {
             comment: None,
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1440,6 +1446,7 @@ async fn duplicate_accept_returns_conflict() {
             comment: None,
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1479,6 +1486,7 @@ async fn accept_then_dispute_returns_conflict() {
             comment: None,
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1493,6 +1501,7 @@ async fn accept_then_dispute_returns_conflict() {
             comment: None,
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1716,6 +1725,7 @@ async fn accept_updates_canonical_review_state() {
             comment: None,
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1790,6 +1800,7 @@ async fn accept_clears_suggestion_pending_review_status() {
             comment: None,
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1966,6 +1977,7 @@ async fn accept_direct_review_pg_preserves_reviewing_status() {
             comment: None,
             commit_sha: Some("bbb2222".to_string()),
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -2034,4 +2046,186 @@ async fn accept_direct_review_pg_preserves_reviewing_status() {
 
     pool.close().await;
     pg_db.drop().await;
+}
+
+/// #2200 sub-fix 3 (`scope-mismatch`): when the agent submits a dispute with
+/// `out_of_scope: true`, the server must close the pending review-decision
+/// dispatch with outcome `scope_mismatch_closed`, route the card to terminal
+/// state, and avoid the (impossible) in-issue re-review target check.
+#[tokio::test]
+async fn dispute_out_of_scope_closes_with_scope_mismatch_outcome() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-oos', 'OOS Agent', '111', '222')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+             VALUES ('card-oos', 'OOS Test', 'review', 'agent-oos', 'dispatch-rd-oos', 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rd-oos', 'card-oos', 'agent-oos', 'review-decision', 'pending', '[Decision] card-oos', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        // Also seed a stale pending review dispatch to verify cleanup picks it up.
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rv-stale', 'card-oos', 'agent-oos', 'review', 'pending', '[Review R1] card-oos', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-oos".to_string(),
+            decision: "dispute".to_string(),
+            comment: Some("Finding belongs to a different card on the stacked branch".to_string()),
+            commit_sha: None,
+            dispatch_id: Some("dispatch-rd-oos".to_string()),
+            out_of_scope: Some(true),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "out-of-scope dispute must succeed instead of failing closed; body = {:?}",
+        body.0
+    );
+    assert_eq!(body.0["decision"].as_str().unwrap(), "dispute");
+    assert_eq!(
+        body.0["outcome"].as_str().unwrap(),
+        "scope_mismatch_closed",
+        "out-of-scope dispute must report scope_mismatch_closed outcome"
+    );
+
+    let conn = db.lock().unwrap();
+    let (card_status, review_status): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, review_status FROM kanban_cards WHERE id = 'card-oos'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let rd_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-rd-oos'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stale_rv_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-rv-stale'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(
+        card_status, "done",
+        "out-of-scope dispute must transition card to terminal state"
+    );
+    assert_eq!(
+        review_status, None,
+        "out-of-scope dispute must clear review_status"
+    );
+    assert_eq!(
+        rd_status, "completed",
+        "out-of-scope dispute must finalize the pending review-decision dispatch as completed"
+    );
+    assert_eq!(
+        stale_rv_status, "cancelled",
+        "out-of-scope dispute must cancel stale pending review dispatches"
+    );
+}
+
+/// #2200 sub-fix 3: when `out_of_scope` is absent (or false), the legacy
+/// in-scope dispute path must run unchanged. With no postgres pool wired in
+/// the sqlite-only test state, the original code returns 500 from
+/// `prepare_dispute_review_entry_pg_first`; the new shortcut must NOT
+/// silently swallow this and return 200.
+#[tokio::test]
+async fn dispute_without_out_of_scope_flag_uses_legacy_in_scope_path() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-is', 'IS Agent', '333', '444')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+             VALUES ('card-is', 'In Scope Test', 'review', 'agent-is', 'dispatch-rd-is', 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rd-is', 'card-is', 'agent-is', 'review-decision', 'pending', '[Decision] card-is', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), engine);
+
+    // out_of_scope = None → legacy path. In the sqlite-only test fixture this
+    // path requires postgres for the dispute review-entry tx, so it fails
+    // with 500. The key assertion is that the response is NOT the new 200
+    // OK with `outcome: scope_mismatch_closed`.
+    let (status_none, body_none) = submit_review_decision(
+        State(state.clone()),
+        Json(ReviewDecisionBody {
+            card_id: "card-is".to_string(),
+            decision: "dispute".to_string(),
+            comment: Some("Real review feedback for this card".to_string()),
+            commit_sha: None,
+            dispatch_id: None,
+            out_of_scope: None,
+        }),
+    )
+    .await;
+    assert_ne!(
+        status_none,
+        StatusCode::OK,
+        "in-scope dispute must not silently take the scope_mismatch_closed shortcut"
+    );
+    assert!(
+        body_none.0.get("outcome").and_then(|v| v.as_str()) != Some("scope_mismatch_closed"),
+        "in-scope dispute must not report scope_mismatch_closed outcome; body = {:?}",
+        body_none.0
+    );
+
+    // out_of_scope = Some(false) → also legacy path.
+    let (status_false, body_false) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-is".to_string(),
+            decision: "dispute".to_string(),
+            comment: Some("Still in-scope".to_string()),
+            commit_sha: None,
+            dispatch_id: None,
+            out_of_scope: Some(false),
+        }),
+    )
+    .await;
+    assert_ne!(
+        status_false,
+        StatusCode::OK,
+        "out_of_scope=false must behave like the legacy in-scope path"
+    );
+    assert!(
+        body_false.0.get("outcome").and_then(|v| v.as_str()) != Some("scope_mismatch_closed"),
+        "out_of_scope=false must not report scope_mismatch_closed outcome; body = {:?}",
+        body_false.0
+    );
 }

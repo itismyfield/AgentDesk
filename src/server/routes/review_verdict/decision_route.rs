@@ -1100,6 +1100,14 @@ pub struct ReviewDecisionBody {
     /// the card. Prevents replayed/stale decisions from consuming the wrong
     /// dispatch.
     pub dispatch_id: Option<String>,
+    /// #2200 sub-fix 3 (`scope-mismatch`): when the agent disputes a review
+    /// because the finding lies outside the current card's scope (e.g. a
+    /// stacked-branch leftover), set this to true. The server will close the
+    /// pending review-decision dispatch with outcome `scope_mismatch_closed`
+    /// and route the card to terminal state instead of requiring an in-issue
+    /// re-review target. Only meaningful when `decision == "dispute"`.
+    #[serde(default)]
+    pub out_of_scope: Option<bool>,
 }
 
 /// POST /api/reviews/decision
@@ -1683,6 +1691,146 @@ pub async fn submit_review_decision(
             );
         }
         "dispute" => {
+            // #2200 sub-fix 3 (`scope-mismatch`): When the agent explicitly
+            // marks the dispute as out-of-scope (e.g. the review finding lives
+            // on a different card's issue / stacked branch), we cannot create
+            // an in-issue re-review target because none exists. Instead of
+            // failing closed with #491 ("re-review target does not belong to
+            // the card issue"), we cleanly close the pending review-decision
+            // dispatch with outcome `scope_mismatch_closed` and route the
+            // card to terminal state (same as dismiss). The in-scope dispute
+            // path below is untouched.
+            if body.out_of_scope == Some(true) {
+                // Cancel stale review/review-decision dispatches first so the
+                // dedup guard doesn't strand them after the terminal
+                // transition.
+                let stale_ids = stale_review_dispatch_ids_pg_first(&state, &body.card_id).await;
+                for stale_id in &stale_ids {
+                    let _ = cancel_dispatch_pg_first(
+                        &state,
+                        stale_id,
+                        Some("scope_mismatch_closed"),
+                    )
+                    .await;
+                }
+
+                // Finalize the pending review-decision dispatch with an
+                // auditable outcome before the terminal transition (mirrors
+                // the in-scope dispute path's mark-completed step, but with
+                // the scope_mismatch_closed source).
+                if let Some(ref rd_id) = pending_rd_id {
+                    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+                    let status_db = state.legacy_db();
+                    #[cfg(not(all(test, feature = "legacy-sqlite-tests")))]
+                    let status_db = None;
+                    match crate::dispatch::set_dispatch_status_with_backends(
+                        status_db,
+                        state.pg_pool_ref(),
+                        rd_id,
+                        "completed",
+                        Some(&json!({
+                            "decision": "dispute",
+                            "outcome": "scope_mismatch_closed",
+                            "completion_source": "review_decision_api",
+                        })),
+                        "mark_dispatch_completed",
+                        Some(&["pending", "dispatched"]),
+                        true,
+                    ) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!(
+                                card_id = %body.card_id,
+                                pending_rd_id = %rd_id,
+                                error = %e,
+                                "[review-decision] #2200 sub-3 failed to finalize pending review-decision before scope_mismatch_closed",
+                            );
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({
+                                    "error": format!(
+                                        "failed to finalize pending review-decision for scope_mismatch_closed: {e}"
+                                    ),
+                                    "card_id": body.card_id,
+                                    "pending_dispatch_id": rd_id,
+                                })),
+                            );
+                        }
+                    }
+                }
+
+                // Route card to terminal state (same as dismiss) — the
+                // dispute is intentionally closed because the finding is not
+                // about this card.
+                let card_ctx =
+                    load_review_decision_card_context_pg_first(&state, &body.card_id).await;
+                let effective_pipeline = resolve_effective_pipeline_pg_first(
+                    &state,
+                    card_ctx.repo_id.as_deref(),
+                    card_ctx.agent_id.as_deref(),
+                )
+                .await;
+                let terminal_state = effective_pipeline
+                    .states
+                    .iter()
+                    .find(|state| state.terminal)
+                    .map(|state| state.id.clone())
+                    .unwrap_or_else(|| "done".to_string());
+                let _ = transition_status_pg_first(
+                    &state,
+                    &body.card_id,
+                    &terminal_state,
+                    "dispute_scope_mismatch_closed",
+                    crate::engine::transition::ForceIntent::SystemRecovery,
+                )
+                .await;
+
+                // Reuse dismiss cleanup to clear any leftover pending review
+                // dispatches and review_status.
+                if let Err(error) = dismiss_review_cleanup_pg_first(&state, &body.card_id).await {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": error})),
+                    );
+                }
+
+                update_card_review_state(
+                    review_state_db(&state),
+                    state.pg_pool_ref(),
+                    &body.card_id,
+                    "dispute_scope_mismatch_closed",
+                    pending_rd_id.as_deref(),
+                );
+                record_decision_tuning(
+                    state.pg_pool_ref(),
+                    &body.card_id,
+                    "dispute_scope_mismatch_closed",
+                    pending_rd_id.as_deref(),
+                )
+                .await;
+                spawn_review_tuning_aggregate_pg_first(&state);
+
+                emit_card_updated(&state, &body.card_id).await;
+                tracing::info!(
+                    card_id = %body.card_id,
+                    pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
+                    cancelled_stale = stale_ids.len(),
+                    "[review-decision] #2200 sub-3 closed dispute as scope_mismatch_closed",
+                );
+                return (
+                    StatusCode::OK,
+                    Json(json!({
+                        "ok": true,
+                        "card_id": body.card_id,
+                        "decision": "dispute",
+                        "outcome": "scope_mismatch_closed",
+                        "pending_dispatch_id": pending_rd_id,
+                        "cancelled_stale_dispatches": stale_ids.len(),
+                        "message": "Dispute closed: review finding declared out-of-scope for this card",
+                    })),
+                );
+            }
+
             if let Err(error) = prepare_dispute_review_entry_pg_first(&state, &body.card_id).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
