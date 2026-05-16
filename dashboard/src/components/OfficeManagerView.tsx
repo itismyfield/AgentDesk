@@ -4,6 +4,11 @@ import type { Agent, Office } from "../types";
 import * as api from "../api/client";
 import AgentAvatar from "./AgentAvatar";
 import {
+  OFFICE_COLORS,
+  OFFICE_ICONS,
+  useOfficeManager,
+} from "./office-manager/useOfficeManager";
+import {
   SurfaceActionButton,
   SurfaceCard,
   SurfaceEmptyState,
@@ -21,41 +26,6 @@ interface OfficeManagerViewProps {
   onChanged: () => void;
 }
 
-interface OfficeDraft {
-  name: string;
-  name_ko: string;
-  icon: string;
-  color: string;
-  description: string;
-}
-
-const OFFICE_ICONS = ["🏢", "🏠", "🏭", "🏗️", "🏛️", "🍳", "🎮", "📚", "🔬", "🎨", "🛠️", "🌐"];
-const OFFICE_COLORS = [
-  "#10b981", "#14b8a6", "#06b6d4", "#3b82f6", "#84cc16",
-  "#f59e0b", "#f97316", "#ef4444", "#64748b", "#22c55e",
-];
-
-function makeBlankDraft(): OfficeDraft {
-  return {
-    name: "",
-    name_ko: "",
-    icon: "🏢",
-    color: "#10b981",
-    description: "",
-  };
-}
-
-function makeDraftFromOffice(office: Office | null): OfficeDraft {
-  if (!office) return makeBlankDraft();
-  return {
-    name: office.name ?? "",
-    name_ko: office.name_ko ?? "",
-    icon: office.icon ?? "🏢",
-    color: office.color ?? "#10b981",
-    description: office.description ?? "",
-  };
-}
-
 export default function OfficeManagerView({
   offices,
   allAgents,
@@ -67,13 +37,24 @@ export default function OfficeManagerView({
   const [order, setOrder] = useState<Office[]>(offices);
   const [orderDirty, setOrderDirty] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(selectedOfficeId ?? offices[0]?.id ?? null);
-  const [draft, setDraft] = useState<OfficeDraft>(() => makeDraftFromOffice(offices[0] ?? null));
   const [creating, setCreating] = useState(false);
-  const [search, setSearch] = useState("");
-  const [memberIds, setMemberIds] = useState<Set<string>>(new Set());
-  const [membersLoading, setMembersLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [orderSaving, setOrderSaving] = useState(false);
+  const {
+    clearMembers,
+    deleteOffice: removeOffice,
+    draft,
+    filteredAgents,
+    loadMembers,
+    memberIds,
+    membersLoading,
+    resetDraft,
+    saveOffice: persistOffice,
+    saving,
+    search,
+    setDraft,
+    setSearch,
+    toggleMember: toggleOfficeMember,
+  } = useOfficeManager({ allAgents, onChanged });
 
   useEffect(() => {
     if (!orderDirty) {
@@ -98,55 +79,20 @@ export default function OfficeManagerView({
 
   useEffect(() => {
     if (creating) {
-      setDraft(makeBlankDraft());
-      setMemberIds(new Set());
+      resetDraft(null);
+      clearMembers();
       return;
     }
-    setDraft(makeDraftFromOffice(selectedOffice));
-  }, [creating, selectedOffice]);
+    resetDraft(selectedOffice);
+  }, [clearMembers, creating, resetDraft, selectedOffice]);
 
   useEffect(() => {
     if (!selectedOffice || creating) {
-      setMemberIds(new Set());
+      clearMembers();
       return;
     }
-    let cancelled = false;
-    setMembersLoading(true);
-    api.getAgents(selectedOffice.id).then((agents) => {
-      if (!cancelled) {
-        setMemberIds(new Set(agents.map((agent) => agent.id)));
-      }
-    }).catch(() => {
-      if (!cancelled) {
-        setMemberIds(new Set());
-      }
-    }).finally(() => {
-      if (!cancelled) {
-        setMembersLoading(false);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [creating, selectedOffice]);
-
-  const filteredAgents = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    const filtered = !query
-      ? allAgents
-      : allAgents.filter((agent) => (
-        agent.name.toLowerCase().includes(query)
-        || agent.name_ko.toLowerCase().includes(query)
-        || (agent.alias && agent.alias.toLowerCase().includes(query))
-        || agent.avatar_emoji.includes(query)
-      ));
-    return [...filtered].sort((left, right) => {
-      const leftAssigned = memberIds.has(left.id) ? 0 : 1;
-      const rightAssigned = memberIds.has(right.id) ? 0 : 1;
-      if (leftAssigned !== rightAssigned) return leftAssigned - rightAssigned;
-      return (left.alias || left.name_ko || left.name).localeCompare(right.alias || right.name_ko || right.name);
-    });
-  }, [allAgents, memberIds, search]);
+    return loadMembers(selectedOffice.id);
+  }, [clearMembers, creating, loadMembers, selectedOffice]);
 
   const startCreate = () => {
     setCreating(true);
@@ -188,68 +134,25 @@ export default function OfficeManagerView({
   };
 
   const saveOffice = async () => {
-    setSaving(true);
-    try {
-      const payload = {
-        name: draft.name.trim(),
-        name_ko: draft.name_ko.trim() || draft.name.trim(),
-        icon: draft.icon,
-        color: draft.color,
-        description: draft.description.trim() || null,
-      };
-      if (creating) {
-        const created = await api.createOffice(payload);
+    const created = await persistOffice({ creating, office: selectedOffice });
+    if (creating) {
+      if (created) {
         setCreating(false);
         setSelectedId(created.id);
-      } else if (selectedOffice) {
-        await api.updateOffice(selectedOffice.id, payload);
       }
-      onChanged();
-    } finally {
-      setSaving(false);
     }
   };
 
   const deleteOffice = async () => {
     if (!selectedOffice) return;
     if (!window.confirm(tr("이 오피스를 삭제하시겠습니까?", "Delete this office?"))) return;
-    setSaving(true);
-    try {
-      await api.deleteOffice(selectedOffice.id);
-      setSelectedId(null);
-      onChanged();
-    } finally {
-      setSaving(false);
-    }
+    await removeOffice(selectedOffice);
+    setSelectedId(null);
   };
 
   const toggleMember = async (agentId: string) => {
     if (!selectedOffice || creating) return;
-    setSaving(true);
-    const assigned = memberIds.has(agentId);
-    setMemberIds((prev) => {
-      const next = new Set(prev);
-      if (assigned) next.delete(agentId);
-      else next.add(agentId);
-      return next;
-    });
-    try {
-      if (assigned) {
-        await api.removeAgentFromOffice(selectedOffice.id, agentId);
-      } else {
-        await api.addAgentToOffice(selectedOffice.id, agentId);
-      }
-      onChanged();
-    } catch {
-      setMemberIds((prev) => {
-        const next = new Set(prev);
-        if (assigned) next.add(agentId);
-        else next.delete(agentId);
-        return next;
-      });
-    } finally {
-      setSaving(false);
-    }
+    await toggleOfficeMember(selectedOffice, agentId);
   };
 
   const inputStyle = {
