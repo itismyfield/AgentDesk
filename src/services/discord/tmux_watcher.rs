@@ -93,6 +93,74 @@ async fn complete_watcher_status_panel_v2(
     }
 }
 
+/// #2161 — wait for the TUI pane to reach a `Ready for input` quiescent
+/// state before emitting `TurnCompleted` to the live status panel.
+///
+/// Only `RuntimeHandoffKind::ClaudeTui` foreground turns are gated; other
+/// runtime kinds keep the existing immediate-emit path (see
+/// `should_gate_completion_for_tui_quiescence` in `tmux.rs` for the matrix).
+/// The wait is bounded by `TUI_COMPLETION_QUIESCENCE_TIMEOUT` so a stuck pane
+/// cannot stall the user-visible `응답 완료` marker indefinitely — if the
+/// timeout fires we still emit, but log a structured warn so we can audit
+/// the false-completion frequency in production.
+async fn wait_for_tui_quiescence_before_completion(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    task_notification_kind: Option<crate::services::agent_protocol::TaskNotificationKind>,
+) {
+    let inflight = crate::services::discord::inflight::load_inflight_state(
+        provider,
+        channel_id.get(),
+    );
+    let runtime_kind = inflight.as_ref().and_then(|state| state.runtime_kind);
+    let rebind_origin = inflight.as_ref().map(|state| state.rebind_origin).unwrap_or(false);
+
+    if !crate::services::discord::tmux::should_gate_completion_for_tui_quiescence(
+        runtime_kind,
+        rebind_origin,
+        task_notification_kind,
+    ) {
+        return;
+    }
+
+    let started_at = tokio::time::Instant::now();
+    loop {
+        let session_name = tmux_session_name.to_string();
+        let ready = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || {
+                crate::services::provider::tmux_session_ready_for_input(&session_name)
+            }),
+        )
+        .await
+        .unwrap_or(Ok(false))
+        .unwrap_or(false);
+
+        if ready {
+            return;
+        }
+        if started_at.elapsed()
+            >= crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                gate = "tui_completion_quiescence",
+                "[{ts}] ⚠ TUI pane was not yet idle after {:?} — emitting `응답 완료` anyway (#2161)",
+                crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT,
+            );
+            return;
+        }
+        tokio::time::sleep(
+            crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_POLL_INTERVAL,
+        )
+        .await;
+    }
+}
+
 pub(in crate::services::discord) async fn tmux_output_watcher(
     channel_id: ChannelId,
     http: Arc<serenity::Http>,
@@ -2445,6 +2513,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let terminal_output_committed = relay_ok || relay_suppressed;
 
         if terminal_output_committed {
+            // #2161 TUI completion gate: ClaudeTui sessions can land a
+            // `result` JSONL event before the interactive pane is actually
+            // quiescent. Without this wait, the user sees `응답 완료` on
+            // Discord while the tmux pane still shows `almost done thinking`
+            // and subsequent relay messages continue past the completion
+            // marker. Gate only this user-visible status event — relay text
+            // already committed above, and downstream watermark / mailbox
+            // bookkeeping below intentionally proceeds regardless.
+            wait_for_tui_quiescence_before_completion(
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                task_notification_kind,
+            )
+            .await;
+
             complete_watcher_status_panel_v2(
                 &http,
                 &shared,

@@ -1468,6 +1468,69 @@ fn is_terminal_finalize_stop_candidate(
     terminal_output_committed && dispatch_ok && watcher_handled_mailbox_finish
 }
 
+/// #2161 TUI completion gate — decide whether the watcher must wait for the
+/// underlying TUI pane to reach quiescence before emitting the user-visible
+/// `✅ 응답 완료` status event.
+///
+/// The CLI provider session can write a terminal `result` JSONL event before
+/// the interactive TUI has finished rendering tool output, plan presentations,
+/// or trailing assistant text into its tmux pane. Without this gate, the
+/// watcher relays the response text, immediately marks the turn as
+/// `TurnCompleted`, and the user sees `응답 완료` on Discord while their
+/// right-side tmux pane is still actively scrolling / showing
+/// `almost done thinking`. Subsequent relay messages can then continue past
+/// the completion marker — a lifecycle bug.
+///
+/// We currently only gate `RuntimeHandoffKind::ClaudeTui`. `LegacyTmuxWrapper`
+/// drives a non-interactive wrapper script whose `result` event coincides
+/// with the script exiting, so no extra quiescence step is needed.
+/// `CodexTui` has its own completion contract and is intentionally excluded
+/// from this gate to keep the fix minimal and reviewable.
+#[inline]
+pub(super) fn should_gate_completion_for_tui_quiescence(
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    rebind_origin: bool,
+    task_notification_kind: Option<crate::services::agent_protocol::TaskNotificationKind>,
+) -> bool {
+    // rebind_origin inflights describe an externally-launched tmux session
+    // that AgentDesk did not start — the operator (not the Discord turn)
+    // owns input cadence and the "응답 완료" marker is suppressed by other
+    // rebind-origin guards anyway. Don't add an additional wait.
+    if rebind_origin {
+        return false;
+    }
+    // Background / monitor-auto-turn paths emit `✅ 백그라운드 완료` and have
+    // their own quiescence semantics (the trigger that started them is the
+    // gate). Don't double-gate them here.
+    if matches!(
+        task_notification_kind,
+        Some(
+            crate::services::agent_protocol::TaskNotificationKind::Background
+                | crate::services::agent_protocol::TaskNotificationKind::MonitorAutoTurn
+        )
+    ) {
+        return false;
+    }
+    matches!(
+        runtime_kind,
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+    )
+}
+
+/// Upper bound for `should_gate_completion_for_tui_quiescence` polling.
+/// Kept short enough that a hung pane cannot stall the user-visible
+/// `응답 완료` marker for more than a few seconds — the gate is best-effort
+/// observability, not a correctness primitive.
+pub(super) const TUI_COMPLETION_QUIESCENCE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(3);
+
+/// Poll interval inside the quiescence wait. Matches the existing
+/// `READY_FOR_INPUT_IDLE_PROBE_INTERVAL` cadence used elsewhere in the
+/// watcher so concurrent ticks don't fight each other on the same tmux
+/// session.
+pub(super) const TUI_COMPLETION_QUIESCENCE_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
 #[inline]
 fn watcher_stop_decision_after_terminal_finalize(
     terminal_output_committed: bool,
@@ -1549,6 +1612,85 @@ mod terminal_finalize_liveness_tests {
             WatcherStopDecision::Continue,
             "non-committed terminal output is not a stop candidate even if liveness is gone"
         );
+    }
+}
+
+#[cfg(test)]
+mod tui_completion_gate_tests {
+    use super::should_gate_completion_for_tui_quiescence;
+    use crate::services::agent_protocol::{RuntimeHandoffKind, TaskNotificationKind};
+
+    #[test]
+    fn claude_tui_managed_turn_is_gated() {
+        assert!(should_gate_completion_for_tui_quiescence(
+            Some(RuntimeHandoffKind::ClaudeTui),
+            false,
+            None,
+        ));
+    }
+
+    #[test]
+    fn legacy_tmux_wrapper_skips_the_gate() {
+        // Legacy wrapper's `result` event coincides with the script exiting,
+        // so the existing path already aligns with TUI quiescence.
+        assert!(!should_gate_completion_for_tui_quiescence(
+            Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+            false,
+            None,
+        ));
+    }
+
+    #[test]
+    fn process_backend_skips_the_gate() {
+        assert!(!should_gate_completion_for_tui_quiescence(
+            Some(RuntimeHandoffKind::ProcessBackend),
+            false,
+            None,
+        ));
+    }
+
+    #[test]
+    fn codex_tui_is_excluded_for_minimal_scope() {
+        // Codex TUI has its own completion contract (#2189) and is
+        // intentionally outside the scope of this #2161 fix to keep the
+        // change focused and reviewable.
+        assert!(!should_gate_completion_for_tui_quiescence(
+            Some(RuntimeHandoffKind::CodexTui),
+            false,
+            None,
+        ));
+    }
+
+    #[test]
+    fn missing_runtime_kind_skips_the_gate() {
+        assert!(!should_gate_completion_for_tui_quiescence(None, false, None,));
+    }
+
+    #[test]
+    fn rebind_origin_inflight_skips_the_gate() {
+        // Externally-adopted tmux sessions don't drive a Discord-origin turn;
+        // the rebind path already suppresses user-visible completion markers.
+        assert!(!should_gate_completion_for_tui_quiescence(
+            Some(RuntimeHandoffKind::ClaudeTui),
+            true,
+            None,
+        ));
+    }
+
+    #[test]
+    fn background_task_notification_skips_the_gate() {
+        // Background and monitor auto-turn paths emit their own completion
+        // markers; their trigger is the gate, not pane quiescence.
+        assert!(!should_gate_completion_for_tui_quiescence(
+            Some(RuntimeHandoffKind::ClaudeTui),
+            false,
+            Some(TaskNotificationKind::Background),
+        ));
+        assert!(!should_gate_completion_for_tui_quiescence(
+            Some(RuntimeHandoffKind::ClaudeTui),
+            false,
+            Some(TaskNotificationKind::MonitorAutoTurn),
+        ));
     }
 }
 
