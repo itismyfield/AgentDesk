@@ -5,6 +5,7 @@ pub mod cancel_tombstones;
 pub mod dispatch_semaphores;
 pub mod dispatched_sessions;
 pub mod dispatches;
+pub mod idempotency;
 pub mod intake_outbox;
 pub mod kanban;
 pub mod kanban_cards;

@@ -347,6 +347,21 @@ impl RepairCaller {
     }
 }
 
+/// Scope identifier under which phase-gate repair idempotency keys are stored.
+/// Lets the same operator-supplied UUID be reused across unrelated endpoints
+/// without aliasing in `idempotency_keys`.
+const PHASE_GATE_REPAIR_IDEMPOTENCY_SCOPE: &str = "phase-gate-repair";
+
+fn parse_idempotency_key_header(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("idempotency-key")
+        .or_else(|| headers.get("Idempotency-Key"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .map(str::to_string)
+}
+
 /// POST /api/queue/runs/{id}/phase-gates/repair
 pub async fn repair_phase_gates(
     State(state): State<AppState>,
@@ -364,7 +379,16 @@ pub async fn repair_phase_gates(
         return response;
     }
 
-    let body: RepairPhaseGateBody = match parse_json_body(body, "phase-gates/repair") {
+    let idempotency_key = parse_idempotency_key_header(&headers);
+    let request_fingerprint = idempotency_key.as_ref().map(|_| {
+        crate::db::idempotency::fingerprint_request(
+            "POST",
+            &format!("/api/queue/runs/{id}/phase-gates/repair"),
+            &body,
+        )
+    });
+
+    let parsed_body: RepairPhaseGateBody = match parse_json_body(body, "phase-gates/repair") {
         Ok(parsed) => parsed,
         Err(error) => {
             audit_phase_gate_repair_rejected(&id, &caller, "bad_request", &error);
@@ -384,67 +408,172 @@ pub async fn repair_phase_gates(
     caller.verify(
         crate::server::routes::kanban::resolve_requesting_agent_id_with_pg(pool, &headers).await,
     );
-    let options = crate::db::auto_queue::PhaseGateRepairOptions {
-        phase: body.phase,
-        dispatch_id: body.dispatch_id,
+
+    // #2257 concern 5: Stripe-style idempotency-key handling. When the
+    // caller passes an `Idempotency-Key` header we claim the slot and
+    // either run the work fresh, replay a prior response, or reject the
+    // request because the key is either mid-flight or being reused with
+    // a different body. Behavior without the header is unchanged.
+    let idempotency_slot = if let (Some(key), Some(fingerprint)) =
+        (idempotency_key.as_ref(), request_fingerprint.as_ref())
+    {
+        match crate::db::idempotency::claim(
+            pool,
+            PHASE_GATE_REPAIR_IDEMPOTENCY_SCOPE,
+            key,
+            fingerprint,
+            Some(&caller.audit_label()),
+            crate::db::idempotency::DEFAULT_IDEMPOTENCY_TTL,
+        )
+        .await
+        {
+            Ok(crate::db::idempotency::IdempotencyOutcome::Created) => Some(key.clone()),
+            Ok(crate::db::idempotency::IdempotencyOutcome::Replay { status, body, .. }) => {
+                audit_phase_gate_repair_rejected(
+                    &id,
+                    &caller,
+                    "idempotency_replay",
+                    "returning cached response",
+                );
+                return (
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+                    Json(body),
+                );
+            }
+            Ok(crate::db::idempotency::IdempotencyOutcome::InFlight) => {
+                audit_phase_gate_repair_rejected(
+                    &id,
+                    &caller,
+                    "idempotency_in_flight",
+                    "concurrent request with the same key is still running",
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "another request with this Idempotency-Key is still in flight",
+                    })),
+                );
+            }
+            Ok(crate::db::idempotency::IdempotencyOutcome::FingerprintMismatch { .. }) => {
+                audit_phase_gate_repair_rejected(
+                    &id,
+                    &caller,
+                    "idempotency_fingerprint_mismatch",
+                    "key reused with a different request body",
+                );
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "error": "Idempotency-Key already used with a different request body",
+                    })),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %id,
+                    key = %key,
+                    error = %error,
+                    "phase-gate repair idempotency claim failed; proceeding without dedup"
+                );
+                None
+            }
+        }
+    } else {
+        None
     };
-    match crate::db::auto_queue::repair_phase_gates_for_run_on_pg(pool, &id, options).await {
-        Ok(summary) => {
-            audit_phase_gate_repair_summary(&caller, &summary);
-            let outcomes: Vec<serde_json::Value> = summary
-                .outcomes
-                .into_iter()
-                .map(|outcome| {
-                    json!({
-                        "dispatch_id": outcome.dispatch_id,
-                        "phase": outcome.phase,
-                        "outcome": outcome.outcome,
-                        "run_resumed": outcome.run_resumed,
-                        "run_finalized": outcome.run_finalized,
-                        "pending_count": outcome.pending_count,
-                        "failed_reason": truncate_failed_reason(outcome.failed_reason),
+
+    let options = crate::db::auto_queue::PhaseGateRepairOptions {
+        phase: parsed_body.phase,
+        dispatch_id: parsed_body.dispatch_id,
+    };
+    let (status, response_body) =
+        match crate::db::auto_queue::repair_phase_gates_for_run_on_pg(pool, &id, options).await {
+            Ok(summary) => {
+                audit_phase_gate_repair_summary(&caller, &summary);
+                let outcomes: Vec<serde_json::Value> = summary
+                    .outcomes
+                    .into_iter()
+                    .map(|outcome| {
+                        json!({
+                            "dispatch_id": outcome.dispatch_id,
+                            "phase": outcome.phase,
+                            "outcome": outcome.outcome,
+                            "run_resumed": outcome.run_resumed,
+                            "run_finalized": outcome.run_finalized,
+                            "pending_count": outcome.pending_count,
+                            "failed_reason": truncate_failed_reason(outcome.failed_reason),
+                        })
                     })
-                })
-                .collect();
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "ok": true,
-                    "run_id": summary.run_id,
-                    "phase_filter": summary.phase_filter,
-                    "dispatch_id_filter": summary.dispatch_id_filter,
-                    "candidate_dispatches": summary.candidate_dispatches,
-                    "cleared_gates": summary.cleared_gates,
-                    "failed_gates": summary.failed_gates,
-                    "awaiting_siblings": summary.awaiting_siblings,
-                    "stale_dispatches": summary.stale_dispatches,
-                    "no_context_dispatches": summary.no_context_dispatches,
-                    "orphan_gates_skipped": summary.orphan_gates_skipped,
-                    "blocking_gates_remaining": summary.blocking_gates_remaining,
-                    "run_status": summary.run_status,
-                    "outcomes": outcomes,
-                })),
-            )
-        }
-        Err(error @ crate::db::auto_queue::PhaseGateRepairError::InvalidRequest { .. }) => {
-            let message = error.to_string();
-            audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
-            (StatusCode::BAD_REQUEST, Json(json!({"error": message})))
-        }
-        Err(error @ crate::db::auto_queue::PhaseGateRepairError::NotFound { .. }) => {
-            let message = error.to_string();
-            audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
-            (StatusCode::NOT_FOUND, Json(json!({"error": message})))
-        }
-        Err(error) => {
-            let message = error.to_string();
-            audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": message})),
-            )
+                    .collect();
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "ok": true,
+                        "run_id": summary.run_id,
+                        "phase_filter": summary.phase_filter,
+                        "dispatch_id_filter": summary.dispatch_id_filter,
+                        "candidate_dispatches": summary.candidate_dispatches,
+                        "cleared_gates": summary.cleared_gates,
+                        "failed_gates": summary.failed_gates,
+                        "awaiting_siblings": summary.awaiting_siblings,
+                        "stale_dispatches": summary.stale_dispatches,
+                        "no_context_dispatches": summary.no_context_dispatches,
+                        "orphan_gates_skipped": summary.orphan_gates_skipped,
+                        "blocking_gates_remaining": summary.blocking_gates_remaining,
+                        "run_status": summary.run_status,
+                        "outcomes": outcomes,
+                    })),
+                )
+            }
+            Err(error @ crate::db::auto_queue::PhaseGateRepairError::InvalidRequest { .. }) => {
+                let message = error.to_string();
+                audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
+                (StatusCode::BAD_REQUEST, Json(json!({"error": message})))
+            }
+            Err(error @ crate::db::auto_queue::PhaseGateRepairError::NotFound { .. }) => {
+                let message = error.to_string();
+                audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
+                (StatusCode::NOT_FOUND, Json(json!({"error": message})))
+            }
+            Err(error) => {
+                let message = error.to_string();
+                audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": message})),
+                )
+            }
+        };
+
+    // #2257 concern 5: stamp the idempotency slot with the final response
+    // so subsequent retries with the same key replay verbatim. We do this
+    // for every terminal outcome — both success (200 OK) and the
+    // structured error paths (400 / 404 / 500) — because Stripe's
+    // contract guarantees the same response on replay regardless of
+    // whether the original request "succeeded". On the rare write
+    // failure we log and continue; the slot will eventually be GC'd.
+    if let Some(key) = idempotency_slot.as_ref() {
+        let status_u16 = status.as_u16();
+        let body_value = response_body.0.clone();
+        if let Err(error) = crate::db::idempotency::record_response(
+            pool,
+            PHASE_GATE_REPAIR_IDEMPOTENCY_SCOPE,
+            key,
+            status_u16,
+            &body_value,
+        )
+        .await
+        {
+            tracing::warn!(
+                run_id = %id,
+                key = %key,
+                error = %error,
+                "phase-gate repair idempotency record_response failed; slot will expire via GC"
+            );
         }
     }
+
+    (status, response_body)
 }
 
 fn repair_phase_gate_caller_from_headers(headers: &HeaderMap) -> String {
