@@ -5,7 +5,7 @@ use std::sync::mpsc;
 
 use crate::services::codex::{
     CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
-    codex_background_event_summary,
+    CodexLaunchOptions, build_codex_exec_args, codex_background_event_summary,
 };
 use crate::services::tmux_common::RotatingJsonlWriter;
 use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
@@ -26,6 +26,7 @@ pub fn run(
     goals_enabled: Option<bool>,
     input_mode: InputMode,
     compact_token_limit: Option<u64>,
+    add_dirs: &[String],
 ) {
     let mode_label = match input_mode {
         InputMode::Fifo => "tmux resume loop",
@@ -150,6 +151,7 @@ pub fn run(
         fast_mode_enabled,
         goals_enabled,
         compact_token_limit,
+        add_dirs,
     ) {
         emit_result_error(&mut output, &err);
         let exit_reason_path = format!("{}.exit_reason", output_file);
@@ -172,6 +174,7 @@ pub fn run(
             fast_mode_enabled,
             goals_enabled,
             compact_token_limit,
+            add_dirs,
         ) {
             emit_result_error(&mut output, &err);
             followup_error = Some(err);
@@ -239,51 +242,31 @@ fn run_turn(
     fast_mode_enabled: Option<bool>,
     goals_enabled: Option<bool>,
     compact_token_limit: Option<u64>,
+    add_dirs: &[String],
 ) -> Result<(), String> {
     emit_status("[sending...]");
 
-    let mut args = Vec::new();
-    if let Some(model) = codex_model.map(str::trim).filter(|value| !value.is_empty()) {
-        let effort = reasoning_effort
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or("high");
-        args.push("-c".to_string());
-        args.push(format!(r#"model_reasoning_effort="{}""#, effort));
-        args.push("-m".to_string());
-        args.push(model.to_string());
-    }
-    if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
-        args.push("-c".to_string());
-        args.push(format!("model_auto_compact_token_limit={}", limit));
-    }
-    if let Some(enabled) = fast_mode_enabled {
-        args.push(if enabled {
-            "--enable".to_string()
-        } else {
-            "--disable".to_string()
-        });
-        args.push("fast_mode".to_string());
-    }
-    if let Some(enabled) = goals_enabled {
-        args.push(if enabled {
-            "--enable".to_string()
-        } else {
-            "--disable".to_string()
-        });
-        args.push("goals".to_string());
-    }
-    args.push("exec".to_string());
-    if let Some(existing_thread_id) = thread_id.as_deref() {
-        args.push("resume".to_string());
-        args.push(existing_thread_id.to_string());
-    }
-    args.extend([
-        "--skip-git-repo-check".to_string(),
-        "--json".to_string(),
-        "--dangerously-bypass-approvals-and-sandbox".to_string(),
-        prompt.to_string(),
-    ]);
+    let default_reasoning_effort = codex_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|_| "high");
+    let effective_reasoning_effort = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(default_reasoning_effort);
+    let add_dir_refs = add_dirs.iter().map(String::as_str).collect::<Vec<_>>();
+    let args = build_codex_exec_args(
+        &CodexLaunchOptions::new(prompt)
+            .with_resume_session_id(thread_id.as_deref())
+            .with_model(codex_model)
+            .with_reasoning_effort(effective_reasoning_effort)
+            .with_compact_token_limit(compact_token_limit)
+            .with_readonly_mode(false)
+            .with_fast_mode_enabled(fast_mode_enabled)
+            .with_goals_enabled(goals_enabled)
+            .with_cwd(Some(working_dir))
+            .with_add_dirs(&add_dir_refs),
+    );
 
     let mut cmd = Command::new(codex_bin);
     crate::services::platform::augment_exec_path(&mut cmd, codex_bin);

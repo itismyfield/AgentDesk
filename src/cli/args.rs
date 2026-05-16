@@ -267,6 +267,9 @@ pub(crate) enum Commands {
         /// Working directory (defaults to ".")
         #[arg(long, default_value = ".")]
         cwd: String,
+        /// Additional directory writable alongside the primary workspace
+        #[arg(long = "add-dir")]
+        add_dirs: Vec<String>,
         /// Input mode: fifo (default) or pipe
         #[arg(long, value_enum, default_value_t = InputModeArg::Fifo)]
         input_mode: InputModeArg,
