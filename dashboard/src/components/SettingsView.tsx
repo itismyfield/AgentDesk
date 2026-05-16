@@ -1,5 +1,4 @@
-import * as Accordion from "@radix-ui/react-accordion";
-import { Check, ChevronDown, Eye, Info } from "lucide-react";
+import { Check, Eye, Info } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type {
   Agent,
@@ -7,41 +6,36 @@ import type {
   VoiceAgentConfig,
   VoiceConfigResponse,
   VoiceGlobalConfig,
-  VoiceSensitivityMode,
 } from "../types";
 import * as api from "../api";
 import type { GitHubRepoOption } from "../api";
 import { STORAGE_KEYS } from "../lib/storageKeys";
 import { writeLocalStorageValue } from "../lib/useLocalStorage";
 import {
-  SurfaceCallout as SettingsCallout,
   SurfaceCard as SettingsCard,
   SurfaceEmptyState as SettingsEmptyState,
   SurfaceSection as SettingsSection,
-  SurfaceSubsection as SettingsSubsection,
 } from "./common/SurfacePrimitives";
 import { Modal } from "./common/overlay/Modal";
-import { SettingsAuditNotes, SettingsGlossary } from "./settings/SettingsKnowledge";
+import { SettingsGlossary } from "./settings/SettingsKnowledge";
 import { SettingsNavigation } from "./settings/SettingsNavigation";
-import {
-  CompactFieldCard,
-  GroupLabel,
-  SettingRow,
-  StorageSurfaceCard,
-} from "./settings/SettingsPanels";
+import { SettingRow } from "./settings/SettingsPanels";
+import { SettingsGeneralPanel } from "./settings/SettingsGeneralPanel";
+import { SettingsOnboardingPanel } from "./settings/SettingsOnboardingPanel";
+import { SettingsPipelinePanel } from "./settings/SettingsPipelinePanel";
+import { SettingsRuntimePanel } from "./settings/SettingsRuntimePanel";
+import { SettingsVoicePanel } from "./settings/SettingsVoicePanel";
 import {
   getDangerousConfigKeys,
   getDangerousConfigLabel,
 } from "./settings/settingsDangerousConfig";
 import {
-  ADVANCED_PIPELINE_CATEGORIES,
   CATEGORIES,
   GENERAL_FIELD_KEYS,
   GENERAL_FIELD_LIMITS,
   PIPELINE_SELECTOR_REFRESH_TIMEOUT_MS,
   PipelineAgentCacheEntry,
   PipelineRepoCacheEntry,
-  PRIMARY_PIPELINE_CATEGORIES,
   SETTING_GROUPS,
   SETTINGS_PANEL_QUERY_KEY,
   SYSTEM_CATEGORY_META,
@@ -54,7 +48,6 @@ import {
   configSourceClass,
   configSourceLabel,
   findVoiceAliasConflict,
-  formatPipelineAgentLabel,
   formatUnit,
   getCachedPipelineAgentEntry,
   getCachedPipelineRepoEntry,
@@ -69,9 +62,6 @@ import {
   readSettingsPanelFromUrl,
   restartBehaviorNote,
   selectDefaultPipelineRepo,
-  splitVoiceAliases,
-  voiceAgentBuiltInAliases,
-  voiceAgentKeys,
   voiceConfigComparable,
   voiceSaveBody,
   writeStoredPipelineAgentCache,
@@ -85,8 +75,6 @@ import {
 } from "./settings/SettingsModel";
 
 const OnboardingWizard = lazy(() => import("./OnboardingWizard"));
-const FsmEditor = lazy(() => import("./agent-manager/FsmEditor"));
-const PipelineVisualEditor = lazy(() => import("./agent-manager/PipelineVisualEditor"));
 
 interface SettingsViewProps {
   settings: CompanySettings;
@@ -1229,807 +1217,105 @@ export default function SettingsView({
     [panelQueryNormalized, tr],
   );
 
-  const renderGeneralPanel = () => (
-    <form className="space-y-5" onSubmit={handleSave} noValidate>
-      {renderSettingGroupCard({
-        titleKo: "일반",
-        titleEn: "General",
-        descriptionKo: "회사 정보와 표시 환경, 메타 설정.",
-        descriptionEn: "Company identity, display environment, and meta settings.",
-        totalCount: generalMetas.length,
-        rows: generalMetas.map((meta) => renderSettingRow(meta)),
-      })}
-
-      <SettingsCallout
-        action={(
-          <button
-            type="submit"
-            disabled={saving || !companyDirty || generalFormInvalid}
-            className={primaryActionClass}
-            style={primaryActionStyle}
-          >
-            {saving ? tr("저장 중...", "Saving...") : tr("일반 설정 저장", "Save general settings")}
-          </button>
-        )}
-      >
-        <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-          {tr(
-            "일반 설정은 한 번에 저장되며 기존 `settings` JSON과 병합해 hidden key 손실을 막습니다. 회사 이름은 필수이고 텍스트 입력은 저장 시 trim 처리됩니다.",
-            "General settings save together and merge into the existing `settings` JSON so hidden keys are preserved. Company name is required, and text inputs are trimmed on save.",
-          )}
-        </p>
-      </SettingsCallout>
-
-      <SettingsSubsection
-        title={tr("저장 경로", "Storage surfaces")}
-        description={tr(
-          "이 화면의 값이 어디에 저장되는지 먼저 보여줍니다. 저장면을 숨기면 운영자가 설정의 실제 영향 범위를 오해하게 됩니다.",
-          "Show where each setting is persisted. Hiding storage surfaces makes the UI misleading for operators.",
-        )}
-      >
-        <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
-          <StorageSurfaceCard
-            title={tr("회사 설정 JSON", "Company settings JSON")}
-            body={tr(
-              "`/api/settings`가 `kv_meta['settings']` 전체 JSON을 저장합니다. 부분 patch가 아니라 full replace라서 merged save가 필요합니다.",
-              "`/api/settings` stores the full `kv_meta['settings']` JSON. It is a full replace API, so the UI must send a merged save.",
-            )}
-            footer={tr("source: kv_meta['settings']", "source: kv_meta['settings']")}
-          />
-          <StorageSurfaceCard
-            title={tr("런타임 설정", "Runtime config")}
-            body={tr(
-              "폴링 주기와 cache TTL 같은 값은 `kv_meta['runtime-config']`에 저장되고 재시작 없이 반영됩니다.",
-              "Polling intervals and cache TTL values live in `kv_meta['runtime-config']` and apply without restart.",
-            )}
-            footer={tr("source: kv_meta['runtime-config']", "source: kv_meta['runtime-config']")}
-          />
-          <StorageSurfaceCard
-            title={tr("정책/파이프라인 키", "Policy and pipeline keys")}
-            body={tr(
-              "리뷰, 타임아웃, context compact 같은 값은 개별 `kv_meta` 키로 저장되고 `/api/settings/config` whitelist를 통해 노출됩니다.",
-              "Review, timeout, and context-compaction values are stored as individual `kv_meta` keys and exposed through `/api/settings/config`.",
-            )}
-            footer={tr("source: individual kv_meta keys", "source: individual kv_meta keys")}
-          />
-          <StorageSurfaceCard
-            title={tr("온보딩/시크릿", "Onboarding and secrets")}
-            body={tr(
-              "봇 토큰과 guild/owner/provider 설정은 일반 폼이 아니라 전용 온보딩 API와 위저드가 관리합니다.",
-              "Bot tokens and guild/owner/provider wiring are managed by the dedicated onboarding API and wizard rather than the general form.",
-            )}
-            footer={tr("source: onboarding API + kv_meta", "source: onboarding API + kv_meta")}
-          />
-        </div>
-      </SettingsSubsection>
-    </form>
-  );
-
-  const renderRuntimePanel = () => (
-    <div className="space-y-4">
-      {!rcLoaded ? (
-        <SettingsEmptyState className="text-sm">
-          {tr("런타임 설정을 불러오는 중...", "Loading runtime config...")}
-        </SettingsEmptyState>
-      ) : (
-        <div className="space-y-4">
-          <Accordion.Root
-            type="single"
-            value={activeRuntimeCategoryId}
-            onValueChange={(value) => {
-              if (value) setActiveRuntimeCategoryId(value);
-            }}
-            className="space-y-3"
-          >
-            {CATEGORIES.map((category) => {
-              const categoryMetas = runtimeMetas.filter((meta) =>
-                category.fields.some((field) => field.key === meta.key),
-              );
-              const rows = categoryMetas
-                .map((meta) => {
-                  const field = category.fields.find((item) => item.key === meta.key);
-                  if (!field) return renderSettingRow(meta);
-                  const value = Number(meta.effectiveValue) || 0;
-                  const defaultValue = Number(meta.defaultValue) || 0;
-                  const isDefault = value === defaultValue;
-                  const controlOverlay = (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="range"
-                        min={field.min}
-                        max={field.max}
-                        step={field.step}
-                        value={value}
-                        onChange={(event) => handleRcChange(field.key, Number(event.target.value))}
-                        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
-                        style={{ accentColor: "var(--th-accent-primary)" }}
-                      />
-                      <input
-                        type="number"
-                        min={field.min}
-                        max={field.max}
-                        step={field.step}
-                        value={value}
-                        onChange={(event) => {
-                          const next = Number(event.target.value);
-                          if (Number.isFinite(next) && next >= field.min && next <= field.max) {
-                            handleRcChange(field.key, next);
-                          }
-                        }}
-                        className="w-20 rounded-xl px-2 py-1.5 text-right text-xs"
-                        style={{
-                          ...inputStyle,
-                          fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-                        }}
-                      />
-                    </div>
-                  );
-                  const trailingMeta = !isDefault ? (
-                    <button
-                      type="button"
-                      onClick={() => handleRcReset(field.key)}
-                      className={subtleButtonClass}
-                      style={subtleButtonStyle}
-                    >
-                      {tr("기본값 복원", "Reset to default")}
-                    </button>
-                  ) : null;
-                  return renderSettingRow(meta, { controlOverlay, trailingMeta });
-                })
-                .filter(Boolean);
-              const countLabel = panelQueryNormalized
-                ? `${rows.length}/${categoryMetas.length}`
-                : tr(`${categoryMetas.length}개`, `${categoryMetas.length} items`);
-              const isOpen = activeRuntimeCategoryId === category.id;
-
-              return (
-                <Accordion.Item
-                  key={category.id}
-                  value={category.id}
-                  className="overflow-hidden rounded-[20px] border"
-                  style={{
-                    borderColor: isOpen
-                      ? "color-mix(in srgb, var(--th-accent-primary) 32%, var(--th-border) 68%)"
-                      : "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                    background: isOpen
-                      ? "color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-primary-soft) 18%)"
-                      : "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-                  }}
-                >
-                  <Accordion.Header>
-                    <Accordion.Trigger
-                      className="flex w-full items-start justify-between gap-3 px-4 py-4 text-left sm:px-5"
-                      style={{ color: "var(--th-text)" }}
-                    >
-                      <span className="min-w-0">
-                        <span className="settings-section-title block text-sm font-semibold">
-                          {tr(category.titleKo, category.titleEn)}
-                        </span>
-                        <span className="settings-copy mt-1 block text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
-                          {tr(category.descriptionKo, category.descriptionEn)}
-                        </span>
-                      </span>
-                      <span className="flex shrink-0 items-center gap-2">
-                        <span
-                          className="settings-count-chip inline-flex rounded-full border px-2.5 py-1 text-[10px] font-medium"
-                          style={{
-                            borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                            background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
-                            color: "var(--th-text-muted)",
-                          }}
-                        >
-                          {countLabel}
-                        </span>
-                        <ChevronDown
-                          size={16}
-                          style={{
-                            color: "var(--th-text-muted)",
-                            transform: isOpen ? "rotate(180deg)" : "none",
-                            transition: "transform 0.2s",
-                          }}
-                        />
-                      </span>
-                    </Accordion.Trigger>
-                  </Accordion.Header>
-                  <Accordion.Content
-                    className="px-2 pb-2 sm:px-3"
-                    style={{ borderTop: "1px solid color-mix(in srgb, var(--th-border) 60%, transparent)" }}
-                  >
-                    {rows.length > 0 ? (
-                      <div className="pt-1">{rows}</div>
-                    ) : (
-                      <SettingsEmptyState className="my-2 text-sm">
-                        {tr("검색 결과가 없습니다.", "No matching settings.")}
-                      </SettingsEmptyState>
-                    )}
-                  </Accordion.Content>
-                </Accordion.Item>
-              );
-            })}
-          </Accordion.Root>
-
-          <SettingsCallout
-            className="mt-0"
-            action={(
-              <button
-                onClick={handleRcSave}
-                disabled={rcSaving || !rcDirty}
-                className={primaryActionClass}
-                style={primaryActionStyle}
-              >
-                {rcSaving ? tr("저장 중...", "Saving...") : tr("런타임 저장", "Save runtime")}
-              </button>
-              )}
-          >
-            <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-              {tr(
-                "런타임 설정은 저장 즉시 반영됩니다. 현재 선택한 하위 카테고리는 브라우저에 기억해 두었다가 다음 방문 때 다시 엽니다.",
-                "Runtime settings apply immediately on save. The selected subcategory is remembered in the browser and restored on the next visit.",
-              )}
-            </p>
-          </SettingsCallout>
-        </div>
-      )}
-    </div>
-  );
-
-  const renderPipelineCategory = (categoryKey: keyof typeof SYSTEM_CATEGORY_META) => {
-    // Pipeline group rows are built directly from configEntries via pipelineMetas.
-    // We still group them by category for visual hierarchy inside the pipeline panel.
-    const entries = groupedConfigEntries[categoryKey] ?? [];
-    if (entries.length === 0) return null;
-    const meta = SYSTEM_CATEGORY_META[categoryKey];
-    const metasInCategory = entries
-      .map((entry) => pipelineMetas.find((m) => m.key === entry.key))
-      .filter((m): m is SettingRowMeta => Boolean(m));
-    return renderSettingGroupCard({
-      titleKo: meta.titleKo,
-      titleEn: meta.titleEn,
-      descriptionKo: meta.descriptionKo,
-      descriptionEn: meta.descriptionEn,
-      totalCount: metasInCategory.length,
-      rows: metasInCategory.map((m) => {
-        const trailingMeta = m.key.endsWith("_channel_id") ? (
-          <span style={{ color: "var(--th-text-muted)" }}>
-            {tr(
-              "Discord channel ID는 정밀도 손실을 피하려고 문자열로 유지합니다.",
-              "Discord channel IDs stay as strings to avoid precision loss.",
-            )}
-          </span>
-        ) : null;
-        return renderSettingRow(m, { trailingMeta });
-      }),
-    });
-  };
-
-  const renderPipelinePanel = () => (
-    <div className="space-y-5">
-      {configEntries.length === 0 ? (
-        <SettingsEmptyState className="text-sm">
-          {tr("파이프라인 설정을 불러오는 중...", "Loading pipeline config...")}
-        </SettingsEmptyState>
-      ) : (
-        <div className="space-y-5">
-          <SettingsCallout
-            action={(
-              <button
-                onClick={handleConfigSave}
-                disabled={configSaving || !configDirty}
-                className={primaryActionClass}
-                style={primaryActionStyle}
-              >
-                {configSaving ? tr("저장 중...", "Saving...") : tr("파이프라인 저장", "Save pipeline")}
-              </button>
-            )}
-          >
-            <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-              {tr(
-                "이 섹션은 whitelist된 개별 `kv_meta` 키만 편집합니다. read-only 항목도 숨기지 않고 현재 상태를 드러내며, `context_clear_*` 같은 API 바깥 항목은 아래 audit 노트에서 별도로 정리합니다.",
-                "This section edits only whitelisted individual `kv_meta` keys. Read-only items remain visible as status, and API-outside items such as `context_clear_*` are tracked in the audit notes below.",
-              )}
-            </p>
-          </SettingsCallout>
-
-          <SettingsSubsection
-            title={tr("FSM 비주얼 에디터", "FSM visual editor")}
-            description={tr(
-              "repo/agent 범위를 먼저 고른 뒤, 상태 전환 event·hook·policy를 전용 FSM 캔버스에서 조정합니다.",
-              "Pick the repo or agent scope first, then tune transition events, hooks, and policies on the dedicated FSM canvas.",
-            )}
-          >
-            {pipelineSelectorLoading && pipelineRepos.length === 0 ? (
-              <SettingsEmptyState className="text-sm">
-                {tr("파이프라인 에디터 대상을 불러오는 중...", "Loading pipeline editor targets...")}
-              </SettingsEmptyState>
-            ) : pipelineSelectorError ? (
-              <SettingsEmptyState className="text-sm">
-                {pipelineSelectorError}
-              </SettingsEmptyState>
-            ) : pipelineRepos.length === 0 ? (
-              <SettingsEmptyState className="text-sm">
-                {tr("편집 가능한 repo가 없습니다.", "No editable repositories are available.")}
-              </SettingsEmptyState>
-            ) : (
-              <div className="space-y-4">
-                <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
-                  <CompactFieldCard
-                    label={tr("대상 repo", "Target repo")}
-                    description={tr(
-                      "기본 FSM은 repo 레벨에서 편집하고, 필요할 때만 agent override로 내려갑니다.",
-                      "Start at the repo-level FSM and only drop to an agent override when needed.",
-                    )}
-                  >
-                    <select
-                      value={selectedPipelineRepo}
-                      onChange={(event) => setSelectedPipelineRepo(event.target.value)}
-                      className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                      style={inputStyle}
-                    >
-                      {pipelineRepos.map((repo) => (
-                        <option key={repo.nameWithOwner} value={repo.nameWithOwner}>
-                          {repo.nameWithOwner}
-                        </option>
-                      ))}
-                    </select>
-                  </CompactFieldCard>
-                  <CompactFieldCard
-                    label={tr("에이전트 override", "Agent override")}
-                    description={tr(
-                      "선택하면 editor 안에서 agent 레벨 전환을 활성화합니다.",
-                      "Selecting an agent enables the agent-level path inside the editor.",
-                    )}
-                  >
-                    <select
-                      value={selectedPipelineAgentId ?? ""}
-                      onChange={(event) => setSelectedPipelineAgentId(event.target.value || null)}
-                      className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                      style={inputStyle}
-                    >
-                      <option value="">{tr("없음", "None")}</option>
-                      {pipelineAgents.map((agent) => (
-                        <option key={agent.id} value={agent.id}>
-                          {formatPipelineAgentLabel(agent, isKo)}
-                        </option>
-                      ))}
-                    </select>
-                  </CompactFieldCard>
-                </div>
-
-                {selectedPipelineRepo ? (
-                  <div className="space-y-4">
-                    <Suspense
-                      fallback={(
-                        <SettingsEmptyState className="text-sm">
-                          {tr("FSM 에디터를 준비하는 중...", "Preparing FSM editor...")}
-                        </SettingsEmptyState>
-                      )}
-                    >
-                      <FsmEditor
-                        tr={tr}
-                        locale={isKo ? "ko" : "en"}
-                        repo={selectedPipelineRepo}
-                        agents={pipelineAgents}
-                        selectedAgentId={selectedPipelineAgentId}
-                      />
-                    </Suspense>
-
-                    <SettingsSubsection
-                      title={tr("고급 / Agent별 파이프라인 편집기", "Advanced / agent-specific pipeline editor")}
-                      description={tr(
-                        "FSM 바깥의 state hook, timeout, phase gate, stage 실행 순서는 아래 고급 편집기에서 따로 다룹니다.",
-                        "State hooks, timeouts, phase gates, and stage execution stay in the advanced editor below.",
-                      )}
-                    >
-                      <Suspense
-                        fallback={(
-                          <SettingsEmptyState className="text-sm">
-                            {tr("고급 파이프라인 편집기를 준비하는 중...", "Preparing advanced pipeline editor...")}
-                          </SettingsEmptyState>
-                        )}
-                      >
-                        <PipelineVisualEditor
-                          tr={tr}
-                          locale={isKo ? "ko" : "en"}
-                          repo={selectedPipelineRepo}
-                          agents={pipelineAgents}
-                          selectedAgentId={selectedPipelineAgentId}
-                          variant="advanced"
-                        />
-                      </Suspense>
-                    </SettingsSubsection>
-                  </div>
-                ) : (
-                  <SettingsEmptyState className="text-sm">
-                    {tr("repo를 선택하면 FSM 에디터가 열립니다.", "Select a repo to open the FSM editor.")}
-                  </SettingsEmptyState>
-                )}
-              </div>
-            )}
-          </SettingsSubsection>
-
-          <div className="space-y-3">
-            <GroupLabel title={tr("자주 쓰는 설정", "Frequent settings")} />
-            {PRIMARY_PIPELINE_CATEGORIES.map(renderPipelineCategory)}
-          </div>
-          <div className="space-y-3">
-            <GroupLabel title={tr("고급 설정", "Advanced settings")} />
-            {ADVANCED_PIPELINE_CATEGORIES.map(renderPipelineCategory)}
-          </div>
-
-          <SettingsAuditNotes isKo={isKo} />
-        </div>
-      )}
-    </div>
-  );
-
-  const renderVoicePanel = () => {
-    if (!voiceLoaded) {
-      return (
-        <SettingsEmptyState className="text-sm">
-          {tr("음성 설정을 불러오는 중...", "Loading voice config...")}
-        </SettingsEmptyState>
-      );
-    }
-    if (!voiceDraft) {
-      return (
-        <div className="space-y-4">
-          <SettingsEmptyState className="text-sm">
-            {voiceError ?? tr("음성 설정을 불러오지 못했습니다.", "Failed to load voice settings.")}
-          </SettingsEmptyState>
-          <button
-            type="button"
-            onClick={() => void loadVoiceConfig()}
-            className={secondaryActionClass}
-            style={secondaryActionStyle}
-          >
-            {tr("다시 불러오기", "Retry")}
-          </button>
-        </div>
-      );
-    }
-
-    const visibleGlobalCards = [
-      isRowVisible("voice.global.lobby_channel_id") ? (
-        <CompactFieldCard
-          key="lobby"
-          label={tr("Lobby 채널 ID", "Lobby channel ID")}
-          description={tr(
-            "단일 voice-lobby로 들어오는 음성을 agent alias 라우팅에 사용합니다.",
-            "Single voice-lobby channel used for agent alias routing.",
-          )}
-        >
-          <input
-            value={voiceDraft.global.lobby_channel_id ?? ""}
-            onChange={(event) => updateVoiceGlobal("lobby_channel_id", event.target.value)}
-            className="w-full rounded-2xl px-3 py-2.5 text-sm"
-            style={inputStyle}
-            placeholder={tr("예: 1503294653313712169", "e.g. 1503294653313712169")}
-          />
-        </CompactFieldCard>
-      ) : null,
-      isRowVisible("voice.global.active_agent_ttl_seconds") ? (
-        <CompactFieldCard
-          key="ttl"
-          label={tr("Active agent TTL", "Active agent TTL")}
-          description={tr(
-            "alias 없이 이어 말할 수 있는 최근 agent 유지 시간입니다.",
-            "How long follow-up speech can continue without repeating an alias.",
-          )}
-        >
-          <div className="flex items-center gap-3">
-            <input
-              type="range"
-              min={30}
-              max={1800}
-              step={30}
-              value={voiceDraft.global.active_agent_ttl_seconds}
-              onChange={(event) =>
-                updateVoiceGlobal("active_agent_ttl_seconds", Number(event.target.value))
-              }
-              className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
-              style={{ accentColor: "var(--th-accent-primary)" }}
-            />
-            <input
-              type="number"
-              min={1}
-              step={30}
-              value={voiceDraft.global.active_agent_ttl_seconds}
-              onChange={(event) =>
-                updateVoiceGlobal("active_agent_ttl_seconds", Number(event.target.value) || 180)
-              }
-              className="w-24 rounded-xl px-2 py-1.5 text-right text-xs"
-              style={{
-                ...inputStyle,
-                fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-              }}
-            />
-          </div>
-        </CompactFieldCard>
-      ) : null,
-      isRowVisible("voice.global.default_sensitivity_mode") ? (
-        <CompactFieldCard
-          key="sensitivity"
-          label={tr("기본 민감도", "Default sensitivity")}
-          description={tr(
-            "agent별 override가 없을 때 적용할 barge-in 민감도입니다.",
-            "Barge-in sensitivity used when an agent has no override.",
-          )}
-        >
-          <select
-            value={voiceDraft.global.default_sensitivity_mode}
-            onChange={(event) =>
-              updateVoiceGlobal("default_sensitivity_mode", event.target.value as VoiceSensitivityMode)
-            }
-            className="w-full rounded-2xl px-3 py-2.5 text-sm"
-            style={inputStyle}
-          >
-            {VOICE_SENSITIVITY_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {tr(option.labelKo, option.labelEn)}
-              </option>
-            ))}
-          </select>
-        </CompactFieldCard>
-      ) : null,
-      isRowVisible("voice.global.version") ? (
-        <CompactFieldCard
-          key="version"
-          label={tr("설정 버전", "Config version")}
-          description={tr(
-            "저장 시 optimistic locking에 사용하는 버전 해시입니다.",
-            "Version hash used for optimistic locking on save.",
-          )}
-        >
-          <code
-            className="block truncate rounded-xl px-3 py-2 text-xs"
-            style={{
-              background: "color-mix(in srgb, var(--th-overlay-medium) 80%, transparent)",
-              color: "var(--th-text-muted)",
-              fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-            }}
-          >
-            {voiceDraft.version}
-          </code>
-        </CompactFieldCard>
-      ) : null,
-    ].filter(Boolean);
-
-    const agentCards = voiceDraft.agents
-      .filter((agent) =>
-        voiceAgentKeys(agent.id).some((key) => isRowVisible(key)),
-      )
-      .map((agent) => {
-        const displayName = isKo && agent.name_ko ? agent.name_ko : agent.name;
-        const conflictInAgent =
-          voiceAliasConflict &&
-          (voiceAliasConflict.firstAgent.id === agent.id || voiceAliasConflict.secondAgent.id === agent.id);
-        return (
-          <SettingsCard
-            key={agent.id}
-            className="rounded-2xl p-4"
-            style={{
-              borderColor: conflictInAgent
-                ? "rgba(248,113,113,0.45)"
-                : "color-mix(in srgb, var(--th-border) 72%, transparent)",
-              background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
-            }}
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
-                  {displayName}
-                </div>
-                <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                  {agent.id} · {agent.name}
-                </div>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={agent.voice_enabled}
-                onClick={() => updateVoiceAgent(agent.id, { voice_enabled: !agent.voice_enabled })}
-                className="relative inline-flex h-7 w-12 items-center rounded-full transition-colors"
-                style={{
-                  background: agent.voice_enabled
-                    ? "var(--th-accent-primary)"
-                    : "color-mix(in srgb, var(--th-border) 80%, transparent)",
-                }}
-              >
-                <span
-                  className="inline-block h-6 w-6 rounded-full bg-white shadow transition-transform"
-                  style={{ transform: agent.voice_enabled ? "translateX(1.45rem)" : "translateX(0.13rem)" }}
-                />
-              </button>
-            </div>
-
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              {isRowVisible(`voice.agent.${agent.id}.wake_word`) ? (
-                <CompactFieldCard
-                  label={tr("Wake word", "Wake word")}
-                  description={tr("비어 있으면 agent alias만으로 라우팅합니다.", "When empty, the agent routes by alias only.")}
-                >
-                  <input
-                    value={agent.wake_word}
-                    onChange={(event) => updateVoiceAgent(agent.id, { wake_word: event.target.value })}
-                    className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                    style={inputStyle}
-                    placeholder={tr("예: 에이전트", "e.g. agent")}
-                  />
-                </CompactFieldCard>
-              ) : null}
-              {isRowVisible(`voice.agent.${agent.id}.sensitivity`) ? (
-                <CompactFieldCard
-                  label={tr("민감도", "Sensitivity")}
-                  description={tr("agent별 barge-in 감지 민감도입니다.", "Per-agent barge-in detection sensitivity.")}
-                >
-                  <select
-                    value={agent.sensitivity_mode}
-                    onChange={(event) =>
-                      updateVoiceAgent(agent.id, { sensitivity_mode: event.target.value as VoiceSensitivityMode })
-                    }
-                    className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                    style={inputStyle}
-                  >
-                    {VOICE_SENSITIVITY_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {tr(option.labelKo, option.labelEn)}
-                      </option>
-                    ))}
-                  </select>
-                </CompactFieldCard>
-              ) : null}
-              {isRowVisible(`voice.agent.${agent.id}.aliases`) ? (
-                <CompactFieldCard
-                  label={tr("Aliases", "Aliases")}
-                  description={tr("쉼표 또는 줄바꿈으로 여러 호출명을 입력합니다.", "Enter multiple spoken aliases separated by commas or new lines.")}
-                  footer={tr(
-                    `기본 alias: ${voiceAgentBuiltInAliases(agent).join(", ")}`,
-                    `Built-in aliases: ${voiceAgentBuiltInAliases(agent).join(", ")}`,
-                  )}
-                >
-                  <textarea
-                    value={agent.aliases.join("\n")}
-                    onChange={(event) => updateVoiceAgent(agent.id, { aliases: splitVoiceAliases(event.target.value) })}
-                    className="min-h-[92px] w-full resize-y rounded-2xl px-3 py-2.5 text-sm"
-                    style={inputStyle}
-                  />
-                </CompactFieldCard>
-              ) : null}
-            </div>
-          </SettingsCard>
-        );
-      });
-
-    return (
-      <div className="space-y-5">
-        <SettingsCallout
-          action={(
-            <button
-              type="button"
-              onClick={() => void handleVoiceSave()}
-              disabled={voiceSaving || !voiceDirty || Boolean(voiceAliasConflict)}
-              className={primaryActionClass}
-              style={primaryActionStyle}
-            >
-              {voiceSaving ? tr("저장 중...", "Saving...") : tr("음성 설정 저장", "Save voice")}
-            </button>
-          )}
-        >
-          <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-            {tr(
-              "음성 설정은 agentdesk.yaml에 저장되며 runtime voice routing이 다음 발화부터 다시 읽습니다. alias는 NFC/lowercase/공백·특수문자 제거 기준으로 충돌을 막습니다.",
-              "Voice settings are stored in agentdesk.yaml and runtime voice routing reloads them on the next utterance. Aliases reject collisions after NFC/lowercase and removing spaces/special characters.",
-            )}
-          </p>
-        </SettingsCallout>
-
-        {voiceError ? (
-          <SettingsEmptyState className="text-sm">{voiceError}</SettingsEmptyState>
-        ) : null}
-
-        {voiceAliasConflict ? (
-          <SettingsCallout>
-            <p className="text-sm leading-6" style={{ color: "rgba(252,165,165,0.95)" }}>
-              {tr(
-                `alias 충돌: ${voiceAliasConflict.firstAgent.name} "${voiceAliasConflict.firstAlias}" ↔ ${voiceAliasConflict.secondAgent.name} "${voiceAliasConflict.secondAlias}" (${voiceAliasConflict.normalized})`,
-                `Alias collision: ${voiceAliasConflict.firstAgent.name} "${voiceAliasConflict.firstAlias}" ↔ ${voiceAliasConflict.secondAgent.name} "${voiceAliasConflict.secondAlias}" (${voiceAliasConflict.normalized})`,
-              )}
-            </p>
-          </SettingsCallout>
-        ) : null}
-
-        {renderSettingGroupCard({
-          titleKo: "Voice lobby",
-          titleEn: "Voice lobby",
-          descriptionKo: "lobby 채널, active-agent TTL, 기본 민감도와 버전입니다.",
-          descriptionEn: "Lobby channel, active-agent TTL, default sensitivity, and version.",
-          totalCount: 4,
-          rows: visibleGlobalCards,
-        })}
-
-        <SettingsSubsection
-          title={tr("에이전트 음성 라우팅", "Agent voice routing")}
-          description={tr(
-            "각 agent의 음성 활성화, wake word, 호출 alias, 민감도 override를 편집합니다.",
-            "Edit each agent's voice enablement, wake word, spoken aliases, and sensitivity override.",
-          )}
-        >
-          <div className="grid gap-3">
-            {agentCards.length > 0 ? (
-              agentCards
-            ) : (
-              <SettingsEmptyState className="text-sm">
-                {tr("검색 결과가 없습니다.", "No matching agents.")}
-              </SettingsEmptyState>
-            )}
-          </div>
-        </SettingsSubsection>
-      </div>
-    );
-  };
-
-  const renderOnboardingPanel = () => (
-    <div className="space-y-5">
-      {renderSettingGroupCard({
-        titleKo: "온보딩",
-        titleEn: "Onboarding",
-        descriptionKo: "위저드 / /api/onboarding/* 가 관리하는 키. 일반 폼이 아니라 위저드를 사용하세요.",
-        descriptionEn: "Wizard- and /api/onboarding/*-managed keys. Use the wizard instead of editing here.",
-        totalCount: onboardingMetas.length,
-        rows: onboardingMetas.map((meta) => renderSettingRow(meta)),
-      })}
-
-      <div className="grid gap-3 md:grid-cols-[minmax(0,1.15fr)_minmax(16rem,0.85fr)]">
-        <SettingsCard
-          className="rounded-3xl p-5"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-            background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
-          }}
-        >
-          <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
-            {tr("위저드가 처리하는 범위", "What the wizard covers")}
-          </div>
-          <div className="mt-4 space-y-3 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-            <div>{tr("Discord 봇 토큰, guild/owner, provider 연결", "Discord bot token, guild/owner, and provider wiring")}</div>
-            <div>{tr("기본 채널/카테고리와 role map 구성", "Default channels/categories and role-map setup")}</div>
-            <div>{tr("기본 운영 파이프라인과 초기 설정 재생성", "Default operating pipeline and initial config regeneration")}</div>
-          </div>
-        </SettingsCard>
-
-        <SettingsCard
-          className="rounded-3xl p-5"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-            background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
-          }}
-        >
-          <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
-            {tr("권장 시점", "When to run it")}
-          </div>
-          <div className="mt-4 space-y-3 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-            <div>{tr("새 워크스페이스를 처음 붙일 때", "When wiring a new workspace for the first time")}</div>
-            <div>{tr("봇 토큰이나 owner/provider를 바꿨을 때", "When bot tokens or owner/provider settings changed")}</div>
-            <div>{tr("기본 채널/정책을 다시 생성해야 할 때", "When default channels or policies need to be recreated")}</div>
-          </div>
-        </SettingsCard>
-      </div>
-    </div>
-  );
-
   const renderActivePanel = () => {
     switch (activePanel) {
       case "runtime":
-        return renderRuntimePanel();
+        return (
+          <SettingsRuntimePanel
+            activeRuntimeCategoryId={activeRuntimeCategoryId}
+            inputStyle={inputStyle}
+            onCategoryChange={setActiveRuntimeCategoryId}
+            onRuntimeChange={handleRcChange}
+            onRuntimeReset={handleRcReset}
+            onRuntimeSave={handleRcSave}
+            panelQueryNormalized={panelQueryNormalized}
+            primaryActionClass={primaryActionClass}
+            primaryActionStyle={primaryActionStyle}
+            rcDirty={rcDirty}
+            rcLoaded={rcLoaded}
+            rcSaving={rcSaving}
+            renderSettingRow={renderSettingRow}
+            runtimeMetas={runtimeMetas}
+            subtleButtonClass={subtleButtonClass}
+            subtleButtonStyle={subtleButtonStyle}
+            tr={tr}
+          />
+        );
       case "pipeline":
-        return renderPipelinePanel();
+        return (
+          <SettingsPipelinePanel
+            configDirty={configDirty}
+            configEntries={configEntries}
+            configSaving={configSaving}
+            groupedConfigEntries={groupedConfigEntries}
+            inputStyle={inputStyle}
+            isKo={isKo}
+            onConfigSave={handleConfigSave}
+            pipelineAgents={pipelineAgents}
+            pipelineMetas={pipelineMetas}
+            pipelineRepos={pipelineRepos}
+            pipelineSelectorError={pipelineSelectorError}
+            pipelineSelectorLoading={pipelineSelectorLoading}
+            primaryActionClass={primaryActionClass}
+            primaryActionStyle={primaryActionStyle}
+            renderSettingGroupCard={renderSettingGroupCard}
+            renderSettingRow={renderSettingRow}
+            selectedPipelineAgentId={selectedPipelineAgentId}
+            selectedPipelineRepo={selectedPipelineRepo}
+            setSelectedPipelineAgentId={setSelectedPipelineAgentId}
+            setSelectedPipelineRepo={setSelectedPipelineRepo}
+            tr={tr}
+          />
+        );
       case "voice":
-        return renderVoicePanel();
+        return (
+          <SettingsVoicePanel
+            inputStyle={inputStyle}
+            isKo={isKo}
+            isRowVisible={isRowVisible}
+            loadVoiceConfig={loadVoiceConfig}
+            onVoiceSave={handleVoiceSave}
+            primaryActionClass={primaryActionClass}
+            primaryActionStyle={primaryActionStyle}
+            renderSettingGroupCard={renderSettingGroupCard}
+            secondaryActionClass={secondaryActionClass}
+            secondaryActionStyle={secondaryActionStyle}
+            tr={tr}
+            updateVoiceAgent={updateVoiceAgent}
+            updateVoiceGlobal={updateVoiceGlobal}
+            voiceAliasConflict={voiceAliasConflict}
+            voiceDirty={voiceDirty}
+            voiceDraft={voiceDraft}
+            voiceError={voiceError}
+            voiceLoaded={voiceLoaded}
+            voiceSaving={voiceSaving}
+          />
+        );
       case "onboarding":
-        return renderOnboardingPanel();
+        return (
+          <SettingsOnboardingPanel
+            onboardingMetas={onboardingMetas}
+            renderSettingGroupCard={renderSettingGroupCard}
+            renderSettingRow={renderSettingRow}
+            tr={tr}
+          />
+        );
       case "general":
       default:
-        return renderGeneralPanel();
+        return (
+          <SettingsGeneralPanel
+            companyDirty={companyDirty}
+            generalFormInvalid={generalFormInvalid}
+            generalMetas={generalMetas}
+            onSave={handleSave}
+            primaryActionClass={primaryActionClass}
+            primaryActionStyle={primaryActionStyle}
+            renderSettingGroupCard={renderSettingGroupCard}
+            renderSettingRow={renderSettingRow}
+            saving={saving}
+            tr={tr}
+          />
+        );
     }
   };
   const renderHeaderActions = () => {
