@@ -1981,9 +1981,9 @@ impl VoiceBargeInRuntime {
                         let tombstone = handoff_message_id.and_then(|id| {
                             crate::voice::cancel_tombstone::global_store().lookup(id)
                         });
-                        if cancel_token.cancelled.load(Ordering::Relaxed) || tombstone.is_some() {
-                            let observed_via_tombstone = tombstone.is_some()
-                                && !cancel_token.cancelled.load(Ordering::Relaxed);
+                        let local_cancel = cancel_token.cancelled.load(Ordering::Relaxed);
+                        if local_cancel || tombstone.is_some() {
+                            let observed_via_tombstone = tombstone.is_some() && !local_cancel;
                             let cancel_reason = cancel_token
                                 .cancel_source()
                                 .or_else(|| tombstone.clone())
@@ -1997,17 +1997,66 @@ impl VoiceBargeInRuntime {
                             // mailbox-actor reason owner.
                             let target_cancel_label: &'static str =
                                 "voice_foreground_cancel_during_handoff";
-                            // #2374 — record the tombstone via the
-                            // handoff-aware variant so a still-later
-                            // third caller for the same handoff also
-                            // sees the cancel.
-                            let result = super::mailbox_cancel_active_turn_with_reason_and_handoff(
-                                shared,
-                                target_channel_id,
-                                target_cancel_label,
-                                handoff_message_id,
-                            )
-                            .await;
+                            // #2374 Codex round-1 fix (HIGH-2): record
+                            // the tombstone UNCONDITIONALLY when we
+                            // observe the cancel for a known
+                            // `handoff_message_id`, before issuing the
+                            // mailbox cancel. The original v1
+                            // implementation only recorded the
+                            // tombstone after the actor confirmed a
+                            // live token; that missed the cases where
+                            // the target turn had not yet started
+                            // (intake race) or had already finalized.
+                            // A later retry must still observe the
+                            // tombstone.
+                            if let Some(handoff_id) = handoff_message_id {
+                                super::record_voice_handoff_cancel_tombstone(
+                                    handoff_id,
+                                    target_cancel_label,
+                                );
+                            }
+                            // #2374 Codex round-1 fix (HIGH-1):
+                            // identity-guarded cancel. Only cancel the
+                            // active target-channel turn if its
+                            // `user_message_id` matches the handoff
+                            // `message_id`. Without this guard a late
+                            // retry could observe the tombstone and
+                            // cancel an UNRELATED turn that happened
+                            // to start on the same target channel
+                            // after the original handoff turn
+                            // finalized. When `handoff_message_id` is
+                            // unavailable (dispatch driver returned
+                            // none — already logged at dispatch time)
+                            // we fall back to the unguarded cancel and
+                            // only when the local cancel flag is set
+                            // — i.e. the original first cancel still
+                            // owns the turn — so we cannot kill an
+                            // unrelated turn.
+                            let result = if let Some(handoff_id) = handoff_message_id {
+                                super::mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
+                                    shared,
+                                    target_channel_id,
+                                    handoff_id,
+                                    target_cancel_label,
+                                )
+                                .await
+                            } else if local_cancel {
+                                super::mailbox_cancel_active_turn_with_reason(
+                                    shared,
+                                    target_channel_id,
+                                    target_cancel_label,
+                                )
+                                .await
+                            } else {
+                                // Tombstone-only observation without a
+                                // message id to identity-guard on: do
+                                // NOT issue a blind cancel; just
+                                // suppress the foreground ack.
+                                crate::services::turn_orchestrator::CancelActiveTurnResult {
+                                    token: None,
+                                    already_stopping: false,
+                                }
+                            };
                             tracing::info!(
                                 source_channel_id = source_channel_id.get(),
                                 target_channel_id = target_channel_id.get(),
@@ -2016,6 +2065,7 @@ impl VoiceBargeInRuntime {
                                 already_stopping = result.already_stopping,
                                 cancel_source = %cancel_reason,
                                 observed_via_tombstone,
+                                handoff_message_id = ?handoff_message_id.map(|m| m.get()),
                                 "voice background handoff just-started turn cancelled \
                                  because foreground cancel won the race (#2335 / #2374)"
                             );
@@ -2027,7 +2077,18 @@ impl VoiceBargeInRuntime {
                             .synthesize_acknowledgement(ack, source_channel_id)
                             .await
                         {
-                            if cancel_token.cancelled.load(Ordering::Relaxed) {
+                            // #2374 Codex round-1 fix (MEDIUM-3):
+                            // recheck the handoff tombstone after the
+                            // `synthesize_acknowledgement` await. A
+                            // concurrent cancel can record the
+                            // tombstone DURING synthesis; without
+                            // re-checking we would still play the ack.
+                            let tombstone_after_synth = handoff_message_id.and_then(|id| {
+                                crate::voice::cancel_tombstone::global_store().lookup(id)
+                            });
+                            if cancel_token.cancelled.load(Ordering::Relaxed)
+                                || tombstone_after_synth.is_some()
+                            {
                                 log_cancel_suppressed("post_background_handoff_play");
                                 return true;
                             }

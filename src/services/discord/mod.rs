@@ -2195,24 +2195,6 @@ async fn mailbox_cancel_active_turn_with_reason(
     channel_id: ChannelId,
     reason: &str,
 ) -> CancelActiveTurnResult {
-    mailbox_cancel_active_turn_with_reason_and_handoff(shared, channel_id, reason, None).await
-}
-
-/// #2374 — like `mailbox_cancel_active_turn_with_reason` but also records
-/// a process-local tombstone keyed by `handoff_message_id` when the
-/// caller has one. The tombstone lets a LATE second cancel attempt for
-/// the same handoff observe that a prior cancel already happened and
-/// suppress any re-fired actions (ack synthesis, spoken-summary
-/// playback) instead of racing with an in-memory cancel flag that may
-/// have been cleared (the original target-channel turn already
-/// finalized) or that the new caller cannot see (the new caller holds a
-/// different `cancel_token`).
-async fn mailbox_cancel_active_turn_with_reason_and_handoff(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    reason: &str,
-    handoff_message_id: Option<MessageId>,
-) -> CancelActiveTurnResult {
     let tmux_session_name = shared
         .tmux_watchers
         .channel_binding(&channel_id)
@@ -2233,16 +2215,6 @@ async fn mailbox_cancel_active_turn_with_reason_and_handoff(
         .mailbox(channel_id)
         .cancel_active_turn_with_reason(reason.to_string())
         .await;
-    if let Some(handoff_message_id) = handoff_message_id
-        && result.token.is_some()
-    {
-        // #2374 — record the tombstone AFTER the actor has confirmed a
-        // cancel actually happened (token returned). A second cancel
-        // attempt for the same handoff message id can then consult the
-        // tombstone and discard itself even if the original target-turn
-        // token has already finalized and been cleared from the mailbox.
-        crate::voice::cancel_tombstone::global_store().record(handoff_message_id, reason);
-    }
     #[cfg(unix)]
     if result.token.is_some() {
         // #1309: in-memory publish is synchronous (instant suppression);
@@ -2251,6 +2223,52 @@ async fn mailbox_cancel_active_turn_with_reason_and_handoff(
         tmux::record_recent_turn_stop(channel_id, tmux_session_name.as_deref(), reason).await;
     }
     result
+}
+
+/// #2374 Codex round-1 fix (HIGH-1) — identity-guarded variant for the
+/// voice handoff cancel path. Cancels the active turn on `channel_id`
+/// ONLY when its `user_message_id` matches `handoff_message_id`. An
+/// unguarded cancel from the tombstone retry path could otherwise kill
+/// an unrelated turn that happened to start on the same target channel
+/// after the original handoff turn finalized.
+///
+/// Recording the tombstone is the caller's responsibility (see
+/// [`record_voice_handoff_cancel_tombstone`]) so a tombstone can be
+/// written even when no active turn is present (HIGH-2 fix).
+pub(crate) async fn mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    handoff_message_id: MessageId,
+    reason: &str,
+) -> CancelActiveTurnResult {
+    let tmux_session_name = shared
+        .tmux_watchers
+        .channel_binding(&channel_id)
+        .map(|binding| binding.tmux_session_name)
+        .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
+    let result = shared
+        .mailbox(channel_id)
+        .cancel_active_turn_if_user_message_with_reason(handoff_message_id, reason.to_string())
+        .await;
+    #[cfg(unix)]
+    if result.token.is_some() {
+        tmux::record_recent_turn_stop(channel_id, tmux_session_name.as_deref(), reason).await;
+    }
+    result
+}
+
+/// #2374 Codex round-1 fix (HIGH-2) — record the voice handoff
+/// cancel-tombstone unconditionally when a cancel is observed for a
+/// known `handoff_message_id`. The original PR only recorded a
+/// tombstone when the target mailbox cancel returned a live token,
+/// missing the cases where the target turn had not yet started (intake
+/// race) or had already finalized. In both cases a later retry for the
+/// same handoff must still observe the tombstone and discard itself.
+pub(crate) fn record_voice_handoff_cancel_tombstone(
+    handoff_message_id: MessageId,
+    reason: impl Into<String>,
+) {
+    crate::voice::cancel_tombstone::global_store().record(handoff_message_id, reason);
 }
 
 async fn mailbox_cancel_active_turn_if_current_with_reason(
