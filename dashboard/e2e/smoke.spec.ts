@@ -1641,6 +1641,16 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
   });
 
+  test("office: desktop spatial scene exposes an accessible summary", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
+    await page.goto("/office");
+
+    const officeScene = page.getByRole("img", { name: /오피스 공간 보기|Spatial office view/ });
+    await expect(officeScene).toBeVisible({ timeout: 15000 });
+    await expect(page.locator("#office-scene-status-summary")).toContainText(/Ada Dashboard|아다 대시보드/);
+    await expect(officeScene.locator("canvas")).toHaveAttribute("aria-hidden", "true");
+  });
+
   test("home: widget order persists from storage and reset restores defaults", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
 

@@ -493,6 +493,34 @@ export default function OfficeView({
     [elapsedTick, language],
   );
   const selectedAgentLabel = selectedAgent?.alias || selectedAgent?.name_ko || selectedAgent?.name;
+  const officeSceneLabel = isKo
+    ? `오피스 공간 보기. ${departments.length}개 부서, ${agents.length}명 에이전트, 작업 중 ${workingSeatCount}명, 리뷰 ${reviewSeatCount}명, 수동 개입 ${manualCount}건.`
+    : `Spatial office view. ${departments.length} departments, ${agents.length} agents, ${workingSeatCount} working, ${reviewSeatCount} in review, ${manualCount} manual interventions.`;
+  const officeStatusSummary = useMemo(
+    () => {
+      if (agents.length === 0) {
+        return isKo ? "표시할 에이전트가 없습니다." : "No agents to display.";
+      }
+      return agents
+        .map((agent) => {
+          const agentLabel = agent.name_ko || agent.name || agent.alias || agent.role_id;
+          const status = getSeatStatusMeta(
+            seatStatusByAgent.get(agent.id) ?? "idle",
+            isKo,
+          ).label;
+          const warning = manualInterventionByAgent.has(agent.id)
+            ? (isKo ? "수동 개입 필요" : "manual intervention needed")
+            : null;
+          const card = primaryCardByAgent.get(agent.id);
+          const cardLabel = card?.github_issue_number
+            ? `#${card.github_issue_number}`
+            : card?.title ?? null;
+          return [agentLabel, status, warning, cardLabel].filter(Boolean).join(" · ");
+        })
+        .join(". ");
+    },
+    [agents, isKo, manualInterventionByAgent, primaryCardByAgent, seatStatusByAgent],
+  );
 
   return (
     <div
@@ -557,7 +585,17 @@ export default function OfficeView({
                 }}
               >
                 <div className="relative min-h-[28.75rem] overflow-hidden">
-                  <div ref={containerRef} className="min-h-[28.75rem] w-full" style={{ imageRendering: "pixelated" }} />
+                  <p id="office-scene-status-summary" className="sr-only">
+                    {officeStatusSummary}
+                  </p>
+                  <div
+                    ref={containerRef}
+                    role="img"
+                    aria-label={officeSceneLabel}
+                    aria-describedby="office-scene-status-summary"
+                    className="min-h-[28.75rem] w-full"
+                    style={{ imageRendering: "pixelated" }}
+                  />
                   <OfficeManualWarningOverlay
                     entries={manualWarningEntries}
                     isKo={isKo}
