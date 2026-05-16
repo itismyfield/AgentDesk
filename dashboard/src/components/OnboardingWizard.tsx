@@ -21,92 +21,92 @@ import {
 
 const COMMAND_PROVIDERS = ["claude", "codex", "gemini", "opencode", "qwen"] as const;
 
+const PROVIDER_CONFIG = {
+  claude: {
+    suffix: "cc",
+    label: "Claude",
+    cliName: "Claude Code",
+    installHintKo: "설치: npm install -g @anthropic-ai/claude-code",
+    installHintEn: "Install: npm install -g @anthropic-ai/claude-code",
+    loginHintKo: "로그인: claude login",
+    loginHintEn: "Login: claude login",
+    loginCommand: "claude login",
+  },
+  codex: {
+    suffix: "cdx",
+    label: "Codex",
+    cliName: "Codex CLI",
+    installHintKo: "설치: npm install -g @openai/codex",
+    installHintEn: "Install: npm install -g @openai/codex",
+    loginHintKo: "로그인: codex login",
+    loginHintEn: "Login: codex login",
+    loginCommand: "codex login",
+  },
+  gemini: {
+    suffix: "gm",
+    label: "Gemini",
+    cliName: "Gemini CLI",
+    installHintKo: "설치: npm install -g @google/gemini-cli",
+    installHintEn: "Install: npm install -g @google/gemini-cli",
+    loginHintKo: "로그인: gemini",
+    loginHintEn: "Login: gemini",
+    loginCommand: "gemini",
+  },
+  opencode: {
+    suffix: "oc",
+    label: "OpenCode",
+    cliName: "OpenCode",
+    installHintKo: "설치: npm install -g opencode-ai",
+    installHintEn: "Install: npm install -g opencode-ai",
+    loginHintKo: "로그인: opencode 실행 후 provider 인증 확인",
+    loginHintEn: "Login: run opencode, then verify provider auth",
+    loginCommand: "opencode",
+  },
+  qwen: {
+    suffix: "qw",
+    label: "Qwen",
+    cliName: "Qwen Code",
+    installHintKo: "설치: npm install -g @qwen-code/qwen-code@latest",
+    installHintEn: "Install: npm install -g @qwen-code/qwen-code@latest",
+    loginHintKo: "로그인: qwen 실행 후 /auth",
+    loginHintEn: "Login: run qwen, then /auth",
+    loginCommand: "qwen -> /auth",
+  },
+} as const satisfies Record<CommandBotEntry["provider"], {
+  suffix: string;
+  label: string;
+  cliName: string;
+  installHintKo: string;
+  installHintEn: string;
+  loginHintKo: string;
+  loginHintEn: string;
+  loginCommand: string;
+}>;
+
 function providerSuffix(provider: CommandBotEntry["provider"]) {
-  switch (provider) {
-    case "claude":
-      return "cc";
-    case "codex":
-      return "cdx";
-    case "gemini":
-      return "gm";
-    case "opencode":
-      return "oc";
-    case "qwen":
-      return "qw";
-  }
+  return PROVIDER_CONFIG[provider].suffix;
 }
 
 function providerLabel(provider: CommandBotEntry["provider"]) {
-  switch (provider) {
-    case "claude":
-      return "Claude";
-    case "codex":
-      return "Codex";
-    case "gemini":
-      return "Gemini";
-    case "opencode":
-      return "OpenCode";
-    case "qwen":
-      return "Qwen";
-  }
+  return PROVIDER_CONFIG[provider].label;
 }
 
 function providerCliName(provider: CommandBotEntry["provider"]) {
-  switch (provider) {
-    case "claude":
-      return "Claude Code";
-    case "codex":
-      return "Codex CLI";
-    case "gemini":
-      return "Gemini CLI";
-    case "opencode":
-      return "OpenCode";
-    case "qwen":
-      return "Qwen Code";
-  }
+  return PROVIDER_CONFIG[provider].cliName;
 }
 
 function providerInstallHint(provider: CommandBotEntry["provider"], isKo: boolean) {
-  switch (provider) {
-    case "claude":
-      return isKo ? "설치: npm install -g @anthropic-ai/claude-code" : "Install: npm install -g @anthropic-ai/claude-code";
-    case "codex":
-      return isKo ? "설치: npm install -g @openai/codex" : "Install: npm install -g @openai/codex";
-    case "gemini":
-      return isKo ? "설치: npm install -g @google/gemini-cli" : "Install: npm install -g @google/gemini-cli";
-    case "opencode":
-      return isKo ? "설치: npm install -g opencode-ai" : "Install: npm install -g opencode-ai";
-    case "qwen":
-      return isKo ? "설치: npm install -g @qwen-code/qwen-code@latest" : "Install: npm install -g @qwen-code/qwen-code@latest";
-  }
+  const config = PROVIDER_CONFIG[provider];
+  return isKo ? config.installHintKo : config.installHintEn;
 }
 
 function providerLoginHint(provider: CommandBotEntry["provider"], isKo: boolean) {
-  switch (provider) {
-    case "claude":
-      return isKo ? "로그인: claude login" : "Login: claude login";
-    case "codex":
-      return isKo ? "로그인: codex login" : "Login: codex login";
-    case "gemini":
-      return isKo ? "로그인: gemini" : "Login: gemini";
-    case "opencode":
-      return isKo ? "로그인: opencode 실행 후 provider 인증 확인" : "Login: run opencode, then verify provider auth";
-    case "qwen":
-      return isKo ? "로그인: qwen 실행 후 /auth" : "Login: run qwen, then /auth";
-  }
+  const config = PROVIDER_CONFIG[provider];
+  return isKo ? config.loginHintKo : config.loginHintEn;
 }
 
 function providerLoginCommand(provider: CommandBotEntry["provider"]) {
-  switch (provider) {
-    case "gemini":
-      return "gemini";
-    case "opencode":
-      return "opencode";
-    case "qwen":
-      return "qwen -> /auth";
-    default:
-      return `${provider} login`;
-  }
+  return PROVIDER_CONFIG[provider].loginCommand;
 }
 
 interface Guild {
