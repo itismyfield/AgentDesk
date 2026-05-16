@@ -2359,16 +2359,9 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         None
     };
-    // Whether we should delete the durable row after handoff. We
-    // consume whenever this intake actually routes a voice announcement
-    // — including the local-store fast path — so the row cannot be
-    // re-picked-up by a peer worker after a Discord shard failover
-    // re-delivers the message_create event.
-    //
-    // We capture this before later branches null out
-    // `durable_voice_announcement` (e.g. announce-bot id mismatch);
-    // we only set it once we know we'll actually proceed with intake.
-    let mut durable_pending_consume = false;
+    // Capture source flags before the .or() chain below moves the options.
+    let had_local_store_entry = stored_voice_announcement.is_some();
+    let had_durable_peek = durable_voice_announcement.is_some();
     let reconstructed_voice_announcement = stored_voice_announcement.or(durable_voice_announcement);
     let has_reconstructed_voice_announcement = reconstructed_voice_announcement.is_some();
     let announce_bot_id = if has_reconstructed_voice_announcement || has_parsed_voice_announcement {
@@ -2400,10 +2393,45 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
     }
     let is_voice_announcement = voice_announcement.is_some();
-    // Now that author validation has accepted (or rejected) the announcement,
-    // mark the durable row for consumption iff we are about to route it.
+    // #2209 v3 review — the atomic durable claim is the FIRST
+    // side-effectful gate for voice-announce intake. We claim
+    // unconditionally for any voice-announce intake (durable peek
+    // path AND local-store fast path) so a peer process can never
+    // run side effects for a turn we already own and vice versa.
+    //
+    // Producer ordering (see voice_barge_in.rs) guarantees the
+    // durable row is committed BEFORE the local store is published,
+    // so by the time any process intakes a voice announce message,
+    // a claimable durable row exists. The only `Skipped` case in
+    // practice is single-node dev with no pg pool, where the local
+    // store's `take()` semantics already provide single-consumer
+    // ownership inside the process.
     if is_voice_announcement {
-        durable_pending_consume = true;
+        let outcome = consume_durable_voice_announcement_after_handoff(
+            shared.pg_pool.as_ref(),
+            user_msg_id,
+        )
+        .await;
+        match outcome {
+            DurableConsumeOutcome::Claimed => {
+                // Authoritative owner — proceed with intake.
+            }
+            DurableConsumeOutcome::AlreadyClaimedOrExpired => {
+                tracing::warn!(
+                    event = "voice_announce_durable_claim_lost",
+                    channel_id = channel_id.get(),
+                    message_id = user_msg_id.get(),
+                    had_local_store_entry,
+                    had_durable_peek,
+                    "aborting intake — peer worker already claimed this voice announce (or TTL expired between peek and consume); no side effects performed"
+                );
+                return Ok(());
+            }
+            DurableConsumeOutcome::Skipped => {
+                // No pg pool — single-node dev. Local store `take`
+                // is the ownership token.
+            }
+        }
     }
     let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
         let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
@@ -2456,25 +2484,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             .try_handle_voice_transcript_announcement(shared, channel_id, announcement)
             .await
     {
-        // Barge-in successfully absorbed the announcement — this counts
-        // as a successful hand-off, so the durable row may be claimed.
-        // The atomic claim guards against a sibling worker that already
-        // routed this turn (#2209 finding #1, ship-blocker review).
-        if durable_pending_consume {
-            let outcome = consume_durable_voice_announcement_after_handoff(
-                shared.pg_pool.as_ref(),
-                user_msg_id,
-            )
-            .await;
-            if matches!(outcome, DurableConsumeOutcome::AlreadyClaimedOrExpired) {
-                tracing::warn!(
-                    event = "voice_announce_durable_claim_lost",
-                    channel_id = channel_id.get(),
-                    message_id = user_msg_id.get(),
-                    "barge-in absorbed announcement but durable claim was lost — peer worker likely already routed; not retrying"
-                );
-            }
-        }
+        // Durable row already claimed at the top of this handler.
+        // No additional cleanup needed here.
         return Ok(());
     }
     if !is_voice_announcement
@@ -4697,27 +4708,10 @@ pub(in crate::services::discord) async fn handle_text_message(
         tracing::info!("  [{ts}]   ⚠ inflight state save failed: {e}");
     }
 
-    // #2209 finding #2 + post-v2 review — atomic ownership claim at the
-    // dispatch commit point. The durable row was peeked (non-destructive)
-    // at intake; here we claim it via UPDATE … RETURNING. If the claim
-    // is lost (peer worker already claimed, or TTL expired between peek
-    // and now), abort dispatch rather than risk duplicating the turn.
-    if durable_pending_consume {
-        let outcome = consume_durable_voice_announcement_after_handoff(
-            shared.pg_pool.as_ref(),
-            user_msg_id,
-        )
-        .await;
-        if matches!(outcome, DurableConsumeOutcome::AlreadyClaimedOrExpired) {
-            tracing::warn!(
-                event = "voice_announce_durable_claim_lost",
-                channel_id = channel_id.get(),
-                message_id = user_msg_id.get(),
-                "aborting dispatch — peer worker already claimed this voice announce (or TTL expired between peek and consume)"
-            );
-            return Ok(());
-        }
-    }
+    // Durable announce-meta row was already claimed at the top of
+    // this handler (before any side effects). No further consume is
+    // required here — reaching this point means we are the
+    // authoritative owner of this turn.
 
     // Create channel for streaming
     let (tx, rx) = mpsc::channel();
