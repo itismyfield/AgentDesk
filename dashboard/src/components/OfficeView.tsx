@@ -633,11 +633,148 @@ export default function OfficeView({
                       : (isKo ? "클릭해서 상세 보기" : "Click to inspect details")}
                   </span>
                 </div>
+                <OfficeDesktopAgentAccessList
+                  agents={agents}
+                  isKo={isKo}
+                  manualInterventionByAgent={manualInterventionByAgent}
+                  onSelectAgent={handleSelectAgent}
+                  primaryCardByAgent={primaryCardByAgent}
+                  seatStatusByAgent={seatStatusByAgent}
+                />
               </SurfaceCard>
             )}
           </div>
 
         </div>
+      </div>
+    </div>
+  );
+}
+
+function sortOfficeAgentsByStatus(
+  agents: Agent[],
+  manualInterventionByAgent: Map<string, OfficeManualIntervention>,
+  seatStatusByAgent: Map<string, OfficeSeatStatus>,
+): Agent[] {
+  return [...agents].sort((a, b) => {
+    const leftManual = manualInterventionByAgent.has(a.id) ? 0 : 1;
+    const rightManual = manualInterventionByAgent.has(b.id) ? 0 : 1;
+    if (leftManual !== rightManual) return leftManual - rightManual;
+
+    const order: Record<OfficeSeatStatus, number> = {
+      review: 0,
+      working: 1,
+      idle: 2,
+      offline: 3,
+    };
+    const leftStatus = seatStatusByAgent.get(a.id) ?? "idle";
+    const rightStatus = seatStatusByAgent.get(b.id) ?? "idle";
+    const statusDiff = (order[leftStatus] ?? 9) - (order[rightStatus] ?? 9);
+    if (statusDiff !== 0) return statusDiff;
+    return (a.alias || a.name_ko || a.name).localeCompare(b.alias || b.name_ko || b.name);
+  });
+}
+
+function OfficeDesktopAgentAccessList({
+  agents,
+  isKo,
+  onSelectAgent,
+  manualInterventionByAgent,
+  primaryCardByAgent,
+  seatStatusByAgent,
+}: {
+  agents: Agent[];
+  isKo: boolean;
+  onSelectAgent?: (agent: Agent) => void;
+  manualInterventionByAgent: Map<string, OfficeManualIntervention>;
+  primaryCardByAgent: Map<string, KanbanCard>;
+  seatStatusByAgent: Map<string, OfficeSeatStatus>;
+}) {
+  const sorted = sortOfficeAgentsByStatus(agents, manualInterventionByAgent, seatStatusByAgent);
+  if (sorted.length === 0) return null;
+
+  return (
+    <div
+      className="border-t px-4 py-3"
+      style={{ borderColor: "color-mix(in srgb, var(--th-border) 62%, transparent)" }}
+    >
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <span
+          className="text-[11px] font-semibold uppercase tracking-[0.14em]"
+          style={{ color: "var(--th-text-muted)" }}
+        >
+          {isKo ? "에이전트 상태" : "Agent Status"}
+        </span>
+        <span className="text-[11px]" style={{ color: "var(--th-text-faint)" }}>
+          {isKo ? `${sorted.length}명` : `${sorted.length} agents`}
+        </span>
+      </div>
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+        {sorted.map((agent) => {
+          const status = seatStatusByAgent.get(agent.id) ?? "idle";
+          const statusMeta = getSeatStatusMeta(status, isKo);
+          const manualIntervention = manualInterventionByAgent.get(agent.id) ?? null;
+          const primaryCard = primaryCardByAgent.get(agent.id) ?? null;
+          const agentLabel = agent.alias || agent.name_ko || agent.name;
+          const detail = manualIntervention?.reason
+            ? previewManualReason(manualIntervention.reason)
+            : previewCardTitle(primaryCard?.title ?? null);
+          return (
+            <button
+              key={agent.id}
+              type="button"
+              onClick={() => onSelectAgent?.(agent)}
+              className="min-w-0 rounded-2xl border px-3 py-2.5 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+              style={{
+                background: manualIntervention
+                  ? "color-mix(in srgb, var(--th-badge-amber-bg) 48%, var(--th-card-bg) 52%)"
+                  : "color-mix(in srgb, var(--th-bg-surface) 88%, transparent)",
+                borderColor: manualIntervention
+                  ? "color-mix(in srgb, var(--th-accent-warn) 28%, var(--th-border) 72%)"
+                  : "color-mix(in srgb, var(--th-border) 68%, transparent)",
+                color: "var(--th-text-primary)",
+                outlineColor: "var(--th-focus-ring)",
+              }}
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <AgentAvatar agent={agent} agents={agents} size={24} rounded="xl" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold">{agentLabel}</span>
+                  <span className="mt-1 flex flex-wrap items-center gap-1.5">
+                    <span
+                      className="inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium"
+                      style={{
+                        background: statusMeta.background,
+                        color: statusMeta.textColor,
+                      }}
+                    >
+                      {statusMeta.label}
+                    </span>
+                    {manualIntervention ? (
+                      <span
+                        className="inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium"
+                        style={{
+                          background: "color-mix(in srgb, var(--th-badge-amber-bg) 72%, transparent)",
+                          color: "var(--th-accent-warn)",
+                        }}
+                      >
+                        {isKo ? "수동 개입" : "Manual"}
+                      </span>
+                    ) : null}
+                  </span>
+                </span>
+              </span>
+              {detail ? (
+                <span
+                  className="mt-2 block truncate text-[11px]"
+                  style={{ color: "var(--th-text-muted)" }}
+                >
+                  {detail}
+                </span>
+              ) : null}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -1002,23 +1139,7 @@ function MobileAgentStatusGrid({
   primaryCardByAgent: Map<string, KanbanCard>;
   seatStatusByAgent: Map<string, OfficeSeatStatus>;
 }) {
-  const sorted = [...agents].sort((a, b) => {
-    const leftManual = manualInterventionByAgent.has(a.id) ? 0 : 1;
-    const rightManual = manualInterventionByAgent.has(b.id) ? 0 : 1;
-    if (leftManual !== rightManual) return leftManual - rightManual;
-
-    const order: Record<OfficeSeatStatus, number> = {
-      review: 0,
-      working: 1,
-      idle: 2,
-      offline: 3,
-    };
-    const leftStatus = seatStatusByAgent.get(a.id) ?? "idle";
-    const rightStatus = seatStatusByAgent.get(b.id) ?? "idle";
-    const statusDiff = (order[leftStatus] ?? 9) - (order[rightStatus] ?? 9);
-    if (statusDiff !== 0) return statusDiff;
-    return (a.alias || a.name_ko || a.name).localeCompare(b.alias || b.name_ko || b.name);
-  });
+  const sorted = sortOfficeAgentsByStatus(agents, manualInterventionByAgent, seatStatusByAgent);
 
   const [expandedWarningAgentId, setExpandedWarningAgentId] = useState<string | null>(null);
   const manualCount = sorted.reduce(
