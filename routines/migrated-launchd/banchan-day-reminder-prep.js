@@ -18,7 +18,11 @@
 // NO_REPLY on days when 반찬데이 is not relevant. This routine preserves that
 // behavior unchanged by delegating to the same shell entrypoint.
 //
-// PARALLEL-RUN SAFETY: launchd plist remains active during verification.
+// PARALLEL-RUN SAFETY: Calendar-gated. On non-반찬데이 days both launchd and
+// the routine return NO_REPLY (no Discord side effect); on 반찬데이 the
+// recipient sees two identical reminders during the verification window —
+// acceptable for this category since the message is a low-noise prep
+// reminder. After 24h parity, remove the launchd plist.
 agentdesk.routines.register({
   name: "banchan-day-reminder-prep",
   tick(ctx) {

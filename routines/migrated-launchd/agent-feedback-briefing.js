@@ -13,9 +13,10 @@
 //     "timeout_secs": 1800
 //   }
 //
-// PARALLEL-RUN SAFETY: For the 24h verification window after attach, the launchd
-// plist is still active. Both fire — the operator de-duplicates after observing
-// matching payload. Do not remove the launchd plist until ≥24h clean.
+// CUTOVER SAFETY: This job sends to Discord. Use the stage-paused → cutover
+// protocol in docs/launchd-to-routine-migration-plan.md (attach without
+// schedule → pause → PATCH schedule → bootout launchd label → resume).
+// True parallel-running would duplicate the Discord message.
 agentdesk.routines.register({
   name: "agent-feedback-briefing",
   tick(ctx) {

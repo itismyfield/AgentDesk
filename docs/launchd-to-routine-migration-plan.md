@@ -17,18 +17,18 @@ target Discord channel, skill path, and any side effects unchanged.
 
 | # | launchd label | routine script_ref | cron (KST) | agent_id | status |
 |---|---|---|---|---|---|
-| 1 | `com.itismyfield.agent-feedback-briefing` | `migrated-launchd/agent-feedback-briefing.js` | `5 19 * * *` | `ch-pmd` | parallel-running |
-| 2 | `com.itismyfield.ai-integrated-briefing` | `migrated-launchd/ai-integrated-briefing.js` | `10 9,21 * * *` | `project-newsbot` | parallel-running |
-| 3 | `com.itismyfield.banchan-day-reminder.prep` | `migrated-launchd/banchan-day-reminder-prep.js` | `0 8 * * *` | `family-routine` | parallel-running |
-| 4 | `com.itismyfield.banchan-day-reminder.cook` | `migrated-launchd/banchan-day-reminder-cook.js` | `0 18 * * *` | `family-routine` | parallel-running |
-| 5 | `com.itismyfield.cookingheart-daily-briefing` | `migrated-launchd/cookingheart-daily-briefing.js` | `0 19 * * *` | `project-agentdesk` | parallel-running |
-| 6 | `com.itismyfield.family-morning-briefing.obujang` | `migrated-launchd/family-morning-briefing-obujang.js` | `30 6 * * *` | `personal-obiseo` | parallel-running |
-| 7 | `com.itismyfield.family-morning-briefing.yohoejang` | `migrated-launchd/family-morning-briefing-yohoejang.js` | `31 6 * * *` | `personal-yobiseo` | parallel-running |
+| 1 | `com.itismyfield.agent-feedback-briefing` | `migrated-launchd/agent-feedback-briefing.js` | `5 19 * * *` | `ch-pmd` | cutover (stage-paused) |
+| 2 | `com.itismyfield.ai-integrated-briefing` | `migrated-launchd/ai-integrated-briefing.js` | `10 9,21 * * *` | `project-newsbot` | cutover (stage-paused) |
+| 3 | `com.itismyfield.banchan-day-reminder.prep` | `migrated-launchd/banchan-day-reminder-prep.js` | `0 8 * * *` | `family-routine` | parallel-run (calendar-gated) |
+| 4 | `com.itismyfield.banchan-day-reminder.cook` | `migrated-launchd/banchan-day-reminder-cook.js` | `0 18 * * *` | `family-routine` | parallel-run (calendar-gated) |
+| 5 | `com.itismyfield.cookingheart-daily-briefing` | `migrated-launchd/cookingheart-daily-briefing.js` | `0 19 * * *` | `project-agentdesk` | cutover (stage-paused) |
+| 6 | `com.itismyfield.family-morning-briefing.obujang` | `migrated-launchd/family-morning-briefing-obujang.js` | `30 6 * * *` | `personal-obiseo` | cutover (stage-paused) |
+| 7 | `com.itismyfield.family-morning-briefing.yohoejang` | `migrated-launchd/family-morning-briefing-yohoejang.js` | `31 6 * * *` | `personal-yobiseo` | cutover (stage-paused) |
 | 8 | `com.itismyfield.memento-daily-report` | `migrated-launchd/memento-daily-report.js` | `0 9 * * *` | **TODO** | scripts-only (not attached) |
 | 9 | `com.itismyfield.memento-hygiene` | `migrated-launchd/memento-hygiene.js` | `0 6 * * *` | **TODO** | scripts-only (not attached) |
 | 10 | `com.itismyfield.memory-merge` | `migrated-launchd/memory-merge.js` | `0 6 * * *` | **TODO** | scripts-only (not attached) |
-| 11 | `com.itismyfield.token-daily-report` | `migrated-launchd/token-daily-report.js` | `0 7 * * *` | `token-manager` | parallel-running |
-| 12 | `com.agentdesk.queue-stability-batch` | `migrated-launchd/queue-stability-batch.js` | `0 4 * * *` | `project-agentdesk` | parallel-running |
+| 11 | `com.itismyfield.token-daily-report` | `migrated-launchd/token-daily-report.js` | `0 7 * * *` | `token-manager` | cutover (stage-paused) |
+| 12 | `com.agentdesk.queue-stability-batch` | `migrated-launchd/queue-stability-batch.js` | `0 4 * * *` | `project-agentdesk` | parallel-run (idempotent) |
 
 Jobs 8/9/10 have no agent owner yet (the issue marks them `(담당자 확정
 필요)`). The routine scripts ship for staging, but **do not attach them via
@@ -43,38 +43,27 @@ launchd `StartCalendarInterval` wall-clock times exactly. DST is not a
 factor in Asia/Seoul (KST is UTC+9 year-round, no DST), so no off-by-one
 hour shift is possible between launchd and the routine scheduler.
 
-## Operator: attach routines (once dcserver is up)
+## Operator: attach routines (once dcserver is up + scripts mirrored)
 
-Run the following on whichever node is the cluster leader. The
-`agentfactory` workspace (or any workspace with a checked-out repo that
-includes `routines/migrated-launchd/`) must be deployed before the script
-loader will see the new files.
+Run on whichever node is the cluster leader. The workspace containing
+`routines/migrated-launchd/` must be deployed before the script loader
+will see the new files. Do **not** run any of the attach commands below
+until the Cross-leader-prerequisite step has mirrored the
+`~/.local/bin/*.sh` entrypoints to every node eligible to hold the
+routine-runtime lease.
+
+The attach commands are split into three groups: Group A
+(parallel-run-safe, attach with schedule), Group B (cutover via
+stage-paused — attach without schedule, then PATCH schedule at cutover
+time), and Group C (do not attach until agent_id is decided).
+
+### Group A — attach with schedule (parallel-run safe: 3, 4, 12)
 
 ```bash
 REL_PORT="${AGENTDESK_REL_PORT:-8791}"
 API="http://127.0.0.1:${REL_PORT}"
 
-# Job 1 — agent-feedback-briefing
-curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "migrated-launchd/agent-feedback-briefing.js",
-  "name": "agent-feedback-briefing",
-  "agent_id": "ch-pmd",
-  "execution_strategy": "fresh",
-  "schedule": "5 19 * * *",
-  "timeout_secs": 1800
-}'
-
-# Job 2 — ai-integrated-briefing
-curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "migrated-launchd/ai-integrated-briefing.js",
-  "name": "ai-integrated-briefing",
-  "agent_id": "project-newsbot",
-  "execution_strategy": "fresh",
-  "schedule": "10 9,21 * * *",
-  "timeout_secs": 1800
-}'
-
-# Job 3 — banchan-day-reminder-prep
+# Job 3 — banchan-day-reminder-prep (calendar-gated, NO_REPLY on non-반찬데이)
 curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
   "script_ref": "migrated-launchd/banchan-day-reminder-prep.js",
   "name": "banchan-day-reminder-prep",
@@ -84,7 +73,7 @@ curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
   "timeout_secs": 900
 }'
 
-# Job 4 — banchan-day-reminder-cook
+# Job 4 — banchan-day-reminder-cook (calendar-gated, NO_REPLY on non-반찬데이)
 curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
   "script_ref": "migrated-launchd/banchan-day-reminder-cook.js",
   "name": "banchan-day-reminder-cook",
@@ -94,47 +83,7 @@ curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
   "timeout_secs": 900
 }'
 
-# Job 5 — cookingheart-daily-briefing
-curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "migrated-launchd/cookingheart-daily-briefing.js",
-  "name": "cookingheart-daily-briefing",
-  "agent_id": "project-agentdesk",
-  "execution_strategy": "fresh",
-  "schedule": "0 19 * * *",
-  "timeout_secs": 1800
-}'
-
-# Job 6 — family-morning-briefing-obujang
-curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "migrated-launchd/family-morning-briefing-obujang.js",
-  "name": "family-morning-briefing-obujang",
-  "agent_id": "personal-obiseo",
-  "execution_strategy": "fresh",
-  "schedule": "30 6 * * *",
-  "timeout_secs": 1800
-}'
-
-# Job 7 — family-morning-briefing-yohoejang
-curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "migrated-launchd/family-morning-briefing-yohoejang.js",
-  "name": "family-morning-briefing-yohoejang",
-  "agent_id": "personal-yobiseo",
-  "execution_strategy": "fresh",
-  "schedule": "31 6 * * *",
-  "timeout_secs": 1800
-}'
-
-# Job 11 — token-daily-report
-curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "migrated-launchd/token-daily-report.js",
-  "name": "token-daily-report",
-  "agent_id": "token-manager",
-  "execution_strategy": "fresh",
-  "schedule": "0 7 * * *",
-  "timeout_secs": 1800
-}'
-
-# Job 12 — queue-stability-batch
+# Job 12 — queue-stability-batch (script has idempotency guard)
 curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
   "script_ref": "migrated-launchd/queue-stability-batch.js",
   "name": "queue-stability-batch",
@@ -143,19 +92,95 @@ curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
   "schedule": "0 4 * * *",
   "timeout_secs": 3600
 }'
-
-# Jobs 8, 9, 10 — DO NOT ATTACH until agent_id is set.
-# When ready, replace AGENT_ID below and POST.
-#
-# curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-#   "script_ref": "migrated-launchd/memento-daily-report.js",
-#   "name": "memento-daily-report",
-#   "agent_id": "AGENT_ID",
-#   "execution_strategy": "fresh",
-#   "schedule": "0 9 * * *",
-#   "timeout_secs": 1800
-# }'
 ```
+
+### Group B — stage-paused attach without schedule (cutover jobs: 1, 2, 5, 6, 7, 11)
+
+These have user-visible side effects (Discord messages / DMs). They are
+attached **without** `schedule` so the inserted row's `next_due_at`
+stays null and routine-runtime cannot fire them. Immediately pause the
+row as belt-and-suspenders, then follow the
+**Stage-paused → cutover protocol** below to PATCH the real schedule at
+cutover time.
+
+```bash
+# Capture the routine id from each POST response (jq .routine.id).
+
+# Job 1 — agent-feedback-briefing (cutover schedule: 5 19 * * *)
+ID1=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/agent-feedback-briefing.js",
+  "name": "agent-feedback-briefing",
+  "agent_id": "ch-pmd",
+  "execution_strategy": "fresh",
+  "timeout_secs": 1800
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID1/pause" -X POST
+
+# Job 2 — ai-integrated-briefing (cutover schedule: 10 9,21 * * *)
+ID2=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/ai-integrated-briefing.js",
+  "name": "ai-integrated-briefing",
+  "agent_id": "project-newsbot",
+  "execution_strategy": "fresh",
+  "timeout_secs": 1800
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID2/pause" -X POST
+
+# Job 5 — cookingheart-daily-briefing (cutover schedule: 0 19 * * *)
+ID5=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/cookingheart-daily-briefing.js",
+  "name": "cookingheart-daily-briefing",
+  "agent_id": "project-agentdesk",
+  "execution_strategy": "fresh",
+  "timeout_secs": 1800
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID5/pause" -X POST
+
+# Job 6 — family-morning-briefing-obujang (cutover schedule: 30 6 * * *)
+ID6=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/family-morning-briefing-obujang.js",
+  "name": "family-morning-briefing-obujang",
+  "agent_id": "personal-obiseo",
+  "execution_strategy": "fresh",
+  "timeout_secs": 1800
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID6/pause" -X POST
+
+# Job 7 — family-morning-briefing-yohoejang (cutover schedule: 31 6 * * *)
+ID7=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/family-morning-briefing-yohoejang.js",
+  "name": "family-morning-briefing-yohoejang",
+  "agent_id": "personal-yobiseo",
+  "execution_strategy": "fresh",
+  "timeout_secs": 1800
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID7/pause" -X POST
+
+# Job 11 — token-daily-report (cutover schedule: 0 7 * * *)
+ID11=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/token-daily-report.js",
+  "name": "token-daily-report",
+  "agent_id": "token-manager",
+  "execution_strategy": "fresh",
+  "timeout_secs": 1800
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID11/pause" -X POST
+
+# Verify all six are paused:
+for ID in "$ID1" "$ID2" "$ID5" "$ID6" "$ID7" "$ID11"; do
+  curl -sf "$API/api/routines/$ID" | jq -r '.routine | "\(.id) \(.status)"'
+done
+# Expected: every row reports "paused".
+```
+
+### Group C — DO NOT ATTACH (jobs 8, 9, 10 — agent_id TBD)
+
+The launchd plists for memento-daily-report, memento-hygiene, and
+memory-merge keep firing while the agent owner is decided. Once an
+`agent_id` is chosen, attach via the Group B pattern (no schedule, then
+pause, then PATCH schedule at cutover) — these jobs mutate external
+state (memento store / merged memory files), so true parallel-run is
+not safe.
 
 ## Cross-leader prerequisite — script availability
 
@@ -166,23 +191,27 @@ wherever the workspace is deployed. Routines invoke the absolute path,
 so a routine that fires while the `routine-runtime` lease is held by a
 node missing the script will fail.
 
-Before attaching any of jobs 1–11, the operator must do **one** of:
+Before attaching any of jobs 1–11, the operator **must mirror the
+scripts to every node eligible to hold the `routine-runtime` lease**:
 
-- (recommended) `rsync -av mac-mini:/Users/itismyfield/.local/bin/{agent-feedback-briefing,ai-integrated-briefing,banchan-day-reminder-prep,banchan-day-reminder-cook,cookingheart-daily-briefing,family-morning-briefing-obujang,family-morning-briefing-yohoejang,memento-daily-report,memento-hygiene,memory-merge,token-daily-report,run-claude-message-job}.sh /Users/itismyfield/.local/bin/`
-  on every node eligible to hold the `routine-runtime` lease (today:
-  mac-book), and confirm `ls -l ~/.local/bin/*.sh` matches on both
-  hosts; **or**
-- pin the `routine-runtime` worker to mac-mini for the duration of the
-  parallel-run window via cluster config (`execution_scope` /
-  preferred-leader pin) so only mac-mini ever holds the lease until the
-  scripts are mirrored.
+```bash
+# Run from mac-book (or whichever non-mac-mini leader candidate exists):
+rsync -av mac-mini:/Users/itismyfield/.local/bin/{agent-feedback-briefing,ai-integrated-briefing,banchan-day-reminder-prep,banchan-day-reminder-cook,cookingheart-daily-briefing,family-morning-briefing-obujang,family-morning-briefing-yohoejang,memento-daily-report,memento-hygiene,memory-merge,token-daily-report,run-claude-message-job}.sh /Users/itismyfield/.local/bin/
+chmod +x /Users/itismyfield/.local/bin/*.sh
+# Verify parity:
+ssh mac-mini 'ls -l ~/.local/bin/*.sh' | sort
+ls -l /Users/itismyfield/.local/bin/*.sh | sort
+```
 
-After the §1 lease-succession bug fix lands, the routine system is
-**capable** of running these jobs from either leader; the entrypoints
-just have to be present on the leader at fire time. Until the scripts
-are moved into the repo (or `~/.adk/release/bin/` and deployed via
-`adk-release`), this is a host-local dependency the operator must keep
-in sync.
+The two listings must match before any of jobs 1–11 is attached.
+
+No supported `preferred-leader` / `execution_scope` knob currently exists
+to pin `routine-runtime` to mac-mini (`WORKER_SPECS` declares it
+hardcoded `LeaderOnly`; the only way to keep the lease on mac-mini is to
+keep mac-book down or out of the cluster). Mirroring scripts is the
+only safe option. Long-term, move the entrypoints into the repo (e.g.
+`scripts/launchd-migrated/`) and have `adk-release` deploy them so the
+release artifact is the source of truth.
 
 ## Verification window (≥24 hours)
 
@@ -193,21 +222,66 @@ protocol instead:
 
 ### Stage-paused → cutover protocol (jobs with Discord side effects: 1, 2, 5, 6, 7, 11)
 
-1. POST `/api/routines` to create each row (per the attach commands
-   above).
-2. Immediately `POST /api/routines/<id>/pause` so the routine is
-   registered but does not fire. The launchd plist remains the sole
-   sender.
-3. On the cutover day for each job, SSH mac-mini and run
+`POST /api/routines` always inserts the row as `status='enabled'` with a
+computed `next_due_at`; there is no create-as-paused flag. Calling pause
+in a second request opens a race: if the attach lands within one minute
+of the cron's fire time, `routine-runtime` can claim the lease and send
+the message before the pause arrives, producing a duplicate Discord
+fire alongside the still-loaded launchd plist. To eliminate that race,
+**attach without a schedule first**, then pause, then PATCH the schedule
+in:
+
+1. Attach the row **with no schedule** so the routine-runtime cannot
+   pick a `next_due_at`:
+   ```bash
+   curl -sf "$API/api/routines" -X POST \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "script_ref": "migrated-launchd/cookingheart-daily-briefing.js",
+       "name": "cookingheart-daily-briefing",
+       "agent_id": "project-agentdesk",
+       "execution_strategy": "fresh",
+       "timeout_secs": 1800
+     }'
+   ```
+   Note `schedule` is omitted — the routine has no `next_due_at`, so it
+   cannot fire.
+2. Pause the routine (belt-and-suspenders against any background
+   resume that wrote a `next_due_at`):
+   ```bash
+   curl -sf "$API/api/routines/<id>/pause" -X POST
+   ```
+3. PATCH the schedule in (still paused; `next_due_at` is computed but
+   the lease loop ignores paused rows):
+   ```bash
+   curl -sf "$API/api/routines/<id>" -X PATCH \
+     -H 'Content-Type: application/json' \
+     -d '{"schedule":"0 19 * * *"}'
+   ```
+4. On the cutover day for each job, SSH mac-mini and run
    `launchctl bootout user/$(id -u)/<launchd-label>` to stop launchd
    firing **for that label only**. Do not delete the plist file yet.
-4. `POST /api/routines/<id>/resume` to enable the routine.
-5. Watch `GET /api/routines/<id>/runs?limit=10` and the Discord target
+5. Resume the routine. The resume route uses
+   `Json<ResumeRoutineBody>`; a bare POST without
+   `Content-Type: application/json` and a body returns 400. Use:
+   ```bash
+   curl -sf "$API/api/routines/<id>/resume" -X POST \
+     -H 'Content-Type: application/json' \
+     -d '{}'
+   ```
+   (Optionally pass `{"next_due_at":"<RFC3339>"}` to force the first
+   fire time.)
+6. Watch `GET /api/routines/<id>/runs?limit=10` and the Discord target
    for the next scheduled fire to confirm the routine sends exactly one
    message with the same payload the launchd plist used to send.
-6. After 24h clean operation, delete the plist file:
+7. After 24h clean operation, delete the plist file:
    `rm ~/Library/LaunchAgents/<launchd-label>.plist`. Rollback is no
    longer one-step after this; see Rollback below.
+
+Before promoting any of these jobs to production, smoke-test the
+pause/resume curl shape against a throwaway routine to confirm both
+endpoints accept the documented body and the routine returns
+`status='enabled'` after resume.
 
 ### True parallel-run (idempotent jobs: 3, 4, 12)
 

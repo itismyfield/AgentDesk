@@ -24,7 +24,10 @@
 // routine to status=enabled. If the script requires the env var, set it via
 // the agent's environment configuration rather than per-routine.
 //
-// PARALLEL-RUN SAFETY: launchd plist remains active during verification.
+// CUTOVER SAFETY: This job mutates the 4-tier memory store. Once the operator
+// sets agent_id, use the stage-paused → cutover protocol in
+// docs/launchd-to-routine-migration-plan.md to avoid running two merges
+// back-to-back.
 agentdesk.routines.register({
   name: "memory-merge",
   tick(ctx) {

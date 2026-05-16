@@ -16,7 +16,13 @@
 // NOTE: Calendar-driven — the skill returns NO_REPLY on non-반찬데이 days. The
 // 18:00 fire is intentional and matches the original launchd cadence.
 //
-// PARALLEL-RUN SAFETY: launchd plist remains active during verification.
+// PARALLEL-RUN SAFETY: Calendar-gated. On non-반찬데이 days both launchd and
+// the routine return NO_REPLY (no Discord side effect); on 반찬데이 the
+// recipient sees two identical reminders during the verification window —
+// acceptable for this category since the message is a low-noise cook
+// reminder. After 24h parity, remove the launchd plist.
+// If duplication on 반찬데이 is unacceptable, instead use the stage-paused
+// protocol from the migration doc.
 agentdesk.routines.register({
   name: "banchan-day-reminder-cook",
   tick(ctx) {

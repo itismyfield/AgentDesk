@@ -13,9 +13,11 @@
 //     "timeout_secs": 1800
 //   }
 //
-// PARALLEL-RUN SAFETY: launchd plist remains active during verification.
-// Morning briefings have user-visible side effects (Discord DM); operator
-// must visually verify only one fire reaches the channel before removing plist.
+// CUTOVER SAFETY: This job sends a personal morning briefing to Discord. Use
+// the stage-paused → cutover protocol in
+// docs/launchd-to-routine-migration-plan.md (attach without schedule → pause
+// → PATCH schedule → bootout launchd label → resume). True parallel-running
+// would deliver two briefings to the recipient every morning.
 agentdesk.routines.register({
   name: "family-morning-briefing-yohoejang",
   tick(ctx) {

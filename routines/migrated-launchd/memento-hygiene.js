@@ -17,7 +17,10 @@
 // Do not enable this routine (status=enabled) until agent_id is set. Until
 // then, launchd continues to fire (no functional regression).
 //
-// PARALLEL-RUN SAFETY: launchd plist remains active during verification.
+// CUTOVER SAFETY: This job mutates memento state (hygiene compaction). Once
+// the operator sets agent_id, use the stage-paused → cutover protocol in
+// docs/launchd-to-routine-migration-plan.md to avoid running two
+// compactions back-to-back.
 agentdesk.routines.register({
   name: "memento-hygiene",
   tick(ctx) {

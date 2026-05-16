@@ -13,7 +13,10 @@
 //     "timeout_secs": 1800
 //   }
 //
-// PARALLEL-RUN SAFETY: launchd plist remains active during verification.
+// CUTOVER SAFETY: This job sends to Discord. Use the stage-paused → cutover
+// protocol in docs/launchd-to-routine-migration-plan.md (attach without
+// schedule → pause → PATCH schedule → bootout launchd label → resume).
+// True parallel-running would duplicate the Discord message.
 agentdesk.routines.register({
   name: "cookingheart-daily-briefing",
   tick(ctx) {
