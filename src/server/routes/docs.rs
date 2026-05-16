@@ -4686,7 +4686,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "session_key": "claude:1473922824350601297:agentdesk-claude-channel-1473922824350601297",
                 "tmux_session": "agentdesk-claude-channel-1473922824350601297",
                 "tmux_killed": false,
-                "lifecycle_path": "runtime",
+                "lifecycle_path": "canonical",
                 "queued_remaining": 0,
                 "queued_before": 0,
                 "queue_preserved": true,
