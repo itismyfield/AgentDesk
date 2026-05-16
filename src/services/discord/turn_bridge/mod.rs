@@ -3881,6 +3881,14 @@ pub(super) fn spawn_turn_bridge(
         let mut preserve_inflight_for_cleanup_retry = false;
         let mut terminal_delivery_committed = false;
         let mut status_panel_terminal_committed = false;
+        // #2161 (Codex round-2 H1): hoisted into the outer scope so the
+        // bridge can run the TUI completion gate BEFORE dispatch completion
+        // and reuse the same outcome for the visible status-panel emit
+        // below. Default is "emit" for paths that don't reach the gate
+        // (e.g. cancelled, prompt_too_long, transport_error) and for
+        // non-unix targets where the tmux module is configured out.
+        #[allow(unused_mut)]
+        let mut bridge_should_emit_completion = true;
 
         // Remove ⏳ only if the bridge still owns output delivery.
         // Relay owners commit their own visible lifecycle.
@@ -4518,6 +4526,46 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
+            // #2161 (Codex round-2 H1): run the TUI completion gate BEFORE
+            // dispatch completion / queue drain so a still-busy ClaudeTui
+            // pane cannot advance lifecycle state ahead of pane quiescence.
+            // The same outcome is reused by the status-panel emit below.
+            // The gate lives in the `tmux` module (`#[cfg(unix)]`); on
+            // non-unix targets we skip it and emit completion as normal.
+            #[cfg(unix)]
+            {
+                let bridge_gate_outcome = if terminal_delivery_committed
+                    && !preserve_inflight_for_cleanup_retry
+                {
+                    if let Some(tmux_session_name) = inflight_state.tmux_session_name.as_deref() {
+                        super::tmux::run_tui_completion_gate(
+                            &provider,
+                            channel_id,
+                            tmux_session_name,
+                            inflight_state.task_notification_kind,
+                        )
+                        .await
+                    } else {
+                        super::tmux::TuiCompletionGateOutcome::NotGated
+                    }
+                } else {
+                    super::tmux::TuiCompletionGateOutcome::NotGated
+                };
+
+                bridge_should_emit_completion = bridge_gate_outcome.should_emit_completion();
+
+                // On TimedOut we preserve the inflight + suppress dispatch
+                // completion so queued turns do not drain into a busy pane. The
+                // next watcher pass / placeholder sweeper reconciles when the
+                // pane finally reports idle.
+                if matches!(
+                    bridge_gate_outcome,
+                    super::tmux::TuiCompletionGateOutcome::TimedOut
+                ) {
+                    preserve_inflight_for_cleanup_retry = true;
+                }
+            }
+
             if should_complete_work_dispatch_after_terminal_delivery(
                 should_complete_work_dispatch_after_delivery,
                 terminal_delivery_committed,
@@ -4574,7 +4622,11 @@ pub(super) fn spawn_turn_bridge(
                 terminal_delivery_committed && !preserve_inflight_for_cleanup_retry;
         }
 
-        if status_panel_terminal_committed {
+        if status_panel_terminal_committed && bridge_should_emit_completion {
+            // #2161 (Codex H1): the bridge-owned delivery path runs the
+            // gate ABOVE so it can also block dispatch completion on
+            // TimedOut. Here we just reuse the outcome and skip the
+            // visible `응답 완료` if the pane was still busy.
             complete_status_panel_v2(
                 shared_owned.as_ref(),
                 gateway.as_ref(),

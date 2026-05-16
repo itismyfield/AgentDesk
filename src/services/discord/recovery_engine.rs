@@ -184,6 +184,34 @@ async fn complete_recovery_visible_turn(
         return;
     };
 
+    // #2161 (Codex round-2 M1): recovery completes a turn based on JSONL
+    // `result` + output-file drain, not tmux pane readiness. For ClaudeTui
+    // sessions the same premature-completion bug applies — gate the
+    // user-visible `응답 완료` emit on quiescence, and on timeout skip
+    // the emit so the next watcher pass / placeholder sweeper reconciles.
+    // The gate lives in the `tmux` module (`#[cfg(unix)]`); on non-unix
+    // targets we skip it and emit completion as normal.
+    #[cfg(unix)]
+    if let Some(tmux_session_name) = state.tmux_session_name.as_deref() {
+        let outcome = super::tmux::run_tui_completion_gate(
+            provider,
+            channel_id,
+            tmux_session_name,
+            state.task_notification_kind,
+        )
+        .await;
+        if !outcome.should_emit_completion() {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                source = source,
+                "[{ts}] ⚠ recovery turn-complete suppressed by TUI quiescence gate (#2161)"
+            );
+            return;
+        }
+    }
+
     shared
         .placeholder_live_events
         .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
