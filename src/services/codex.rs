@@ -15,7 +15,7 @@ use crate::services::claude_tui::hook_server::current_hook_endpoint;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{kill_child_tree, shell_escape};
+use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
     fold_read_output_result, is_readonly_tool_policy, register_child_pid,
@@ -547,19 +547,130 @@ pub fn execute_command_simple_cancellable_with_model(
     )
 }
 
+/// Execute a one-shot Codex CLI invocation with a hard timeout.
+///
+/// On timeout this mirrors `provider_exec::execute_simple_with_timeout`:
+/// the shared [`CancelToken`] is tripped (also triggering tmux cleanup),
+/// then `kill_pid_tree` is called on the registered child PID so the
+/// Codex CLI and its descendants receive SIGTERM (process group first,
+/// PID fallback), followed by SIGKILL after a short grace window. The
+/// Codex spawn is now placed in its own process group via
+/// `configure_child_process_group`, so the SIGTERM/SIGKILL reach
+/// grand-descendants too. Without this the orphaned Codex CLI would
+/// keep holding its working directory and rollout state long after the
+/// caller has moved on (issue #2249).
+///
+/// PID-reuse safety: before signalling we re-check the channel for a
+/// late natural completion (worker finished after `recv_timeout` returned
+/// but before we got here). On a hit we skip the kill entirely so we
+/// never SIGKILL a numeric PID that may already have been reaped and
+/// reused by the OS. We also clear `child_pid` from the CancelToken when
+/// the worker completes naturally, so any later cancel cannot fire a
+/// stale PID. Thread cleanup is bounded: we only `join()` the worker
+/// after observing it sent its result (or after the kill drained it),
+/// never on an indefinitely blocked thread.
 pub fn execute_command_simple_with_timeout(
     prompt: &str,
     timeout: Duration,
     label: &str,
 ) -> Result<String, String> {
     let prompt = prompt.to_string();
+    let label_owned = label.to_string();
+    let cancel_token = std::sync::Arc::new(CancelToken::new());
+    let cancel_for_worker = std::sync::Arc::clone(&cancel_token);
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(execute_command_simple(&prompt));
+    let worker = std::thread::spawn(move || {
+        let result = execute_command_simple_cancellable(&prompt, Some(&cancel_for_worker));
+        // Clear the registered child PID *before* sending the result.
+        // The Child has already been reaped by wait_with_output() inside
+        // execute_command_simple_cancellable, so the kernel may recycle
+        // this PID at any moment. Clearing here prevents a late timeout
+        // path (timer raced ahead of recv on a different timeline) from
+        // signalling a reused, unrelated PID.
+        *cancel_for_worker
+            .child_pid
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        let _ = tx.send(result);
     });
+
     match rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(_) => Err(format!("{label} timeout after {}s", timeout.as_secs())),
+        Ok(result) => {
+            // Worker already finished and cleared child_pid; safe to join.
+            let _ = worker.join();
+            result
+        }
+        Err(_) => {
+            // Re-check the channel: the worker may have sent its result in
+            // the tiny window between recv_timeout returning Err and us
+            // getting here. If so, take the natural completion and skip
+            // the kill — child_pid was cleared by the worker, but the OS
+            // could already have reused the numeric PID, so signalling it
+            // would be a stray SIGKILL to an unrelated process.
+            if let Ok(result) = rx.try_recv() {
+                tracing::debug!(
+                    provider = "codex",
+                    stage = %label_owned,
+                    "codex execute_command_simple_with_timeout completed in race with timeout; skipping kill"
+                );
+                let _ = worker.join();
+                return result;
+            }
+
+            tracing::warn!(
+                provider = "codex",
+                stage = %label_owned,
+                timeout_secs = timeout.as_secs(),
+                "codex execute_command_simple_with_timeout timed out; cancelling and killing child"
+            );
+            cancel_token.cancel_with_tmux_cleanup();
+            // Snapshot under lock and clear, so any concurrent observer
+            // sees the same "no PID" state we are about to act on.
+            let child_pid = cancel_token
+                .child_pid
+                .lock()
+                .map(|mut guard| guard.take())
+                .unwrap_or(None);
+            if let Some(pid) = child_pid {
+                tracing::warn!(
+                    provider = "codex",
+                    stage = %label_owned,
+                    child_pid = pid,
+                    "codex execute_command_simple_with_timeout sending SIGTERM/SIGKILL to child process group"
+                );
+                // kill_pid_tree sends SIGTERM to the process group (or
+                // PID fallback), waits ~200ms, then escalates to SIGKILL
+                // on the still-alive target. The Codex spawn is in its
+                // own group (configure_child_process_group above), so
+                // the negative-PID path reaches grand-descendants.
+                kill_pid_tree(pid);
+            } else {
+                tracing::warn!(
+                    provider = "codex",
+                    stage = %label_owned,
+                    "codex execute_command_simple_with_timeout had no registered child PID at cancel time"
+                );
+            }
+            // Bounded drain: wait up to 3s for the worker to observe the
+            // kill, drop its sender, and let the channel close. Only
+            // join() if we actually saw the worker hand back a result;
+            // otherwise drop the JoinHandle and let the OS reap the
+            // thread when this process exits, rather than blocking the
+            // caller forever on a stuck wait_with_output.
+            if rx.recv_timeout(Duration::from_secs(3)).is_ok() {
+                let _ = worker.join();
+            } else {
+                tracing::warn!(
+                    provider = "codex",
+                    stage = %label_owned,
+                    "codex execute_command_simple_with_timeout worker did not drain within 3s; abandoning join"
+                );
+            }
+            Err(format!(
+                "{label_owned} timeout after {}s",
+                timeout.as_secs()
+            ))
+        }
     }
 }
 
@@ -655,10 +766,10 @@ fn execute_command_simple_inner(
 
     let mut command = Command::new(&codex_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    // #2250: put Codex in its own process group so that
-    // `kill_pid_tree(child_pid)` from the simple-cancel watcher reaches any
-    // wrapper / grandchild it may have spawned. Without this, the watcher
-    // can only terminate the immediate child PID and any descendants leak.
+    // #2249 / #2250: put Codex in its own process group so kill_pid_tree(child_pid)
+    // can SIGTERM/SIGKILL the whole descendant tree on cancel/timeout. Without
+    // this, kill(-pid, ...) targets PGID = our own process group and the kill
+    // falls back to the immediate child PID only — wrappers / grandchildren leak.
     crate::services::process::configure_child_process_group(&mut command);
     let mut child = command
         .args(&args)
@@ -2811,6 +2922,132 @@ mod tests {
             }
             other => panic!("Expected Ok(RecreateSession), got {:?}", other),
         }
+    }
+
+    /// Regression test for #2249: on timeout, the spawned Codex child
+    /// AND its grandchildren must be killed via SIGTERM→SIGKILL within
+    /// the grace window, not left running as orphans. The grandchild
+    /// assertion specifically exercises the `configure_child_process_group`
+    /// path — without it, `kill_pid_tree` cannot reach descendants.
+    #[cfg(unix)]
+    #[test]
+    fn execute_command_simple_with_timeout_kills_child_on_timeout() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let _env_guard = crate::services::discord::runtime_store::lock_test_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fake_codex = temp.path().join("fake-codex");
+        let pid_file = temp.path().join("fake-codex.pid");
+        let grandchild_pid_file = temp.path().join("fake-codex-grandchild.pid");
+
+        // Fake codex: spawn a long-lived grandchild (its own subshell
+        // sleep loop), record both PIDs, then loop forever. The
+        // grandchild inherits the codex process group, so a SIGTERM
+        // to the negative PID must reach it. If the parent spawn is
+        // not in its own group, kill_pid_tree(-codex_pid) hits our
+        // test runner's group instead and the grandchild survives —
+        // which is exactly the bug #2249 keeps reintroducing.
+        fs::write(
+            &fake_codex,
+            "#!/bin/sh\nprintf '%s' \"$$\" > \"$AGENTDESK_TEST_PID_FILE\"\n( sleep 600 & printf '%s' \"$!\" > \"$AGENTDESK_TEST_GRANDCHILD_PID_FILE\"; wait ) &\nwhile :; do sleep 1; done\n",
+        )
+        .expect("write fake codex");
+        let mut perms = fs::metadata(&fake_codex).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_codex, perms).expect("set perms");
+
+        let previous_codex_path = std::env::var_os("AGENTDESK_CODEX_PATH");
+        let previous_pid_file = std::env::var_os("AGENTDESK_TEST_PID_FILE");
+        let previous_grandchild_pid_file = std::env::var_os("AGENTDESK_TEST_GRANDCHILD_PID_FILE");
+
+        // SAFETY: env mutations are serialized by lock_test_env().
+        unsafe {
+            std::env::set_var("AGENTDESK_CODEX_PATH", &fake_codex);
+            std::env::set_var("AGENTDESK_TEST_PID_FILE", &pid_file);
+            std::env::set_var("AGENTDESK_TEST_GRANDCHILD_PID_FILE", &grandchild_pid_file);
+        }
+
+        let started = Instant::now();
+        let result = super::execute_command_simple_with_timeout(
+            "ignored prompt",
+            Duration::from_secs(1),
+            "codex 2249 regression",
+        );
+        let elapsed = started.elapsed();
+
+        // Restore env before any assert can panic out of this block.
+        unsafe {
+            match previous_codex_path {
+                Some(value) => std::env::set_var("AGENTDESK_CODEX_PATH", value),
+                None => std::env::remove_var("AGENTDESK_CODEX_PATH"),
+            }
+            match previous_pid_file {
+                Some(value) => std::env::set_var("AGENTDESK_TEST_PID_FILE", value),
+                None => std::env::remove_var("AGENTDESK_TEST_PID_FILE"),
+            }
+            match previous_grandchild_pid_file {
+                Some(value) => std::env::set_var("AGENTDESK_TEST_GRANDCHILD_PID_FILE", value),
+                None => std::env::remove_var("AGENTDESK_TEST_GRANDCHILD_PID_FILE"),
+            }
+        }
+
+        let err = result.expect_err("expected timeout error");
+        assert!(
+            err.contains("codex 2249 regression timeout"),
+            "unexpected error: {err}"
+        );
+        // Grace window is ~200ms in kill_pid_tree; allow generous
+        // slack for CI scheduling but bound it well under a real
+        // child's wall-clock lifetime so we know the kill fired.
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "timeout path took too long: {:?}",
+            elapsed
+        );
+
+        // Confirm both the codex child and its grandchild are gone
+        // within the SIGTERM (200ms grace) + SIGKILL window. If a PID
+        // file never appeared, the shell never reached its printf —
+        // we skip that specific assertion rather than treating a slow
+        // CI scheduler as a regression.
+        fn assert_pid_dead_within(pid_file: &std::path::Path, label: &str) {
+            let pid_deadline = Instant::now() + Duration::from_secs(2);
+            while !pid_file.exists() && Instant::now() < pid_deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if !pid_file.exists() {
+                return;
+            }
+            let pid_str = std::fs::read_to_string(pid_file).expect("pid file");
+            let pid_str = pid_str.trim();
+            if pid_str.is_empty() {
+                return;
+            }
+            let kill_deadline = Instant::now() + Duration::from_secs(5);
+            let mut still_alive = true;
+            while Instant::now() < kill_deadline {
+                let alive = std::process::Command::new("kill")
+                    .args(["-0", pid_str])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !alive {
+                    still_alive = false;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(
+                !still_alive,
+                "{label} pid {pid_str} survived past SIGTERM+SIGKILL grace window"
+            );
+        }
+
+        assert_pid_dead_within(&pid_file, "codex child");
+        assert_pid_dead_within(&grandchild_pid_file, "codex grandchild");
     }
 }
 
