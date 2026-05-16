@@ -1838,12 +1838,20 @@ impl RoutineStore {
         .await
     }
 
+    /// Pause an enabled routine.
+    ///
+    /// `next_due_at` is preserved on purpose (#2395). Clearing it here makes
+    /// the resume PATCH-semantics meaningless for routines that only have an
+    /// explicit one-shot `next_due_at` (no `schedule`): after pause/resume
+    /// `{}`, the seeding path could not recover `next_due_at` because there
+    /// is no `schedule` to derive it from. While `paused`, the row is
+    /// excluded from `claim_due_runs` (status = 'enabled' guard), so the
+    /// retained timestamp does not cause spurious dispatches.
     pub async fn pause_routine(&self, routine_id: &str) -> Result<bool> {
         let result = sqlx::query(
             r#"
             UPDATE routines
             SET status = 'paused',
-                next_due_at = NULL,
                 updated_at = NOW()
             WHERE id = $1
               AND status = 'enabled'
