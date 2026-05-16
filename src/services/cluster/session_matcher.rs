@@ -487,8 +487,7 @@ mod tests {
     fn match_session_happy_claude() {
         let channel = "agent-channel-cc";
         let session = ProviderKind::Claude.build_tmux_session_name(channel);
-        let directory =
-            dir_with(vec![binding(channel, "agent-a3061", ProviderKind::Claude)]);
+        let directory = dir_with(vec![binding(channel, "agent-a3061", ProviderKind::Claude)]);
         let matched = match_session(&session, "claude", &directory).expect("should match");
         assert_eq!(matched.channel_id, channel);
         assert_eq!(matched.agent_id, "agent-a3061");
@@ -565,8 +564,7 @@ mod tests {
         // tmux with the right name but never launched claude).
         let channel = "agent-pane-mismatch";
         let session = ProviderKind::Claude.build_tmux_session_name(channel);
-        let directory =
-            dir_with(vec![binding(channel, "td", ProviderKind::Claude)]);
+        let directory = dir_with(vec![binding(channel, "td", ProviderKind::Claude)]);
         match match_session_detailed(&session, Some("bash"), &directory) {
             MatchOutcome::Rejected(MatchRejection::PaneProviderMismatch {
                 session_name,
@@ -748,8 +746,7 @@ mod tests {
         // to wait for the file to appear or kill the session.
         let channel = "chan-no-rollout";
         let session = ProviderKind::Claude.build_tmux_session_name(channel);
-        let directory =
-            dir_with(vec![binding(channel, "agent", ProviderKind::Claude)]);
+        let directory = dir_with(vec![binding(channel, "agent", ProviderKind::Claude)]);
         let matched = match_session(&session, "claude", &directory).expect("matches");
         // Expected path is reported even though no jsonl exists on disk.
         assert!(matched.expected_rollout_path.contains(&session));

@@ -507,10 +507,7 @@ fn handle_show(action: ShowAction) -> std::result::Result<(), String> {
 /// supervisor code (E2/E3) that *does* have the binding directory should call
 /// [`crate::services::cluster::session_matcher::expected_session_name_for`]
 /// directly.
-fn cmd_show_session_name(
-    channel: &str,
-    provider: Option<&str>,
-) -> std::result::Result<(), String> {
+fn cmd_show_session_name(channel: &str, provider: Option<&str>) -> std::result::Result<(), String> {
     use crate::services::cluster::session_matcher::expected_session_name_for;
     use crate::services::provider::ProviderKind;
 
