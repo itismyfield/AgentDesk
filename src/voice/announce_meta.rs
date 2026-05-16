@@ -55,6 +55,21 @@ pub(crate) struct VoiceBackgroundHandoffMeta {
     /// `voice_channel_for_background` to disambiguate when multiple agents
     /// map onto the same background channel.
     pub agent_id: Option<String>,
+    /// Set at dispatch time when the durable PG write failed (or no pool
+    /// was available). When `true`, terminal delivery on this node may
+    /// fall back to consuming the in-memory marker even though no PG row
+    /// exists — restoring the pre-#2274 local-only behaviour under DB
+    /// unavailability. Always `false` for markers loaded from PG, since
+    /// those rows are themselves the durable source of truth.
+    ///
+    /// Codex #2274 round-2 finding: without this flag, a transient PG
+    /// outage at dispatch would silently drop the spoken summary because
+    /// the PG-authoritative claim path would return `Ok(None)` and refuse
+    /// to route. The flag scopes the fallback to exactly the case it is
+    /// meant to handle (persist failed AT DISPATCH) and never to the case
+    /// PG actually consumed a real row (since `forget_handoff` clears the
+    /// local copy in that branch).
+    pub local_only_fallback: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +155,28 @@ impl VoiceAnnouncementMetaStore {
     pub(crate) fn forget_handoff(&self, message_id: MessageId) {
         if let Ok(mut entries) = self.handoff_entries.write() {
             entries.remove(&message_id.get());
+        }
+    }
+
+    /// Flip the `local_only_fallback` flag on an in-memory marker. Called
+    /// at dispatch time when the durable PG write failed (or no pool was
+    /// available), so the terminal-delivery path knows it is safe to fall
+    /// back to consuming the local marker without a backing PG row.
+    /// Returns true iff a marker existed and was updated.
+    ///
+    /// Codex #2274 round-2 finding: see the `local_only_fallback` doc
+    /// comment on `VoiceBackgroundHandoffMeta`.
+    pub(crate) fn mark_handoff_local_only_fallback(&self, message_id: MessageId) -> bool {
+        let Ok(mut entries) = self.handoff_entries.write() else {
+            return false;
+        };
+        let now = Instant::now();
+        prune_handoff_expired_locked(&mut entries, now);
+        if let Some(stored) = entries.get_mut(&message_id.get()) {
+            stored.meta.local_only_fallback = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -258,6 +295,8 @@ pub(crate) async fn load_handoff_durable(
                 )))
             })?,
             agent_id,
+            // A row that came from PG is durable by definition.
+            local_only_fallback: false,
         })
     })
     .transpose()
@@ -304,6 +343,8 @@ pub(crate) async fn take_handoff_durable(
                 )))
             })?,
             agent_id,
+            // A row that came from PG is durable by definition.
+            local_only_fallback: false,
         })
     })
     .transpose()
@@ -383,6 +424,8 @@ pub(crate) async fn rehydrate_handoffs_from_pg(pool: &PgPool) -> Result<u64, sql
                 voice_channel_id: voice_channel_id_u64,
                 background_channel_id: background_channel_id_u64,
                 agent_id,
+                // Rehydrated entries are backed by a durable PG row.
+                local_only_fallback: false,
             },
             remaining,
         );
@@ -453,6 +496,7 @@ mod tests {
             voice_channel_id: 300,
             background_channel_id: 200,
             agent_id: Some("project-agentdesk".to_string()),
+            local_only_fallback: false,
         };
 
         store.insert_handoff(message_id, meta.clone());
@@ -479,6 +523,7 @@ mod tests {
             voice_channel_id: voice,
             background_channel_id: background,
             agent_id: agent.map(str::to_string),
+            local_only_fallback: false,
         }
     }
 
