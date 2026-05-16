@@ -29,20 +29,43 @@ const POLICY_HOOK_WARN_THRESHOLD: Duration = Duration::from_millis(100);
 
 /// Inner state of the policy engine (not Clone).
 struct PolicyEngineInner {
-    // Order matters for drop: policies (Persistent values) must be dropped
-    // before context and runtime.
+    // Order matters for drop. Rust drops struct fields in declaration order,
+    // so we list them from the JS side outwards:
+    //   1. `policies`     — Persistent JS values; must be cleared before the
+    //                        runtime is dropped (also done explicitly in
+    //                        `Drop::drop` to cope with poisoned mutexes).
+    //   2. `_hot_reload`  — Watcher + worker thread guard. Its `Drop`
+    //                        joins the worker thread, which owns a clone of
+    //                        the QuickJS `Context`. Joining here makes that
+    //                        clone drop *before* we touch `context` or
+    //                        `_runtime` below, preventing a stale `Context`
+    //                        from outliving the runtime — the failure mode
+    //                        that surfaced as a QuickJS C-assert during
+    //                        review-decision CLI shutdown (#2200 sub-fix 2).
+    //   3. `context`      — Engine's own Context.
+    //   4. `_runtime`     — QuickJS runtime; must be dropped last so every
+    //                        Context referencing it has already been dropped.
     policies: PolicyStore,
+    _hot_reload: Option<loader::HotReloadGuard>,
     context: Context,
     _runtime: Runtime,
-    // Keep watcher alive so hot-reload continues working
-    _watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl Drop for PolicyEngineInner {
     fn drop(&mut self) {
-        // Clear all persistent JS values before the runtime is dropped
+        // Clear all persistent JS values before the runtime is dropped.
         if let Ok(mut guard) = self.policies.lock() {
             guard.clear();
+        }
+        // Proactively tear down the hot-reload worker so its `Context` clone
+        // is dropped before this function returns and the remaining fields
+        // (context, runtime) get dropped. Without this the worker would only
+        // be torn down when `_hot_reload` is dropped via the normal field
+        // drop order, which is safe in isolation but fragile under panics
+        // and mutex poisoning. Explicit shutdown here is the belt to the
+        // declaration-order suspenders.
+        if let Some(mut guard) = self._hot_reload.take() {
+            guard.shutdown();
         }
     }
 }
@@ -413,10 +436,10 @@ impl PolicyEngine {
         );
 
         let inner = Arc::new(Mutex::new(PolicyEngineInner {
-            _runtime: runtime,
-            context,
             policies: store,
-            _watcher: watcher,
+            _hot_reload: watcher,
+            context,
+            _runtime: runtime,
         }));
         let tick_hook_in_flight = Arc::new(AtomicBool::new(false));
         let actor = PolicyEngineActor::spawn(
