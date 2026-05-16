@@ -2140,6 +2140,14 @@ pub(in crate::services::discord) async fn handle_text_message(
         .as_ref()
         .map(|announcement| announcement.transcript.as_str())
         .unwrap_or(user_text);
+    if let Some(announcement) = voice_announcement.as_ref()
+        && shared
+            .voice_barge_in
+            .try_handle_voice_transcript_announcement(shared, channel_id, announcement)
+            .await
+    {
+        return Ok(());
+    }
     if !is_voice_announcement
         && shared
             .voice_barge_in

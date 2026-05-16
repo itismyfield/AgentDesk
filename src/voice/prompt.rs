@@ -106,14 +106,18 @@ pub(crate) fn voice_foreground_prompt(text: &str, language: &str, max_chars: usi
         vec![
             "You are the foreground voice interaction layer for AgentDesk.",
             "Reply only with a short spoken response. Do not run tools, edit files, deploy, delete, send external messages, or make irreversible decisions.",
-            "A processing chime already plays when work starts. If the user asks for real work, checking, fixes, deploys, long research, or file/code changes, do not acknowledge in words; output exactly ADK_VOICE_SILENCE.",
+            "If the utterance is noise, side talk, or does not need an AgentDesk response, output exactly ADK_VOICE_SILENCE.",
+            "For real work requests such as file edits, deploys, long research, external calls, log checks, or code changes, do not answer in voice. Output exactly `ADK_VOICE_HANDOFF_BACKGROUND: <short one-line request summary>`.",
+            "After that marker, the system will hand the request to the background agent and report back by voice.",
             "Do not guess when uncertain. Ask one short clarification or say that the background turn will check.",
         ]
     } else {
         vec![
             "너는 AgentDesk 보이스 foreground interaction layer다.",
             "음성으로 말할 짧은 응답만 작성해라. 도구 실행, 파일 수정, 배포, 삭제, 외부 전송, 되돌릴 수 없는 결정은 하지 마라.",
-            "이미 처리 시작 효과음이 재생된다. 사용자가 실제 작업, 확인, 수정, 배포, 긴 조사, 파일/코드 작업을 요청하면 접수 멘트를 말하지 말고 정확히 ADK_VOICE_SILENCE 만 출력해라.",
+            "잡음, 곁말, AgentDesk 응답이 필요 없는 발화라면 정확히 ADK_VOICE_SILENCE 만 출력해라.",
+            "파일 수정, 배포, 긴 조사, 외부 호출, 로그 확인, 코드 변경 같은 실제 작업이 필요한 요청은 음성으로 답하지 말고 정확히 `ADK_VOICE_HANDOFF_BACKGROUND: <짧은 한 줄 요청 요약>` 형식으로만 출력해라.",
+            "그러면 시스템이 백그라운드 에이전트로 이관하고 결과를 다시 음성으로 알린다.",
             "불확실하면 추측하지 말고 짧게 되묻거나 background turn에서 확인한다고 말해라.",
         ]
     }
@@ -449,7 +453,20 @@ mod tests {
         assert!(prompt.contains("보이스 foreground"));
         assert!(prompt.contains("하드 제한: 180자"));
         assert!(prompt.contains("도구 실행"));
+        assert!(prompt.contains("ADK_VOICE_SILENCE"));
+        assert!(prompt.contains("ADK_VOICE_HANDOFF_BACKGROUND: <짧은 한 줄 요청 요약>"));
+        assert!(prompt.contains("백그라운드 에이전트로 이관"));
         assert!(prompt.contains("<user_transcript>\n긴 작업 해줘\n</user_transcript>"));
+    }
+
+    #[test]
+    fn english_voice_foreground_prompt_instructs_background_handoff_marker() {
+        let prompt = voice_foreground_prompt("check the logs", "en-US", 120);
+
+        assert!(prompt.contains("ADK_VOICE_SILENCE"));
+        assert!(prompt.contains("ADK_VOICE_HANDOFF_BACKGROUND: <short one-line request summary>"));
+        assert!(prompt.contains("background agent"));
+        assert!(prompt.contains("<user_transcript>\ncheck the logs\n</user_transcript>"));
     }
 
     #[test]
