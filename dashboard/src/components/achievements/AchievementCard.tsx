@@ -173,7 +173,7 @@ export function AchievementCard({
           </div>
           {item.agentName ? (
             <div
-              className="mt-3 inline-flex items-center gap-2 text-[10.5px]"
+              className="mt-3 flex max-w-full items-center gap-2 text-[10.5px]"
               style={{ color: "var(--fg-faint)" }}
             >
               <AchievementAvatar
@@ -182,7 +182,7 @@ export function AchievementCard({
                 emoji={item.avatarEmoji || "🤖"}
                 label={item.agentName}
               />
-              <span className="truncate">{item.agentName}</span>
+              <span className="min-w-0 flex-1 truncate">{item.agentName}</span>
             </div>
           ) : null}
           {item.section !== "earned" && typeof item.progress === "number" ? (

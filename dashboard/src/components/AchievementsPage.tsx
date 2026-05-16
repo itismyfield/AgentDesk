@@ -315,7 +315,7 @@ export default function AchievementsPage({
         .achievements-grid {
           display: grid;
           gap: 14px;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: minmax(0, 1fr);
         }
 
         .achievements-grid.bottom {
@@ -325,6 +325,12 @@ export default function AchievementsPage({
         .achievement-card:hover {
           transform: translateY(-1px);
           background: color-mix(in srgb, var(--bg-2) 96%, transparent);
+        }
+
+        @media (min-width: 720px) {
+          .achievements-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
         }
 
         @media (min-width: 1200px) {

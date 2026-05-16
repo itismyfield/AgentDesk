@@ -1,4 +1,4 @@
-import { Suspense, lazy } from "react";
+import { Fragment, Suspense, lazy } from "react";
 import type { CSSProperties } from "react";
 
 import type { GitHubRepoOption } from "../../api";
@@ -251,11 +251,15 @@ export function SettingsPipelinePanel({
 
           <div className="space-y-3">
             <GroupLabel title={tr("자주 쓰는 설정", "Frequent settings")} />
-            {PRIMARY_PIPELINE_CATEGORIES.map(renderPipelineCategory)}
+            {PRIMARY_PIPELINE_CATEGORIES.map((category) => (
+              <Fragment key={category}>{renderPipelineCategory(category)}</Fragment>
+            ))}
           </div>
           <div className="space-y-3">
             <GroupLabel title={tr("고급 설정", "Advanced settings")} />
-            {ADVANCED_PIPELINE_CATEGORIES.map(renderPipelineCategory)}
+            {ADVANCED_PIPELINE_CATEGORIES.map((category) => (
+              <Fragment key={category}>{renderPipelineCategory(category)}</Fragment>
+            ))}
           </div>
 
           <SettingsAuditNotes isKo={isKo} />

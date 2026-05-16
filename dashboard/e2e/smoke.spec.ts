@@ -1781,7 +1781,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(earnedCard).toBeFocused();
   });
 
-  test("achievements: mobile keeps the badge grid in two columns", async ({ page }, testInfo) => {
+  test("achievements: mobile stacks badge cards without text clipping", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
 
     await page.goto("/achievements");
@@ -1806,7 +1806,7 @@ test.describe("Dashboard smoke tests", () => {
 
         return Math.abs(firstCard.y - secondCard.y);
       })
-      .toBeLessThan(6);
+      .toBeGreaterThan(24);
 
     await expect
       .poll(async () => {
@@ -1821,9 +1821,15 @@ test.describe("Dashboard smoke tests", () => {
           }),
         ]);
 
-        return secondCard.x - firstCard.x;
+        return Math.abs(secondCard.x - firstCard.x);
       })
-      .toBeGreaterThan(24);
+      .toBeLessThan(6);
+
+    const clippedCards = await lockedCards.evaluateAll((cards) =>
+      cards.filter((card) => card.scrollWidth > card.clientWidth + 2).length,
+    );
+    expect(clippedCards).toBe(0);
+    await expectNoHorizontalOverflow(page);
   });
 
   test("gamification: operational routes keep home and achievements widgets out of the content area", async ({ page }) => {
