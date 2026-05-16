@@ -2201,6 +2201,18 @@ async fn mailbox_cancel_active_turn_with_reason(
         .map(|binding| binding.tmux_session_name)
         .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
     let result = shared.mailbox(channel_id).cancel_active_turn().await;
+    // Issue #2335 (medium, Codex round 2): label the active turn's
+    // CancelToken with the voice-specific reason so downstream
+    // turn_bridge / dispatch cancel reporting carries
+    // `voice_barge_in_live_cut` etc. instead of falling back to
+    // `turn_bridge_cancelled`. The sibling helper
+    // `mailbox_cancel_active_turn_if_current_with_reason` already does
+    // this for the explicit-token path; replicate it here for the
+    // implicit cancel path so the cancel_source enum is observable on
+    // every consumer.
+    if let Some(ref token) = result.token {
+        token.set_cancel_source(reason);
+    }
     #[cfg(unix)]
     if result.token.is_some() {
         // #1309: in-memory publish is synchronous (instant suppression);
