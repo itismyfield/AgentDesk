@@ -35,7 +35,6 @@ import type {
   TaskDispatch,
   UiLanguage,
 } from "../../types";
-import type { KanbanReview } from "../../api";
 import { localeName } from "../../i18n";
 import {
   BOARD_COLUMN_DEFS,
@@ -67,10 +66,14 @@ import {
   type KanbanBoardColumnStatus,
   type EditorState,
 } from "./kanban-utils";
+import { formatAuditResult, formatDispatchSummary } from "./card-detail-activity";
 import {
-  formatAuditResult,
-  formatDispatchSummary,
-} from "./card-detail-activity";
+  filterKanbanCards,
+  useKanbanFilterState,
+  type KanbanCardTypeFilter,
+  type KanbanSignalStatusFilter,
+} from "./kanban-filter-state";
+import { reviewDecisionMap, useKanbanCardActivity } from "./useKanbanCardActivity";
 import {
   createDeliveryEventsLoadState,
   compactStringParts,
@@ -158,8 +161,6 @@ const SURFACE_CHIP_STYLE = {
 } as const;
 
 const DELIVERY_EVENTS_POLL_MS = 5_000;
-const CARD_COMMENTS_STALE_MS = 5 * 60_000;
-
 const SURFACE_GHOST_BUTTON_STYLE = {
   background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
   borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
@@ -171,49 +172,10 @@ const SURFACE_MODAL_CARD_STYLE = {
   borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
 } as const;
 
-const kanbanCardActivityQueryKey = (cardId: string) =>
-  ["kanban", "card", cardId, "activity"] as const;
-const kanbanCardAuditLogQueryKey = (cardId: string) =>
-  [...kanbanCardActivityQueryKey(cardId), "audit-log"] as const;
-const kanbanCardGitHubCommentsQueryKey = (cardId: string) =>
-  [...kanbanCardActivityQueryKey(cardId), "github-comments"] as const;
-const kanbanCardReviewsQueryKey = (cardId: string) =>
-  [...kanbanCardActivityQueryKey(cardId), "reviews"] as const;
 const kanbanRepoSourcesQueryKey = ["kanban", "repo-sources"] as const;
 const kanbanAvailableReposQueryKey = ["kanban", "available-repos"] as const;
 const kanbanRepoIssuesQueryKey = (repo: string) =>
   ["kanban", "repo-issues", repo] as const;
-
-function latestActionableReview(reviews: KanbanReview[]): KanbanReview | null {
-  return reviews
-    .filter((review) =>
-      review.verdict === "improve" ||
-      review.verdict === "dilemma" ||
-      review.verdict === "mixed" ||
-      review.verdict === "decided",
-    )
-    .sort((a, b) => b.round - a.round)[0] ?? null;
-}
-
-function reviewDecisionMap(review: KanbanReview | null): Record<string, "accept" | "reject"> {
-  if (!review?.items_json) return {};
-  try {
-    const items = JSON.parse(review.items_json) as Array<{
-      id: string;
-      category: string;
-      decision?: string;
-    }>;
-    const decisions: Record<string, "accept" | "reject"> = {};
-    for (const item of items) {
-      if (item.decision === "accept" || item.decision === "reject") {
-        decisions[item.id] = item.decision;
-      }
-    }
-    return decisions;
-  } catch {
-    return {};
-  }
-}
 
 export default function KanbanTab({
   tr,
@@ -237,12 +199,23 @@ export default function KanbanTab({
   const [selectedRepo, setSelectedRepo] = useState("");
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [agentPipelineStages, setAgentPipelineStages] = useState<import("../../types").PipelineStage[]>([]);
-  const [agentFilter, setAgentFilter] = useState("all");
-  const [deptFilter, setDeptFilter] = useState("all");
-  const [cardTypeFilter, setCardTypeFilter] = useState<"all" | "issue" | "review">("all");
-  const [signalStatusFilter, setSignalStatusFilter] = useState<"all" | "review" | "blocked" | "requested" | "stalled">("all");
-  const [search, setSearch] = useState("");
-  const [showClosed, setShowClosed] = useState(false);
+  const {
+    activeFilterCount,
+    advancedFilterDirty,
+    agentFilter,
+    cardTypeFilter,
+    deptFilter,
+    resetAdvancedFilters,
+    search,
+    setAgentFilter,
+    setCardTypeFilter,
+    setDeptFilter,
+    setSearch,
+    setShowClosed,
+    setSignalStatusFilter,
+    showClosed,
+    signalStatusFilter,
+  } = useKanbanFilterState();
   const [storedSelectedCardId, setSelectedCardId] = useLocalStorage<string | null>(STORAGE_KEYS.kanbanDrawerLastId, null);
   const [editor, setEditor] = useState<EditorState>(EMPTY_EDITOR);
   const [assignIssue, setAssignIssue] = useState<GitHubIssue | null>(null);
@@ -282,7 +255,6 @@ export default function KanbanTab({
   );
   const [deliveryEventsPanelVisible, setDeliveryEventsPanelVisible] = useState(true);
   const [timelineFilter, setTimelineFilter] = useState<"review" | "pm" | "work" | "general" | null>(null);
-  const [activityRefreshTick, setActivityRefreshTick] = useState(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [liveTurnsByAgentId, setLiveTurnsByAgentId] = useState<Record<string, api.AgentTurnState>>({});
   const deliveryEventsStateRef = useRef(deliveryEventsState);
@@ -360,47 +332,15 @@ export default function KanbanTab({
 
   const selectedCardId = typeof storedSelectedCardId === "string" ? storedSelectedCardId : null;
   const selectedCard = selectedCardId ? cardsById.get(selectedCardId) ?? null : null;
-  const selectedCardNeedsReviewData =
-    selectedCard?.review_status === "suggestion_pending" ||
-    selectedCard?.review_status === "dilemma_pending" ||
-    selectedCard?.review_status === "decided";
-  const auditLogQuery = useQuery({
-    queryKey: selectedCardId
-      ? kanbanCardAuditLogQueryKey(selectedCardId)
-      : ["kanban", "card", "none", "activity", "audit-log"],
-    queryFn: () => api.getCardAuditLog(selectedCardId!),
-    enabled: Boolean(selectedCardId),
-    staleTime: 60_000,
-  });
-  const githubCommentsQuery = useQuery({
-    queryKey: selectedCardId
-      ? kanbanCardGitHubCommentsQueryKey(selectedCardId)
-      : ["kanban", "card", "none", "activity", "github-comments"],
-    queryFn: () => api.getCardGitHubComments(selectedCardId!),
-    enabled: Boolean(selectedCardId && selectedCard?.github_issue_number),
-    staleTime: CARD_COMMENTS_STALE_MS,
-  });
-  const reviewsQuery = useQuery({
-    queryKey: selectedCardId
-      ? kanbanCardReviewsQueryKey(selectedCardId)
-      : ["kanban", "card", "none", "activity", "reviews"],
-    queryFn: () => api.getKanbanReviews(selectedCardId!),
-    enabled: Boolean(selectedCardId && selectedCardNeedsReviewData),
-    staleTime: 30_000,
-  });
-  const auditLog = auditLogQuery.data ?? [];
-  const ghComments = githubCommentsQuery.data?.comments ?? [];
-  const githubIssueBody = githubCommentsQuery.data?.body;
-  const reviewData = useMemo(
-    () => latestActionableReview(reviewsQuery.data ?? []),
-    [reviewsQuery.data],
-  );
-  const invalidateCardActivity = useCallback((cardId: string) => {
-    void queryClient.invalidateQueries({ queryKey: kanbanCardActivityQueryKey(cardId) });
-    if (selectedCardId === cardId) {
-      setActivityRefreshTick((prev) => prev + 1);
-    }
-  }, [queryClient, selectedCardId]);
+  const {
+    activityRefreshTick,
+    auditLog,
+    clearCardReviews,
+    ghComments,
+    githubIssueBody,
+    invalidateCardActivity,
+    reviewData,
+  } = useKanbanCardActivity({ selectedCard, selectedCardId });
 
   const STALLED_REVIEW_STATUSES = new Set(["awaiting_dod", "suggestion_pending", "dilemma_pending", "reviewing"]);
   const stalledCards = useMemo(
@@ -758,19 +698,6 @@ export default function KanbanTab({
     () => Array.from(repoAgentCounts.entries()).sort((a, b) => b[1] - a[1]),
     [repoAgentCounts],
   );
-  const activeFilterCount = [
-    search.trim().length > 0,
-    agentFilter !== "all",
-    deptFilter !== "all",
-    cardTypeFilter !== "all",
-    signalStatusFilter !== "all",
-    showClosed,
-  ].filter(Boolean).length;
-  const advancedFilterDirty =
-    deptFilter !== "all" ||
-    cardTypeFilter !== "all" ||
-    signalStatusFilter !== "all" ||
-    showClosed;
   const selectedCardAssigneeLabel = selectedCard?.assignee_agent_id
     ? getAgentLabel(selectedCard.assignee_agent_id)
     : tr("미할당", "Unassigned");
@@ -899,38 +826,21 @@ export default function KanbanTab({
   }, [activityRefreshTick, commitDeliveryEventsState, deliveryEventsPanelVisible, selectedDeliveryDispatchId]);
 
   const filteredCards = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return repoCards.filter((card) => {
-      if (!showClosed && TERMINAL_STATUSES.has(card.status)) {
-        return false;
-      }
-      // Per-agent kanban view filter (top-level agent selector)
-      if (selectedAgentId && card.assignee_agent_id !== selectedAgentId) {
-        return false;
-      }
-      if (agentFilter !== "all" && card.assignee_agent_id !== agentFilter) {
-        return false;
-      }
-      if (deptFilter !== "all" && agentMap.get(card.assignee_agent_id ?? "")?.department_id !== deptFilter) {
-        return false;
-      }
-      if (cardTypeFilter === "issue" && isReviewCard(card)) return false;
-      if (cardTypeFilter === "review" && !isReviewCard(card)) return false;
-      if (signalStatusFilter === "review" && card.status !== "review") return false;
-      if (signalStatusFilter === "blocked" && !isManualInterventionCard(card)) return false;
-      if (signalStatusFilter === "requested" && getBoardColumnStatus(card.status) !== "requested") return false;
-      if (
-        signalStatusFilter === "stalled"
-        && !(card.status === "in_progress" && Boolean(card.started_at) && nowMs - ((card.started_at ?? 0) < 1e12 ? (card.started_at ?? 0) * 1000 : (card.started_at ?? 0)) > STALE_IN_PROGRESS_MS)
-      ) {
-        return false;
-      }
-      if (!needle) return true;
-      return (
-        card.title.toLowerCase().includes(needle) ||
-        (card.description ?? "").toLowerCase().includes(needle) ||
-        getAgentLabel(card.assignee_agent_id).toLowerCase().includes(needle)
-      );
+    return filterKanbanCards({
+      agentMap,
+      filters: {
+        agentFilter,
+        deptFilter,
+        cardTypeFilter,
+        signalStatusFilter,
+        search,
+        showClosed,
+      },
+      getAgentLabel,
+      nowMs,
+      repoCards,
+      selectedAgentId,
+      staleInProgressMs: STALE_IN_PROGRESS_MS,
     });
   }, [agentFilter, agentMap, cardTypeFilter, deptFilter, getAgentLabel, nowMs, signalStatusFilter, repoCards, search, selectedAgentId, showClosed]);
 
@@ -1557,7 +1467,7 @@ export default function KanbanTab({
                     </span>
                     <select
                       value={cardTypeFilter}
-                      onChange={(event) => setCardTypeFilter(event.target.value as "all" | "issue" | "review")}
+                      onChange={(event) => setCardTypeFilter(event.target.value as KanbanCardTypeFilter)}
                       className="w-full rounded-xl border px-3 py-2 text-sm"
                       style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                     >
@@ -1572,7 +1482,7 @@ export default function KanbanTab({
                     </span>
                     <select
                       value={signalStatusFilter}
-                      onChange={(event) => setSignalStatusFilter(event.target.value as "all" | "review" | "blocked" | "requested" | "stalled")}
+                      onChange={(event) => setSignalStatusFilter(event.target.value as KanbanSignalStatusFilter)}
                       className="w-full rounded-xl border px-3 py-2 text-sm"
                       style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                     >
@@ -1597,12 +1507,7 @@ export default function KanbanTab({
                   {advancedFilterDirty && (
                     <button
                       type="button"
-                      onClick={() => {
-                        setDeptFilter("all");
-                        setCardTypeFilter("all");
-                        setSignalStatusFilter("all");
-                        setShowClosed(false);
-                      }}
+                      onClick={resetAdvancedFilters}
                       className="w-full rounded-xl border px-3 py-2 text-xs"
                       style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-secondary)" }}
                     >
@@ -2737,7 +2642,7 @@ export default function KanbanTab({
                           try {
                             await api.triggerDecidedRework(reviewData.id);
                             if (selectedCard) {
-                              queryClient.setQueryData(kanbanCardReviewsQueryKey(selectedCard.id), []);
+                              clearCardReviews(selectedCard.id);
                             }
                             setReviewDecisions({});
                           } catch (error) {
