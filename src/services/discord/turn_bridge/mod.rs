@@ -4575,18 +4575,39 @@ pub(super) fn spawn_turn_bridge(
         }
 
         if status_panel_terminal_committed {
-            complete_status_panel_v2(
-                shared_owned.as_ref(),
-                gateway.as_ref(),
-                channel_id,
-                status_panel_msg_id,
-                &provider,
-                status_panel_started_at,
-                &mut last_status_panel_text,
-                false,
-                "turn_terminal_delivery",
-            )
-            .await;
+            // #2161 (Codex H1): apply the TUI completion gate to the
+            // bridge-owned delivery path too. When Claude emits Done before
+            // RuntimeReady and the bridge still has unsent text in
+            // full_response, `should_delegate_bridge_relay_to_watcher`
+            // returns false and the bridge — not the watcher — drives
+            // terminal delivery here. Without this gate the same premature
+            // `응답 완료` reproduces on the bridge-driven path.
+            let bridge_gate_outcome =
+                if let Some(tmux_session_name) = inflight_state.tmux_session_name.as_deref() {
+                    super::tmux::run_tui_completion_gate(
+                        &provider,
+                        channel_id,
+                        tmux_session_name,
+                        inflight_state.task_notification_kind,
+                    )
+                    .await
+                } else {
+                    super::tmux::TuiCompletionGateOutcome::NotGated
+                };
+            if bridge_gate_outcome.should_emit_completion() {
+                complete_status_panel_v2(
+                    shared_owned.as_ref(),
+                    gateway.as_ref(),
+                    channel_id,
+                    status_panel_msg_id,
+                    &provider,
+                    status_panel_started_at,
+                    &mut last_status_panel_text,
+                    false,
+                    "turn_terminal_delivery",
+                )
+                .await;
+            }
         }
 
         if !bridge_relay_delegated_to_watcher

@@ -93,22 +93,48 @@ async fn complete_watcher_status_panel_v2(
     }
 }
 
-/// #2161 — wait for the TUI pane to reach a `Ready for input` quiescent
-/// state before emitting `TurnCompleted` to the live status panel.
+/// #2161 — TUI completion gate. Callers ask `run_tui_completion_gate` to
+/// confirm the underlying tmux pane has reached a `Ready for input`
+/// quiescent state before pushing `StatusEvent::TurnCompleted` to the live
+/// status panel.
 ///
-/// Only `RuntimeHandoffKind::ClaudeTui` foreground turns are gated; other
-/// runtime kinds keep the existing immediate-emit path (see
-/// `should_gate_completion_for_tui_quiescence` in `tmux.rs` for the matrix).
-/// The wait is bounded by `TUI_COMPLETION_QUIESCENCE_TIMEOUT` so a stuck pane
-/// cannot stall the user-visible `응답 완료` marker indefinitely — if the
-/// timeout fires we still emit, but log a structured warn so we can audit
-/// the false-completion frequency in production.
-async fn wait_for_tui_quiescence_before_completion(
+/// Only `RuntimeHandoffKind::ClaudeTui` turns are gated; other runtime kinds
+/// return `NotGated` (= emit immediately) so existing completion contracts
+/// stay unchanged (see `should_gate_completion_for_tui_quiescence` in
+/// `tmux.rs` for the full matrix).
+///
+/// The wait is bounded by `TUI_COMPLETION_QUIESCENCE_TIMEOUT`. On `TimedOut`
+/// the caller MUST suppress the `TurnCompleted` emit — promoting the panel
+/// to `✅ 응답 완료` on a still-busy pane reproduces the bug this gate
+/// exists to prevent (Codex review #2161 H2). The placeholder sweeper and
+/// next-turn intake reconcile the lingering Active panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum TuiCompletionGateOutcome {
+    NotGated,
+    ConfirmedIdle,
+    TimedOut,
+}
+
+impl TuiCompletionGateOutcome {
+    /// `true` when callers should proceed with emitting the user-visible
+    /// `TurnCompleted` status event. `false` only on `TimedOut`, where
+    /// the pane is still busy past the bounded wait and emitting would
+    /// reproduce the #2161 premature-completion bug. The placeholder
+    /// sweeper / next-turn intake reconciles the still-Active panel later.
+    pub(in crate::services::discord) fn should_emit_completion(self) -> bool {
+        match self {
+            Self::NotGated | Self::ConfirmedIdle => true,
+            Self::TimedOut => false,
+        }
+    }
+}
+
+pub(in crate::services::discord) async fn run_tui_completion_gate(
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
     task_notification_kind: Option<crate::services::agent_protocol::TaskNotificationKind>,
-) {
+) -> TuiCompletionGateOutcome {
     let inflight = crate::services::discord::inflight::load_inflight_state(
         provider,
         channel_id.get(),
@@ -121,7 +147,7 @@ async fn wait_for_tui_quiescence_before_completion(
         rebind_origin,
         task_notification_kind,
     ) {
-        return;
+        return TuiCompletionGateOutcome::NotGated;
     }
 
     let started_at = tokio::time::Instant::now();
@@ -138,7 +164,7 @@ async fn wait_for_tui_quiescence_before_completion(
         .unwrap_or(false);
 
         if ready {
-            return;
+            return TuiCompletionGateOutcome::ConfirmedIdle;
         }
         if started_at.elapsed()
             >= crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT
@@ -149,10 +175,10 @@ async fn wait_for_tui_quiescence_before_completion(
                 channel = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 gate = "tui_completion_quiescence",
-                "[{ts}] ⚠ TUI pane was not yet idle after {:?} — emitting `응답 완료` anyway (#2161)",
+                "[{ts}] \u{26a0} TUI pane was not yet idle after {:?} — suppressing turn-complete status to avoid premature completion (#2161); placeholder sweeper / next-turn intake will reconcile",
                 crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT,
             );
-            return;
+            return TuiCompletionGateOutcome::TimedOut;
         }
         tokio::time::sleep(
             crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_POLL_INTERVAL,
@@ -2515,13 +2541,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if terminal_output_committed {
             // #2161 TUI completion gate: ClaudeTui sessions can land a
             // `result` JSONL event before the interactive pane is actually
-            // quiescent. Without this wait, the user sees `응답 완료` on
+            // quiescent. Without this gate the user sees `응답 완료` on
             // Discord while the tmux pane still shows `almost done thinking`
             // and subsequent relay messages continue past the completion
             // marker. Gate only this user-visible status event — relay text
             // already committed above, and downstream watermark / mailbox
             // bookkeeping below intentionally proceeds regardless.
-            wait_for_tui_quiescence_before_completion(
+            //
+            // On gate timeout (Codex H2) we deliberately do NOT emit
+            // `TurnCompleted` — the placeholder sweeper / next-turn intake
+            // will close the lingering Active panel rather than mark a hung
+            // pane as completed.
+            let gate_outcome = run_tui_completion_gate(
                 &watcher_provider,
                 channel_id,
                 &tmux_session_name,
@@ -2529,20 +2560,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             )
             .await;
 
-            complete_watcher_status_panel_v2(
-                &http,
-                &shared,
-                channel_id,
-                status_panel_msg_id,
-                &watcher_provider,
-                status_panel_started_at,
-                &mut last_status_panel_text,
-                matches!(
-                    task_notification_kind,
-                    Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
-                ),
-            )
-            .await;
+            if gate_outcome.should_emit_completion() {
+                complete_watcher_status_panel_v2(
+                    &http,
+                    &shared,
+                    channel_id,
+                    status_panel_msg_id,
+                    &watcher_provider,
+                    status_panel_started_at,
+                    &mut last_status_panel_text,
+                    matches!(
+                        task_notification_kind,
+                        Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
+                    ),
+                )
+                .await;
+            }
         }
 
         // Advance the shared confirmed-delivery watermark on any committed

@@ -1468,14 +1468,14 @@ fn is_terminal_finalize_stop_candidate(
     terminal_output_committed && dispatch_ok && watcher_handled_mailbox_finish
 }
 
-/// #2161 TUI completion gate — decide whether the watcher must wait for the
-/// underlying TUI pane to reach quiescence before emitting the user-visible
-/// `✅ 응답 완료` status event.
+/// #2161 TUI completion gate — decide whether the user-visible
+/// `✅ 응답 완료` / `✅ 백그라운드 완료` status event must wait for the
+/// underlying TUI pane to reach quiescence before being emitted.
 ///
 /// The CLI provider session can write a terminal `result` JSONL event before
 /// the interactive TUI has finished rendering tool output, plan presentations,
-/// or trailing assistant text into its tmux pane. Without this gate, the
-/// watcher relays the response text, immediately marks the turn as
+/// or trailing assistant text into its tmux pane. Without this gate the
+/// caller relays the response text, immediately marks the turn as
 /// `TurnCompleted`, and the user sees `응답 완료` on Discord while their
 /// right-side tmux pane is still actively scrolling / showing
 /// `almost done thinking`. Subsequent relay messages can then continue past
@@ -1486,29 +1486,23 @@ fn is_terminal_finalize_stop_candidate(
 /// with the script exiting, so no extra quiescence step is needed.
 /// `CodexTui` has its own completion contract and is intentionally excluded
 /// from this gate to keep the fix minimal and reviewable.
+///
+/// `task_notification_kind` is accepted but intentionally does NOT skip the
+/// gate — a Background or MonitorAutoTurn that runs inside ClaudeTui still
+/// emits a visible status transition (`✅ 백그라운드 완료`) and the user
+/// observes the same premature-completion bug on the same pane. Codex review
+/// on #2161 flagged the original task-notification skip as the H3 finding.
 #[inline]
 pub(super) fn should_gate_completion_for_tui_quiescence(
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
     rebind_origin: bool,
-    task_notification_kind: Option<crate::services::agent_protocol::TaskNotificationKind>,
+    _task_notification_kind: Option<crate::services::agent_protocol::TaskNotificationKind>,
 ) -> bool {
     // rebind_origin inflights describe an externally-launched tmux session
     // that AgentDesk did not start — the operator (not the Discord turn)
     // owns input cadence and the "응답 완료" marker is suppressed by other
     // rebind-origin guards anyway. Don't add an additional wait.
     if rebind_origin {
-        return false;
-    }
-    // Background / monitor-auto-turn paths emit `✅ 백그라운드 완료` and have
-    // their own quiescence semantics (the trigger that started them is the
-    // gate). Don't double-gate them here.
-    if matches!(
-        task_notification_kind,
-        Some(
-            crate::services::agent_protocol::TaskNotificationKind::Background
-                | crate::services::agent_protocol::TaskNotificationKind::MonitorAutoTurn
-        )
-    ) {
         return false;
     }
     matches!(
@@ -1678,19 +1672,48 @@ mod tui_completion_gate_tests {
     }
 
     #[test]
-    fn background_task_notification_skips_the_gate() {
-        // Background and monitor auto-turn paths emit their own completion
-        // markers; their trigger is the gate, not pane quiescence.
-        assert!(!should_gate_completion_for_tui_quiescence(
+    fn background_and_monitor_task_notifications_still_gated_for_tui() {
+        // Codex review on #2161 H3: Background and MonitorAutoTurn emit a
+        // visible `백그라운드 완료` marker that the user sees on the same
+        // pane, so the gate applies to them too when running on ClaudeTui.
+        // task_notification_kind is intentionally not a skip condition.
+        assert!(should_gate_completion_for_tui_quiescence(
             Some(RuntimeHandoffKind::ClaudeTui),
             false,
             Some(TaskNotificationKind::Background),
         ));
-        assert!(!should_gate_completion_for_tui_quiescence(
+        assert!(should_gate_completion_for_tui_quiescence(
             Some(RuntimeHandoffKind::ClaudeTui),
             false,
             Some(TaskNotificationKind::MonitorAutoTurn),
         ));
+        assert!(should_gate_completion_for_tui_quiescence(
+            Some(RuntimeHandoffKind::ClaudeTui),
+            false,
+            Some(TaskNotificationKind::Subagent),
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tui_completion_gate_outcome_tests {
+    use super::TuiCompletionGateOutcome;
+
+    #[test]
+    fn not_gated_emits_immediately() {
+        assert!(TuiCompletionGateOutcome::NotGated.should_emit_completion());
+    }
+
+    #[test]
+    fn confirmed_idle_emits() {
+        assert!(TuiCompletionGateOutcome::ConfirmedIdle.should_emit_completion());
+    }
+
+    #[test]
+    fn timed_out_suppresses_emit() {
+        // Codex H2: timeout MUST suppress the TurnCompleted emit;
+        // placeholder sweeper / next-turn intake reconciles later.
+        assert!(!TuiCompletionGateOutcome::TimedOut.should_emit_completion());
     }
 }
 
@@ -2222,7 +2245,10 @@ async fn finish_restored_watcher_active_turn(
 /// When Claude produces output from terminal input (not Discord), relay it to Discord.
 #[path = "tmux_watcher.rs"]
 mod tmux_watcher;
-pub(super) use self::tmux_watcher::{tmux_output_watcher, tmux_output_watcher_with_restore};
+pub(super) use self::tmux_watcher::{
+    TuiCompletionGateOutcome, run_tui_completion_gate, tmux_output_watcher,
+    tmux_output_watcher_with_restore,
+};
 #[path = "tmux_output_stream.rs"]
 mod tmux_output_stream;
 pub(super) use self::tmux_output_stream::{
