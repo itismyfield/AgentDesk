@@ -1,9 +1,11 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::services::provider::ProviderKind;
-use poise::serenity_prelude::{ChannelId, MessageId};
+use poise::serenity_prelude::{ChannelId, GuildId, MessageId};
 
 use super::SharedData;
+
+const VOICE_ANNOUNCE_DEFAULT_GENERATION: u64 = 1;
 
 /// Boundary between voice foreground interaction and long-running provider work.
 ///
@@ -65,9 +67,49 @@ impl VoiceBackgroundDriverCapabilities {
 }
 
 pub(in crate::services::discord) struct VoiceBackgroundStartRequest<'a> {
+    pub guild_id: Option<GuildId>,
+    pub voice_channel_id: ChannelId,
     pub channel_id: ChannelId,
     pub shared: &'a Arc<SharedData>,
+    pub utterance_id: &'a str,
+    pub generation: u64,
     pub message_content: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct VoiceAnnounceDeliveryId {
+    pub correlation_id: String,
+    pub semantic_event_id: String,
+}
+
+impl VoiceAnnounceDeliveryId {
+    fn as_manual(&self) -> super::health::ManualOutboundDeliveryId<'_> {
+        super::health::ManualOutboundDeliveryId {
+            correlation_id: &self.correlation_id,
+            semantic_event_id: &self.semantic_event_id,
+        }
+    }
+}
+
+pub(in crate::services::discord) fn default_voice_announce_generation() -> u64 {
+    VOICE_ANNOUNCE_DEFAULT_GENERATION
+}
+
+pub(in crate::services::discord) fn voice_announce_delivery_id(
+    guild_id: GuildId,
+    voice_channel_id: ChannelId,
+    utterance_id: &str,
+    generation: u64,
+) -> VoiceAnnounceDeliveryId {
+    VoiceAnnounceDeliveryId {
+        correlation_id: format!(
+            "voice:{}:{}:{}",
+            guild_id.get(),
+            voice_channel_id.get(),
+            utterance_id
+        ),
+        semantic_event_id: format!("announce:generation:{generation}"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +152,15 @@ impl VoiceBackgroundTurnDriver for AnnounceBotTranscriptDriver {
                 .health_registry()
                 .ok_or_else(|| "health registry unavailable".to_string())?;
             let target = format!("channel:{}", request.channel_id.get());
-            let (status, body) = super::health::send_message_with_backends(
+            let delivery_id = request.guild_id.map(|guild_id| {
+                voice_announce_delivery_id(
+                    guild_id,
+                    request.voice_channel_id,
+                    request.utterance_id,
+                    request.generation,
+                )
+            });
+            let (status, body) = super::health::send_message_with_backends_and_delivery_id(
                 &registry,
                 None::<&crate::db::Db>,
                 request.shared.pg_pool.as_ref(),
@@ -119,6 +169,7 @@ impl VoiceBackgroundTurnDriver for AnnounceBotTranscriptDriver {
                 "voice",
                 "announce",
                 Some("voice transcript"),
+                delivery_id.as_ref().map(VoiceAnnounceDeliveryId::as_manual),
             )
             .await;
             if !status.starts_with("200") {
@@ -256,9 +307,24 @@ mod tests {
     use super::{
         ClaudeTuiPseudoHeadlessDriver, HeadlessLegacyVoiceBackgroundDriver,
         VoiceBackgroundDriverKind, VoiceBackgroundTurnDriver, candidate_driver_kinds_for_provider,
-        select_voice_background_driver,
+        default_voice_announce_generation, select_voice_background_driver,
+        voice_announce_delivery_id,
     };
     use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::{ChannelId, GuildId};
+
+    #[test]
+    fn voice_announce_delivery_id_is_utterance_bound() {
+        let delivery_id = voice_announce_delivery_id(
+            GuildId::new(111),
+            ChannelId::new(222),
+            "20260516-test",
+            default_voice_announce_generation(),
+        );
+
+        assert_eq!(delivery_id.correlation_id, "voice:111:222:20260516-test");
+        assert_eq!(delivery_id.semantic_event_id, "announce:generation:1");
+    }
 
     #[test]
     fn claude_voice_background_candidates_keep_dual_path_visible() {

@@ -31,7 +31,8 @@ use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 
 use super::SharedData;
 use super::voice_background_driver::{
-    VoiceBackgroundStartRequest, VoiceBackgroundTurnDriver, select_voice_background_driver,
+    VoiceBackgroundStartRequest, VoiceBackgroundTurnDriver, default_voice_announce_generation,
+    select_voice_background_driver,
 };
 pub(in crate::services::discord) const INTERNAL_VOICE_MESSAGE_ID_START: u64 =
     9_000_000_000_000_000_000;
@@ -1386,6 +1387,15 @@ impl VoiceBargeInRuntime {
             .resolve_background_provider_for_target(target_channel_id)
             .await;
         let driver = select_voice_background_driver(&background_provider);
+        let guild_id = self.voice_turn_guild_id(source_channel_id, target_channel_id);
+        if guild_id.is_none() {
+            tracing::warn!(
+                source_channel_id = source_channel_id.get(),
+                target_channel_id = target_channel_id.get(),
+                utterance_id = %utterance.utterance_id,
+                "voice transcript announcement has no registered voice guild; sending without delivery id"
+            );
+        }
         let announcement = crate::voice::prompt::build_voice_transcript_announcement(
             transcript,
             utterance.user_id,
@@ -1408,8 +1418,12 @@ impl VoiceBargeInRuntime {
         );
         match driver
             .start(VoiceBackgroundStartRequest {
+                guild_id,
+                voice_channel_id: source_channel_id,
                 channel_id: target_channel_id,
                 shared,
+                utterance_id: &utterance.utterance_id,
+                generation: default_voice_announce_generation(),
                 message_content: &announcement,
             })
             .await
@@ -1757,6 +1771,21 @@ impl VoiceBargeInRuntime {
             return;
         };
         self.voice_guilds.insert(target_channel_id.get(), guild_id);
+    }
+
+    fn voice_turn_guild_id(
+        &self,
+        source_channel_id: ChannelId,
+        target_channel_id: ChannelId,
+    ) -> Option<GuildId> {
+        self.voice_guilds
+            .get(&source_channel_id.get())
+            .map(|entry| *entry.value())
+            .or_else(|| {
+                self.voice_guilds
+                    .get(&target_channel_id.get())
+                    .map(|entry| *entry.value())
+            })
     }
 
     async fn ask_for_agent(&self, shared: &Arc<SharedData>, channel_id: ChannelId) {
@@ -2681,6 +2710,29 @@ mod tests {
             started_at: "2026-05-16T07:00:00+09:00".to_string(),
             completed_at: "2026-05-16T07:00:05+09:00".to_string(),
         }
+    }
+
+    #[test]
+    fn voice_turn_guild_id_prefers_source_and_falls_back_to_target() {
+        let mut config = VoiceConfig::default();
+        config.enabled = true;
+        let runtime = VoiceBargeInRuntime::from_voice_config(&config);
+        let source_channel_id = ChannelId::new(123);
+        let target_channel_id = ChannelId::new(456);
+        let source_guild_id = GuildId::new(789);
+        let target_guild_id = GuildId::new(987);
+
+        runtime.register_voice_context(target_channel_id, target_guild_id);
+        assert_eq!(
+            runtime.voice_turn_guild_id(source_channel_id, target_channel_id),
+            Some(target_guild_id)
+        );
+
+        runtime.register_voice_context(source_channel_id, source_guild_id);
+        assert_eq!(
+            runtime.voice_turn_guild_id(source_channel_id, target_channel_id),
+            Some(source_guild_id)
+        );
     }
 
     /// #2156: keep_recordings=false 일 때 cleanup_utterance_artifacts 가 utterance
