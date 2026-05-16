@@ -189,6 +189,9 @@ async fn complete_recovery_visible_turn(
     // sessions the same premature-completion bug applies — gate the
     // user-visible `응답 완료` emit on quiescence, and on timeout skip
     // the emit so the next watcher pass / placeholder sweeper reconciles.
+    // The gate lives in the `tmux` module (`#[cfg(unix)]`); on non-unix
+    // targets we skip it and emit completion as normal.
+    #[cfg(unix)]
     if let Some(tmux_session_name) = state.tmux_session_name.as_deref() {
         let outcome = super::tmux::run_tui_completion_gate(
             provider,
