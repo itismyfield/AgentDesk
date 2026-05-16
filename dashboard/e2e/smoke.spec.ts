@@ -1936,6 +1936,27 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("meetings-page-timeline")).toBeVisible();
   });
 
+  test("meetings: timeline search and status filters keep the list scoped", async ({ page }) => {
+    await mockMeetingsHubApis(page);
+    await page.goto("/meetings");
+
+    const timelinePane = page.getByTestId("meetings-page-timeline");
+    await expect(timelinePane).toBeVisible({ timeout: 15000 });
+
+    await page.getByRole("searchbox", { name: /회의 검색|Search meetings/ }).fill("read-only");
+    await expect(timelinePane.getByText(/Meetings hub read-only QA/)).toBeVisible();
+    await expect(timelinePane.getByText(/로드밸런서 경고 플로우 리뷰/)).toHaveCount(0);
+
+    await page.getByRole("button", { name: /^완료$|^Done$/ }).click();
+    await expect(timelinePane.getByText(/검색 조건에 맞는 회의가 없습니다|No meetings match/)).toBeVisible();
+
+    await page.getByRole("button", { name: /^전체$|^All$/ }).click();
+    await page.getByRole("searchbox", { name: /회의 검색|Search meetings/ }).fill("");
+    await page.getByRole("button", { name: /^진행$|^Active$/ }).click();
+    await expect(timelinePane.getByText(/Meetings hub read-only QA/)).toBeVisible();
+    await expect(timelinePane.getByText(/로드밸런서 경고 플로우 리뷰/)).toHaveCount(0);
+  });
+
   test("meetings: detail drawer opens from the timeline", async ({ page }) => {
     await mockMeetingsHubApis(page);
     await page.goto("/meetings");
