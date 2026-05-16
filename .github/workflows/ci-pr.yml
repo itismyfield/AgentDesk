@@ -107,6 +107,9 @@ jobs:
               - '.cargo/**'
               - 'rust-toolchain*'
               - 'build.rs'
+              # defaults.json is embedded into the Rust binary via
+              # `include_str!("../defaults.json")` in src/config.rs.
+              - 'defaults.json'
             # rust_compile is a narrower subset of rust_or_policy: only paths
             # whose change can plausibly alter Rust binary output (and therefore
             # require cross-OS verification on macOS/Windows). Pure JS policy,
@@ -114,6 +117,10 @@ jobs:
             # those are still verified by the ubuntu Rust lane plus Lint/Script
             # checks, and the nightly workflow continues to run the full
             # macOS/Windows matrix daily.
+            #
+            # Must include every compile-time Rust input. Audit before adding
+            # new `include_str!`/`include_bytes!`/`sqlx::migrate!`/`build.rs`
+            # tracked paths.
             rust_compile:
               - 'src/**'
               - 'tests/**'
@@ -124,6 +131,9 @@ jobs:
               - '.cargo/**'
               - 'rust-toolchain*'
               - 'build.rs'
+              # defaults.json is embedded into the Rust binary via
+              # `include_str!("../defaults.json")` in src/config.rs.
+              - 'defaults.json'
 
   dashboard:
     name: Dashboard (Node 22)
