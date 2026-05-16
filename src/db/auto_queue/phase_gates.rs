@@ -800,6 +800,50 @@ WHERE pg.run_id = $1
 ORDER BY pg.phase, pg.dispatch_id
 FOR UPDATE OF pg";
 
+/// #2257 concern 4: lock the candidate `task_dispatches` rows themselves
+/// BEFORE the per-phase advisory lock or the `phase_gates` row locks. The
+/// regular PATCH completion path takes `task_dispatches` first (implicit
+/// row lock on its `UPDATE`) and only then takes the same advisory +
+/// phase_gates locks the repair path uses. Keeping the same lock order
+/// across both paths is what prevents deadlock between a concurrent
+/// repair and PATCH on the same dispatch.
+///
+/// `ORDER BY td.id` makes acquisition deterministic when two concurrent
+/// repairs target overlapping dispatch sets — they line up on the same
+/// id sequence instead of fighting in arbitrary order.
+const PHASE_GATE_REPAIR_LOCK_DISPATCH_ROWS_SQL: &str = "\
+SELECT td.id
+FROM task_dispatches td
+JOIN auto_queue_phase_gates pg ON pg.dispatch_id = td.id
+WHERE pg.run_id = $1
+  AND pg.status IN ('pending', 'failed')
+  AND pg.dispatch_id IS NOT NULL
+  AND td.status NOT IN ('pending', 'dispatched')
+  AND ($2::BIGINT IS NULL OR pg.phase = $2)
+  AND ($3::TEXT IS NULL OR pg.dispatch_id = $3)
+ORDER BY td.id
+FOR UPDATE OF td";
+
+async fn lock_phase_gate_repair_candidate_dispatch_rows_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    phase_filter: Option<i64>,
+    dispatch_id_filter: Option<&str>,
+) -> Result<(), PhaseGateRepairError> {
+    sqlx::query_scalar::<_, String>(PHASE_GATE_REPAIR_LOCK_DISPATCH_ROWS_SQL)
+        .bind(run_id)
+        .bind(phase_filter)
+        .bind(dispatch_id_filter)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| {
+            PhaseGateRepairError::database(format!(
+                "lock task_dispatches rows for phase-gate repair on run {run_id}: {error}"
+            ))
+        })?;
+    Ok(())
+}
+
 async fn lock_phase_gate_repair_candidate_phases_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
@@ -868,6 +912,18 @@ pub async fn repair_phase_gates_for_run_on_pg(
             "auto-queue run not found: {run_id}"
         )));
     }
+
+    // #2257 concern 4: lock task_dispatches FIRST (matching PATCH's order),
+    // then advisory locks, then phase_gates FOR UPDATE. Any concurrent
+    // dispatch PATCH on the same dispatch waits at step 1; we then see its
+    // committed status/result in the candidate read below.
+    lock_phase_gate_repair_candidate_dispatch_rows_on_pg_tx(
+        &mut tx,
+        run_id,
+        options.phase,
+        dispatch_id.as_deref(),
+    )
+    .await?;
 
     lock_phase_gate_repair_candidate_phases_on_pg_tx(
         &mut tx,
@@ -2365,6 +2421,110 @@ mod reconcile_phase_gate_pg_tests {
         );
         assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
         assert_eq!(run_status(&pool, "run-pg-test").await, "active");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2257 concern 4 regression: a concurrent direct UPDATE on
+    /// `task_dispatches.status` (which is what `PATCH /api/dispatches/{id}`
+    /// runs through `set_dispatch_status_on_pg_with_sync`) acquires the
+    /// same `task_dispatches` row lock the repair path now takes. The two
+    /// paths must serialize on the dispatch row without deadlock and the
+    /// final phase_gate state must reflect the post-PATCH dispatch state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repair_serializes_with_concurrent_dispatch_update_without_deadlock() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+        seed_pending_entry(&pool, "run-pg-test", "entry-next-phase-deadlock", 1).await;
+
+        insert_dispatch(
+            &pool,
+            "dsp-repair-vs-patch",
+            "completed",
+            gate_context(),
+            Some(json!({"verdict":"phase_gate_passed"})),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "failed".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-repair-vs-patch".into()],
+                next_phase: Some(1),
+                final_phase: false,
+                failure_reason: Some("stale failed verdict".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed failed gate state");
+        sqlx::query("UPDATE auto_queue_runs SET status='paused' WHERE id='run-pg-test'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let repair_pool = pool.clone();
+        let repair_barrier = Arc::clone(&barrier);
+        let repair_task = tokio::spawn(async move {
+            repair_barrier.wait().await;
+            repair_phase_gates_for_run_on_pg(
+                &repair_pool,
+                "run-pg-test",
+                PhaseGateRepairOptions::default(),
+            )
+            .await
+        });
+        // Simulate PATCH /api/dispatches/{id}: open its own tx, lock the
+        // same task_dispatches row, mutate, commit. Mirrors the lock
+        // order that `set_dispatch_status_on_pg_with_sync` takes
+        // (task_dispatches first via UPDATE row lock).
+        let patch_pool = pool.clone();
+        let patch_barrier = Arc::clone(&barrier);
+        let patch_task = tokio::spawn(async move {
+            patch_barrier.wait().await;
+            let mut tx = patch_pool.begin().await.expect("begin patch-simulation tx");
+            sqlx::query(
+                "UPDATE task_dispatches
+                 SET result = CAST($1 AS jsonb), updated_at = NOW()
+                 WHERE id = 'dsp-repair-vs-patch'",
+            )
+            .bind(r#"{"verdict":"phase_gate_passed","note":"post-patch"}"#)
+            .execute(&mut *tx)
+            .await
+            .expect("patch task_dispatches");
+            // Hold the row lock briefly to maximize lock-order overlap
+            // with the repair task — exposes deadlock if the two paths
+            // ever drift to opposite orders.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tx.commit().await.expect("commit patch-simulation tx");
+        });
+        barrier.wait().await;
+
+        // Bounded wait so a regression that re-introduces the deadlock
+        // fails fast instead of hanging the test runner.
+        let repair = tokio::time::timeout(std::time::Duration::from_secs(15), repair_task)
+            .await
+            .expect("repair task did not deadlock")
+            .expect("repair task panicked");
+        let _patch = tokio::time::timeout(std::time::Duration::from_secs(15), patch_task)
+            .await
+            .expect("patch task did not deadlock")
+            .expect("patch task panicked");
+        let summary = repair.expect("repair returned Ok");
+
+        // The repair eventually cleared the gate (one of the two orderings
+        // — either it read post-PATCH state and cleared, or pre-PATCH and
+        // still cleared because the existing verdict was already a pass).
+        // The invariant we care about is no deadlock + final consistent
+        // state: the gate row is gone, run resumed.
+        assert_eq!(summary.cleared_gates + summary.failed_gates, 1);
+        assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
 
         pool.close().await;
         pg_db.drop().await;

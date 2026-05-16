@@ -298,6 +298,7 @@ pub(crate) async fn run(
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("HTTP server listening on {addr}");
+    routes::audit_explicit_auth_routes_on_boot(&config);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
