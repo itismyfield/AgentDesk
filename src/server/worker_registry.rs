@@ -9,6 +9,7 @@ use crate::engine::PolicyEngine;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::routines::validate_routine_runtime_config;
 use sqlx::PgPool;
+use tokio::sync::Notify;
 
 use super::cluster::ClusterRuntime;
 use super::ws::{BatchBuffer, BroadcastTx};
@@ -432,6 +433,10 @@ pub(crate) struct SupervisedWorkerRegistry {
     pg_pool: Option<Arc<PgPool>>,
     cluster_runtime: ClusterRuntime,
     shutdown: Arc<AtomicBool>,
+    /// Wakes the watcher-supervisor out of its idle `rx.recv().await` on
+    /// graceful shutdown so the drain path runs without depending on a
+    /// trailing registry event. See `#2409` finding #4.
+    watcher_supervisor_notify: Arc<Notify>,
     running: Vec<RunningWorker>,
 }
 
@@ -450,6 +455,7 @@ impl SupervisedWorkerRegistry {
             pg_pool,
             cluster_runtime,
             shutdown: Arc::new(AtomicBool::new(false)),
+            watcher_supervisor_notify: Arc::new(Notify::new()),
             running: Vec::new(),
         }
     }
@@ -717,12 +723,16 @@ impl SupervisedWorkerRegistry {
                     return Ok(None);
                 }
                 let shutdown = self.shutdown.clone();
+                let shutdown_notify = self.watcher_supervisor_notify.clone();
                 // Worker-local: tmux is host-scoped, so every node supervises
                 // its own relays. No leader gating — peer hosts can't observe
                 // each other's sessions anyway.
                 self.register_tokio(spec, async move {
-                    crate::services::cluster::watcher_supervisor::run_with_discard_sink(shutdown)
-                        .await;
+                    crate::services::cluster::watcher_supervisor::run_with_discard_sink_and_notify(
+                        shutdown,
+                        shutdown_notify,
+                    )
+                    .await;
                 });
                 Ok(None)
             }
@@ -897,6 +907,9 @@ impl SupervisedWorkerRegistry {
 impl Drop for SupervisedWorkerRegistry {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        // Wake the watcher-supervisor's idle `rx.recv().await` so it observes
+        // the shutdown flag without waiting for a trailing registry event.
+        self.watcher_supervisor_notify.notify_waiters();
     }
 }
 

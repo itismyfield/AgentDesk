@@ -42,6 +42,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use tokio::sync::Notify;
 use tokio::sync::broadcast::error::RecvError;
 
 use super::session_registry::{
@@ -156,24 +157,39 @@ fn spawn_if_absent(
 /// Spawns relays for every entry the registry currently lists; the supervisor
 /// trusts the registry as the source of truth, so any missing entries simply
 /// don't get a relay.
+///
+/// **Finding #2409.1**: lag recovery must also detect *rebinds*. If the
+/// skipped broadcast event was a `RegistryChange::Updated` for an existing
+/// session (e.g. the tmux session is now bound to a different channel /
+/// agent), the previously-spawned relay still carries the stale
+/// [`MatchedChannel`] and would mis-route every frame after the lag. We
+/// therefore compare each active handle's `matched()` snapshot against the
+/// registry's current entry and tear down + respawn when the binding differs.
 fn full_reconcile(
     active: &mut ActiveRelays,
     registry: &SessionRegistry,
     sink: &Arc<dyn RelaySink>,
 ) -> Vec<StreamRelayHandle> {
     let snapshot = registry.list_matched();
-    let live_names: std::collections::HashSet<String> = snapshot
+    let live: std::collections::HashMap<String, &RegisteredSession> = snapshot
         .iter()
-        .map(|e| e.matched.expected_session_name.clone())
+        .map(|e| (e.matched.expected_session_name.clone(), e))
         .collect();
-    // Take down relays for sessions that the registry no longer knows about.
-    let stale: Vec<String> = active
-        .by_session
-        .keys()
-        .filter(|name| !live_names.contains(*name))
-        .cloned()
-        .collect();
-    let mut to_shutdown = Vec::with_capacity(stale.len());
+    // Take down relays for sessions that the registry no longer knows about,
+    // AND for sessions whose binding has drifted (rebind during a lag).
+    let mut to_shutdown = Vec::new();
+    let mut stale: Vec<String> = Vec::new();
+    let mut rebound: Vec<String> = Vec::new();
+    for (name, handle) in &active.by_session {
+        match live.get(name) {
+            None => stale.push(name.clone()),
+            Some(entry) => {
+                if binding_differs(handle.matched(), &entry.matched) {
+                    rebound.push(name.clone());
+                }
+            }
+        }
+    }
     for name in stale {
         if let Some(handle) = active.remove(&name) {
             tracing::info!(
@@ -183,10 +199,32 @@ fn full_reconcile(
             to_shutdown.push(handle);
         }
     }
+    for name in rebound {
+        if let Some(handle) = active.remove(&name) {
+            tracing::warn!(
+                session = %name,
+                old_channel_id = %handle.matched().channel_id,
+                old_agent_id = %handle.matched().agent_id,
+                "watcher-supervisor: tearing down relay during reconcile (binding rebound)"
+            );
+            to_shutdown.push(handle);
+        }
+    }
     for entry in &snapshot {
         spawn_if_absent(active, entry, sink);
     }
     to_shutdown
+}
+
+/// Returns true when two [`MatchedChannel`] values differ in routing-relevant
+/// fields (channel id, agent id, or provider). Session-name equality is the
+/// key we look these up by, and rollout path is purely derived, so we don't
+/// compare them.
+fn binding_differs(
+    a: &super::session_matcher::MatchedChannel,
+    b: &super::session_matcher::MatchedChannel,
+) -> bool {
+    a.channel_id != b.channel_id || a.agent_id != b.agent_id || a.provider != b.provider
 }
 
 /// Run the supervisor loop until `shutdown` flips true. The loop:
@@ -207,15 +245,41 @@ pub async fn run_watcher_supervisor_loop(
     shutdown: Arc<AtomicBool>,
 ) {
     let registry = global_session_registry();
-    run_watcher_supervisor_loop_with_registry(config, sink, shutdown, registry).await;
+    run_watcher_supervisor_loop_with_registry(config, sink, shutdown, registry, None).await;
 }
 
-/// Test-friendly variant — accepts an explicit registry.
+/// Run the supervisor with an explicit shutdown notifier. The notifier lets
+/// the caller wake the loop out of an idle `rx.recv().await` so graceful
+/// shutdown observability is independent of registry traffic — see
+/// **Finding #2409.4**.
+pub async fn run_watcher_supervisor_loop_with_notify(
+    config: SupervisorConfig,
+    sink: Arc<dyn RelaySink>,
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+) {
+    let registry = global_session_registry();
+    run_watcher_supervisor_loop_with_registry(
+        config,
+        sink,
+        shutdown,
+        registry,
+        Some(shutdown_notify),
+    )
+    .await;
+}
+
+/// Test-friendly variant — accepts an explicit registry and an optional
+/// `Notify` for shutdown observability. When `shutdown_notify` is `Some`, the
+/// caller can wake the loop out of an idle `recv` by calling
+/// `notify_one()`/`notify_waiters()` on the same `Notify`, even if no
+/// registry event fires.
 pub async fn run_watcher_supervisor_loop_with_registry(
     config: SupervisorConfig,
     sink: Arc<dyn RelaySink>,
     shutdown: Arc<AtomicBool>,
     registry: Arc<SessionRegistry>,
+    shutdown_notify: Option<Arc<Notify>>,
 ) {
     let mut rx = registry.subscribe();
     let mut active = ActiveRelays::default();
@@ -231,36 +295,74 @@ pub async fn run_watcher_supervisor_loop_with_registry(
         "watcher-supervisor entering main loop"
     );
 
-    loop {
+    // Local fallback notify so the select! has a uniform shape even when the
+    // caller didn't supply one. We just never wake this one ourselves.
+    let local_notify = Arc::new(Notify::new());
+    let notify = shutdown_notify.unwrap_or(local_notify);
+
+    enum LoopAction {
+        Continue,
+        ResubscribeAfterBackoff,
+        Break,
+    }
+
+    'outer: loop {
         if shutdown.load(Ordering::Acquire) {
             break;
         }
-        match rx.recv().await {
-            Ok(change) => {
-                let to_shutdown = apply_change(&mut active, &change, &sink);
-                if let Some(handle) = to_shutdown {
-                    handle.shutdown().await;
+        let action = {
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            tokio::select! {
+                biased;
+                _ = &mut notified => {
+                    // Shutdown signal observed. Re-check the flag and break
+                    // immediately if it flipped; otherwise spurious wake — loop.
+                    if shutdown.load(Ordering::Acquire) {
+                        LoopAction::Break
+                    } else {
+                        LoopAction::Continue
+                    }
+                }
+                recv_result = rx.recv() => match recv_result {
+                    Ok(change) => {
+                        let to_shutdown = apply_change(&mut active, &change, &sink);
+                        if let Some(handle) = to_shutdown {
+                            handle.shutdown().await;
+                        }
+                        LoopAction::Continue
+                    }
+                    Err(RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            skipped,
+                            "watcher-supervisor: broadcast lagged; running full reconcile"
+                        );
+                        let teardowns = full_reconcile(&mut active, &registry, &sink);
+                        for handle in teardowns {
+                            handle.shutdown().await;
+                        }
+                        LoopAction::Continue
+                    }
+                    Err(RecvError::Closed) => {
+                        // Registry dropped — happens only at process shutdown,
+                        // but we don't want to busy-loop if it ever happens
+                        // unexpectedly.
+                        tracing::warn!(
+                            "watcher-supervisor: registry broadcast closed; backing off and retrying"
+                        );
+                        if shutdown.load(Ordering::Acquire) {
+                            LoopAction::Break
+                        } else {
+                            LoopAction::ResubscribeAfterBackoff
+                        }
+                    }
                 }
             }
-            Err(RecvError::Lagged(skipped)) => {
-                tracing::warn!(
-                    skipped,
-                    "watcher-supervisor: broadcast lagged; running full reconcile"
-                );
-                let teardowns = full_reconcile(&mut active, &registry, &sink);
-                for handle in teardowns {
-                    handle.shutdown().await;
-                }
-            }
-            Err(RecvError::Closed) => {
-                // Registry dropped — happens only at process shutdown, but
-                // we don't want to busy-loop if it ever happens unexpectedly.
-                tracing::warn!(
-                    "watcher-supervisor: registry broadcast closed; backing off and retrying"
-                );
-                if shutdown.load(Ordering::Acquire) {
-                    break;
-                }
+        };
+        match action {
+            LoopAction::Continue => {}
+            LoopAction::Break => break 'outer,
+            LoopAction::ResubscribeAfterBackoff => {
                 tokio::time::sleep(config.backoff).await;
                 // Re-subscribe in case a new registry was installed; for the
                 // global singleton this is a no-op but keeps the loop alive.
@@ -290,6 +392,22 @@ pub async fn run_with_discard_sink(shutdown: Arc<AtomicBool>) {
         SupervisorConfig::default(),
         Arc::new(DiscardSink) as Arc<dyn RelaySink>,
         shutdown,
+    )
+    .await;
+}
+
+/// Variant of [`run_with_discard_sink`] that accepts a shutdown
+/// [`Notify`] so the host worker registry can wake the supervisor out of an
+/// idle `rx.recv().await` on graceful shutdown. See `#2409` finding #4.
+pub async fn run_with_discard_sink_and_notify(
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+) {
+    run_watcher_supervisor_loop_with_notify(
+        SupervisorConfig::default(),
+        Arc::new(DiscardSink) as Arc<dyn RelaySink>,
+        shutdown,
+        shutdown_notify,
     )
     .await;
 }
@@ -372,6 +490,7 @@ mod tests {
                 sink_clone,
                 shutdown_clone,
                 registry_clone,
+                None,
             )
             .await;
         });
@@ -430,6 +549,7 @@ mod tests {
                 sink_clone,
                 shutdown_clone,
                 registry_clone,
+                None,
             )
             .await;
         });
