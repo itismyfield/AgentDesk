@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { useCallback, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { CheckCircle2, Info, TriangleAlert, XCircle } from "lucide-react";
+import { Toaster, toast } from "sonner";
 
 export interface Notification {
   id: string;
@@ -16,6 +18,7 @@ export function useNotifications(maxItems = 50) {
     (message: string, type: Notification["type"] = "info") => {
       const id = `n-${++idRef.current}`;
       setNotifications((prev) => [{ id, message, type, ts: Date.now() }, ...prev].slice(0, maxItems));
+      showToast(id, message, type);
       return id;
     },
     [maxItems],
@@ -23,24 +26,30 @@ export function useNotifications(maxItems = 50) {
 
   const updateNotification = useCallback(
     (id: string, message: string, type?: Notification["type"]) => {
+      let toastType = type;
       setNotifications((prev) =>
         prev.map((notification) =>
           notification.id === id
-            ? {
+            ? (() => {
+                toastType = toastType ?? notification.type;
+                return {
                 ...notification,
                 message,
                 type: type ?? notification.type,
                 ts: Date.now(),
-              }
+                };
+              })()
             : notification,
         ),
       );
+      showToast(id, message, toastType ?? "info");
     },
     [],
   );
 
   const dismissNotification = useCallback((id: string) => {
     setNotifications((prev) => prev.filter((notification) => notification.id !== id));
+    toast.dismiss(id);
   }, []);
 
   return { notifications, pushNotification, updateNotification, dismissNotification } as const;
@@ -62,61 +71,69 @@ const NOTIFICATION_TYPE_BACKGROUNDS: Record<Notification["type"], string> = {
   error: "rgba(248,113,113,0.14)",
 };
 
+const NOTIFICATION_TYPE_ICONS: Record<Notification["type"], ReactNode> = {
+  info: <Info size={16} aria-hidden="true" />,
+  success: <CheckCircle2 size={16} aria-hidden="true" />,
+  warning: <TriangleAlert size={16} aria-hidden="true" />,
+  error: <XCircle size={16} aria-hidden="true" />,
+};
+
+function showToast(
+  id: string,
+  message: string,
+  type: Notification["type"],
+) {
+  const options = {
+    id,
+    duration: TOAST_TTL_MS,
+    closeButton: true,
+    icon: NOTIFICATION_TYPE_ICONS[type],
+    style: {
+      borderColor: `${NOTIFICATION_TYPE_COLORS[type]}55`,
+      background: `linear-gradient(135deg, ${NOTIFICATION_TYPE_BACKGROUNDS[type]}, color-mix(in srgb, var(--th-surface) 94%, transparent))`,
+      color: "var(--th-text)",
+    },
+  } as const;
+
+  if (type === "success") {
+    toast.success(message, options);
+  } else if (type === "warning") {
+    toast.warning(message, options);
+  } else if (type === "error") {
+    toast.error(message, options);
+  } else {
+    toast.info(message, options);
+  }
+}
+
 interface ToastOverlayProps {
   notifications: Notification[];
   onDismiss: (id: string) => void;
 }
 
-export function ToastOverlay({ notifications, onDismiss }: ToastOverlayProps) {
-  const recent = notifications.filter((notification) => Date.now() - notification.ts < TOAST_TTL_MS);
-
-  useEffect(() => {
-    if (recent.length === 0) return;
-    const timer = window.setInterval(() => {
-      const now = Date.now();
-      for (const notification of recent) {
-        if (now - notification.ts >= TOAST_TTL_MS) {
-          onDismiss(notification.id);
-        }
-      }
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [recent, onDismiss]);
-
-  if (recent.length === 0) return null;
-
+export function ToastOverlay({ notifications: _notifications, onDismiss: _onDismiss }: ToastOverlayProps) {
   return (
-    <div className="fixed right-3 z-[100] flex max-w-sm flex-col gap-2 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] sm:bottom-4 sm:right-4">
-      {recent.slice(0, 4).map((notification) => (
-        <div
-          key={notification.id}
-          className="flex items-start gap-2 rounded-xl border px-3 py-2 text-sm shadow-lg"
-          style={{
-            borderColor: `${NOTIFICATION_TYPE_COLORS[notification.type]}55`,
-            background: `linear-gradient(135deg, ${NOTIFICATION_TYPE_BACKGROUNDS[notification.type]}, color-mix(in srgb, var(--th-surface) 92%, transparent))`,
-            color: "var(--th-text)",
-          }}
-        >
-          <span
-            className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
-            style={{ background: NOTIFICATION_TYPE_COLORS[notification.type] }}
-          />
-          <div className="min-w-0 flex-1">
-            <p className="break-words text-xs leading-relaxed">{notification.message}</p>
-          </div>
-          <button
-            onClick={() => onDismiss(notification.id)}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted)] transition-opacity hover:opacity-100"
-            style={{
-              background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
-              borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
-            }}
-            aria-label="Dismiss notification"
-          >
-            <X size={12} />
-          </button>
-        </div>
-      ))}
-    </div>
+    <Toaster
+      closeButton
+      expand
+      richColors={false}
+      position="bottom-right"
+      visibleToasts={4}
+      duration={TOAST_TTL_MS}
+      mobileOffset={{
+        bottom: "calc(4.75rem + env(safe-area-inset-bottom))",
+        left: "0.75rem",
+        right: "0.75rem",
+      }}
+      toastOptions={{
+        closeButtonAriaLabel: "Dismiss notification",
+        classNames: {
+          toast: "agentdesk-toast",
+          title: "agentdesk-toast-title",
+          closeButton: "agentdesk-toast-close",
+        },
+      }}
+      containerAriaLabel="Notifications"
+    />
   );
 }

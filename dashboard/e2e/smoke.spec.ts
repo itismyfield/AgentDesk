@@ -1413,6 +1413,30 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   });
 
+  test("command palette searches routes and closes accessibly", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop keyboard shortcut coverage");
+    await page.goto("/home");
+
+    await page.getByLabel(/검색 열기|Open search/).click();
+    const palette = page.getByRole("dialog", {
+      name: /명령 팔레트|Command Palette/,
+    });
+    await expect(palette).toBeVisible();
+
+    const search = palette.getByPlaceholder(/검색|Search/);
+    await expect(search).toBeFocused();
+    await search.fill("stats");
+    await expect(palette.getByText(/통계|Stats/)).toBeVisible();
+
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/stats$/);
+
+    await page.getByLabel(/검색 열기|Open search/).click();
+    await expect(palette).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(palette).toHaveCount(0);
+  });
+
   test("desktop: sidebar renders at the full shell width", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
     await page.goto("/home");
@@ -1466,6 +1490,9 @@ test.describe("Dashboard smoke tests", () => {
 
     const moreMenu = page.getByTestId("app-mobile-more-menu");
     await expect(moreMenu).toBeVisible();
+    await expect(
+      moreMenu.getByRole("button", { name: /더보기 닫기|Close more menu/ }),
+    ).toBeFocused();
     await expect(moreMenu.getByRole("button", { name: /에이전트|Agents/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /운영|Ops/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /회의|Meetings/ })).toBeVisible();
@@ -1492,6 +1519,10 @@ test.describe("Dashboard smoke tests", () => {
     expect(tabbarStyles.paddingBottom).toContain("env(safe-area-inset-bottom)");
     expect(tabbarStyles.paddingLeft).toContain("env(safe-area-inset-left)");
     expect(tabbarStyles.paddingRight).toContain("env(safe-area-inset-right)");
+
+    await page.keyboard.press("Escape");
+    await expect(moreMenu).toHaveCount(0);
+    await expect(page.getByTestId("app-mobile-more-button")).toBeFocused();
   });
 
   test("responsive: mobile topbar keeps breadcrumb on a dedicated row", async ({ page }, testInfo) => {
@@ -1607,7 +1638,20 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("home-widget-quality")).toBeVisible({ timeout: 15000 });
     await page.getByTestId("home-edit-toggle").click();
 
-    await page.getByTestId("home-widget-missions").dragTo(page.getByTestId("home-widget-m_rate_limit"));
+    const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
+    await page
+      .getByTestId("home-widget-missions")
+      .dispatchEvent("dragstart", { dataTransfer });
+    await page
+      .getByTestId("home-widget-m_rate_limit")
+      .dispatchEvent("dragover", { dataTransfer });
+    await page
+      .getByTestId("home-widget-m_rate_limit")
+      .dispatchEvent("drop", { dataTransfer });
+    await page
+      .getByTestId("home-widget-missions")
+      .dispatchEvent("dragend", { dataTransfer });
+    await dataTransfer.dispose();
 
     await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DRAGGED_HOME_WIDGET_ORDER);
     await expect

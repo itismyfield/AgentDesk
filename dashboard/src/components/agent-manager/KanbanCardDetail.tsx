@@ -1,6 +1,7 @@
 import { useState } from "react";
 import * as api from "../../api";
 import type { KanbanReview } from "../../api";
+import { KANBAN_STATUS_TONES } from "../../theme/statusTokens";
 import CardIssueContent from "./CardIssueContent";
 import CardTimeline from "./CardTimeline";
 import TurnTranscriptPanel from "./TurnTranscriptPanel";
@@ -443,12 +444,12 @@ export default function KanbanCardDetail({
             className="block"
           >
             <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{
-              color: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "#eab308" : selectedCard.review_status === "improve_rework" ? "#f97316" : "#14b8a6",
+              color: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "#eab308" : selectedCard.review_status === "improve_rework" ? KANBAN_STATUS_TONES.failed.accent : KANBAN_STATUS_TONES.review.accent,
             }}>
               {tr("카운터 모델 리뷰", "Counter-Model Review")}
             </div>
             <div className="text-sm" style={{
-              color: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "#fde047" : selectedCard.review_status === "improve_rework" ? "#fdba74" : "#5eead4",
+              color: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "#fde047" : selectedCard.review_status === "improve_rework" ? "#fdba74" : KANBAN_STATUS_TONES.review.text,
             }}>
               {selectedCard.review_status === "reviewing" && (() => {
                 const reviewDispatch = dispatches.find(

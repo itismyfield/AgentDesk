@@ -227,6 +227,20 @@ textarea {
   font: inherit;
 }
 
+:where(
+  a[href],
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  [role="button"],
+  [tabindex]:not([tabindex="-1"])
+):focus-visible {
+  outline: 2px solid var(--th-focus-ring, var(--th-accent-primary, var(--accent)));
+  outline-offset: 2px;
+}
+
 @media (max-width: 899px) {
   body { overflow-x: hidden; overflow-y: auto; }
 }
@@ -349,6 +363,54 @@ textarea {
 .dash-btn:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--dash-btn-color, #93c5fd) 60%, white 40%);
   outline-offset: 2px;
+}
+
+.agentdesk-toast {
+  border-radius: var(--r-md) !important;
+  border-width: 1px !important;
+  box-shadow: var(--shadow-md) !important;
+}
+
+.agentdesk-toast-title {
+  font-size: 0.8125rem !important;
+  line-height: 1.45 !important;
+}
+
+.agentdesk-toast-close {
+  border-color: color-mix(in srgb, var(--th-border) 64%, transparent) !important;
+  background: color-mix(in srgb, var(--th-card-bg) 92%, transparent) !important;
+  color: var(--th-text-muted) !important;
+}
+
+[cmdk-group-heading] {
+  padding: 0.625rem 1rem 0.25rem;
+  color: var(--th-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.command-palette-item {
+  display: flex;
+  width: 100%;
+  min-height: 2.75rem;
+  cursor: pointer;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  color: var(--th-text);
+  font-size: 0.875rem;
+  text-align: left;
+}
+
+.command-palette-item[data-selected="true"] {
+  background: var(--th-accent-primary-soft);
+}
+
+.command-palette-item-kind,
+.command-palette-item-meta {
+  color: var(--th-text-muted);
 }
 
 .dash-btn:disabled {

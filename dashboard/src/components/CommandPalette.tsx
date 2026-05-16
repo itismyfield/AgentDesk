@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from "react";
+import { Command } from "cmdk";
 import { Search } from "lucide-react";
 import type { Agent, Department } from "../types";
 import { SurfaceEmptyState } from "./common/SurfacePrimitives";
@@ -33,7 +34,6 @@ export default function CommandPalette({
   departmentRouteId = "settings_organization",
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
-  const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -44,54 +44,15 @@ export default function CommandPalette({
 
   type ResultItem = { type: "agent"; agent: Agent } | { type: "nav"; id: string; label: string; icon: string } | { type: "dept"; dept: Department };
 
-  const results = useMemo(() => {
-    const items: ResultItem[] = [];
-    const q = query.toLowerCase().trim();
-
-    const navs = routes.map((route) => ({
+  const navItems = useMemo(
+    () =>
+      routes.map((route) => ({
       id: route.id,
       label: tr(route.labelKo, route.labelEn),
       icon: route.icon,
-    }));
-
-    if (!q) {
-      items.push(...navs.map((n) => ({ type: "nav" as const, ...n })));
-      items.push(...agents.slice(0, 8).map((a) => ({ type: "agent" as const, agent: a })));
-      return items;
-    }
-
-    // Filter navs
-    for (const n of navs) {
-      if (n.label.toLowerCase().includes(q) || n.id.includes(q)) {
-        items.push({ type: "nav", ...n });
-      }
-    }
-
-    // Filter agents
-    for (const a of agents) {
-      if (
-        a.name.toLowerCase().includes(q) ||
-        a.name_ko.toLowerCase().includes(q) ||
-        (a.alias && a.alias.toLowerCase().includes(q)) ||
-        a.avatar_emoji.includes(q)
-      ) {
-        items.push({ type: "agent", agent: a });
-      }
-    }
-
-    // Filter departments
-    for (const d of departments) {
-      if (d.name.toLowerCase().includes(q) || d.name_ko.toLowerCase().includes(q)) {
-        items.push({ type: "dept", dept: d });
-      }
-    }
-
-    return items.slice(0, 12);
-  }, [query, agents, departments, isKo, routes]);
-
-  useEffect(() => {
-    setSelectedIndex(0);
-  }, [query]);
+    })),
+    [isKo, routes],
+  );
 
   const handleSelect = (item: ResultItem) => {
     if (item.type === "nav") {
@@ -104,48 +65,39 @@ export default function CommandPalette({
     onClose();
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setSelectedIndex((i) => Math.min(i + 1, results.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setSelectedIndex((i) => Math.max(i - 1, 0));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      if (results[selectedIndex]) handleSelect(results[selectedIndex]);
-    } else if (e.key === "Escape") {
-      onClose();
-    }
-  };
-
   return (
     <div
       className="fixed inset-0 z-[100] flex items-start justify-center pt-[15vh]"
       onClick={onClose}
     >
       <div className="fixed inset-0" style={{ background: "var(--th-modal-overlay)" }} />
-      <div
+      <Command
+        loop
         role="dialog"
         aria-modal="true"
         aria-label={tr("명령 팔레트", "Command Palette")}
+        label={tr("명령 팔레트", "Command Palette")}
         className="relative w-full max-w-lg mx-4 overflow-hidden rounded-[28px] border shadow-2xl"
         style={{
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
           background:
             "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
         }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onClose();
+          }
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Search input */}
         <div className="flex items-center gap-3 px-4 py-3 border-b" style={{ borderColor: "var(--th-border)" }}>
           <Search size={18} style={{ color: "var(--th-text-muted)" }} />
-          <input
+          <Command.Input
             ref={inputRef}
-            type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={handleKeyDown}
+            onValueChange={setQuery}
             placeholder={tr("검색... (에이전트, 메뉴, 부서)", "Search... (agents, menu, departments)")}
             className="flex-1 bg-transparent text-sm outline-none"
             style={{ color: "var(--th-text)" }}
@@ -156,56 +108,95 @@ export default function CommandPalette({
         </div>
 
         {/* Results */}
-        <div className="max-h-64 overflow-y-auto py-2">
-          {results.map((item, i) => (
-            <button
-              key={item.type === "agent" ? item.agent.id : item.type === "nav" ? item.id : item.dept.id}
-              onClick={() => handleSelect(item)}
-              className={`w-full flex items-center gap-3 px-4 py-2 text-left text-sm transition-colors ${
-                i === selectedIndex ? "rounded-xl" : ""
-              }`}
-              style={{
-                color: "var(--th-text)",
-                background: i === selectedIndex ? "var(--th-accent-primary-soft)" : "transparent",
-              }}
-            >
-              <span className="flex items-center justify-center w-6 text-base text-center">
-                {item.type === "agent" ? (
-                  <AgentAvatar agent={item.agent} agents={agents} size={22} />
-                ) : item.type === "nav" ? (
-                  item.icon
-                ) : (
-                  item.dept.icon
-                )}
-              </span>
-              <div className="flex-1 min-w-0">
-                <div className="truncate">
-                  {item.type === "agent"
-                    ? (item.agent.alias || item.agent.name_ko || item.agent.name)
-                    : item.type === "nav"
-                    ? item.label
-                    : (item.dept.name_ko || item.dept.name)}
-                </div>
-                {item.type === "agent" && (
-                  <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {item.agent.department_name_ko || ""} · {item.agent.status}
-                  </div>
-                )}
-              </div>
-              <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                {item.type === "agent" ? tr("에이전트", "Agent")
-                  : item.type === "nav" ? tr("이동", "Go")
-                  : tr("부서", "Dept")}
-              </span>
-            </button>
-          ))}
-          {results.length === 0 && (
+        <Command.List
+          className="max-h-64 overflow-y-auto py-2"
+          label={tr("검색 결과", "Search results")}
+        >
+          <Command.Empty>
             <SurfaceEmptyState className="mx-2 px-4 py-6 text-center text-sm">
               {tr("결과 없음", "No results")}
             </SurfaceEmptyState>
-          )}
-        </div>
-      </div>
+          </Command.Empty>
+
+          <Command.Group heading={tr("이동", "Navigate")}>
+            {navItems.map((item) => (
+              <Command.Item
+                key={item.id}
+                value={`nav:${item.id}:${item.label}`}
+                keywords={[item.id, item.label]}
+                className="command-palette-item"
+                onSelect={() => handleSelect({ type: "nav", ...item })}
+              >
+                <span className="flex w-6 items-center justify-center text-base text-center">
+                  {item.icon}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate">{item.label}</div>
+                </div>
+                <span className="text-xs command-palette-item-kind">
+                  {tr("이동", "Go")}
+                </span>
+              </Command.Item>
+            ))}
+          </Command.Group>
+
+          <Command.Group heading={tr("에이전트", "Agents")}>
+            {agents.map((agent) => (
+              <Command.Item
+                key={agent.id}
+                value={`agent:${agent.id}:${agent.alias ?? ""}:${agent.name_ko}:${agent.name}`}
+                keywords={[
+                  agent.name,
+                  agent.name_ko,
+                  agent.alias ?? "",
+                  agent.avatar_emoji,
+                  agent.department_name_ko ?? "",
+                  agent.status,
+                ]}
+                className="command-palette-item"
+                onSelect={() => handleSelect({ type: "agent", agent })}
+              >
+                <span className="flex w-6 items-center justify-center text-base text-center">
+                  <AgentAvatar agent={agent} agents={agents} size={22} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate">
+                    {agent.alias || agent.name_ko || agent.name}
+                  </div>
+                  <div className="text-xs command-palette-item-meta">
+                    {agent.department_name_ko || ""} · {agent.status}
+                  </div>
+                </div>
+                <span className="text-xs command-palette-item-kind">
+                  {tr("에이전트", "Agent")}
+                </span>
+              </Command.Item>
+            ))}
+          </Command.Group>
+
+          <Command.Group heading={tr("부서", "Departments")}>
+            {departments.map((dept) => (
+              <Command.Item
+                key={dept.id}
+                value={`dept:${dept.id}:${dept.name_ko}:${dept.name}`}
+                keywords={[dept.name, dept.name_ko, dept.icon]}
+                className="command-palette-item"
+                onSelect={() => handleSelect({ type: "dept", dept })}
+              >
+                <span className="flex w-6 items-center justify-center text-base text-center">
+                  {dept.icon}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate">{dept.name_ko || dept.name}</div>
+                </div>
+                <span className="text-xs command-palette-item-kind">
+                  {tr("부서", "Dept")}
+                </span>
+              </Command.Item>
+            ))}
+          </Command.Group>
+        </Command.List>
+      </Command>
     </div>
   );
 }

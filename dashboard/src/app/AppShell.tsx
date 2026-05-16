@@ -54,6 +54,7 @@ import {
 import { deriveOfficeAgentState } from "../components/office-view/officeAgentState";
 import { MiniRateLimitBar } from "../components/office-view/OfficeInsightPanel";
 import OfficeSelectorBar from "../components/OfficeSelectorBar";
+import { useFocusTrap } from "../components/common/overlay";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "./breakpoints";
 import {
   DEFAULT_ROUTE_PATH,
@@ -323,6 +324,7 @@ export default function AppShell({
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [showTweaksPanel, setShowTweaksPanel] = useState(false);
   const [showMobileMoreMenu, setShowMobileMoreMenu] = useState(false);
+  const mobileMoreMenuRef = useFocusTrap(showMobileMoreMenu);
   const [agentsPageTab, setAgentsPageTab] = useState<AgentsPageTab>("agents");
   const [kanbanSignalFocus, setKanbanSignalFocus] =
     useState<KanbanSignalFocus | null>(null);
@@ -950,7 +952,7 @@ export default function AppShell({
                         accent="var(--th-accent-warn)"
                       />
                       <NotificationSummaryRow
-                        label={tr("최근 토스트", "Recent toasts")}
+                        label={tr("최근 알림", "Recent notifications")}
                         value={recentNotifications.length}
                         accent="var(--th-accent-info)"
                       />
@@ -1401,10 +1403,12 @@ export default function AppShell({
             >
               <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" />
               <div
+                ref={mobileMoreMenuRef}
                 data-testid="app-mobile-more-menu"
                 role="dialog"
                 aria-modal="true"
                 aria-label={tr("확장 메뉴", "Extensions menu")}
+                tabIndex={-1}
                 className="relative w-full max-h-[80vh] overflow-y-auto rounded-t-[2rem] border px-4 pb-4 pt-3 shadow-2xl animate-in fade-in slide-in-from-bottom-4 duration-200"
                 style={{
                   borderColor: "var(--th-border-subtle)",
@@ -1412,6 +1416,12 @@ export default function AppShell({
                     "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 98%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 95%, transparent) 100%)",
                   paddingBottom:
                     "max(1rem, calc(1rem + env(safe-area-inset-bottom)))",
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setShowMobileMoreMenu(false);
+                  }
                 }}
                 onClick={(event) => event.stopPropagation()}
               >
@@ -2711,13 +2721,16 @@ function HomeOverviewPage({
               onDrop={(event) => {
                 if (!editing || isMobileViewport) return;
                 event.preventDefault();
-                if (dragIndex == null || dragIndex === index) {
+                const transferredIndex = Number(event.dataTransfer.getData("text/plain"));
+                const fromIndex =
+                  dragIndex ?? (Number.isInteger(transferredIndex) ? transferredIndex : null);
+                if (fromIndex == null || fromIndex === index) {
                   setDragIndex(null);
                   setOverIndex(null);
                   return;
                 }
                 const next = [...widgets];
-                const [moved] = next.splice(dragIndex, 1);
+                const [moved] = next.splice(fromIndex, 1);
                 next.splice(index, 0, moved);
                 setWidgets(next);
                 setDragIndex(null);

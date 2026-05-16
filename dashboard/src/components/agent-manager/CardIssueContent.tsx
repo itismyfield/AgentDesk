@@ -1,5 +1,6 @@
 import MarkdownContent from "../common/MarkdownContent";
 import type { KanbanCard } from "../../types";
+import { KANBAN_STATUS_TONES } from "../../theme/statusTokens";
 import {
   parseIssueSections,
   type EditorState,
@@ -80,9 +81,9 @@ export default function CardIssueContent({
 
       {/* DoD Checklist */}
       {editor.review_checklist.length > 0 && (
-        <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: "rgba(20,184,166,0.3)" }}>
+        <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: `${KANBAN_STATUS_TONES.review.accent}4d` }}>
           <div className="flex items-center justify-between gap-3">
-            <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#2dd4bf" }}>
+            <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: KANBAN_STATUS_TONES.review.text }}>
               DoD (Definition of Done)
               {isGitHubLinked && (
                 <span className="ml-2 text-xs font-normal normal-case tracking-normal" style={{ color: "var(--th-text-muted)" }}>

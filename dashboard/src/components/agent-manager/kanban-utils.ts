@@ -1,4 +1,5 @@
 import type { GitHubComment } from "../../api";
+import { KANBAN_STATUS_TONES } from "../../theme/statusTokens";
 import type {
   KanbanCard,
   KanbanCardMetadata,
@@ -30,27 +31,27 @@ interface KanbanColumnDef<TStatus extends string> {
 }
 
 export const COLUMN_DEFS: Array<KanbanColumnDef<KanbanCardStatus | "failed">> = [
-  { status: "backlog", labelKo: "백로그", labelEn: "Backlog", accent: "#64748b" },
-  { status: "ready", labelKo: "준비됨", labelEn: "Ready", accent: "#0ea5e9" },
-  { status: "requested", labelKo: "준비됨", labelEn: "Ready", accent: "#10b981" },
-  { status: "failed", labelKo: "실패", labelEn: "Failed", accent: "#f97316" },
-  { status: "in_progress", labelKo: "진행 중", labelEn: "In Progress", accent: "#f59e0b" },
-  { status: "review", labelKo: "검토", labelEn: "Review", accent: "#14b8a6" },
-  { status: "qa_pending", labelKo: "QA 대기", labelEn: "QA Pending", accent: "#06b6d4" },
-  { status: "qa_in_progress", labelKo: "QA 진행", labelEn: "QA In Progress", accent: "#3b82f6" },
-  { status: "qa_failed", labelKo: "QA 실패", labelEn: "QA Failed", accent: "#fb7185" },
-  { status: "done", labelKo: "완료", labelEn: "Done", accent: "#22c55e" },
+  { status: "backlog", labelKo: "백로그", labelEn: "Backlog", accent: KANBAN_STATUS_TONES.backlog.accent },
+  { status: "ready", labelKo: "준비됨", labelEn: "Ready", accent: KANBAN_STATUS_TONES.ready.accent },
+  { status: "requested", labelKo: "준비됨", labelEn: "Ready", accent: KANBAN_STATUS_TONES.requested.accent },
+  { status: "failed", labelKo: "실패", labelEn: "Failed", accent: KANBAN_STATUS_TONES.failed.accent },
+  { status: "in_progress", labelKo: "진행 중", labelEn: "In Progress", accent: KANBAN_STATUS_TONES.in_progress.accent },
+  { status: "review", labelKo: "검토", labelEn: "Review", accent: KANBAN_STATUS_TONES.review.accent },
+  { status: "qa_pending", labelKo: "QA 대기", labelEn: "QA Pending", accent: KANBAN_STATUS_TONES.qa_pending.accent },
+  { status: "qa_in_progress", labelKo: "QA 진행", labelEn: "QA In Progress", accent: KANBAN_STATUS_TONES.qa_in_progress.accent },
+  { status: "qa_failed", labelKo: "QA 실패", labelEn: "QA Failed", accent: KANBAN_STATUS_TONES.qa_failed.accent },
+  { status: "done", labelKo: "완료", labelEn: "Done", accent: KANBAN_STATUS_TONES.done.accent },
 ];
 
 export const BOARD_COLUMN_DEFS: Array<KanbanColumnDef<KanbanBoardColumnStatus>> = [
-  { status: "backlog", labelKo: "백로그", labelEn: "Backlog", accent: "#64748b" },
-  { status: "requested", labelKo: "준비됨", labelEn: "Ready", accent: "#10b981" },
-  { status: "in_progress", labelKo: "진행 중", labelEn: "In Progress", accent: "#f59e0b" },
-  { status: "review", labelKo: "검토", labelEn: "Review", accent: "#14b8a6" },
-  { status: "qa_pending", labelKo: "QA 대기", labelEn: "QA Pending", accent: "#e879f9" },
-  { status: "qa_in_progress", labelKo: "QA 진행", labelEn: "QA In Progress", accent: "#c084fc" },
-  { status: "failed", labelKo: "실패", labelEn: "Failed", accent: "#f97316" },
-  { status: "done", labelKo: "완료 일감", labelEn: "Completed Work", accent: "#22c55e" },
+  { status: "backlog", labelKo: "백로그", labelEn: "Backlog", accent: KANBAN_STATUS_TONES.backlog.accent },
+  { status: "requested", labelKo: "준비됨", labelEn: "Ready", accent: KANBAN_STATUS_TONES.requested.accent },
+  { status: "in_progress", labelKo: "진행 중", labelEn: "In Progress", accent: KANBAN_STATUS_TONES.in_progress.accent },
+  { status: "review", labelKo: "검토", labelEn: "Review", accent: KANBAN_STATUS_TONES.review.accent },
+  { status: "qa_pending", labelKo: "QA 대기", labelEn: "QA Pending", accent: KANBAN_STATUS_TONES.qa_pending.accent },
+  { status: "qa_in_progress", labelKo: "QA 진행", labelEn: "QA In Progress", accent: KANBAN_STATUS_TONES.qa_in_progress.accent },
+  { status: "failed", labelKo: "실패", labelEn: "Failed", accent: KANBAN_STATUS_TONES.failed.accent },
+  { status: "done", labelKo: "완료 일감", labelEn: "Completed Work", accent: KANBAN_STATUS_TONES.done.accent },
 ];
 
 export const TERMINAL_STATUSES = new Set<KanbanCardStatus>(["done"]);
@@ -81,19 +82,19 @@ export const STATUS_TRANSITIONS: Record<KanbanCardStatus, KanbanCardStatus[]> = 
 };
 
 export const TRANSITION_STYLE: Record<string, { bg: string; text: string }> = {
-  ready: { bg: "rgba(14,165,233,0.18)", text: "#38bdf8" },
-  requested: { bg: "rgba(16,185,129,0.18)", text: "#10b981" },
-  in_progress: { bg: "rgba(245,158,11,0.18)", text: "#fbbf24" },
-  review: { bg: "rgba(20,184,166,0.18)", text: "#2dd4bf" },
-  done: { bg: "rgba(34,197,94,0.22)", text: "#4ade80" },
-  blocked: { bg: "rgba(239,68,68,0.18)", text: "#f87171" },
-  backlog: { bg: "rgba(100,116,139,0.18)", text: "#94a3b8" },
-  cancelled: { bg: "rgba(107,114,128,0.18)", text: "#9ca3af" },
-  failed: { bg: "rgba(249,115,22,0.18)", text: "#fb923c" },
-  qa_pending: { bg: "rgba(6,182,212,0.18)", text: "#06b6d4" },
-  qa_in_progress: { bg: "rgba(59,130,246,0.18)", text: "#3b82f6" },
-  qa_failed: { bg: "rgba(251,113,133,0.18)", text: "#fb7185" },
-  pending_decision: { bg: "rgba(249,115,22,0.18)", text: "#f97316" },
+  ready: KANBAN_STATUS_TONES.ready,
+  requested: KANBAN_STATUS_TONES.requested,
+  in_progress: KANBAN_STATUS_TONES.in_progress,
+  review: KANBAN_STATUS_TONES.review,
+  done: KANBAN_STATUS_TONES.done,
+  blocked: KANBAN_STATUS_TONES.blocked,
+  backlog: KANBAN_STATUS_TONES.backlog,
+  cancelled: KANBAN_STATUS_TONES.cancelled,
+  failed: KANBAN_STATUS_TONES.failed,
+  qa_pending: KANBAN_STATUS_TONES.qa_pending,
+  qa_in_progress: KANBAN_STATUS_TONES.qa_in_progress,
+  qa_failed: KANBAN_STATUS_TONES.qa_failed,
+  pending_decision: KANBAN_STATUS_TONES.pending_decision,
 };
 
 export const REQUEST_TIMEOUT_MS = 45 * 60 * 1000;
