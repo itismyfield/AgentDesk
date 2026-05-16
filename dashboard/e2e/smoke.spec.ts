@@ -1491,6 +1491,28 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("app-mobile-tab-kanban")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-stats")).toBeVisible();
 
+    const tabMetrics = await bottomNav.locator("button").evaluateAll((buttons) =>
+      buttons.map((button) => {
+        const node = button as HTMLElement;
+        const box = node.getBoundingClientRect();
+        const iconBox = node.querySelector("svg")?.getBoundingClientRect();
+        const label = node.querySelector("span:not([class*='absolute'])") as HTMLElement | null;
+        return {
+          height: box.height,
+          fontSize: Number.parseFloat(window.getComputedStyle(node).fontSize),
+          iconWidth: iconBox?.width ?? 0,
+          labelClientWidth: label?.clientWidth ?? 0,
+          labelScrollWidth: label?.scrollWidth ?? 0,
+        };
+      }),
+    );
+    for (const metric of tabMetrics) {
+      expect(metric.height).toBeGreaterThanOrEqual(44);
+      expect(metric.fontSize).toBeGreaterThanOrEqual(11);
+      expect(metric.iconWidth).toBeGreaterThanOrEqual(20);
+      expect(metric.labelScrollWidth).toBeLessThanOrEqual(metric.labelClientWidth + 1);
+    }
+
     const tabbarZIndex = await bottomNav.evaluate((element) =>
       Number(window.getComputedStyle(element as HTMLElement).zIndex),
     );

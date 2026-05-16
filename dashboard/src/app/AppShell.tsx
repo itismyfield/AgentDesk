@@ -120,7 +120,7 @@ interface AppShellProps {
 type AgentsPageTab = "agents" | "departments" | "backlog" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
 
-const MOBILE_TABBAR_SAFE_AREA_HEIGHT = "calc(3.5rem + env(safe-area-inset-bottom))";
+const MOBILE_TABBAR_SAFE_AREA_HEIGHT = "calc(4rem + env(safe-area-inset-bottom))";
 
 const HOME_PRIMARY_WIDGET_IDS = [
   "m_tokens",
@@ -1357,16 +1357,21 @@ export default function AppShell({
                   key={route.id}
                   type="button"
                   data-testid={`app-mobile-tab-${route.id}`}
+                  aria-label={tr(
+                    `${isKo ? route.labelKo : route.labelEn} 열기`,
+                    `Open ${route.labelEn}`,
+                  )}
+                  aria-current={isActive ? "page" : undefined}
                   onClick={() => navigateToRoute(route.path)}
-                  className="relative flex h-14 flex-1 flex-col items-center justify-center gap-0.5 text-[10px] font-medium"
+                  className="relative flex h-16 min-w-0 flex-1 flex-col items-center justify-center gap-1 text-[11.5px] font-medium leading-none"
                   style={{
                     color: isActive
                       ? "var(--th-accent-primary)"
                       : "var(--th-text-muted)",
                   }}
                 >
-                  <Icon size={18} />
-                  <span>{isKo ? route.labelKo : route.labelEn}</span>
+                  <Icon size={20} />
+                  <span className="max-w-full truncate px-1">{isKo ? route.labelKo : route.labelEn}</span>
                   {badge !== undefined && badge > 0 && (
                     <span className="absolute right-[28%] top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[8px] font-semibold text-white">
                       {badge > 9 ? "9+" : badge}
@@ -1378,8 +1383,11 @@ export default function AppShell({
             <button
               type="button"
               data-testid="app-mobile-more-button"
+              aria-haspopup="dialog"
+              aria-expanded={showMobileMoreMenu}
+              aria-controls={showMobileMoreMenu ? "app-mobile-more-menu" : undefined}
               onClick={() => setShowMobileMoreMenu((prev) => !prev)}
-              className="relative flex h-14 flex-1 flex-col items-center justify-center gap-0.5 text-[10px] font-medium"
+              className="relative flex h-16 min-w-0 flex-1 flex-col items-center justify-center gap-1 text-[11.5px] font-medium leading-none"
               style={{
                 color:
                   activeMobileRouteId === "more"
@@ -1387,8 +1395,8 @@ export default function AppShell({
                     : "var(--th-text-muted)",
               }}
             >
-              <Settings size={18} />
-              <span>{tr("설정", "Settings")}</span>
+              <Settings size={20} />
+              <span className="max-w-full truncate px-1">{tr("설정", "Settings")}</span>
               {(unresolvedMeetingsCount > 0 || unreadCount > 0) && (
                 <span className="absolute right-[28%] top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[8px] font-semibold text-white">
                   {unresolvedMeetingsCount + unreadCount > 9
@@ -1408,6 +1416,7 @@ export default function AppShell({
               <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" />
               <div
                 ref={mobileMoreMenuRef}
+                id="app-mobile-more-menu"
                 data-testid="app-mobile-more-menu"
                 role="dialog"
                 aria-modal="true"
