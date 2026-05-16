@@ -100,6 +100,17 @@ pub(in crate::services::discord) struct VoiceProgressEvent {
     pub label: String,
 }
 
+/// #2374 — return value from `dispatch_voice_background_handoff`. The
+/// caller needs both the dispatched `turn_id` (for tracing /
+/// follow-up cancellation) AND the handoff message id so it can key
+/// the cancel-tombstone on something durable across multiple cancel
+/// attempts.
+#[derive(Debug, Clone)]
+struct VoiceBackgroundHandoffOutcome {
+    turn_id: String,
+    handoff_message_id: Option<MessageId>,
+}
+
 #[derive(Clone)]
 struct LivePlaybackSession {
     player: Arc<dyn BargeInPlayerStop>,
@@ -1945,32 +1956,56 @@ impl VoiceBargeInRuntime {
                     )
                     .await
                 {
-                    Ok(turn_id) => {
-                        // Issue #2335 (Codex round 3): if a barge-in / stop
-                        // arrived DURING `dispatch_voice_background_handoff`,
-                        // the background turn was already created on the
-                        // target channel. The post-await check below would
-                        // suppress the spoken ack but leave the stale
-                        // background turn running. Immediately cancel the
-                        // just-started target-channel turn so the user's
-                        // stop actually stops the work.
-                        if cancel_token.cancelled.load(Ordering::Relaxed) {
-                            let cancel_reason = cancel_token.cancel_source().unwrap_or_else(|| {
-                                "voice_foreground_cancel_during_handoff".to_string()
-                            });
+                    Ok(handoff_outcome) => {
+                        let VoiceBackgroundHandoffOutcome {
+                            turn_id,
+                            handoff_message_id,
+                        } = handoff_outcome;
+                        // #2374 — consult the handoff cancel-tombstone
+                        // BEFORE inspecting our own in-memory cancel
+                        // flag. A retried voice utterance can re-enter
+                        // this branch for the same handoff after the
+                        // first attempt's `cancel_token` has finalized
+                        // (and therefore no longer reads `cancelled`).
+                        // Without the tombstone the second caller would
+                        // proceed to fire the spoken ack and a duplicate
+                        // background cancel, even though the user's
+                        // original cancel already terminated the work.
+                        //
+                        // Tombstones are keyed by the durable handoff
+                        // `message_id`. When the dispatch driver could
+                        // not surface a message id (rare — logged at
+                        // dispatch time), the tombstone path is
+                        // effectively a no-op and we fall back to the
+                        // legacy in-memory cancel-flag check.
+                        let tombstone = handoff_message_id.and_then(|id| {
+                            crate::voice::cancel_tombstone::global_store().lookup(id)
+                        });
+                        if cancel_token.cancelled.load(Ordering::Relaxed) || tombstone.is_some() {
+                            let observed_via_tombstone = tombstone.is_some()
+                                && !cancel_token.cancelled.load(Ordering::Relaxed);
+                            let cancel_reason = cancel_token
+                                .cancel_source()
+                                .or_else(|| tombstone.clone())
+                                .unwrap_or_else(|| {
+                                    "voice_foreground_cancel_during_handoff".to_string()
+                                });
                             // `cancel_reason` is a captured String — use a
                             // static fallback label to satisfy the
                             // `&'static str` signature; the dynamic reason is
-                            // still written to the active turn token by
-                            // `mailbox_cancel_active_turn_with_reason` only
-                            // accepting `&str`, so promote to a static
-                            // category here.
+                            // still written to the active turn token by the
+                            // mailbox-actor reason owner.
                             let target_cancel_label: &'static str =
                                 "voice_foreground_cancel_during_handoff";
-                            let result = super::mailbox_cancel_active_turn_with_reason(
+                            // #2374 — record the tombstone via the
+                            // handoff-aware variant so a still-later
+                            // third caller for the same handoff also
+                            // sees the cancel.
+                            let result = super::mailbox_cancel_active_turn_with_reason_and_handoff(
                                 shared,
                                 target_channel_id,
                                 target_cancel_label,
+                                handoff_message_id,
                             )
                             .await;
                             tracing::info!(
@@ -1980,8 +2015,9 @@ impl VoiceBargeInRuntime {
                                 target_cancelled = result.token.is_some(),
                                 already_stopping = result.already_stopping,
                                 cancel_source = %cancel_reason,
+                                observed_via_tombstone,
                                 "voice background handoff just-started turn cancelled \
-                                 because foreground cancel won the race (#2335)"
+                                 because foreground cancel won the race (#2335 / #2374)"
                             );
                             log_cancel_suppressed("post_background_handoff_started");
                             return true;
@@ -2031,7 +2067,7 @@ impl VoiceBargeInRuntime {
         target_channel_id: ChannelId,
         announcement: &crate::voice::prompt::VoiceTranscriptAnnouncement,
         summary: &str,
-    ) -> Result<String, String> {
+    ) -> Result<VoiceBackgroundHandoffOutcome, String> {
         let background_provider = self
             .resolve_background_provider_for_target(target_channel_id)
             .await;
@@ -2079,7 +2115,10 @@ impl VoiceBargeInRuntime {
                 "voice background handoff dispatch returned no message_id; spoken summary routing will fall back to legacy prefix detection"
             );
         }
-        Ok(outcome.turn_id)
+        Ok(VoiceBackgroundHandoffOutcome {
+            turn_id: outcome.turn_id,
+            handoff_message_id: outcome.message_id,
+        })
     }
 
     async fn start_voice_turn(
