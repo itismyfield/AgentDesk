@@ -133,17 +133,76 @@ jobs:
     #
     # When repo variable MACOS_RUNNER is set to a JSON array of labels
     # (e.g. '["self-hosted","macOS","arm64","agentdesk-mac-mini"]'),
-    # the macos-latest matrix entry routes to that runner — UNLESS the
-    # event is a pull_request from a fork, in which case we force back
-    # to the GitHub-hosted runner to keep untrusted code off the
-    # operator's machine. Default (variable unset) is macos-latest.
-    # See docs/ci-self-hosted-runner.md.
-    runs-on: ${{ fromJSON((matrix.os == 'macos-latest' && vars.MACOS_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.MACOS_RUNNER || format('"{0}"', matrix.os)) }}
+    # the macos-latest matrix entry routes to that runner — but ONLY
+    # for trusted triggers (`push` and `workflow_dispatch`). Any
+    # `pull_request` event (including those opened from forks) is
+    # forced to the GitHub-hosted `macos-latest` runner regardless of
+    # `vars.MACOS_RUNNER`. Default (variable unset) is macos-latest.
+    #
+    # Why event-gate instead of fork-gate?
+    # A `pull_request` workflow file is supplied by the PR head — i.e.
+    # a malicious fork can rewrite this expression or the sanity check
+    # below in its own workflow run. Workflow-local fork checks are
+    # therefore not a real isolation boundary. The robust approach is
+    # to keep all `pull_request` jobs on GitHub-hosted runners and
+    # only allow self-hosted on triggers that fork contributors cannot
+    # initiate:
+    #   - `push`: pushes to branches in this repo (forks cannot push
+    #     here without write access)
+    #   - `workflow_dispatch`: requires repo write permission
+    # See docs/ci-self-hosted-runner.md §6.
+    runs-on: ${{ fromJSON((matrix.os == 'macos-latest' && vars.MACOS_RUNNER != '' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) && vars.MACOS_RUNNER || format('"{0}"', matrix.os)) }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
+      # Event-gate self-hosted runner sanity check (defence-in-depth).
+      # The `runs-on` expression above already restricts self-hosted
+      # selection to `push` and `workflow_dispatch`, but if a future
+      # edit, a typo, or a misconfigured `vars.MACOS_RUNNER` allowed a
+      # `pull_request` event (especially from a fork) to land on a
+      # self-hosted runner, this step fails the job before any
+      # untrusted code (checkout, dependency install, etc.) executes
+      # on the operator's machine. Runs before `actions/checkout`.
+      #
+      # Fails closed: any pull_request* event executing on a
+      # self-hosted runner aborts the job, regardless of whether the
+      # head repo metadata is available.
+      - name: Event-gate / self-hosted runner sanity check
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+          RUNNER_ENV: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          echo "runner.environment = ${RUNNER_ENV:-unknown}"
+          echo "github.event_name  = ${EVENT_NAME}"
+          echo "head repo          = ${HEAD_REPO:-<none>}"
+          echo "base repo          = ${BASE_REPO}"
+          case "${EVENT_NAME}" in
+            pull_request|pull_request_target)
+              if [ "${RUNNER_ENV:-}" = "self-hosted" ]; then
+                echo "::error::pull_request event executing on a self-hosted runner. This is forbidden — pull_request workflow files are PR-controlled and cannot be trusted on self-hosted infrastructure. Check vars.MACOS_RUNNER routing and the runs-on expression in ci-pr.yml."
+                exit 1
+              fi
+              echo "pull_request event on GitHub-hosted runner (${RUNNER_ENV:-unknown}). OK."
+              ;;
+            push|workflow_dispatch)
+              echo "Trusted event (${EVENT_NAME}); self-hosted routing permitted."
+              ;;
+            *)
+              if [ "${RUNNER_ENV:-}" = "self-hosted" ]; then
+                echo "::error::Unexpected event '${EVENT_NAME}' executing on a self-hosted runner; failing closed."
+                exit 1
+              fi
+              echo "Event '${EVENT_NAME}' on GitHub-hosted runner; OK."
+              ;;
+          esac
+
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain

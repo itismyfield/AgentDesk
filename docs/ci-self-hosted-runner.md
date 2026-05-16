@@ -159,10 +159,9 @@ documented by GitHub (label *intersection*, requiring an array of labels —
 not a comma-delimited string):
 
 ```yaml
-# ci-pr.yml (matrix; fork-PR guard forces hosted runner regardless of variable)
+# ci-pr.yml (matrix; self-hosted only on trusted events — push, workflow_dispatch)
 runs-on: ${{ fromJSON((matrix.os == 'macos-latest' && vars.MACOS_RUNNER != ''
-  && (github.event_name != 'pull_request'
-      || github.event.pull_request.head.repo.full_name == github.repository))
+  && (github.event_name == 'push' || github.event_name == 'workflow_dispatch'))
   && vars.MACOS_RUNNER || format('"{0}"', matrix.os)) }}
 
 # ci-nightly.yml (schedule + workflow_dispatch only, no fork exposure)
@@ -172,10 +171,15 @@ runs-on: ${{ fromJSON(vars.MACOS_RUNNER != '' && vars.MACOS_RUNNER || '"macos-la
 **Default behaviour: unchanged.** `vars.MACOS_RUNNER` is unset → jobs run on
 GitHub-hosted `macos-latest`.
 
-**Fork-PR safety: enforced in the workflow.** Even with `MACOS_RUNNER` set,
-the `check_fast` macOS entry stays on `macos-latest` when the event is a
-`pull_request` whose head repo differs from the base repo. See
-[§6 Security notes](#6-security-notes) for the threat model.
+**Fork-PR safety: event-gated, not fork-gated.** `pull_request` and
+`pull_request_target` runs **always** stay on GitHub-hosted `macos-latest`,
+regardless of `vars.MACOS_RUNNER` or whether the PR is from a fork. Only
+`push` (which fork contributors cannot fire on this repo) and
+`workflow_dispatch` (which requires repo write access) can route to the
+self-hosted runner. A second-layer sanity check step in `check_fast` fails
+the macOS lane closed if any `pull_request*` event somehow lands on a
+self-hosted runner. See [§6 Security notes](#6-security-notes) for the
+threat model.
 
 To opt in *after* the runner is live and `Idle`:
 
@@ -237,40 +241,49 @@ canonical compromise vector and is called out in
 
 **Policy for this repo:**
 
-1. **Forks stay on GH-hosted runners — defence in depth, not a single
-   workflow-level check.** The `runs-on` expression in `check_fast`
-   evaluates `github.event.pull_request.head.repo.full_name == github.repository`
-   and falls back to `macos-latest` when the head repo differs. This is
-   only *one* layer. Because `pull_request` from a fork uses the workflow
-   file *from the PR head*, a malicious fork PR could in principle modify
-   `ci-pr.yml` itself to bypass the expression. The required additional
-   controls — to be confirmed by the operator **before** setting
-   `MACOS_RUNNER` — are:
+1. **`pull_request*` jobs never run on self-hosted — by event gate, not by
+   fork check.** Because a `pull_request` workflow file is supplied by the
+   PR head (i.e. PR-controlled), any workflow-local fork comparison can be
+   removed or rewritten by the PR itself and is therefore not a real
+   isolation boundary. The robust approach we use:
+
+   - The `runs-on` expression in `check_fast` selects the self-hosted
+     runner *only* when `github.event_name` is `push` or
+     `workflow_dispatch`. Any `pull_request` event (same-repo or fork)
+     falls back to `macos-latest` regardless of `vars.MACOS_RUNNER`.
+   - An "Event-gate / self-hosted runner sanity check" step runs first
+     on the macOS lane (before `actions/checkout`) and **fails closed**
+     if a `pull_request*` event lands on a self-hosted runner — covering
+     misconfiguration, future workflow edits, or unexpected event shapes.
+
+   This means: fork contributors cannot reach the self-hosted runner via
+   PRs at all. Trusted events (`push`, `workflow_dispatch`) require write
+   access, which fork contributors do not have.
+
+   `ci-nightly.yml` has no fork exposure (triggers are `schedule` +
+   `workflow_dispatch` only) and is not subject to this concern.
+
+   **Required pre-flight before setting `MACOS_RUNNER`** (operator
+   responsibility, in addition to the workflow-level event gate):
 
    a. **Settings → Actions → General → "Approval for outside collaborators"**:
       set to **"Require approval for all outside collaborators"** (or
       stricter, e.g. "first-time contributors who are new to GitHub"). A
-      maintainer must click "Approve and run" on every fork PR's first run,
-      which surfaces any workflow-file edits for human review before any
-      runner is dispatched.
+      maintainer must click "Approve and run" on every fork PR's first run.
+      Even though fork PRs cannot select the self-hosted runner under the
+      event gate, this setting also protects any unrelated future
+      self-hosted lanes added to the repo.
 
    b. **Settings → Actions → Runners → Runner groups** (org plans) or, at a
       minimum, ensure this runner is only registered against this single
       repo (`config.sh --url https://github.com/<owner>/<repo>`).
 
-   c. Treat the workflow `runs-on` expression as a *secondary* guard for
-      well-behaved PRs, not as the primary trust boundary.
-
-   `ci-nightly.yml` has no fork exposure (triggers are `schedule` +
-   `workflow_dispatch` only) and is not subject to this concern.
-
    **Until (a) and (b) are confirmed, do not set `MACOS_RUNNER`.**
 2. Acceptable triggers for the self-hosted runner: `push` to branches owned
-   by this repo, same-repo `pull_request`, `schedule`, `workflow_dispatch`.
-   Do **not** add `pull_request_target` without re-reviewing this section —
-   that trigger runs the *base branch* workflow with elevated permissions,
-   which is fine for the security boundary but expands the attack surface
-   for any new self-hosted lanes you add.
+   by this repo, `schedule`, `workflow_dispatch`. Do **not** route
+   `pull_request` (same-repo or fork) or `pull_request_target` to the
+   self-hosted runner — both event shapes carry PR-controlled or
+   elevated-permission risk that workflow-local checks cannot fully contain.
 3. Runner runs as the operator's user — **not** root. Do not `sudo` from
    within steps. Keep the runner dir on the same volume as the operator's
    home so file ownership is unsurprising.
@@ -285,7 +298,7 @@ canonical compromise vector and is called out in
 | Symptom | What happens | Operator action |
 |---------|--------------|-----------------|
 | Runner offline (launchd dead, host off, network down) | Jobs **queue indefinitely** on the self-hosted label. GitHub does **not** auto-fall-back to hosted. | Either: (a) bring the runner back, or (b) delete `vars.MACOS_RUNNER` to revert to `macos-latest` and re-run. |
-| Fork-PR macOS job didn't pick up self-hosted runner | Expected. The workflow forces `macos-latest` for `pull_request` from forks regardless of `MACOS_RUNNER`. | No action — this is the security boundary working as designed. |
+| `pull_request` macOS job didn't pick up self-hosted runner (same-repo PR or fork PR) | Expected. The workflow forces `macos-latest` for **any** `pull_request*` event regardless of `MACOS_RUNNER`. Self-hosted is gated to `push` and `workflow_dispatch` only. | No action — this is the security boundary working as designed. To exercise the self-hosted lane on a branch, push directly to the branch in this repo or trigger `workflow_dispatch`. |
 | `MACOS_RUNNER` value rejected at runtime with a `fromJSON` error | The variable is not valid JSON. | Re-save it as a JSON array (with double quotes and brackets) — e.g. `["self-hosted","macOS","arm64","agentdesk-mac-mini"]`. |
 | Runner online but stuck on prior job | New jobs queue behind it. | `launchctl kickstart -k …` to restart; cancel any zombie job from GitHub UI. |
 | Token expired during `config.sh` | `config.sh` exits non-zero with `Http response code: NotFound`. | Re-fetch token (§2). Tokens last ~1h. |
