@@ -1974,16 +1974,20 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
 ) -> ManualDeliveryOutcome {
-    let dedup_key = delivery_id.map(|delivery_id| {
-        format!(
-            "{}::{}",
-            delivery_id.correlation_id, delivery_id.semantic_event_id
-        )
-    });
+    // Issue #2363: the manual dedupe key must include the resolved target
+    // channel. Voice announce delivery ids encode (guild, voice_channel,
+    // utterance, generation) in correlation+semantic, but the routed
+    // **target** channel can still differ (e.g. transcript vs handoff).
+    // Without the channel in the key, a legitimate send to a different
+    // target would be silently suppressed as a duplicate.
+    let dedup_key = delivery_id.map(|delivery_id| manual_dedup_key(channel_id, delivery_id));
     if let Some(key) = dedup_key.as_deref() {
-        if dedup.lookup(key).is_some() {
+        if let Some(existing_message_id) = dedup.lookup(key) {
+            // Return the previously delivered message id so callers that
+            // depend on it (e.g. AnnounceBotTranscriptDriver::start) treat
+            // retries as success-with-known-message rather than a parse error.
             return ManualDeliveryOutcome::Sent {
-                message_id: String::new(),
+                message_id: existing_message_id,
                 delivery: Some("duplicate"),
             };
         }
@@ -2045,16 +2049,14 @@ async fn deliver_manual_dm_notification<C: ManualOutboundClient>(
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
 ) -> ManualDeliveryOutcome {
-    let dedup_key = delivery_id.map(|delivery_id| {
-        format!(
-            "{}::{}",
-            delivery_id.correlation_id, delivery_id.semantic_event_id
-        )
-    });
+    // Issue #2363: scope the dedupe key by the DM target so the same
+    // delivery id can't be silently suppressed across different recipients.
+    let dm_target_label = format!("dm:{user_id}");
+    let dedup_key = delivery_id.map(|delivery_id| manual_dedup_key(&dm_target_label, delivery_id));
     if let Some(key) = dedup_key.as_deref() {
-        if dedup.lookup(key).is_some() {
+        if let Some(existing_message_id) = dedup.lookup(key) {
             return ManualDeliveryOutcome::Sent {
-                message_id: String::new(),
+                message_id: existing_message_id,
                 delivery: Some("duplicate"),
             };
         }
@@ -2163,8 +2165,13 @@ async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
                 FallbackUsed::ParentChannel => "parent_channel",
             }),
         },
-        DeliveryResult::Duplicate { .. } => ManualDeliveryOutcome::Sent {
-            message_id: String::new(),
+        DeliveryResult::Duplicate {
+            existing_messages, ..
+        } => ManualDeliveryOutcome::Sent {
+            // Issue #2363: surface the prior message id so retry callers
+            // (e.g. announce-bot transcript driver) don't fail on an empty
+            // numeric body when the v3 layer dedupes structurally.
+            message_id: first_raw_message_id(&existing_messages).unwrap_or_default(),
             delivery: Some("duplicate"),
         },
         DeliveryResult::Skip { .. } => ManualDeliveryOutcome::Sent {
@@ -2182,15 +2189,35 @@ fn record_manual_delivery_success(
     dedup_key: Option<&str>,
     result: &ManualDeliveryOutcome,
 ) {
-    let ManualDeliveryOutcome::Sent { message_id, .. } = result else {
+    let ManualDeliveryOutcome::Sent {
+        message_id,
+        delivery,
+    } = result
+    else {
         return;
     };
     if message_id.is_empty() {
         return;
     }
+    // Don't overwrite the stored entry when we're just replaying a known
+    // duplicate — `dedup.record` would re-insert the same id but at a
+    // refreshed timestamp on backends that gain TTLs later.
+    if matches!(delivery, Some("duplicate")) {
+        return;
+    }
     if let Some(key) = dedup_key {
         dedup.record(key, message_id);
     }
+}
+
+/// Build a manual-delivery dedupe key scoped to the resolved target so that
+/// the same (correlation_id, semantic_event_id) cannot collide across
+/// different Discord channels or DM recipients.
+fn manual_dedup_key(target_label: &str, delivery_id: ManualOutboundDeliveryId<'_>) -> String {
+    format!(
+        "manual::{}::{}::{}",
+        target_label, delivery_id.correlation_id, delivery_id.semantic_event_id
+    )
 }
 
 fn parse_channel_id_for_manual(channel_id: &str) -> Result<ChannelId, ManualDeliveryOutcome> {
@@ -2677,7 +2704,7 @@ mod manual_v3_delivery_tests {
         assert_eq!(
             second,
             ManualDeliveryOutcome::Sent {
-                message_id: String::new(),
+                message_id: "message-1".to_string(),
                 delivery: Some("duplicate")
             }
         );
@@ -2749,7 +2776,7 @@ mod manual_v3_delivery_tests {
         assert_eq!(
             second,
             ManualDeliveryOutcome::Sent {
-                message_id: String::new(),
+                message_id: "message-1".to_string(),
                 delivery: Some("duplicate"),
             }
         );
@@ -2956,6 +2983,139 @@ mod manual_v3_delivery_tests {
             ManualDeliveryOutcome::Sent { delivery: None, .. }
         ));
         assert_eq!(client.posts.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn voice_announce_same_delivery_id_different_target_channel_does_not_dedupe() {
+        use crate::services::discord::voice_background_driver::{
+            default_voice_announce_generation, voice_announce_delivery_id,
+        };
+        use poise::serenity_prelude::{ChannelId, GuildId};
+
+        // Issue #2363 (Codex high-severity finding): the dedupe key must
+        // include the resolved target channel. Otherwise an announce queued
+        // first to a transcript channel and later re-routed to a different
+        // target channel for the same (guild, voice_channel, utterance,
+        // generation) tuple would be silently suppressed as a duplicate.
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let voice_id = voice_announce_delivery_id(
+            GuildId::new(7001),
+            ChannelId::new(8002),
+            "utt-cross-target",
+            default_voice_announce_generation(),
+        );
+        let delivery_id = ManualOutboundDeliveryId {
+            correlation_id: &voice_id.correlation_id,
+            semantic_event_id: &voice_id.semantic_event_id,
+        };
+
+        let to_channel_a = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "voice transcript",
+            "announce",
+            None,
+            Some(delivery_id),
+        )
+        .await;
+        let to_channel_b = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9001",
+            "voice transcript",
+            "announce",
+            None,
+            Some(delivery_id),
+        )
+        .await;
+
+        assert_eq!(
+            to_channel_a,
+            ManualDeliveryOutcome::Sent {
+                message_id: "message-1".to_string(),
+                delivery: None,
+            }
+        );
+        assert_eq!(
+            to_channel_b,
+            ManualDeliveryOutcome::Sent {
+                message_id: "message-2".to_string(),
+                delivery: None,
+            }
+        );
+        assert_eq!(client.posts.lock().unwrap().len(), 2);
+        assert_eq!(
+            client.post_targets.lock().unwrap().clone(),
+            vec!["9000".to_string(), "9001".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_announce_duplicate_surfaces_prior_message_id_not_empty() {
+        use crate::services::discord::voice_background_driver::{
+            default_voice_announce_generation, voice_announce_delivery_id,
+        };
+        use poise::serenity_prelude::{ChannelId, GuildId};
+
+        // Issue #2363 (Codex high-severity finding): the duplicate path must
+        // return the prior delivered message id. The announce-bot driver
+        // (`AnnounceBotTranscriptDriver::start`) parses `message_id` from
+        // the response body and errors out on empty / non-numeric values.
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let voice_id = voice_announce_delivery_id(
+            GuildId::new(7001),
+            ChannelId::new(8002),
+            "utt-known-id",
+            default_voice_announce_generation(),
+        );
+        let delivery_id = ManualOutboundDeliveryId {
+            correlation_id: &voice_id.correlation_id,
+            semantic_event_id: &voice_id.semantic_event_id,
+        };
+
+        let _ = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "voice transcript",
+            "announce",
+            None,
+            Some(delivery_id),
+        )
+        .await;
+        let dup = deliver_manual_notification(
+            &client,
+            &dedup,
+            "9000",
+            "voice transcript",
+            "announce",
+            None,
+            Some(delivery_id),
+        )
+        .await;
+
+        match dup {
+            ManualDeliveryOutcome::Sent {
+                message_id,
+                delivery,
+            } => {
+                assert!(
+                    !message_id.is_empty(),
+                    "duplicate must return prior message id, not empty"
+                );
+                assert!(
+                    message_id
+                        .chars()
+                        .all(|c| c == '-' || c.is_ascii_alphanumeric()),
+                    "message_id should be parseable by callers"
+                );
+                assert_eq!(delivery, Some("duplicate"));
+            }
+            other => panic!("expected Sent(duplicate), got {other:?}"),
+        }
     }
 }
 
@@ -3179,7 +3339,7 @@ mod tests {
         assert_eq!(
             second,
             ManualDeliveryOutcome::Sent {
-                message_id: String::new(),
+                message_id: "message-1".to_string(),
                 delivery: Some("duplicate")
             }
         );
@@ -3255,7 +3415,7 @@ mod tests {
         assert_eq!(
             second,
             ManualDeliveryOutcome::Sent {
-                message_id: String::new(),
+                message_id: "message-1".to_string(),
                 delivery: Some("duplicate")
             }
         );
