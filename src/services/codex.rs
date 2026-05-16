@@ -1048,7 +1048,12 @@ fn execute_streaming_local_tui_tmux(
         )
     };
 
-    let read_result = match tail_result {
+    // Combined post-match handling for #2208 (tmux cleanup on tail Err) and
+    // #2213 (typed RuntimeHandoff::CodexTui emission). Bind the success
+    // payload to `tail_outcome` so we can still read its fields after the
+    // match — the previous shape consumed `tail_result` here and then
+    // referenced `tail_result.<field>` below, which fails to compile.
+    let tail_outcome = match tail_result {
         Ok(result) => result,
         Err(error) => {
             // #2182 follow-up: rollout wait / tail failures used to leak the
@@ -1069,7 +1074,7 @@ fn execute_streaming_local_tui_tmux(
         }
     };
 
-    let read_result = tail_result.read_result.clone();
+    let read_result = tail_outcome.read_result.clone();
     if matches!(
         read_result,
         crate::services::provider::ReadOutputResult::SessionDied { .. }
@@ -1078,13 +1083,20 @@ fn execute_streaming_local_tui_tmux(
             result: "⚠ Codex TUI session ended before producing a response.".to_string(),
             session_id: None,
         });
-    } else {
+    } else if matches!(
+        read_result,
+        crate::services::provider::ReadOutputResult::Completed { .. }
+    ) {
+        // #2213 follow-up: only emit RuntimeReady on a successful Completed
+        // tail. Cancelled tails (user-aborted turns) should NOT stamp
+        // inflight state with a partial parse — the cancel path emits its
+        // own terminal markers upstream.
         let _ = sender.send(StreamMessage::RuntimeReady {
             handoff: RuntimeHandoff::CodexTui {
-                rollout_path: tail_result.rollout_path.display().to_string(),
-                thread_id: tail_result.session_id,
+                rollout_path: tail_outcome.rollout_path.display().to_string(),
+                thread_id: tail_outcome.session_id,
                 tmux_session_name: tmux_session_name.to_string(),
-                last_offset: tail_result.final_offset,
+                last_offset: tail_outcome.final_offset,
             },
         });
     }
