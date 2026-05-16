@@ -615,6 +615,45 @@ fn worktree_head_matches_commit(dir: &str, commit_sha: &str) -> bool {
     head == commit_sha
 }
 
+fn clean_exact_review_worktree_path(
+    card_id: &str,
+    source: &str,
+    path: &str,
+    commit: &str,
+) -> Option<String> {
+    if !std::path::Path::new(path).is_dir() || !worktree_head_matches_commit(path, commit) {
+        return None;
+    }
+
+    let dirty_paths =
+        crate::services::platform::shell::git_tracked_change_paths(path).unwrap_or_default();
+    if dirty_paths.is_empty() {
+        return Some(path.to_string());
+    }
+
+    let sample = dirty_paths
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::warn!(
+        "[dispatch] Review dispatch for card {}: ignoring {} worktree_path '{}' for commit {} because tracked changes exist{}",
+        card_id,
+        source,
+        path,
+        &commit[..8.min(commit.len())],
+        if sample.is_empty() {
+            String::new()
+        } else if dirty_paths.len() > 3 {
+            format!(" ({sample}, +{} more)", dirty_paths.len() - 3)
+        } else {
+            format!(" ({sample})")
+        }
+    );
+    None
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 fn resolve_review_target_branch(
     db: &Db,
@@ -908,12 +947,22 @@ fn latest_completed_work_dispatch_target(
         .or_else(|| {
             result_json
                 .as_ref()
+                .and_then(|v| json_string_field(v, "head_sha"))
+        })
+        .or_else(|| {
+            result_json
+                .as_ref()
                 .and_then(|v| json_string_field(v, "reviewed_commit"))
         })
         .or_else(|| {
             context_json
                 .as_ref()
                 .and_then(|v| json_string_field(v, "completed_commit"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "head_sha"))
         })
         .or_else(|| {
             context_json
@@ -1054,6 +1103,8 @@ fn apply_review_target_context(
     }
     if let Some(path) = target.worktree_path.as_deref() {
         obj.insert("worktree_path".to_string(), json!(path));
+    } else {
+        obj.remove("worktree_path");
     }
     if let Some(target_repo) = target.target_repo.as_deref() {
         obj.insert("target_repo".to_string(), json!(target_repo));
@@ -2211,12 +2262,22 @@ async fn latest_completed_work_dispatch_target_pg(
         .or_else(|| {
             result_json
                 .as_ref()
+                .and_then(|v| json_string_field(v, "head_sha"))
+        })
+        .or_else(|| {
+            result_json
+                .as_ref()
                 .and_then(|v| json_string_field(v, "reviewed_commit"))
         })
         .or_else(|| {
             context_json
                 .as_ref()
                 .and_then(|v| json_string_field(v, "completed_commit"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "head_sha"))
         })
         .or_else(|| {
             context_json
@@ -2336,6 +2397,127 @@ async fn resolve_card_issue_commit_target_pg(
     }))
 }
 
+async fn resolve_pr_tracking_review_target_pg(
+    pool: &PgPool,
+    card_id: &str,
+    context: Option<&serde_json::Value>,
+) -> Result<Option<DispatchExecutionTarget>> {
+    let Some((repo_id, tracked_worktree_path, tracked_branch, head_sha)) = sqlx::query_as::<
+        _,
+        (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT repo_id, worktree_path, branch, head_sha
+         FROM pr_tracking
+         WHERE card_id = $1
+           AND head_sha IS NOT NULL
+           AND length(trim(head_sha)) > 0
+         ORDER BY updated_at DESC
+         LIMIT 1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load postgres pr_tracking target for {card_id}: {error}"))?
+    else {
+        return Ok(None);
+    };
+
+    let Some(reviewed_commit) = head_sha
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let target_repo = match repo_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => Some(value),
+        None => resolve_card_target_repo_ref(pool, card_id, context).await,
+    };
+    let repo_dir = if let Some(value) = target_repo.as_deref() {
+        crate::services::platform::shell::resolve_repo_dir_for_target(Some(value))
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let repo_dir = match repo_dir {
+        Some(repo_dir) => Some(repo_dir),
+        None => resolve_card_repo_dir_with_context_pg(
+            pool,
+            card_id,
+            context,
+            "recover pr_tracking review target repo",
+        )
+        .await
+        .ok()
+        .flatten(),
+    };
+
+    let tracked_worktree_path = tracked_worktree_path
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let mut branch = tracked_branch
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let mut commit_lookup_dir = None;
+    let mut worktree_path = None;
+
+    if let Some(path) = tracked_worktree_path.as_deref() {
+        if git_commit_exists(path, &reviewed_commit) {
+            commit_lookup_dir = Some(path.to_string());
+        }
+        worktree_path =
+            clean_exact_review_worktree_path(card_id, "pr_tracking", path, &reviewed_commit);
+    }
+
+    if let Some(repo_dir) = repo_dir.as_deref() {
+        if commit_lookup_dir.is_none() && git_commit_exists(repo_dir, &reviewed_commit) {
+            commit_lookup_dir = Some(repo_dir.to_string());
+        }
+        if worktree_path.is_none() {
+            worktree_path = clean_exact_review_worktree_path(
+                card_id,
+                "pr_tracking repo",
+                repo_dir,
+                &reviewed_commit,
+            );
+        }
+    }
+
+    let Some(commit_lookup_dir) = commit_lookup_dir else {
+        tracing::warn!(
+            "[dispatch] Review dispatch for card {}: pr_tracking head_sha {} is not recoverable from its worktree or repo mapping",
+            card_id,
+            &reviewed_commit[..8.min(reviewed_commit.len())]
+        );
+        return Ok(None);
+    };
+
+    branch = resolve_review_target_branch_pg(
+        pool,
+        card_id,
+        &commit_lookup_dir,
+        &reviewed_commit,
+        branch.as_deref(),
+    )
+    .await
+    .or(branch);
+
+    Ok(Some(DispatchExecutionTarget {
+        reviewed_commit,
+        branch,
+        worktree_path,
+        target_repo,
+    }))
+}
+
 async fn resolve_repo_head_fallback_target_pg(
     pool: &PgPool,
     kanban_card_id: &str,
@@ -2399,23 +2581,36 @@ async fn resolve_repo_head_fallback_target_pg(
     Ok(Some(target))
 }
 
-/// #1563 RC9 helper: latest completed_commit (any) for this card. Looks at
-/// `task_dispatches.result->>'completed_commit'` across implementation and
-/// rework dispatches in completed status. Used to skip the dirty-worktree
-/// guard in the repo-HEAD fallback when we already have a stable commit
-/// pin for the card's review target.
+/// #1563 RC9 helper: latest completed/review commit for this card. Looks at
+/// task_dispatches JSON across implementation and rework dispatches in
+/// completed status. Used to skip the dirty-worktree guard in the repo-HEAD
+/// fallback when we already have a stable commit pin for the card's review
+/// target.
 async fn latest_completed_dispatch_commit_for_card_pg(
     pool: &PgPool,
     kanban_card_id: &str,
 ) -> Option<String> {
     sqlx::query_scalar::<_, String>(
-        "SELECT result->>'completed_commit'
-         FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND dispatch_type IN ('implementation', 'rework')
-           AND status = 'completed'
-           AND result ? 'completed_commit'
-           AND length(result->>'completed_commit') > 0
+        "WITH completed_dispatch_commits AS (
+             SELECT
+                 COALESCE(
+                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(result::TEXT), ''), '{}')::jsonb)->>'completed_commit'), ''),
+                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(result::TEXT), ''), '{}')::jsonb)->>'head_sha'), ''),
+                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(result::TEXT), ''), '{}')::jsonb)->>'reviewed_commit'), ''),
+                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(context::TEXT), ''), '{}')::jsonb)->>'completed_commit'), ''),
+                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(context::TEXT), ''), '{}')::jsonb)->>'head_sha'), ''),
+                     NULLIF(BTRIM((COALESCE(NULLIF(BTRIM(context::TEXT), ''), '{}')::jsonb)->>'reviewed_commit'), '')
+                 ) AS commit,
+                 updated_at,
+                 id
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type IN ('implementation', 'rework')
+               AND status = 'completed'
+         )
+         SELECT commit
+         FROM completed_dispatch_commits
+         WHERE commit IS NOT NULL
          ORDER BY updated_at DESC, id DESC
          LIMIT 1",
     )
@@ -2514,6 +2709,10 @@ pub(super) async fn build_review_context(
     let ctx_snapshot = serde_json::Value::Object(obj.clone());
     let is_noop_verification =
         obj.get("review_mode").and_then(|v| v.as_str()) == Some("noop_verification");
+    let is_rereview_dispatch = obj
+        .get("rereview")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
     let card_issue_repo = load_card_issue_repo_pg(pool, kanban_card_id).await;
     let card_issue_number = card_issue_repo
         .as_ref()
@@ -2581,6 +2780,13 @@ pub(super) async fn build_review_context(
                 })
                 .map(|value| value.to_string());
 
+            let pr_tracking_target = if is_rereview_dispatch {
+                resolve_pr_tracking_review_target_pg(pool, kanban_card_id, Some(&ctx_snapshot))
+                    .await?
+            } else {
+                None
+            };
+
             if let Some(external_repo) = historical_external_repo_unrecoverable {
                 apply_review_target_warning(
                     &mut obj,
@@ -2592,6 +2798,15 @@ pub(super) async fn build_review_context(
                     "[dispatch] Review dispatch for card {}: historical external target_repo '{}' is unrecoverable — suppressing card-scoped fallback",
                     kanban_card_id,
                     external_repo
+                );
+            } else if let Some(target) = pr_tracking_target {
+                apply_review_target_context(&target, &mut obj);
+                tracing::info!(
+                    "[dispatch] Review dispatch for card {}: rereview using pr_tracking target (commit {}, branch: {:?}, path: {:?})",
+                    kanban_card_id,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())],
+                    target.branch.as_deref(),
+                    target.worktree_path.as_deref()
                 );
             } else if let Some((wt_path, wt_branch, wt_commit)) =
                 resolve_card_worktree(pool, kanban_card_id, Some(&ctx_snapshot)).await?
@@ -2659,6 +2874,35 @@ pub(super) async fn build_review_context(
 }
 
 #[cfg(test)]
+mod review_target_context_tests {
+    use super::{DispatchExecutionTarget, apply_review_target_context};
+    use serde_json::json;
+
+    #[test]
+    fn apply_review_target_context_removes_stale_worktree_path_when_target_has_none() {
+        let target = DispatchExecutionTarget {
+            reviewed_commit: "abc123".to_string(),
+            branch: Some("main".to_string()),
+            worktree_path: None,
+            target_repo: Some("/repo".to_string()),
+        };
+        let mut obj = serde_json::Map::from_iter([
+            ("reviewed_commit".to_string(), json!("old")),
+            ("branch".to_string(), json!("old-branch")),
+            ("worktree_path".to_string(), json!("/dirty-worktree")),
+            ("target_repo".to_string(), json!("/old-repo")),
+        ]);
+
+        apply_review_target_context(&target, &mut obj);
+
+        assert_eq!(obj["reviewed_commit"], json!("abc123"));
+        assert_eq!(obj["branch"], json!("main"));
+        assert_eq!(obj["target_repo"], json!("/repo"));
+        assert!(obj.get("worktree_path").is_none());
+    }
+}
+
+#[cfg(test)]
 mod issue_reference_tests {
     use super::commit_subject_references_issue;
 
@@ -2681,6 +2925,162 @@ mod issue_reference_tests {
             "#1765suffix unrelated",
             1765
         ));
+    }
+}
+
+#[cfg(test)]
+mod pg_rereview_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use serde_json::json;
+
+    fn run_git(dir: &str, args: &[&str]) {
+        GitCommand::new()
+            .repo(dir)
+            .args(args)
+            .run_output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed: {err}"));
+    }
+
+    fn init_test_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        let repo_dir = repo.path().to_str().unwrap();
+        run_git(repo_dir, &["init", "-b", "main"]);
+        run_git(repo_dir, &["config", "user.email", "test@test.com"]);
+        run_git(repo_dir, &["config", "user.name", "Test"]);
+        run_git(repo_dir, &["commit", "--allow-empty", "-m", "initial"]);
+        repo
+    }
+
+    fn git_commit(dir: &str, message: &str) -> String {
+        run_git(dir, &["commit", "--allow-empty", "-m", message]);
+        crate::services::platform::git_head_commit(dir).unwrap()
+    }
+
+    async fn pg_seed_card(
+        pool: &PgPool,
+        card_id: &str,
+        issue_number: Option<i64>,
+        repo_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, github_issue_number, repo_id)
+             VALUES ($1, 'Test Card', 'ready', $2, $3)
+             ON CONFLICT (id) DO UPDATE
+             SET github_issue_number = EXCLUDED.github_issue_number,
+                 repo_id = EXCLUDED.repo_id",
+        )
+        .bind(card_id)
+        .bind(issue_number)
+        .bind(repo_id)
+        .execute(pool)
+        .await
+        .expect("seed kanban_cards");
+    }
+
+    async fn pg_seed_agent(
+        pool: &PgPool,
+        agent_id: &str,
+        discord_channel_id: Option<&str>,
+        discord_channel_alt: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO UPDATE
+             SET discord_channel_id = EXCLUDED.discord_channel_id,
+                 discord_channel_alt = EXCLUDED.discord_channel_alt",
+        )
+        .bind(agent_id)
+        .bind(format!("Agent {agent_id}"))
+        .bind(discord_channel_id)
+        .bind(discord_channel_alt)
+        .execute(pool)
+        .await
+        .expect("seed agents");
+    }
+
+    #[tokio::test]
+    async fn pg_latest_completed_dispatch_commit_uses_postgres_json_extraction() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let card_id = "card-pg-latest-completed-commit";
+        pg_seed_card(&pool, card_id, Some(9_929), None).await;
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, dispatch_type, status, title, context, result, updated_at)
+             VALUES
+                ($1, $2, 'implementation', 'completed', 'Done', $3, $4, NOW())",
+        )
+        .bind("dispatch-pg-head-sha")
+        .bind(card_id)
+        .bind(json!({}).to_string())
+        .bind(json!({ "completed_commit": " ", "head_sha": "abc123" }).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed completed dispatch");
+
+        let latest = latest_completed_dispatch_commit_for_card_pg(&pool, card_id)
+            .await
+            .expect("completed dispatch head_sha should be extracted");
+
+        assert_eq!(latest, "abc123");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pg_build_review_context_rereview_uses_pr_tracking_head_when_repo_root_dirty() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let card_id = "card-pg-rereview-pr-tracking-dirty";
+        let repo = init_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let tracked_file = repo.path().join("tracked.rs");
+        std::fs::write(&tracked_file, "clean\n").unwrap();
+        run_git(repo_dir, &["add", "tracked.rs"]);
+        let reviewed_commit = git_commit(repo_dir, "fix: committed card target");
+        std::fs::write(&tracked_file, "dirty\n").unwrap();
+
+        pg_seed_card(&pool, card_id, Some(9_928), Some(repo_dir)).await;
+        pg_seed_agent(&pool, "agent-1", Some("111"), Some("222")).await;
+        sqlx::query(
+            "INSERT INTO pr_tracking (card_id, repo_id, worktree_path, branch, head_sha, state)
+             VALUES ($1, $2, $3, 'main', $4, 'wait-ci')",
+        )
+        .bind(card_id)
+        .bind(repo_dir)
+        .bind(repo_dir)
+        .bind(&reviewed_commit)
+        .execute(&pool)
+        .await
+        .expect("seed pr_tracking");
+
+        let pg_context = build_review_context(
+            &pool,
+            card_id,
+            "agent-1",
+            &json!({ "rereview": true, "reason": "runtime failure regression" }),
+            ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
+        )
+        .await
+        .expect("rereview should use pr_tracking head_sha instead of dirty repo HEAD fallback");
+        let pg_parsed: serde_json::Value = serde_json::from_str(&pg_context).unwrap();
+
+        assert_eq!(pg_parsed["reviewed_commit"], reviewed_commit);
+        assert_eq!(pg_parsed["branch"], "main");
+        assert_eq!(pg_parsed["target_repo"], repo_dir);
+        assert!(
+            pg_parsed.get("worktree_path").is_none(),
+            "dirty repo-root must not be emitted as a review worktree path: {pg_parsed}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
 
