@@ -33,6 +33,51 @@ fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
     PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
 }
 
+/// #2200 sub-3 HIGH 1: build a real on-disk git repo whose HEAD commit's
+/// subject references some unrelated issue. Used by the out-of-scope close
+/// path tests so the sqlite tri-state check can return a proven
+/// `OutOfScope`. The supplied `card_issue_number` is what the CARD claims;
+/// the commit subject mentions a *different* issue so
+/// `commit_subject_references_issue(subject, card_issue_number)` is false.
+fn init_test_git_repo_out_of_scope(card_issue_number: i64) -> (tempfile::TempDir, String) {
+    fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap_or_else(|error| panic!("run git {args:?}: {error}"));
+        if !output.status.success() {
+            panic!(
+                "git {:?} failed: {}\n{}",
+                args,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+    let other_issue = card_issue_number + 4242; // guaranteed different
+    let tempdir = tempfile::tempdir().unwrap();
+    let repo = tempdir.path();
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["config", "user.email", "test@example.invalid"]);
+    run_git(repo, &["config", "user.name", "Review Verdict Test"]);
+    run_git(repo, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("README.md"), "out-of-scope fixture\n").unwrap();
+    run_git(repo, &["add", "README.md"]);
+    run_git(
+        repo,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            &format!("fix: unrelated work (#{other_issue})"),
+        ],
+    );
+    let commit = run_git(repo, &["rev-parse", "HEAD"]);
+    (tempdir, commit)
+}
+
 /// Per-test Postgres database lifecycle for the #1238 PG-fixture migration of
 /// review_verdict / review-decision handler tests. After PR #1306 these
 /// handlers are PG-only so the corresponding tests need a PG pool wired into
@@ -2054,6 +2099,14 @@ async fn accept_direct_review_pg_preserves_reviewing_status() {
 /// state, and avoid the (impossible) in-issue re-review target check.
 #[tokio::test]
 async fn dispute_out_of_scope_closes_with_scope_mismatch_outcome() {
+    // #2200 sub-3 HIGH 1 fail-closed: the sqlite tri-state scope check
+    // requires a real git repo whose HEAD commit subject does NOT
+    // reference the card's issue number. Otherwise the check returns
+    // Unknown (no repo) or InScope, and the close path refuses — which is
+    // the correct fail-closed behavior. A real out-of-scope close needs a
+    // real out-of-scope commit.
+    let (repo_dir, commit_sha) = init_test_git_repo_out_of_scope(99001);
+    let repo_dir_path = repo_dir.path().to_string_lossy().into_owned();
     let db = test_db();
     let engine = test_engine(&db);
     {
@@ -2062,9 +2115,12 @@ async fn dispute_out_of_scope_closes_with_scope_mismatch_outcome() {
             "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-oos', 'OOS Agent', '111', '222')",
             [],
         ).unwrap();
+        // Seed github_issue_number = 99001 so the tri-state check has an
+        // issue to verify against; the seeded commit's subject does NOT
+        // reference #99001, so the verifier returns OutOfScope.
         conn.execute(
-            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
-             VALUES ('card-oos', 'OOS Test', 'review', 'agent-oos', 'dispatch-rd-oos', 'suggestion_pending', datetime('now'), datetime('now'))",
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, github_issue_number, created_at, updated_at)
+             VALUES ('card-oos', 'OOS Test', 'review', 'agent-oos', 'dispatch-rd-oos', 'suggestion_pending', 99001, datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         conn.execute(
@@ -2072,17 +2128,17 @@ async fn dispute_out_of_scope_closes_with_scope_mismatch_outcome() {
              VALUES ('dispatch-rd-oos', 'card-oos', 'agent-oos', 'review-decision', 'pending', '[Decision] card-oos', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
-        // Seed a live pending review dispatch with a reviewed_commit that
-        // the server can validate against the card issue. The sqlite test
-        // `commit_belongs_to_card_issue` fallback returns false, simulating
-        // an out-of-scope reviewed commit — exactly the scenario the
-        // server-side scope verification should accept.
+        // Live pending review dispatch points at the real out-of-scope
+        // commit via `target_repo = <abs-path>` so resolve_repo_dir_for_target
+        // returns the temp git repo.
+        let context_json = format!(
+            "{{\"reviewed_commit\":\"{commit_sha}\",\"target_repo\":\"{repo_dir_path}\"}}"
+        );
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
              VALUES ('dispatch-rv-stale', 'card-oos', 'agent-oos', 'review', 'pending', '[Review R1] card-oos',
-                     '{\"reviewed_commit\":\"deadbeef1234567\",\"target_repo\":\"acme/repo\"}',
-                     datetime('now'), datetime('now'))",
-            [],
+                     ?1, datetime('now'), datetime('now'))",
+            [context_json.as_str()],
         ).unwrap();
     }
 
@@ -2410,6 +2466,238 @@ async fn dispute_out_of_scope_refused_when_reviewed_commit_missing() {
         StatusCode::CONFLICT,
         "out_of_scope must be refused without reviewed_commit; body = {:?}",
         body.0
+    );
+}
+
+/// #2200 sub-3 HIGH 1 (Codex round-2): scope verification must fail-CLOSED
+/// when the tri-state check returns `Unknown`. A transient repo/git failure
+/// (no on-disk repo for the reviewed_commit) MUST NOT be silently treated
+/// as "out-of-scope confirmed". The previous bool-collapse let
+/// `false → DoesNotBelong → allow close`, which fail-OPEN terminalized
+/// cards on transient errors. The fail-closed reply returns 503 so the
+/// caller knows to retry once verification can complete.
+#[tokio::test]
+async fn dispute_out_of_scope_refused_when_scope_check_unknown() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-unk', 'Unknown', '111', '222')",
+            [],
+        ).unwrap();
+        // Card HAS github_issue_number (so the tri-state check actually
+        // attempts repo verification) but the target_repo points at a
+        // non-existent path → resolve_repo_dir_for_target fails → tri
+        // returns Unknown.
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, github_issue_number, created_at, updated_at)
+             VALUES ('card-unk', 'Unknown', 'review', 'agent-unk', 'dispatch-rd-unk', 'suggestion_pending', 88002, datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rd-unk', 'card-unk', 'agent-unk', 'review-decision', 'pending', '[Decision] card-unk', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+             VALUES ('dispatch-rv-unk', 'card-unk', 'agent-unk', 'review', 'pending', '[Review R1] card-unk',
+                     '{\"reviewed_commit\":\"deadbeef1234567\",\"target_repo\":\"/tmp/agentdesk-test-nonexistent-repo-#2200-sub3\"}',
+                     datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-unk".to_string(),
+            decision: "dispute".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-rd-unk".to_string()),
+            out_of_scope: Some(true),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Unknown scope verification must fail-closed with 503, not fail-open with 200; body = {:?}",
+        body.0
+    );
+    assert_eq!(
+        body.0
+            .get("reason")
+            .and_then(|v| v.as_str()),
+        Some("scope_check_unknown"),
+        "fail-closed response must surface the scope_check_unknown reason"
+    );
+
+    // Card must NOT have transitioned and the review-decision dispatch
+    // must remain pending — fail-closed means nothing changes.
+    let conn = db.lock().unwrap();
+    let card_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-unk'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        card_status, "review",
+        "fail-closed Unknown must not transition the card"
+    );
+    let rd_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-rd-unk'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rd_status, "pending",
+        "fail-closed Unknown must not finalize the pending review-decision dispatch"
+    );
+}
+
+/// #2200 sub-3 HIGH 2 (Codex round-2): idempotent resume. If a prior
+/// `/api/review-decision` call with `out_of_scope: true` finalized the
+/// review-decision dispatch with outcome `scope_mismatch_closed` but
+/// crashed (or had its card transition fail) before the card reached
+/// terminal, a retry must pick up where the prior attempt left off rather
+/// than rejecting with "no pending review-decision dispatch". This closes
+/// the non-atomic window between dispatch completion and card transition.
+#[tokio::test]
+async fn dispute_out_of_scope_resumes_after_partial_close() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-res', 'Resume', '111', '222')",
+            [],
+        ).unwrap();
+        // Card is still in 'review' (the prior call's card transition
+        // did not complete) and has NO pending review-decision dispatch
+        // (the prior call DID complete the finalize step).
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, github_issue_number, created_at, updated_at)
+             VALUES ('card-res', 'Resume', 'review', 'agent-res', 'dispatch-rd-res', 'suggestion_pending', 77003, datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        // Prior review-decision dispatch already completed with
+        // outcome=scope_mismatch_closed (the proof the prior call left
+        // behind before crashing on the card transition).
+        let prior_result = serde_json::json!({
+            "decision": "dispute",
+            "outcome": "scope_mismatch_closed",
+            "completion_source": "review_decision_api",
+            "review_dispatch_id": "dispatch-rv-res",
+            "reviewed_commit": "abcdef1234567890",
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, completed_at, created_at, updated_at)
+             VALUES ('dispatch-rd-res', 'card-res', 'agent-res', 'review-decision', 'completed', '[Decision] card-res', ?1, datetime('now'), datetime('now'), datetime('now'))",
+            [prior_result.as_str()],
+        ).unwrap();
+        // Stale review dispatch left over from before the crash.
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rv-res', 'card-res', 'agent-res', 'review', 'pending', '[Review R1] card-res', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-res".to_string(),
+            decision: "dispute".to_string(),
+            comment: Some("Retrying after prior partial close".to_string()),
+            commit_sha: None,
+            dispatch_id: Some("dispatch-rd-res".to_string()),
+            out_of_scope: Some(true),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "retry after partial scope_mismatch_closed must resume to 200, not reject with 409; body = {:?}",
+        body.0
+    );
+    assert_eq!(
+        body.0["outcome"].as_str(),
+        Some("scope_mismatch_closed"),
+        "resume must keep the original outcome"
+    );
+    assert_eq!(
+        body.0["resumed"].as_bool(),
+        Some(true),
+        "resume must flag itself as a recovery so operators can tell idempotent retries apart"
+    );
+
+    // Card must now be terminal and the stale review dispatch must be
+    // cancelled.
+    let conn = db.lock().unwrap();
+    let card_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-res'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        card_status, "done",
+        "resume must transition the card to terminal"
+    );
+    let rv_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-rv-res'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rv_status, "cancelled",
+        "resume must cancel the stale review dispatch"
+    );
+
+    // Calling again after the card is terminal must be an idempotent
+    // no-op (no further state change, still 200 OK).
+    drop(conn);
+    let state2 = AppState::test_state(db.clone(), test_engine(&db));
+    let (status2, body2) = submit_review_decision(
+        State(state2),
+        Json(ReviewDecisionBody {
+            card_id: "card-res".to_string(),
+            decision: "dispute".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-rd-res".to_string()),
+            out_of_scope: Some(true),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status2,
+        StatusCode::OK,
+        "double-retry after terminal must be an idempotent no-op; body = {:?}",
+        body2.0
+    );
+    assert_eq!(
+        body2.0["resumed"].as_bool(),
+        Some(false),
+        "idempotent no-op must flag resumed=false (no state change required)"
     );
 }
 

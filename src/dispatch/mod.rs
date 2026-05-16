@@ -25,11 +25,12 @@ pub use dispatch_channel::{
 #[allow(unused_imports)]
 pub(crate) use dispatch_context::{
     DispatchSessionStrategy, REVIEW_QUALITY_CHECKLIST, REVIEW_QUALITY_SCOPE_REMINDER,
-    REVIEW_VERDICT_IMPROVE_GUIDANCE, commit_belongs_to_card_issue, commit_belongs_to_card_issue_pg,
-    dispatch_session_strategy_from_context, dispatch_type_force_new_session_default,
-    dispatch_type_requires_fresh_worktree, dispatch_type_session_strategy_default,
-    dispatch_type_uses_thread_routing, ensure_card_worktree, inject_review_dispatch_identifiers,
-    resolve_card_worktree,
+    REVIEW_VERDICT_IMPROVE_GUIDANCE, ScopeCheck, commit_belongs_to_card_issue,
+    commit_belongs_to_card_issue_pg, commit_belongs_to_card_issue_pg_tri,
+    commit_belongs_to_card_issue_tri, dispatch_session_strategy_from_context,
+    dispatch_type_force_new_session_default, dispatch_type_requires_fresh_worktree,
+    dispatch_type_session_strategy_default, dispatch_type_uses_thread_routing,
+    ensure_card_worktree, inject_review_dispatch_identifiers, resolve_card_worktree,
 };
 #[allow(unused_imports)]
 pub(crate) use dispatch_create::{

@@ -491,6 +491,264 @@ async fn pending_review_decision_dispatch_id_pg_first(
     None
 }
 
+/// #2200 sub-3 HIGH 2: idempotency probe. Locate a recently-finalized
+/// `review-decision` dispatch that already recorded
+/// `result.outcome == "scope_mismatch_closed"` for this card. Used to detect
+/// the in-progress close left behind when the prior `/api/review-decision`
+/// call succeeded at `set_dispatch_status_with_backends` but crashed (or had
+/// its card transition rejected) before the card reached terminal. A retry
+/// can then resume from cancel-stale + transition + cleanup without
+/// rejecting on "no pending review-decision dispatch".
+#[derive(Debug, Clone)]
+struct PriorScopeMismatchClose {
+    dispatch_id: String,
+    review_dispatch_id: Option<String>,
+    reviewed_commit: Option<String>,
+}
+
+async fn recent_scope_mismatch_finalized_pg_first(
+    state: &AppState,
+    card_id: &str,
+) -> Option<PriorScopeMismatchClose> {
+    if let Some(pool) = state.pg_pool_ref() {
+        return match sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT id, result
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = 'review-decision'
+               AND status = 'completed'
+               AND result IS NOT NULL
+               AND (result::jsonb ->> 'outcome') = 'scope_mismatch_closed'
+             ORDER BY COALESCE(completed_at, updated_at) DESC NULLS LAST, updated_at DESC NULLS LAST
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((dispatch_id, result_raw))) => Some(parse_prior_scope_mismatch_close(
+                dispatch_id,
+                result_raw,
+            )),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    card_id,
+                    %error,
+                    "[review-decision] failed to load recent scope_mismatch_closed dispatch (postgres)"
+                );
+                None
+            }
+        };
+    }
+
+    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+    if let Some(db) = state.legacy_db() {
+        return db.separate_conn().ok().and_then(|conn| {
+            // sqlite has no jsonb operators, so filter in Rust.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, result
+                     FROM task_dispatches
+                     WHERE kanban_card_id = ?1
+                       AND dispatch_type = 'review-decision'
+                       AND status = 'completed'
+                       AND result IS NOT NULL
+                     ORDER BY COALESCE(completed_at, updated_at) DESC, rowid DESC
+                     LIMIT 8",
+                )
+                .ok()?;
+            let mut rows = stmt
+                .query_map([card_id], |row| {
+                    let id: String = row.get(0)?;
+                    let result_raw: Option<String> = row.get(1)?;
+                    Ok((id, result_raw))
+                })
+                .ok()?;
+            while let Some(Ok((id, result_raw))) = rows.next() {
+                if let Some(raw) = result_raw.as_deref() {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+                        if value.get("outcome").and_then(|v| v.as_str())
+                            == Some("scope_mismatch_closed")
+                        {
+                            return Some(parse_prior_scope_mismatch_close(id, result_raw));
+                        }
+                    }
+                }
+            }
+            None
+        });
+    }
+
+    None
+}
+
+/// #2200 sub-3 HIGH 2: resume the close sequence from a prior partial
+/// success. The dispatch is already finalized with
+/// `outcome = scope_mismatch_closed` — we only need to cancel stale
+/// dispatches, transition the card to terminal, and run dismiss cleanup.
+/// Card already-in-terminal is a successful no-op.
+async fn resume_scope_mismatch_close(
+    state: &AppState,
+    card_id: &str,
+    prior: &PriorScopeMismatchClose,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let card_ctx = load_review_decision_card_context_pg_first(state, card_id).await;
+    let effective_pipeline = resolve_effective_pipeline_pg_first(
+        state,
+        card_ctx.repo_id.as_deref(),
+        card_ctx.agent_id.as_deref(),
+    )
+    .await;
+    let terminal_state = effective_pipeline
+        .states
+        .iter()
+        .find(|s| s.terminal)
+        .map(|s| s.id.clone())
+        .unwrap_or_else(|| "done".to_string());
+
+    let current_status = card_ctx.status.clone().unwrap_or_default();
+    if effective_pipeline.is_terminal(&current_status) {
+        // Idempotent no-op: a prior call already completed the entire
+        // close. Return success with the prior dispatch metadata so the
+        // caller can correlate.
+        tracing::info!(
+            card_id = %card_id,
+            pending_rd_id = %prior.dispatch_id,
+            "[review-decision] #2200 sub-3 HIGH 2 idempotent no-op: card already in terminal after prior scope_mismatch_closed finalize"
+        );
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "card_id": card_id,
+                "decision": "dispute",
+                "outcome": "scope_mismatch_closed",
+                "pending_dispatch_id": prior.dispatch_id,
+                "review_dispatch_id": prior.review_dispatch_id,
+                "reviewed_commit": prior.reviewed_commit,
+                "resumed": false,
+                "message": "Dispute already closed by prior call; card is terminal (idempotent no-op)",
+            })),
+        );
+    }
+
+    // Card is NOT terminal — the prior call finalized the dispatch but
+    // did not complete the transition. Pick up from cancel-stale onward.
+    tracing::warn!(
+        card_id = %card_id,
+        pending_rd_id = %prior.dispatch_id,
+        current_status = %current_status,
+        terminal_state = %terminal_state,
+        "[review-decision] #2200 sub-3 HIGH 2 resuming partially-completed scope_mismatch_closed: dispatch already finalized, card pending transition"
+    );
+
+    let stale_ids = stale_review_dispatch_ids_pg_first(state, card_id).await;
+    let mut cancelled_stale = 0usize;
+    for stale_id in &stale_ids {
+        if cancel_dispatch_pg_first(state, stale_id, Some("scope_mismatch_closed"))
+            .await
+            .unwrap_or(0)
+            > 0
+        {
+            cancelled_stale += 1;
+        }
+    }
+
+    match transition_status_pg_first(
+        state,
+        card_id,
+        &terminal_state,
+        "dispute_scope_mismatch_closed_resume",
+        crate::engine::transition::ForceIntent::SystemRecovery,
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(
+                card_id = %card_id,
+                pending_rd_id = %prior.dispatch_id,
+                terminal_state = %terminal_state,
+                error = %e,
+                "[review-decision] #2200 sub-3 HIGH 2 resume failed to transition card to terminal",
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!(
+                        "scope_mismatch_closed resume: card transition to {terminal_state} failed: {e}"
+                    ),
+                    "card_id": card_id,
+                    "pending_dispatch_id": prior.dispatch_id,
+                })),
+            );
+        }
+    }
+
+    if let Err(error) = dismiss_review_cleanup_pg_first(state, card_id).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        );
+    }
+
+    update_card_review_state(
+        review_state_db(state),
+        state.pg_pool_ref(),
+        card_id,
+        "dispute_scope_mismatch_closed",
+        Some(&prior.dispatch_id),
+    );
+
+    emit_card_updated(state, card_id).await;
+    tracing::info!(
+        card_id = %card_id,
+        pending_rd_id = %prior.dispatch_id,
+        cancelled_stale,
+        "[review-decision] #2200 sub-3 HIGH 2 resumed and completed scope_mismatch_closed"
+    );
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "card_id": card_id,
+            "decision": "dispute",
+            "outcome": "scope_mismatch_closed",
+            "pending_dispatch_id": prior.dispatch_id,
+            "review_dispatch_id": prior.review_dispatch_id,
+            "reviewed_commit": prior.reviewed_commit,
+            "cancelled_stale_dispatches": cancelled_stale,
+            "resumed": true,
+            "message": "Dispute close resumed: card transitioned to terminal after prior partial close",
+        })),
+    )
+}
+
+fn parse_prior_scope_mismatch_close(
+    dispatch_id: String,
+    result_raw: Option<String>,
+) -> PriorScopeMismatchClose {
+    let parsed = result_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    let review_dispatch_id = parsed
+        .as_ref()
+        .and_then(|v| v.get("review_dispatch_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let reviewed_commit = parsed
+        .as_ref()
+        .and_then(|v| v.get("reviewed_commit"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    PriorScopeMismatchClose {
+        dispatch_id,
+        review_dispatch_id,
+        reviewed_commit,
+    }
+}
+
 async fn emit_card_updated(state: &AppState, card_id: &str) {
     if let Some(pool) = state.pg_pool_ref() {
         match super::super::kanban::load_card_json_pg(pool, card_id).await {
@@ -985,6 +1243,40 @@ async fn commit_belongs_to_card_issue_pg_first(
     false
 }
 
+/// #2200 sub-3 HIGH 1: tri-state scope verification used by the out-of-scope
+/// close path. The bool helper above intentionally collapses Unknown into
+/// "false" (fall-back-to-stricter-check semantics for legacy callers).
+/// The close path MUST distinguish — Unknown is a refusal, not a proof of
+/// out-of-scope.
+async fn commit_belongs_to_card_issue_pg_first_tri(
+    state: &AppState,
+    card_id: &str,
+    commit_sha: &str,
+    target_repo: Option<&str>,
+) -> crate::dispatch::ScopeCheck {
+    if let Some(pool) = state.pg_pool_ref() {
+        return crate::dispatch::commit_belongs_to_card_issue_pg_tri(
+            pool,
+            card_id,
+            commit_sha,
+            target_repo,
+        )
+        .await;
+    }
+
+    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+    if let Some(db) = state.legacy_db() {
+        return crate::dispatch::commit_belongs_to_card_issue_tri(
+            &db,
+            card_id,
+            commit_sha,
+            target_repo,
+        );
+    }
+
+    crate::dispatch::ScopeCheck::Unknown
+}
+
 async fn cancel_dispatch_pg_first(
     state: &AppState,
     dispatch_id: &str,
@@ -1173,6 +1465,39 @@ pub async fn submit_review_decision(
     let pending_rd_id = pending_review_decision_dispatch_id_pg_first(&state, &body.card_id).await;
 
     if pending_rd_id.is_none() {
+        // HIGH 2 idempotency guard: a prior dispute+out_of_scope call may
+        // have finalized the review-decision dispatch with outcome
+        // `scope_mismatch_closed` but crashed before the card reached
+        // terminal. On a retry the pending lookup correctly returns None
+        // (the dispatch is no longer pending), but rejecting with 409
+        // would strand the card half-closed. Instead, detect the prior
+        // finalize and resume from cancel-stale + transition + cleanup.
+        // The dispatch's `result.outcome = scope_mismatch_closed` is the
+        // proof — the caller cannot forge it because finalize required a
+        // dispatch_id match in the original call. We additionally cross-
+        // check the submitted dispatch_id (if any) against the prior
+        // finalized dispatch_id.
+        if body.decision == "dispute" && body.out_of_scope == Some(true) {
+            if let Some(prior) =
+                recent_scope_mismatch_finalized_pg_first(&state, &body.card_id).await
+            {
+                if let Some(submitted) = body.dispatch_id.as_deref() {
+                    if submitted != prior.dispatch_id {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "error": format!(
+                                    "out_of_scope retry dispatch_id mismatch: submitted {submitted} but prior finalized scope_mismatch_closed is {}",
+                                    prior.dispatch_id
+                                ),
+                                "card_id": body.card_id,
+                            })),
+                        );
+                    }
+                }
+                return resume_scope_mismatch_close(&state, &body.card_id, &prior).await;
+            }
+        }
         // No pending review-decision dispatch → stale or duplicate call
         return (
             StatusCode::CONFLICT,
@@ -1805,7 +2130,15 @@ pub async fn submit_review_decision(
                         );
                     }
                 };
-                if commit_belongs_to_card_issue_pg_first(
+                // HIGH 1 fail-closed: tri-state scope verification. Only a
+                // proven OutOfScope is allowed to take the close shortcut.
+                // InScope refuses with 409 (legacy in-scope dispute is the
+                // right path). Unknown — repo dir unavailable, git log
+                // failed, commit not reachable, etc. — refuses with 503 so
+                // the caller knows verification didn't conclude and can
+                // retry once the underlying repo state is recoverable. A
+                // transient PG/git failure must NEVER terminalize a card.
+                match commit_belongs_to_card_issue_pg_first_tri(
                     &state,
                     &body.card_id,
                     &reviewed_commit,
@@ -1813,23 +2146,47 @@ pub async fn submit_review_decision(
                 )
                 .await
                 {
-                    tracing::warn!(
-                        card_id = %body.card_id,
-                        pending_rd_id = %rd_id,
-                        review_dispatch_id = %live_review.id,
-                        reviewed_commit = %reviewed_commit,
-                        "[review-decision] #2200 sub-3 rejected out_of_scope claim: reviewed_commit belongs to the card issue"
-                    );
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(json!({
-                            "error": "out_of_scope dispute refused: reviewed_commit belongs to this card's issue; submit a regular dispute instead",
-                            "card_id": body.card_id,
-                            "pending_dispatch_id": rd_id,
-                            "review_dispatch_id": live_review.id,
-                            "reviewed_commit": reviewed_commit,
-                        })),
-                    );
+                    crate::dispatch::ScopeCheck::OutOfScope => {}
+                    crate::dispatch::ScopeCheck::InScope => {
+                        tracing::warn!(
+                            card_id = %body.card_id,
+                            pending_rd_id = %rd_id,
+                            review_dispatch_id = %live_review.id,
+                            reviewed_commit = %reviewed_commit,
+                            "[review-decision] #2200 sub-3 rejected out_of_scope claim: reviewed_commit belongs to the card issue"
+                        );
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "error": "out_of_scope dispute refused: reviewed_commit belongs to this card's issue; submit a regular dispute instead",
+                                "card_id": body.card_id,
+                                "pending_dispatch_id": rd_id,
+                                "review_dispatch_id": live_review.id,
+                                "reviewed_commit": reviewed_commit,
+                            })),
+                        );
+                    }
+                    crate::dispatch::ScopeCheck::Unknown => {
+                        tracing::warn!(
+                            card_id = %body.card_id,
+                            pending_rd_id = %rd_id,
+                            review_dispatch_id = %live_review.id,
+                            reviewed_commit = %reviewed_commit,
+                            target_repo = %live_review.target_repo.as_deref().unwrap_or(""),
+                            "[review-decision] #2200 sub-3 HIGH 1 refused out_of_scope: scope verification inconclusive (repo/git transient failure); fail-closed"
+                        );
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({
+                                "error": "scope verification inconclusive; cannot close as out-of-scope. Retry once the repo is reachable, or submit a regular dispute.",
+                                "card_id": body.card_id,
+                                "pending_dispatch_id": rd_id,
+                                "review_dispatch_id": live_review.id,
+                                "reviewed_commit": reviewed_commit,
+                                "reason": "scope_check_unknown",
+                            })),
+                        );
+                    }
                 }
 
                 // 3. Atomic-ish close sequence with strict result checks. The
