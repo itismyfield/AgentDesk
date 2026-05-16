@@ -1091,6 +1091,12 @@ fn execute_streaming_local_tui_tmux(
         }
     }
 
+    // #2172 cancel boundary: keep a clone of the cancel token so that
+    // post-tail emission (RuntimeReady / SessionDied Done) and the
+    // tail-error tmux-cleanup branch can BOTH consult `cancel_requested`
+    // without re-acquiring it. The tail call itself moves its clone into
+    // the rollout-tail thread; this clone stays in the launch frame.
+    let cancel_token_for_post_tail = cancel_token.clone();
     let tail_result = if session_selection.resume {
         let rollout_path = session_selection
             .rollout_path
@@ -1120,10 +1126,30 @@ fn execute_streaming_local_tui_tmux(
             || tmux_session_has_live_pane(tmux_session_name),
         )
     };
+    let cancel_observed = || {
+        crate::services::provider::cancel_requested(cancel_token_for_post_tail.as_deref())
+    };
 
     let tail_result = match tail_result {
         Ok(result) => result,
         Err(error) => {
+            // #2172 cancel boundary: a user /stop that arrives before the
+            // rollout file is discovered surfaces as an Err from the
+            // wait_for_* helpers ("cancelled waiting for Codex rollout
+            // transcript"). Killing the tmux session in that path
+            // contradicts the PreserveSession default for /stop — the
+            // pane teardown is owned by stop_active_turn's
+            // TmuxCleanupPolicy, not by the launch error handler. Skip
+            // the local cleanup when cancel is observed and let the
+            // turn_bridge cancel path drive session lifecycle.
+            if cancel_observed() {
+                tracing::info!(
+                    tmux_session = tmux_session_name,
+                    error = %error,
+                    "Codex rollout tail cancelled before transcript; tmux cleanup deferred to cancel path"
+                );
+                return Err(error);
+            }
             // #2182 follow-up: rollout wait / tail failures used to leak the
             // tmux session because `?` propagated Err without cleaning the
             // launched session. Kill it explicitly so the worktree doesn't
@@ -1143,6 +1169,31 @@ fn execute_streaming_local_tui_tmux(
     };
 
     let read_result = tail_result.read_result.clone();
+    // #2172 cancel boundary: relay suppression is enforced at every
+    // Direct TUI StreamMessage producer, not just rollout_tail. The
+    // post-tail SessionDied Done and the RuntimeReady handoff frame
+    // must also drop on the floor when the user has cancelled — a
+    // cancelled turn must not deliver any further frame to the bridge.
+    // ReadOutputResult::Cancelled is handled explicitly: it never
+    // emits RuntimeReady (which would let the bridge mutate handoff
+    // state on a cancelled turn) and it never emits Done either.
+    if matches!(
+        read_result,
+        crate::services::provider::ReadOutputResult::Cancelled { .. }
+    ) {
+        tracing::info!(
+            tmux_session = tmux_session_name,
+            "Codex Direct TUI tail returned Cancelled; suppressing post-tail StreamMessage emission"
+        );
+        return Ok(());
+    }
+    if cancel_observed() {
+        tracing::info!(
+            tmux_session = tmux_session_name,
+            "Codex Direct TUI launch observed cancel after tail returned; suppressing post-tail StreamMessage emission"
+        );
+        return Ok(());
+    }
     if matches!(
         read_result,
         crate::services::provider::ReadOutputResult::SessionDied { .. }

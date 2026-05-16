@@ -95,19 +95,64 @@ emits zero post-cancel `StreamMessage`.
 
 ### Race: cancel vs. final completion frame
 
-If the rollout emits a `Done` frame and the user cancels in the same
-millisecond, two paths are possible:
+The contract is "whichever comes first wins". A cancel arriving AFTER the
+bridge has already processed `Done` does NOT reclassify the turn as
+cancelled — the bridge gates its cancel finalisation arm on `!done`. A
+cancel that lands while the bridge is sitting in
+`terminal_control_drain_until` exits the drain immediately but the turn
+remains a completed turn for finalisation, dispatch reporting, and
+inflight clearance.
 
-- The `Done` was already enqueued into `rx` before the cancel flag flipped.
-  The bridge may or may not consume it; the bridge's cancel-break in
-  `mod.rs` makes this best-effort. Acceptable: the turn is reported as
-  cancelled, no later output is emitted, and the user sees the cancel.
+If the rollout emits a `Done` frame and the user cancels in the same
+millisecond, three paths are possible:
+
+- The `Done` was already enqueued into `rx` AND the bridge has already
+  consumed it (`done = true`) before the cancel flag flipped. The
+  `!done && cancel_requested` guard suppresses the cancel-arm; the turn
+  finalises as completed. Cancel-after-completion is a no-op.
+- The `Done` was already enqueued into `rx` but not yet drained. The
+  bridge's cancel-break runs first, the turn is finalised as cancelled,
+  and the in-flight `Done` is discarded. Acceptable: the user pressed
+  stop, no later output is emitted.
 - The `Done` is generated AFTER the cancel flag flipped. The
   `RelaySuppressionSender` drops it. The tail returns
-  `ReadOutputResult::Cancelled`. The bridge's cancel block finalises the
-  turn exactly once. The user sees the cancel.
+  `ReadOutputResult::Cancelled`. The post-tail emitter in
+  `execute_streaming_local_tui_tmux` also short-circuits on `Cancelled`
+  and on a late `cancel_observed()`, so no `RuntimeReady` /
+  `Done` ever reaches the bridge. The bridge's cancel block finalises
+  the turn exactly once. The user sees the cancel.
 
-In both cases the post-cancel relay boundary holds.
+In all three cases the post-cancel relay boundary holds and the turn is
+finalised exactly once.
+
+### Relay suppression applies to ALL Direct TUI producers
+
+`tail_rollout_file_until_assistant_response` is the bulk producer, but it
+is not the only one. The launch entrypoint
+`execute_streaming_local_tui_tmux` also emits two terminal frames
+directly:
+
+- `StreamMessage::Done` when the tail returns `SessionDied`.
+- `StreamMessage::RuntimeReady { handoff: RuntimeHandoff::CodexTui }`
+  for the normal handoff (so the watcher takes over relay).
+
+Both of those raw `sender.send` calls must drop on the floor when the
+cancel token is set, because the `RelaySuppressionSender` wraps only the
+tail's sender, not the launch frame's. The launch code checks
+`cancel_requested` on the post-tail clone of the cancel token before
+emitting either frame. Without this guard, a `Cancelled` tail result
+could fall through and emit a `RuntimeReady` that the bridge consumes
+during its post-cancel `try_recv` drain — letting it mutate
+handoff/inflight state on behalf of a cancelled turn.
+
+The cancel-before-rollout path (the rollout-wait helpers return an
+`Err("cancelled waiting for Codex rollout transcript")`) is also
+short-circuited: instead of tearing down the tmux session via
+`kill_session_with_reason`, the launch returns the error and lets
+`turn_bridge::stop_active_turn` apply the configured
+`TmuxCleanupPolicy`. This preserves the documented `/stop` default of
+"do not kill the pane" and lets follow-up turns reuse the session if
+the cancel policy is `PreserveSession*`.
 
 ### Exactly-once finalisation
 
