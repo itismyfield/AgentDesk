@@ -23,7 +23,9 @@ use crate::db::session_observability::{
 };
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::{PersistTurnOwned, TurnTokenUsage};
-use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
+use crate::services::agent_protocol::{
+    RuntimeHandoff, RuntimeHandoffKind, StatusEvent, TaskNotificationKind,
+};
 use crate::services::memory::{
     CaptureRequest, SessionEndReason, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
@@ -1145,6 +1147,195 @@ pub(super) fn persist_turn_analytics_row_with_handles(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn handle_watcher_runtime_handoff(
+    shared_owned: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    inflight_state: &mut InflightTurnState,
+    runtime_kind: RuntimeHandoffKind,
+    output_path: String,
+    input_fifo_path: Option<String>,
+    tmux_session_name: String,
+    last_offset: u64,
+    tmux_last_offset: &mut Option<u64>,
+    watcher_owner_channel_id: &mut ChannelId,
+    standby_relay_owns_output: &mut bool,
+    watcher_relay_available_for_turn: &mut bool,
+    tmux_handed_off: &mut bool,
+    watcher_owns_assistant_relay: &mut bool,
+    bridge_published_finalize_owed_for_this_turn: &mut bool,
+    state_dirty: &mut bool,
+    done: bool,
+    terminal_control_drain_until: &mut Option<std::time::Instant>,
+) {
+    *tmux_last_offset = Some(last_offset);
+    inflight_state.runtime_kind = Some(runtime_kind);
+    inflight_state.tmux_session_name = Some(tmux_session_name.clone());
+    inflight_state.output_path = Some(output_path.clone());
+    inflight_state.input_fifo_path = input_fifo_path.filter(|path| !path.is_empty());
+    inflight_state.last_offset = last_offset;
+
+    // #226: Atomic claim via try_claim_watcher
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
+    let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let last_heartbeat_ts_ms = Arc::new(std::sync::atomic::AtomicI64::new(
+        super::tmux_watcher_now_ms(),
+    ));
+    let mailbox_finalize_owed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = TmuxWatcherHandle {
+        tmux_session_name: tmux_session_name.clone(),
+        paused: paused.clone(),
+        resume_offset: resume_offset.clone(),
+        cancel: cancel.clone(),
+        pause_epoch: pause_epoch.clone(),
+        turn_delivered: turn_delivered.clone(),
+        last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
+        mailbox_finalize_owed: mailbox_finalize_owed.clone(),
+    };
+    #[cfg(unix)]
+    let (watcher_claimed, watcher_claim_replaced_existing) = {
+        let claim = super::tmux::claim_or_reuse_watcher(
+            &shared_owned.tmux_watchers,
+            channel_id,
+            handle,
+            provider,
+            "turn_bridge_runtime_ready",
+        );
+        *watcher_owner_channel_id = claim.owner_channel_id();
+        (claim.should_spawn(), claim.replaced_existing())
+    };
+    #[cfg(not(unix))]
+    let (watcher_claimed, watcher_claim_replaced_existing) = {
+        let _ = handle;
+        (false, false)
+    };
+    #[cfg(unix)]
+    let mut watcher_ready_for_relay = !watcher_claimed;
+    #[cfg(not(unix))]
+    let mut watcher_ready_for_relay = false;
+    let _ = watcher_claim_replaced_existing;
+    if watcher_claimed {
+        #[cfg(unix)]
+        {
+            let on_standby = shared_owned.cached_serenity_ctx.get().is_none();
+            if on_standby {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ⏭ standby relay: skipping tmux watcher spawn for channel {}; spawning JSONL→Discord standby_relay",
+                    channel_id
+                );
+                let _ = shared_owned.tmux_watchers.remove(watcher_owner_channel_id);
+                if let Some(http_for_standby) = shared_owned.serenity_http_or_token_fallback() {
+                    let placeholder_msg_id_opt = if inflight_state.current_msg_id == 0 {
+                        None
+                    } else {
+                        Some(serenity::MessageId::new(inflight_state.current_msg_id))
+                    };
+                    let output_path_for_standby = output_path.clone();
+                    let cancel_for_standby = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let shared_for_standby = shared_owned.clone();
+                    let provider_for_standby = provider.clone();
+                    tokio::spawn(super::standby_relay::run_standby_relay(
+                        http_for_standby,
+                        channel_id,
+                        placeholder_msg_id_opt,
+                        output_path_for_standby,
+                        last_offset,
+                        cancel_for_standby,
+                        shared_for_standby,
+                        provider_for_standby,
+                        std::time::Duration::from_secs(900),
+                    ));
+                    *standby_relay_owns_output = true;
+                    let _ = save_inflight_state(inflight_state);
+                } else {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ standby relay skipped: no Http source for channel {}",
+                        channel_id
+                    );
+                }
+            } else if let Some(http_bg) = shared_owned.serenity_http_or_token_fallback() {
+                let shared_bg = shared_owned.clone();
+                inflight_state.watcher_owns_live_relay = true;
+                let restored_turn = super::tmux::restored_watcher_turn_from_inflight(
+                    inflight_state,
+                    &tmux_session_name,
+                    true,
+                );
+                if let Ok(mut guard) = resume_offset.lock() {
+                    *guard = Some(last_offset);
+                }
+                turn_delivered.store(false, std::sync::atomic::Ordering::Relaxed);
+                if watcher_claim_replaced_existing {
+                    shared_owned.record_tmux_watcher_reconnect(channel_id);
+                }
+                tokio::spawn(super::tmux::tmux_output_watcher_with_restore(
+                    channel_id,
+                    http_bg,
+                    shared_bg,
+                    output_path,
+                    tmux_session_name,
+                    last_offset,
+                    cancel,
+                    paused,
+                    resume_offset,
+                    pause_epoch,
+                    turn_delivered,
+                    last_heartbeat_ts_ms,
+                    mailbox_finalize_owed,
+                    restored_turn,
+                ));
+                *watcher_relay_available_for_turn = true;
+                let _ = save_inflight_state(inflight_state);
+                watcher_ready_for_relay = true;
+            } else {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ no Http source (neither cached_serenity_ctx nor cached_bot_token); tmux watcher not started for channel {}",
+                    channel_id
+                );
+                if let Some((_, handle)) =
+                    shared_owned.tmux_watchers.remove(watcher_owner_channel_id)
+                {
+                    handle
+                        .cancel
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    if watcher_ready_for_relay {
+        *tmux_handed_off = true;
+        inflight_state.watcher_owns_live_relay = true;
+        *watcher_owns_assistant_relay = true;
+        if let Some(watcher) = shared_owned.tmux_watchers.get(watcher_owner_channel_id) {
+            *watcher_relay_available_for_turn = true;
+            if let Ok(mut guard) = watcher.resume_offset.lock() {
+                *guard = Some(last_offset);
+            }
+            watcher
+                .turn_delivered
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            watcher
+                .mailbox_finalize_owed
+                .store(true, std::sync::atomic::Ordering::Release);
+            *bridge_published_finalize_owed_for_this_turn = true;
+            watcher
+                .paused
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    *state_dirty = true;
+    if done {
+        *terminal_control_drain_until = None;
+    }
+}
+
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -1849,7 +2040,7 @@ pub(super) fn spawn_turn_bridge(
                             );
                             if is_error {
                                 record_placeholder_live_event(
-                                    shared_owned.as_ref(),
+                                    &shared_owned,
                                     channel_id,
                                     super::placeholder_live_events::RecentPlaceholderEvent::tool_error(
                                         &content,
@@ -2286,9 +2477,12 @@ pub(super) fn spawn_turn_bridge(
                             last_offset,
                         } => {
                             tmux_last_offset = Some(last_offset);
+                            inflight_state.runtime_kind =
+                                Some(RuntimeHandoffKind::LegacyTmuxWrapper);
                             inflight_state.tmux_session_name = Some(tmux_session_name.clone());
                             inflight_state.output_path = Some(output_path.clone());
-                            inflight_state.input_fifo_path = Some(input_fifo_path);
+                            inflight_state.input_fifo_path =
+                                Some(input_fifo_path).filter(|path| !path.is_empty());
                             inflight_state.last_offset = last_offset;
 
                             // #226: Atomic claim via try_claim_watcher
@@ -2547,6 +2741,100 @@ pub(super) fn spawn_turn_bridge(
                                 terminal_control_drain_until = None;
                             }
                         }
+                        StreamMessage::RuntimeReady { handoff } => match handoff {
+                            RuntimeHandoff::LegacyTmuxWrapper {
+                                output_path,
+                                input_fifo_path,
+                                tmux_session_name,
+                                last_offset,
+                            } => {
+                                handle_watcher_runtime_handoff(
+                                    &shared_owned,
+                                    &provider,
+                                    channel_id,
+                                    &mut inflight_state,
+                                    RuntimeHandoffKind::LegacyTmuxWrapper,
+                                    output_path,
+                                    Some(input_fifo_path),
+                                    tmux_session_name,
+                                    last_offset,
+                                    &mut tmux_last_offset,
+                                    &mut watcher_owner_channel_id,
+                                    &mut standby_relay_owns_output,
+                                    &mut watcher_relay_available_for_turn,
+                                    &mut tmux_handed_off,
+                                    &mut watcher_owns_assistant_relay,
+                                    &mut bridge_published_finalize_owed_for_this_turn,
+                                    &mut state_dirty,
+                                    done,
+                                    &mut terminal_control_drain_until,
+                                );
+                            }
+                            RuntimeHandoff::ClaudeTui {
+                                transcript_path,
+                                tmux_session_name,
+                                last_offset,
+                            } => {
+                                handle_watcher_runtime_handoff(
+                                    &shared_owned,
+                                    &provider,
+                                    channel_id,
+                                    &mut inflight_state,
+                                    RuntimeHandoffKind::ClaudeTui,
+                                    transcript_path,
+                                    None,
+                                    tmux_session_name,
+                                    last_offset,
+                                    &mut tmux_last_offset,
+                                    &mut watcher_owner_channel_id,
+                                    &mut standby_relay_owns_output,
+                                    &mut watcher_relay_available_for_turn,
+                                    &mut tmux_handed_off,
+                                    &mut watcher_owns_assistant_relay,
+                                    &mut bridge_published_finalize_owed_for_this_turn,
+                                    &mut state_dirty,
+                                    done,
+                                    &mut terminal_control_drain_until,
+                                );
+                            }
+                            RuntimeHandoff::CodexTui {
+                                rollout_path,
+                                thread_id,
+                                tmux_session_name,
+                                last_offset,
+                            } => {
+                                tmux_last_offset = Some(last_offset);
+                                inflight_state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+                                inflight_state.tmux_session_name = Some(tmux_session_name);
+                                inflight_state.output_path = Some(rollout_path);
+                                inflight_state.input_fifo_path = None;
+                                if let Some(thread_id) = thread_id {
+                                    inflight_state.session_id = Some(thread_id);
+                                }
+                                inflight_state.last_offset = last_offset;
+                                state_dirty = true;
+                                if done {
+                                    terminal_control_drain_until = None;
+                                }
+                            }
+                            RuntimeHandoff::ProcessBackend {
+                                output_path,
+                                session_name,
+                                last_offset,
+                            } => {
+                                tmux_last_offset = Some(last_offset);
+                                inflight_state.runtime_kind =
+                                    Some(RuntimeHandoffKind::ProcessBackend);
+                                inflight_state.tmux_session_name = Some(session_name);
+                                inflight_state.output_path = Some(output_path);
+                                inflight_state.input_fifo_path = None;
+                                inflight_state.last_offset = last_offset;
+                                state_dirty = true;
+                                if done {
+                                    terminal_control_drain_until = None;
+                                }
+                            }
+                        },
                         StreamMessage::ProcessReady {
                             output_path,
                             session_name,
@@ -2559,8 +2847,10 @@ pub(super) fn spawn_turn_bridge(
                             // so the handoff cleanup path would delete the placeholder
                             // with no one to send the final response.
                             tmux_last_offset = Some(last_offset);
+                            inflight_state.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
                             inflight_state.tmux_session_name = Some(session_name);
                             inflight_state.output_path = Some(output_path);
+                            inflight_state.input_fifo_path = None;
                             inflight_state.last_offset = last_offset;
                             state_dirty = true;
                             if done {

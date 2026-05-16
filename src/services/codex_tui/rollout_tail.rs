@@ -16,6 +16,15 @@ pub struct RolloutTailOutcome {
     pub lines_read: usize,
     pub bytes_read: u64,
     pub final_offset: u64,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexTuiTailResult {
+    pub read_result: ReadOutputResult,
+    pub rollout_path: PathBuf,
+    pub final_offset: u64,
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,14 +83,50 @@ pub fn tail_latest_rollout_for_cwd(
     )
 }
 
+pub fn tail_latest_rollout_for_cwd_with_handoff(
+    cwd: &Path,
+    modified_since: SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+) -> Result<CodexTuiTailResult, String> {
+    tail_latest_rollout_for_cwd_with_handoff_options(
+        cwd,
+        modified_since,
+        sender,
+        cancel_token,
+        is_alive,
+        RolloutTailOptions::default(),
+    )
+}
+
 pub fn tail_latest_rollout_for_cwd_with_options(
+    cwd: &Path,
+    modified_since: SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+    options: RolloutTailOptions,
+) -> Result<ReadOutputResult, String> {
+    tail_latest_rollout_for_cwd_with_handoff_options(
+        cwd,
+        modified_since,
+        sender,
+        cancel_token,
+        is_alive,
+        options,
+    )
+    .map(|result| result.read_result)
+}
+
+fn tail_latest_rollout_for_cwd_with_handoff_options(
     cwd: &Path,
     modified_since: SystemTime,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
     mut is_alive: impl FnMut() -> bool,
     options: RolloutTailOptions,
-) -> Result<ReadOutputResult, String> {
+) -> Result<CodexTuiTailResult, String> {
     let sessions_dir = default_codex_sessions_dir()
         .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
     let rollout_path = wait_for_latest_rollout_for_cwd(
@@ -101,7 +146,12 @@ pub fn tail_latest_rollout_for_cwd_with_options(
         is_alive,
         options.terminal_drain,
     )
-    .map(|result| result.0)
+    .map(|(read_result, outcome)| CodexTuiTailResult {
+        read_result,
+        rollout_path,
+        final_offset: outcome.final_offset,
+        session_id: outcome.session_id,
+    })
 }
 
 pub fn replay_rollout_file(
@@ -170,6 +220,32 @@ pub fn tail_resumed_rollout_for_session(
     )
 }
 
+pub fn tail_resumed_rollout_for_session_with_handoff(
+    cwd: &Path,
+    session_id: &str,
+    previous_rollout_path: &Path,
+    previous_start_offset: u64,
+    modified_since: SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+) -> Result<CodexTuiTailResult, String> {
+    let sessions_dir = default_codex_sessions_dir()
+        .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
+    tail_resumed_rollout_for_session_with_handoff_options(
+        cwd,
+        session_id,
+        previous_rollout_path,
+        previous_start_offset,
+        modified_since,
+        &sessions_dir,
+        sender,
+        cancel_token,
+        is_alive,
+        RolloutTailOptions::default(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tail_resumed_rollout_for_session_with_options(
     cwd: &Path,
@@ -180,9 +256,37 @@ fn tail_resumed_rollout_for_session_with_options(
     sessions_dir: &Path,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    mut is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> bool,
     options: RolloutTailOptions,
 ) -> Result<ReadOutputResult, String> {
+    tail_resumed_rollout_for_session_with_handoff_options(
+        cwd,
+        session_id,
+        previous_rollout_path,
+        previous_start_offset,
+        modified_since,
+        sessions_dir,
+        sender,
+        cancel_token,
+        is_alive,
+        options,
+    )
+    .map(|result| result.read_result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tail_resumed_rollout_for_session_with_handoff_options(
+    cwd: &Path,
+    session_id: &str,
+    previous_rollout_path: &Path,
+    previous_start_offset: u64,
+    modified_since: SystemTime,
+    sessions_dir: &Path,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    mut is_alive: impl FnMut() -> bool,
+    options: RolloutTailOptions,
+) -> Result<CodexTuiTailResult, String> {
     let rollout_path = wait_for_resumed_rollout_for_session(
         cwd,
         session_id,
@@ -209,7 +313,12 @@ fn tail_resumed_rollout_for_session_with_options(
         is_alive,
         options.terminal_drain,
     )
-    .map(|result| result.0)
+    .map(|(read_result, outcome)| CodexTuiTailResult {
+        read_result,
+        rollout_path,
+        final_offset: outcome.final_offset,
+        session_id: outcome.session_id,
+    })
 }
 
 fn wait_for_latest_rollout_for_cwd(
@@ -531,6 +640,7 @@ fn outcome(state: &RolloutParseState, final_offset: u64) -> RolloutTailOutcome {
         lines_read: state.lines_read,
         bytes_read: state.bytes_read,
         final_offset,
+        session_id: state.session_id.clone(),
     }
 }
 

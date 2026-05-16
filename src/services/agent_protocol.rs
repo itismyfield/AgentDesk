@@ -1,4 +1,5 @@
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
 /// Reference list of known Claude Code tools.
@@ -57,6 +58,76 @@ impl TaskNotificationKind {
             "background" => Some(Self::Background),
             "monitor_auto_turn" => Some(Self::MonitorAutoTurn),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeHandoffKind {
+    LegacyTmuxWrapper,
+    ClaudeTui,
+    CodexTui,
+    ProcessBackend,
+}
+
+impl RuntimeHandoffKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyTmuxWrapper => "legacy_tmux_wrapper",
+            Self::ClaudeTui => "claude_tui",
+            Self::CodexTui => "codex_tui",
+            Self::ProcessBackend => "process_backend",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LegacyTmuxWrapper => "legacy tmux wrapper",
+            Self::ClaudeTui => "Claude TUI",
+            Self::CodexTui => "Codex TUI",
+            Self::ProcessBackend => "ProcessBackend",
+        }
+    }
+
+    pub fn requires_input_fifo(self) -> bool {
+        matches!(self, Self::LegacyTmuxWrapper)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeHandoff {
+    LegacyTmuxWrapper {
+        output_path: String,
+        input_fifo_path: String,
+        tmux_session_name: String,
+        last_offset: u64,
+    },
+    ClaudeTui {
+        transcript_path: String,
+        tmux_session_name: String,
+        last_offset: u64,
+    },
+    CodexTui {
+        rollout_path: String,
+        thread_id: Option<String>,
+        tmux_session_name: String,
+        last_offset: u64,
+    },
+    ProcessBackend {
+        output_path: String,
+        session_name: String,
+        last_offset: u64,
+    },
+}
+
+impl RuntimeHandoff {
+    pub fn kind(&self) -> RuntimeHandoffKind {
+        match self {
+            Self::LegacyTmuxWrapper { .. } => RuntimeHandoffKind::LegacyTmuxWrapper,
+            Self::ClaudeTui { .. } => RuntimeHandoffKind::ClaudeTui,
+            Self::CodexTui { .. } => RuntimeHandoffKind::CodexTui,
+            Self::ProcessBackend { .. } => RuntimeHandoffKind::ProcessBackend,
         }
     }
 }
@@ -125,6 +196,9 @@ pub enum StreamMessage {
         tmux_session_name: String,
         last_offset: u64,
     },
+    /// Provider runtime is ready for bridge handoff without overloading
+    /// wrapper-only fields such as the tmux input FIFO.
+    RuntimeReady { handoff: RuntimeHandoff },
     /// ProcessBackend session completed first turn (no tmux watcher needed)
     ProcessReady {
         output_path: String,

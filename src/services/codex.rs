@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use crate::services::agent_protocol::StreamMessage;
+use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage};
 use crate::services::claude;
 use crate::services::claude_tui::hook_bundle::{HookBundleConfig, codex_hook_config_overrides};
 use crate::services::claude_tui::hook_server::current_hook_endpoint;
@@ -1018,7 +1018,7 @@ fn execute_streaming_local_tui_tmux(
         }
     }
 
-    let read_result = if session_selection.resume {
+    let tail_result = if session_selection.resume {
         let rollout_path = session_selection
             .rollout_path
             .as_deref()
@@ -1028,7 +1028,7 @@ fn execute_streaming_local_tui_tmux(
             .selected_session_id
             .as_deref()
             .ok_or_else(|| "Codex TUI resume selected without session id".to_string())?;
-        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session(
+        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session_with_handoff(
             std::path::Path::new(working_dir),
             selected_session_id,
             rollout_path,
@@ -1039,7 +1039,7 @@ fn execute_streaming_local_tui_tmux(
             || tmux_session_has_live_pane(tmux_session_name),
         )?
     } else {
-        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd(
+        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff(
             std::path::Path::new(working_dir),
             rollout_modified_since,
             sender.clone(),
@@ -1048,6 +1048,7 @@ fn execute_streaming_local_tui_tmux(
         )?
     };
 
+    let read_result = tail_result.read_result.clone();
     if matches!(
         read_result,
         crate::services::provider::ReadOutputResult::SessionDied { .. }
@@ -1055,6 +1056,15 @@ fn execute_streaming_local_tui_tmux(
         let _ = sender.send(StreamMessage::Done {
             result: "⚠ Codex TUI session ended before producing a response.".to_string(),
             session_id: None,
+        });
+    } else {
+        let _ = sender.send(StreamMessage::RuntimeReady {
+            handoff: RuntimeHandoff::CodexTui {
+                rollout_path: tail_result.rollout_path.display().to_string(),
+                thread_id: tail_result.session_id,
+                tmux_session_name: tmux_session_name.to_string(),
+                last_offset: tail_result.final_offset,
+            },
         });
     }
 
