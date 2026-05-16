@@ -1121,23 +1121,26 @@ pub(super) async fn restore_inflight_turns(
 
         let channel_id = ChannelId::new(state.channel_id);
 
-        // #2235: rows written by a newer binary may carry an unknown
-        // `runtime_kind` variant; `deserialize_runtime_kind_tolerant` collapsed
-        // that to `None`. When a row's persisted `version` is ahead of this
-        // binary's `INFLIGHT_STATE_VERSION` AND its `runtime_kind` is missing,
-        // the semantics of the row are owned by code we don't understand —
-        // any recovery attempt would guess at runtime/handoff shape. Silent
-        // skip (debug-level log + clear) is strictly better than guessing or
-        // surfacing the legacy "input fifo path missing" notice.
-        if state.runtime_kind.is_none()
-            && state.version > super::inflight::inflight_state_version()
-        {
+        // #2235: silent-skip rows whose on-disk `runtime_kind` was a
+        // present-but-unknown variant string. `load_inflight_states_from_root`
+        // distinguishes this from "field absent" (legacy v7 rows) via the
+        // transient `runtime_kind_unknown_on_disk` flag, so the existing
+        // heuristic recovery path still runs for absent-field legacy rows.
+        // Belt-and-suspenders: also silent-skip when a row's persisted
+        // `version` is ahead of this binary and `runtime_kind` is missing —
+        // forward-marked rows authored by a newer binary should not be
+        // guessed at.
+        let runtime_kind_skew_detected = state.runtime_kind_unknown_on_disk
+            || (state.runtime_kind.is_none()
+                && state.version > super::inflight::inflight_state_version());
+        if runtime_kind_skew_detected {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::debug!(
-                "  [{ts}] ↩ inflight recovery silent-skip for channel {}: row version {} > local {} with unknown runtime_kind",
+                "  [{ts}] ↩ inflight recovery silent-skip for channel {}: runtime_kind unknown/forward-marked (version={}, local={}, unknown_on_disk={})",
                 state.channel_id,
                 state.version,
-                super::inflight::inflight_state_version()
+                super::inflight::inflight_state_version(),
+                state.runtime_kind_unknown_on_disk
             );
             finish_recovered_turn_mailbox(
                 shared,

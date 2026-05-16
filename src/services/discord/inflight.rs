@@ -87,6 +87,16 @@ pub(super) struct InflightTurnState {
     /// compat for new runtime kinds.
     #[serde(default, deserialize_with = "deserialize_runtime_kind_tolerant")]
     pub runtime_kind: Option<RuntimeHandoffKind>,
+    /// #2235: transient sidecar populated by `load_inflight_states_from_root`
+    /// when the on-disk JSON had a `runtime_kind` field whose value was a
+    /// non-empty string this binary did not recognize (i.e. a future variant).
+    /// Distinct from `runtime_kind = None` for "field absent" (legacy v7
+    /// rows). Recovery uses this to silent-skip present-but-unknown rows
+    /// regardless of `version`, while still recovering legacy absent-field
+    /// rows via the normal heuristics. `#[serde(skip)]` keeps the flag
+    /// out of the on-disk shape — it is purely an in-memory annotation.
+    #[serde(skip)]
+    pub runtime_kind_unknown_on_disk: bool,
     #[serde(default)]
     pub worktree_path: Option<String>,
     #[serde(default)]
@@ -229,6 +239,7 @@ impl InflightTurnState {
             output_path,
             input_fifo_path,
             runtime_kind,
+            runtime_kind_unknown_on_disk: false,
             worktree_path: None,
             worktree_branch: None,
             base_commit: None,
@@ -871,7 +882,7 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
             );
             continue;
         };
-        let Ok(state) = serde_json::from_str::<InflightTurnState>(&content) else {
+        let Ok(mut state) = serde_json::from_str::<InflightTurnState>(&content) else {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ⚠ removing malformed inflight state file: {}",
@@ -880,6 +891,26 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
             let _ = fs::remove_file(&path);
             continue;
         };
+        // #2235: the tolerant `runtime_kind` deserializer collapses both
+        // "field absent" (legacy v7 rows) and "present-but-unknown variant"
+        // (rows written by a future binary) to `runtime_kind = None`.
+        // Recovery treats these two cases differently — absent legacy rows
+        // recover via heuristics; present-unknown rows silent-skip. Re-parse
+        // the JSON as a value to disambiguate and record the verdict on the
+        // transient `runtime_kind_unknown_on_disk` flag.
+        if state.runtime_kind.is_none() {
+            if let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(raw_runtime) = raw_value.get("runtime_kind")
+                && let Some(raw_str) = raw_runtime.as_str()
+                && !raw_str.is_empty()
+                && !matches!(
+                    raw_str,
+                    "legacy_tmux_wrapper" | "claude_tui" | "codex_tui" | "process_backend"
+                )
+            {
+                state.runtime_kind_unknown_on_disk = true;
+            }
+        }
         if state.provider_kind().as_ref() != Some(provider) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -1184,6 +1215,53 @@ mod stall_recovery_tests {
             loaded[0].version > super::INFLIGHT_STATE_VERSION,
             "version stays forward-marked for the recovery silent-skip guard"
         );
+        assert!(
+            loaded[0].runtime_kind_unknown_on_disk,
+            "present-but-unknown runtime_kind must be distinguishable from legacy absent-field None"
+        );
+    }
+
+    /// #2235: legacy v7 rows have NO `runtime_kind` field on disk at all.
+    /// These must deserialize with `runtime_kind = None` AND
+    /// `runtime_kind_unknown_on_disk = false`, so the recovery silent-skip
+    /// guard does not regress legacy recovery flows that depend on the
+    /// `runtime_kind_for_recovery` heuristic.
+    #[test]
+    fn inflight_legacy_v7_row_with_absent_runtime_kind_recovers_via_heuristic() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join(ProviderKind::Claude.as_str());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let valid_state = InflightTurnState::new(
+            ProviderKind::Claude,
+            555,
+            Some("adk-claude".to_string()),
+            7,
+            8,
+            99,
+            "hello".to_string(),
+            None,
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        let mut value = serde_json::to_value(&valid_state).unwrap();
+        // Strip the runtime_kind field entirely to mimic an on-disk legacy
+        // v7 row from before #2213.
+        value.as_object_mut().unwrap().remove("runtime_kind");
+        value["version"] = serde_json::Value::Number(serde_json::Number::from(7u32));
+        let path = dir.join("555.json");
+        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].runtime_kind.is_none());
+        assert!(
+            !loaded[0].runtime_kind_unknown_on_disk,
+            "absent-field legacy v7 rows must not look like a forward-unknown row"
+        );
+        assert_eq!(loaded[0].version, 7);
     }
 
     /// #2235: when an on-disk row has `runtime_kind = None` (legacy pre-v8

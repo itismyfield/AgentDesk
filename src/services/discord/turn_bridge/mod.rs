@@ -1237,21 +1237,17 @@ fn handle_watcher_runtime_handoff(
     }
     inflight_state.input_fifo_path = fifo_path;
     inflight_state.last_offset = last_offset;
-    // #2235: persist the watcher handoff stamp BEFORE the watcher claim /
-    // spawn side effects below. A bridge crash between in-memory stamp and
-    // the later centralized state_dirty flush would otherwise leave disk
-    // holding the stale pre-handoff shape (e.g. prelaunch LegacyTmuxWrapper
-    // with the wrong FIFO/output) — exactly the rollback failure mode this
-    // issue is meant to close. Failures are logged but non-fatal: the
-    // subsequent state_dirty flush still runs and watcher spawn must not
-    // block on disk hiccups.
-    if let Err(error) = save_inflight_state(inflight_state) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ inflight save after runtime handoff stamp failed for channel {}: {error}",
-            channel_id
-        );
-    }
+    // #2235 NOTE: we deliberately do NOT durably save the row here.
+    // `watcher_owns_live_relay` is still `false` at this point and only flips
+    // to `true` after the watcher is successfully claimed and either spawned
+    // (line ~1391) or handed off to the standby relay (line ~1331). A save
+    // before that flag is set would leak a v8 row with the new handoff shape
+    // alongside `watcher_owns_live_relay = false`, which on restart would
+    // make the restored watcher yield to a phantom bridge owner (codex
+    // adversarial review on #2235). The existing branch-specific saves at
+    // the post-flag flip points plus the centralized `state_dirty` flush
+    // already cover the durable-stamp guarantee for watcher-owned
+    // RuntimeReady paths.
 
     // #226: Atomic claim via try_claim_watcher
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
