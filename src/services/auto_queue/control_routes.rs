@@ -297,24 +297,44 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
 pub async fn repair_phase_gates(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let caller = repair_phase_gate_caller_from_headers(&headers);
+    if let Err(response) =
+        crate::server::routes::kanban::require_explicit_bearer_token(&headers, "phase-gate repair")
+    {
+        audit_phase_gate_repair_rejected(&id, &caller, "unauthorized", "authorization failed");
+        return response;
+    }
+
     let body: RepairPhaseGateBody = match parse_json_body(body, "phase-gates/repair") {
         Ok(parsed) => parsed,
         Err(error) => {
+            audit_phase_gate_repair_rejected(&id, &caller, "bad_request", &error);
             return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
         }
     };
     let Some(pool) = state.pg_pool_ref() else {
+        audit_phase_gate_repair_rejected(
+            &id,
+            &caller,
+            "pg_unavailable",
+            "postgres pool unavailable",
+        );
         return pg_unavailable_response();
     };
 
+    let caller = crate::server::routes::kanban::resolve_requesting_agent_id_with_pg(pool, &headers)
+        .await
+        .unwrap_or(caller);
     let options = crate::db::auto_queue::PhaseGateRepairOptions {
         phase: body.phase,
         dispatch_id: body.dispatch_id,
     };
     match crate::db::auto_queue::repair_phase_gates_for_run_on_pg(pool, &id, options).await {
         Ok(summary) => {
+            audit_phase_gate_repair_summary(&caller, &summary);
             let outcomes: Vec<serde_json::Value> = summary
                 .outcomes
                 .into_iter()
@@ -349,18 +369,79 @@ pub async fn repair_phase_gates(
                 })),
             )
         }
-        Err(error) if error.starts_with("not_found:") => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": error.trim_start_matches("not_found:")})),
-        ),
-        Err(error) if error == "run_id is required" || error == "phase must be >= 0" => {
-            (StatusCode::BAD_REQUEST, Json(json!({"error": error})))
+        Err(error @ crate::db::auto_queue::PhaseGateRepairError::InvalidRequest { .. }) => {
+            let message = error.to_string();
+            audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
+            (StatusCode::BAD_REQUEST, Json(json!({"error": message})))
         }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Err(error @ crate::db::auto_queue::PhaseGateRepairError::NotFound { .. }) => {
+            let message = error.to_string();
+            audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
+            (StatusCode::NOT_FOUND, Json(json!({"error": message})))
+        }
+        Err(error) => {
+            let message = error.to_string();
+            audit_phase_gate_repair_rejected(&id, &caller, error.kind(), &message);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": message})),
+            )
+        }
     }
+}
+
+fn repair_phase_gate_caller_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-agent-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("agent:{value}"))
+        .or_else(|| {
+            headers
+                .get("x-channel-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("channel:{value}"))
+        })
+        .unwrap_or_else(|| "api".to_string())
+}
+
+fn audit_phase_gate_repair_summary(
+    caller: &str,
+    summary: &crate::db::auto_queue::PhaseGateRepairSummary,
+) {
+    let ctx = AutoQueueLogContext::new().run(&summary.run_id);
+    let span = crate::services::auto_queue::auto_queue_trace_span("phase_gate_repair", &ctx);
+    let _guard = span.enter();
+    tracing::info!(
+        caller = %caller,
+        outcome = "ok",
+        phase_filter = ?summary.phase_filter,
+        dispatch_id_filter = ?summary.dispatch_id_filter,
+        candidate_dispatches = summary.candidate_dispatches,
+        cleared_gates = summary.cleared_gates,
+        failed_gates = summary.failed_gates,
+        awaiting_siblings = summary.awaiting_siblings,
+        stale_dispatches = summary.stale_dispatches,
+        no_context_dispatches = summary.no_context_dispatches,
+        blocking_gates_remaining = summary.blocking_gates_remaining,
+        run_status = ?summary.run_status,
+        "[auto-queue] phase-gate repair completed"
+    );
+}
+
+fn audit_phase_gate_repair_rejected(run_id: &str, caller: &str, outcome: &str, error: &str) {
+    let ctx = AutoQueueLogContext::new().run(run_id);
+    let span = crate::services::auto_queue::auto_queue_trace_span("phase_gate_repair", &ctx);
+    let _guard = span.enter();
+    tracing::warn!(
+        caller = %caller,
+        outcome = %outcome,
+        error = %error,
+        "[auto-queue] phase-gate repair rejected"
+    );
 }
 
 /// POST /api/queue/cancel — cancel all active/paused runs and pending entries
