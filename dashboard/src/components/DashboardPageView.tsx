@@ -91,22 +91,18 @@ import RateLimitWidget from "./dashboard/RateLimitWidget";
 import TokenAnalyticsSection from "./dashboard/TokenAnalyticsSection";
 import ReceiptWidget from "./dashboard/ReceiptWidget";
 import { timeAgo, type TFunction } from "./dashboard/model";
+import {
+  DEFAULT_HOME_WIDGET_ORDER,
+  HOME_WIDGET_STORAGE_KEY,
+  readStoredHomeWidgetOrder,
+  type HomeWidgetId,
+} from "./dashboard/homeWidgetOrder";
 import { formatProviderFlow } from "./MeetingProviderFlow";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
 const MeetingMinutesView = lazy(() => import("./MeetingMinutesView"));
 
 type PulseKanbanSignal = "review" | "blocked" | "requested" | "stalled";
-type HomeWidgetId =
-  | "metric_agents"
-  | "metric_dispatch"
-  | "metric_review"
-  | "metric_followups"
-  | "office"
-  | "signals"
-  | "quality"
-  | "roster"
-  | "activity";
 type HomeSignalTone = "info" | "warn" | "danger" | "success";
 
 interface HomeSignalRow {
@@ -164,19 +160,6 @@ interface DashboardPageViewProps {
   onRequestedTabHandled?: () => void;
 }
 
-const HOME_WIDGET_STORAGE_KEY = "agentdesk.dashboard.home.widgets.v1";
-const DEFAULT_HOME_WIDGET_ORDER: HomeWidgetId[] = [
-  "metric_agents",
-  "metric_dispatch",
-  "metric_review",
-  "metric_followups",
-  "office",
-  "signals",
-  "quality",
-  "roster",
-  "activity",
-];
-
 const EMPTY_DASHBOARD_STATS: DashboardStats = {
   agents: {
     total: 0,
@@ -200,32 +183,6 @@ const EMPTY_DASHBOARD_STATS: DashboardStats = {
     top_repos: [],
   },
 };
-
-function normalizeHomeWidgetOrder(value: unknown): HomeWidgetId[] {
-  if (!Array.isArray(value)) return DEFAULT_HOME_WIDGET_ORDER;
-  const valid = new Set<HomeWidgetId>(DEFAULT_HOME_WIDGET_ORDER);
-  const next: HomeWidgetId[] = [];
-  for (const item of value) {
-    if (typeof item !== "string" || !valid.has(item as HomeWidgetId) || next.includes(item as HomeWidgetId)) {
-      continue;
-    }
-    next.push(item as HomeWidgetId);
-  }
-  for (const item of DEFAULT_HOME_WIDGET_ORDER) {
-    if (!next.includes(item)) next.push(item);
-  }
-  return next;
-}
-
-function readStoredHomeWidgetOrder(): HomeWidgetId[] {
-  if (typeof window === "undefined") return DEFAULT_HOME_WIDGET_ORDER;
-  try {
-    const raw = window.localStorage.getItem(HOME_WIDGET_STORAGE_KEY);
-    return raw ? normalizeHomeWidgetOrder(JSON.parse(raw)) : DEFAULT_HOME_WIDGET_ORDER;
-  } catch {
-    return DEFAULT_HOME_WIDGET_ORDER;
-  }
-}
 
 function getLocalizedAgentName(
   agent: Pick<Agent, "alias" | "name" | "name_ko" | "name_ja" | "name_zh">,
@@ -434,7 +391,9 @@ export default function DashboardPageView({
     [meetings],
   );
   const [editingWidgets, setEditingWidgets] = useState(false);
-  const [widgetOrder, setWidgetOrder] = useState<HomeWidgetId[]>(() => readStoredHomeWidgetOrder());
+  const [widgetOrder, setWidgetOrder] = useState<HomeWidgetId[]>(() =>
+    readStoredHomeWidgetOrder(typeof window === "undefined" ? null : window.localStorage),
+  );
   const [activeWidgetId, setActiveWidgetId] = useState<HomeWidgetId | null>(null);
   const [overWidgetId, setOverWidgetId] = useState<HomeWidgetId | null>(null);
   const widgetDragSensors = useSensors(
