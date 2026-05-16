@@ -495,22 +495,99 @@ fn resolve_card_repo_dir(db: &Db, card_id: &str, purpose: &str) -> Result<Option
 /// design ensures the fallback chain always reaches `resolve_card_worktree()` or
 /// `resolve_card_issue_commit_target()` when the dispatch-history commit can't
 /// be confirmed as belonging to this issue.
+///
+/// Accepted forms (the patterns AgentDesk itself generates / observes — locked
+/// in by `commit_subject_references_issue_*` tests):
+///   - `#N <subject>`              — leading hash reference (project convention)
+///   - `(#N)` at the end of subject — squash-merge suffix
+///   - `[#N] <subject>`            — bracketed leading reference
+///   - `<subject> ... #N` when N is the *only* `#<digits>` reference in the
+///     subject — supports trailing "refs #N" / em-dash forms
+///
+/// Rejected — multi-issue subjects where N is not in a canonical position
+/// (leading or trailing-squash) are treated as ambiguous because they could
+/// originate from an unrelated commit that merely cross-references this card.
+/// Sub-fix 2 of #2200 (validator-mismatch) tightened this: previously *any*
+/// word-boundary occurrence of `#N` anywhere in the subject was accepted,
+/// which let a `fix #999, refs #523`-style subject borrowed from another
+/// issue pass through and poison the reviewed_commit fallback chain.
 fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
     let needle = format!("#{issue_number}");
-    subject.match_indices(&needle).any(|(start, _)| {
-        let before_ok = subject[..start]
-            .chars()
-            .next_back()
-            .map(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
-            .unwrap_or(true);
-        let end = start + needle.len();
-        let after_ok = subject[end..]
+    // Collect all delimiter-bounded `#<digits>` references in the subject. We
+    // need both the count of distinct numeric references (to detect ambiguous
+    // multi-reference subjects) and the byte offsets of every match of our
+    // needle so we can check whether at least one occurrence sits in a
+    // canonical position.
+    let mut all_refs: Vec<&str> = Vec::new();
+    let bytes = subject.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let before_ok = if i == 0 {
+                true
+            } else {
+                let prev = bytes[i - 1];
+                !prev.is_ascii_alphanumeric() && prev != b'_'
+            };
+            let digits_start = i + 1;
+            let mut j = digits_start;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if before_ok && j > digits_start {
+                let after_ok = if j == bytes.len() {
+                    true
+                } else {
+                    let next = bytes[j];
+                    !next.is_ascii_alphanumeric() && next != b'_'
+                };
+                if after_ok {
+                    all_refs.push(&subject[i..j]);
+                }
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+
+    let needle_matches: Vec<usize> = all_refs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, value)| (*value == needle).then_some(idx))
+        .collect();
+    if needle_matches.is_empty() {
+        return false;
+    }
+    if all_refs.len() == 1 {
+        // Single-reference subject: a delimiter-bounded `#N` anywhere is
+        // sufficient proof.
+        return true;
+    }
+
+    // Multi-reference subject: require N to sit in a canonical position so
+    // ambiguous cross-references can't impersonate ownership. Canonical = the
+    // leading reference or the trailing-squash `(#N)` suffix.
+    let trimmed = subject.trim();
+    if let Some(rest) = trimmed.strip_prefix(&needle) {
+        if rest
             .chars()
             .next()
             .map(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
-            .unwrap_or(true);
-        before_ok && after_ok
-    })
+            .unwrap_or(true)
+        {
+            return true;
+        }
+    }
+    if trimmed.starts_with(&format!("[{}]", needle)) || trimmed.starts_with(&format!("({})", needle))
+    {
+        return true;
+    }
+    let squash_suffix = format!("({})", needle);
+    if trimmed.ends_with(&squash_suffix) {
+        return true;
+    }
+    false
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -2910,10 +2987,9 @@ mod issue_reference_tests {
     fn commit_subject_references_issue_accepts_squash_and_adk_prefix_forms() {
         assert!(commit_subject_references_issue("#1765 some title", 1765));
         assert!(commit_subject_references_issue("feat: foo (#1765)", 1765));
-        assert!(commit_subject_references_issue(
-            "fix #1765, #1766 multi",
-            1765
-        ));
+        // A single-reference subject where N is the only `#<digits>` token
+        // is accepted regardless of position (e.g. trailing "refs #N").
+        assert!(commit_subject_references_issue("fix bug — refs #1765", 1765));
     }
 
     #[test]
@@ -2930,9 +3006,9 @@ mod issue_reference_tests {
     /// #2200 sub-fix 2 (`validator-mismatch`): the original friction case had a
     /// commit subject of the form `'#523 …'` while the validator was only
     /// recognising the parenthesised squash form `'… (#523)'`. Both shapes
-    /// must now be accepted; we additionally pin a handful of less-obvious
-    /// forms (leading reference, trailing reference, multi-issue references)
-    /// so a future regex tightening can't silently regress the accepted set.
+    /// must be accepted; multi-reference subjects must still require N to sit
+    /// in a canonical position so cross-references from unrelated commits
+    /// can't impersonate ownership (Codex adversarial review feedback).
     #[test]
     fn commit_subject_references_issue_friction_2200_validator_mismatch() {
         // Exact friction symptom: hash-prefix subject must be accepted.
@@ -2941,20 +3017,42 @@ mod issue_reference_tests {
         assert!(commit_subject_references_issue("feat: bar (#523)", 523));
         // Bracketed form (some templates use square brackets).
         assert!(commit_subject_references_issue("[#523] do thing", 523));
-        // Trailing hash reference (Conventional Commits "refs #N" style).
-        assert!(commit_subject_references_issue("fix bug — #523", 523));
-        // Multi-issue subject: only one of the references needs to match.
+        // Multi-reference subject where N is in the canonical leading
+        // position must be accepted.
         assert!(commit_subject_references_issue(
-            "chore: #100 #200 #523 #999 done",
+            "#523 fix bug; also refs #999",
             523
         ));
-        // Negative: alphanumeric/underscore boundary blocks false positives so
-        // the relaxed validator does not accept unrelated card numbers that
-        // happen to contain `523` as a substring.
+        // Multi-reference subject where N is the trailing-squash suffix.
+        assert!(commit_subject_references_issue(
+            "feat: cross-link refs #100 (#523)",
+            523
+        ));
+
+        // Negative: alphanumeric/underscore boundary blocks false positives.
         assert!(!commit_subject_references_issue("#5230 unrelated", 523));
         assert!(!commit_subject_references_issue("foo#523 noboundary", 523));
         assert!(!commit_subject_references_issue("#523_unrelated body", 523));
         assert!(!commit_subject_references_issue("issue_#523 still bad", 523));
+
+        // Negative — Codex round-1 finding: a multi-reference subject where
+        // 523 is NOT in a canonical position must NOT be treated as proof of
+        // ownership. The leading `#999` makes it ambiguous; another issue's
+        // commit could borrow this subject when fixing both.
+        assert!(!commit_subject_references_issue(
+            "fix #999, refs #523",
+            523
+        ));
+        assert!(!commit_subject_references_issue(
+            "chore: #100 #200 #523 #999 done",
+            523
+        ));
+        // Negative: trailing reference shape, but multiple references — N is
+        // not in a canonical position, so reject as ambiguous.
+        assert!(!commit_subject_references_issue(
+            "fix #999 follow-up — refs #523",
+            523
+        ));
     }
 }
 
