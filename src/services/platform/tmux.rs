@@ -304,6 +304,58 @@ pub fn list_session_names() -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// A single tmux session as enumerated by [`list_sessions_with_pane_command`].
+/// Field order mirrors the tmux `-F` format string in that helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumeratedSession {
+    pub session_name: String,
+    /// `#{pane_current_command}` of the session's active pane — empty when
+    /// tmux couldn't resolve a pane (rare; treated as "unknown" by callers).
+    pub pane_current_command: String,
+}
+
+/// List every tmux session along with its active pane's `pane_current_command`.
+/// Used by `SessionDiscovery` (Epic #2285 / E2) to feed the `SessionMatcher`
+/// with both the session name *and* the live provider fingerprint in a single
+/// tmux invocation, avoiding a follow-up `display-message` per session.
+///
+/// The `-F` format uses `|` as a field separator. Session names produced by
+/// [`build_tmux_session_name`](crate::services::provider::ProviderKind::build_tmux_session_name)
+/// only contain `[A-Za-z0-9_-]`, so `|` is safe. Defensive callers should
+/// nonetheless `splitn(2, '|')` to avoid surprises from operator-created
+/// sessions.
+pub fn list_sessions_with_pane_command() -> Result<Vec<EnumeratedSession>, String> {
+    let out = tmux_command()
+        .args([
+            "list-sessions",
+            "-F",
+            "#{session_name}|#{pane_current_command}",
+        ])
+        .output()
+        .map_err(|e| format!("tmux list-sessions failed: {e}"))?;
+    if !out.status.success() {
+        return Err("tmux list-sessions returned non-zero".to_string());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut sessions = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(2, '|');
+        let session_name = parts.next().unwrap_or("").trim().to_string();
+        if session_name.is_empty() {
+            continue;
+        }
+        let pane_current_command = parts.next().unwrap_or("").trim().to_string();
+        sessions.push(EnumeratedSession {
+            session_name,
+            pane_current_command,
+        });
+    }
+    Ok(sessions)
+}
+
 /// Check if a session has any live (non-dead) panes.
 pub fn has_live_pane(session_name: &str) -> bool {
     if !has_session(session_name) {

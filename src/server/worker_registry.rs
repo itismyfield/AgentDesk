@@ -133,6 +133,7 @@ enum ServerWorkerId {
     DmReplyRetry,
     WsBatchFlusher,
     RoutineRuntime,
+    SessionDiscovery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,7 +232,7 @@ pub(crate) struct WorkerSpec {
     pub(crate) notes: &'static str,
 }
 
-pub(crate) const WORKER_SPECS: [WorkerSpec; 9] = [
+pub(crate) const WORKER_SPECS: [WorkerSpec; 10] = [
     WorkerSpec {
         id: ServerWorkerId::GithubSync,
         name: "github_sync_loop",
@@ -352,6 +353,25 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 9] = [
         execution_scope: WorkerExecutionScope::LeaderOnly,
         health_owner: "failed DM notification rows and retry tracing",
         notes: "Skips the immediate tick and only starts retries after the first interval",
+    },
+    WorkerSpec {
+        id: ServerWorkerId::SessionDiscovery,
+        name: "session_discovery_loop",
+        kind: WorkerKind::TokioTask,
+        target: "services::cluster::session_discovery::run_discovery_loop",
+        responsibility: "Enumerate tmux sessions, match to channel bindings, maintain SessionRegistry",
+        owner: "server::worker_registry",
+        start_stage: WorkerStartStage::AfterBootReconcile,
+        start_order: 65,
+        restart_policy: WorkerRestartPolicy::LoopOwned,
+        shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
+        execution_scope: WorkerExecutionScope::WorkerLocal,
+        health_owner: "SessionRegistry contents and /api/cluster/sessions diagnostic",
+        notes: "Worker-local because tmux is host-scoped — every node must enumerate its own \
+                sessions for the cluster registry. Reconcile is instance_id-scoped so peers \
+                cannot stomp each other's entries. Boot reconcile runs immediately; subsequent \
+                polls every 10s. External request_discovery_tick() nudges fire an immediate tick \
+                for E3 event hooks.",
     },
     WorkerSpec {
         id: ServerWorkerId::WsBatchFlusher,
@@ -649,6 +669,28 @@ impl SupervisedWorkerRegistry {
                 });
                 Ok(Some(buffer))
             }
+            ServerWorkerId::SessionDiscovery => {
+                let Some(discovery_pg_pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
+                };
+                let instance_id = Some(self.cluster_runtime.instance_id().to_string());
+                let shutdown = self.shutdown.clone();
+                // Worker-local (not register_leader_tokio): tmux is host-scoped,
+                // so every node must enumerate its own sessions. The registry's
+                // reconcile_for_node is instance_id-scoped to keep peers from
+                // stomping each other's entries.
+                self.register_tokio(spec, async move {
+                    crate::services::cluster::session_discovery::run_discovery_loop(
+                        instance_id,
+                        discovery_pg_pool,
+                        crate::services::cluster::session_discovery::DiscoveryConfig::default(),
+                        shutdown,
+                    )
+                    .await;
+                });
+                Ok(None)
+            }
             ServerWorkerId::RoutineRuntime => {
                 if !self.config.routines.enabled {
                     self.log_skip(spec, "routines.enabled=false");
@@ -941,7 +983,7 @@ mod tests {
 
     #[test]
     fn long_lived_workers_have_explicit_supervision_metadata() {
-        assert_eq!(WORKER_SPECS.len(), 9);
+        assert_eq!(WORKER_SPECS.len(), 10);
         assert!(
             WORKER_SPECS
                 .windows(2)
@@ -952,7 +994,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.start_stage == WorkerStartStage::AfterBootReconcile)
                 .count(),
-            8
+            9
         );
         assert_eq!(
             WORKER_SPECS
@@ -980,7 +1022,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.execution_scope == WorkerExecutionScope::WorkerLocal)
                 .count(),
-            2
+            3
         );
         assert!(WORKER_SPECS.iter().all(|spec| !spec.owner.is_empty()));
         assert!(
