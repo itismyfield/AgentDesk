@@ -129,6 +129,50 @@ ssh-agent + Touch ID / 1Password on `mac-mini` and `mac-book`. Adding a
 service-account key inside AgentDesk would create a new long-lived
 credential surface for no functional gain.
 
+### SSH invocation hardening
+
+If the implementation ships subprocess `ssh` (the leaning option in
+"Open questions"), the user's `~/.ssh/config` MUST NOT be consulted,
+because a stanza in user config can turn a single allow-listed host
+into a multi-hop route (`ProxyJump`/`ProxyCommand`), swap the
+authentication source from ssh-agent to an arbitrary on-disk key
+(`IdentityFile`), or weaken host-key pinning
+(`StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`). The
+allow-list naming a host name MUST be authoritative over the actual
+endpoint and authentication behavior.
+
+The invocation MUST therefore pin every relevant option on the command
+line and refuse to read user config:
+
+- `-F /dev/null` — do not read `~/.ssh/config` or `/etc/ssh/ssh_config`.
+- `-o IdentitiesOnly=yes` — only offer the ssh-agent identities the
+  invocation explicitly authorizes.
+- `-o IdentityAgent=$SSH_AUTH_SOCK` — bind to the operator's running
+  agent; refuse to fall back to file-based identities.
+- `-o IdentityFile=none` (or equivalently no `-i` flag) — no on-disk
+  private key may authenticate.
+- `-o ProxyCommand=none` and `-o ProxyJump=none` — single hop only
+  (matches the non-goal on multi-hop SSH).
+- `-o ForwardAgent=no`, `-o ForwardX11=no`, `-o RequestTTY=force`,
+  `-o ControlMaster=no`, `-o ControlPath=none` — no inbound back-channel,
+  no shared multiplex socket, force PTY (cancel relies on it).
+- `-o StrictHostKeyChecking=yes`, `-o UserKnownHostsFile=~/.ssh/known_hosts`
+  — host-key pinning is non-overridable.
+- `-o BatchMode=yes` — no interactive password prompts may appear under
+  any failure mode.
+
+Any `RemoteProfile` (or future `remote_hosts` entry) that attempts to
+override one of these options is a config-load error. A regression test
+MUST cover the rejection of profiles that set `ProxyJump`, `IdentityFile`,
+agent forwarding, or a relaxed `StrictHostKeyChecking` value.
+
+If the implementation ships `russh` instead, the equivalent guarantees
+apply: do not read `~/.ssh/config`, accept identities only from the
+agent socket, do not open additional channels for forwarding, and pin
+the host key against `~/.ssh/known_hosts` with strict semantics. The
+hardening list above is the canonical contract; the transport choice is
+implementation detail.
+
 ## Authz
 
 Targeting a remote host is a two-step authorization, both of which MUST
@@ -156,30 +200,62 @@ returns so downstream UI is unchanged.
 
 ## Cancel semantics
 
-A local AgentDesk cancel MUST tear down the remote Codex child within
-the same bound as a local cancel. The contract:
+A local AgentDesk cancel MUST tear down the remote Codex child **and
+every descendant it spawned** within the same bound as a local cancel.
+This section picks one process-group model rather than mixing PTY
+foreground signaling with `setsid`, because those two contradict each
+other: a process detached via `setsid` is no longer in the PTY's
+foreground process group and PTY close / SIGHUP stops being
+authoritative on it.
 
-- AgentDesk MUST request a PTY on the SSH channel and launch Codex as
-  the *foreground* process of the remote shell. Codex's controlling
-  terminal is the PTY; closing the PTY is what produces SIGHUP on the
-  remote child.
-- On `CancelToken` fire, AgentDesk MUST, in order: (a) send the
-  client-side "break" / `SIGINT` over the SSH channel, (b) close the
-  channel, (c) close the SSH session. Step (a) gives Codex a chance to
-  flush; step (b) triggers SIGHUP via the PTY; step (c) is the
-  hard-stop the shell-down case relies on.
-- AgentDesk MUST NOT rely on running `kill` against a remote PID. PIDs
-  are not stable across the trust boundary and the remote shell may
-  not have permission to signal arbitrary processes.
-- The remote-side install of Codex MUST be invoked under a wrapper
-  (operator-supplied, documented per host) that re-exec's with
-  `setsid` and traps SIGHUP to reap any grandchildren the Codex CLI
-  spawns. AgentDesk documents the wrapper requirement; AgentDesk does
-  not push the wrapper.
-- The cancel path MUST be exercised by an integration test that asserts
-  the remote PTY closes and the local dispatcher returns within the
-  existing local-cancel SLO. Without this test passing, the gate stays
-  off regardless of `remote_ssh_enabled`.
+The contract — process-group based, not PTY-foreground based:
+
+- AgentDesk MUST request a PTY on the SSH channel (`RequestTTY=force`
+  in the invocation list above). The PTY exists so the remote shell
+  has a controlling terminal that produces SIGHUP on channel close,
+  and so Codex's TUI-style output flushes; it is not the primary
+  cancel mechanism.
+- The remote shell MUST launch Codex through a small operator-supplied
+  wrapper script whose contract is:
+  1. The wrapper runs in the same session and process group the remote
+     `sshd` started; it does **not** call `setsid`. Codex inherits the
+     wrapper's PGID. (This is the explicit retraction of the earlier
+     `setsid` requirement — `setsid` and the PTY-foreground model are
+     incompatible and the wrapper drops `setsid`.)
+  2. The wrapper traps `SIGHUP`, `SIGINT`, and `SIGTERM`, and on any of
+     them sends `SIGTERM` to the entire process group (`kill -- -$$`),
+     waits a short grace period (≤ 2s), then sends `SIGKILL` to the
+     same group. This guarantees Codex and any grandchildren die
+     together.
+  3. The wrapper waits on Codex and exits with Codex's status. It does
+     **not** background Codex, does **not** call `nohup`, and does
+     **not** redirect stdout/stderr.
+- On `CancelToken` fire, AgentDesk MUST, in order: (a) write `0x03`
+  (ETX / Ctrl-C) into the PTY so the foreground process group sees
+  SIGINT — this is Codex's chance to flush; (b) close the SSH channel,
+  which produces SIGHUP for the wrapper via the PTY hangup; (c) close
+  the SSH session, which is the hard-stop for the host-down /
+  shell-unresponsive case.
+- AgentDesk MUST NOT rely on running `kill` against a remote PID
+  resolved out of band. PIDs are not stable across the trust boundary
+  and the SSH user may not have permission to signal arbitrary
+  processes. Cancellation is signal-only, through the PTY and channel.
+- The cancel path MUST be exercised by an integration test that
+  asserts **both** of the following before declaring success:
+  1. The local dispatcher returns within the existing local-cancel SLO.
+  2. After the cancel, the remote host has no Codex descendant alive
+     in the wrapper's process group. The test queries the remote `ps`
+     for descendants of the wrapper PID (recorded by the wrapper
+     itself into a known per-turn file) and asserts the set is empty.
+- A second integration test MUST cover the network-drop path: kill the
+  SSH session from the AgentDesk side without sending Ctrl-C, and
+  assert the same "no descendants" property holds after the wrapper's
+  SIGHUP handler runs.
+
+Without **both** integration tests passing, the gate stays off
+regardless of `remote_ssh_enabled` — this is what
+`PREREQUISITES_SATISFIED` in `src/services/codex_remote_policy.rs`
+gates.
 
 This ADR explicitly does **not** introduce a remote tmux session for
 Codex. `execute_streaming_remote_tmux` remains a stub because remote
@@ -268,7 +344,12 @@ explicit follow-ups gated behind this document:
    config-load time when `remote_ssh_enabled` is `true`. Tracked
    separately.
 
-Per this ADR, the gate `providers.codex.remote_ssh_enabled` lands now,
-defaults `false`, and emits a startup warning if it is `true` while the
-follow-ups above are not in place — so operators cannot silently flip
-the gate ahead of the implementation work.
+Per this ADR, the gate `providers.codex.remote_ssh_enabled` lands now
+and defaults `false`. Flipping it to `true` while the follow-ups above
+are not in place is a **hard bootstrap error**, not a warning — see
+`src/services/codex_remote_policy.rs::PREREQUISITES_SATISFIED`. A
+warn-only gate would become a persisted "enabled" signal that a
+partial future implementation could silently honor; the hard-fail
+removes that risk and forces the implementation PR to flip
+`PREREQUISITES_SATISFIED` to `true` in the same change that wires
+everything up.

@@ -10,6 +10,7 @@ pub mod claude;
 pub mod claude_tui;
 pub mod cluster;
 pub mod codex;
+pub mod codex_remote_policy;
 #[cfg(unix)]
 pub mod codex_tmux_wrapper;
 pub mod codex_tui;

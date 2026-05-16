@@ -169,12 +169,14 @@ mod tests {
             "claude".to_string(),
             ProviderConfig {
                 tui_hosting: Some(false),
+                ..ProviderConfig::default()
             },
         );
         config.providers.insert(
             "qwen".to_string(),
             ProviderConfig {
                 tui_hosting: Some(true),
+                ..ProviderConfig::default()
             },
         );
 
@@ -234,12 +236,14 @@ mod tests {
             "claude".to_string(),
             ProviderConfig {
                 tui_hosting: Some(false),
+                ..ProviderConfig::default()
             },
         );
         config.providers.insert(
             "qwen".to_string(),
             ProviderConfig {
                 tui_hosting: Some(true),
+                ..ProviderConfig::default()
             },
         );
         install_provider_hosting_config(&config);

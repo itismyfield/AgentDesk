@@ -67,24 +67,26 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
 
     // Issue #2193 — Codex remote SSH runtime gate.
     //
-    // The ADR (`docs/codex-remote-ssh-policy.md`) lands the gate now but
-    // leaves the implementation follow-ups (real `services::remote`,
-    // `providers.codex.remote_hosts` allow-list, PTY-bound cancel path,
-    // integration test) explicitly out of this change. If an operator
-    // flips the gate before those land, they get a loud warning at
-    // startup so the misconfiguration is visible — the dispatcher still
-    // refuses to route to the stubbed `execute_streaming_remote_*`
-    // helpers because they unconditionally return Err.
-    if config.codex_remote_ssh_enabled() {
-        tracing::warn!(
-            issue = 2193,
-            doc = "docs/codex-remote-ssh-policy.md",
-            "providers.codex.remote_ssh_enabled is true but the ADR follow-ups \
+    // The ADR (`docs/codex-remote-ssh-policy.md`) lands the gate now and
+    // pins it to a compile-time prerequisites constant. Until every
+    // ADR follow-up (real `services::remote`, `providers.codex.remote_hosts`
+    // allow-list, PTY-bound process-group cancel, hardened SSH
+    // invocation, cancel integration test) lands, that constant stays
+    // `false`. Flipping `providers.codex.remote_ssh_enabled: true` in
+    // `agentdesk.yaml` is a hard bootstrap error — not a warning —
+    // because a warn-only gate becomes a persisted "enabled" signal
+    // that a partial future implementation could silently honor.
+    if config.codex_remote_ssh_enabled()
+        && !crate::services::codex_remote_policy::PREREQUISITES_SATISFIED
+    {
+        return Err(anyhow::anyhow!(
+            "providers.codex.remote_ssh_enabled is true, but the prerequisites in \
+             docs/codex-remote-ssh-policy.md are not satisfied yet \
              (services::remote SSH implementation, providers.codex.remote_hosts \
-             allow-list, PTY-bound cancel path, and the cancel integration test) \
-             are not in place yet. Remote Codex turns will still fail; flip this \
-             gate back to false until the follow-ups land."
-        );
+             allow-list, hardened SSH invocation, process-group cancel, and the \
+             cancel integration test). Set providers.codex.remote_ssh_enabled \
+             back to false until the ADR follow-ups land (#2193)."
+        ));
     }
 
     Ok(BootstrapState { config })

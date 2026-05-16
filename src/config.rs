@@ -150,10 +150,12 @@ pub struct ProviderConfig {
     /// prerequisite in `docs/codex-remote-ssh-policy.md` is in place.
     /// At time of writing, the ADR's follow-ups are NOT in place
     /// (`services::remote_stub` still returns errors, the allow-list
-    /// schema is not wired, the integration test does not exist). The
-    /// bootstrap step logs a loud warning when this flag is `true` so
-    /// the operator cannot silently flip the gate ahead of the ADR's
-    /// required prereqs.
+    /// schema is not wired, the integration test does not exist).
+    /// Bootstrap therefore **hard-fails** when this flag is `true` and
+    /// `crate::services::codex_remote_policy::PREREQUISITES_SATISFIED`
+    /// is `false`, so a warn-only gate cannot become a persisted
+    /// "enabled" signal that a partial future implementation silently
+    /// honors.
     #[serde(
         default,
         alias = "remoteSshEnabled",
