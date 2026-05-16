@@ -551,17 +551,23 @@ fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
         }
     }
 
-    let needle_matches: Vec<usize> = all_refs
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, value)| (*value == needle).then_some(idx))
-        .collect();
-    if needle_matches.is_empty() {
+    let mut found_needle = false;
+    let mut competing_ref = false;
+    for value in &all_refs {
+        if *value == needle {
+            found_needle = true;
+        } else {
+            competing_ref = true;
+        }
+    }
+    if !found_needle {
         return false;
     }
-    if all_refs.len() == 1 {
-        // Single-reference subject: a delimiter-bounded `#N` anywhere is
-        // sufficient proof.
+    if !competing_ref {
+        // Subject references only this issue (one or many times): a
+        // delimiter-bounded `#N` is sufficient proof. Duplicate references
+        // to the same issue (e.g. `fix #523, refs #523`) are explicitly not
+        // ambiguous (Codex round-2 finding).
         return true;
     }
 
@@ -3051,6 +3057,19 @@ mod issue_reference_tests {
         // not in a canonical position, so reject as ambiguous.
         assert!(!commit_subject_references_issue(
             "fix #999 follow-up — refs #523",
+            523
+        ));
+
+        // Codex round-2 finding: duplicate references to *the same* issue
+        // are not ambiguous. The previous occurrence-count guard rejected
+        // these and could fail a valid reviewed_commit lookup as stale.
+        assert!(commit_subject_references_issue("fix #523, refs #523", 523));
+        assert!(commit_subject_references_issue(
+            "wip: #523 part 1 — followup refs #523",
+            523
+        ));
+        assert!(commit_subject_references_issue(
+            "feat: foo #523 #523 #523 done",
             523
         ));
     }

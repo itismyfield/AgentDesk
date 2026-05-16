@@ -669,46 +669,33 @@ pub struct HotReloadGuard {
 }
 
 impl HotReloadGuard {
-    /// Hard deadline for the worker thread to finish once `shutdown` is
-    /// requested. The interrupt handler will already have aborted any
-    /// in-flight JS eval; this is the belt-and-suspenders timeout for the
-    /// surrounding Rust loop. Long enough to absorb a slow JS prologue but
-    /// short enough that a CLI invocation never appears hung at exit.
-    const JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
     /// Explicit shutdown — useful for tests and for engine drop sequences that
     /// want deterministic teardown before the runtime is dropped.
+    ///
+    /// Shutdown proceeds in three steps:
+    ///   1. Set `stop`. The QuickJS interrupt handler tied to this flag
+    ///      promptly aborts any in-flight JS bytecode (e.g. a runaway
+    ///      `while(true){}` in a hot-reloaded policy).
+    ///   2. Drop the watcher so its event channel disconnects.
+    ///   3. **Unbounded** join. We deliberately do *not* detach on a deadline:
+    ///      the worker holds a `Context` clone whose lifetime is tied to the
+    ///      QuickJS runtime, and a detached thread that hasn't yet released
+    ///      that `Context` would let the engine drop the underlying runtime
+    ///      while the bytecode/native call is still pending — exactly the
+    ///      use-after-free we are trying to prevent (#2200 sub-fix 2, Codex
+    ///      round-2 feedback). The interrupt handler covers the common
+    ///      runaway-JS case; for a hot-reloaded policy that's blocked
+    ///      inside a long-running native bridge op (e.g. `agentdesk.exec`)
+    ///      we accept a blocked shutdown over a UAF. In practice the
+    ///      engine's bridge ops are themselves bounded, so this join
+    ///      converges; and CLI invocations don't enable hot-reload at all
+    ///      (see `cli::direct::build_app_state`).
     pub fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Release);
         // Drop the watcher first so the worker's mpsc channel disconnects.
         self.watcher.take();
         if let Some(handle) = self.join.take() {
-            // Best-effort bounded join. The interrupt handler tied to `stop`
-            // should make this near-instant even when the worker was mid-eval
-            // of a runaway policy. If the worker does refuse to exit within
-            // JOIN_TIMEOUT we log and detach: leaking the thread is strictly
-            // better than blocking the engine drop forever, and because the
-            // thread still has its `Context` clone the runtime will stay
-            // alive (its refcount is non-zero) until the thread does exit —
-            // so we never get a use-after-free, just a leak.
-            let deadline = std::time::Instant::now() + Self::JOIN_TIMEOUT;
-            loop {
-                if handle.is_finished() {
-                    let _ = handle.join();
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    tracing::warn!(
-                        "hot-reload worker did not exit within shutdown deadline; detaching to avoid blocking engine drop"
-                    );
-                    // Drop the handle without joining — the thread will exit
-                    // on its own when QuickJS finally observes the interrupt
-                    // request, releasing its Context clone then.
-                    std::mem::drop(handle);
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+            let _ = handle.join();
         }
     }
 }
