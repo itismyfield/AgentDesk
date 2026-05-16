@@ -2321,6 +2321,17 @@ pub(in crate::services::discord) async fn handle_text_message(
             Some(&context),
         )
     });
+    // #2266: keep the original Discord author (the announce bot, for a
+    // voice-transcript announcement) so the race-loss enqueue path can
+    // attribute the queued `Intervention` to the announce bot. When the
+    // queued turn later re-enters `handle_text_message` via the
+    // dispatch/kickoff hooks, the same `announce_bot_id == Some(request_owner)`
+    // check (line ~2274) will pass and the reinserted voice payload (or
+    // the embedded copy lifted into `stored_voice_announcement`) will be
+    // honored instead of treated as spoofed. The post-rebind
+    // `request_owner` below is the voice user id, used only for the rest
+    // of the active-turn flow.
+    let original_request_owner = request_owner;
     let voice_request_owner_name;
     let request_owner = voice_announcement
         .as_ref()
@@ -3309,7 +3320,15 @@ pub(in crate::services::discord) async fn handle_text_message(
             &bot_owner_provider,
             channel_id,
             build_race_requeued_intervention(
-                request_owner,
+                // #2266: attribute the queued `Intervention` to the original
+                // Discord author (the announce bot for voice transcripts) so
+                // the downstream `handle_text_message`
+                // `announce_bot_id == Some(request_owner)` check at line
+                // ~2274 passes when the dispatch path replays the queued
+                // turn. Passing the post-rebind voice-user id here would
+                // make the queued turn look like a non-announce author and
+                // the embedded voice payload would be discarded as spoofed.
+                original_request_owner,
                 user_msg_id,
                 user_text,
                 reply_context.clone(),
@@ -7751,6 +7770,56 @@ mod tests {
             .take(queued.message_id)
             .expect("dispatched take() must recover the voice announcement");
         assert_eq!(dispatched, announcement);
+    }
+
+    // #2266 (Codex round-2 finding [high] — live queued dispatch must
+    // re-authorize the embedded voice payload against the announce bot,
+    // not against the previous turn's owner):
+    //   - The race-loss enqueue path stamps `Intervention.author_id` with
+    //     the ORIGINAL Discord author (the announce bot for voice transcripts)
+    //     rather than the post-rebind voice-user id, so the subsequent
+    //     queued dispatch can replay the same announce_bot authorization
+    //     check at line ~2274 of `handle_text_message`.
+    //   - This regression locks in the contract: a queued voice
+    //     `Intervention` carries `author_id == announce_bot_user_id`.
+    #[test]
+    fn race_requeue_attributes_voice_intervention_to_announce_bot() {
+        let announce_bot_id = UserId::new(999_111);
+        let voice_user_id = UserId::new(42);
+        let user_msg_id = poise::serenity_prelude::MessageId::new(2_266_007);
+        let announcement = crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: "회의록 정리해줘".to_string(),
+            user_id: voice_user_id.get().to_string(),
+            utterance_id: "utt-author".to_string(),
+            language: "ko-KR".to_string(),
+            verbose_progress: false,
+            started_at: None,
+            completed_at: None,
+            samples_written: None,
+        };
+
+        // The race-loss enqueue path uses `original_request_owner`, which is
+        // the Discord author of the raw message (the announce bot), NOT the
+        // voice-user id that `handle_text_message` rebinds to for the rest
+        // of the active-turn flow.
+        let queued = build_race_requeued_intervention(
+            announce_bot_id,
+            user_msg_id,
+            &announcement.transcript,
+            None,
+            false,
+            false,
+            Some(announcement.clone()),
+        );
+
+        assert_eq!(
+            queued.author_id, announce_bot_id,
+            "queued voice intervention must be attributed to the announce bot so the\n             dispatch path's authorization check `announce_bot_id == Some(request_owner)`\n             still passes when the embedded payload is reinserted",
+        );
+        assert_ne!(
+            queued.author_id, voice_user_id,
+            "queued voice intervention author_id must NOT be the voice-user id,\n             which would make handle_text_message treat the embedded announcement\n             as spoofed and discard it",
+        );
     }
 
     // #2266 (Codex finding [high] — intake-gate must not consume the store):

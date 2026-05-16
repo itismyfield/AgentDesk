@@ -551,15 +551,33 @@ impl TurnGateway for DiscordGateway {
             // plain text. The original entry was consumed by the active
             // turn that won the race; this in-flight handoff is what makes
             // the queued path self-contained against the 30s in-memory TTL.
+            let has_embedded_voice_announcement =
+                intervention.voice_announcement.is_some();
             if let Some(announcement) = intervention.voice_announcement.as_ref() {
                 crate::voice::announce_meta::global_store()
                     .insert(intervention.message_id, announcement.clone());
             }
+            // #2266: for voice-transcript queued items, the
+            // `handle_text_message` voice-author authorization check at
+            // line ~2274 requires `announce_bot_id == Some(request_owner)`.
+            // The queued `Intervention.author_id` was captured at intake or
+            // race-loss enqueue time as the ORIGINAL Discord author (the
+            // announce bot), so pass it through here instead of
+            // `live_turn.request_owner` (which is the previous turn's
+            // owner). Non-voice queued items kept the legacy behavior of
+            // routing via the live-turn owner so the user attribution does
+            // not silently swap mid-chain; we only override the
+            // request_owner when the intervention is voice-tagged.
+            let dispatch_request_owner = if has_embedded_voice_announcement {
+                intervention.author_id
+            } else {
+                live_turn.request_owner
+            };
             handle_text_message(
                 &deps,
                 channel_id,
                 intervention.message_id,
-                live_turn.request_owner,
+                dispatch_request_owner,
                 request_owner_name,
                 &intervention.text,
                 true,
