@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage};
 use crate::services::claude;
-use crate::services::claude_tui::hook_bundle::{HookBundleConfig, codex_hook_config_overrides};
+use crate::services::claude_tui::hook_bundle::{
+    HookBundleConfig, codex_hook_config_overrides, run_codex_hook_launch_self_check,
+};
 use crate::services::claude_tui::hook_server::current_hook_endpoint;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
@@ -415,6 +417,7 @@ fn current_agentdesk_exe_for_hook_bundle() -> String {
 fn prepare_codex_tui_hook_overrides(
     tmux_session_name: &str,
     session_id: Option<&str>,
+    codex_bin: &str,
 ) -> Vec<String> {
     let Some(endpoint) = current_hook_endpoint() else {
         tracing::debug!(
@@ -423,6 +426,13 @@ fn prepare_codex_tui_hook_overrides(
         );
         return Vec::new();
     };
+
+    // Issue #2210: re-run the hook trust hash self-check against the binary
+    // actually selected for this session. The startup-time check in
+    // `server/mod.rs` only sees `resolve_codex_path()`; per-agent registry
+    // channels / env overrides can resolve to a different binary here. The
+    // launch-time check is deduped by (path, version) so it doesn't spam.
+    let _ = run_codex_hook_launch_self_check(codex_bin);
 
     let hook_session_id = session_id
         .map(str::trim)
@@ -985,7 +995,8 @@ fn execute_streaming_local_tui_tmux(
         report_provider,
     );
     let mut args = build_codex_tui_args(&launch_options);
-    let codex_hook_overrides = prepare_codex_tui_hook_overrides(tmux_session_name, session_id);
+    let codex_hook_overrides =
+        prepare_codex_tui_hook_overrides(tmux_session_name, session_id, &codex_bin);
     if !codex_hook_overrides.is_empty() {
         append_codex_config_overrides(&mut args, codex_hook_overrides);
     }

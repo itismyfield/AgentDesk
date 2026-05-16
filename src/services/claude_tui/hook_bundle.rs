@@ -549,6 +549,47 @@ pub fn run_codex_hook_startup_self_check(
     false
 }
 
+/// Per-launch deduplication cache for the Codex hook self-check. Keyed by
+/// `(codex_bin_path, codex_cli_version)` so an operator only sees one warning
+/// per distinct binary across the lifetime of the dcserver process.
+static LAUNCH_SELF_CHECK_SEEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<(String, String)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Per-launch self-check runner. Called each time the Codex TUI launch path
+/// resolves a Codex binary so the operator gets a warning if a session-specific
+/// binary (canary/candidate channel, env override, etc.) doesn't match the
+/// version AgentDesk has been audited against. Dedupes across the dcserver
+/// lifetime so it never spams logs on repeated launches of the same binary.
+///
+/// Returns `true` if the launch binary passed the check (or was already
+/// reported in this process); `false` if a warning was logged.
+pub fn run_codex_hook_launch_self_check(codex_bin_path: &str) -> bool {
+    let version = probe_codex_cli_version(codex_bin_path);
+    let cache_key = (
+        codex_bin_path.to_string(),
+        version.clone().unwrap_or_else(|| "<unknown>".to_string()),
+    );
+    {
+        let mut seen = LAUNCH_SELF_CHECK_SEEN
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !seen.insert(cache_key.clone()) {
+            return true; // already reported in this process
+        }
+    }
+    run_codex_hook_startup_self_check(true, version.as_deref(), Some(codex_bin_path))
+}
+
+/// Test-only seam to drain the launch self-check dedupe cache so tests
+/// exercising the launch path don't fight each other.
+#[cfg(test)]
+pub fn reset_launch_self_check_cache_for_tests() {
+    LAUNCH_SELF_CHECK_SEEN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clear();
+}
+
 /// Probes `codex --version` to obtain the CLI version string for the
 /// startup self-check. Returns `None` if Codex CLI is absent, unreachable,
 /// or doesn't print a parseable version on stdout. The probe is best-effort
@@ -792,6 +833,22 @@ mod tests {
             Some("/tmp/codex"),
         );
         assert!(!pass);
+    }
+
+    #[test]
+    fn run_codex_hook_launch_self_check_dedupes_repeated_calls() {
+        // Per-launch check warns once per (path, version) combo and then
+        // returns true on subsequent invocations for the same binary.
+        reset_launch_self_check_cache_for_tests();
+        let fake_path = "/nonexistent/codex-stub-fake-for-test";
+        // First call: probe fails (binary missing), version is `<unknown>`.
+        // First-time-seen returns whatever run_codex_hook_startup_self_check
+        // returns (false for unknown version). What matters: second call is
+        // deduped → returns true and emits no log.
+        let _first = run_codex_hook_launch_self_check(fake_path);
+        let second = run_codex_hook_launch_self_check(fake_path);
+        assert!(second, "second call for same binary must be deduped");
+        reset_launch_self_check_cache_for_tests();
     }
 
     #[test]
