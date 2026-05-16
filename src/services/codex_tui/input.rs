@@ -113,8 +113,7 @@ pub const FOLLOWUP_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const PROMPT_READY_TIMEOUT_ERROR_PREFIX: &str = "timeout waiting for codex tui";
 const PROMPT_READY_SESSION_DEAD_ERROR: &str =
     "codex tui session died before prompt input was ready";
-pub const PROMPT_READY_CANCELLED_ERROR: &str =
-    "codex tui prompt readiness wait cancelled";
+pub const PROMPT_READY_CANCELLED_ERROR: &str = "codex tui prompt readiness wait cancelled";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptReadinessKind {
@@ -372,10 +371,7 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
         TuiInputAction::Escape => "escape",
     };
     if stderr.is_empty() {
-        Err(format!(
-            "tmux send {action_name} failed: {}",
-            output.status
-        ))
+        Err(format!("tmux send {action_name} failed: {}", output.status))
     } else {
         Err(format!("tmux send {action_name} failed: {stderr}"))
     }
@@ -483,7 +479,10 @@ fn line_is_codex_composer_edge(line: &str) -> bool {
     if total < COMPOSER_EDGE_MIN_GLYPHS {
         return false;
     }
-    let box_glyphs = trimmed.chars().filter(|ch| is_box_drawing_char(*ch)).count();
+    let box_glyphs = trimmed
+        .chars()
+        .filter(|ch| is_box_drawing_char(*ch))
+        .count();
     box_glyphs >= COMPOSER_EDGE_MIN_GLYPHS && box_glyphs * 2 >= total
 }
 
@@ -797,7 +796,9 @@ The diagram shows ╭ here.\n\
 
     #[test]
     fn cancelled_error_is_classified_and_distinct_from_timeout_and_session_dead() {
-        assert!(is_prompt_ready_cancelled_error(PROMPT_READY_CANCELLED_ERROR));
+        assert!(is_prompt_ready_cancelled_error(
+            PROMPT_READY_CANCELLED_ERROR
+        ));
         assert!(!is_prompt_ready_timeout_error(PROMPT_READY_CANCELLED_ERROR));
         assert!(!is_session_dead_error(PROMPT_READY_CANCELLED_ERROR));
     }

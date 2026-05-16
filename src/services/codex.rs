@@ -1160,9 +1160,8 @@ fn execute_streaming_local_tui_tmux(
         // we have enough telemetry to trust the detector, follow-up
         // prompt injection (separate PR) can gate on it via
         // `codex_tui::input::send_followup_prompt`.
-        let snapshot = crate::services::codex_tui::input::prompt_readiness_snapshot(
-            tmux_session_name,
-        );
+        let snapshot =
+            crate::services::codex_tui::input::prompt_readiness_snapshot(tmux_session_name);
         tracing::debug!(
             tmux_session = tmux_session_name,
             composer_marker_detected = snapshot.composer_marker_detected,
