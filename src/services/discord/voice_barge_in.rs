@@ -262,6 +262,7 @@ async fn generate_foreground_ack_text(
     transcript: &str,
     language: &str,
     foreground: &EffectiveVoiceForegroundConfig,
+    cancel_token: Arc<crate::services::provider::CancelToken>,
 ) -> Option<VoiceForegroundDecision> {
     let _fallback_for_tests_and_docs = foreground_ack_text(transcript, language);
     let prompt =
@@ -270,17 +271,25 @@ async fn generate_foreground_ack_text(
     let model = foreground.model.clone();
     let max_chars = foreground.max_chars;
     let timeout = Duration::from_millis(foreground.timeout_ms);
+    let cancel_for_blocking = cancel_token.clone();
     let result = tokio::time::timeout(
         timeout + Duration::from_millis(250),
         tokio::task::spawn_blocking(move || {
             let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
             match provider_kind {
-                ProviderKind::Claude => crate::services::claude::execute_command_simple_with_model(
-                    &prompt,
-                    Some(&model),
-                ),
+                ProviderKind::Claude => {
+                    crate::services::claude::execute_command_simple_cancellable_with_model(
+                        &prompt,
+                        Some(&model),
+                        Some(cancel_for_blocking),
+                    )
+                }
                 ProviderKind::Codex => {
-                    crate::services::codex::execute_command_simple_with_model(&prompt, Some(&model))
+                    crate::services::codex::execute_command_simple_cancellable_with_model(
+                        &prompt,
+                        Some(&model),
+                        Some(cancel_for_blocking),
+                    )
                 }
                 ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
                     "foreground provider {} does not support model-scoped instant call yet",
@@ -403,6 +412,7 @@ async fn generate_voice_channel_text_reply(
     text: &str,
     language: &str,
     foreground: &EffectiveVoiceForegroundConfig,
+    cancel_token: Arc<crate::services::provider::CancelToken>,
 ) -> Option<String> {
     let prompt =
         crate::voice::prompt::voice_channel_text_prompt(text, language, foreground.max_chars);
@@ -410,17 +420,25 @@ async fn generate_voice_channel_text_reply(
     let model = foreground.model.clone();
     let max_chars = foreground.max_chars;
     let timeout = Duration::from_millis(foreground.timeout_ms);
+    let cancel_for_blocking = cancel_token.clone();
     let result = tokio::time::timeout(
         timeout + Duration::from_millis(250),
         tokio::task::spawn_blocking(move || {
             let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
             match provider_kind {
-                ProviderKind::Claude => crate::services::claude::execute_command_simple_with_model(
-                    &prompt,
-                    Some(&model),
-                ),
+                ProviderKind::Claude => {
+                    crate::services::claude::execute_command_simple_cancellable_with_model(
+                        &prompt,
+                        Some(&model),
+                        Some(cancel_for_blocking),
+                    )
+                }
                 ProviderKind::Codex => {
-                    crate::services::codex::execute_command_simple_with_model(&prompt, Some(&model))
+                    crate::services::codex::execute_command_simple_cancellable_with_model(
+                        &prompt,
+                        Some(&model),
+                        Some(cancel_for_blocking),
+                    )
                 }
                 ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
                     "voice channel text provider {} does not support model-scoped instant call yet",
@@ -477,6 +495,7 @@ async fn generate_voice_background_result_summary(
     background_result: &str,
     language: &str,
     foreground: &EffectiveVoiceForegroundConfig,
+    cancel_token: Arc<crate::services::provider::CancelToken>,
 ) -> Option<String> {
     let max_chars = foreground.max_chars.max(120);
     let prompt = crate::voice::prompt::voice_background_result_summary_prompt(
@@ -487,17 +506,25 @@ async fn generate_voice_background_result_summary(
     let provider = foreground.provider.clone();
     let model = foreground.model.clone();
     let timeout = Duration::from_millis(foreground.timeout_ms);
+    let cancel_for_blocking = cancel_token.clone();
     let result = tokio::time::timeout(
         timeout + Duration::from_millis(250),
         tokio::task::spawn_blocking(move || {
             let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
             match provider_kind {
-                ProviderKind::Claude => crate::services::claude::execute_command_simple_with_model(
-                    &prompt,
-                    Some(&model),
-                ),
+                ProviderKind::Claude => {
+                    crate::services::claude::execute_command_simple_cancellable_with_model(
+                        &prompt,
+                        Some(&model),
+                        Some(cancel_for_blocking),
+                    )
+                }
                 ProviderKind::Codex => {
-                    crate::services::codex::execute_command_simple_with_model(&prompt, Some(&model))
+                    crate::services::codex::execute_command_simple_cancellable_with_model(
+                        &prompt,
+                        Some(&model),
+                        Some(cancel_for_blocking),
+                    )
                 }
                 ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
                     "voice background summary provider {} does not support model-scoped instant call yet",
@@ -719,6 +746,14 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     // F12 (#2046): voice alias collision 경고를 1회만 노출. utterance 마다 같은
     // collision 으로 warn 이 쏟아져 운영 로그가 묻히는 것을 막는다.
     alias_collision_signature: std::sync::Mutex<Option<String>>,
+    // #2250 (ADR #2175 follow-up): per-channel registry of in-flight foreground
+    // Codex/Claude calls. Each entry is the CancelToken passed to the
+    // `execute_command_simple_cancellable_with_model` invocation, so that
+    // explicit-stop barge-in, supersession by a new utterance, or shutdown
+    // can terminate the spawned child mid-flight rather than waiting for
+    // natural exit.
+    inflight_foreground_cancels:
+        dashmap::DashMap<u64, Vec<Arc<crate::services::provider::CancelToken>>>,
 }
 
 impl VoiceBargeInRuntime {
@@ -766,6 +801,7 @@ impl VoiceBargeInRuntime {
             next_internal_message_id: AtomicU64::new(INTERNAL_VOICE_MESSAGE_ID_START),
             config_cache: std::sync::Mutex::new(None),
             alias_collision_signature: std::sync::Mutex::new(None),
+            inflight_foreground_cancels: dashmap::DashMap::new(),
         }
     }
 
@@ -797,11 +833,68 @@ impl VoiceBargeInRuntime {
             next_internal_message_id: AtomicU64::new(INTERNAL_VOICE_MESSAGE_ID_START),
             config_cache: std::sync::Mutex::new(None),
             alias_collision_signature: std::sync::Mutex::new(None),
+            inflight_foreground_cancels: dashmap::DashMap::new(),
         }
     }
 
     pub(in crate::services::discord) fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// #2250: register a CancelToken for an in-flight foreground/voice Codex
+    /// or Claude call so explicit-stop barge-in, supersession by a new
+    /// utterance, or runtime cleanup can terminate the spawned child.
+    fn register_inflight_foreground_cancel(
+        &self,
+        channel_id: ChannelId,
+        token: Arc<crate::services::provider::CancelToken>,
+    ) {
+        self.inflight_foreground_cancels
+            .entry(channel_id.get())
+            .or_default()
+            .push(token);
+    }
+
+    /// #2250: remove a previously registered CancelToken once the
+    /// foreground call has returned (cancelled or completed normally).
+    fn unregister_inflight_foreground_cancel(
+        &self,
+        channel_id: ChannelId,
+        token: &Arc<crate::services::provider::CancelToken>,
+    ) {
+        if let Some(mut entry) = self.inflight_foreground_cancels.get_mut(&channel_id.get()) {
+            entry.retain(|existing| !Arc::ptr_eq(existing, token));
+        }
+        self.inflight_foreground_cancels
+            .remove_if(&channel_id.get(), |_, value| value.is_empty());
+    }
+
+    /// #2250: signal cancellation on every in-flight foreground call for the
+    /// given channel. Called by explicit-stop barge-in and supersession
+    /// paths so the spawned Codex/Claude child is killed instead of running
+    /// to natural exit (ADR #2175).
+    pub(in crate::services::discord) fn cancel_inflight_foreground_calls(
+        &self,
+        channel_id: ChannelId,
+        reason: &'static str,
+    ) -> usize {
+        let Some((_, tokens)) = self.inflight_foreground_cancels.remove(&channel_id.get()) else {
+            return 0;
+        };
+        let count = tokens.len();
+        for token in tokens {
+            token.set_cancel_source(reason);
+            token.cancel_with_tmux_cleanup();
+        }
+        if count > 0 {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                count,
+                reason,
+                "voice foreground inflight Codex/Claude calls cancelled (#2250)"
+            );
+        }
+        count
     }
 
     pub(in crate::services::discord) fn verbose_progress_enabled(&self) -> bool {
@@ -840,9 +933,13 @@ impl VoiceBargeInRuntime {
         let foreground = self
             .resolve_effective_foreground_config(channel_id, target_channel_id)
             .await;
-        let reply = generate_voice_channel_text_reply(text, &language, &foreground)
-            .await
-            .unwrap_or_else(|| "지금 보이스 빠른 답변 모델 응답을 만들지 못했어요.".to_string());
+        let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
+        self.register_inflight_foreground_cancel(channel_id, cancel_token.clone());
+        let reply =
+            generate_voice_channel_text_reply(text, &language, &foreground, cancel_token.clone())
+                .await
+                .unwrap_or_else(|| "지금 보이스 빠른 답변 모델 응답을 만들지 못했어요.".to_string());
+        self.unregister_inflight_foreground_cancel(channel_id, &cancel_token);
 
         if let Err(error) = channel_id.say(http.as_ref(), reply).await {
             tracing::warn!(
@@ -1050,6 +1147,12 @@ impl VoiceBargeInRuntime {
             if let Some((_, session)) = self.spoken_result_playbacks.remove(&channel_id) {
                 session.cancellation.cancel();
             }
+            // #2250: also abort any in-flight foreground Codex/Claude call so
+            // its spawned child does not outlive the guild teardown.
+            self.cancel_inflight_foreground_calls(
+                ChannelId::new(channel_id),
+                "voice_guild_teardown",
+            );
             self.active_voice_routes.remove(&channel_id);
             self.deferred_buffers.remove(&channel_id);
         }
@@ -1341,17 +1444,24 @@ impl VoiceBargeInRuntime {
         let foreground = self
             .resolve_effective_foreground_config(voice_channel_id, background_channel_id)
             .await;
-        let summary =
-            generate_voice_background_result_summary(background_result, &language, &foreground)
-                .await
-                .unwrap_or_else(|| {
-                    fallback_voice_background_result_summary(
-                        background_result,
-                        &language,
-                        foreground.max_chars,
-                        failed,
-                    )
-                });
+        let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
+        self.register_inflight_foreground_cancel(voice_channel_id, cancel_token.clone());
+        let summary = generate_voice_background_result_summary(
+            background_result,
+            &language,
+            &foreground,
+            cancel_token.clone(),
+        )
+        .await
+        .unwrap_or_else(|| {
+            fallback_voice_background_result_summary(
+                background_result,
+                &language,
+                foreground.max_chars,
+                failed,
+            )
+        });
+        self.unregister_inflight_foreground_cancel(voice_channel_id, &cancel_token);
         if summary.trim().is_empty() {
             return;
         }
@@ -1583,6 +1693,12 @@ impl VoiceBargeInRuntime {
             .verify_processing_barge_in_after_stt(transcript);
         match decision {
             ProcessingBargeInDecision::AbortAgent => {
+                // #2250: also cancel any in-flight foreground/voice Codex
+                // call so its child process is killed mid-flight, not just
+                // the background turn.
+                let inflight_cancelled = self
+                    .cancel_inflight_foreground_calls(channel_id, "voice_barge_in_explicit_stop");
+                let _ = inflight_cancelled;
                 let result = super::mailbox_cancel_active_turn_with_reason(
                     shared,
                     channel_id,
@@ -1645,10 +1761,17 @@ impl VoiceBargeInRuntime {
             .resolve_effective_foreground_config(source_channel_id, target_channel_id)
             .await;
         self.play_processing_chime(shared, source_channel_id).await;
-        let decision =
-            generate_foreground_ack_text(&announcement.transcript, &language, &foreground)
-                .await
-                .unwrap_or(VoiceForegroundDecision::Silence);
+        let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
+        self.register_inflight_foreground_cancel(source_channel_id, cancel_token.clone());
+        let decision = generate_foreground_ack_text(
+            &announcement.transcript,
+            &language,
+            &foreground,
+            cancel_token.clone(),
+        )
+        .await
+        .unwrap_or(VoiceForegroundDecision::Silence);
+        self.unregister_inflight_foreground_cancel(source_channel_id, &cancel_token);
 
         match decision {
             VoiceForegroundDecision::Silence => {
@@ -2861,6 +2984,65 @@ mod tests {
         config.enabled = true;
         config.barge_in.acknowledgement_enabled = false;
         VoiceBargeInRuntime::from_voice_config(&config)
+    }
+
+    /// #2250: explicit-stop barge-in must flip the cancel flag on every
+    /// in-flight foreground Codex/Claude call registered for the channel,
+    /// so the spawned child is killed by the simple-cancel watcher rather
+    /// than running to natural exit. Verifies the registry wiring;
+    /// end-to-end child kill is covered by
+    /// `simple_cancel_watcher_tests::watcher_kills_sleeping_child_when_token_is_cancelled`.
+    #[test]
+    fn cancel_inflight_foreground_calls_flips_every_registered_token() {
+        let runtime = enabled_runtime();
+        let channel = ChannelId::new(42);
+        let token_a = Arc::new(crate::services::provider::CancelToken::new());
+        let token_b = Arc::new(crate::services::provider::CancelToken::new());
+        runtime.register_inflight_foreground_cancel(channel, token_a.clone());
+        runtime.register_inflight_foreground_cancel(channel, token_b.clone());
+        // Unrelated channel must not be affected by the cancel below.
+        let other_channel = ChannelId::new(43);
+        let token_c = Arc::new(crate::services::provider::CancelToken::new());
+        runtime.register_inflight_foreground_cancel(other_channel, token_c.clone());
+
+        let count =
+            runtime.cancel_inflight_foreground_calls(channel, "voice_barge_in_explicit_stop");
+        assert_eq!(count, 2, "both tokens on the channel must be cancelled");
+        assert!(token_a.cancelled.load(Ordering::Relaxed));
+        assert!(token_b.cancelled.load(Ordering::Relaxed));
+        assert!(
+            !token_c.cancelled.load(Ordering::Relaxed),
+            "tokens on other channels must be untouched"
+        );
+        assert_eq!(
+            token_a.cancel_source().as_deref(),
+            Some("voice_barge_in_explicit_stop")
+        );
+        // Registry is drained after cancel so re-running is idempotent.
+        let zero =
+            runtime.cancel_inflight_foreground_calls(channel, "voice_barge_in_explicit_stop");
+        assert_eq!(zero, 0);
+    }
+
+    /// #2250: unregistering a CancelToken after a foreground call completes
+    /// must leave sibling in-flight tokens for the same channel intact.
+    #[test]
+    fn unregister_inflight_foreground_cancel_preserves_siblings() {
+        let runtime = enabled_runtime();
+        let channel = ChannelId::new(7);
+        let token_a = Arc::new(crate::services::provider::CancelToken::new());
+        let token_b = Arc::new(crate::services::provider::CancelToken::new());
+        runtime.register_inflight_foreground_cancel(channel, token_a.clone());
+        runtime.register_inflight_foreground_cancel(channel, token_b.clone());
+
+        runtime.unregister_inflight_foreground_cancel(channel, &token_a);
+        let count = runtime.cancel_inflight_foreground_calls(channel, "test");
+        assert_eq!(
+            count, 1,
+            "only the still-registered token should be cancelled"
+        );
+        assert!(!token_a.cancelled.load(Ordering::Relaxed));
+        assert!(token_b.cancelled.load(Ordering::Relaxed));
     }
 
     #[test]
