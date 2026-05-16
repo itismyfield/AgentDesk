@@ -110,6 +110,111 @@ fn render_goals_wrapper_arg(goals_override: Option<bool>) -> String {
     }
 }
 
+fn render_codex_wrapper_tmux_script(
+    env_lines: &str,
+    exe: &str,
+    output_path: &str,
+    input_fifo_path: &str,
+    prompt_path: &str,
+    working_dir: &str,
+    codex_bin: &str,
+    model: Option<&str>,
+    session_id: Option<&str>,
+    compact_token_limit: Option<u64>,
+    fast_mode_enabled: Option<bool>,
+    goals_enabled: Option<bool>,
+) -> String {
+    format!(
+        "#!/bin/bash\n\
+        {env}\
+        exec {exe} codex-tmux-wrapper \\\n  \
+        --output-file {output} \\\n  \
+        --input-fifo {input_fifo} \\\n  \
+        --prompt-file {prompt} \\\n  \
+        --cwd {wd} \\\n  \
+        --codex-bin {codex_bin}{model_arg}{effort_arg}{resume_arg}{compact_arg}{fast_mode_arg}{goals_arg}\n",
+        env = env_lines,
+        exe = shell_escape(exe),
+        output = shell_escape(output_path),
+        input_fifo = shell_escape(input_fifo_path),
+        prompt = shell_escape(prompt_path),
+        wd = shell_escape(working_dir),
+        codex_bin = shell_escape(codex_bin),
+        model_arg = model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(" \\\n  --codex-model {}", shell_escape(value)))
+            .unwrap_or_default(),
+        compact_arg = compact_token_limit
+            .filter(|&l| l > 0)
+            .map(|l| format!(" \\\n  --compact-token-limit {}", l))
+            .unwrap_or_default(),
+        effort_arg = std::env::var("AGENTDESK_CODEX_REASONING_EFFORT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| format!(" \\\n  --reasoning-effort {}", shell_escape(&v)))
+            .unwrap_or_default(),
+        resume_arg = session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(" \\\n  --resume-session-id {}", shell_escape(value)))
+            .unwrap_or_default(),
+        fast_mode_arg = render_fast_mode_wrapper_arg(fast_mode_enabled),
+        goals_arg = render_goals_wrapper_arg(goals_enabled),
+    )
+}
+
+fn base_tui_args(
+    prompt: &str,
+    model: Option<&str>,
+    model_reasoning_effort: Option<&str>,
+    readonly_mode: bool,
+    fast_mode_enabled: Option<bool>,
+    goals_enabled: Option<bool>,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(effort) = model_reasoning_effort
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            args.push("-c".to_string());
+            args.push(format!("model_reasoning_effort={effort:?}"));
+        }
+        args.push("-m".to_string());
+        args.push(model.to_string());
+    }
+    append_feature_override_args(&mut args, "fast_mode", fast_mode_enabled);
+    append_feature_override_args(&mut args, "goals", goals_enabled);
+    if readonly_mode {
+        args.extend(["--sandbox".to_string(), "read-only".to_string()]);
+    } else {
+        args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+    }
+    args.extend(["--".to_string(), prompt.to_string()]);
+    args
+}
+
+fn render_codex_tui_tmux_script(env_lines: &str, codex_bin: &str, args: &[String]) -> String {
+    let rendered_args = args
+        .iter()
+        .map(|arg| shell_escape(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let arg_suffix = if rendered_args.is_empty() {
+        String::new()
+    } else {
+        format!(" {rendered_args}")
+    };
+    format!(
+        "#!/bin/bash\n\
+        {env}\
+        exec {codex_bin}{arg_suffix}\n",
+        env = env_lines,
+        codex_bin = shell_escape(codex_bin),
+    )
+}
+
 fn should_reuse_existing_provider_session(
     existing_session_usable: bool,
     force_fresh_provider_session: bool,
@@ -170,7 +275,10 @@ fn execute_command_simple_cancellable_with_options(
     cancel_token: Option<&CancelToken>,
 ) -> Result<String, String> {
     let session_selection =
-        crate::services::provider_hosting::resolve_provider_session_selection(&ProviderKind::Codex);
+        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+            &ProviderKind::Codex,
+            false,
+        );
     session_selection.log_start("codex.execute_command_simple");
 
     let resolution = resolve_codex_binary();
@@ -276,8 +384,16 @@ pub fn execute_command_streaming(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
+    #[cfg(unix)]
+    let entrypoint_supports_tui_hosting =
+        remote_profile.is_none() && tmux_session_name.is_some() && claude::is_tmux_available();
+    #[cfg(not(unix))]
+    let entrypoint_supports_tui_hosting = false;
     let session_selection =
-        crate::services::provider_hosting::resolve_provider_session_selection(&ProviderKind::Codex);
+        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+            &ProviderKind::Codex,
+            entrypoint_supports_tui_hosting,
+        );
     session_selection.log_start("codex.execute_command_streaming");
 
     let readonly_mode = is_readonly_tool_policy(allowed_tools);
@@ -326,6 +442,24 @@ pub fn execute_command_streaming(
     if let Some(tmux_name) = tmux_session_name {
         #[cfg(unix)]
         if claude::is_tmux_available() {
+            if session_selection.driver
+                == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting
+            {
+                return execute_streaming_local_tui_tmux(
+                    &prompt,
+                    model,
+                    fast_mode_enabled,
+                    goals_enabled,
+                    working_dir,
+                    sender,
+                    cancel_token,
+                    tmux_name,
+                    report_channel_id,
+                    report_provider,
+                    readonly_mode,
+                    force_fresh_provider_session,
+                );
+            }
             return execute_streaming_local_tmux(
                 &prompt,
                 model,
@@ -542,6 +676,106 @@ fn execute_streaming_remote_tmux(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn execute_streaming_local_tui_tmux(
+    prompt: &str,
+    model: Option<&str>,
+    fast_mode_enabled: Option<bool>,
+    goals_enabled: Option<bool>,
+    working_dir: &str,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    tmux_session_name: &str,
+    report_channel_id: Option<u64>,
+    report_provider: Option<ProviderKind>,
+    readonly_mode: bool,
+    force_fresh_provider_session: bool,
+) -> Result<(), String> {
+    let session_exists = tmux_session_exists(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+
+    if session_exists {
+        let cleanup_reason = if force_fresh_provider_session {
+            "codex tui fresh provider session requested"
+        } else if has_live_pane {
+            "codex tui local session restart before direct launch"
+        } else {
+            "stale codex tui local session cleanup before recreate"
+        };
+        record_tmux_exit_reason(tmux_session_name, cleanup_reason);
+        crate::services::platform::tmux::kill_session_with_reason(
+            tmux_session_name,
+            cleanup_reason,
+        );
+    }
+
+    crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
+    write_tmux_owner_marker(tmux_session_name)?;
+    let owner_path = tmux_owner_path(tmux_session_name);
+
+    let resolution = resolve_codex_binary();
+    let codex_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Codex CLI not found".to_string())?;
+    let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
+    let env_lines = build_tmux_launch_env_lines(
+        resolution.exec_path.as_deref(),
+        report_channel_id,
+        report_provider,
+    );
+    let reasoning_effort = std::env::var("AGENTDESK_CODEX_REASONING_EFFORT").ok();
+    let args = base_tui_args(
+        prompt,
+        model,
+        reasoning_effort.as_deref(),
+        readonly_mode,
+        fast_mode_enabled,
+        goals_enabled,
+    );
+    let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
+
+    std::fs::write(&script_path, &script_content)
+        .map_err(|e| format!("Failed to write Codex TUI launch script: {}", e))?;
+
+    let tmux_result = crate::services::platform::tmux::create_session(
+        tmux_session_name,
+        Some(working_dir),
+        &format!("bash {}", shell_escape(&script_path)),
+    )?;
+
+    if !tmux_result.status.success() {
+        let stderr = String::from_utf8_lossy(&tmux_result.stderr);
+        let _ = std::fs::remove_file(&owner_path);
+        let _ = std::fs::remove_file(&script_path);
+        return Err(format!("tmux error: {}", stderr));
+    }
+
+    crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
+
+    if let Some(ref token) = cancel_token {
+        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(tmux_session_name.to_string());
+        if let Some(pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) {
+            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
+        }
+    }
+
+    let _ = sender.send(StreamMessage::Text {
+        content: format!(
+            "Codex TUI session launched in tmux: `{}`",
+            tmux_session_name
+        ),
+    });
+    let _ = sender.send(StreamMessage::Done {
+        result: String::new(),
+        session_id: None,
+    });
+
+    Ok(())
+}
+
+#[cfg(unix)]
 fn execute_streaming_local_tmux(
     prompt: &str,
     model: Option<&str>,
@@ -653,43 +887,19 @@ fn execute_streaming_local_tmux(
         report_provider,
     );
 
-    let script_content = format!(
-        "#!/bin/bash\n\
-        {env}\
-        exec {exe} codex-tmux-wrapper \\\n  \
-        --output-file {output} \\\n  \
-        --input-fifo {input_fifo} \\\n  \
-        --prompt-file {prompt} \\\n  \
-        --cwd {wd} \\\n  \
-        --codex-bin {codex_bin}{model_arg}{effort_arg}{resume_arg}{compact_arg}{fast_mode_arg}{goals_arg}\n",
-        env = env_lines,
-        exe = shell_escape(&exe.display().to_string()),
-        output = shell_escape(&output_path),
-        input_fifo = shell_escape(&input_fifo_path),
-        prompt = shell_escape(&prompt_path),
-        wd = shell_escape(working_dir),
-        codex_bin = shell_escape(&codex_bin),
-        model_arg = model
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| format!(" \\\n  --codex-model {}", shell_escape(value)))
-            .unwrap_or_default(),
-        compact_arg = compact_token_limit
-            .filter(|&l| l > 0)
-            .map(|l| format!(" \\\n  --compact-token-limit {}", l))
-            .unwrap_or_default(),
-        effort_arg = std::env::var("AGENTDESK_CODEX_REASONING_EFFORT")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .map(|v| format!(" \\\n  --reasoning-effort {}", shell_escape(&v)))
-            .unwrap_or_default(),
-        resume_arg = session_id
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| format!(" \\\n  --resume-session-id {}", shell_escape(value)))
-            .unwrap_or_default(),
-        fast_mode_arg = render_fast_mode_wrapper_arg(fast_mode_enabled),
-        goals_arg = render_goals_wrapper_arg(goals_enabled),
+    let script_content = render_codex_wrapper_tmux_script(
+        &env_lines,
+        &exe.display().to_string(),
+        &output_path,
+        &input_fifo_path,
+        &prompt_path,
+        working_dir,
+        &codex_bin,
+        model,
+        session_id,
+        compact_token_limit,
+        fast_mode_enabled,
+        goals_enabled,
     );
 
     std::fs::write(&script_path, &script_content)
@@ -1347,6 +1557,55 @@ fn handle_codex_json_line(
     }
 
     Ok(Some(false))
+}
+
+#[cfg(test)]
+mod tui_hosting_tests {
+    use super::{base_tui_args, render_codex_tui_tmux_script, render_codex_wrapper_tmux_script};
+
+    #[test]
+    fn codex_tui_tmux_script_launches_codex_directly_without_wrapper() {
+        let args = base_tui_args(
+            "hello from tui",
+            Some("gpt-5-codex"),
+            Some("medium"),
+            false,
+            Some(true),
+            Some(false),
+        );
+        let script = render_codex_tui_tmux_script("unset CLAUDECODE\n", "/opt/bin/codex", &args);
+
+        assert!(script.contains("exec '/opt/bin/codex' "));
+        assert!(!script.contains("codex-tmux-wrapper"));
+        assert!(script.contains("'-m' 'gpt-5-codex'"));
+        assert!(script.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(script.contains("'--' 'hello from tui'"));
+    }
+
+    #[test]
+    fn codex_legacy_tmux_script_preserves_wrapper_launch() {
+        let script = render_codex_wrapper_tmux_script(
+            "unset CLAUDECODE\n",
+            "/tmp/agentdesk",
+            "/tmp/out.jsonl",
+            "/tmp/in.fifo",
+            "/tmp/prompt.txt",
+            "/work/repo",
+            "/opt/bin/codex",
+            Some("gpt-5-codex"),
+            Some("thread-123"),
+            Some(120_000),
+            Some(false),
+            Some(true),
+        );
+
+        assert!(script.contains("exec '/tmp/agentdesk' codex-tmux-wrapper"));
+        assert!(script.contains("--codex-bin '/opt/bin/codex'"));
+        assert!(script.contains("--codex-model 'gpt-5-codex'"));
+        assert!(script.contains("--resume-session-id 'thread-123'"));
+        assert!(script.contains("--compact-token-limit 120000"));
+        assert!(!script.contains("exec '/opt/bin/codex' "));
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
