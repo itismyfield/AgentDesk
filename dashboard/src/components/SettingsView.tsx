@@ -3272,21 +3272,49 @@ export default function SettingsView({
             {ADVANCED_PIPELINE_CATEGORIES.map(renderPipelineCategory)}
           </div>
 
-          <div id="settings-audit-notes">
-            <SettingsSubsection
-              title={tr("감사 노트", "Audit notes")}
-              description={tr(
-                "일반 폼에 바로 넣으면 거짓말이 되거나, 프론트만으로는 정본을 보장할 수 없는 항목입니다. 운영자에게 현재 한계를 숨기지 않기 위해 그대로 노출합니다.",
-                "These items would become misleading in the regular form or cannot be made truthful from the frontend alone. They stay visible so operators can see the current limits.",
-              )}
+          <details
+            id="settings-audit-notes"
+            data-testid="settings-audit-notes"
+            className="settings-audit-disclosure rounded-[20px] border"
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+              background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
+            }}
+          >
+            <summary
+              className="flex cursor-pointer list-none items-start justify-between gap-3 px-4 py-4 sm:px-5"
+              data-testid="settings-audit-summary"
             >
+              <span className="min-w-0">
+                <span className="settings-section-title block text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                  {tr("운영자 감사 노트", "Operator audit notes")}
+                </span>
+                <span className="settings-copy mt-1 block text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+                  {tr(
+                    "일반 폼에 넣으면 오해를 만드는 backend-followup과 read-only 항목만 접어 둡니다.",
+                    "Backend-followup and read-only items stay folded away from the regular form.",
+                  )}
+                </span>
+              </span>
+              <span
+                className="settings-count-chip inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+                  background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
+                  color: "var(--th-text-muted)",
+                }}
+              >
+                {tr(`${AUDIT_NOTES.length}개`, `${AUDIT_NOTES.length} notes`)}
+              </span>
+            </summary>
+            <div className="border-t px-4 py-4 sm:px-5" style={{ borderColor: "color-mix(in srgb, var(--th-border) 62%, transparent)" }}>
               <div className="grid gap-3 md:grid-cols-2">
                 {AUDIT_NOTES.map((note) => (
                   <AuditNoteCard key={note.id} note={note} isKo={isKo} />
                 ))}
               </div>
-            </SettingsSubsection>
-          </div>
+            </div>
+          </details>
         </div>
       )}
     </div>

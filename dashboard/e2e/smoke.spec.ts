@@ -2194,6 +2194,22 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("pipeline-selection-title")).toBeVisible({ timeout: 1500 });
     await expect(page.getByTestId("pipeline-refresh-indicator")).toBeVisible();
     await expect(page.getByTestId("pipeline-selection-title")).toContainText("backlog → ready");
+    await expect(page.getByTestId("settings-audit-notes")).toBeAttached();
+    await expect
+      .poll(() =>
+        page
+          .getByTestId("settings-audit-notes")
+          .evaluate((node) => (node as HTMLDetailsElement).open),
+      )
+      .toBe(false);
+    await page.getByTestId("settings-audit-summary").click();
+    await expect
+      .poll(() =>
+        page
+          .getByTestId("settings-audit-notes")
+          .evaluate((node) => (node as HTMLDetailsElement).open),
+      )
+      .toBe(true);
     await expect(page.getByTestId("pipeline-refresh-indicator")).toBeHidden({ timeout: 3000 });
   });
 

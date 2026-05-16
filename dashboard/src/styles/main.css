@@ -792,6 +792,23 @@ textarea {
   text-wrap: pretty;
 }
 
+.settings-audit-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-audit-disclosure summary::after {
+  align-self: center;
+  color: var(--th-text-muted);
+  content: "+";
+  flex-shrink: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.settings-audit-disclosure[open] summary::after {
+  content: "-";
+}
+
 @media (max-width: 1180px) {
   .setting-row-grid {
     grid-template-columns: minmax(0, 1fr) minmax(14rem, 260px) auto;
