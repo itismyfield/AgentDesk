@@ -157,25 +157,45 @@ pub async fn insert_voice_turn_link_pg(
         .execute(&mut *tx)
         .await?;
 
-    // If an active row already exists for this utterance (any generation),
-    // dedupe to None — initial-insert is not a retarget.
-    let active_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM voice_turn_link
-              WHERE guild_id = $1
-                AND voice_channel_id = $2
-                AND utterance_id = $3
-                AND status = 'active'
-         )",
+    // Reuse the same "latest-row" guard retarget uses, so insert cannot
+    // resurrect a closed turn either. Three reject cases:
+    //   (a) latest row is 'active' — initial insert is not a retarget;
+    //       dedupe.
+    //   (b) latest row is 'terminal' — utterance closed; resurrection
+    //       attempt; dedupe.
+    //   (c) latest row exists with generation >= insert.generation —
+    //       stale insert against a newer generation; dedupe.
+    // The (b) case is the critical one Codex round-3 review flagged:
+    // without it a delayed/misrouted insert at a higher generation
+    // would bypass the partial unique index (which ignores terminal
+    // rows) and re-open a finished turn as active.
+    #[derive(sqlx::FromRow)]
+    struct LatestRow {
+        generation: i32,
+        status: String,
+    }
+    let latest: Option<LatestRow> = sqlx::query_as(
+        "SELECT generation, status
+           FROM voice_turn_link
+          WHERE guild_id = $1
+            AND voice_channel_id = $2
+            AND utterance_id = $3
+          ORDER BY generation DESC
+          LIMIT 1",
     )
     .bind(u64_to_i64(insert.guild_id))
     .bind(u64_to_i64(insert.voice_channel_id))
     .bind(&insert.utterance_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    if active_exists {
-        tx.commit().await?;
-        return Ok(None);
+    if let Some(latest_row) = latest.as_ref() {
+        if latest_row.status == "active"
+            || latest_row.status == "terminal"
+            || insert.generation <= latest_row.generation
+        {
+            tx.commit().await?;
+            return Ok(None);
+        }
     }
 
     let sql = format!(
@@ -923,6 +943,57 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active_count, 1, "exactly one active row per utterance");
+
+        pool.close().await;
+        pg.drop().await;
+    }
+
+    /// Insert-path resurrection regression (Codex review #2362 final).
+    /// `insert_voice_turn_link_pg` must apply the same terminal-row
+    /// guard `retarget_voice_turn_link_pg` does. A delayed/misrouted
+    /// insert against an utterance whose latest row is `terminal` must
+    /// dedupe to `None`, not bypass the partial unique index (which
+    /// ignores terminal rows) and re-open a closed turn as active.
+    #[tokio::test]
+    async fn insert_after_mark_terminal_does_not_resurrect_pg() {
+        let Some(pg) = TestPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg.connect_and_migrate().await;
+
+        insert_voice_turn_link_pg(&pool, &sample_insert(0))
+            .await
+            .unwrap()
+            .expect("seed gen0");
+        mark_terminal_voice_turn_link_pg(&pool, 100, 200, "utt-42", 0)
+            .await
+            .unwrap()
+            .expect("mark gen0 terminal");
+
+        // A late insert arrives at a *higher* generation. The partial
+        // unique active index does not protect us (terminal row is
+        // excluded); the only thing standing between this and a
+        // resurrected active row is the latest-row guard.
+        let mut late = sample_insert(1);
+        late.dispatch_id = Some("dispatch-late-insert".to_string());
+        let result = insert_voice_turn_link_pg(&pool, &late).await.unwrap();
+        assert!(
+            result.is_none(),
+            "insert after terminal must dedupe to None, not resurrect"
+        );
+
+        // No active rows must exist.
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM voice_turn_link
+              WHERE guild_id = 100
+                AND voice_channel_id = 200
+                AND utterance_id = 'utt-42'
+                AND status = 'active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(active_count, 0, "no active row may exist post-terminal");
 
         pool.close().await;
         pg.drop().await;
