@@ -948,21 +948,97 @@ pub fn start_hot_reload(
 /// aborts the eval once the encoded deadline passes; the guard clears the
 /// deadline back to `0` on drop so subsequent (potentially long-running)
 /// evals on the same runtime are not affected.
+///
+/// In addition to the AtomicU64 (which the QuickJS interrupt handler reads
+/// on every bytecode tick), the guard also installs the deadline into a
+/// thread-local so synchronous native bridge ops invoked by JS on this
+/// thread can observe it. This is required because the interrupt handler
+/// only fires between bytecode instructions — a Rust function called from
+/// JS holds the runtime lock for its entire duration and can otherwise
+/// blow past the deadline (#2378).
 struct ArmedDeadline<'a> {
     slot: &'a Arc<AtomicU64>,
+    previous_thread_local: Option<Instant>,
 }
 
 impl<'a> ArmedDeadline<'a> {
     fn new(slot: &'a Arc<AtomicU64>, budget: Duration) -> Self {
         let deadline = Instant::now() + budget;
         slot.store(encode_deadline(deadline), Ordering::Release);
-        Self { slot }
+        let previous_thread_local =
+            CURRENT_BRIDGE_DEADLINE.with(|cell| cell.replace(Some(deadline)));
+        Self {
+            slot,
+            previous_thread_local,
+        }
     }
 }
 
 impl<'a> Drop for ArmedDeadline<'a> {
     fn drop(&mut self) {
         self.slot.store(0, Ordering::Release);
+        let previous = self.previous_thread_local.take();
+        CURRENT_BRIDGE_DEADLINE.with(|cell| cell.set(previous));
+    }
+}
+
+thread_local! {
+    /// Per-thread deadline for synchronous native bridge ops. Set by
+    /// `ArmedDeadline::new` when a bounded JS eval is in flight on this
+    /// thread, cleared (or restored to the previous nested value) on drop.
+    /// Bridge ops read this via [`bridge_op_deadline`] to bound their own
+    /// internal timeouts and to fail fast when the deadline has passed —
+    /// the QuickJS interrupt handler can't fire while Rust is running, so
+    /// bridge ops must enforce the deadline themselves (#2378).
+    static CURRENT_BRIDGE_DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Returns the current thread's bridge-op deadline, if a bounded JS eval is
+/// in flight on this thread. Bridge ops should call this before performing
+/// long synchronous work and either:
+///   1. Return an error immediately if the deadline has already passed.
+///   2. Shorten their internal timeout to fit within the remaining budget.
+///
+/// Returns `None` if no deadline is armed — bridge ops should retain their
+/// default timeout behaviour in that case (e.g. live-engine policy hooks
+/// invoked outside of hot-reload pre-validation).
+pub(crate) fn bridge_op_deadline() -> Option<Instant> {
+    CURRENT_BRIDGE_DEADLINE.with(|cell| cell.get())
+}
+
+/// Returns the remaining bridge-op budget, or `Some(Duration::ZERO)` if the
+/// deadline has already passed. Returns `None` if no deadline is armed.
+pub(crate) fn bridge_op_deadline_remaining() -> Option<Duration> {
+    bridge_op_deadline().map(|deadline| {
+        deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO)
+    })
+}
+
+/// Test-only RAII helper that installs a thread-local bridge-op deadline so
+/// `engine::ops::*` modules can exercise their deadline-clamping paths
+/// without spinning up a full `HotReloadGuard`. Restores any previously
+/// installed deadline on drop.
+#[cfg(test)]
+pub(crate) struct ScopedBridgeDeadline {
+    previous: Option<Instant>,
+}
+
+#[cfg(test)]
+impl ScopedBridgeDeadline {
+    pub(crate) fn new(budget: Duration) -> Self {
+        let deadline = Instant::now() + budget;
+        let previous = CURRENT_BRIDGE_DEADLINE.with(|cell| cell.replace(Some(deadline)));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedBridgeDeadline {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        CURRENT_BRIDGE_DEADLINE.with(|cell| cell.set(previous));
     }
 }
 
@@ -1299,6 +1375,64 @@ mod tests {
         guard.shutdown();
         drop(guard);
         drop(runtime);
+    }
+
+    /// #2378: synchronous native bridge ops must observe the bridge-op
+    /// deadline that's armed for the currently-running JS eval. The
+    /// QuickJS interrupt handler can't fire while Rust is running, so we
+    /// rely on bridge ops to consult `bridge_op_deadline_remaining()` and
+    /// either short-circuit or clamp their own internal timeout.
+    ///
+    /// This test verifies the load-bearing contract directly: while an
+    /// `ArmedDeadline` is in scope on this thread, the public
+    /// `bridge_op_deadline_remaining()` helper returns a budget that
+    /// shrinks monotonically and becomes zero once the deadline passes.
+    /// After the guard drops, the helper returns `None` again so live
+    /// engine bridge ops are not affected.
+    #[test]
+    fn bridge_op_deadline_visible_to_native_ops_while_armed() {
+        assert!(
+            bridge_op_deadline_remaining().is_none(),
+            "no deadline should be armed at test start"
+        );
+
+        let slot = Arc::new(AtomicU64::new(0));
+        {
+            let _armed = ArmedDeadline::new(&slot, Duration::from_millis(200));
+
+            // Immediately after arming, the remaining budget must be positive
+            // and bounded by the original budget. Use a generous upper bound
+            // (the requested budget) since `Instant::now()` may advance
+            // between `ArmedDeadline::new` and this read.
+            let initial = bridge_op_deadline_remaining()
+                .expect("deadline should be visible to bridge ops while armed");
+            assert!(
+                initial > Duration::ZERO && initial <= Duration::from_millis(200),
+                "initial bridge-op budget out of range: {initial:?}"
+            );
+
+            // Sleep past the deadline; the helper must now report a zero
+            // remaining budget so synchronous bridge ops short-circuit.
+            std::thread::sleep(Duration::from_millis(250));
+            let after_deadline = bridge_op_deadline_remaining()
+                .expect("deadline should still be visible after it has passed");
+            assert!(
+                after_deadline.is_zero(),
+                "bridge-op deadline should report zero remaining after expiry, got {after_deadline:?}"
+            );
+        }
+
+        assert!(
+            bridge_op_deadline_remaining().is_none(),
+            "deadline must clear once ArmedDeadline drops so live ops are unaffected"
+        );
+        // The shared AtomicU64 slot must also be cleared so the interrupt
+        // handler sees `0` (no deadline armed) on subsequent ticks.
+        assert_eq!(
+            slot.load(Ordering::Acquire),
+            0,
+            "ArmedDeadline drop must reset the shared deadline slot"
+        );
     }
 
     #[test]
