@@ -14,6 +14,13 @@ import {
   summarizeMeetings,
 } from "../app/meetingSummary";
 import { useI18n } from "../i18n";
+import {
+  getMeetingIssueResult,
+  getMeetingIssueState,
+  getMeetingIssueTone,
+  getProposedIssueKey,
+  type MeetingIssueState,
+} from "../lib/meetingHelpers";
 import type {
   RoundTableMeeting,
   RoundTableMeetingChannelOption,
@@ -191,47 +198,8 @@ function getMeetingStatusTone(
   return "err";
 }
 
-function getProposedIssueKey(issue: {
-  title: string;
-  body: string;
-  assignee: string;
-}): string {
-  return JSON.stringify([issue.title.trim(), issue.body.trim(), issue.assignee.trim()]);
-}
-
-function getMeetingIssueResult(
-  meeting: RoundTableMeeting,
-  issue: {
-    title: string;
-    body: string;
-    assignee: string;
-  },
-): { ok: boolean; discarded?: boolean; error?: string | null } | null {
-  const key = getProposedIssueKey(issue);
-  return (
-    meeting.issue_creation_results?.find((result) => result.key === key) ?? null
-  );
-}
-
-function getMeetingIssueState(
-  result: { ok: boolean; discarded?: boolean; error?: string | null } | null,
-): "created" | "failed" | "discarded" | "pending" {
-  if (!result) return "pending";
-  if (result.discarded) return "discarded";
-  return result.ok ? "created" : "failed";
-}
-
-function getMeetingIssueTone(
-  state: "created" | "failed" | "discarded" | "pending",
-): "ok" | "warn" | "err" | "neutral" {
-  if (state === "created") return "ok";
-  if (state === "failed") return "err";
-  if (state === "discarded") return "neutral";
-  return "warn";
-}
-
 function getMeetingIssueStateLabel(
-  state: "created" | "failed" | "discarded" | "pending",
+  state: MeetingIssueState,
   t: ReturnType<typeof useI18n>["t"],
 ): string {
   if (state === "created") return t({ ko: "생성됨", en: "Created" });

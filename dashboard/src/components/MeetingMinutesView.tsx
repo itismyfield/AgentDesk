@@ -6,8 +6,12 @@ import {
   removeLocalStorageValue,
   writeLocalStorageValue,
 } from "../lib/useLocalStorage";
+import {
+  getMeetingIssueResult,
+  getMeetingIssueState,
+  getProposedIssueKey,
+} from "../lib/meetingHelpers";
 import type {
-  IssueCreationResult,
   ProposedIssue,
   RoundTableMeeting,
   RoundTableMeetingChannelOption,
@@ -131,32 +135,6 @@ function filterReposForViewer(
   return repos.filter((repo) =>
     repo.nameWithOwner.startsWith(`${viewerLogin}/`),
   );
-}
-
-function getProposedIssueKey(issue: ProposedIssue): string {
-  return JSON.stringify([
-    issue.title.trim(),
-    issue.body.trim(),
-    issue.assignee.trim(),
-  ]);
-}
-
-function getMeetingIssueResult(
-  meeting: RoundTableMeeting,
-  issue: ProposedIssue,
-): IssueCreationResult | null {
-  const key = getProposedIssueKey(issue);
-  return (
-    meeting.issue_creation_results?.find((result) => result.key === key) ?? null
-  );
-}
-
-function getMeetingIssueState(
-  result: IssueCreationResult | null,
-): "created" | "failed" | "discarded" | "pending" {
-  if (!result) return "pending";
-  if (result.discarded) return "discarded";
-  return result.ok ? "created" : "failed";
 }
 
 function normalizeSelectionReason(reason: string | null | undefined): string {

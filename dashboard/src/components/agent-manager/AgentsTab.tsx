@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getSkillRanking } from "../../api";
 import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
+import { getCurrentTaskSummary } from "../../lib/agentHelpers";
 import AgentAvatar from "../AgentAvatar";
 import { getProviderMeta } from "../../app/providerTheme";
 import {
@@ -55,40 +56,6 @@ type AgentViewMode = "grid" | "list";
 function agentSecondaryLine(agent: Agent, locale: string) {
   if (agent.alias?.trim()) return `aka ${agent.alias.trim()}`;
   return locale === "en" ? agent.name_ko || agent.name : agent.name;
-}
-
-function currentTaskSummary(
-  agent: Agent,
-  tr: Translator,
-): { label: string; value: string } {
-  if (agent.current_task_id) {
-    return {
-      label: tr("현재 작업", "Current Task"),
-      value: agent.current_task_id,
-    };
-  }
-  if (agent.workflow_pack_key) {
-    return {
-      label: tr("워크플로우", "Workflow"),
-      value: agent.workflow_pack_key,
-    };
-  }
-  if (agent.session_info) {
-    return {
-      label: tr("세션", "Session"),
-      value: agent.session_info,
-    };
-  }
-  if (agent.personality) {
-    return {
-      label: tr("메모", "Notes"),
-      value: agent.personality,
-    };
-  }
-  return {
-    label: tr("상태", "Status"),
-    value: tr("대기 중", "Standing by"),
-  };
 }
 
 function buildTopSkillMap(rows: Awaited<ReturnType<typeof getSkillRanking>>["byAgent"]) {
@@ -418,7 +385,7 @@ export default function AgentsTab({
                 const providerMeta = getProviderMeta(selectedAgent.cli_provider);
                 const levelInfo = getAgentLevel(selectedAgent.stats_xp);
                 const levelTitle = getAgentTitle(selectedAgent.stats_xp, isKo);
-                const task = currentTaskSummary(selectedAgent, tr);
+                const task = getCurrentTaskSummary(selectedAgent, tr);
                 const roleKey = selectedAgent.role_id || selectedAgent.id;
                 const topSkills = topSkillsByAgent.get(roleKey) ?? [];
 
