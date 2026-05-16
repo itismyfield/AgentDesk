@@ -90,6 +90,7 @@ export default function EmojiPicker({
                   <button
                     key={emoji}
                     type="button"
+                    aria-pressed={value === emoji}
                     onClick={() => {
                       onChange(emoji);
                       setOpen(false);

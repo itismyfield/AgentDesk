@@ -1282,7 +1282,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       label: tr("소유자 ID 형식", "Owner ID format"),
       ok: ownerIdValid,
       detail: ownerId.trim()
-        ? tr("18~19자리 Discord 사용자 ID 형식인지 확인했습니다.", "Checked that the value matches a Discord user ID format.")
+        ? tr("17~20자리 Discord 사용자 ID 형식인지 확인했습니다.", "Checked that the value matches a Discord user ID format.")
         : tr("비워두면 첫 메시지 발신자가 자동 소유자가 됩니다.", "Leave blank to make the first message sender the owner."),
     },
     {
@@ -2225,8 +2225,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               </ol>
               <div className="mt-1" style={{ color: "var(--th-text-muted)" }}>
                 {tr(
-                  "18~19자리 숫자입니다 (예: 123456789012345678)",
-                  "It's an 18-19 digit number (e.g., 123456789012345678)",
+                  "17~20자리 숫자입니다 (예: 123456789012345678)",
+                  "It's a 17-20 digit number (e.g., 123456789012345678)",
                 )}
               </div>
             </div>
