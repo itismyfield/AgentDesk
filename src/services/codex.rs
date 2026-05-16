@@ -1467,11 +1467,31 @@ fn execute_streaming_local_tui_tmux(
         // `services::discord::turn_bridge::mod::RuntimeHandoff::CodexTui`
         // branch). If we publish RuntimeReady against a tmux session
         // whose composer never came back up, downstream consumers will
-        // operate on a non-ready handoff. Bound the wait at the
-        // follow-up budget (45s) so a hung TUI is escalated quickly.
+        // operate on a non-ready handoff.
+        //
+        // Bridge-drain race (Codex round-3 review on #2325):
+        // `rollout_tail` has already emitted `StreamMessage::Done` by
+        // the time we get here, so the bridge has started its
+        // `terminal_control_drain_until` window (250ms) before it
+        // finalises the inflight. The readiness wait MUST fit inside
+        // that window or our `RuntimeReady` / failure `Done` will be
+        // dropped after the bridge has already cleared inflight state.
+        // We use `PromptReadinessKind::PostTurnHandoff` (200ms budget)
+        // and split outcomes:
+        //   - Ready → emit RuntimeReady (handoff preserved).
+        //   - Session dead → emit failure Done; tmux death is
+        //     observable synchronously so the verdict reaches the
+        //     bridge inside the drain window.
+        //   - Composer not yet redrawn within the probe budget → emit
+        //     RuntimeReady anyway with a tracing warning. The
+        //     assistant response has already shipped via the tail
+        //     `Done`; preserving the handoff is the safe default for
+        //     recovery / watcher-relay even if the visual composer is
+        //     still settling. Making this case hard-fail would require
+        //     cross-bridge cooperation tracked separately.
         match crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
             tmux_session_name,
-            crate::services::codex_tui::input::PromptReadinessKind::Followup,
+            crate::services::codex_tui::input::PromptReadinessKind::PostTurnHandoff,
             cancel_token_for_post_tail.as_ref(),
         ) {
             Ok(()) => {
@@ -1497,25 +1517,42 @@ fn execute_streaming_local_tui_tmux(
                 );
                 return Ok(());
             }
-            Err(error) => {
-                // Timeout or session-dead surfaces as an operator-visible
-                // Done so the bridge finalises the turn instead of
-                // emitting RuntimeReady against a hung / dead pane.
+            Err(error) if crate::services::codex_tui::input::is_session_dead_error(&error) => {
+                // Session death is detected synchronously by the tmux
+                // pane-alive check, so this verdict reaches the bridge
+                // inside its drain window. Skip RuntimeReady and surface
+                // a failure Done.
                 tracing::warn!(
                     tmux_session = tmux_session_name,
                     error = %error,
-                    "Codex TUI composer never became input-ready after assistant response; suppressing RuntimeReady"
+                    "Codex TUI session died before becoming input-ready; suppressing RuntimeReady"
                 );
-                let user_message =
-                    if crate::services::codex_tui::input::is_session_dead_error(&error) {
-                        "⚠ Codex TUI session ended before becoming input-ready.".to_string()
-                    } else {
-                        "⚠ Codex TUI did not return to input-ready state after the response."
-                            .to_string()
-                    };
                 let _ = sender.send(StreamMessage::Done {
-                    result: user_message,
+                    result: "⚠ Codex TUI session ended before becoming input-ready.".to_string(),
                     session_id: tail_result.session_id.clone(),
+                });
+            }
+            Err(error) => {
+                // Composer did not redraw within the 200ms probe budget.
+                // The assistant response already shipped, the pane is
+                // still alive — preserve the handoff so recovery /
+                // watcher-relay paths remain functional, and record a
+                // warning for telemetry. Making this case hard-fail
+                // would require the bridge to keep its inflight open
+                // beyond the 250ms drain (tracked as a follow-up to
+                // #2325).
+                tracing::warn!(
+                    tmux_session = tmux_session_name,
+                    error = %error,
+                    "Codex TUI composer not yet input-ready inside post-turn probe budget; emitting RuntimeReady best-effort"
+                );
+                let _ = sender.send(StreamMessage::RuntimeReady {
+                    handoff: RuntimeHandoff::CodexTui {
+                        rollout_path: tail_result.rollout_path.display().to_string(),
+                        thread_id: tail_result.session_id,
+                        tmux_session_name: tmux_session_name.to_string(),
+                        last_offset: tail_result.final_offset,
+                    },
                 });
             }
         }

@@ -110,6 +110,12 @@ const COMPOSER_FOOTER_ADJACENCY_LINES: usize = 3;
 
 pub const FRESH_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const FOLLOWUP_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
+/// Post-turn handoff probe budget. Sized to fit inside the turn-bridge
+/// `terminal_control_drain_until` window (250ms) so any
+/// `StreamMessage::RuntimeReady` / failure `Done` we emit after this
+/// probe still reaches the bridge before it finalises the inflight on
+/// the rollout-tail `Done`. See #2325 / Codex review.
+pub const POST_TURN_HANDOFF_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 const PROMPT_READY_TIMEOUT_ERROR_PREFIX: &str = "timeout waiting for codex tui";
 const PROMPT_READY_SESSION_DEAD_ERROR: &str =
     "codex tui session died before prompt input was ready";
@@ -119,6 +125,10 @@ pub const PROMPT_READY_CANCELLED_ERROR: &str = "codex tui prompt readiness wait 
 pub enum PromptReadinessKind {
     FreshTurn,
     Followup,
+    /// Bounded post-turn probe used by the Codex TUI launch frame to
+    /// gate the `RuntimeReady` handoff on a live composer without
+    /// racing the turn-bridge drain window. See [`POST_TURN_HANDOFF_PROBE_TIMEOUT`].
+    PostTurnHandoff,
 }
 
 impl PromptReadinessKind {
@@ -126,6 +136,7 @@ impl PromptReadinessKind {
         match self {
             Self::FreshTurn => FRESH_PROMPT_READY_TIMEOUT,
             Self::Followup => FOLLOWUP_PROMPT_READY_TIMEOUT,
+            Self::PostTurnHandoff => POST_TURN_HANDOFF_PROBE_TIMEOUT,
         }
     }
 
@@ -133,6 +144,7 @@ impl PromptReadinessKind {
         match self {
             Self::FreshTurn => "fresh",
             Self::Followup => "follow-up",
+            Self::PostTurnHandoff => "post-turn-handoff",
         }
     }
 }
@@ -768,6 +780,22 @@ The diagram shows ╭ here.\n\
     fn prompt_ready_timeouts_are_split_for_fresh_and_followup_turns() {
         assert_eq!(PromptReadinessKind::FreshTurn.timeout().as_secs(), 120);
         assert_eq!(PromptReadinessKind::Followup.timeout().as_secs(), 45);
+    }
+
+    #[test]
+    fn post_turn_handoff_probe_fits_inside_bridge_drain_window() {
+        // #2325 round-3: the post-turn probe must fit inside the
+        // turn-bridge `terminal_control_drain_until` window (250ms)
+        // so any RuntimeReady / failure Done emitted after the probe
+        // still reaches the bridge before it finalises the inflight.
+        // If this assertion fails, the post-turn handoff race
+        // documented in `execute_streaming_local_tui_tmux` will
+        // silently drop frames — keep the probe strictly under
+        // 250ms or revisit the bridge drain window first.
+        assert!(
+            PromptReadinessKind::PostTurnHandoff.timeout() < Duration::from_millis(250),
+            "post-turn handoff probe must stay strictly under the 250ms bridge drain window"
+        );
     }
 
     #[test]
