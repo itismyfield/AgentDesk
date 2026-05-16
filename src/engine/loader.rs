@@ -115,6 +115,21 @@ pub fn load_policies_from_dir(ctx: &Context, dir: &Path) -> Result<Vec<LoadedPol
 /// Used by hot-reload pre-validation so the previous loaded version can be
 /// preserved on failure.
 pub fn load_policies_from_dir_validated(ctx: &Context, dir: &Path) -> Result<Vec<LoadedPolicy>> {
+    load_policies_from_dir_validated_inner(ctx, dir, None)
+}
+
+/// Internal variant of `load_policies_from_dir_validated` that optionally
+/// arms a QuickJS interrupt deadline around each policy's `eval` call. The
+/// deadline is armed *inside* `ctx.with(...)` (i.e. while we already hold
+/// the runtime lock) and cleared immediately after eval returns — that way
+/// the deadline can NEVER expire while an unrelated live policy hook is the
+/// currently-executing JS on the runtime, which is the false-positive
+/// scenario Codex flagged in round-3 review of #2372.
+pub(crate) fn load_policies_from_dir_validated_inner(
+    ctx: &Context,
+    dir: &Path,
+    eval_deadline: Option<&Arc<AtomicU64>>,
+) -> Result<Vec<LoadedPolicy>> {
     let mut policies = Vec::new();
 
     if !dir.exists() {
@@ -131,7 +146,7 @@ pub fn load_policies_from_dir_validated(ctx: &Context, dir: &Path) -> Result<Vec
     for path in entries {
         // Syntax + eval check: any single-file load error fails the whole
         // pre-validation so the previously loaded set stays intact.
-        let policy = load_single_policy(ctx, &path)
+        let policy = load_single_policy_with_deadline(ctx, &path, eval_deadline)
             .map_err(|e| anyhow::anyhow!("policy {} failed to load: {e}", path.display()))?;
         policies.push(policy);
     }
@@ -147,6 +162,19 @@ pub fn load_policies_from_dir_validated(ctx: &Context, dir: &Path) -> Result<Vec
 
 /// Load a single policy file.
 pub fn load_single_policy(ctx: &Context, path: &Path) -> Result<LoadedPolicy> {
+    load_single_policy_with_deadline(ctx, path, None)
+}
+
+/// Internal variant of `load_single_policy` that optionally arms a per-eval
+/// wall-clock deadline. The deadline is armed only after `ctx.with(...)`
+/// has acquired the runtime lock and is cleared immediately after the
+/// `eval_with_options` call returns, so the global interrupt handler can
+/// never tear down an unrelated live hook running on the same runtime.
+pub(crate) fn load_single_policy_with_deadline(
+    ctx: &Context,
+    path: &Path,
+    eval_deadline: Option<&Arc<AtomicU64>>,
+) -> Result<LoadedPolicy> {
     let source = std::fs::read_to_string(path)?;
     let file_name = path
         .file_stem()
@@ -175,7 +203,25 @@ pub fn load_single_policy(ctx: &Context, path: &Path) -> Result<LoadedPolicy> {
             )
             .map_err(|e| anyhow::anyhow!("failed to set up registerPolicy: {e}"))?;
 
-        // Evaluate the policy file (non-strict so policies can use sloppy mode)
+        // Evaluate the policy file (non-strict so policies can use sloppy mode).
+        // #2372 round-3: arm the deadline ONLY here, after `ctx.with` has
+        // acquired the runtime lock. The interrupt handler installed by
+        // `start_hot_reload` checks the deadline on every bytecode tick,
+        // and dropping `_deadline_guard` clears the slot back to 0. This
+        // guarantees the deadline can never expire while an unrelated live
+        // hook is the currently-running JS on the runtime — the only JS
+        // that can be executing between arm and disarm is *this* policy
+        // file's pre-validation, because we hold the lock.
+        //
+        // #2378 (Codex follow-up): the guard's scope extends through ALL
+        // subsequent `policy_obj.get(...)` / `keys()` calls below. Property
+        // access on the captured object can invoke user-defined getters or
+        // Proxy traps that re-enter JS (`while(true){}`, `agentdesk.exec`,
+        // etc.), and without coverage those re-entries would run completely
+        // unbounded. The guard is therefore dropped only after all
+        // user-controlled property reads have completed.
+        let _deadline_guard =
+            eval_deadline.map(|slot| ArmedDeadline::new(slot, HOT_RELOAD_EVAL_BUDGET));
         let mut eval_opts = rquickjs::context::EvalOptions::default();
         eval_opts.strict = false;
         let eval_result: rquickjs::Result<rquickjs::Value> =
@@ -642,7 +688,46 @@ pub(crate) fn install_policy_module_loader(
 // ── Hot reload via notify ────────────────────────────────────────
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// Default wall-clock budget for a single hot-reload pre-validation eval.
+/// A policy that runs longer than this is considered runaway and is aborted
+/// by the QuickJS interrupt handler installed in `start_hot_reload`. Picked
+/// to be comfortably above any realistic policy `registerPolicy()` call
+/// (which is structurally just a function definition + a single side-effect
+/// assignment) while still keeping a wedged engine from blocking live
+/// policy execution for more than a couple of seconds (#2372).
+const HOT_RELOAD_EVAL_BUDGET: Duration = Duration::from_secs(2);
+
+/// Monotonic reference instant used to encode QuickJS interrupt deadlines as
+/// a single `AtomicU64` of milliseconds-since-reference. Lazily initialised
+/// the first time a deadline is armed.
+fn deadline_reference() -> Instant {
+    use std::sync::OnceLock;
+    static REF: OnceLock<Instant> = OnceLock::new();
+    *REF.get_or_init(Instant::now)
+}
+
+/// Encode an `Instant` as millis-since the deadline reference for storage in
+/// an `AtomicU64`. The reference is initialised on first use so the encoded
+/// value is always non-negative.
+fn encode_deadline(deadline: Instant) -> u64 {
+    deadline
+        .saturating_duration_since(deadline_reference())
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+/// Returns `true` when the encoded deadline (millis-since-reference) is set
+/// and has already passed. A value of `0` means no deadline is armed.
+fn deadline_reached(encoded: u64) -> bool {
+    if encoded == 0 {
+        return false;
+    }
+    let elapsed = deadline_reference().elapsed().as_millis();
+    elapsed >= encoded as u128
+}
 
 /// Guard for the hot-reload subsystem.
 ///
@@ -666,6 +751,14 @@ pub struct HotReloadGuard {
     watcher: Option<RecommendedWatcher>,
     join: Option<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
+    /// Encoded wall-clock deadline (millis-since `deadline_reference()`) for
+    /// the currently-running QuickJS eval. `0` means no deadline is armed.
+    /// Set before hot-reload pre-validation and cleared once eval returns —
+    /// the interrupt handler reads this on every QuickJS bytecode tick and
+    /// aborts the eval once the deadline passes (#2372). Exposed on the
+    /// guard so tests and callers can arm a deadline for live evals running
+    /// on the shared runtime.
+    eval_deadline: Arc<AtomicU64>,
 }
 
 impl HotReloadGuard {
@@ -740,18 +833,33 @@ pub fn start_hot_reload(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_worker = stop.clone();
     let stop_interrupt = stop.clone();
+    // Per-eval wall-clock deadline shared with the interrupt handler. `0`
+    // means no deadline armed; any non-zero value is the deadline encoded
+    // as millis-since `deadline_reference()`. The worker arms this before
+    // each hot-reload pre-validation and clears it on completion, but the
+    // arc is also exposed on the guard so live engine callers can arm a
+    // deadline of their own for any other eval that runs on this runtime.
+    let eval_deadline = Arc::new(AtomicU64::new(0));
+    let eval_deadline_worker = eval_deadline.clone();
+    let eval_deadline_interrupt = eval_deadline.clone();
     // Install a QuickJS interrupt handler that aborts any in-flight `eval`
-    // as soon as `stop` is set. This is the mechanism that makes
-    // `HotReloadGuard::shutdown` actually leak-proof when a hot-reloaded
-    // policy contains a runaway loop — without it the worker would never
-    // observe the loop-level stop check and engine drop would block
-    // forever (Codex adversarial review for #2200 sub-fix 2). The handler
-    // lives on the Runtime so it also covers main-engine evals, which is
-    // safe: `stop` is only set when the engine is already being torn down,
-    // by which point the actor has been told to shut down and no caller
-    // expects JS to continue executing.
+    // when EITHER the shutdown flag is set OR the per-eval deadline has
+    // passed. The shutdown leg keeps `HotReloadGuard::shutdown` leak-proof
+    // against runaway hot-reload evals (#2200 sub-fix 2). The deadline leg
+    // additionally protects the LIVE engine: if a hot-reloaded policy
+    // contains `while (true) {}` we must abort it without waiting for
+    // shutdown to be requested — otherwise it would hold the runtime lock
+    // and stall live policy execution indefinitely (#2372 follow-up).
+    //
+    // The handler lives on the Runtime so it also covers main-engine evals,
+    // which is safe: the `stop` flag is only set when the engine is being
+    // torn down, and the deadline is only non-zero when a caller explicitly
+    // armed one for a bounded eval (see `arm_eval_deadline`).
     ctx.runtime().set_interrupt_handler(Some(Box::new(move || {
-        stop_interrupt.load(Ordering::Acquire)
+        if stop_interrupt.load(Ordering::Acquire) {
+            return true;
+        }
+        deadline_reached(eval_deadline_interrupt.load(Ordering::Acquire))
     })));
     // Spawn a background thread to process file-change events
     let dir = policies_dir.clone();
@@ -792,7 +900,18 @@ pub fn start_hot_reload(
                         // Hot-reload pre-validation (#1079): syntax/eval check
                         // plus hook orchestration conflict check. If either
                         // fails we keep the currently loaded version.
-                        match load_policies_from_dir_validated(&ctx, &dir) {
+                        //
+                        // #2372: pass the shared deadline slot through so the
+                        // per-policy eval inside `load_single_policy_with_deadline`
+                        // can arm a wall-clock interrupt *after* it holds the
+                        // runtime lock. Arming here would let the deadline
+                        // expire while waiting for the lock and interrupt an
+                        // unrelated live hook — see #2372 round-3 review.
+                        match load_policies_from_dir_validated_inner(
+                            &ctx,
+                            &dir,
+                            Some(&eval_deadline_worker),
+                        ) {
                             Ok(new_policies) => {
                                 let count = new_policies.len();
                                 if let Ok(mut guard) = store.lock() {
@@ -827,7 +946,120 @@ pub fn start_hot_reload(
         watcher: Some(watcher),
         join: Some(join),
         stop,
+        eval_deadline,
     })
+}
+
+/// RAII helper for arming the shared `eval_deadline` AtomicU64 around a
+/// bounded JS eval. The interrupt handler installed by `start_hot_reload`
+/// aborts the eval once the encoded deadline passes; the guard clears the
+/// deadline back to `0` on drop so subsequent (potentially long-running)
+/// evals on the same runtime are not affected.
+///
+/// In addition to the AtomicU64 (which the QuickJS interrupt handler reads
+/// on every bytecode tick), the guard also installs the deadline into a
+/// thread-local so synchronous native bridge ops invoked by JS on this
+/// thread can observe it. This is required because the interrupt handler
+/// only fires between bytecode instructions — a Rust function called from
+/// JS holds the runtime lock for its entire duration and can otherwise
+/// blow past the deadline (#2378).
+struct ArmedDeadline<'a> {
+    slot: &'a Arc<AtomicU64>,
+    previous_thread_local: Option<Instant>,
+}
+
+impl<'a> ArmedDeadline<'a> {
+    fn new(slot: &'a Arc<AtomicU64>, budget: Duration) -> Self {
+        let deadline = Instant::now() + budget;
+        slot.store(encode_deadline(deadline), Ordering::Release);
+        let previous_thread_local =
+            CURRENT_BRIDGE_DEADLINE.with(|cell| cell.replace(Some(deadline)));
+        Self {
+            slot,
+            previous_thread_local,
+        }
+    }
+}
+
+impl<'a> Drop for ArmedDeadline<'a> {
+    fn drop(&mut self) {
+        self.slot.store(0, Ordering::Release);
+        let previous = self.previous_thread_local.take();
+        CURRENT_BRIDGE_DEADLINE.with(|cell| cell.set(previous));
+    }
+}
+
+thread_local! {
+    /// Per-thread deadline for synchronous native bridge ops. Set by
+    /// `ArmedDeadline::new` when a bounded JS eval is in flight on this
+    /// thread, cleared (or restored to the previous nested value) on drop.
+    /// Bridge ops read this via [`bridge_op_deadline`] to bound their own
+    /// internal timeouts and to fail fast when the deadline has passed —
+    /// the QuickJS interrupt handler can't fire while Rust is running, so
+    /// bridge ops must enforce the deadline themselves (#2378).
+    static CURRENT_BRIDGE_DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Returns the current thread's bridge-op deadline, if a bounded JS eval is
+/// in flight on this thread. Bridge ops should call this before performing
+/// long synchronous work and either:
+///   1. Return an error immediately if the deadline has already passed.
+///   2. Shorten their internal timeout to fit within the remaining budget.
+///
+/// Returns `None` if no deadline is armed — bridge ops should retain their
+/// default timeout behaviour in that case (e.g. live-engine policy hooks
+/// invoked outside of hot-reload pre-validation).
+pub(crate) fn bridge_op_deadline() -> Option<Instant> {
+    CURRENT_BRIDGE_DEADLINE.with(|cell| cell.get())
+}
+
+/// Returns the remaining bridge-op budget, or `Some(Duration::ZERO)` if the
+/// deadline has already passed. Returns `None` if no deadline is armed.
+pub(crate) fn bridge_op_deadline_remaining() -> Option<Duration> {
+    bridge_op_deadline().map(|deadline| {
+        deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO)
+    })
+}
+
+/// Test-only RAII helper that installs a thread-local bridge-op deadline so
+/// `engine::ops::*` modules can exercise their deadline-clamping paths
+/// without spinning up a full `HotReloadGuard`. Restores any previously
+/// installed deadline on drop.
+#[cfg(test)]
+pub(crate) struct ScopedBridgeDeadline {
+    previous: Option<Instant>,
+}
+
+#[cfg(test)]
+impl ScopedBridgeDeadline {
+    pub(crate) fn new(budget: Duration) -> Self {
+        let deadline = Instant::now() + budget;
+        let previous = CURRENT_BRIDGE_DEADLINE.with(|cell| cell.replace(Some(deadline)));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedBridgeDeadline {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        CURRENT_BRIDGE_DEADLINE.with(|cell| cell.set(previous));
+    }
+}
+
+impl HotReloadGuard {
+    /// Arm the shared QuickJS interrupt deadline for the next `budget` worth
+    /// of wall-clock time. The interrupt handler installed by
+    /// `start_hot_reload` watches this deadline on every bytecode tick and
+    /// aborts the in-flight eval once it passes — protecting the live
+    /// engine from runaway hot-reloaded policies (#2372). The deadline is
+    /// cleared automatically when the returned guard drops.
+    #[cfg(test)]
+    pub(crate) fn arm_eval_deadline(&self, budget: Duration) -> impl Drop + '_ {
+        ArmedDeadline::new(&self.eval_deadline, budget)
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -918,6 +1150,223 @@ mod tests {
         }
     }
 
+    /// #2372: the QuickJS interrupt handler must fire when a per-eval
+    /// deadline passes, even if the guard's shutdown flag is still `false`.
+    /// This is the live-engine failure mode Codex flagged: a hot-reloaded
+    /// policy containing `while (true) {}` must not stall the runtime
+    /// until shutdown is triggered.
+    #[test]
+    fn hot_reload_guard_interrupts_runaway_eval_on_deadline_without_shutdown() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+
+        // Arm a tight per-eval deadline (100ms) WITHOUT requesting shutdown.
+        // The interrupt handler must abort the runaway loop based on the
+        // deadline alone.
+        let _armed = guard.arm_eval_deadline(Duration::from_millis(100));
+
+        let start = Instant::now();
+        let probe_ctx = Context::full(&runtime).expect("create probe context");
+        let is_err = probe_ctx.with(|c| {
+            let result: rquickjs::Result<rquickjs::Value<'_>> =
+                c.eval::<rquickjs::Value<'_>, _>("while (true) {}");
+            result.is_err()
+        });
+        let elapsed = start.elapsed();
+        drop(probe_ctx);
+
+        assert!(
+            is_err,
+            "deadline-based interrupt did not abort runaway eval (shutdown was never requested)"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "deadline-based interrupt fired too late: {elapsed:?} (expected <2s for a 100ms deadline)"
+        );
+
+        // Tear down cleanly so the runtime can drop without UAF.
+        drop(_armed);
+        drop(guard);
+        drop(runtime);
+    }
+
+    /// #2372: a legitimate fast eval that completes well within the budget
+    /// must NOT be interrupted by the deadline. Guards against a false
+    /// positive rate where slow-but-legitimate JS policies are aborted.
+    #[test]
+    fn hot_reload_guard_deadline_does_not_interrupt_fast_eval() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+
+        let _armed = guard.arm_eval_deadline(Duration::from_secs(5));
+        let probe_ctx = Context::full(&runtime).expect("create probe context");
+        let value: i32 = probe_ctx
+            .with(|c| c.eval::<i32, _>("1 + 2"))
+            .expect("fast eval should not be interrupted");
+        assert_eq!(value, 3);
+        drop(probe_ctx);
+
+        drop(_armed);
+        drop(guard);
+        drop(runtime);
+    }
+
+    /// #2372: when no deadline is armed (encoded value `0`) and shutdown is
+    /// not requested, the interrupt handler must return `false` for evals of
+    /// any duration. This is the steady-state behaviour for live engine
+    /// eval calls that don't opt in to deadline protection.
+    #[test]
+    fn hot_reload_guard_no_deadline_means_no_interrupt() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+
+        // No deadline armed. A short busy-loop must complete normally.
+        let probe_ctx = Context::full(&runtime).expect("create probe context");
+        let value: i32 = probe_ctx
+            .with(|c| c.eval::<i32, _>("var s=0; for (var i=0;i<10000;i++) { s = (s+i)|0; } s"))
+            .expect("eval with no deadline should not be interrupted");
+        assert!(value != 0);
+        drop(probe_ctx);
+
+        drop(guard);
+        drop(runtime);
+    }
+
+    /// #2372 round-3 (Codex follow-up): the scope-bound deadline path —
+    /// `load_single_policy_with_deadline` — must interrupt a runaway policy
+    /// eval based on the wall-clock budget alone. Mirrors the live-engine
+    /// failure mode without relying on the file watcher (which is
+    /// platform-dependent and racy).
+    ///
+    /// We run the load on a fresh probe context (cloned from the runtime)
+    /// so the interrupted eval's partial state can be torn down with the
+    /// probe context before the outer runtime drops — same pattern the
+    /// shutdown-interrupt test uses for QuickJS hygiene.
+    #[test]
+    fn load_single_policy_with_deadline_interrupts_runaway_policy() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // start_hot_reload installs the deadline-aware interrupt handler on
+        // the shared runtime.
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let deadline_slot = guard.eval_deadline.clone();
+
+        let policy_file = tmp.path().join("runaway.js");
+        std::fs::write(&policy_file, "while (true) {}").expect("write runaway policy");
+
+        // Run the runaway-load on a separate context tied to the same
+        // runtime so we can drop the partial state before the runtime
+        // tears down. Wrap in a thread so a bug in the interrupt wiring
+        // would manifest as a hang rather than the whole suite freezing.
+        let runtime_for_thread = runtime.clone();
+        let load_thread = std::thread::spawn(move || {
+            let probe_ctx = Context::full(&runtime_for_thread).expect("probe context");
+            let start = Instant::now();
+            let result =
+                load_single_policy_with_deadline(&probe_ctx, &policy_file, Some(&deadline_slot));
+            let elapsed = start.elapsed();
+            // Drop the probe context inside the thread so its partial state
+            // is reclaimed before the runtime drops in the parent.
+            drop(probe_ctx);
+            (result.is_err(), elapsed)
+        });
+        let join_deadline = Instant::now() + HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3);
+        loop {
+            if load_thread.is_finished() {
+                break;
+            }
+            assert!(
+                Instant::now() < join_deadline,
+                "scope-bound deadline interrupt did not fire within budget+3s"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (is_err, elapsed) = load_thread.join().expect("load thread join");
+        assert!(
+            is_err,
+            "runaway policy should fail to load (deadline interrupt expected)"
+        );
+        assert!(
+            elapsed < HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(1),
+            "deadline-based interrupt fired too late: {elapsed:?} (budget {HOT_RELOAD_EVAL_BUDGET:?})"
+        );
+
+        drop(guard);
+        drop(runtime);
+    }
+
+    /// #2372 round-3 (Codex follow-up): the deadline must be scoped to the
+    /// loader's `ctx.with()` eval — it must NEVER fire while an unrelated
+    /// live hook is the currently-executing JS on the same runtime. This
+    /// test arms the deadline-aware handler, then runs a slow-but-legitimate
+    /// "live hook" eval on the runtime *before* invoking the loader. The
+    /// slow eval must complete without interruption because the deadline
+    /// slot is only set between the loader's `ctx.with` entry and its
+    /// `eval_with_options` return.
+    #[test]
+    fn hot_reload_deadline_does_not_interrupt_concurrent_live_hook() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+
+        // Sanity: the deadline slot is 0 (no deadline armed) for the entire
+        // duration of this live eval, because we never call the loader and
+        // never invoke `arm_eval_deadline`. The handler must therefore
+        // return false on every bytecode tick.
+        assert_eq!(guard.eval_deadline.load(Ordering::Acquire), 0);
+
+        // Mirror the shutdown-interrupt test's hygiene pattern: run the
+        // live eval on a fresh probe context tied to the same runtime and
+        // drop it before tearing down the runtime so any partial JS state
+        // is reclaimed in order. This is the live-engine analogue (no
+        // shutdown is requested) of the existing during-shutdown test.
+        let probe_ctx = Context::full(&runtime).expect("create probe context");
+        let start = Instant::now();
+        let result: i32 = probe_ctx
+            .with(|c| {
+                // Moderately slow but bounded JS work — well within what a
+                // real policy hook might do (~50ms of pure JS busy loop).
+                c.eval::<i32, _>("var s=0; for (var i=0;i<500000;i++) { s = (s + i) | 0; } s")
+            })
+            .expect("legitimate live eval should not be interrupted");
+        let elapsed = start.elapsed();
+        let _ = result;
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "legitimate live eval took unexpectedly long: {elapsed:?}"
+        );
+        // Slot remained 0 throughout — proves the deadline was never armed
+        // outside the loader path.
+        assert_eq!(guard.eval_deadline.load(Ordering::Acquire), 0);
+
+        drop(probe_ctx);
+        drop(guard);
+        drop(runtime);
+    }
+
     #[test]
     fn hot_reload_guard_explicit_shutdown_is_idempotent() {
         let runtime = Runtime::new().expect("create QuickJS runtime");
@@ -931,6 +1380,136 @@ mod tests {
         // Calling shutdown explicitly then dropping must not panic, even
         // when the implicit Drop runs a second shutdown.
         guard.shutdown();
+        drop(guard);
+        drop(runtime);
+    }
+
+    /// #2378: synchronous native bridge ops must observe the bridge-op
+    /// deadline that's armed for the currently-running JS eval. The
+    /// QuickJS interrupt handler can't fire while Rust is running, so we
+    /// rely on bridge ops to consult `bridge_op_deadline_remaining()` and
+    /// either short-circuit or clamp their own internal timeout.
+    ///
+    /// This test verifies the load-bearing contract directly: while an
+    /// `ArmedDeadline` is in scope on this thread, the public
+    /// `bridge_op_deadline_remaining()` helper returns a budget that
+    /// shrinks monotonically and becomes zero once the deadline passes.
+    /// After the guard drops, the helper returns `None` again so live
+    /// engine bridge ops are not affected.
+    #[test]
+    fn bridge_op_deadline_visible_to_native_ops_while_armed() {
+        assert!(
+            bridge_op_deadline_remaining().is_none(),
+            "no deadline should be armed at test start"
+        );
+
+        let slot = Arc::new(AtomicU64::new(0));
+        {
+            let _armed = ArmedDeadline::new(&slot, Duration::from_millis(200));
+
+            // Immediately after arming, the remaining budget must be positive
+            // and bounded by the original budget. Use a generous upper bound
+            // (the requested budget) since `Instant::now()` may advance
+            // between `ArmedDeadline::new` and this read.
+            let initial = bridge_op_deadline_remaining()
+                .expect("deadline should be visible to bridge ops while armed");
+            assert!(
+                initial > Duration::ZERO && initial <= Duration::from_millis(200),
+                "initial bridge-op budget out of range: {initial:?}"
+            );
+
+            // Sleep past the deadline; the helper must now report a zero
+            // remaining budget so synchronous bridge ops short-circuit.
+            std::thread::sleep(Duration::from_millis(250));
+            let after_deadline = bridge_op_deadline_remaining()
+                .expect("deadline should still be visible after it has passed");
+            assert!(
+                after_deadline.is_zero(),
+                "bridge-op deadline should report zero remaining after expiry, got {after_deadline:?}"
+            );
+        }
+
+        assert!(
+            bridge_op_deadline_remaining().is_none(),
+            "deadline must clear once ArmedDeadline drops so live ops are unaffected"
+        );
+        // The shared AtomicU64 slot must also be cleared so the interrupt
+        // handler sees `0` (no deadline armed) on subsequent ticks.
+        assert_eq!(
+            slot.load(Ordering::Acquire),
+            0,
+            "ArmedDeadline drop must reset the shared deadline slot"
+        );
+    }
+
+    /// #2378 (Codex follow-up): a policy whose `name` getter contains an
+    /// infinite loop must be interrupted by the deadline. Prior to this
+    /// fix the deadline guard was dropped immediately after
+    /// `eval_with_options` returned, so the subsequent `policy_obj.get(...)`
+    /// — which actually invokes the user's getter — ran completely
+    /// unbounded. This regression test exercises the full hot-reload load
+    /// path on disk with a runaway getter to confirm the deadline covers
+    /// it.
+    #[test]
+    fn load_single_policy_deadline_covers_user_property_getters() {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let guard =
+            start_hot_reload(tmp.path().to_path_buf(), ctx, store).expect("start hot reload");
+        let deadline_slot = guard.eval_deadline.clone();
+
+        // Policy whose `name` accessor spins forever. The eval itself
+        // returns immediately (registerPolicy completes), so the deadline
+        // must remain armed through the subsequent `policy_obj.get("name")`
+        // for the spin to be interrupted.
+        let policy_file = tmp.path().join("runaway_getter.js");
+        std::fs::write(
+            &policy_file,
+            r#"
+                agentdesk.registerPolicy({
+                    get name() {
+                        while (true) {}
+                    }
+                });
+            "#,
+        )
+        .expect("write runaway-getter policy");
+
+        let runtime_for_thread = runtime.clone();
+        let load_thread = std::thread::spawn(move || {
+            let probe_ctx = Context::full(&runtime_for_thread).expect("probe context");
+            let start = Instant::now();
+            let result =
+                load_single_policy_with_deadline(&probe_ctx, &policy_file, Some(&deadline_slot));
+            let elapsed = start.elapsed();
+            drop(probe_ctx);
+            (result.is_err(), elapsed)
+        });
+
+        let join_deadline = Instant::now() + HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3);
+        loop {
+            if load_thread.is_finished() {
+                break;
+            }
+            assert!(
+                Instant::now() < join_deadline,
+                "deadline did not cover user-controlled property getter within budget+3s"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (is_err, elapsed) = load_thread.join().expect("load thread join");
+        assert!(
+            is_err,
+            "runaway getter should propagate as a load error (deadline interrupt expected)"
+        );
+        assert!(
+            elapsed < HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(1),
+            "deadline fired too late on getter: {elapsed:?} (budget {HOT_RELOAD_EVAL_BUDGET:?})"
+        );
+
         drop(guard);
         drop(runtime);
     }
