@@ -1,51 +1,26 @@
-import { useEffect, useState } from "react";
-import type {
-  Agent,
-  AuditLogEntry,
-  CompanySettings,
-  DashboardStats,
-  Department,
-  DispatchedSession,
-  KanbanCard,
-  Office,
-  RoundTableMeeting,
-  TaskDispatch,
-  WSEvent,
-} from "./types";
-import { DEFAULT_SETTINGS } from "./types";
-import * as api from "./api/client";
+import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import type { KanbanCard, WSEvent } from "./types";
 import { onApiError } from "./api/client";
 import { KanbanProvider } from "./contexts/KanbanContext";
 import { OfficeProvider } from "./contexts/OfficeContext";
 import { SettingsProvider } from "./contexts/SettingsContext";
-import {
-  type Notification,
-  useNotifications,
-} from "./components/NotificationCenter";
+import { useNotifications } from "./components/NotificationCenter";
 import { useDashboardSocket } from "./app/useDashboardSocket";
+import {
+  dashboardBootstrapQueryKey,
+  fetchDashboardBootstrap,
+} from "./app/bootstrapQuery";
 import AppShell from "./app/AppShell";
 import { useI18n } from "./i18n";
 
-interface BootstrapData {
-  offices: Office[];
-  agents: Agent[];
-  allAgents: Agent[];
-  departments: Department[];
-  allDepartments: Department[];
-  sessions: DispatchedSession[];
-  stats: DashboardStats | null;
-  settings: CompanySettings;
-  roundTableMeetings: RoundTableMeeting[];
-  auditLogs: AuditLogEntry[];
-  kanbanCards: KanbanCard[];
-  taskDispatches: TaskDispatch[];
-  selectedOfficeId: string | null;
-}
-
 export default function App() {
-  const [data, setData] = useState<BootstrapData | null>(null);
   const { notifications, pushNotification, updateNotification, dismissNotification } =
     useNotifications();
+  const bootstrapQuery = useQuery({
+    queryKey: dashboardBootstrapQueryKey,
+    queryFn: fetchDashboardBootstrap,
+  });
 
   useEffect(() => {
     const lastFired = new Map<string, number>();
@@ -66,86 +41,6 @@ export default function App() {
     return () => onApiError(null);
   }, [pushNotification]);
 
-  useEffect(() => {
-    (async () => {
-      // #2050 P2 finding 7 — guard every bootstrap call individually so a
-      // single API hiccup (e.g. /api/settings 500) no longer wipes the
-      // whole dashboard.
-      const safe = <T,>(p: Promise<T>, fallback: T): Promise<T> =>
-        p.catch((err) => {
-          console.warn("[bootstrap] partial failure:", err);
-          return fallback;
-        });
-
-      try {
-        await safe(api.getSession(), { ok: false, csrf_token: "" });
-        const offices = await safe(api.getOffices(), [] as Office[]);
-        const defaultOfficeId = offices.length > 0 ? offices[0].id : undefined;
-        const [
-          allAgents,
-          agents,
-          allDepartments,
-          departments,
-          sessions,
-          stats,
-          settings,
-          meetings,
-          logs,
-          cards,
-          dispatches,
-        ] = await Promise.all([
-          safe(api.getAgents(), [] as Agent[]),
-          safe(api.getAgents(defaultOfficeId), [] as Agent[]),
-          safe(api.getDepartments(), [] as Department[]),
-          safe(api.getDepartments(defaultOfficeId), [] as Department[]),
-          safe(api.getDispatchedSessions(true), [] as DispatchedSession[]),
-          safe(api.getStats(defaultOfficeId), null as DashboardStats | null),
-          safe(api.getSettings(), DEFAULT_SETTINGS as Partial<CompanySettings>),
-          safe(api.getRoundTableMeetings(), [] as RoundTableMeeting[]),
-          safe(api.getAuditLogs(12), [] as AuditLogEntry[]),
-          safe(api.getKanbanCards(), [] as KanbanCard[]),
-          safe(api.getTaskDispatches({ limit: 200 }), [] as TaskDispatch[]),
-        ]);
-        const resolvedSettings = {
-          ...DEFAULT_SETTINGS,
-          ...settings,
-        } as CompanySettings;
-        setData({
-          offices,
-          agents,
-          allAgents,
-          departments,
-          allDepartments,
-          sessions,
-          stats,
-          settings: resolvedSettings,
-          roundTableMeetings: meetings,
-          auditLogs: logs,
-          kanbanCards: cards,
-          taskDispatches: dispatches,
-          selectedOfficeId: defaultOfficeId ?? null,
-        });
-      } catch (error) {
-        console.error("Bootstrap failed:", error);
-        setData({
-          offices: [],
-          agents: [],
-          allAgents: [],
-          departments: [],
-          allDepartments: [],
-          sessions: [],
-          stats: null,
-          settings: DEFAULT_SETTINGS,
-          roundTableMeetings: [],
-          auditLogs: [],
-          kanbanCards: [],
-          taskDispatches: [],
-          selectedOfficeId: null,
-        });
-      }
-    })();
-  }, []);
-
   const handleWsEvent = (event: WSEvent) => {
     if (event.type === "kanban_card_created") {
       const card = event.payload as KanbanCard;
@@ -157,6 +52,7 @@ export default function App() {
 
   const { wsConnected } = useDashboardSocket(handleWsEvent);
   const { t } = useI18n();
+  const data = bootstrapQuery.data;
 
   if (!data) {
     return (

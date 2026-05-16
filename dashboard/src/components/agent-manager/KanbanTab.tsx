@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../../api";
 import type { DispatchDeliveryEvent, GitHubIssue, GitHubRepoOption, KanbanRepoSource } from "../../api";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
@@ -157,6 +158,7 @@ const SURFACE_CHIP_STYLE = {
 } as const;
 
 const DELIVERY_EVENTS_POLL_MS = 5_000;
+const CARD_COMMENTS_STALE_MS = 5 * 60_000;
 
 const SURFACE_GHOST_BUTTON_STYLE = {
   background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
@@ -168,6 +170,46 @@ const SURFACE_MODAL_CARD_STYLE = {
     "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
   borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
 } as const;
+
+const kanbanCardActivityQueryKey = (cardId: string) =>
+  ["kanban", "card", cardId, "activity"] as const;
+const kanbanCardAuditLogQueryKey = (cardId: string) =>
+  [...kanbanCardActivityQueryKey(cardId), "audit-log"] as const;
+const kanbanCardGitHubCommentsQueryKey = (cardId: string) =>
+  [...kanbanCardActivityQueryKey(cardId), "github-comments"] as const;
+const kanbanCardReviewsQueryKey = (cardId: string) =>
+  [...kanbanCardActivityQueryKey(cardId), "reviews"] as const;
+
+function latestActionableReview(reviews: KanbanReview[]): KanbanReview | null {
+  return reviews
+    .filter((review) =>
+      review.verdict === "improve" ||
+      review.verdict === "dilemma" ||
+      review.verdict === "mixed" ||
+      review.verdict === "decided",
+    )
+    .sort((a, b) => b.round - a.round)[0] ?? null;
+}
+
+function reviewDecisionMap(review: KanbanReview | null): Record<string, "accept" | "reject"> {
+  if (!review?.items_json) return {};
+  try {
+    const items = JSON.parse(review.items_json) as Array<{
+      id: string;
+      category: string;
+      decision?: string;
+    }>;
+    const decisions: Record<string, "accept" | "reject"> = {};
+    for (const item of items) {
+      if (item.decision === "accept" || item.decision === "reject") {
+        decisions[item.id] = item.decision;
+      }
+    }
+    return decisions;
+  } catch {
+    return {};
+  }
+}
 
 export default function KanbanTab({
   tr,
@@ -185,6 +227,7 @@ export default function KanbanTab({
   externalStatusFocus,
   onClearSignalFocus,
 }: KanbanTabProps) {
+  const queryClient = useQueryClient();
   const LIVE_TURN_POLL_MS = 4_000;
   const [repoSources, setRepoSources] = useState<KanbanRepoSource[]>([]);
   const [repoInput, setRepoInput] = useState("");
@@ -223,7 +266,6 @@ export default function KanbanTab({
   const [headerOpen, setHeaderOpen] = useLocalStorage<boolean>(STORAGE_KEYS.kanbanHeaderOpen, false);
   const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false);
   const advancedFiltersRef = useRef<HTMLDivElement | null>(null);
-  const [reviewData, setReviewData] = useState<KanbanReview | null>(null);
   const [reviewDecisions, setReviewDecisions] = useState<Record<string, "accept" | "reject">>({});
   const [reviewBusy, setReviewBusy] = useState(false);
   const [recentDonePage, setRecentDonePage] = useState(0);
@@ -236,8 +278,6 @@ export default function KanbanTab({
   const [assignBeforeReady, setAssignBeforeReady] = useState<{ cardId: string; agentId: string } | null>(null);
   const [cancelConfirm, setCancelConfirm] = useState<{ cardIds: string[]; source: "bulk" | "single" } | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
-  const [auditLog, setAuditLog] = useState<api.CardAuditLogEntry[]>([]);
-  const [ghComments, setGhComments] = useState<api.GitHubComment[]>([]);
   const [deliveryEventsState, setDeliveryEventsState] = useState<DeliveryEventsLoadState<DispatchDeliveryEvent>>(
     () => createDeliveryEventsLoadState(),
   );
@@ -246,10 +286,8 @@ export default function KanbanTab({
   const [activityRefreshTick, setActivityRefreshTick] = useState(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [liveTurnsByAgentId, setLiveTurnsByAgentId] = useState<Record<string, api.AgentTurnState>>({});
-  const ghCommentsCache = useRef<Map<string, { comments: api.GitHubComment[]; body: string; ts: number }>>(new Map());
   const deliveryEventsStateRef = useRef(deliveryEventsState);
   const deliveryEventsPanelRef = useRef<HTMLDivElement | null>(null);
-  const detailRequestSeq = useRef(0);
   const commitDeliveryEventsState = useCallback((
     updater: (prev: DeliveryEventsLoadState<DispatchDeliveryEvent>) => DeliveryEventsLoadState<DispatchDeliveryEvent>,
   ) => {
@@ -300,12 +338,47 @@ export default function KanbanTab({
 
   const selectedCardId = typeof storedSelectedCardId === "string" ? storedSelectedCardId : null;
   const selectedCard = selectedCardId ? cardsById.get(selectedCardId) ?? null : null;
-  const invalidateCardActivity = (cardId: string) => {
-    ghCommentsCache.current.delete(cardId);
+  const selectedCardNeedsReviewData =
+    selectedCard?.review_status === "suggestion_pending" ||
+    selectedCard?.review_status === "dilemma_pending" ||
+    selectedCard?.review_status === "decided";
+  const auditLogQuery = useQuery({
+    queryKey: selectedCardId
+      ? kanbanCardAuditLogQueryKey(selectedCardId)
+      : ["kanban", "card", "none", "activity", "audit-log"],
+    queryFn: () => api.getCardAuditLog(selectedCardId!),
+    enabled: Boolean(selectedCardId),
+    staleTime: 60_000,
+  });
+  const githubCommentsQuery = useQuery({
+    queryKey: selectedCardId
+      ? kanbanCardGitHubCommentsQueryKey(selectedCardId)
+      : ["kanban", "card", "none", "activity", "github-comments"],
+    queryFn: () => api.getCardGitHubComments(selectedCardId!),
+    enabled: Boolean(selectedCardId && selectedCard?.github_issue_number),
+    staleTime: CARD_COMMENTS_STALE_MS,
+  });
+  const reviewsQuery = useQuery({
+    queryKey: selectedCardId
+      ? kanbanCardReviewsQueryKey(selectedCardId)
+      : ["kanban", "card", "none", "activity", "reviews"],
+    queryFn: () => api.getKanbanReviews(selectedCardId!),
+    enabled: Boolean(selectedCardId && selectedCardNeedsReviewData),
+    staleTime: 30_000,
+  });
+  const auditLog = auditLogQuery.data ?? [];
+  const ghComments = githubCommentsQuery.data?.comments ?? [];
+  const githubIssueBody = githubCommentsQuery.data?.body;
+  const reviewData = useMemo(
+    () => latestActionableReview(reviewsQuery.data ?? []),
+    [reviewsQuery.data],
+  );
+  const invalidateCardActivity = useCallback((cardId: string) => {
+    void queryClient.invalidateQueries({ queryKey: kanbanCardActivityQueryKey(cardId) });
     if (selectedCardId === cardId) {
       setActivityRefreshTick((prev) => prev + 1);
     }
-  };
+  }, [queryClient, selectedCardId]);
 
   const STALLED_REVIEW_STATUSES = new Set(["awaiting_dod", "suggestion_pending", "dilemma_pending", "reviewing"]);
   const stalledCards = useMemo(
@@ -356,64 +429,21 @@ export default function KanbanTab({
   };
 
   useEffect(() => {
-    const requestSeq = detailRequestSeq.current + 1;
-    detailRequestSeq.current = requestSeq;
-    const isCurrentRequest = () => detailRequestSeq.current === requestSeq;
-
     setEditor(coerceEditor(selectedCard));
     setRetryAssigneeId(selectedCard?.assignee_agent_id ?? "");
     setNewChecklistItem("");
-    setReviewData(null);
     setReviewDecisions({});
-    setAuditLog([]);
-    setGhComments([]);
     setTimelineFilter(null);
-    // Fetch audit log and GitHub comments for selected card
-    if (selectedCard) {
-      api.getCardAuditLog(selectedCard.id).then((logs) => {
-        if (isCurrentRequest()) setAuditLog(logs);
-      }).catch(() => {});
-      if (selectedCard.github_issue_number) {
-        const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-        const cached = ghCommentsCache.current.get(selectedCard.id);
-        if (cached && Date.now() - cached.ts < CACHE_TTL) {
-          if (isCurrentRequest()) {
-            setGhComments(cached.comments);
-            if (cached.body != null) setEditor((prev) => ({ ...prev, description: cached.body }));
-          }
-        } else {
-          api.getCardGitHubComments(selectedCard.id).then((result) => {
-            if (!isCurrentRequest()) return;
-            ghCommentsCache.current.set(selectedCard.id, { comments: result.comments, body: result.body, ts: Date.now() });
-            setGhComments(result.comments);
-            if (result.body != null) setEditor((prev) => ({ ...prev, description: result.body }));
-          }).catch(() => {});
-        }
-      }
-    }
-    // Fetch review data for suggestion_pending/dilemma_pending cards
-    if (selectedCard?.review_status === "suggestion_pending" || selectedCard?.review_status === "dilemma_pending" || selectedCard?.review_status === "decided") {
-      api.getKanbanReviews(selectedCard.id).then((reviews) => {
-        if (!isCurrentRequest()) return;
-        const latest = reviews.filter((r) => r.verdict === "improve" || r.verdict === "dilemma" || r.verdict === "mixed" || r.verdict === "decided")
-          .sort((a, b) => b.round - a.round)[0];
-        if (latest) {
-          setReviewData(latest);
-          // Restore existing decisions
-          try {
-            const items = latest.items_json ? JSON.parse(latest.items_json) as Array<{ id: string; category: string; decision?: string }> : [];
-            const existing: Record<string, "accept" | "reject"> = {};
-            for (const item of items) {
-              if (item.decision === "accept" || item.decision === "reject") {
-                existing[item.id] = item.decision;
-              }
-            }
-            setReviewDecisions(existing);
-          } catch { /* ignore */ }
-        }
-      }).catch(() => {});
-    }
-  }, [activityRefreshTick, selectedCard]);
+  }, [selectedCard]);
+
+  useEffect(() => {
+    if (!selectedCard || githubIssueBody == null) return;
+    setEditor((prev) => ({ ...prev, description: githubIssueBody }));
+  }, [githubIssueBody, selectedCard?.id]);
+
+  useEffect(() => {
+    setReviewDecisions(reviewDecisionMap(reviewData));
+  }, [reviewData?.id]);
 
   useEffect(() => {
     const media = window.matchMedia(MOBILE_LAYOUT_MEDIA_QUERY);
@@ -2702,7 +2732,9 @@ export default function KanbanTab({
                           setActionError(null);
                           try {
                             await api.triggerDecidedRework(reviewData.id);
-                            setReviewData(null);
+                            if (selectedCard) {
+                              queryClient.setQueryData(kanbanCardReviewsQueryKey(selectedCard.id), []);
+                            }
                             setReviewDecisions({});
                           } catch (error) {
                             setActionError(error instanceof Error ? error.message : tr("재디스패치에 실패했습니다.", "Failed to trigger rework."));

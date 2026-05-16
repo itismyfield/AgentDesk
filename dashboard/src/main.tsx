@@ -1,7 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
+import { queryClient } from "./app/queryClient";
 import { OverlayProvider } from "./components/common/overlay";
 import {
   DEFAULT_ACCENT_PRESET,
@@ -39,10 +41,12 @@ window.addEventListener("error", (e) => {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <OverlayProvider>
-        <App />
-      </OverlayProvider>
-    </BrowserRouter>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <OverlayProvider>
+          <App />
+        </OverlayProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
   </React.StrictMode>,
 );
