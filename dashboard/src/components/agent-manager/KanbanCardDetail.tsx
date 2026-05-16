@@ -1,18 +1,17 @@
-import { useState } from "react";
-import * as api from "../../api";
-import type { KanbanReview } from "../../api";
-import {
-  KANBAN_STATUS_TONES,
-  REVIEW_STATUS_TONES,
-} from "../../theme/statusTokens";
+import type {
+  CardAuditLogEntry,
+  GitHubComment,
+  KanbanReview,
+} from "../../api";
 import CardIssueContent from "./CardIssueContent";
 import CardTimeline from "./CardTimeline";
 import TurnTranscriptPanel from "./TurnTranscriptPanel";
+import KanbanCardActivitySections from "./KanbanCardActivitySections";
+import KanbanCardReviewPanel from "./KanbanCardReviewPanel";
 import { localeName } from "../../i18n";
 import {
   SurfaceActionButton,
   SurfaceCard,
-  SurfaceEmptyState,
   SurfaceMetricPill,
   SurfaceNotice,
 } from "../common/SurfacePrimitives";
@@ -21,12 +20,10 @@ import type {
   KanbanCard,
   KanbanCardMetadata,
   KanbanCardPriority,
-  KanbanCardStatus,
   TaskDispatch,
   UiLanguage,
 } from "../../types";
 import {
-  hasManualInterventionReason,
   PRIORITY_OPTIONS,
   STATUS_TRANSITIONS,
   TRANSITION_STYLE,
@@ -38,28 +35,6 @@ import {
   stringifyCardMetadata,
   type EditorState,
 } from "./kanban-utils";
-import {
-  formatAuditResult,
-  formatDispatchSummary,
-} from "./card-detail-activity";
-
-const ACTIVITY_RESULT_TONE_STYLE = {
-  default: {
-    backgroundColor: "rgba(148,163,184,0.08)",
-    borderColor: "rgba(148,163,184,0.16)",
-    color: "var(--th-text-secondary)",
-  },
-  warn: {
-    backgroundColor: "rgba(245,158,11,0.10)",
-    borderColor: "rgba(245,158,11,0.24)",
-    color: "#fbbf24",
-  },
-  danger: {
-    backgroundColor: "rgba(248,113,113,0.10)",
-    borderColor: "rgba(248,113,113,0.24)",
-    color: "#fca5a5",
-  },
-} as const;
 
 export function canRetryCard(card: KanbanCard | null) {
   return Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
@@ -101,8 +76,8 @@ export interface KanbanCardDetailProps {
   setActionError: React.Dispatch<React.SetStateAction<string | null>>;
 
   // Activity data
-  auditLog: api.CardAuditLogEntry[];
-  ghComments: api.GitHubComment[];
+  auditLog: CardAuditLogEntry[];
+  ghComments: GitHubComment[];
   reviewData: KanbanReview | null;
   setReviewData: React.Dispatch<React.SetStateAction<KanbanReview | null>>;
   reviewDecisions: Record<string, "accept" | "reject">;
@@ -171,7 +146,6 @@ export default function KanbanCardDetail({
   onDeleteCard,
   invalidateCardActivity,
 }: KanbanCardDetailProps) {
-  const [reviewBusy, setReviewBusy] = useState(false);
 
   const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
   const inputChrome = {
@@ -434,177 +408,16 @@ export default function KanbanCardDetail({
           </SurfaceNotice>
         )}
 
-        {/* Review status */}
-        {selectedCard.status === "review" && selectedCard.review_status && (() => {
-          const reviewTone =
-            selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending"
-              ? REVIEW_STATUS_TONES.blocked
-              : selectedCard.review_status === "improve_rework"
-                ? REVIEW_STATUS_TONES.rework
-                : REVIEW_STATUS_TONES.review;
-          return (
-          <SurfaceNotice
-            tone={
-              (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending")
-                ? "warn"
-                : selectedCard.review_status === "improve_rework"
-                  ? "danger"
-                  : "success"
-            }
-            className="block"
-          >
-            <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{
-              color: reviewTone.accent,
-            }}>
-              {tr("카운터 모델 리뷰", "Counter-Model Review")}
-            </div>
-            <div className="text-sm" style={{
-              color: reviewTone.text,
-            }}>
-              {selectedCard.review_status === "reviewing" && (() => {
-                const reviewDispatch = dispatches.find(
-                  (d) => d.parent_dispatch_id === selectedCard.latest_dispatch_id && d.dispatch_type === "review",
-                );
-                const verdictStatus = !reviewDispatch
-                  ? tr("verdict 대기중", "verdict pending")
-                  : reviewDispatch.status === "completed"
-                    ? tr("verdict 전달됨", "verdict delivered")
-                    : tr("verdict 미전달 — 에이전트가 아직 회신하지 않음", "verdict not delivered — agent hasn't responded");
-                return <>{tr("카운터 모델이 코드를 리뷰하고 있습니다...", "Counter model is reviewing...")} <span style={{ opacity: 0.7 }}>({verdictStatus})</span></>;
-              })()}
-              {selectedCard.review_status === "awaiting_dod" && tr("DoD 항목이 모두 완료되면 자동 리뷰가 시작됩니다.", "Auto review starts when all DoD items are complete.")}
-              {selectedCard.review_status === "improve_rework" && tr("개선 사항이 발견되어 원본 모델에 재작업을 요청했습니다.", "Improvements needed — rework dispatched to original model.")}
-              {selectedCard.review_status === "suggestion_pending" && tr("카운터 모델이 검토 항목을 추출했습니다. 수용/불수용을 결정해 주세요.", "Counter model extracted review findings. Decide accept/reject for each.")}
-              {selectedCard.review_status === "dilemma_pending" && tr("판단이 어려운 항목이 있습니다. 수동으로 결정해 주세요.", "Dilemma items found — manual decision needed.")}
-              {selectedCard.review_status === "decided" && tr("리뷰 결정이 완료되었습니다.", "Review decision completed.")}
-            </div>
-          </SurfaceNotice>
-          );
-        })()}
-
-        {/* Review suggestion decision UI */}
-        {(selectedCard.review_status === "suggestion_pending" || selectedCard.review_status === "dilemma_pending") && reviewData && (() => {
-          const items: Array<{ id: string; category: string; summary: string; detail?: string; suggestion?: string; pros?: string; cons?: string; decision?: string }> =
-            reviewData.items_json ? JSON.parse(reviewData.items_json) : [];
-          const actionableItems = items.filter((i) => i.category !== "pass");
-          if (actionableItems.length === 0) return null;
-          const allDecided = actionableItems.every((i) => reviewDecisions[i.id]);
-          return (
-            <SurfaceCard
-              className="space-y-4"
-              style={{
-                borderColor: `${REVIEW_STATUS_TONES.blocked.accent}59`,
-                backgroundColor: "rgba(234,179,8,0.06)",
-              }}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: REVIEW_STATUS_TONES.blocked.accent }}>
-                  {tr("리뷰 제안 사항", "Review Suggestions")}
-                </div>
-                <span className="text-xs px-2 py-0.5 rounded-full" style={{
-                  backgroundColor: allDecided ? KANBAN_STATUS_TONES.done.bg : "rgba(234,179,8,0.18)",
-                  color: allDecided ? KANBAN_STATUS_TONES.done.text : REVIEW_STATUS_TONES.blocked.text,
-                }}>
-                  {Object.keys(reviewDecisions).filter((k) => actionableItems.some((d) => d.id === k)).length}/{actionableItems.length}
-                </span>
-              </div>
-              <div className="space-y-3">
-                {actionableItems.map((item) => {
-                  const decision = reviewDecisions[item.id];
-                  return (
-                    <SurfaceCard key={item.id} className="space-y-2 p-3" style={{
-                      borderColor: decision === "accept" ? "rgba(34,197,94,0.35)" : decision === "reject" ? "rgba(239,68,68,0.35)" : "rgba(148,163,184,0.22)",
-                      backgroundColor: decision === "accept" ? "rgba(34,197,94,0.06)" : decision === "reject" ? "rgba(239,68,68,0.06)" : "rgba(255,255,255,0.03)",
-                    }}>
-                      <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
-                        {item.summary}
-                      </div>
-                      {item.detail && (
-                        <div className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
-                          {item.detail}
-                        </div>
-                      )}
-                      {item.suggestion && (
-                        <div className="text-xs px-2 py-1 rounded-lg" style={{ backgroundColor: "rgba(96,165,250,0.08)", color: "#93c5fd" }}>
-                          {tr("제안", "Suggestion")}: {item.suggestion}
-                        </div>
-                      )}
-                      {(item.pros || item.cons) && (
-                        <div className="grid grid-cols-2 gap-2 text-xs">
-                          {item.pros && (
-                            <div className="px-2 py-1 rounded-lg" style={{ backgroundColor: "rgba(34,197,94,0.08)", color: "#86efac" }}>
-                              {tr("장점", "Pros")}: {item.pros}
-                            </div>
-                          )}
-                          {item.cons && (
-                            <div className="px-2 py-1 rounded-lg" style={{ backgroundColor: "rgba(239,68,68,0.08)", color: "#fca5a5" }}>
-                              {tr("단점", "Cons")}: {item.cons}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      <div className="flex gap-2 pt-1">
-                        <SurfaceActionButton
-                          onClick={() => {
-                            setReviewDecisions((prev) => ({ ...prev, [item.id]: "accept" }));
-                            void api.saveReviewDecisions(reviewData.id, [{ item_id: item.id, decision: "accept" }]).catch(() => {});
-                          }}
-                          tone={decision === "accept" ? "success" : "neutral"}
-                          className="flex-1"
-                          style={{
-                            color: decision === "accept" ? "#4ade80" : "var(--th-text-secondary)",
-                          }}
-                        >
-                          {tr("수용", "Accept")}
-                        </SurfaceActionButton>
-                        <SurfaceActionButton
-                          onClick={() => {
-                            setReviewDecisions((prev) => ({ ...prev, [item.id]: "reject" }));
-                            void api.saveReviewDecisions(reviewData.id, [{ item_id: item.id, decision: "reject" }]).catch(() => {});
-                          }}
-                          tone={decision === "reject" ? "danger" : "neutral"}
-                          className="flex-1"
-                          style={{
-                            color: decision === "reject" ? "#f87171" : "var(--th-text-secondary)",
-                          }}
-                        >
-                          {tr("불수용", "Reject")}
-                        </SurfaceActionButton>
-                      </div>
-                    </SurfaceCard>
-                  );
-                })}
-              </div>
-              <SurfaceActionButton
-                disabled={!allDecided || reviewBusy}
-                onClick={async () => {
-                  setReviewBusy(true);
-                  setActionError(null);
-                  try {
-                    await api.triggerDecidedRework(reviewData.id);
-                    setReviewData(null);
-                    setReviewDecisions({});
-                  } catch (error) {
-                    setActionError(error instanceof Error ? error.message : tr("재디스패치에 실패했습니다.", "Failed to trigger rework."));
-                  } finally {
-                    setReviewBusy(false);
-                  }
-                }}
-                tone="warn"
-                className="w-full py-2.5 text-sm"
-                style={{
-                  color: allDecided ? "#fef3c7" : "var(--th-text-muted)",
-                }}
-              >
-                {reviewBusy
-                  ? tr("재디스패치 중...", "Dispatching rework...")
-                  : allDecided
-                    ? tr("결정 완료 → 재디스패치", "Decisions Complete → Dispatch Rework")
-                    : tr("모든 항목에 결정을 내려주세요", "Decide all items first")}
-              </SurfaceActionButton>
-            </SurfaceCard>
-          );
-        })()}
+        <KanbanCardReviewPanel
+          card={selectedCard}
+          dispatches={dispatches}
+          reviewData={reviewData}
+          setReviewData={setReviewData}
+          reviewDecisions={reviewDecisions}
+          setReviewDecisions={setReviewDecisions}
+          setActionError={setActionError}
+          tr={tr}
+        />
 
         {/* Description / Issue Sections */}
         <CardIssueContent
@@ -709,160 +522,14 @@ export default function KanbanCardDetail({
           <SurfaceMetricPill label={tr("완료", "Completed")} value={formatIso(selectedCard.completed_at, locale)} />
         </div>
 
-        {/* Dispatch history — all dispatches for this card */}
-        {(() => {
-          const cardDispatches = dispatches
-            .filter((d) => d.kanban_card_id === selectedCard.id)
-            .sort((a, b) => {
-              const ta = typeof a.created_at === "number" ? a.created_at : new Date(a.created_at).getTime();
-              const tb = typeof b.created_at === "number" ? b.created_at : new Date(b.created_at).getTime();
-              return tb - ta;
-            });
-          const hasAny = cardDispatches.length > 0 || selectedCard.latest_dispatch_status;
-          if (!hasAny) return null;
-
-          const dispatchStatusColor: Record<string, string> = {
-            pending: "#fbbf24",
-            dispatched: "#38bdf8",
-            in_progress: "#f59e0b",
-            completed: "#4ade80",
-            failed: "#f87171",
-            cancelled: "#9ca3af",
-          };
-
-          return (
-            <SurfaceCard className="space-y-3">
-              <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
-                {tr("Dispatch 이력", "Dispatch history")}
-                {cardDispatches.length > 0 && (
-                  <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
-                    ({cardDispatches.length})
-                  </span>
-                )}
-              </h4>
-              {parseCardMetadata(selectedCard.metadata_json).timed_out_reason && (
-                <SurfaceNotice tone="warn" compact className="text-sm">
-                  {parseCardMetadata(selectedCard.metadata_json).timed_out_reason}
-                </SurfaceNotice>
-              )}
-              {cardDispatches.length > 0 ? (
-                <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {cardDispatches.map((d) => (
-                    <div
-                      key={d.id}
-                      className="rounded-xl border px-3 py-2 text-sm"
-                      style={{ borderColor: "rgba(148,163,184,0.12)", backgroundColor: d.id === selectedCard.latest_dispatch_id ? "rgba(37,99,235,0.08)" : "transparent" }}
-                    >
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span
-                          className="inline-block w-2 h-2 rounded-full shrink-0"
-                          style={{ backgroundColor: dispatchStatusColor[d.status] ?? "#94a3b8" }}
-                        />
-                        <span className="font-mono text-xs" style={{ color: "var(--th-text-muted)" }}>
-                          #{d.id.slice(0, 8)}
-                        </span>
-                        <span
-                          className="px-1.5 py-0.5 rounded text-xs font-medium"
-                          style={{ backgroundColor: "rgba(148,163,184,0.12)", color: dispatchStatusColor[d.status] ?? "#94a3b8" }}
-                        >
-                          {d.status}
-                        </span>
-                        {d.dispatch_type && (
-                          <span className="px-1.5 py-0.5 rounded text-xs" style={{ backgroundColor: "rgba(148,163,184,0.08)", color: "var(--th-text-secondary)" }}>
-                            {d.dispatch_type}
-                          </span>
-                        )}
-                        {d.to_agent_id && (
-                          <span className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
-                            → {getAgentLabel(d.to_agent_id)}
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-3 mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                        <span>{formatIso(d.created_at, locale)}</span>
-                        {d.chain_depth > 0 && <span>depth {d.chain_depth}</span>}
-                      </div>
-                      {(() => {
-                        const dispatchSummary = formatDispatchSummary(d.result_summary);
-                        if (!dispatchSummary) return null;
-                        return (
-                          <div
-                            className="mt-2 rounded-lg border px-2 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-words"
-                            style={{
-                              borderColor: "rgba(148,163,184,0.16)",
-                              backgroundColor: "rgba(148,163,184,0.06)",
-                              color: "var(--th-text-secondary)",
-                            }}
-                          >
-                            {dispatchSummary}
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <SurfaceEmptyState className="grid gap-2 md:grid-cols-2 text-sm">
-                  <div>{tr("dispatch 상태", "Dispatch status")}: {selectedCard.latest_dispatch_status ?? "-"}</div>
-                  <div>{tr("최신 dispatch", "Latest dispatch")}: {selectedCard.latest_dispatch_id ? `#${selectedCard.latest_dispatch_id.slice(0, 8)}` : "-"}</div>
-                </SurfaceEmptyState>
-              )}
-            </SurfaceCard>
-          );
-        })()}
-
-        {/* State transition history (audit log) */}
-        {auditLog.length > 0 && (
-          <SurfaceCard className="space-y-3">
-            <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
-              {tr("상태 전환 이력", "State Transition History")}
-              <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
-                ({auditLog.length})
-              </span>
-            </h4>
-            <div className="space-y-1.5 max-h-48 overflow-y-auto">
-              {auditLog.map((log) => {
-                const resultPresentation = formatAuditResult(log.result, tr);
-                return (
-                  <div
-                    key={log.id}
-                    className="rounded-lg px-2.5 py-2 text-xs space-y-1.5"
-                    style={{ backgroundColor: "rgba(255,255,255,0.03)" }}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="shrink-0" style={{ color: "var(--th-text-muted)" }}>
-                        {formatIso(log.created_at, locale)}
-                      </span>
-                      <span
-                        className="ml-auto px-1.5 py-0.5 rounded text-xs"
-                        style={{ backgroundColor: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}
-                      >
-                        {log.source}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span style={{ color: TRANSITION_STYLE[log.from_status ?? ""]?.text ?? "var(--th-text-secondary)" }}>
-                        {log.from_status ? labelForStatus(log.from_status as KanbanCardStatus, tr) : "—"}
-                      </span>
-                      <span style={{ color: "var(--th-text-muted)" }}>→</span>
-                      <span style={{ color: TRANSITION_STYLE[log.to_status ?? ""]?.text ?? "var(--th-text-secondary)" }}>
-                        {log.to_status ? labelForStatus(log.to_status as KanbanCardStatus, tr) : "—"}
-                      </span>
-                    </div>
-                    {resultPresentation && (
-                      <div
-                        className="rounded-md border px-2 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-words"
-                        style={ACTIVITY_RESULT_TONE_STYLE[resultPresentation.tone]}
-                      >
-                        {resultPresentation.text}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </SurfaceCard>
-        )}
+        <KanbanCardActivitySections
+          card={selectedCard}
+          dispatches={dispatches}
+          auditLog={auditLog}
+          tr={tr}
+          locale={locale}
+          getAgentLabel={getAgentLabel}
+        />
 
         {/* Unified GitHub comment timeline */}
         <CardTimeline
