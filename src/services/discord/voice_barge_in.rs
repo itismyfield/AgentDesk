@@ -2149,26 +2149,43 @@ impl VoiceBargeInRuntime {
                     // no row), dispatch, and THEN the durable INSERT
                     // lands, leaving an orphaned replayable row until
                     // the next GC sweep.
-                    if let Some(pool) = shared.pg_pool.as_ref() {
-                        if let Err(error) = crate::voice::announce_meta::persist_durable(
+                    //
+                    // v4 review — when pg pool is configured but the
+                    // durable INSERT fails, do NOT publish the local
+                    // store entry either. Intake will then treat the
+                    // message as an unowned voice-announce candidate
+                    // and drop it via voice_announce_durable_miss
+                    // rather than dispatch a turn nobody can claim.
+                    let durable_publish = if let Some(pool) = shared.pg_pool.as_ref() {
+                        match crate::voice::announce_meta::persist_durable(
                             pool,
                             message_id,
                             &announcement_meta,
                         )
                         .await
                         {
-                            tracing::warn!(
-                                error = %error,
-                                source_channel_id = source_channel_id.get(),
-                                target_channel_id = target_channel_id.get(),
-                                message_id = message_id.get(),
-                                utterance_id = %utterance.utterance_id,
-                                "failed to persist voice transcript announcement metadata"
-                            );
+                            Ok(()) => true,
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    source_channel_id = source_channel_id.get(),
+                                    target_channel_id = target_channel_id.get(),
+                                    message_id = message_id.get(),
+                                    utterance_id = %utterance.utterance_id,
+                                    "failed to persist voice transcript announcement metadata — skipping local-store publish to keep ownership consistent"
+                                );
+                                false
+                            }
                         }
+                    } else {
+                        // No pg pool — local-only mode; the in-process
+                        // store IS the source of truth.
+                        true
+                    };
+                    if durable_publish {
+                        crate::voice::announce_meta::global_store()
+                            .insert(message_id, announcement_meta.clone());
                     }
-                    crate::voice::announce_meta::global_store()
-                        .insert(message_id, announcement_meta.clone());
                 }
                 tracing::info!(
                     source_channel_id = source_channel_id.get(),

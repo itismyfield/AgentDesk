@@ -2276,10 +2276,12 @@ enum DurableConsumeOutcome {
     /// A peer worker already claimed the row, or the row TTL'd
     /// between peek and claim. Caller MUST abort dispatch.
     AlreadyClaimedOrExpired,
-    /// Pool unavailable or query error. The caller has nothing
-    /// durable to consume; treat as benign (the in-process local
-    /// store is the source of truth in this case).
-    Skipped,
+    /// No pg pool configured at all (single-node dev). The in-process
+    /// local store is the source of truth. Caller proceeds.
+    NoPool,
+    /// Pg pool IS configured but the claim query itself errored.
+    /// Caller MUST fail closed and abort — we cannot prove ownership.
+    QueryError,
 }
 
 /// Atomic ownership claim at the dispatch commit point. See
@@ -2289,7 +2291,7 @@ async fn consume_durable_voice_announcement_after_handoff(
     message_id: MessageId,
 ) -> DurableConsumeOutcome {
     let Some(pool) = pg_pool else {
-        return DurableConsumeOutcome::Skipped;
+        return DurableConsumeOutcome::NoPool;
     };
     match crate::voice::announce_meta::consume_durable(pool, message_id).await {
         Ok(Some(_)) => DurableConsumeOutcome::Claimed,
@@ -2298,9 +2300,13 @@ async fn consume_durable_voice_announcement_after_handoff(
             tracing::warn!(
                 error = %error,
                 message_id = message_id.get(),
-                "failed to consume durable voice transcript announcement metadata after handoff"
+                "failed to consume durable voice transcript announcement metadata — failing closed"
             );
-            DurableConsumeOutcome::Skipped
+            // #2209 v4 review — fail closed. A transient DB error at
+            // the ownership gate must NOT let the handler proceed
+            // into side-effectful work without proving it owns the
+            // durable row.
+            DurableConsumeOutcome::QueryError
         }
     }
 }
@@ -2427,9 +2433,20 @@ pub(in crate::services::discord) async fn handle_text_message(
                 );
                 return Ok(());
             }
-            DurableConsumeOutcome::Skipped => {
-                // No pg pool — single-node dev. Local store `take`
-                // is the ownership token.
+            DurableConsumeOutcome::QueryError => {
+                tracing::warn!(
+                    event = "voice_announce_durable_claim_query_error",
+                    channel_id = channel_id.get(),
+                    message_id = user_msg_id.get(),
+                    had_local_store_entry,
+                    had_durable_peek,
+                    "aborting intake — durable claim query errored and ownership cannot be proven; no side effects performed"
+                );
+                return Ok(());
+            }
+            DurableConsumeOutcome::NoPool => {
+                // No pg pool configured — single-node dev. Local
+                // store `take` is the ownership token.
             }
         }
     }

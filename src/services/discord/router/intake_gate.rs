@@ -1844,13 +1844,24 @@ pub(in crate::services::discord) async fn handle_event(
                 // No active turn — fall through to normal processing below
             }
 
-            // Queue messages while AI is in progress (executed as next turn after current finishes)
-            if mailbox_has_live_active_turn_or_cleanup_stale_proof(
-                &data.shared,
-                &data.provider,
-                channel_id,
-            )
-            .await
+            // Queue messages while AI is in progress (executed as next turn after current finishes).
+            // #2209 v4 review — voice-announcement messages must never be queued
+            // as ordinary soft interventions. They carry durable metadata that
+            // is consumed under an atomic ownership claim inside
+            // handle_text_message; routing them through the mailbox-queue path
+            // would (a) lose the voice-utterance context, (b) leave the durable
+            // row unclaimed for the active-turn duration, and (c) potentially
+            // exceed the durable TTL before the queued execution runs. Let
+            // voice announces fall through to handle_text_message even when
+            // the channel has an active turn — that handler is responsible
+            // for the queueing decision under voice-aware semantics.
+            if !is_voice_transcript_announcement
+                && mailbox_has_live_active_turn_or_cleanup_stale_proof(
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                )
+                .await
             {
                 let outcome = enqueue_soft_intervention(
                     data,
@@ -1915,10 +1926,15 @@ pub(in crate::services::discord) async fn handle_event(
             }
 
             // Reconcile gate (#122): until startup recovery is complete, queue messages.
-            if !data
-                .shared
-                .reconcile_done
-                .load(std::sync::atomic::Ordering::Relaxed)
+            // #2209 v4 review — same rationale as the mailbox-queue branch
+            // above: voice announces must not be re-queued as plain
+            // interventions; route them through handle_text_message where the
+            // atomic durable claim runs as the first side-effect gate.
+            if !is_voice_transcript_announcement
+                && !data
+                    .shared
+                    .reconcile_done
+                    .load(std::sync::atomic::Ordering::Relaxed)
             {
                 let _ = enqueue_soft_intervention(
                     data,
@@ -1948,10 +1964,14 @@ pub(in crate::services::discord) async fn handle_event(
 
             // Drain mode: when restart is pending, queue new messages instead of
             // starting new turns. This ensures only existing turns drain to completion.
-            if data
-                .shared
-                .restart_pending
-                .load(std::sync::atomic::Ordering::Relaxed)
+            // #2209 v4 review — voice announces must not flow through the
+            // intervention-queue path; route them through handle_text_message
+            // so the atomic durable claim runs as the first side-effect gate.
+            if !is_voice_transcript_announcement
+                && data
+                    .shared
+                    .restart_pending
+                    .load(std::sync::atomic::Ordering::Relaxed)
             {
                 let is_shutting_down = data
                     .shared
