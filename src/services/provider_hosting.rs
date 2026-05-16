@@ -140,7 +140,7 @@ pub fn any_requested_tui_hosting_driver_available(config: &Config) -> bool {
 }
 
 pub fn provider_tui_hosting_driver_available(provider: &ProviderKind) -> bool {
-    matches!(provider, ProviderKind::Claude)
+    matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
 }
 
 #[cfg(test)]
@@ -188,6 +188,18 @@ mod tests {
         install_provider_hosting_config(&Config::default());
 
         let selection = resolve_provider_session_selection(&ProviderKind::Claude);
+
+        assert!(selection.requested_tui_hosting);
+        assert_eq!(selection.driver, ProviderSessionDriver::TuiHosting);
+        assert_eq!(selection.fallback_reason, None);
+    }
+
+    #[test]
+    fn requested_tui_selects_codex_driver_when_available() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        install_provider_hosting_config(&Config::default());
+
+        let selection = resolve_provider_session_selection(&ProviderKind::Codex);
 
         assert!(selection.requested_tui_hosting);
         assert_eq!(selection.driver, ProviderSessionDriver::TuiHosting);
