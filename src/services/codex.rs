@@ -1018,7 +1018,7 @@ fn execute_streaming_local_tui_tmux(
         }
     }
 
-    let read_result = if session_selection.resume {
+    let tail_result = if session_selection.resume {
         let rollout_path = session_selection
             .rollout_path
             .as_deref()
@@ -1037,7 +1037,7 @@ fn execute_streaming_local_tui_tmux(
             sender.clone(),
             cancel_token,
             || tmux_session_has_live_pane(tmux_session_name),
-        )?
+        )
     } else {
         crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd(
             std::path::Path::new(working_dir),
@@ -1045,7 +1045,28 @@ fn execute_streaming_local_tui_tmux(
             sender.clone(),
             cancel_token,
             || tmux_session_has_live_pane(tmux_session_name),
-        )?
+        )
+    };
+
+    let read_result = match tail_result {
+        Ok(result) => result,
+        Err(error) => {
+            // #2182 follow-up: rollout wait / tail failures used to leak the
+            // tmux session because `?` propagated Err without cleaning the
+            // launched session. Kill it explicitly so the worktree doesn't
+            // accumulate dangling Codex TUIs.
+            tracing::warn!(
+                tmux_session = tmux_session_name,
+                error = %error,
+                "Codex rollout tail failed; killing tmux session to avoid leak"
+            );
+            record_tmux_exit_reason(tmux_session_name, &format!("rollout tail failed: {error}"));
+            crate::services::platform::tmux::kill_session_with_reason(
+                tmux_session_name,
+                "codex rollout tail failed",
+            );
+            return Err(error);
+        }
     };
 
     if matches!(
