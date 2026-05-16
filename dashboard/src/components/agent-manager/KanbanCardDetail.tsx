@@ -1,7 +1,10 @@
 import { useState } from "react";
 import * as api from "../../api";
 import type { KanbanReview } from "../../api";
-import { KANBAN_STATUS_TONES } from "../../theme/statusTokens";
+import {
+  KANBAN_STATUS_TONES,
+  REVIEW_STATUS_TONES,
+} from "../../theme/statusTokens";
 import CardIssueContent from "./CardIssueContent";
 import CardTimeline from "./CardTimeline";
 import TurnTranscriptPanel from "./TurnTranscriptPanel";
@@ -432,7 +435,14 @@ export default function KanbanCardDetail({
         )}
 
         {/* Review status */}
-        {selectedCard.status === "review" && selectedCard.review_status && (
+        {selectedCard.status === "review" && selectedCard.review_status && (() => {
+          const reviewTone =
+            selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending"
+              ? REVIEW_STATUS_TONES.blocked
+              : selectedCard.review_status === "improve_rework"
+                ? REVIEW_STATUS_TONES.rework
+                : REVIEW_STATUS_TONES.review;
+          return (
           <SurfaceNotice
             tone={
               (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending")
@@ -444,12 +454,12 @@ export default function KanbanCardDetail({
             className="block"
           >
             <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{
-              color: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "#eab308" : selectedCard.review_status === "improve_rework" ? KANBAN_STATUS_TONES.failed.accent : KANBAN_STATUS_TONES.review.accent,
+              color: reviewTone.accent,
             }}>
               {tr("카운터 모델 리뷰", "Counter-Model Review")}
             </div>
             <div className="text-sm" style={{
-              color: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "#fde047" : selectedCard.review_status === "improve_rework" ? "#fdba74" : KANBAN_STATUS_TONES.review.text,
+              color: reviewTone.text,
             }}>
               {selectedCard.review_status === "reviewing" && (() => {
                 const reviewDispatch = dispatches.find(
@@ -469,7 +479,8 @@ export default function KanbanCardDetail({
               {selectedCard.review_status === "decided" && tr("리뷰 결정이 완료되었습니다.", "Review decision completed.")}
             </div>
           </SurfaceNotice>
-        )}
+          );
+        })()}
 
         {/* Review suggestion decision UI */}
         {(selectedCard.review_status === "suggestion_pending" || selectedCard.review_status === "dilemma_pending") && reviewData && (() => {
@@ -482,17 +493,17 @@ export default function KanbanCardDetail({
             <SurfaceCard
               className="space-y-4"
               style={{
-                borderColor: "rgba(234,179,8,0.35)",
+                borderColor: `${REVIEW_STATUS_TONES.blocked.accent}59`,
                 backgroundColor: "rgba(234,179,8,0.06)",
               }}
             >
               <div className="flex items-center justify-between gap-2">
-                <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#eab308" }}>
+                <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: REVIEW_STATUS_TONES.blocked.accent }}>
                   {tr("리뷰 제안 사항", "Review Suggestions")}
                 </div>
                 <span className="text-xs px-2 py-0.5 rounded-full" style={{
-                  backgroundColor: allDecided ? "rgba(34,197,94,0.18)" : "rgba(234,179,8,0.18)",
-                  color: allDecided ? "#4ade80" : "#fde047",
+                  backgroundColor: allDecided ? KANBAN_STATUS_TONES.done.bg : "rgba(234,179,8,0.18)",
+                  color: allDecided ? KANBAN_STATUS_TONES.done.text : REVIEW_STATUS_TONES.blocked.text,
                 }}>
                   {Object.keys(reviewDecisions).filter((k) => actionableItems.some((d) => d.id === k)).length}/{actionableItems.length}
                 </span>

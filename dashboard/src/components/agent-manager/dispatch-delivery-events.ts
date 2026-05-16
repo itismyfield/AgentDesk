@@ -1,14 +1,10 @@
-export const DELIVERY_EVENT_STATUS_STYLE: Record<string, { bg: string; text: string }> = {
-  reserved: { bg: "rgba(156,163,175,0.12)", text: "#9ca3af" },
-  sent: { bg: "rgba(34,197,94,0.16)", text: "#86efac" },
-  fallback: { bg: "rgba(249,115,22,0.16)", text: "#fdba74" },
-  duplicate: { bg: "rgba(59,130,246,0.14)", text: "#60a5fa" },
-  skipped: { bg: "rgba(156,163,175,0.12)", text: "#9ca3af" },
-  failed: { bg: "rgba(248,113,113,0.16)", text: "#fca5a5" },
-};
+import { DELIVERY_EVENT_STATUS_TONES } from "../../theme/statusTokens";
+
+export const DELIVERY_EVENT_STATUS_STYLE = DELIVERY_EVENT_STATUS_TONES;
 
 export function getDeliveryEventStatusStyle(status: string): { bg: string; text: string } {
-  return DELIVERY_EVENT_STATUS_STYLE[status] ?? { bg: "rgba(148,163,184,0.10)", text: "#94a3b8" };
+  return DELIVERY_EVENT_STATUS_TONES[status as keyof typeof DELIVERY_EVENT_STATUS_TONES]
+    ?? { bg: "rgba(148,163,184,0.10)", text: "#94a3b8" };
 }
 
 export function deliveryEventMessagesCount(value: unknown): number {

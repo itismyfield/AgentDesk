@@ -34,6 +34,12 @@ import { localeName } from "../../i18n";
 import { useLocalStorage } from "../../lib/useLocalStorage";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import {
+  AUTOQUEUE_RUN_STATUS_TONES,
+  QUEUE_ENTRY_STATUS_TONES,
+  getBatchPhaseColor,
+  getQueueGroupColor,
+} from "../../theme/statusTokens";
+import {
   createEmptyAutoQueueStatus,
   getAutoQueuePrimaryAction,
   normalizeAutoQueueStatus,
@@ -92,63 +98,6 @@ function formatTs(
   }).format(value);
 }
 
-const ENTRY_STATUS_STYLE: Record<
-  string,
-  { bg: string; text: string; label: string; labelEn: string }
-> = {
-  pending: {
-    bg: "rgba(100,116,139,0.18)",
-    text: "#94a3b8",
-    label: "대기",
-    labelEn: "Pending",
-  },
-  dispatched: {
-    bg: "rgba(245,158,11,0.18)",
-    text: "#fbbf24",
-    label: "진행",
-    labelEn: "Active",
-  },
-  done: {
-    bg: "rgba(34,197,94,0.22)",
-    text: "#4ade80",
-    label: "완료",
-    labelEn: "Done",
-  },
-  review: {
-    bg: "rgba(139,92,246,0.22)",
-    text: "#a78bfa",
-    label: "리뷰",
-    labelEn: "Review",
-  },
-  rework: {
-    bg: "rgba(236,72,153,0.22)",
-    text: "#f472b6",
-    label: "리뷰 반영",
-    labelEn: "Rework",
-  },
-  skipped: {
-    bg: "rgba(107,114,128,0.18)",
-    text: "#9ca3af",
-    label: "건너뜀",
-    labelEn: "Skipped",
-  },
-  failed: {
-    bg: "rgba(239,68,68,0.18)",
-    text: "#f87171",
-    label: "실패",
-    labelEn: "Failed",
-  },
-};
-
-const RUN_STATUS_STYLE: Record<AutoQueueRun["status"], { bg: string; text: string; label: string; labelEn: string }> = {
-  generated: { bg: "rgba(59,130,246,0.18)", text: "#60a5fa", label: "생성됨", labelEn: "Generated" },
-  pending: { bg: "rgba(56,189,248,0.2)", text: "#38bdf8", label: "PMD 대기", labelEn: "Awaiting PMD" },
-  active: { bg: "rgba(16,185,129,0.2)", text: "#10b981", label: "실행 중", labelEn: "Active" },
-  paused: { bg: "rgba(245,158,11,0.2)", text: "#fbbf24", label: "일시정지", labelEn: "Paused" },
-  completed: { bg: "rgba(34,197,94,0.2)", text: "#4ade80", label: "완료", labelEn: "Done" },
-  cancelled: { bg: "rgba(248,113,113,0.18)", text: "#f87171", label: "취소됨", labelEn: "Cancelled" },
-};
-
 function reorderPendingIds(ids: string[], fromId: string, toId: string): string[] | null {
   const fromIdx = ids.indexOf(fromId);
   const toIdx = ids.indexOf(toId);
@@ -174,26 +123,8 @@ function shiftPendingId(
 
 // ── Draggable Entry Row ──
 
-const THREAD_GROUP_COLORS = [
-  "#10b981",
-  "#38bdf8",
-  "#f59e0b",
-  "#fbbf24",
-  "#4ade80",
-  "#fb923c",
-  "#ef4444",
-  "#22d3ee",
-  "#a3e635",
-  "#f87171",
-];
-
 function threadGroupColor(group: number): string {
-  return THREAD_GROUP_COLORS[group % THREAD_GROUP_COLORS.length];
-}
-
-function batchPhaseColor(phase: number): string {
-  if (phase <= 0) return "#94a3b8";
-  return THREAD_GROUP_COLORS[(phase - 1) % THREAD_GROUP_COLORS.length];
+  return getQueueGroupColor(group);
 }
 
 function batchPhaseLabel(phase: number): string {
@@ -270,7 +201,9 @@ function EntryRow({
     entry.status === "dispatched" && (entry.card_status === "review" || entry.card_status === "rework")
       ? entry.card_status
       : entry.status;
-  const sty = ENTRY_STATUS_STYLE[effectiveDisplayStatus] ?? ENTRY_STATUS_STYLE.pending;
+  const sty =
+    QUEUE_ENTRY_STATUS_TONES[effectiveDisplayStatus as keyof typeof QUEUE_ENTRY_STATUS_TONES]
+    ?? QUEUE_ENTRY_STATUS_TONES.pending;
   const isPending = entry.status === "pending";
   const isFailed = entry.status === "failed";
   const retryCount = entry.retry_count ?? 0;
@@ -326,8 +259,8 @@ function EntryRow({
               <span
                 className="mr-1 rounded px-1 py-0.5 font-mono text-xs"
                 style={{
-                  backgroundColor: `${batchPhaseColor(entry.batch_phase ?? 0)}22`,
-                  color: batchPhaseColor(entry.batch_phase ?? 0),
+                  backgroundColor: `${getBatchPhaseColor(entry.batch_phase ?? 0)}22`,
+                  color: getBatchPhaseColor(entry.batch_phase ?? 0),
                 }}
               >
                 {batchPhaseLabel(entry.batch_phase ?? 0)}
@@ -1185,7 +1118,7 @@ export default function AutoQueuePanel({
     content: ReactNode,
   ) => {
     const activePhase = currentBatchPhase === phase;
-    const phaseColor = batchPhaseColor(phase);
+    const phaseColor = getBatchPhaseColor(phase);
     const doneInPhase = phaseEntries.filter(isCompletedEntry).length;
 
     return (
@@ -1451,11 +1384,11 @@ export default function AutoQueuePanel({
             <span
               className="text-[11px] px-1.5 py-0.5 rounded-full shrink-0"
               style={{
-                backgroundColor: RUN_STATUS_STYLE[run.status].bg,
-                color: RUN_STATUS_STYLE[run.status].text,
+                backgroundColor: AUTOQUEUE_RUN_STATUS_TONES[run.status].bg,
+                color: AUTOQUEUE_RUN_STATUS_TONES[run.status].text,
               }}
             >
-              {tr(RUN_STATUS_STYLE[run.status].label, RUN_STATUS_STYLE[run.status].labelEn)}
+              {tr(AUTOQUEUE_RUN_STATUS_TONES[run.status].label, AUTOQUEUE_RUN_STATUS_TONES[run.status].labelEn)}
             </span>
           )}
           {totalCount > 0 && (
