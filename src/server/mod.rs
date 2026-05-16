@@ -202,6 +202,19 @@ pub(crate) async fn run(
         } else {
             None
         };
+
+    // Issue #2210 item 2: one-shot startup self-check on the Codex hook trust
+    // hash canonicalization. Runs only when the Codex CLI is detected on PATH;
+    // never blocks startup but emits a clear operator warning if AgentDesk's
+    // own invariants don't hold, so the SessionStart-silently-disabled failure
+    // mode is at least surfaced before users hit it on a Codex CLI bump.
+    {
+        let codex_cli_present =
+            crate::services::codex::resolve_codex_path().is_some();
+        let _ = crate::services::claude_tui::hook_bundle::run_codex_hook_startup_self_check(
+            codex_cli_present,
+        );
+    }
     let cluster_runtime = cluster::bootstrap(&config, pg_pool.clone()).await;
     let cluster_instance_id = cluster_runtime.instance_id().to_string();
     if let Some(pool) = pg_pool.clone() {
