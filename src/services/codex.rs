@@ -1048,7 +1048,7 @@ fn execute_streaming_local_tui_tmux(
         )
     };
 
-    let read_result = match tail_result {
+    let tail_result = match tail_result {
         Ok(result) => result,
         Err(error) => {
             // #2182 follow-up: rollout wait / tail failures used to leak the
