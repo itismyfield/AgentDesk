@@ -409,8 +409,11 @@ export default function MeetingsAndSkillsPage({
                 <div className="min-w-0">
                   <div className="mi-title">{meeting.agenda}</div>
                   <div className="mi-meta">
-                    <span className="mono">
-                      {formatMeetingDate(meeting.started_at, locale)}
+                    <span
+                      className="mono"
+                      title={formatMeetingDate(meeting.started_at, locale)}
+                    >
+                      {formatRelativeTime(meeting.started_at, language, locale)}
                     </span>
                     <span>· {durationLabel}</span>
                     <span>
@@ -463,7 +466,7 @@ export default function MeetingsAndSkillsPage({
                 {getMeetingStatusLabel(selectedMeeting, t)}
               </span>
               <span className="md-status-copy">
-                {formatRelativeTime(selectedMeeting.started_at, language, locale)}
+                {formatMeetingDate(selectedMeeting.started_at, locale)}
               </span>
             </div>
           ) : null}
