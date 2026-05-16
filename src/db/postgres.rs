@@ -1313,6 +1313,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_json_extract_0058_up_and_down_preserve_array_path_behavior() {
+        let test_db = TestDatabase::create().await;
+        let config = postgres_test_config(&test_db);
+
+        let pool =
+            connect_test_pool_and_migrate_config(&config, "db::postgres json_extract test pool")
+                .await
+                .expect("connect and migrate postgres")
+                .expect("postgres pool");
+
+        let (array_value, strict_mismatch, malformed_path, volatility): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT
+                json_extract('{\"items\":[{\"id\":\"first\"}]}'::jsonb, '$.items[0].id'),
+                json_extract('{\"phase_gate\":[{\"run_id\":\"run-array\"}]}'::jsonb, '$.phase_gate.run_id'),
+                json_extract('{}'::jsonb, '$['),
+                (SELECT provolatile::text
+                 FROM pg_proc
+                 WHERE oid = 'json_extract(jsonb,text)'::regprocedure)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("query 0058 json_extract up behavior");
+        assert_eq!(array_value.as_deref(), Some("first"));
+        assert_eq!(strict_mismatch, None);
+        assert_eq!(malformed_path, None);
+        assert_eq!(volatility, "s");
+
+        POSTGRES_MIGRATOR
+            .undo(&pool, 57)
+            .await
+            .expect("undo 0058 json_extract migration");
+
+        let (down_array_value, down_lax_value, down_malformed_path, down_volatility): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT
+                json_extract('{\"items\":[{\"id\":\"first\"}]}'::jsonb, '$.items[0].id'),
+                json_extract('{\"phase_gate\":[{\"run_id\":\"run-array\"}]}'::jsonb, '$.phase_gate.run_id'),
+                json_extract('{}'::jsonb, '$['),
+                (SELECT provolatile::text
+                 FROM pg_proc
+                 WHERE oid = 'json_extract(jsonb,text)'::regprocedure)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("query 0058 json_extract down behavior");
+        assert_eq!(down_array_value.as_deref(), Some("first"));
+        assert_eq!(down_lax_value.as_deref(), Some("run-array"));
+        assert_eq!(down_malformed_path, None);
+        assert_eq!(down_volatility, "s");
+
+        close_test_pool(pool, "db::postgres json_extract test pool")
+            .await
+            .expect("close postgres pool");
+        test_db.drop().await;
+    }
+
+    #[tokio::test]
     async fn postgres_startup_reseed_migrates_legacy_openclaw_agent_ids() {
         let test_db = TestDatabase::create().await;
         let mut config = postgres_test_config(&test_db);
