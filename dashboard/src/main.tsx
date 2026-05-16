@@ -13,6 +13,7 @@ import {
   resolveThemePreference,
 } from "./app/themePreferences";
 import "./styles/main.css";
+import "./styles/main.components.css";
 
 const prefersDarkScheme = window.matchMedia("(prefers-color-scheme: dark)").matches;
 const initialThemePreference = readStoredThemePreference(window.localStorage, "dark");
