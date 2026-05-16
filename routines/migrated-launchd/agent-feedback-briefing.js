@@ -9,10 +9,14 @@
 //        "name": "agent-feedback-briefing", "agent_id": "ch-pmd",
 //        "execution_strategy": "fresh", "timeout_secs": 1800 }
 //   2. POST /api/routines/<id>/pause
-//   3. At cutover: launchctl bootout the launchd label, then
-//      PATCH /api/routines/<id> { "schedule": "5 19 * * *" }
-//      and POST /api/routines/<id>/resume -d '{}'
-// Do NOT POST with "schedule" included — that opens a duplicate-send race.
+//   3. PATCH /api/routines/<id> { "schedule": "5 19 * * *" }
+//   4. Verify next_due_at is populated and in the future:
+//      curl ... /api/routines/<id> | jq .routine.next_due_at
+//      Capture as $NEXT_DUE.
+//   5. SSH mac-mini, launchctl bootout the launchd label.
+//   6. POST /api/routines/<id>/resume -d "{\"next_due_at\":\"$NEXT_DUE\"}"
+//      (a bare {} body writes next_due_at=NULL and strands the routine).
+// Do NOT POST with "schedule" included on attach — duplicate-send race.
 //
 // CUTOVER SAFETY: This job sends to Discord. Use the stage-paused → cutover
 // protocol in docs/launchd-to-routine-migration-plan.md (attach without

@@ -240,6 +240,14 @@ fire alongside the still-loaded launchd plist. To eliminate that race,
 **attach without a schedule first**, then pause, then PATCH the schedule
 in:
 
+**Critical ordering:** PATCH the schedule **before** booting out
+launchd, so the routine's `next_due_at` is computed and verifiable
+while launchd is still firing. Only after the DB has a valid
+`next_due_at` do you bootout launchd, then resume with that exact
+`next_due_at` echoed back to the API. Passing `{}` to resume writes
+`next_due_at = NULL`, which strands the routine (the seed loop only
+re-runs at dcserver boot).
+
 1. Attach the row **with no schedule** so the routine-runtime cannot
    pick a `next_due_at`:
    ```bash
@@ -260,37 +268,62 @@ in:
    ```bash
    curl -sf "$API/api/routines/<id>/pause" -X POST
    ```
-3. PATCH the schedule in (still paused; `next_due_at` is computed but
-   the lease loop ignores paused rows):
+3. PATCH the schedule in. This automatically computes and stores
+   `next_due_at`; the row stays paused so the lease loop ignores it.
    ```bash
    curl -sf "$API/api/routines/<id>" -X PATCH \
      -H 'Content-Type: application/json' \
      -d '{"schedule":"0 19 * * *"}'
    ```
-4. On the cutover day for each job, SSH mac-mini and run
-   `launchctl bootout user/$(id -u)/<launchd-label>` to stop launchd
-   firing **for that label only**. Do not delete the plist file yet.
-5. Resume the routine. The resume route uses
-   `Json<ResumeRoutineBody>`; a bare POST without
-   `Content-Type: application/json` and a body returns 400. Use:
+4. **Verify** the row is paused **and** has a `next_due_at` strictly
+   in the future:
+   ```bash
+   curl -sf "$API/api/routines/<id>" | jq '.routine | {status, schedule, next_due_at}'
+   # Expected: status="paused", schedule matches, next_due_at is a
+   # future RFC3339 timestamp at the right cron mark.
+   ```
+   Capture the value for step 6:
+   ```bash
+   NEXT_DUE=$(curl -sf "$API/api/routines/<id>" | jq -r '.routine.next_due_at')
+   ```
+5. SSH mac-mini and bootout launchd for the affected label only:
+   ```bash
+   launchctl bootout user/$(id -u)/<launchd-label>
+   launchctl print user/$(id -u)/<launchd-label> 2>&1 | head -1
+   # Expected: "Could not find service" (confirms bootout).
+   ```
+   Do **not** delete the plist file. Leave it in
+   `~/Library/LaunchAgents/` so Rollback B remains a single
+   `launchctl bootstrap` away.
+6. Resume the routine and pass `next_due_at` explicitly to preserve
+   the value PATCH computed. The resume route uses
+   `Json<ResumeRoutineBody>`; without an explicit `next_due_at` the
+   handler overwrites the column with NULL:
    ```bash
    curl -sf "$API/api/routines/<id>/resume" -X POST \
      -H 'Content-Type: application/json' \
-     -d '{}'
+     -d "{\"next_due_at\":\"$NEXT_DUE\"}"
+   curl -sf "$API/api/routines/<id>" | jq '.routine | {status, next_due_at}'
+   # Expected: status="enabled", next_due_at matches $NEXT_DUE.
    ```
-   (Optionally pass `{"next_due_at":"<RFC3339>"}` to force the first
-   fire time.)
-6. Watch `GET /api/routines/<id>/runs?limit=10` and the Discord target
-   for the next scheduled fire to confirm the routine sends exactly one
-   message with the same payload the launchd plist used to send.
-7. After 24h clean operation, delete the plist file:
-   `rm ~/Library/LaunchAgents/<launchd-label>.plist`. Rollback is no
-   longer one-step after this; see Rollback below.
+7. Watch `GET /api/routines/<id>/runs?limit=10` and the Discord target
+   for the next scheduled fire to confirm the routine sends exactly
+   one message with the same payload the launchd plist used to send.
+8. After 24h clean operation, **move** the plist file instead of
+   removing it:
+   ```bash
+   mkdir -p ~/Library/LaunchAgents.disabled
+   mv ~/Library/LaunchAgents/<launchd-label>.plist \
+      ~/Library/LaunchAgents.disabled/
+   ```
+   This keeps Rollback B viable; Rollback C is only needed if the
+   file is truly deleted.
 
 Before promoting any of these jobs to production, smoke-test the
-pause/resume curl shape against a throwaway routine to confirm both
-endpoints accept the documented body and the routine returns
-`status='enabled'` after resume.
+attach → pause → PATCH → bootout → resume sequence against a
+throwaway routine (e.g. one of the `monitoring/` scripts pointed at a
+test channel) to confirm the resume actually fires at the expected
+minute and `next_due_at` stays populated after resume.
 
 ### True parallel-run (job 12 only)
 

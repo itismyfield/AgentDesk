@@ -10,10 +10,11 @@
 //        "name": "memento-hygiene", "agent_id": "<decided owner>",
 //        "execution_strategy": "fresh", "timeout_secs": 1800 }
 //   2. POST /api/routines/<id>/pause
-//   3. At cutover: launchctl bootout the launchd label, then
-//      PATCH /api/routines/<id> { "schedule": "0 6 * * *" }
-//      and POST /api/routines/<id>/resume -d '{}'
-// Do NOT POST with "schedule" included.
+//   3. PATCH /api/routines/<id> { "schedule": "0 6 * * *" }
+//   4. Verify next_due_at and capture as $NEXT_DUE.
+//   5. SSH mac-mini, launchctl bootout the launchd label.
+//   6. POST /api/routines/<id>/resume -d "{\"next_due_at\":\"$NEXT_DUE\"}"
+// Do NOT POST with "schedule" included on attach.
 //
 // Do not enable this routine (status=enabled) until agent_id is set. Until
 // then, launchd continues to fire (no functional regression).

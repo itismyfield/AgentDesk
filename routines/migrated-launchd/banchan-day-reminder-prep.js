@@ -11,10 +11,11 @@
 //        "name": "banchan-day-reminder-prep", "agent_id": "family-routine",
 //        "execution_strategy": "fresh", "timeout_secs": 900 }
 //   2. POST /api/routines/<id>/pause
-//   3. At cutover: launchctl bootout the launchd label, then
-//      PATCH /api/routines/<id> { "schedule": "0 8 * * *" }
-//      and POST /api/routines/<id>/resume -d '{}'
-// Do NOT POST with "schedule" included.
+//   3. PATCH /api/routines/<id> { "schedule": "0 8 * * *" }
+//   4. Verify next_due_at and capture as $NEXT_DUE.
+//   5. SSH mac-mini, launchctl bootout the launchd label.
+//   6. POST /api/routines/<id>/resume -d "{\"next_due_at\":\"$NEXT_DUE\"}"
+// Do NOT POST with "schedule" included on attach.
 //
 // NOTE: The shell script + skill 'banchan-day-reminder' performs the calendar
 // lookup itself; the daily 08:00 fire is intentional — the skill returns

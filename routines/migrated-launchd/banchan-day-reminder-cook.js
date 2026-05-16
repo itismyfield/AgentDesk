@@ -11,10 +11,11 @@
 //        "name": "banchan-day-reminder-cook", "agent_id": "family-routine",
 //        "execution_strategy": "fresh", "timeout_secs": 900 }
 //   2. POST /api/routines/<id>/pause
-//   3. At cutover: launchctl bootout the launchd label, then
-//      PATCH /api/routines/<id> { "schedule": "0 18 * * *" }
-//      and POST /api/routines/<id>/resume -d '{}'
-// Do NOT POST with "schedule" included.
+//   3. PATCH /api/routines/<id> { "schedule": "0 18 * * *" }
+//   4. Verify next_due_at and capture as $NEXT_DUE.
+//   5. SSH mac-mini, launchctl bootout the launchd label.
+//   6. POST /api/routines/<id>/resume -d "{\"next_due_at\":\"$NEXT_DUE\"}"
+// Do NOT POST with "schedule" included on attach.
 //
 // NOTE: Calendar-driven — the skill returns NO_REPLY on non-반찬데이 days. The
 // 18:00 fire is intentional and matches the original launchd cadence.
