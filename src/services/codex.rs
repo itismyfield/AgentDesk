@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::claude;
+use crate::services::claude_tui::hook_bundle::{HookBundleConfig, codex_hook_config_overrides};
+use crate::services::claude_tui::hook_server::current_hook_endpoint;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
@@ -205,6 +207,22 @@ fn base_tui_args(
     args
 }
 
+fn append_codex_config_overrides(
+    args: &mut Vec<String>,
+    overrides: impl IntoIterator<Item = String>,
+) {
+    let insert_at = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let mut override_args = Vec::new();
+    for override_value in overrides {
+        override_args.push("-c".to_string());
+        override_args.push(override_value);
+    }
+    args.splice(insert_at..insert_at, override_args);
+}
+
 fn render_codex_tui_tmux_script(env_lines: &str, codex_bin: &str, args: &[String]) -> String {
     let rendered_args = args
         .iter()
@@ -223,6 +241,40 @@ fn render_codex_tui_tmux_script(env_lines: &str, codex_bin: &str, args: &[String
         env = env_lines,
         codex_bin = shell_escape(codex_bin),
     )
+}
+
+#[cfg(unix)]
+fn current_agentdesk_exe_for_hook_bundle() -> String {
+    std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "agentdesk".to_string())
+}
+
+#[cfg(unix)]
+fn prepare_codex_tui_hook_overrides(
+    tmux_session_name: &str,
+    session_id: Option<&str>,
+) -> Vec<String> {
+    let Some(endpoint) = current_hook_endpoint() else {
+        tracing::debug!(
+            tmux_session_name,
+            "Codex TUI hook receiver endpoint unavailable; launching without hook relays"
+        );
+        return Vec::new();
+    };
+
+    let hook_session_id = session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(tmux_session_name);
+    let config = HookBundleConfig {
+        endpoint,
+        provider: ProviderKind::Codex.as_str().to_string(),
+        session_id: hook_session_id.to_string(),
+        agentdesk_exe: current_agentdesk_exe_for_hook_bundle(),
+    };
+    codex_hook_config_overrides(&config)
 }
 
 fn should_reuse_existing_provider_session(
@@ -457,10 +509,10 @@ pub fn execute_command_streaming(
             {
                 return execute_streaming_local_tui_tmux(
                     &prompt,
+                    session_id,
                     model,
                     fast_mode_enabled,
                     goals_enabled,
-                    session_id,
                     working_dir,
                     sender,
                     cancel_token,
@@ -690,10 +742,10 @@ fn execute_streaming_remote_tmux(
 #[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tui_tmux(
     prompt: &str,
+    session_id: Option<&str>,
     model: Option<&str>,
     fast_mode_enabled: Option<bool>,
     goals_enabled: Option<bool>,
-    session_id: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -742,8 +794,9 @@ fn execute_streaming_local_tui_tmux(
         report_channel_id,
         report_provider,
     );
+    let codex_hook_overrides = prepare_codex_tui_hook_overrides(tmux_session_name, session_id);
     let reasoning_effort = std::env::var("AGENTDESK_CODEX_REASONING_EFFORT").ok();
-    let args = base_tui_args(
+    let mut args = base_tui_args(
         session_selection.resume_session_id(),
         prompt,
         model,
@@ -752,6 +805,9 @@ fn execute_streaming_local_tui_tmux(
         fast_mode_enabled,
         goals_enabled,
     );
+    if !codex_hook_overrides.is_empty() {
+        append_codex_config_overrides(&mut args, codex_hook_overrides);
+    }
     let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
     let rollout_modified_since = std::time::SystemTime::now();
 
@@ -1610,7 +1666,10 @@ fn handle_codex_json_line(
 
 #[cfg(test)]
 mod tui_hosting_tests {
-    use super::{base_tui_args, render_codex_tui_tmux_script, render_codex_wrapper_tmux_script};
+    use super::{
+        append_codex_config_overrides, base_tui_args, render_codex_tui_tmux_script,
+        render_codex_wrapper_tmux_script,
+    };
 
     #[test]
     fn codex_tui_tmux_script_launches_codex_directly_without_wrapper() {
@@ -1661,6 +1720,31 @@ mod tui_hosting_tests {
         let separator = args.iter().position(|arg| arg == "--").unwrap();
         assert_eq!(args[separator - 1], "session-123");
         assert_eq!(args[separator + 1], "resume prompt");
+    }
+
+    #[test]
+    fn codex_tui_config_overrides_are_inserted_before_prompt_delimiter() {
+        let mut args = base_tui_args(
+            None,
+            "hello from tui",
+            Some("gpt-5-codex"),
+            None,
+            false,
+            None,
+            None,
+        );
+
+        append_codex_config_overrides(&mut args, vec!["features.hooks=true".to_string()]);
+
+        let override_index = args
+            .windows(2)
+            .position(|pair| pair[0] == "-c" && pair[1] == "features.hooks=true")
+            .expect("expected hook feature override");
+        let delimiter_index = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("expected prompt delimiter");
+        assert!(override_index < delimiter_index);
     }
 
     #[test]

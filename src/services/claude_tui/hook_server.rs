@@ -22,7 +22,10 @@ pub enum HookEventKind {
     UserPromptSubmit,
     Stop,
     PreToolUse,
+    PermissionRequest,
     PostToolUse,
+    PreCompact,
+    PostCompact,
     Notification,
     SubagentStop,
     Unknown(String),
@@ -35,7 +38,10 @@ impl HookEventKind {
             "user_prompt_submit" => Self::UserPromptSubmit,
             "stop" => Self::Stop,
             "pre_tool_use" => Self::PreToolUse,
+            "permission_request" => Self::PermissionRequest,
             "post_tool_use" => Self::PostToolUse,
+            "pre_compact" => Self::PreCompact,
+            "post_compact" => Self::PostCompact,
             "notification" => Self::Notification,
             "subagent_stop" => Self::SubagentStop,
             other => Self::Unknown(other.to_string()),
@@ -48,7 +54,10 @@ impl HookEventKind {
             Self::UserPromptSubmit => "user_prompt_submit",
             Self::Stop => "stop",
             Self::PreToolUse => "pre_tool_use",
+            Self::PermissionRequest => "permission_request",
             Self::PostToolUse => "post_tool_use",
+            Self::PreCompact => "pre_compact",
+            Self::PostCompact => "post_compact",
             Self::Notification => "notification",
             Self::SubagentStop => "subagent_stop",
             Self::Unknown(value) => value.as_str(),
@@ -171,7 +180,7 @@ pub async fn spawn_hook_server_with_state(
             })
             .await;
         if let Err(error) = result {
-            tracing::warn!("claude_tui hook server stopped with error: {error}");
+            tracing::warn!("tui hook server stopped with error: {error}");
         }
     });
 
@@ -183,10 +192,7 @@ pub async fn spawn_hook_server_with_state(
     *HOOK_ENDPOINT
         .write()
         .unwrap_or_else(|error| error.into_inner()) = Some(handle.base_url());
-    tracing::info!(
-        endpoint = handle.base_url(),
-        "claude_tui hook server started"
-    );
+    tracing::info!(endpoint = handle.base_url(), "tui hook server started");
     Ok(handle)
 }
 
@@ -253,12 +259,20 @@ async fn receive_hook(
         payload,
     };
     let event_name = event.kind.as_str().to_string();
+    if matches!(event.kind, HookEventKind::Unknown(_)) {
+        tracing::warn!(
+            provider,
+            event = event_name,
+            session_id,
+            "unknown tui hook event accepted for provider-scoped telemetry"
+        );
+    }
     if state.event_tx.send(event).is_err() {
         tracing::debug!(
             provider,
             event = event_name,
             session_id,
-            "claude_tui hook event accepted with no subscribers; event discarded"
+            "tui hook event accepted with no subscribers; event discarded"
         );
     }
 
@@ -325,15 +339,31 @@ mod tests {
         LazyLock::new(|| std::sync::Mutex::new(()));
 
     #[test]
-    fn hook_event_kind_normalizes_claude_names() {
+    fn hook_event_kind_normalizes_provider_hook_names() {
         assert_eq!(HookEventKind::from_path("Stop"), HookEventKind::Stop);
         assert_eq!(
             HookEventKind::from_path("PreToolUse"),
             HookEventKind::PreToolUse
         );
         assert_eq!(
+            HookEventKind::from_path("PermissionRequest"),
+            HookEventKind::PermissionRequest
+        );
+        assert_eq!(
+            HookEventKind::from_path("pre-compact"),
+            HookEventKind::PreCompact
+        );
+        assert_eq!(
+            HookEventKind::from_path("PostCompact"),
+            HookEventKind::PostCompact
+        );
+        assert_eq!(
             HookEventKind::from_path("subagent-stop"),
             HookEventKind::SubagentStop
+        );
+        assert_eq!(
+            HookEventKind::from_path("FutureCodexHook"),
+            HookEventKind::Unknown("future_codex_hook".to_string())
         );
     }
 
