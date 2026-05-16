@@ -9,6 +9,11 @@ use poise::serenity_prelude::MessageId;
 use super::prompt::VoiceTranscriptAnnouncement;
 
 const ANNOUNCEMENT_META_TTL: Duration = Duration::from_secs(30);
+/// Voice-background handoff markers can outlive the short announce TTL because
+/// the background turn they trigger may run for minutes before the terminal
+/// delivery callback consults the marker. Keep generously long so legitimate
+/// long-running background turns still find the marker.
+const HANDOFF_META_TTL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone)]
 struct StoredVoiceTranscriptAnnouncement {
@@ -16,9 +21,36 @@ struct StoredVoiceTranscriptAnnouncement {
     expires_at: Instant,
 }
 
+/// Typed marker recorded by the voice foreground → background dispatch path
+/// (`dispatch_voice_background_handoff`). The turn bridge consults this on
+/// terminal delivery to decide whether the spoken summary should be routed
+/// into the foreground voice channel.
+///
+/// This replaces the user-controllable Korean-prefix substring match that
+/// `is_voice_background_handoff_prompt` previously used (issue #2236).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VoiceBackgroundHandoffMeta {
+    /// Voice channel that originated the handoff (where the spoken summary
+    /// should be routed if it is delivered).
+    pub voice_channel_id: u64,
+    /// Background text channel where the handoff prompt was posted.
+    pub background_channel_id: u64,
+    /// Agent id from the active voice route. Used by
+    /// `voice_channel_for_background` to disambiguate when multiple agents
+    /// map onto the same background channel.
+    pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct StoredVoiceBackgroundHandoffMeta {
+    meta: VoiceBackgroundHandoffMeta,
+    expires_at: Instant,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct VoiceAnnouncementMetaStore {
     entries: RwLock<HashMap<u64, StoredVoiceTranscriptAnnouncement>>,
+    handoff_entries: RwLock<HashMap<u64, StoredVoiceBackgroundHandoffMeta>>,
 }
 
 impl VoiceAnnouncementMetaStore {
@@ -54,6 +86,43 @@ impl VoiceAnnouncementMetaStore {
         prune_expired_locked(&mut entries, now);
         entries.contains_key(&message_id.get())
     }
+
+    pub(crate) fn insert_handoff(&self, message_id: MessageId, meta: VoiceBackgroundHandoffMeta) {
+        if let Ok(mut entries) = self.handoff_entries.write() {
+            let now = Instant::now();
+            prune_handoff_expired_locked(&mut entries, now);
+            entries.insert(
+                message_id.get(),
+                StoredVoiceBackgroundHandoffMeta {
+                    meta,
+                    expires_at: now + HANDOFF_META_TTL,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn get_handoff(&self, message_id: MessageId) -> Option<VoiceBackgroundHandoffMeta> {
+        let mut entries = self.handoff_entries.write().ok()?;
+        let now = Instant::now();
+        prune_handoff_expired_locked(&mut entries, now);
+        entries
+            .get(&message_id.get())
+            .map(|stored| stored.meta.clone())
+    }
+
+    pub(crate) fn take_handoff(&self, message_id: MessageId) -> Option<VoiceBackgroundHandoffMeta> {
+        let mut entries = self.handoff_entries.write().ok()?;
+        let now = Instant::now();
+        prune_handoff_expired_locked(&mut entries, now);
+        entries.remove(&message_id.get()).map(|stored| stored.meta)
+    }
+}
+
+fn prune_handoff_expired_locked(
+    entries: &mut HashMap<u64, StoredVoiceBackgroundHandoffMeta>,
+    now: Instant,
+) {
+    entries.retain(|_, stored| stored.expires_at > now);
 }
 
 fn prune_expired_locked(
@@ -103,5 +172,30 @@ mod tests {
 
         assert!(store.contains(message_id));
         assert_eq!(store.take(message_id).unwrap().utterance_id, "utt-1");
+    }
+
+    #[test]
+    fn handoff_store_round_trips_typed_metadata() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let message_id = MessageId::new(200);
+        let meta = VoiceBackgroundHandoffMeta {
+            voice_channel_id: 300,
+            background_channel_id: 200,
+            agent_id: Some("project-agentdesk".to_string()),
+        };
+
+        store.insert_handoff(message_id, meta.clone());
+        assert_eq!(store.get_handoff(message_id), Some(meta.clone()));
+        // get_handoff does not consume — same call should still return.
+        assert_eq!(store.get_handoff(message_id), Some(meta.clone()));
+        assert_eq!(store.take_handoff(message_id), Some(meta));
+        assert!(store.get_handoff(message_id).is_none());
+    }
+
+    #[test]
+    fn handoff_store_returns_none_when_absent() {
+        let store = VoiceAnnouncementMetaStore::default();
+        assert!(store.get_handoff(MessageId::new(999)).is_none());
+        assert!(store.take_handoff(MessageId::new(999)).is_none());
     }
 }

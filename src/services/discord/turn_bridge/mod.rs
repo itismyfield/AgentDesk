@@ -92,20 +92,80 @@ fn json_any_true_flag(value: &serde_json::Value, key: &str) -> bool {
     false
 }
 
-fn is_voice_background_handoff_prompt(text: &str) -> bool {
-    let Some(first_line) = text.lines().map(str::trim).find(|line| !line.is_empty()) else {
-        return false;
-    };
-    first_line.starts_with("Voice foreground handed this request to the background agent.")
-        || first_line.starts_with("보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.")
+/// Returns true when a typed voice-background handoff marker exists for
+/// this `user_msg_id`.
+///
+/// The marker is stamped by `dispatch_voice_background_handoff` at the
+/// foreground→background dispatch site (#2236) and consumed exactly once
+/// by `voice_background_completion_target` on terminal delivery. The
+/// previous implementation matched a hardcoded Korean/English prefix in
+/// the prompt body — that prefix is user-controllable (it appears in the
+/// LLM-visible prompt that any user could literally type into a mapped
+/// background channel), so the prefix match was a routing-hijack vector.
+///
+/// The legacy prefix fallback was deliberately removed in #2236 follow-up
+/// review: keeping it open during a deprecation window would have left
+/// the original spoofable path alive for new traffic, not just in-flight
+/// turns. Since voice-background routing was first merged in #2207
+/// (immediate predecessor of this fix), there are no long-running
+/// in-flight turns to migrate. The hard cutover is safe.
+fn is_voice_background_handoff_prompt(user_msg_id: MessageId, _text: &str) -> bool {
+    crate::voice::announce_meta::global_store()
+        .get_handoff(user_msg_id)
+        .is_some()
 }
 
+/// Resolves the foreground voice channel that should hear the spoken
+/// summary of a finished background turn.
+///
+/// #2236: delivery is bound to the typed marker stamped at dispatch time.
+/// The marker carries the original `voice_channel_id` and
+/// `background_channel_id`, so routing does NOT round-trip through the
+/// (potentially-stale, multi-agent-ambiguous) reverse lookup any more.
+///
+/// - Returns `None` when no marker exists for this `user_msg_id` (this
+///   turn was not a voice-background handoff).
+/// - Returns `None` when the marker exists but the recorded
+///   `background_channel_id` does not match the channel that fired this
+///   turn (sanity-check; would only happen if a marker were stamped
+///   against the wrong message id by a buggy dispatch path).
+/// - Otherwise consumes the marker and returns the recorded voice
+///   channel id directly. `mapped_voice_channel_id` is accepted only as
+///   a cross-check parameter — if reverse lookup also resolved a voice
+///   channel and it disagrees with the marker, a warn is emitted but the
+///   marker still wins (it is the authoritative origin record).
 fn voice_background_completion_target(
     mapped_voice_channel_id: Option<ChannelId>,
-    user_text: &str,
+    user_msg_id: MessageId,
+    _user_text: &str,
+    channel_id: ChannelId,
 ) -> Option<ChannelId> {
-    let voice_channel_id = mapped_voice_channel_id?;
-    is_voice_background_handoff_prompt(user_text).then_some(voice_channel_id)
+    let store = crate::voice::announce_meta::global_store();
+    let meta = store.take_handoff(user_msg_id)?;
+    if meta.background_channel_id != channel_id.get() {
+        tracing::warn!(
+            event = "voice_background_handoff_channel_mismatch",
+            user_msg_id = user_msg_id.get(),
+            channel_id = channel_id.get(),
+            marker_background_channel_id = meta.background_channel_id,
+            marker_voice_channel_id = meta.voice_channel_id,
+            "typed handoff marker recorded a different background channel than the turn fired in; refusing to route spoken summary"
+        );
+        return None;
+    }
+    if let Some(mapped) = mapped_voice_channel_id
+        && mapped.get() != meta.voice_channel_id
+    {
+        tracing::warn!(
+            event = "voice_background_handoff_voice_channel_disagrees_with_reverse_lookup",
+            user_msg_id = user_msg_id.get(),
+            channel_id = channel_id.get(),
+            marker_voice_channel_id = meta.voice_channel_id,
+            reverse_lookup_voice_channel_id = mapped.get(),
+            "typed handoff marker disagrees with current reverse-lookup voice channel; marker wins (authoritative origin record)"
+        );
+    }
+    Some(ChannelId::new(meta.voice_channel_id))
 }
 
 #[cfg(test)]
@@ -114,7 +174,7 @@ mod dispatch_kind_tests {
         classify_turn_finished_dispatch_kind, is_voice_background_handoff_prompt,
         voice_background_completion_target,
     };
-    use poise::serenity_prelude::ChannelId;
+    use poise::serenity_prelude::{ChannelId, MessageId};
 
     #[test]
     fn marks_auto_queue_context() {
@@ -166,34 +226,147 @@ mod dispatch_kind_tests {
         );
     }
 
+    /// #2236: without a typed marker, ANY user_text (including the literal
+    /// legacy prefix) must not be classified as a voice-background handoff.
+    /// The legacy prefix fallback was removed because it left the
+    /// user-controllable routing-hijack path open.
     #[test]
-    fn recognizes_voice_background_handoff_prompt() {
-        assert!(is_voice_background_handoff_prompt(
+    fn handoff_prompt_classification_requires_typed_marker() {
+        let user_msg_id = MessageId::new(7_000_001);
+        assert!(!is_voice_background_handoff_prompt(
+            user_msg_id,
             "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.\n\n이관 요약: 로그 확인"
         ));
-        assert!(is_voice_background_handoff_prompt(
+        assert!(!is_voice_background_handoff_prompt(
+            MessageId::new(7_000_002),
             "Voice foreground handed this request to the background agent.\n\nHandoff summary: check logs"
         ));
-        assert!(!is_voice_background_handoff_prompt("일반 텍스트 요청"));
+        assert!(!is_voice_background_handoff_prompt(
+            MessageId::new(7_000_003),
+            "일반 텍스트 요청"
+        ));
     }
 
     #[test]
-    fn background_completion_target_requires_mapping_and_handoff_prompt() {
-        let mapped = Some(ChannelId::new(300));
-        assert_eq!(voice_background_completion_target(mapped, "plain"), None);
+    fn recognizes_voice_background_handoff_via_typed_marker() {
+        // Stamping a typed marker is sufficient — body text is irrelevant.
+        let user_msg_id = MessageId::new(7_100_001);
+        crate::voice::announce_meta::global_store().insert_handoff(
+            user_msg_id,
+            crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: 300,
+                background_channel_id: 200,
+                agent_id: Some("project-agentdesk".to_string()),
+            },
+        );
+        assert!(is_voice_background_handoff_prompt(
+            user_msg_id,
+            "user-controlled body that does not match any prefix",
+        ));
+        // get_handoff does not consume; clean up to keep test isolated.
+        let _ = crate::voice::announce_meta::global_store().take_handoff(user_msg_id);
+    }
+
+    /// #2236: delivery is bound to the marker's recorded voice channel.
+    /// Reverse-lookup result is accepted only as a cross-check.
+    #[test]
+    fn background_completion_target_returns_marker_recorded_voice_channel() {
+        let user_msg_id = MessageId::new(7_300_001);
+        crate::voice::announce_meta::global_store().insert_handoff(
+            user_msg_id,
+            crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: 301,
+                background_channel_id: 201,
+                agent_id: None,
+            },
+        );
+        let mapped = Some(ChannelId::new(301));
+        let channel = ChannelId::new(201);
         assert_eq!(
             voice_background_completion_target(
                 mapped,
-                "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다."
+                user_msg_id,
+                "free-form user-controlled text",
+                channel,
             ),
-            Some(ChannelId::new(300))
+            Some(ChannelId::new(301))
+        );
+        // Marker is consumed exactly once.
+        assert_eq!(
+            voice_background_completion_target(
+                mapped,
+                user_msg_id,
+                "free-form user-controlled text",
+                channel,
+            ),
+            None
+        );
+    }
+
+    /// #2236: prefix-only spoofing attempt — no marker, prefix in body — must NOT route.
+    #[test]
+    fn background_completion_target_refuses_legacy_prefix_without_marker() {
+        let user_msg_id = MessageId::new(7_400_001);
+        let mapped = Some(ChannelId::new(300));
+        let channel = ChannelId::new(200);
+        assert_eq!(
+            voice_background_completion_target(
+                mapped,
+                user_msg_id,
+                "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.",
+                channel,
+            ),
+            None,
+            "user-controllable legacy prefix must no longer drive routing"
+        );
+    }
+
+    /// #2236: marker recorded against a different background channel than
+    /// the turn fired in is treated as a routing mismatch and refused.
+    #[test]
+    fn background_completion_target_refuses_marker_with_wrong_background_channel() {
+        let user_msg_id = MessageId::new(7_500_001);
+        crate::voice::announce_meta::global_store().insert_handoff(
+            user_msg_id,
+            crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: 301,
+                background_channel_id: 999, // not the channel below
+                agent_id: None,
+            },
         );
         assert_eq!(
             voice_background_completion_target(
-                None,
-                "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다."
+                Some(ChannelId::new(301)),
+                user_msg_id,
+                "irrelevant body",
+                ChannelId::new(201), // mismatched
             ),
             None
+        );
+    }
+
+    /// #2236: marker is authoritative — when the reverse-lookup voice channel
+    /// disagrees with the marker, the marker still wins (with a warn).
+    #[test]
+    fn background_completion_target_marker_wins_over_reverse_lookup_disagreement() {
+        let user_msg_id = MessageId::new(7_600_001);
+        crate::voice::announce_meta::global_store().insert_handoff(
+            user_msg_id,
+            crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: 301,
+                background_channel_id: 201,
+                agent_id: None,
+            },
+        );
+        // Reverse lookup says 999, but marker says 301 — marker wins.
+        assert_eq!(
+            voice_background_completion_target(
+                Some(ChannelId::new(999)),
+                user_msg_id,
+                "irrelevant body",
+                ChannelId::new(201),
+            ),
+            Some(ChannelId::new(301))
         );
     }
 }
@@ -4141,13 +4314,24 @@ pub(super) fn spawn_turn_bridge(
             }
 
             if terminal_delivery_committed {
+                // #2236: look up the typed handoff marker stamped at dispatch
+                // time so multi-agent setups with overlapping background
+                // channels can be disambiguated by the stored agent_id. The
+                // marker is consumed inside voice_background_completion_target
+                // below; passing the stored agent_id (cloned, not taken) here
+                // keeps both lookups consistent for this single dispatch.
+                let stored_handoff_agent_id = crate::voice::announce_meta::global_store()
+                    .get_handoff(user_msg_id)
+                    .and_then(|meta| meta.agent_id);
                 let mapped_voice_channel_id = shared_owned
                     .voice_barge_in
-                    .voice_channel_for_background(channel_id)
+                    .voice_channel_for_background(channel_id, stored_handoff_agent_id.as_deref())
                     .await;
                 if let Some(voice_channel_id) = voice_background_completion_target(
                     mapped_voice_channel_id,
+                    user_msg_id,
                     &user_text_owned,
+                    channel_id,
                 ) {
                     if !inflight_state.silent_turn {
                         let voice_barge_in = shared_owned.voice_barge_in.clone();
