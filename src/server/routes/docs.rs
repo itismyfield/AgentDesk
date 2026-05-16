@@ -3519,7 +3519,43 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/session-termination-events",
             "sessions",
-            "List recorded session termination events // TODO: example",
+            "List recorded session termination events",
+        )
+        .with_params([
+            (
+                "dispatch_id",
+                query_param("string", false, "Filter events by task dispatch id"),
+            ),
+            (
+                "card_id",
+                query_param("string", false, "Filter events by linked kanban card id"),
+            ),
+            (
+                "session_key",
+                query_param("string", false, "Filter events by host-qualified session key"),
+            ),
+            (
+                "limit",
+                query_param("integer", false, "Maximum events to return (capped at 500)")
+                    .with_default(50),
+            ),
+        ])
+        .with_example(
+            json!({"query": {"dispatch_id": "dispatch-1", "limit": 1}}),
+            json!({
+                "events": [{
+                    "id": 862,
+                    "session_key": "mac-mini:AgentDesk-codex-adk-cdx",
+                    "dispatch_id": "dispatch-1",
+                    "killer_component": "tmux_watcher",
+                    "reason_code": "dead_after_turn",
+                    "reason_text": "watcher cleanup: dead session after turn",
+                    "probe_snapshot": null,
+                    "last_offset": null,
+                    "tmux_alive": false,
+                    "created_at": "2026-05-16T04:15:48.151Z"
+                }]
+            }),
         ),
         ep("GET", "/api/messages", "messages", "List messages // TODO: example"),
         ep("POST", "/api/messages", "messages", "Create message // TODO: example"),
@@ -5978,5 +6014,44 @@ mod tests {
         assert_eq!(example_body["target"], "channel:1473922824350601297");
         assert_eq!(example_body["content"], "hello");
         assert_eq!(example_body["source"], "system");
+    }
+
+    #[test]
+    fn session_termination_events_docs_include_filters_and_response_shape() {
+        let endpoints = all_endpoints();
+        let endpoint = endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.method == "GET" && endpoint.path == "/api/session-termination-events"
+            })
+            .expect("GET /api/session-termination-events must be documented");
+
+        for param in ["dispatch_id", "card_id", "session_key", "limit"] {
+            assert!(
+                endpoint.params.contains_key(param),
+                "termination event docs must include {param}"
+            );
+        }
+        assert_eq!(
+            endpoint
+                .params
+                .get("limit")
+                .expect("limit should be documented")
+                .default,
+            Some(json!(50))
+        );
+        assert!(
+            !endpoint.description.contains("TODO"),
+            "termination event docs should not be a placeholder"
+        );
+
+        let event = &endpoint
+            .example
+            .as_ref()
+            .expect("termination event docs must include an example")
+            .response["events"][0];
+        assert_eq!(event["tmux_alive"], false);
+        assert_eq!(event["last_offset"], Value::Null);
+        assert_eq!(event["created_at"], "2026-05-16T04:15:48.151Z");
     }
 }
