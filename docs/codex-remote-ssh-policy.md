@@ -358,7 +358,11 @@ owner). Reviving remote tmux requires a separate ADR.
   remote host. The remote host owns its own working directory.
 - Per-turn dynamic host selection from a PMD policy, an LLM, or the
   Discord operator. Targeting is static config.
-- Remote tmux for Codex (see "Cancel semantics").
+- Remote tmux for Codex (see "Cancel semantics"). The dispatch path
+  in `services::codex::execute_command_streaming` hard-refuses the
+  `AGENTDESK_CODEX_REMOTE_TMUX=true` env-var branch independent of the
+  direct-SSH gate, so opening the gate for direct remote SSH does not
+  also open the remote tmux branch.
 - Enabling remote SSH for any provider other than Codex. Claude,
   Gemini, Qwen, and OpenCode keep their stubs.
 - Storing SSH credentials in `agentdesk.yaml`. Cleartext password and

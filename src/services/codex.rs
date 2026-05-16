@@ -672,6 +672,38 @@ pub fn execute_command_streaming(
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
 
     if let Some(profile) = remote_profile {
+        // Issue #2193 — remote tmux is hard-refused regardless of the
+        // remote-SSH gate. `docs/codex-remote-ssh-policy.md` lists
+        // remote tmux as a non-goal: a tmux session on the remote
+        // host can outlive the SSH owner (Codex keeps running after
+        // the SSH session drops, with no AgentDesk-side cancel path),
+        // so it needs its own ADR. Refusing it here keeps the gate's
+        // PREREQUISITES_SATISFIED flip from accidentally enabling
+        // remote tmux when only direct-SSH was implemented.
+        #[cfg(unix)]
+        {
+            let requested_remote_tmux = tmux_session_name.is_some()
+                && std::env::var("AGENTDESK_CODEX_REMOTE_TMUX")
+                    .map(|value| {
+                        let normalized = value.trim().to_ascii_lowercase();
+                        normalized == "1" || normalized == "true" || normalized == "yes"
+                    })
+                    .unwrap_or(false);
+            if requested_remote_tmux {
+                tracing::warn!(
+                    provider = "codex",
+                    profile = %profile.name,
+                    doc = "docs/codex-remote-ssh-policy.md",
+                    "refusing Codex remote tmux dispatch: remote tmux is a \
+                     policy non-goal and requires a separate ADR (#2193)"
+                );
+                return Err(
+                    "Remote tmux execution is a policy non-goal (#2193). \
+                     See docs/codex-remote-ssh-policy.md (non-goals)."
+                        .to_string(),
+                );
+            }
+        }
         // Issue #2193 — gate enforcement on the actual dispatch path.
         // Bootstrap already hard-fails when `remote_ssh_enabled=true`
         // and `PREREQUISITES_SATISFIED=false`, but the gate has to be
@@ -698,36 +730,6 @@ pub fn execute_command_streaming(
                  See docs/codex-remote-ssh-policy.md."
                     .to_string(),
             );
-        }
-        #[cfg(unix)]
-        {
-            let use_remote_tmux = tmux_session_name.is_some()
-                && std::env::var("AGENTDESK_CODEX_REMOTE_TMUX")
-                    .map(|value| {
-                        let normalized = value.trim().to_ascii_lowercase();
-                        normalized == "1" || normalized == "true" || normalized == "yes"
-                    })
-                    .unwrap_or(false);
-            if use_remote_tmux {
-                let tmux_name = tmux_session_name.expect("checked is_some above");
-                log_codex_runtime_kind(
-                    "codex.execute_command_streaming",
-                    CodexRuntimeKind::RemoteTmux,
-                );
-                return execute_streaming_remote_tmux(
-                    profile,
-                    &prompt,
-                    model,
-                    fast_mode_enabled,
-                    goals_enabled,
-                    working_dir,
-                    sender,
-                    cancel_token,
-                    tmux_name,
-                    report_channel_id,
-                    report_provider,
-                );
-            }
         }
         log_codex_runtime_kind(
             "codex.execute_command_streaming",
@@ -2624,5 +2626,114 @@ mod tests {
             }
             other => panic!("Expected Ok(RecreateSession), got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod remote_dispatch_gate_tests {
+    //! Issue #2193 — regression tests for the Codex remote SSH dispatch
+    //! gate inside `execute_command_streaming`. These tests verify that:
+    //!
+    //!   1. A remote profile + tmux + `AGENTDESK_CODEX_REMOTE_TMUX=true`
+    //!      is hard-refused as a policy non-goal, regardless of the
+    //!      direct-SSH gate state.
+    //!   2. A remote profile without the env var is refused when the
+    //!      runtime gate is off (the default).
+    //!
+    //! Both refusals MUST happen before any SSH attempt, so they return
+    //! `Err` synchronously and never call into `services::remote_stub`.
+
+    use crate::services::remote::{RemoteAuth, RemoteProfile};
+    use std::sync::Mutex;
+
+    static GATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fixture_profile() -> RemoteProfile {
+        RemoteProfile {
+            name: "test-mac-mini".to_string(),
+            host: "mac-mini.local".to_string(),
+            port: 22,
+            user: "operator".to_string(),
+            auth: RemoteAuth::KeyFile {
+                path: "/dev/null".to_string(),
+                passphrase: None,
+            },
+            default_path: "/tmp".to_string(),
+            claude_path: None,
+        }
+    }
+
+    fn run_dispatch(
+        tmux_session_name: Option<&str>,
+        remote_tmux_env: Option<&str>,
+    ) -> Result<(), String> {
+        // Lock so the AGENTDESK_CODEX_REMOTE_TMUX env mutation and the
+        // provider_hosting runtime cell can't race with other tests.
+        let _guard = GATE_TEST_LOCK.lock().unwrap();
+
+        // Default gate: OFF. This mirrors fresh-bootstrap state.
+        crate::services::provider_hosting::install_provider_hosting_config(
+            &crate::config::Config::default(),
+        );
+
+        // Manipulate the env var the dispatch path reads.
+        match remote_tmux_env {
+            Some(v) => unsafe { std::env::set_var("AGENTDESK_CODEX_REMOTE_TMUX", v) },
+            None => unsafe { std::env::remove_var("AGENTDESK_CODEX_REMOTE_TMUX") },
+        }
+
+        let profile = fixture_profile();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let result = super::execute_command_streaming(
+            "ignored prompt",
+            None,
+            "/tmp",
+            tx,
+            None,
+            None,
+            None,
+            Some(&profile),
+            tmux_session_name,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        // Clean up the env var so we don't leak state.
+        unsafe { std::env::remove_var("AGENTDESK_CODEX_REMOTE_TMUX") };
+
+        result
+    }
+
+    /// Remote tmux is a policy non-goal and MUST be refused even if the
+    /// direct-SSH gate is later opened — i.e. the refusal does not
+    /// depend on `remote_ssh_enabled` or `PREREQUISITES_SATISFIED`.
+    #[cfg(unix)]
+    #[test]
+    fn remote_tmux_is_hard_refused_as_policy_non_goal() {
+        let err = run_dispatch(Some("test-session"), Some("true"))
+            .expect_err("remote tmux must be refused");
+        assert!(
+            err.contains("non-goal"),
+            "expected non-goal refusal, got: {err}"
+        );
+        assert!(err.contains("#2193"), "refusal must cite the issue: {err}");
+    }
+
+    /// Direct remote SSH dispatch (no tmux env) is refused while the
+    /// gate is off. This guards against a future change wiring real
+    /// `RemoteProfile` lists before flipping `remote_ssh_enabled`.
+    #[test]
+    fn remote_direct_is_refused_when_gate_off() {
+        let err = run_dispatch(None, None).expect_err("remote SSH must be refused while gate off");
+        assert!(
+            err.contains("disabled by policy"),
+            "expected policy refusal, got: {err}"
+        );
+        assert!(err.contains("#2193"), "refusal must cite the issue: {err}");
     }
 }
