@@ -150,6 +150,25 @@ pub(in crate::services::discord::turn_bridge) fn extract_review_decision_commit_
         .last()
 }
 
+/// #2200 sub-fix 3: parse an explicit out-of-scope marker from the agent's
+/// dispute response. Only honoured for `decision == "dispute"`. The marker
+/// must be unambiguous (`out_of_scope: true`, `out_of_scope=true`, or a bare
+/// `[out-of-scope]` tag) to prevent free-text accidentally triggering the
+/// scope-mismatch close.
+pub(in crate::services::discord::turn_bridge) fn extract_out_of_scope_flag(
+    full_response: &str,
+) -> bool {
+    let keyed = regex::Regex::new(r#"(?im)\bout[_\- ]of[_\- ]scope\s*[:=]\s*true\b"#)
+        .ok()
+        .map(|re| re.is_match(full_response))
+        .unwrap_or(false);
+    let tagged = regex::Regex::new(r#"(?im)\[\s*out[-_ ]of[-_ ]scope\s*\]"#)
+        .ok()
+        .map(|re| re.is_match(full_response))
+        .unwrap_or(false);
+    keyed || tagged
+}
+
 async fn submit_review_decision_fallback(
     _api_port: u16,
     card_id: &str,
@@ -161,6 +180,13 @@ async fn submit_review_decision_fallback(
     let commit_sha = (decision == "accept")
         .then(|| extract_review_decision_commit_sha(full_response))
         .flatten();
+    // #2200 sub-fix 3: only honour the out_of_scope marker for dispute. The
+    // server still enforces server-side scope verification, so a hallucinated
+    // marker on an in-scope review will be rejected at /api/review-decision
+    // and fall back to the normal in-scope dispute path.
+    let out_of_scope = (decision == "dispute")
+        .then(|| extract_out_of_scope_flag(full_response))
+        .unwrap_or(false);
     crate::services::discord::internal_api::submit_review_decision(
         crate::server::routes::review_verdict::ReviewDecisionBody {
             card_id: card_id.to_string(),
@@ -168,7 +194,7 @@ async fn submit_review_decision_fallback(
             decision: decision.to_string(),
             comment: Some(comment),
             commit_sha,
-            out_of_scope: None,
+            out_of_scope: Some(out_of_scope),
         },
     )
     .await
@@ -2454,5 +2480,27 @@ mod tests {
         assert_eq!(done.2, Some(10));
         assert!(done.3.is_some());
         assert!(done.4.is_some());
+    }
+
+    /// #2200 sub-fix 3: the completion-guard fallback parser recognises
+    /// explicit `out_of_scope: true` / `[out-of-scope]` markers in a dispute
+    /// response. The marker must be unambiguous so a free-text mention of
+    /// the word "scope" does not silently trigger the scope-mismatch close.
+    #[test]
+    fn extract_out_of_scope_flag_recognises_explicit_markers() {
+        assert!(extract_out_of_scope_flag(
+            "dispute. out_of_scope: true. finding is from another card"
+        ));
+        assert!(extract_out_of_scope_flag("dispute [out-of-scope]"));
+        assert!(extract_out_of_scope_flag("dispute out_of_scope=true"));
+        assert!(!extract_out_of_scope_flag(
+            "dispute - this is in scope, real bug"
+        ));
+        assert!(!extract_out_of_scope_flag(
+            "dispute: out_of_scope is false here"
+        ));
+        assert!(!extract_out_of_scope_flag(
+            "dispute: not out of scope at all"
+        ));
     }
 }

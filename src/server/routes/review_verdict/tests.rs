@@ -2072,10 +2072,16 @@ async fn dispute_out_of_scope_closes_with_scope_mismatch_outcome() {
              VALUES ('dispatch-rd-oos', 'card-oos', 'agent-oos', 'review-decision', 'pending', '[Decision] card-oos', datetime('now'), datetime('now'))",
             [],
         ).unwrap();
-        // Also seed a stale pending review dispatch to verify cleanup picks it up.
+        // Seed a live pending review dispatch with a reviewed_commit that
+        // the server can validate against the card issue. The sqlite test
+        // `commit_belongs_to_card_issue` fallback returns false, simulating
+        // an out-of-scope reviewed commit — exactly the scenario the
+        // server-side scope verification should accept.
         conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
-             VALUES ('dispatch-rv-stale', 'card-oos', 'agent-oos', 'review', 'pending', '[Review R1] card-oos', datetime('now'), datetime('now'))",
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+             VALUES ('dispatch-rv-stale', 'card-oos', 'agent-oos', 'review', 'pending', '[Review R1] card-oos',
+                     '{\"reviewed_commit\":\"deadbeef1234567\",\"target_repo\":\"acme/repo\"}',
+                     datetime('now'), datetime('now'))",
             [],
         ).unwrap();
     }
@@ -2229,3 +2235,181 @@ async fn dispute_without_out_of_scope_flag_uses_legacy_in_scope_path() {
         body_false.0
     );
 }
+
+/// #2200 sub-fix 3 (Codex hardening): an out_of_scope claim without
+/// `dispatch_id` must be refused with 400 — the shortcut requires the caller
+/// to prove ownership of the pending review-decision dispatch.
+#[tokio::test]
+async fn dispute_out_of_scope_requires_dispatch_id() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-noid', 'NoID', '111', '222')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+             VALUES ('card-noid', 'NoID', 'review', 'agent-noid', 'dispatch-rd-noid', 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rd-noid', 'card-noid', 'agent-noid', 'review-decision', 'pending', '[Decision] card-noid', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-noid".to_string(),
+            decision: "dispute".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: None,
+            out_of_scope: Some(true),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "out_of_scope must require dispatch_id; body = {:?}",
+        body.0
+    );
+    let card_status: String = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-noid'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        card_status, "review",
+        "rejected out_of_scope must not transition the card"
+    );
+}
+
+/// #2200 sub-fix 3 (Codex hardening): an out_of_scope claim with no live
+/// review dispatch (so no reviewed_commit to verify) must be refused. We do
+/// not let the caller close the dispute without server-side proof of scope.
+#[tokio::test]
+async fn dispute_out_of_scope_refused_when_no_live_review_dispatch() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-nor', 'NoRev', '111', '222')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+             VALUES ('card-nor', 'NoRev', 'review', 'agent-nor', 'dispatch-rd-nor', 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        // Pending review-decision dispatch only — no active review dispatch.
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rd-nor', 'card-nor', 'agent-nor', 'review-decision', 'pending', '[Decision] card-nor', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-nor".to_string(),
+            decision: "dispute".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-rd-nor".to_string()),
+            out_of_scope: Some(true),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "out_of_scope must be refused without a live review dispatch; body = {:?}",
+        body.0
+    );
+    let card_status: String = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-nor'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        card_status, "review",
+        "rejected out_of_scope must not transition the card"
+    );
+}
+
+/// #2200 sub-fix 3 (Codex hardening): an out_of_scope claim on a live review
+/// dispatch that lacks a reviewed_commit must be refused — we cannot verify
+/// scope without the commit.
+#[tokio::test]
+async fn dispute_out_of_scope_refused_when_reviewed_commit_missing() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-nrc', 'NoCommit', '111', '222')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+             VALUES ('card-nrc', 'NoCommit', 'review', 'agent-nrc', 'dispatch-rd-nrc', 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rd-nrc', 'card-nrc', 'agent-nrc', 'review-decision', 'pending', '[Decision] card-nrc', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        // Live review dispatch with NO reviewed_commit in context.
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rv-nrc', 'card-nrc', 'agent-nrc', 'review', 'pending', '[Review R1] card-nrc', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-nrc".to_string(),
+            decision: "dispute".to_string(),
+            comment: None,
+            commit_sha: None,
+            dispatch_id: Some("dispatch-rd-nrc".to_string()),
+            out_of_scope: Some(true),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "out_of_scope must be refused without reviewed_commit; body = {:?}",
+        body.0
+    );
+}
+
