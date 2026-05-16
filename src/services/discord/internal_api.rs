@@ -219,16 +219,48 @@ pub(super) async fn fetch_dispatch(dispatch_id: &str) -> Result<Value, String> {
     request_json(Method::GET, &format!("/api/dispatches/{dispatch_id}")).await
 }
 
+/// Outcome of a PATCH /api/dispatches/{id} call.
+///
+/// `Conflict` distinguishes the case where the dispatch row is already in a
+/// terminal status (HTTP 409) from a transport / 5xx error (`Err`). Callers
+/// completing dispatches must NOT run a DB-write fallback on `Conflict` —
+/// the row is already final and overwriting it would clobber the prior
+/// result (#2194 regression risk).
+#[derive(Debug)]
+pub(super) enum DispatchUpdateOutcome {
+    Updated(Value),
+    Conflict { body: Value },
+}
+
 pub(super) async fn update_dispatch(
     dispatch_id: &str,
     body: routes::dispatches::UpdateDispatchBody,
-) -> Result<Value, String> {
-    request_body(
-        Method::PATCH,
-        &format!("/api/dispatches/{dispatch_id}"),
-        &body,
-    )
-    .await
+) -> Result<DispatchUpdateOutcome, String> {
+    let ctx = load_context()?;
+    let path = format!("/api/dispatches/{dispatch_id}");
+    let response = client()
+        .request(Method::PATCH, api_url(&ctx, &path))
+        .json(&body)
+        .header(reqwest::header::ORIGIN, api_origin(&ctx))
+        .header(reqwest::header::REFERER, api_origin(&ctx))
+        .send()
+        .await
+        .map_err(|error| format!("direct runtime API {path}: {error}"))?;
+    let status = response.status();
+    let body_value = response.json::<Value>().await.unwrap_or_else(|error| {
+        serde_json::json!({ "error": format!("invalid direct API response: {error}") })
+    });
+    if status.is_success() {
+        Ok(DispatchUpdateOutcome::Updated(body_value))
+    } else if status == reqwest::StatusCode::CONFLICT {
+        Ok(DispatchUpdateOutcome::Conflict { body: body_value })
+    } else {
+        Err(body_value
+            .get("error")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{}: {}", status, body_value)))
+    }
 }
 
 pub(super) async fn submit_review_decision(
