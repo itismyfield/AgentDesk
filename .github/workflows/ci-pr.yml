@@ -26,6 +26,7 @@ jobs:
       high_risk_recovery: ${{ steps.filter.outputs.high_risk_recovery }}
       pg_db: ${{ steps.filter.outputs.pg_db }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
+      rust_compile: ${{ steps.filter.outputs.rust_compile }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -106,6 +107,23 @@ jobs:
               - '.cargo/**'
               - 'rust-toolchain*'
               - 'build.rs'
+            # rust_compile is a narrower subset of rust_or_policy: only paths
+            # whose change can plausibly alter Rust binary output (and therefore
+            # require cross-OS verification on macOS/Windows). Pure JS policy,
+            # shell script, CI metadata, and Node package changes are excluded —
+            # those are still verified by the ubuntu Rust lane plus Lint/Script
+            # checks, and the nightly workflow continues to run the full
+            # macOS/Windows matrix daily.
+            rust_compile:
+              - 'src/**'
+              - 'tests/**'
+              - 'migrations/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'sqlx-data.json'
+              - '.cargo/**'
+              - 'rust-toolchain*'
+              - 'build.rs'
 
   dashboard:
     name: Dashboard (Node 22)
@@ -125,6 +143,9 @@ jobs:
       - name: dashboard build/test
         run: ./scripts/verify-dashboard.sh
 
+  # Ubuntu Rust lane: canonical fast check. Gated on the broad rust_or_policy
+  # filter so a `policies/*.js`, `scripts/*.sh`, `.github/workflows/**`, or
+  # Node package change still gets a Rust check on Linux.
   check_fast:
     name: Fast check + non-PG tests (${{ matrix.os }})
     needs: changes
@@ -155,7 +176,65 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Policy JS unit tests
+        run: npm run test:policies
+
+      - name: cargo check
+        run: cargo check --all-targets
+
+      - name: cargo test (non-PG, targeted subset)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+          cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
+          cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+
+  # Cross-OS Rust compile lanes: macOS + Windows. Gated on the narrower
+  # rust_compile filter so docs-only, dashboard-only, JS-policy-only,
+  # script-only, workflow-metadata-only, and Node-package-only PRs skip the
+  # ~25 min macOS lane and the ~30 min Windows lane entirely. Nightly still
+  # exercises the full matrix daily, so cross-OS Rust drift cannot land
+  # silently.
+  check_fast_cross_os:
+    name: Fast check + non-PG tests (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust_compile == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
     steps:
       # Event-gate self-hosted runner sanity check (defence-in-depth).
       # The `runs-on` expression above already restricts self-hosted
@@ -238,16 +317,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-
-      - name: Setup Node.js
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Policy JS unit tests
-        if: matrix.os == 'ubuntu-latest'
-        run: npm run test:policies
 
       - name: cargo check
         run: cargo check --all-targets
