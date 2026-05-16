@@ -2058,19 +2058,43 @@ impl VoiceBargeInRuntime {
         // the foreground voice channel WITHOUT inspecting the prompt body.
         // The previous design matched a hardcoded Korean prefix on
         // `user_text`, which any user could type to hijack routing.
+        //
+        // #2274: also write through to the durable PG side store so the
+        // marker survives a dcserver restart while the background turn is
+        // still running. The in-memory store remains the hot read path; PG
+        // is the durable source of truth and is consulted as a fallback by
+        // terminal-delivery callers when the in-memory store misses.
         if let Some(message_id) = outcome.message_id {
             let agent_id = self
                 .active_voice_routes
                 .get(&source_channel_id.get())
                 .map(|entry| entry.agent_id.clone());
-            crate::voice::announce_meta::global_store().insert_handoff(
-                message_id,
-                crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
-                    voice_channel_id: source_channel_id.get(),
-                    background_channel_id: target_channel_id.get(),
-                    agent_id,
-                },
-            );
+            let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: source_channel_id.get(),
+                background_channel_id: target_channel_id.get(),
+                agent_id,
+            };
+            crate::voice::announce_meta::global_store().insert_handoff(message_id, meta.clone());
+            if let Some(pool) = shared.pg_pool.as_ref() {
+                if let Err(error) =
+                    crate::voice::announce_meta::persist_handoff_durable(pool, message_id, &meta)
+                        .await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        message_id = message_id.get(),
+                        source_channel_id = source_channel_id.get(),
+                        target_channel_id = target_channel_id.get(),
+                        utterance_id = %announcement.utterance_id,
+                        "voice background handoff durable persistence failed; in-memory marker still active but will not survive dcserver restart"
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    message_id = message_id.get(),
+                    "voice background handoff durable persistence skipped — postgres pool unavailable"
+                );
+            }
         } else {
             tracing::warn!(
                 source_channel_id = source_channel_id.get(),

@@ -123,6 +123,13 @@ fn is_voice_background_handoff_prompt(user_msg_id: MessageId, _text: &str) -> bo
 /// `background_channel_id`, so routing does NOT round-trip through the
 /// (potentially-stale, multi-agent-ambiguous) reverse lookup any more.
 ///
+/// #2274: when the in-memory store misses (e.g. after a dcserver restart
+/// during a long background turn before rehydration finished, or when
+/// terminal delivery lands on a different cluster node than the dispatch
+/// node) the durable PG side store is consulted as a fallback. The atomic
+/// `UPDATE … SET consumed_at = NOW() RETURNING …` claim there guarantees
+/// exactly-once consumption across nodes.
+///
 /// - Returns `None` when no marker exists for this `user_msg_id` (this
 ///   turn was not a voice-background handoff).
 /// - Returns `None` when the marker exists but the recorded
@@ -134,14 +141,57 @@ fn is_voice_background_handoff_prompt(user_msg_id: MessageId, _text: &str) -> bo
 ///   a cross-check parameter — if reverse lookup also resolved a voice
 ///   channel and it disagrees with the marker, a warn is emitted but the
 ///   marker still wins (it is the authoritative origin record).
-fn voice_background_completion_target(
+async fn voice_background_completion_target(
     mapped_voice_channel_id: Option<ChannelId>,
     user_msg_id: MessageId,
     _user_text: &str,
     channel_id: ChannelId,
+    pool: Option<&sqlx::PgPool>,
 ) -> Option<ChannelId> {
     let store = crate::voice::announce_meta::global_store();
-    let meta = store.take_handoff(user_msg_id)?;
+    let meta = match store.take_handoff(user_msg_id) {
+        Some(meta) => {
+            // Mirror the consume into PG so a parallel terminal-delivery
+            // caller on a different node observes the consumed state.
+            // Best-effort; an error here is non-fatal.
+            if let Some(pool) = pool {
+                if let Err(error) =
+                    crate::voice::announce_meta::take_handoff_durable(pool, user_msg_id).await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        user_msg_id = user_msg_id.get(),
+                        "voice_background_handoff durable consume failed after in-memory take; cluster-side row will be GC'd later"
+                    );
+                }
+            }
+            meta
+        }
+        None => {
+            // In-memory miss — fall back to durable claim.
+            let pool = pool?;
+            match crate::voice::announce_meta::take_handoff_durable(pool, user_msg_id).await {
+                Ok(Some(meta)) => {
+                    tracing::info!(
+                        event = "voice_background_handoff_durable_fallback_consumed",
+                        user_msg_id = user_msg_id.get(),
+                        channel_id = channel_id.get(),
+                        "in-memory marker missed; durable PG row carried the routing (post-restart or cross-node)"
+                    );
+                    meta
+                }
+                Ok(None) => return None,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        user_msg_id = user_msg_id.get(),
+                        "voice_background_handoff durable consume failed; refusing to route spoken summary"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
     if meta.background_channel_id != channel_id.get() {
         tracing::warn!(
             event = "voice_background_handoff_channel_mismatch",
@@ -269,8 +319,8 @@ mod dispatch_kind_tests {
 
     /// #2236: delivery is bound to the marker's recorded voice channel.
     /// Reverse-lookup result is accepted only as a cross-check.
-    #[test]
-    fn background_completion_target_returns_marker_recorded_voice_channel() {
+    #[tokio::test]
+    async fn background_completion_target_returns_marker_recorded_voice_channel() {
         let user_msg_id = MessageId::new(7_300_001);
         crate::voice::announce_meta::global_store().insert_handoff(
             user_msg_id,
@@ -288,7 +338,9 @@ mod dispatch_kind_tests {
                 user_msg_id,
                 "free-form user-controlled text",
                 channel,
-            ),
+                None,
+            )
+            .await,
             Some(ChannelId::new(301))
         );
         // Marker is consumed exactly once.
@@ -298,14 +350,16 @@ mod dispatch_kind_tests {
                 user_msg_id,
                 "free-form user-controlled text",
                 channel,
-            ),
+                None,
+            )
+            .await,
             None
         );
     }
 
     /// #2236: prefix-only spoofing attempt — no marker, prefix in body — must NOT route.
-    #[test]
-    fn background_completion_target_refuses_legacy_prefix_without_marker() {
+    #[tokio::test]
+    async fn background_completion_target_refuses_legacy_prefix_without_marker() {
         let user_msg_id = MessageId::new(7_400_001);
         let mapped = Some(ChannelId::new(300));
         let channel = ChannelId::new(200);
@@ -315,7 +369,9 @@ mod dispatch_kind_tests {
                 user_msg_id,
                 "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.",
                 channel,
-            ),
+                None,
+            )
+            .await,
             None,
             "user-controllable legacy prefix must no longer drive routing"
         );
@@ -323,8 +379,8 @@ mod dispatch_kind_tests {
 
     /// #2236: marker recorded against a different background channel than
     /// the turn fired in is treated as a routing mismatch and refused.
-    #[test]
-    fn background_completion_target_refuses_marker_with_wrong_background_channel() {
+    #[tokio::test]
+    async fn background_completion_target_refuses_marker_with_wrong_background_channel() {
         let user_msg_id = MessageId::new(7_500_001);
         crate::voice::announce_meta::global_store().insert_handoff(
             user_msg_id,
@@ -340,15 +396,17 @@ mod dispatch_kind_tests {
                 user_msg_id,
                 "irrelevant body",
                 ChannelId::new(201), // mismatched
-            ),
+                None,
+            )
+            .await,
             None
         );
     }
 
     /// #2236: marker is authoritative — when the reverse-lookup voice channel
     /// disagrees with the marker, the marker still wins (with a warn).
-    #[test]
-    fn background_completion_target_marker_wins_over_reverse_lookup_disagreement() {
+    #[tokio::test]
+    async fn background_completion_target_marker_wins_over_reverse_lookup_disagreement() {
         let user_msg_id = MessageId::new(7_600_001);
         crate::voice::announce_meta::global_store().insert_handoff(
             user_msg_id,
@@ -365,9 +423,56 @@ mod dispatch_kind_tests {
                 user_msg_id,
                 "irrelevant body",
                 ChannelId::new(201),
-            ),
+                None,
+            )
+            .await,
             Some(ChannelId::new(301))
         );
+    }
+
+    /// #2274: when the in-memory marker is absent but the durable PG row
+    /// exists (e.g. dcserver restarted between dispatch and terminal
+    /// delivery), the durable claim path must still resolve the voice
+    /// channel — that is the entire point of this fix.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_completion_target_falls_back_to_durable_pg_row() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let user_msg_id = MessageId::new(7_700_001);
+        let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+            voice_channel_id: 311,
+            background_channel_id: 211,
+            agent_id: Some("project-agentdesk".to_string()),
+        };
+        crate::voice::announce_meta::persist_handoff_durable(&pool, user_msg_id, &meta)
+            .await
+            .expect("persist durable handoff");
+        // Intentionally do NOT insert into the in-memory store — that
+        // simulates the post-restart state before rehydration.
+
+        let resolved = voice_background_completion_target(
+            None,
+            user_msg_id,
+            "irrelevant body",
+            ChannelId::new(211),
+            Some(&pool),
+        )
+        .await;
+        assert_eq!(resolved, Some(ChannelId::new(311)));
+
+        // The durable claim is one-shot — a second call must return None.
+        let again = voice_background_completion_target(
+            None,
+            user_msg_id,
+            "irrelevant body",
+            ChannelId::new(211),
+            Some(&pool),
+        )
+        .await;
+        assert_eq!(again, None);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
 
@@ -4461,9 +4566,29 @@ pub(super) fn spawn_turn_bridge(
                 // marker is consumed inside voice_background_completion_target
                 // below; passing the stored agent_id (cloned, not taken) here
                 // keeps both lookups consistent for this single dispatch.
-                let stored_handoff_agent_id = crate::voice::announce_meta::global_store()
-                    .get_handoff(user_msg_id)
-                    .and_then(|meta| meta.agent_id);
+                //
+                // #2274: if the in-memory marker is absent (dcserver
+                // restarted mid-turn, or rehydration has not yet completed)
+                // fall back to the durable PG row for the agent_id lookup.
+                let pg_pool_for_handoff = shared_owned.pg_pool.as_ref();
+                let in_memory_handoff_agent_id =
+                    crate::voice::announce_meta::global_store()
+                        .get_handoff(user_msg_id)
+                        .and_then(|meta| meta.agent_id);
+                let stored_handoff_agent_id = match in_memory_handoff_agent_id {
+                    Some(agent_id) => Some(agent_id),
+                    None => match pg_pool_for_handoff {
+                        Some(pool) => crate::voice::announce_meta::load_handoff_durable(
+                            pool,
+                            user_msg_id,
+                        )
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|meta| meta.agent_id),
+                        None => None,
+                    },
+                };
                 let mapped_voice_channel_id = shared_owned
                     .voice_barge_in
                     .voice_channel_for_background(channel_id, stored_handoff_agent_id.as_deref())
@@ -4473,7 +4598,10 @@ pub(super) fn spawn_turn_bridge(
                     user_msg_id,
                     &user_text_owned,
                     channel_id,
-                ) {
+                    pg_pool_for_handoff,
+                )
+                .await
+                {
                     if !inflight_state.silent_turn {
                         let voice_barge_in = shared_owned.voice_barge_in.clone();
                         let shared_for_voice = shared_owned.clone();
