@@ -2265,14 +2265,13 @@ async fn refresh_review_target_worktree_pg(
             // behind the same stable-clean probe used by the pr_tracking
             // resolver. HEAD-match without a cleanliness check would let
             // a parallel writer's dirty state leak into the review.
-            let clean_wt =
-                probe_clean_worktree_with_transient_retry(
-                    card_id,
-                    "refresh active worktree",
-                    &wt_path,
-                    &target.reviewed_commit,
-                )
-                .await;
+            let clean_wt = probe_clean_worktree_with_transient_retry(
+                card_id,
+                "refresh active worktree",
+                &wt_path,
+                &target.reviewed_commit,
+            )
+            .await;
             let branch = resolve_review_target_branch_pg(
                 pool,
                 card_id,
@@ -2640,8 +2639,7 @@ const REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY: std::time::Duration =
 /// dirty the tree again immediately after our probe. ~80ms is short enough
 /// to keep total latency under 600ms but long enough to catch a writer that
 /// just emitted one file (typical edit-save loops are tens of ms).
-const REREVIEW_STABILITY_PROBE_GAP: std::time::Duration =
-    std::time::Duration::from_millis(80);
+const REREVIEW_STABILITY_PROBE_GAP: std::time::Duration = std::time::Duration::from_millis(80);
 
 /// Helper: a single "stable-clean" probe that requires two consecutive
 /// clean observations separated by [`REREVIEW_STABILITY_PROBE_GAP`] before
@@ -3888,10 +3886,9 @@ mod pg_rereview_tests {
         .await
         .expect("seed pr_tracking");
 
-        let target =
-            resolve_pr_tracking_review_target_pg(&pool, card_id, None)
-                .await
-                .expect("resolver must succeed");
+        let target = resolve_pr_tracking_review_target_pg(&pool, card_id, None)
+            .await
+            .expect("resolver must succeed");
         assert!(
             target.is_none(),
             "pr_tracking head_sha bound to a different repo_id must be refused: {target:?}"
