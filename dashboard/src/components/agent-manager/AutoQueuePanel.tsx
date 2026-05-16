@@ -1,5 +1,25 @@
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  MouseSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { GripVertical } from "lucide-react";
 import * as api from "../../api";
 import type {
   AutoQueueStatus,
@@ -224,7 +244,7 @@ function EntryRow({
   onUpdateStatus,
   isDragging,
   isDropTarget,
-  dragHandlers,
+  dragHandle,
   moveControls,
   showThreadGroup,
   showBatchPhase,
@@ -236,16 +256,9 @@ function EntryRow({
   onUpdateStatus: (id: string, status: "pending" | "skipped") => void;
   isDragging?: boolean;
   isDropTarget?: boolean;
+  dragHandle?: ReactNode;
   showThreadGroup?: boolean;
   showBatchPhase?: boolean;
-  dragHandlers?: {
-    draggable: boolean;
-    onDragStart: (e: React.DragEvent) => void;
-    onDragOver: (e: React.DragEvent) => void;
-    onDragLeave: (e: React.DragEvent) => void;
-    onDrop: (e: React.DragEvent) => void;
-    onDragEnd: () => void;
-  };
   moveControls?: {
     canMoveUp: boolean;
     canMoveDown: boolean;
@@ -288,19 +301,10 @@ function EntryRow({
               ? "rgba(245,158,11,0.06)"
               : "var(--th-overlay-medium)",
         opacity: isDragging ? 0.5 : 1,
-        cursor: isPending && dragHandlers?.draggable ? "grab" : undefined,
       }}
-      {...(dragHandlers ?? {})}
     >
       <div className="flex min-w-0 flex-1 items-start gap-2">
-        {isPending && dragHandlers?.draggable && (
-          <span
-            className="shrink-0 select-none text-xs"
-            style={{ color: "var(--th-text-muted)", cursor: "grab" }}
-          >
-            ⠿
-          </span>
-        )}
+        {isPending && dragHandle}
         <span
           className="w-5 shrink-0 text-center font-mono text-xs"
           style={{ color: "var(--th-text-muted)" }}
@@ -549,21 +553,27 @@ function EntryRow({
   );
 }
 
-// ── Drag & drop hook for a list of entries ──
+// ── dnd-kit reorder controller for a list of pending entries ──
 
-function useDragReorder(
+function useSortableReorder(
   entries: DispatchQueueEntryType[],
   onReorder: (orderedIds: string[], agentId?: string | null) => Promise<void>,
   agentId?: string | null,
 ) {
-  const [dragId, setDragId] = useState<string | null>(null);
-  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
-  const dragIdRef = useRef<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
   const reorderingRef = useRef(false);
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
 
-  const pendingEntries = entries.filter((e) => e.status === "pending");
+  const pendingIds = useMemo(
+    () => entries.filter((entry) => entry.status === "pending").map((entry) => entry.id),
+    [entries],
+  );
 
-  const guardedReorder = async (orderedIds: string[]) => {
+  const guardedReorder = useCallback(async (orderedIds: string[]) => {
     if (reorderingRef.current) return;
     reorderingRef.current = true;
     try {
@@ -571,95 +581,200 @@ function useDragReorder(
     } finally {
       reorderingRef.current = false;
     }
-  };
+  }, [agentId, onReorder]);
 
-  const makeDragHandlers = (entry: DispatchQueueEntryType) => {
-    if (entry.status !== "pending") return undefined;
+  const handleDragStart = useCallback(
+    (event: DragStartEvent) => {
+      const id = String(event.active.id);
+      if (!pendingIds.includes(id)) return;
+      setActiveId(id);
+      setOverId(null);
+    },
+    [pendingIds],
+  );
 
-    return {
-      draggable: true,
-      onDragStart: (e: React.DragEvent) => {
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", entry.id);
-        dragIdRef.current = entry.id;
-        setDragId(entry.id);
-      },
-      onDragOver: (e: React.DragEvent) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        if (entry.status === "pending" && entry.id !== dragIdRef.current) {
-          setDropTargetId(entry.id);
-        }
-      },
-      onDragLeave: (e: React.DragEvent) => {
-        // Only clear if leaving this element entirely
-        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-        const { clientX, clientY } = e;
-        if (
-          clientX < rect.left ||
-          clientX > rect.right ||
-          clientY < rect.top ||
-          clientY > rect.bottom
-        ) {
-          setDropTargetId((prev) => (prev === entry.id ? null : prev));
-        }
-      },
-      onDrop: (e: React.DragEvent) => {
-        e.preventDefault();
-        const fromId = e.dataTransfer.getData("text/plain");
-        const toId = entry.id;
-        if (!fromId || fromId === toId || entry.status !== "pending") {
-          setDragId(null);
-          setDropTargetId(null);
-          dragIdRef.current = null;
-          return;
-        }
+  const handleDragOver = useCallback(
+    (event: DragOverEvent) => {
+      setOverId(event.over ? String(event.over.id) : null);
+    },
+    [],
+  );
 
-        const ids = pendingEntries.map((pe) => pe.id);
-        const reorderedIds = reorderPendingIds(ids, fromId, toId);
-        if (!reorderedIds) {
-          setDragId(null);
-          setDropTargetId(null);
-          dragIdRef.current = null;
-          return;
-        }
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const fromId = String(event.active.id);
+      const toId = event.over ? String(event.over.id) : null;
+      setActiveId(null);
+      setOverId(null);
+      if (!toId || fromId === toId) return;
 
-        setDragId(null);
-        setDropTargetId(null);
-        dragIdRef.current = null;
+      const fromIndex = pendingIds.indexOf(fromId);
+      const toIndex = pendingIds.indexOf(toId);
+      if (fromIndex === -1 || toIndex === -1) return;
+      void guardedReorder(arrayMove(pendingIds, fromIndex, toIndex));
+    },
+    [guardedReorder, pendingIds],
+  );
 
-        void guardedReorder(reorderedIds);
-      },
-      onDragEnd: () => {
-        setDragId(null);
-        setDropTargetId(null);
-        dragIdRef.current = null;
-      },
-    };
-  };
+  const handleDragCancel = useCallback(() => {
+    setActiveId(null);
+    setOverId(null);
+  }, []);
 
   const makeMoveControls = (entry: DispatchQueueEntryType) => {
     if (entry.status !== "pending") return undefined;
 
-    const ids = pendingEntries.map((pendingEntry) => pendingEntry.id);
-    const index = ids.indexOf(entry.id);
+    const index = pendingIds.indexOf(entry.id);
     if (index === -1) return undefined;
 
     return {
       canMoveUp: index > 0 && !reorderingRef.current,
-      canMoveDown: index < ids.length - 1 && !reorderingRef.current,
+      canMoveDown: index < pendingIds.length - 1 && !reorderingRef.current,
       onMoveUp: () => {
-        const reorderedIds = shiftPendingId(ids, entry.id, -1);
+        const reorderedIds = shiftPendingId(pendingIds, entry.id, -1);
         if (reorderedIds) void guardedReorder(reorderedIds);
       },
       onMoveDown: () => {
-        const reorderedIds = shiftPendingId(ids, entry.id, 1);
+        const reorderedIds = shiftPendingId(pendingIds, entry.id, 1);
         if (reorderedIds) void guardedReorder(reorderedIds);
       },
     };
   };
 
-  return { dragId, dropTargetId, makeDragHandlers, makeMoveControls };
+  return {
+    activeId,
+    overId,
+    pendingIds,
+    sensors,
+    handleDragStart,
+    handleDragOver,
+    handleDragEnd,
+    handleDragCancel,
+    makeMoveControls,
+  };
+}
+
+type SortableReorderController = ReturnType<typeof useSortableReorder>;
+
+function SortableEntryRow({
+  entry,
+  idx,
+  tr,
+  locale,
+  onUpdateStatus,
+  drag,
+  showThreadGroup,
+  showBatchPhase,
+}: {
+  entry: DispatchQueueEntryType;
+  idx: number;
+  tr: (ko: string, en: string) => string;
+  locale: UiLanguage;
+  onUpdateStatus: (id: string, status: "pending" | "skipped") => void;
+  drag: SortableReorderController;
+  showThreadGroup?: boolean;
+  showBatchPhase?: boolean;
+}) {
+  if (entry.status !== "pending") {
+    return (
+      <EntryRow
+        entry={entry}
+        idx={idx}
+        tr={tr}
+        locale={locale}
+        onUpdateStatus={onUpdateStatus}
+        showThreadGroup={showThreadGroup}
+        showBatchPhase={showBatchPhase}
+        moveControls={drag.makeMoveControls(entry)}
+      />
+    );
+  }
+
+  return (
+    <SortablePendingEntryRow
+      entry={entry}
+      idx={idx}
+      tr={tr}
+      locale={locale}
+      onUpdateStatus={onUpdateStatus}
+      drag={drag}
+      showThreadGroup={showThreadGroup}
+      showBatchPhase={showBatchPhase}
+    />
+  );
+}
+
+function SortablePendingEntryRow({
+  entry,
+  idx,
+  tr,
+  locale,
+  onUpdateStatus,
+  drag,
+  showThreadGroup,
+  showBatchPhase,
+}: {
+  entry: DispatchQueueEntryType;
+  idx: number;
+  tr: (ko: string, en: string) => string;
+  locale: UiLanguage;
+  onUpdateStatus: (id: string, status: "pending" | "skipped") => void;
+  drag: SortableReorderController;
+  showThreadGroup?: boolean;
+  showBatchPhase?: boolean;
+}) {
+  const {
+    attributes,
+    isDragging,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+  } = useSortable({ id: entry.id });
+  const isActive = drag.activeId === entry.id || isDragging;
+  const isDropTarget = drag.overId === entry.id && drag.activeId !== entry.id;
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition: transition ?? undefined,
+      }}
+    >
+      <EntryRow
+        entry={entry}
+        idx={idx}
+        tr={tr}
+        locale={locale}
+        onUpdateStatus={onUpdateStatus}
+        isDragging={isActive}
+        isDropTarget={isDropTarget}
+        showThreadGroup={showThreadGroup}
+        showBatchPhase={showBatchPhase}
+        moveControls={drag.makeMoveControls(entry)}
+        dragHandle={
+          <button
+            ref={setActivatorNodeRef}
+            type="button"
+            data-testid={`autoqueue-drag-handle-${entry.id}`}
+            aria-label={tr("큐 항목 순서 변경", "Reorder queue item")}
+            className="shrink-0 rounded-md p-1 transition-colors hover:bg-white/10"
+            style={{
+              color: "var(--th-text-muted)",
+              cursor: "grab",
+              touchAction: "none",
+            }}
+            {...attributes}
+            {...listeners}
+          >
+            <GripVertical size={13} />
+          </button>
+        }
+      />
+    </div>
+  );
 }
 
 // ── Main Panel ──
@@ -1062,7 +1177,7 @@ export default function AutoQueuePanel({
   const allEntriesSorted = sortEntriesForDisplay(entries);
 
   // Drag & drop for "all" view (pending only, no agent scope)
-  const allDrag = useDragReorder(allEntriesSorted, handleReorder);
+  const allDrag = useSortableReorder(allEntriesSorted, handleReorder);
 
   const renderPhaseBlock = (
     phase: number,
@@ -1691,81 +1806,84 @@ export default function AutoQueuePanel({
 
           {/* ── All view: merged list with drag & drop ── */}
           {viewMode === "all" && (
-            hasBatchPhases ? (
-              <div className="space-y-3">
-                {phaseSections.map(([phase, phaseEntries]) => (
-                  <div key={`phase-section-${phase}`}>
-                    {renderPhaseBlock(
-                      phase,
-                      phaseEntries,
-                      <div className="space-y-1">
-                        {sortEntriesForDisplay(phaseEntries).map((entry, idx) => (
-                          <div key={entry.id} className="flex items-center gap-1">
-                            <span
-                              className="text-xs px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
-                              style={{
-                                backgroundColor: "rgba(139,92,246,0.12)",
-                                color: "#a78bfa",
-                              }}
-                            >
-                              {getAgentLabel(entry.agent_id)}
-                            </span>
-                            <div className="flex-1 min-w-0">
-                              <EntryRow
-                                entry={entry}
-                                idx={idx}
-                                tr={tr}
-                                locale={locale}
-                                onUpdateStatus={handleEntryStatusUpdate}
-                                showThreadGroup={hasThreadGroups}
-                                showBatchPhase={hasBatchPhases}
-                                isDragging={allDrag.dragId === entry.id}
-                                isDropTarget={allDrag.dropTargetId === entry.id}
-                                dragHandlers={allDrag.makeDragHandlers(entry)}
-                                moveControls={allDrag.makeMoveControls(entry)}
-                    
-                              />
-                            </div>
-                          </div>
-                        ))}
-                      </div>,
-                    )}
-                    {renderPhaseGateIndicator(phase)}
+            <DndContext
+              sensors={allDrag.sensors}
+              collisionDetection={closestCenter}
+              onDragStart={allDrag.handleDragStart}
+              onDragOver={allDrag.handleDragOver}
+              onDragEnd={allDrag.handleDragEnd}
+              onDragCancel={allDrag.handleDragCancel}
+            >
+              <SortableContext items={allDrag.pendingIds} strategy={verticalListSortingStrategy}>
+                {hasBatchPhases ? (
+                  <div className="space-y-3">
+                    {phaseSections.map(([phase, phaseEntries]) => (
+                      <div key={`phase-section-${phase}`}>
+                        {renderPhaseBlock(
+                          phase,
+                          phaseEntries,
+                          <div className="space-y-1">
+                            {sortEntriesForDisplay(phaseEntries).map((entry, idx) => (
+                              <div key={entry.id} className="flex items-center gap-1">
+                                <span
+                                  className="text-xs px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
+                                  style={{
+                                    backgroundColor: "rgba(139,92,246,0.12)",
+                                    color: "#a78bfa",
+                                  }}
+                                >
+                                  {getAgentLabel(entry.agent_id)}
+                                </span>
+                                <div className="flex-1 min-w-0">
+                                  <SortableEntryRow
+                                    entry={entry}
+                                    idx={idx}
+                                    tr={tr}
+                                    locale={locale}
+                                    onUpdateStatus={handleEntryStatusUpdate}
+                                    drag={allDrag}
+                                    showThreadGroup={hasThreadGroups}
+                                    showBatchPhase={hasBatchPhases}
+                                  />
+                                </div>
+                              </div>
+                            ))}
+                          </div>,
+                        )}
+                        {renderPhaseGateIndicator(phase)}
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {allEntriesSorted.map((entry, idx) => (
-                  <div key={entry.id} className="flex items-center gap-1">
-                    <span
-                      className="text-xs px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
-                      style={{
-                        backgroundColor: "rgba(139,92,246,0.12)",
-                        color: "#a78bfa",
-                      }}
-                    >
-                      {getAgentLabel(entry.agent_id)}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <EntryRow
-                        entry={entry}
-                        idx={idx}
-                        tr={tr}
-                        locale={locale}
-                        onUpdateStatus={handleEntryStatusUpdate}
-                        showThreadGroup={hasThreadGroups}
-                        isDragging={allDrag.dragId === entry.id}
-                        isDropTarget={allDrag.dropTargetId === entry.id}
-                        dragHandlers={allDrag.makeDragHandlers(entry)}
-                        moveControls={allDrag.makeMoveControls(entry)}
-            
-                      />
-                    </div>
+                ) : (
+                  <div className="space-y-1">
+                    {allEntriesSorted.map((entry, idx) => (
+                      <div key={entry.id} className="flex items-center gap-1">
+                        <span
+                          className="text-xs px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
+                          style={{
+                            backgroundColor: "rgba(139,92,246,0.12)",
+                            color: "#a78bfa",
+                          }}
+                        >
+                          {getAgentLabel(entry.agent_id)}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <SortableEntryRow
+                            entry={entry}
+                            idx={idx}
+                            tr={tr}
+                            locale={locale}
+                            onUpdateStatus={handleEntryStatusUpdate}
+                            drag={allDrag}
+                            showThreadGroup={hasThreadGroups}
+                          />
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            )
+                )}
+              </SortableContext>
+            </DndContext>
           )}
 
           {/* ── Thread group view ── */}
@@ -1917,7 +2035,7 @@ function AgentSubQueue({
   onReorder: (orderedIds: string[], agentId?: string | null) => Promise<void>;
   showBatchPhase?: boolean;
 }) {
-  const drag = useDragReorder(agentEntries, onReorder, agentId);
+  const drag = useSortableReorder(agentEntries, onReorder, agentId);
 
   return (
     <div className="space-y-1">
@@ -1995,21 +2113,29 @@ function AgentSubQueue({
           })()}
         </div>
       )}
-      {agentEntries.map((entry, idx) => (
-        <EntryRow
-          key={entry.id}
-          entry={entry}
-          idx={idx}
-          tr={tr}
-          locale={locale}
-          onUpdateStatus={onUpdateStatus}
-          showBatchPhase={showBatchPhase}
-          isDragging={drag.dragId === entry.id}
-          isDropTarget={drag.dropTargetId === entry.id}
-          dragHandlers={drag.makeDragHandlers(entry)}
-          moveControls={drag.makeMoveControls(entry)}
-        />
-      ))}
+      <DndContext
+        sensors={drag.sensors}
+        collisionDetection={closestCenter}
+        onDragStart={drag.handleDragStart}
+        onDragOver={drag.handleDragOver}
+        onDragEnd={drag.handleDragEnd}
+        onDragCancel={drag.handleDragCancel}
+      >
+        <SortableContext items={drag.pendingIds} strategy={verticalListSortingStrategy}>
+          {agentEntries.map((entry, idx) => (
+            <SortableEntryRow
+              key={entry.id}
+              entry={entry}
+              idx={idx}
+              tr={tr}
+              locale={locale}
+              onUpdateStatus={onUpdateStatus}
+              drag={drag}
+              showBatchPhase={showBatchPhase}
+            />
+          ))}
+        </SortableContext>
+      </DndContext>
     </div>
   );
 }
