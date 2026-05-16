@@ -100,8 +100,7 @@ fn build_soft_intervention(
     // inside the Intervention keeps the queued payload self-contained so
     // every queued-dispatch entrypoint can reinsert it into the store and
     // recover the voice-transcript framing.
-    voice_announcement:
-        Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Intervention {
     Intervention {
         author_id,
@@ -128,8 +127,7 @@ async fn enqueue_soft_intervention(
     merge_consecutive: bool,
     // #2266: pass-through for the voice-transcript payload (see
     // `build_soft_intervention` doc-comment).
-    voice_announcement:
-        Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> super::super::MailboxEnqueueOutcome {
     mailbox_enqueue_intervention(
         &data.shared,

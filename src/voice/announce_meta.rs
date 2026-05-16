@@ -124,10 +124,7 @@ impl VoiceAnnouncementMetaStore {
     /// reinserts the payload — but for the intake-time queue paths the
     /// metadata must travel inside the Intervention because the in-memory
     /// store TTL (30s) is shorter than typical queue dwell times.
-    pub(crate) fn peek_clone(
-        &self,
-        message_id: MessageId,
-    ) -> Option<VoiceTranscriptAnnouncement> {
+    pub(crate) fn peek_clone(&self, message_id: MessageId) -> Option<VoiceTranscriptAnnouncement> {
         let mut entries = self.entries.write().ok()?;
         let now = Instant::now();
         prune_expired_locked(&mut entries, now);

@@ -42,8 +42,7 @@ pub(crate) struct Intervention {
     /// the store before re-entering `handle_text_message`) can reconstruct
     /// the voice-transcript framing instead of falling back to plain text.
     /// `None` for non-voice paths.
-    pub(crate) voice_announcement:
-        Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,8 +304,7 @@ pub(crate) struct PendingQueueItem {
     /// with queue files written by older binaries.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) voice_announcement:
-        Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
 fn pending_queue_root() -> Option<PathBuf> {

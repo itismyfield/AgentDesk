@@ -551,8 +551,7 @@ impl TurnGateway for DiscordGateway {
             // plain text. The original entry was consumed by the active
             // turn that won the race; this in-flight handoff is what makes
             // the queued path self-contained against the 30s in-memory TTL.
-            let has_embedded_voice_announcement =
-                intervention.voice_announcement.is_some();
+            let has_embedded_voice_announcement = intervention.voice_announcement.is_some();
             if let Some(announcement) = intervention.voice_announcement.as_ref() {
                 crate::voice::announce_meta::global_store()
                     .insert(intervention.message_id, announcement.clone());
