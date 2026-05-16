@@ -734,6 +734,7 @@ fn execute_streaming_local_tui_tmux(
         goals_enabled,
     );
     let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
+    let rollout_modified_since = std::time::SystemTime::now();
 
     std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Failed to write Codex TUI launch script: {}", e))?;
@@ -761,16 +762,23 @@ fn execute_streaming_local_tui_tmux(
         }
     }
 
-    let _ = sender.send(StreamMessage::Text {
-        content: format!(
-            "Codex TUI session launched in tmux: `{}`",
-            tmux_session_name
-        ),
-    });
-    let _ = sender.send(StreamMessage::Done {
-        result: String::new(),
-        session_id: None,
-    });
+    let read_result = crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd(
+        std::path::Path::new(working_dir),
+        rollout_modified_since,
+        sender.clone(),
+        cancel_token,
+        || tmux_session_has_live_pane(tmux_session_name),
+    )?;
+
+    if matches!(
+        read_result,
+        crate::services::provider::ReadOutputResult::SessionDied { .. }
+    ) {
+        let _ = sender.send(StreamMessage::Done {
+            result: "⚠ Codex TUI session ended before producing a response.".to_string(),
+            session_id: None,
+        });
+    }
 
     Ok(())
 }
