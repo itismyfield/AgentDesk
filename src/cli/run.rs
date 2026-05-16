@@ -356,6 +356,17 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             &event,
             &session_id,
         )),
+        Commands::CodexHookRelay {
+            endpoint,
+            provider,
+            event,
+            session_id,
+        } => exit_for_cli(crate::services::claude_tui::hook_relay::run_cli(
+            &endpoint,
+            &provider,
+            &event,
+            &session_id,
+        )),
         Commands::ResetTmux => {
             super::utils::handle_reset_tmux();
             Ok(())

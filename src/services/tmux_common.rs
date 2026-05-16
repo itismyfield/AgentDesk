@@ -37,6 +37,7 @@ pub fn tmux_exact_target(session_name: &str) -> String {
 const SESSIONS_SUBDIR: &str = "runtime/sessions";
 pub(crate) const CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT: &str = "claude-tui-settings.json";
 pub(crate) const CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT: &str = "claude-tui.sh";
+pub(crate) const CODEX_TUI_HOME_TEMP_EXT: &str = "codex-tui-home";
 
 /// Returns the persistent AgentDesk sessions directory, if a runtime root
 /// is configured. This is the new canonical location for session temp files
@@ -184,6 +185,11 @@ pub fn cleanup_session_temp_files(session_name: &str) {
         let _ = std::fs::remove_file(session_temp_path(session_name, ext));
         let _ = std::fs::remove_file(legacy_tmp_session_path(session_name, ext));
     }
+    let _ = std::fs::remove_dir_all(session_temp_path(session_name, CODEX_TUI_HOME_TEMP_EXT));
+    let _ = std::fs::remove_dir_all(legacy_tmp_session_path(
+        session_name,
+        CODEX_TUI_HOME_TEMP_EXT,
+    ));
 }
 
 /// Get the current AgentDesk runtime root marker for tmux session ownership.
