@@ -149,48 +149,49 @@ async fn voice_background_completion_target(
     pool: Option<&sqlx::PgPool>,
 ) -> Option<ChannelId> {
     let store = crate::voice::announce_meta::global_store();
-    let meta = match store.take_handoff(user_msg_id) {
-        Some(meta) => {
-            // Mirror the consume into PG so a parallel terminal-delivery
-            // caller on a different node observes the consumed state.
-            // Best-effort; an error here is non-fatal.
-            if let Some(pool) = pool {
-                if let Err(error) =
-                    crate::voice::announce_meta::take_handoff_durable(pool, user_msg_id).await
-                {
-                    tracing::warn!(
-                        error = %error,
-                        user_msg_id = user_msg_id.get(),
-                        "voice_background_handoff durable consume failed after in-memory take; cluster-side row will be GC'd later"
-                    );
-                }
+    // #2274 Codex review finding #1: when a PG pool is available the
+    // durable `UPDATE ... SET consumed_at = NOW() RETURNING ...` claim is
+    // ALWAYS authoritative for one-shot consumption, even when an
+    // in-memory marker is present. Otherwise two cluster nodes (or a
+    // pre-restart in-memory holder paired with a post-restart rehydrate)
+    // could both observe a local marker and route duplicate spoken
+    // summaries. The local store is treated as a hot cache, never as the
+    // routing gate.
+    let meta = if let Some(pool) = pool {
+        match crate::voice::announce_meta::take_handoff_durable(pool, user_msg_id).await {
+            Ok(Some(meta)) => {
+                // Drop any local copy so a parallel caller cannot see it.
+                store.forget_handoff(user_msg_id);
+                meta
             }
-            meta
-        }
-        None => {
-            // In-memory miss — fall back to durable claim.
-            let pool = pool?;
-            match crate::voice::announce_meta::take_handoff_durable(pool, user_msg_id).await {
-                Ok(Some(meta)) => {
+            Ok(None) => {
+                if store.get_handoff(user_msg_id).is_some() {
                     tracing::info!(
-                        event = "voice_background_handoff_durable_fallback_consumed",
+                        event = "voice_background_handoff_durable_already_consumed",
                         user_msg_id = user_msg_id.get(),
                         channel_id = channel_id.get(),
-                        "in-memory marker missed; durable PG row carried the routing (post-restart or cross-node)"
+                        "in-memory marker present but durable PG row is absent or already consumed; refusing to route to avoid duplicate spoken summary"
                     );
-                    meta
+                    store.forget_handoff(user_msg_id);
                 }
-                Ok(None) => return None,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        user_msg_id = user_msg_id.get(),
-                        "voice_background_handoff durable consume failed; refusing to route spoken summary"
-                    );
-                    return None;
-                }
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    user_msg_id = user_msg_id.get(),
+                    "voice_background_handoff durable claim failed; refusing to route spoken summary"
+                );
+                return None;
             }
         }
+    } else {
+        // No durable backstop available (typically: dev / no-PG mode).
+        // Preserve legacy local-only behaviour for setups that never
+        // persisted the marker in the first place. Single-node, no-PG
+        // deployments cannot duplicate routing because there is only
+        // one consumer.
+        store.take_handoff(user_msg_id)?
     };
     if meta.background_channel_id != channel_id.get() {
         tracing::warn!(
@@ -470,6 +471,116 @@ mod dispatch_kind_tests {
         )
         .await;
         assert_eq!(again, None);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2274 Codex review finding #1: two concurrent terminal-delivery
+    /// callers both see the local marker (e.g. rehydrated on two nodes,
+    /// or pre-restart-in-memory plus post-restart-rehydrate on the same
+    /// node). Without PG-authoritative consumption, both would route a
+    /// spoken summary — exactly the duplicate-routing bug the durability
+    /// story is meant to prevent. With the fix, exactly one wins.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn background_completion_target_pg_authoritative_under_two_local_holders() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let user_msg_id = MessageId::new(7_800_001);
+        let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+            voice_channel_id: 321,
+            background_channel_id: 221,
+            agent_id: Some("project-agentdesk".to_string()),
+        };
+
+        // Persist exactly one durable row.
+        crate::voice::announce_meta::persist_handoff_durable(&pool, user_msg_id, &meta)
+            .await
+            .expect("persist durable handoff");
+        // Simulate the local cache being populated on this node as well
+        // (e.g. via the foreground dispatch write-through, or via boot
+        // rehydration). On a cluster with two nodes this would happen
+        // independently on each.
+        crate::voice::announce_meta::global_store().insert_handoff(user_msg_id, meta.clone());
+
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let task_a = tokio::spawn(async move {
+            voice_background_completion_target(
+                None,
+                user_msg_id,
+                "irrelevant body",
+                ChannelId::new(221),
+                Some(&pool_a),
+            )
+            .await
+        });
+        let task_b = tokio::spawn(async move {
+            voice_background_completion_target(
+                None,
+                user_msg_id,
+                "irrelevant body",
+                ChannelId::new(221),
+                Some(&pool_b),
+            )
+            .await
+        });
+        let (a, b) = tokio::try_join!(task_a, task_b).expect("join concurrent consumers");
+        let winners = [&a, &b].iter().filter(|r| r.is_some()).count();
+        assert_eq!(
+            winners, 1,
+            "exactly one terminal-delivery caller must route the spoken summary"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2274 Codex review finding #3 regression guard: after rehydration,
+    /// a row that already lived 23h in PG must NOT survive another 24h in
+    /// memory. Verify the in-memory expiry roughly matches the remaining
+    /// durable TTL rather than getting reset.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rehydrate_preserves_remaining_ttl_for_aged_rows() {
+        use crate::voice::announce_meta::{
+            DURABLE_HANDOFF_META_TTL_SECS, VoiceBackgroundHandoffMeta, persist_handoff_durable,
+            rehydrate_handoffs_from_pg,
+        };
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let user_msg_id = MessageId::new(7_900_001);
+        let meta = VoiceBackgroundHandoffMeta {
+            voice_channel_id: 331,
+            background_channel_id: 231,
+            agent_id: None,
+        };
+
+        persist_handoff_durable(&pool, user_msg_id, &meta)
+            .await
+            .expect("persist durable handoff");
+        // Backdate the row to "5 minutes before TTL expiry" so the
+        // remaining lifetime should clamp to ~5 minutes, not a fresh 24h.
+        let near_ttl_age = DURABLE_HANDOFF_META_TTL_SECS - 300;
+        sqlx::query(
+            "UPDATE voice_background_handoff_meta
+             SET created_at = NOW() - make_interval(secs => $1)
+             WHERE message_id = $2",
+        )
+        .bind(near_ttl_age as f64)
+        .bind(user_msg_id.get().to_string())
+        .execute(&pool)
+        .await
+        .expect("backdate row for rehydrate ttl test");
+
+        let count = rehydrate_handoffs_from_pg(&pool)
+            .await
+            .expect("rehydrate succeeds");
+        assert!(count >= 1, "rehydrate must surface the aged row");
+        // Local marker must still be present (remaining TTL > 0 here).
+        let store = crate::voice::announce_meta::global_store();
+        assert!(store.get_handoff(user_msg_id).is_some());
+        // Drain to keep test isolation tight.
+        let _ = store.take_handoff(user_msg_id);
 
         pool.close().await;
         pg_db.drop().await;

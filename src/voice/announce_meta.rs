@@ -11,20 +11,25 @@ use super::prompt::VoiceTranscriptAnnouncement;
 
 const ANNOUNCEMENT_META_TTL: Duration = Duration::from_secs(30);
 /// Voice-background handoff markers can outlive the short announce TTL because
-/// the background turn they trigger may run for minutes before the terminal
-/// delivery callback consults the marker. Keep generously long so legitimate
-/// long-running background turns still find the marker.
-const HANDOFF_META_TTL: Duration = Duration::from_secs(60 * 60);
+/// the background turn they trigger may run for minutes — or, with watchdog
+/// extensions, hours — before the terminal-delivery callback consults the
+/// marker.
+///
+/// 24h is generous: `turn_orchestrator::extend_active_watchdog_deadline` does
+/// not impose a practical cap on the number of extensions
+/// (`count_limit = u32::MAX`, `total_secs_limit = u64::MAX`), so a productive
+/// long turn can legitimately exceed the 1-hour default watchdog. Keeping
+/// markers alive for a full day prevents the spoken-summary path from
+/// silently dropping completions on extended turns (Codex #2274 review
+/// finding #2). Anything older than 24h almost certainly represents a
+/// turn that crashed or never reached terminal delivery.
+const HANDOFF_META_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Durable handoff rows older than this are treated as expired and ignored
 /// by the durable load/take helpers. The leader-only GC sweep
-/// (`gc_expired_voice_background_handoff_meta_pg`) deletes them.
-///
-/// 1 hour is conservative: voice → background → terminal-delivery normally
-/// completes within minutes, so anything older almost certainly represents
-/// a turn that crashed or never reached terminal delivery. Mirrors the
-/// in-memory `HANDOFF_META_TTL`.
-pub(crate) const DURABLE_HANDOFF_META_TTL_SECS: i64 = 60 * 60;
+/// (`gc_expired_voice_background_handoff_meta_pg`) deletes them. Mirrors
+/// the in-memory `HANDOFF_META_TTL` — see that constant for the rationale.
+pub(crate) const DURABLE_HANDOFF_META_TTL_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone)]
 struct StoredVoiceTranscriptAnnouncement {
@@ -99,6 +104,22 @@ impl VoiceAnnouncementMetaStore {
     }
 
     pub(crate) fn insert_handoff(&self, message_id: MessageId, meta: VoiceBackgroundHandoffMeta) {
+        self.insert_handoff_with_remaining_ttl(message_id, meta, HANDOFF_META_TTL);
+    }
+
+    /// Insert with an explicit remaining-lifetime override. Used by
+    /// `rehydrate_handoffs_from_pg` (#2274 Codex review finding #3) so a
+    /// row that already survived 59 minutes in PG only gets the matching
+    /// remaining-TTL in memory — not a fresh 24-hour lease. Without this,
+    /// a stale local marker could outlive its durable row and route a
+    /// completion summary after PG GC has already deleted the source of
+    /// truth.
+    pub(crate) fn insert_handoff_with_remaining_ttl(
+        &self,
+        message_id: MessageId,
+        meta: VoiceBackgroundHandoffMeta,
+        remaining: Duration,
+    ) {
         if let Ok(mut entries) = self.handoff_entries.write() {
             let now = Instant::now();
             prune_handoff_expired_locked(&mut entries, now);
@@ -106,9 +127,19 @@ impl VoiceAnnouncementMetaStore {
                 message_id.get(),
                 StoredVoiceBackgroundHandoffMeta {
                     meta,
-                    expires_at: now + HANDOFF_META_TTL,
+                    expires_at: now + remaining,
                 },
             );
+        }
+    }
+
+    /// Drop a specific marker from the in-memory store without consuming
+    /// it. Used to clear stale local state when the durable PG claim is
+    /// the authoritative source and reports the row is gone (#2274 Codex
+    /// review finding #1).
+    pub(crate) fn forget_handoff(&self, message_id: MessageId) {
+        if let Ok(mut entries) = self.handoff_entries.write() {
+            entries.remove(&message_id.get());
         }
     }
 
@@ -283,6 +314,12 @@ pub(crate) async fn take_handoff_durable(
 /// path (synchronous `get_handoff` / `take_handoff`) keep working after a
 /// dcserver restart without an async fallback ripple.
 ///
+/// #2274 Codex review finding #3: each rehydrated row carries its
+/// PG-recorded age, and the in-memory expiry is set to the REMAINING
+/// portion of the durable TTL — never a fresh 24-hour lease. Without
+/// this, a row that already lived 23 hours in PG could survive another
+/// 24 hours in memory while PG GC deletes the durable source of truth.
+///
 /// Best-effort: a PG error here is logged and ignored. Subsequent
 /// dispatches will still write through and terminal-delivery callers fall
 /// back to `take_handoff_durable` directly when the in-memory store
@@ -290,8 +327,15 @@ pub(crate) async fn take_handoff_durable(
 ///
 /// Returns the count of rows rehydrated for observability.
 pub(crate) async fn rehydrate_handoffs_from_pg(pool: &PgPool) -> Result<u64, sqlx::Error> {
-    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT message_id, voice_channel_id, background_channel_id, agent_id
+    // `age_secs` is computed in SQL so the truth horizon is PG's clock,
+    // not the local process clock — same source of truth used by the
+    // load/take/GC paths.
+    let rows: Vec<(String, String, String, Option<String>, f64)> = sqlx::query_as(
+        "SELECT message_id,
+                voice_channel_id,
+                background_channel_id,
+                agent_id,
+                EXTRACT(EPOCH FROM (NOW() - created_at))::float8 AS age_secs
          FROM voice_background_handoff_meta
          WHERE consumed_at IS NULL
            AND created_at > NOW() - make_interval(secs => $1)",
@@ -301,7 +345,7 @@ pub(crate) async fn rehydrate_handoffs_from_pg(pool: &PgPool) -> Result<u64, sql
     .await?;
     let store = global_store();
     let mut count: u64 = 0;
-    for (message_id, voice_channel_id, background_channel_id, agent_id) in rows {
+    for (message_id, voice_channel_id, background_channel_id, agent_id, age_secs) in rows {
         let Ok(message_id_u64) = message_id.parse::<u64>() else {
             tracing::warn!(
                 message_id,
@@ -325,13 +369,22 @@ pub(crate) async fn rehydrate_handoffs_from_pg(pool: &PgPool) -> Result<u64, sql
             );
             continue;
         };
-        store.insert_handoff(
+        // Compute remaining TTL from PG-reported age. Clamp the lower
+        // bound to a single second so the entry exists at all — the
+        // durable claim path remains the source of truth and will
+        // refuse stale rows even if a barely-alive local entry briefly
+        // survives.
+        let total_ttl_secs = DURABLE_HANDOFF_META_TTL_SECS as f64;
+        let remaining_secs = (total_ttl_secs - age_secs.max(0.0)).max(1.0);
+        let remaining = Duration::from_secs_f64(remaining_secs);
+        store.insert_handoff_with_remaining_ttl(
             MessageId::new(message_id_u64),
             VoiceBackgroundHandoffMeta {
                 voice_channel_id: voice_channel_id_u64,
                 background_channel_id: background_channel_id_u64,
                 agent_id,
             },
+            remaining,
         );
         count += 1;
     }
