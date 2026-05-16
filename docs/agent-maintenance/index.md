@@ -74,7 +74,8 @@ to migration-sensitive surfaces. The gate requires each guarded page to carry
 the preferred ``Last refreshed: <date> (against `main` @ `<sha>`)`` header
 shape and verifies the referenced commit is an ancestor of `HEAD`. When a
 refresh is intentionally anchored to review context instead of a commit, use
-`Last refreshed: <date> (against #<issue> <reason>)` or
+`Last refreshed: <date> (against #<issue> <reason>)`,
+`Last refreshed: <date> (against PR #<num> <reason>)`, or
 `Last refreshed: <date> (manual: <reason>)`; those forms still get date
 freshness checks but skip commit ancestry validation. The gate warns when
 copied line counts in `change-surfaces.md` drift from

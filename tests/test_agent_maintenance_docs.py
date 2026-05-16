@@ -52,6 +52,22 @@ class LastRefreshedHeaderTest(unittest.TestCase):
         self.assertIsNone(parsed.commit)
         self.assertEqual(parsed.anchor, "#1438 PG-only cleanup; default tree")
 
+    def test_parses_pr_prefixed_issue_anchor(self) -> None:
+        parsed = CHECKER.parse_last_refreshed(
+            "> Last refreshed: 2026-05-17 (against PR #2064 freshness regex relax).\n"
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.refreshed_on.isoformat(), "2026-05-17")
+        self.assertIsNone(parsed.commit)
+        self.assertEqual(parsed.anchor, "#2064 freshness regex relax")
+
+    def test_rejects_pr_anchor_without_hash(self) -> None:
+        parsed = CHECKER.parse_last_refreshed(
+            "> Last refreshed: 2026-05-17 (against PR 2064 missing hash).\n"
+        )
+        self.assertIsNone(parsed)
+
     def test_parses_manual_header_shape(self) -> None:
         parsed = CHECKER.parse_last_refreshed(
             "> Last refreshed: 2026-04-30 (manual: verified generated inventory only).\n"
