@@ -156,13 +156,17 @@ jobs:
         if: runner.os != 'macOS'
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Cache cargo registry & build
+      # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
+      # compiled rustc output, and caching multi-GB `target/` directories
+      # starves the 10GB GHA cache quota, evicting sccache shards (observed
+      # Rust hit-rate collapse: 99.80% → 0.00% within hours of merges). See
+      # docs/ci/sccache-setup.md §4.2.
+      - name: Cache cargo registry & git
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
@@ -189,6 +193,11 @@ jobs:
           cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
           cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
           cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+
+      - name: sccache stats
+        if: always() && runner.os != 'macOS'
+        shell: bash
+        run: sccache --show-stats || true
 
   fast_check_required_context:
     name: Fast check (ubuntu-latest)
@@ -261,13 +270,14 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Cache cargo registry & build
+      # See `check_fast` for rationale: `target/` excluded to protect sccache
+      # GHA cache quota.
+      - name: Cache cargo registry & git
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-fast-tests-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-fast-tests-
@@ -280,6 +290,10 @@ jobs:
           cargo test _pg -- --nocapture --test-threads=1
           cargo test pg_ -- --nocapture --test-threads=1
           cargo test postgres -- --nocapture --test-threads=1
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   high-risk-recovery:
     name: High-risk recovery
@@ -320,19 +334,23 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Cache cargo registry & build
+      # See `check_fast` for rationale.
+      - name: Cache cargo registry & git
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-recovery-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-recovery-
 
       - name: High-risk recovery lane
         run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   lint:
     name: Lint
@@ -351,13 +369,13 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Cache cargo registry & build
+      # See `check_fast` for rationale.
+      - name: Cache cargo registry & git
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-lint-
@@ -367,6 +385,10 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -W clippy::all
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   scripts:
     name: Script checks
