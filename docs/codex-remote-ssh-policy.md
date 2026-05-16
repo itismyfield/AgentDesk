@@ -141,30 +141,69 @@ authentication source from ssh-agent to an arbitrary on-disk key
 allow-list naming a host name MUST be authoritative over the actual
 endpoint and authentication behavior.
 
-The invocation MUST therefore pin every relevant option on the command
-line and refuse to read user config:
+The invocation MUST be the following canonical, fully-pinned shape.
+This is one tested command, not a menu — implementers MUST emit
+exactly these flags in this order, and the integration test MUST
+assert the rendered argv matches:
 
-- `-F /dev/null` — do not read `~/.ssh/config` or `/etc/ssh/ssh_config`.
-- `-o IdentitiesOnly=yes` — only offer the ssh-agent identities the
-  invocation explicitly authorizes.
-- `-o IdentityAgent=$SSH_AUTH_SOCK` — bind to the operator's running
-  agent; refuse to fall back to file-based identities.
-- `-o IdentityFile=none` (or equivalently no `-i` flag) — no on-disk
-  private key may authenticate.
-- `-o ProxyCommand=none` and `-o ProxyJump=none` — single hop only
-  (matches the non-goal on multi-hop SSH).
-- `-o ForwardAgent=no`, `-o ForwardX11=no`, `-o RequestTTY=force`,
-  `-o ControlMaster=no`, `-o ControlPath=none` — no inbound back-channel,
-  no shared multiplex socket, force PTY (cancel relies on it).
-- `-o StrictHostKeyChecking=yes`, `-o UserKnownHostsFile=~/.ssh/known_hosts`
-  — host-key pinning is non-overridable.
-- `-o BatchMode=yes` — no interactive password prompts may appear under
-  any failure mode.
+```
+ssh \
+  -F /dev/null \
+  -o BatchMode=yes \
+  -o RequestTTY=force \
+  -o PasswordAuthentication=no \
+  -o KbdInteractiveAuthentication=no \
+  -o ChallengeResponseAuthentication=no \
+  -o GSSAPIAuthentication=no \
+  -o HostbasedAuthentication=no \
+  -o PubkeyAuthentication=yes \
+  -o IdentityFile=none \
+  -o IdentitiesOnly=yes \
+  -o IdentityAgent="$SSH_AUTH_SOCK" \
+  -o ProxyCommand=none \
+  -o ProxyJump=none \
+  -o ForwardAgent=no \
+  -o ForwardX11=no \
+  -o ControlMaster=no \
+  -o ControlPath=none \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=~/.ssh/known_hosts \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=2 \
+  -p <port> <user>@<host> -- <remote-wrapper-invocation>
+```
+
+Rationale for the parts that are easy to get subtly wrong:
+
+- `-F /dev/null` excludes `~/.ssh/config` and `/etc/ssh/ssh_config`
+  entirely. Allow-list naming is authoritative; user config cannot
+  retarget, multi-hop, or relax host-key checking.
+- The four `*Authentication=no` lines plus `PubkeyAuthentication=yes`
+  reduce the auth mechanism set to exactly one: public key.
+- `IdentityFile=none` plus `IdentitiesOnly=yes` plus `IdentityAgent`
+  together mean OpenSSH offers only the identities the running
+  `SSH_AUTH_SOCK` agent holds. `IdentityFile=none` on its own is not
+  enough — without `IdentitiesOnly=yes`, OpenSSH may still offer
+  default on-disk identities (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`,
+  etc.). The pair is the contract.
+- `IdentityAgent="$SSH_AUTH_SOCK"` is included even though it
+  duplicates the default, because `-F /dev/null` could otherwise be
+  read as "no agent socket either". Explicitly naming the socket
+  prevents that mis-reading.
+- `ServerAliveInterval`/`ServerAliveCountMax` bound how long a dead
+  network can keep a remote turn alive after AgentDesk has lost
+  contact, which is part of the "blast radius" guarantee.
+
+The set of agent-resident identities offered is whatever the operator
+has loaded into their ssh-agent. AgentDesk does not implement a second
+allow-list of *which* agent keys may be used; the operator's agent IS
+the credential store, and the host allow-list is the policy surface.
 
 Any `RemoteProfile` (or future `remote_hosts` entry) that attempts to
-override one of these options is a config-load error. A regression test
-MUST cover the rejection of profiles that set `ProxyJump`, `IdentityFile`,
-agent forwarding, or a relaxed `StrictHostKeyChecking` value.
+override one of these options is a config-load error. A regression
+test MUST cover the rejection of profiles that set `ProxyJump`,
+`IdentityFile`, agent forwarding, a relaxed `StrictHostKeyChecking`
+value, or any `*Authentication=yes` value other than `Pubkey`.
 
 If the implementation ships `russh` instead, the equivalent guarantees
 apply: do not read `~/.ssh/config`, accept identities only from the
@@ -217,19 +256,29 @@ The contract — process-group based, not PTY-foreground based:
   cancel mechanism.
 - The remote shell MUST launch Codex through a small operator-supplied
   wrapper script whose contract is:
-  1. The wrapper runs in the same session and process group the remote
-     `sshd` started; it does **not** call `setsid`. Codex inherits the
-     wrapper's PGID. (This is the explicit retraction of the earlier
-     `setsid` requirement — `setsid` and the PTY-foreground model are
-     incompatible and the wrapper drops `setsid`.)
-  2. The wrapper traps `SIGHUP`, `SIGINT`, and `SIGTERM`, and on any of
-     them sends `SIGTERM` to the entire process group (`kill -- -$$`),
-     waits a short grace period (≤ 2s), then sends `SIGKILL` to the
-     same group. This guarantees Codex and any grandchildren die
-     together.
+  1. The wrapper MUST make itself the leader of a new process group
+     while staying attached to the SSH-allocated PTY. Concretely:
+     `set -m` (job control) plus an immediate `kill -0 -$$` self-check
+     that the wrapper's PID equals its PGID; if the equality does not
+     hold, the wrapper MUST `exec setsid --ctty -w bash "$0" "$@"`
+     (Linux) or the equivalent `setsid` invocation that keeps the
+     controlling terminal, and re-verify. The wrapper does NOT detach
+     from the PTY — it only ensures `PID == PGID` so that the
+     "process group" cancel target is unambiguous.
+  2. The wrapper traps `SIGHUP`, `SIGINT`, and `SIGTERM`. On any of
+     them it MUST send `SIGTERM` to its own process group using
+     `kill -TERM 0` (which signals "every process in my process
+     group", and is well-defined regardless of whether `$$` equals
+     the PGID). It waits a short grace period (≤ 2s) and then sends
+     `kill -KILL 0`. The shell-pid form (`kill -- -$$`) is **forbidden**
+     because it assumes the wrapper is the group leader without
+     verifying it; `kill 0` is the canonical correct form.
   3. The wrapper waits on Codex and exits with Codex's status. It does
      **not** background Codex, does **not** call `nohup`, and does
      **not** redirect stdout/stderr.
+  4. The wrapper writes its own PID and PGID into a per-turn file the
+     operator names (so the integration test can verify the group
+     leader identity from outside). The file is unlinked on exit.
 - On `CancelToken` fire, AgentDesk MUST, in order: (a) write `0x03`
   (ETX / Ctrl-C) into the PTY so the foreground process group sees
   SIGINT — this is Codex's chance to flush; (b) close the SSH channel,
@@ -241,12 +290,19 @@ The contract — process-group based, not PTY-foreground based:
   and the SSH user may not have permission to signal arbitrary
   processes. Cancellation is signal-only, through the PTY and channel.
 - The cancel path MUST be exercised by an integration test that
-  asserts **both** of the following before declaring success:
+  asserts **all** of the following before declaring success:
   1. The local dispatcher returns within the existing local-cancel SLO.
   2. After the cancel, the remote host has no Codex descendant alive
-     in the wrapper's process group. The test queries the remote `ps`
-     for descendants of the wrapper PID (recorded by the wrapper
-     itself into a known per-turn file) and asserts the set is empty.
+     in the wrapper's process group. The test reads the wrapper's
+     per-turn PID/PGID file and queries `ps -o pid,pgid` (or
+     equivalent) to confirm the entire group is gone.
+  3. The test fixture intentionally arranges a case where the
+     wrapper's PID and PGID would differ at first invocation
+     (e.g., start Codex through the wrapper from a parent shell that
+     already established a process group), and asserts the wrapper's
+     `PID == PGID` self-check recovers correctly — i.e. that
+     `kill 0` after the recovery signals exactly the wrapper's
+     group and nothing outside it.
 - A second integration test MUST cover the network-drop path: kill the
   SSH session from the AgentDesk side without sending Ctrl-C, and
   assert the same "no descendants" property holds after the wrapper's

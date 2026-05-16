@@ -672,6 +672,33 @@ pub fn execute_command_streaming(
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
 
     if let Some(profile) = remote_profile {
+        // Issue #2193 — gate enforcement on the actual dispatch path.
+        // Bootstrap already hard-fails when `remote_ssh_enabled=true`
+        // and `PREREQUISITES_SATISFIED=false`, but the gate has to be
+        // checked here too: a future change that wires a real
+        // `services::remote` or starts populating `RemoteProfile` lists
+        // would otherwise reach `execute_streaming_remote_*` without
+        // the operator having opted in via `agentdesk.yaml`.
+        //
+        // The policy: both the runtime flag AND the compile-time
+        // prerequisites constant must agree. If either is false, the
+        // turn is refused before any SSH attempt.
+        if !(crate::services::provider_hosting::codex_remote_ssh_enabled()
+            && crate::services::codex_remote_policy::PREREQUISITES_SATISFIED)
+        {
+            tracing::warn!(
+                provider = "codex",
+                profile = %profile.name,
+                doc = "docs/codex-remote-ssh-policy.md",
+                "refusing Codex remote SSH dispatch: gate disabled or \
+                 prerequisites not satisfied (#2193)"
+            );
+            return Err(
+                "Remote SSH execution is disabled by policy (#2193). \
+                 See docs/codex-remote-ssh-policy.md."
+                    .to_string(),
+            );
+        }
         #[cfg(unix)]
         {
             let use_remote_tmux = tmux_session_name.is_some()
