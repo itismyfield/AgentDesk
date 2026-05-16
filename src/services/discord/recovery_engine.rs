@@ -1410,12 +1410,29 @@ pub(super) async fn restore_inflight_turns(
                                 })),
                                 allowed_from: None,
                             };
+                        use super::internal_api::DispatchUpdateOutcome;
+                        let mut already_terminal = false;
                         for attempt in 1..=3u8 {
                             match super::internal_api::update_dispatch(did, payload.clone()).await {
-                                Ok(_) => {
+                                Ok(DispatchUpdateOutcome::Updated(_)) => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     tracing::info!("  [{ts}] ✓ recovery: completed dispatch {did}");
                                     dispatch_completed = true;
+                                    break;
+                                }
+                                Ok(DispatchUpdateOutcome::Conflict { body }) => {
+                                    // #2194 follow-up: dispatch is already in a
+                                    // terminal status. Treat as success — do NOT
+                                    // run DB fallback, which would overwrite the
+                                    // existing result.
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!(
+                                        dispatch_id = %did,
+                                        response = %body,
+                                        "  [{ts}] ✓ recovery: dispatch {did} already terminal (409); leaving prior result intact"
+                                    );
+                                    dispatch_completed = true;
+                                    already_terminal = true;
                                     break;
                                 }
                                 Err(err) => {
@@ -1429,8 +1446,10 @@ pub(super) async fn restore_inflight_turns(
                                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             }
                         }
-                        // API retries exhausted — runtime-root DB fallback
-                        if !dispatch_completed {
+                        // API retries exhausted — runtime-root DB fallback.
+                        // Skip when the dispatch was already terminal (409) so we
+                        // don't clobber its preserved result.
+                        if !dispatch_completed && !already_terminal {
                             dispatch_completed =
                                 super::turn_bridge::runtime_db_fallback_complete_with_result(
                                     did,
