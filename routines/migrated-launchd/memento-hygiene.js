@@ -1,0 +1,37 @@
+// Migrated from launchd: com.itismyfield.memento-hygiene
+// Original shell script: ~/.local/bin/memento-hygiene.sh
+// Schedule: 0 6 * * * (KST, 06:00 daily)
+// Agent: TODO — operator must set agent_id before enabling this routine.
+//        The issue marks this as "(담당자 확정 필요)".
+//
+// Attach this routine via POST /api/routines with:
+//   {
+//     "script_ref": "migrated-launchd/memento-hygiene.js",
+//     "name": "memento-hygiene",
+//     "agent_id": "<TODO: operator decides>",
+//     "execution_strategy": "fresh",
+//     "schedule": "0 6 * * *",
+//     "timeout_secs": 1800
+//   }
+//
+// Do not enable this routine (status=enabled) until agent_id is set. Until
+// then, launchd continues to fire (no functional regression).
+//
+// PARALLEL-RUN SAFETY: launchd plist remains active during verification.
+agentdesk.routines.register({
+  name: "memento-hygiene",
+  tick(ctx) {
+    return {
+      action: "agent",
+      prompt: [
+        "Run the migrated launchd job 'memento-hygiene' for routine_id=" +
+          ctx.routine.id,
+        "Invoke the existing shell pipeline exactly as launchd does:",
+        "  /Users/itismyfield/.local/bin/memento-hygiene.sh",
+        "Working directory matches the original launchd job:",
+        "  /Users/itismyfield/.adk/release/workspaces/agentfactory",
+        "Return a one-line status summary (success | NO_REPLY | error: <msg>).",
+      ].join("\n"),
+    };
+  },
+});
