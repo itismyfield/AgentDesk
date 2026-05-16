@@ -1126,9 +1126,8 @@ fn execute_streaming_local_tui_tmux(
             || tmux_session_has_live_pane(tmux_session_name),
         )
     };
-    let cancel_observed = || {
-        crate::services::provider::cancel_requested(cancel_token_for_post_tail.as_deref())
-    };
+    let cancel_observed =
+        || crate::services::provider::cancel_requested(cancel_token_for_post_tail.as_deref());
 
     let tail_result = match tail_result {
         Ok(result) => result,

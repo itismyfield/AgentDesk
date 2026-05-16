@@ -1313,7 +1313,9 @@ mod tests {
         // observes cancel in the wait loop AND the relay-suppression
         // sender drops the post-cancel append even if a race lets the read
         // pick it up.
-        token.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Append a post-cancel assistant text that, without suppression,
         // would be relayed to Discord as part of the cancelled turn.
