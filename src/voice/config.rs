@@ -43,6 +43,11 @@ pub(crate) struct VoiceConfig {
     pub spoken_result: VoiceSpokenResultConfig,
     pub default_sensitivity_mode: BargeInSensitivity,
     pub auto_join_channel_ids: Vec<String>,
+    /// `false` (기본값) 이면 utterance / segment wav 와 transcript sidecar 를
+    /// STT 직후 삭제하고, 시작 시 기존 누적분도 GC 한다 (#2156). 디버그/품질
+    /// 분석 목적으로 보존하려면 `true` 로 두거나 환경변수 `ADK_VOICE_KEEP_WAV=1`
+    /// 을 설정하면 보존된다.
+    pub keep_recordings: bool,
 }
 
 impl Default for VoiceConfig {
@@ -64,6 +69,7 @@ impl Default for VoiceConfig {
             spoken_result: VoiceSpokenResultConfig::default(),
             default_sensitivity_mode: BargeInSensitivity::Normal,
             auto_join_channel_ids: Vec::new(),
+            keep_recordings: false,
         }
     }
 }
@@ -101,6 +107,20 @@ impl VoiceConfig {
             0 => DEFAULT_ACTIVE_AGENT_TTL_SECS,
             value => value,
         })
+    }
+
+    /// `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav /
+    /// segment / transcript sidecar 를 보존할지 결정한다 (#2156). 환경변수가 명시적으로
+    /// 설정된 경우 config 값을 덮어쓴다.
+    pub(crate) fn keep_voice_recordings(&self) -> bool {
+        if let Some(env_value) = std::env::var("ADK_VOICE_KEEP_WAV")
+            .ok()
+            .as_deref()
+            .and_then(parse_bool_env)
+        {
+            return env_value;
+        }
+        self.keep_recordings
     }
 
     pub(crate) fn auto_join_channel_ids_with_lobby(&self) -> Vec<String> {

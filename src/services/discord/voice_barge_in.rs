@@ -2245,6 +2245,29 @@ impl VoiceBargeInRuntime {
         candidates
     }
 
+    /// #2156: process_completed_utterance 가 끝나면 utterance wav / segment wav /
+    /// transcript sidecar 를 삭제한다. config `voice.keep_recordings` 가 true 거나
+    /// 환경변수 `ADK_VOICE_KEEP_WAV=1` 이면 보존한다.
+    ///
+    /// Race 노트: 외부 STT subprocess 가 sidecar `.txt` 를 비동기로 쓰는 경로에서,
+    /// `wait_for_stt_transcript` 의 polling 이 timeout 으로 끝난 직후 cleanup 이
+    /// 돌면 sidecar 가 늦게 도착해 즉시 삭제될 수 있다. 이미 polling 단계에서
+    /// 충분히 기다린 뒤이므로 손실은 운영자 관점에서 "이 utterance 는 STT 가
+    /// 끝내 실패한 것" 과 동치다. 보존이 필요하면 `keep_recordings=true` 로 두면
+    /// sidecar 가 그대로 남는다.
+    async fn cleanup_utterance_artifacts(&self, utterance: &CompletedUtterance) {
+        if self.voice_config_state.read().await.keep_voice_recordings() {
+            return;
+        }
+        remove_file_quietly(&utterance.path).await;
+        for segment in &utterance.segment_paths {
+            remove_file_quietly(segment).await;
+        }
+        for candidate in self.transcript_path_candidates(utterance) {
+            remove_file_quietly_silent(&candidate).await;
+        }
+    }
+
     fn buffer_for_channel(&self, channel_id: ChannelId) -> Arc<Mutex<DeferredBargeInBuffer>> {
         self.deferred_buffers
             .entry(channel_id.get())
@@ -2357,6 +2380,11 @@ impl VoiceReceiveHook for DiscordVoiceBargeInHook {
                 outcome = ?outcome,
                 "voice barge-in transcript processing finished"
             );
+            // #2156: STT 및 후속 처리가 완료된 시점이므로 utterance wav / segment /
+            // transcript sidecar 를 정리한다. config 가 keep_recordings=true 거나
+            // 환경변수 ADK_VOICE_KEEP_WAV=1 인 경우 cleanup_utterance_artifacts 내부에서
+            // no-op 처리된다.
+            runtime.cleanup_utterance_artifacts(&utterance).await;
         });
     }
 }
@@ -2367,6 +2395,33 @@ fn pcm_i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     bytes
+}
+
+/// #2156: 일반 wav/segment 삭제. NotFound 는 무시, 그 외 에러는 debug 로그.
+async fn remove_file_quietly(path: &Path) {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::debug!(
+            error = %error,
+            path = %path.display(),
+            "voice utterance cleanup could not remove file (#2156)"
+        ),
+    }
+}
+
+/// #2156: transcript sidecar 정리. 후보 다수 중 대부분은 존재하지 않으므로
+/// 모든 에러를 trace 로 낮춰 로그 노이즈를 줄인다.
+async fn remove_file_quietly_silent(path: &Path) {
+    if let Err(error) = tokio::fs::remove_file(path).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::trace!(
+            error = %error,
+            path = %path.display(),
+            "voice transcript sidecar cleanup skipped (#2156)"
+        );
+    }
 }
 
 fn transcript_dirs_from_config(config: &VoiceConfig) -> Vec<PathBuf> {
@@ -2589,5 +2644,118 @@ mod tests {
         assert_eq!(drain.acknowledgement, Some("확인했어요".to_string()));
         assert_eq!(drain.prompt, "첫 번째\n\n---\n\n두 번째");
         assert!(runtime.take_deferred_prompt(channel_id).await.is_none());
+    }
+
+    fn write_dummy(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, b"RIFF").unwrap();
+    }
+
+    fn build_completed_utterance(
+        utterance_path: PathBuf,
+        segment_paths: Vec<PathBuf>,
+    ) -> CompletedUtterance {
+        CompletedUtterance {
+            user_id: 42,
+            control_channel_id: Some(123),
+            utterance_id: "20260516-test".to_string(),
+            path: utterance_path,
+            segment_paths,
+            samples_written: 480,
+            started_at: "2026-05-16T07:00:00+09:00".to_string(),
+            completed_at: "2026-05-16T07:00:05+09:00".to_string(),
+        }
+    }
+
+    /// #2156: keep_recordings=false 일 때 cleanup_utterance_artifacts 가 utterance
+    /// wav / segment wav / transcript sidecar 를 모두 삭제하는지 확인한다.
+    #[tokio::test]
+    async fn cleanup_utterance_artifacts_removes_wav_segments_and_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = VoiceConfig::default();
+        config.enabled = true;
+        config.keep_recordings = false;
+        config.audio.transcripts_dir = temp.path().join("transcripts");
+        let runtime = VoiceBargeInRuntime::from_voice_config(&config);
+
+        let utterance_path = temp.path().join("user_42").join("20260516-test.wav");
+        let segment_a = temp
+            .path()
+            .join("user_42")
+            .join("20260516-test_segment_001.wav");
+        let segment_b = temp
+            .path()
+            .join("user_42")
+            .join("20260516-test_segment_002.wav");
+        let sidecar_inline = utterance_path.with_extension("txt");
+        let sidecar_in_dir = temp
+            .path()
+            .join("transcripts")
+            .join("user_42")
+            .join("20260516-test.txt");
+
+        write_dummy(&utterance_path);
+        write_dummy(&segment_a);
+        write_dummy(&segment_b);
+        write_dummy(&sidecar_inline);
+        write_dummy(&sidecar_in_dir);
+
+        let utterance = build_completed_utterance(
+            utterance_path.clone(),
+            vec![segment_a.clone(), segment_b.clone()],
+        );
+
+        runtime.cleanup_utterance_artifacts(&utterance).await;
+
+        assert!(!utterance_path.exists(), "utterance wav must be deleted");
+        assert!(!segment_a.exists(), "segment A wav must be deleted");
+        assert!(!segment_b.exists(), "segment B wav must be deleted");
+        assert!(!sidecar_inline.exists(), "inline sidecar must be deleted");
+        assert!(
+            !sidecar_in_dir.exists(),
+            "transcripts_dir sidecar must be deleted"
+        );
+    }
+
+    /// #2156: keep_recordings=true 또는 ADK_VOICE_KEEP_WAV=1 일 때 cleanup 이
+    /// 어떤 파일도 건드리지 않아야 한다.
+    #[tokio::test]
+    async fn cleanup_utterance_artifacts_is_noop_when_keep_recordings_true() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = VoiceConfig::default();
+        config.enabled = true;
+        config.keep_recordings = true;
+        let runtime = VoiceBargeInRuntime::from_voice_config(&config);
+
+        let utterance_path = temp.path().join("20260516-test.wav");
+        let segment = temp.path().join("20260516-test_segment_001.wav");
+        write_dummy(&utterance_path);
+        write_dummy(&segment);
+
+        let utterance = build_completed_utterance(utterance_path.clone(), vec![segment.clone()]);
+
+        runtime.cleanup_utterance_artifacts(&utterance).await;
+
+        assert!(utterance_path.exists(), "utterance wav must be preserved");
+        assert!(segment.exists(), "segment wav must be preserved");
+    }
+
+    /// #2156: 이미 존재하지 않는 파일은 NotFound 로 조용히 무시되어야 한다
+    /// (cleanup 이 멱등 — 동일 utterance 에 두 번 호출돼도 panic 하지 않음).
+    #[tokio::test]
+    async fn cleanup_utterance_artifacts_tolerates_missing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = VoiceConfig::default();
+        config.enabled = true;
+        config.keep_recordings = false;
+        let runtime = VoiceBargeInRuntime::from_voice_config(&config);
+
+        let utterance =
+            build_completed_utterance(temp.path().join("does-not-exist.wav"), Vec::new());
+
+        // Should not panic; should not surface errors.
+        runtime.cleanup_utterance_artifacts(&utterance).await;
     }
 }

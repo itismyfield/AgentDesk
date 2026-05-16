@@ -54,6 +54,14 @@ providers:
 voice:
   # Enables Discord voice capture, transcription, and TTS paths.
   enabled: false
+  # When false (default), utterance/segment wav files and transcript sidecars are
+  # deleted after each utterance is fully processed (STT done, transcript routing
+  # complete, turn dispatched), and any pre-existing wav under
+  # `audio.recordings_dir/{utterances,segments}` is GC-ed on startup. Set to true
+  # only for STT-quality debugging.
+  # Override precedence: env `ADK_VOICE_KEEP_WAV=1`/`0` (when set) wins over this
+  # YAML value, so operators can flip retention on/off without editing config.
+  keep_recordings: false
   audio:
     # Directory for captured voice clips before transcription.
     recordings_dir: "~/.adk/voice/recordings"

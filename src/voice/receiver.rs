@@ -59,6 +59,8 @@ pub(crate) struct VoiceReceiverConfig {
     pub(crate) segment_idle: Duration,
     pub(crate) utterance_idle: Duration,
     pub(crate) allowed_user_ids: HashSet<u64>,
+    /// `false` 면 시작 시 누적된 utterance/segment wav 를 GC 한다 (#2156).
+    pub(crate) keep_recordings: bool,
 }
 
 impl VoiceReceiverConfig {
@@ -78,6 +80,7 @@ impl VoiceReceiverConfig {
             segment_idle: Duration::from_millis(config.idle.segment_idle_ms),
             utterance_idle: Duration::from_millis(config.idle.utterance_idle_ms),
             allowed_user_ids,
+            keep_recordings: config.keep_voice_recordings(),
         }
     }
 }
@@ -121,6 +124,11 @@ impl VoiceReceiver {
         config: VoiceReceiverConfig,
         hook: Option<Arc<dyn VoiceReceiveHook>>,
     ) -> Self {
+        // #2156: voice 시작 시 누적된 wav 를 정리한다.
+        // 환경변수/config 로 보존을 명시한 경우만 건너뛴다.
+        if !config.keep_recordings {
+            gc_voice_recordings_dir(&config.recordings_dir);
+        }
         Self {
             inner: Arc::new(ReceiverState::new(config, hook)),
         }
@@ -742,6 +750,91 @@ fn abort_timer(timer: Option<JoinHandle<()>>) {
     }
 }
 
+/// #2156: voice 시작 시 호출된다. 정확히 다음 2단계 레이아웃만 정리한다:
+///   `<recordings_dir>/utterances/user_<id>/<utterance-id>.wav`
+///   `<recordings_dir>/segments/user_<id>/<utterance-id>_segment_NNN.wav`
+/// 더 깊거나 다른 레이아웃의 파일은 손대지 않는다 (운영자가 의도적으로 모아둔
+/// 것일 수 있음). 디렉토리 자체는 남겨 매 utterance 가 다시 `create_dir_all`
+/// 비용을 치르지 않게 한다. 에러는 debug 로그로만 흘려 GC 가 시작 흐름을
+/// 막지 않게 한다.
+///
+/// 안전 가드:
+/// - symlink user 디렉토리는 따라가지 않고 skip 한다 (외부 트리로 빠져 외부
+///   파일을 지울 위험 차단).
+/// - symlink 파일 entry 도 skip (자체 wav 가 아니라 외부 wav 를 가리킬 수 있음).
+fn gc_voice_recordings_dir(recordings_dir: &Path) {
+    let utterance_root = recordings_dir.join("utterances");
+    let segment_root = recordings_dir.join("segments");
+    let removed_utterances = gc_wav_subtree(&utterance_root);
+    let removed_segments = gc_wav_subtree(&segment_root);
+    if removed_utterances + removed_segments > 0 {
+        tracing::info!(
+            removed_utterances,
+            removed_segments,
+            recordings_dir = %recordings_dir.display(),
+            "voice recordings GC removed accumulated wav files (#2156)"
+        );
+    }
+}
+
+fn gc_wav_subtree(root: &Path) -> usize {
+    let mut removed = 0usize;
+    // Root 자체(예: `utterances`, `segments`) 가 symlink 면 따라가지 않는다.
+    // `fs::symlink_metadata` 는 마지막 컴포넌트에 대해 symlink 를 그대로 보고하므로
+    // 외부 트리로 빠지는 GC 진입을 차단할 수 있다.
+    match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            tracing::debug!(
+                path = %root.display(),
+                "voice recordings GC skipped: root is a symlink"
+            );
+            return 0;
+        }
+        Ok(_) => {}
+        Err(_) => return 0,
+    }
+    let Ok(top) = fs::read_dir(root) else {
+        return 0;
+    };
+    for user_dir in top.flatten() {
+        // Symlink user 디렉토리는 정책상 따라가지 않는다 — 외부 트리로 빠질 수 있음.
+        // `DirEntry::file_type` 와 `symlink_metadata` 모두 마지막 컴포넌트의
+        // symlink 를 그대로 보고하므로 어떤 쪽을 써도 무방하지만, root 검사와
+        // 동일하게 `symlink_metadata` 로 통일해 보안 의도를 일관되게 표현한다.
+        let user_path = user_dir.path();
+        match fs::symlink_metadata(&user_path) {
+            Ok(md) if md.file_type().is_symlink() => continue,
+            Ok(_) => {}
+            Err(_) => continue,
+        }
+        let Ok(entries) = fs::read_dir(&user_path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            // Symlink 파일도 skip — 가리키는 대상이 외부 wav 일 수 있다.
+            match fs::symlink_metadata(&entry_path) {
+                Ok(md) if md.file_type().is_symlink() => continue,
+                Ok(_) => {}
+                Err(_) => continue,
+            }
+            if entry_path.extension().and_then(|ext| ext.to_str()) != Some("wav") {
+                continue;
+            }
+            match fs::remove_file(&entry_path) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::debug!(
+                    error = %error,
+                    path = %entry_path.display(),
+                    "voice recordings GC could not remove file"
+                ),
+            }
+        }
+    }
+    removed
+}
+
 fn create_dir_all(path: &Path) -> Result<(), VoiceReceiverError> {
     fs::create_dir_all(path).map_err(|source| VoiceReceiverError::CreateDir {
         path: path.to_path_buf(),
@@ -777,6 +870,10 @@ mod tests {
             segment_idle: TEST_SEGMENT_IDLE,
             utterance_idle: TEST_UTTERANCE_IDLE,
             allowed_user_ids: HashSet::new(),
+            // 테스트는 GC 가 짠 후 생성한 utterance wav 를 즉시 검사하므로
+            // GC 그 자체와 무관. 다만 keep_recordings=true 로 두면 시작 시
+            // wav 삭제가 일어나지 않아 결정적이다.
+            keep_recordings: true,
         }
     }
 
@@ -885,5 +982,123 @@ mod tests {
         assert_eq!(hook.pcm_frames.load(Ordering::SeqCst), 1);
         assert_eq!(hook.completions.load(Ordering::SeqCst), 1);
         assert_eq!(*hook.control_channels.lock().unwrap(), vec![123, 123]);
+    }
+
+    /// #2156: 시작 시 recordings_dir 의 누적 wav 가 모두 사라지고, 디렉토리는
+    /// 보존되어야 한다. 비-wav 파일과 외부 디렉토리는 손대지 않는다.
+    #[test]
+    fn gc_voice_recordings_dir_removes_legacy_wavs_and_preserves_other_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let utterance_user = root.join("utterances").join("user_42");
+        let segment_user = root.join("segments").join("user_42");
+        fs::create_dir_all(&utterance_user).unwrap();
+        fs::create_dir_all(&segment_user).unwrap();
+
+        let stale_utterance = utterance_user.join("20260101-000001-000001.wav");
+        let stale_segment = segment_user.join("20260101-000001-000001_segment_001.wav");
+        let unrelated_txt = utterance_user.join("transcript-sidecar.txt");
+        let outside_file = root.join("unrelated.wav");
+        fs::write(&stale_utterance, b"RIFF").unwrap();
+        fs::write(&stale_segment, b"RIFF").unwrap();
+        fs::write(&unrelated_txt, b"hello").unwrap();
+        fs::write(&outside_file, b"RIFF").unwrap();
+
+        gc_voice_recordings_dir(root);
+
+        assert!(!stale_utterance.exists(), "utterance wav must be removed");
+        assert!(!stale_segment.exists(), "segment wav must be removed");
+        assert!(
+            unrelated_txt.exists(),
+            "non-wav sidecars in user dir must be preserved (transcript sidecars are handled per-utterance)"
+        );
+        assert!(
+            outside_file.exists(),
+            "files outside utterances/segments subtrees must not be touched"
+        );
+        assert!(
+            utterance_user.is_dir() && segment_user.is_dir(),
+            "user directories must remain to avoid re-create cost on the next utterance"
+        );
+    }
+
+    #[test]
+    fn gc_voice_recordings_dir_is_a_noop_when_directory_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("does-not-exist");
+        // Just verify no panic / no error propagation.
+        gc_voice_recordings_dir(&missing);
+        assert!(!missing.exists());
+    }
+
+    /// #2156: GC 는 `<root>/utterances` 또는 `<root>/segments` 가 symlink 면
+    /// 따라가지 않는다 — 외부 트리의 wav 가 의도치 않게 삭제되지 않도록 한다.
+    #[cfg(unix)]
+    #[test]
+    fn gc_voice_recordings_dir_skips_symlinked_root() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+
+        // 외부 트리(레코딩 루트 바깥)에 wav 를 둔다.
+        let outside = temp.path().join("outside");
+        let outside_user = outside.join("user_99");
+        fs::create_dir_all(&outside_user).unwrap();
+        let external_wav = outside_user.join("external.wav");
+        fs::write(&external_wav, b"RIFF").unwrap();
+
+        // 레코딩 루트의 utterances 디렉토리를 외부 트리로 향하는 symlink 로 만든다.
+        let recordings_root = temp.path().join("recordings");
+        fs::create_dir_all(&recordings_root).unwrap();
+        symlink(&outside, recordings_root.join("utterances")).unwrap();
+
+        gc_voice_recordings_dir(&recordings_root);
+
+        assert!(
+            external_wav.exists(),
+            "wav files outside the recordings tree must survive even when the GC root is symlinked into them"
+        );
+    }
+
+    /// #2156: user-dir 또는 wav 파일이 symlink 면 GC 가 따라가지 않고 skip 해야 한다.
+    #[cfg(unix)]
+    #[test]
+    fn gc_voice_recordings_dir_skips_symlinked_user_dir_and_wav_entry() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+
+        // 외부 user 디렉토리와 외부 wav (target of symlinks).
+        let outside = temp.path().join("outside");
+        let outside_user = outside.join("user_99");
+        fs::create_dir_all(&outside_user).unwrap();
+        let external_wav_target = outside_user.join("external.wav");
+        fs::write(&external_wav_target, b"RIFF").unwrap();
+        let other_external_wav = temp.path().join("target.wav");
+        fs::write(&other_external_wav, b"RIFF").unwrap();
+
+        // recordings_dir 안에 symlink user_dir 와 symlink wav 를 만든다.
+        let recordings_root = temp.path().join("recordings");
+        let utterances_root = recordings_root.join("utterances");
+        fs::create_dir_all(&utterances_root).unwrap();
+        symlink(&outside_user, utterances_root.join("user_42_link")).unwrap();
+        let real_user = utterances_root.join("user_1");
+        fs::create_dir_all(&real_user).unwrap();
+        symlink(&other_external_wav, real_user.join("symlink-to.wav")).unwrap();
+        let real_wav = real_user.join("real.wav");
+        fs::write(&real_wav, b"RIFF").unwrap();
+
+        gc_voice_recordings_dir(&recordings_root);
+
+        assert!(
+            external_wav_target.exists(),
+            "files under a symlinked user_dir must not be touched"
+        );
+        assert!(
+            other_external_wav.exists(),
+            "files referenced by a symlinked wav entry must not be touched"
+        );
+        assert!(
+            !real_wav.exists(),
+            "real (non-symlinked) wav files must still be removed"
+        );
     }
 }
