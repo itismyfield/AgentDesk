@@ -24,6 +24,7 @@ import {
   SurfaceSection as SettingsSection,
   SurfaceSubsection as SettingsSubsection,
 } from "./common/SurfacePrimitives";
+import { Modal } from "./common/overlay/Modal";
 import { SettingsAuditNotes, SettingsGlossary } from "./settings/SettingsKnowledge";
 import { SettingsNavigation } from "./settings/SettingsNavigation";
 import {
@@ -32,6 +33,11 @@ import {
   SettingRow,
   StorageSurfaceCard,
 } from "./settings/SettingsPanels";
+import {
+  getDangerousConfigKeys,
+  getDangerousConfigLabel,
+  isDangerousConfigKey,
+} from "./settings/settingsDangerousConfig";
 
 const OnboardingWizard = lazy(() => import("./OnboardingWizard"));
 const FsmEditor = lazy(() => import("./agent-manager/FsmEditor"));
@@ -71,6 +77,10 @@ type ConfigEntry = {
 };
 
 type ConfigEditValue = string | boolean;
+type PendingDangerousConfigSave = {
+  edits: Record<string, ConfigEditValue>;
+  keys: string[];
+};
 type SettingsPanel = "general" | "runtime" | "pipeline" | "onboarding" | "voice";
 type SettingsNotificationType = "info" | "success" | "warning" | "error";
 
@@ -373,6 +383,7 @@ const CATEGORIES: Array<{
 const BOOLEAN_CONFIG_KEYS = new Set([
   "review_enabled",
   "pm_decision_gate_enabled",
+  "merge_automation_enabled",
 ]);
 
 const NUMERIC_CONFIG_KEYS = new Set([
@@ -825,6 +836,7 @@ function metaFromConfigEntry(
   const flags: SettingFlag[] = [];
   if (!readOnly) flags.push("kv_meta");
   if (overrideActive) flags.push("live_override");
+  if (!readOnly && isDangerousConfigKey(entry.key)) flags.push("alert");
   if (readOnly) flags.push("read_only");
   if (restartRequired) flags.push("restart_required");
 
@@ -1032,6 +1044,8 @@ export default function SettingsView({
   const [configEntries, setConfigEntries] = useState<ConfigEntry[]>([]);
   const [configEdits, setConfigEdits] = useState<Record<string, ConfigEditValue>>({});
   const [configSaving, setConfigSaving] = useState(false);
+  const [pendingDangerousConfigSave, setPendingDangerousConfigSave] =
+    useState<PendingDangerousConfigSave | null>(null);
   const [voiceConfig, setVoiceConfig] = useState<VoiceConfigResponse | null>(null);
   const [voiceDraft, setVoiceDraft] = useState<VoiceConfigResponse | null>(null);
   const [voiceLoaded, setVoiceLoaded] = useState(false);
@@ -1915,9 +1929,8 @@ export default function SettingsView({
     setConfigEdits((prev) => ({ ...prev, [key]: value }));
   };
 
-  const handleConfigSave = async () => {
-    if (!configDirty) return;
-    const pendingEdits = { ...configEdits };
+  const saveConfigEdits = async (pendingEdits: Record<string, ConfigEditValue>) => {
+    if (Object.keys(pendingEdits).length === 0) return;
     const previousEntries = configEntries;
     setConfigSaving(true);
     setConfigEntries((current) => applyConfigEdits(current, pendingEdits));
@@ -1949,6 +1962,24 @@ export default function SettingsView({
     } finally {
       setConfigSaving(false);
     }
+  };
+
+  const handleConfigSave = async () => {
+    if (!configDirty) return;
+    const pendingEdits = { ...configEdits };
+    const dangerousKeys = getDangerousConfigKeys(pendingEdits);
+    if (dangerousKeys.length > 0) {
+      setPendingDangerousConfigSave({ edits: pendingEdits, keys: dangerousKeys });
+      return;
+    }
+    await saveConfigEdits(pendingEdits);
+  };
+
+  const handleDangerousConfigConfirm = async () => {
+    if (!pendingDangerousConfigSave) return;
+    const pendingEdits = pendingDangerousConfigSave.edits;
+    setPendingDangerousConfigSave(null);
+    await saveConfigEdits(pendingEdits);
   };
 
   const updateVoiceGlobal = useCallback(
@@ -3056,6 +3087,8 @@ export default function SettingsView({
       </div>
     </div>
   );
+  const dangerousConfigLabels =
+    pendingDangerousConfigSave?.keys.map((key) => getDangerousConfigLabel(key, isKo)).join(", ") ?? "";
 
   return (
     <div
@@ -3132,6 +3165,64 @@ export default function SettingsView({
           </SettingsCard>
         </div>
       </div>
+
+      <Modal
+        open={Boolean(pendingDangerousConfigSave)}
+        onClose={() => setPendingDangerousConfigSave(null)}
+        title={tr("위험 설정 저장 확인", "Confirm risky settings")}
+        description={tr(
+          "자동화, 리뷰 게이트, 컨텍스트 초기화에 영향을 주는 설정입니다.",
+          "These settings affect automation, review gates, or context clearing.",
+        )}
+        size="sm"
+      >
+        <div className="space-y-4">
+          <div className="rounded-2xl border px-4 py-3 text-sm leading-6"
+            style={{
+              borderColor: "rgba(251, 191, 36, 0.35)",
+              background: "rgba(251, 191, 36, 0.10)",
+              color: "var(--th-text)",
+            }}
+          >
+            {tr(
+              "저장하면 진행 중인 카드의 리뷰/머지/컨텍스트 정책이 즉시 달라질 수 있습니다.",
+              "Saving can immediately change review, merge, or context policy for active cards.",
+            )}
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--th-text-muted)" }}>
+              {tr("변경 대상", "Changing")}
+            </div>
+            <div className="mt-2 rounded-xl border px-3 py-2 text-sm" style={{
+              borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+              background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
+              color: "var(--th-text)",
+            }}>
+              {dangerousConfigLabels}
+            </div>
+          </div>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <button
+              type="button"
+              onClick={() => setPendingDangerousConfigSave(null)}
+              className={secondaryActionClass}
+              style={secondaryActionStyle}
+            >
+              {tr("취소", "Cancel")}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDangerousConfigConfirm()}
+              disabled={configSaving}
+              className={primaryActionClass}
+              style={primaryActionStyle}
+            >
+              <Check size={12} />
+              {configSaving ? tr("저장 중...", "Saving...") : tr("확인 후 저장", "Confirm and save")}
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {showOnboarding && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-[#0a0e1a]" role="dialog" aria-modal="true" aria-label="Onboarding wizard">
