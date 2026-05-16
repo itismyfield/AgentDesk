@@ -2536,6 +2536,15 @@ async fn resolve_card_issue_commit_target_pg(
 const REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_millis(500);
 
+/// Gap between the two stability probes that must BOTH report clean before
+/// we restore `worktree_path` after a transient-dirty observation. A single
+/// clean sample is not enough — a concurrent writer could be mid-cycle and
+/// dirty the tree again immediately after our probe. ~80ms is short enough
+/// to keep total latency under 600ms but long enough to catch a writer that
+/// just emitted one file (typical edit-save loops are tens of ms).
+const REREVIEW_STABILITY_PROBE_GAP: std::time::Duration =
+    std::time::Duration::from_millis(80);
+
 /// Probe a candidate worktree once, optionally retrying once on
 /// `DirtyTransient` after [`REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY`].
 ///
@@ -2546,6 +2555,12 @@ const REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY: std::time::Duration =
 /// `probe_clean_exact_review_worktree` (it returns `NotMatching` the moment
 /// HEAD diverges), so a retry can never accept an unrelated commit that
 /// happens to land on the same path mid-window.
+///
+/// Codex round-3: a single post-backoff clean observation is insufficient —
+/// a concurrent writer could re-dirty the tree right after our probe. We
+/// require TWO consecutive clean probes separated by
+/// [`REREVIEW_STABILITY_PROBE_GAP`] before emitting `worktree_path`. If
+/// stability cannot be confirmed, fall through to commit-only review.
 async fn probe_clean_worktree_with_transient_retry(
     card_id: &str,
     source: &str,
@@ -2556,10 +2571,18 @@ async fn probe_clean_worktree_with_transient_retry(
         ReviewWorktreeProbe::Clean(p) => Some(p),
         ReviewWorktreeProbe::DirtyTransient => {
             tokio::time::sleep(REREVIEW_TRANSIENT_DIRTY_RETRY_DELAY).await;
+            // Stability check: BOTH probes must report clean. Otherwise an
+            // active writer briefly between two dirty bursts could fool a
+            // single-sample retry.
+            let first = probe_clean_exact_review_worktree(card_id, source, path, commit).await;
+            if !matches!(first, ReviewWorktreeProbe::Clean(_)) {
+                return None;
+            }
+            tokio::time::sleep(REREVIEW_STABILITY_PROBE_GAP).await;
             match probe_clean_exact_review_worktree(card_id, source, path, commit).await {
                 ReviewWorktreeProbe::Clean(p) => {
                     tracing::info!(
-                        "[dispatch] Review dispatch for card {}: {} worktree '{}' settled clean after transient-dirty retry (commit {})",
+                        "[dispatch] Review dispatch for card {}: {} worktree '{}' settled stable-clean after transient-dirty retry (commit {})",
                         card_id,
                         source,
                         path,
@@ -2567,7 +2590,16 @@ async fn probe_clean_worktree_with_transient_retry(
                     );
                     Some(p)
                 }
-                _ => None,
+                _ => {
+                    tracing::warn!(
+                        "[dispatch] Review dispatch for card {}: {} worktree '{}' failed stability re-check after transient-dirty retry — falling back to commit-only review (commit {})",
+                        card_id,
+                        source,
+                        path,
+                        &commit[..8.min(commit.len())]
+                    );
+                    None
+                }
             }
         }
         // NotMatching and GitFailure: fail-closed, no retry. A path that
@@ -2654,34 +2686,45 @@ async fn resolve_pr_tracking_review_target_pg(
         return Ok(None);
     };
 
-    // #2254 item 6 — repo cross-check.
+    // #2254 item 6 — repo cross-check (Codex round-3: strict).
     //
     // `pr_tracking.head_sha` is an unauthenticated string commit pointer. If
-    // the pr_tracking row is bound to a different `repo_id` than the card
-    // (e.g. a mis-routed integration write, or a submodule / cherry-pick
-    // where the commit hash literally exists in two repos), we must not
-    // emit that head_sha as the review target — the reviewer would run on
-    // unrelated code.
+    // the pr_tracking row is bound to a different repo than the card (e.g.
+    // a mis-routed integration write, or a submodule / cherry-pick where
+    // the commit hash literally exists in two repos), we must not emit that
+    // head_sha as the review target — the reviewer would run on unrelated
+    // code.
     //
-    // Strategy: compare pr_tracking.repo_id with the card's canonical
-    // repo_id from `kanban_cards.repo_id`. When they differ, refuse this
-    // resolver and let downstream fallbacks (worktree / issue-commit / repo
-    // HEAD) take over.
+    // Strict rule: when pr_tracking has a non-empty `repo_id`, that value
+    // MUST resolve to the same local repo as the card's canonical scope
+    // (the card's own `repo_id`, falling back to the per-deployment default
+    // repo when the card row's column is NULL). Any of the following
+    // outcomes is treated as "unprovable equivalence" and rejects the
+    // pr_tracking head_sha:
+    //   - pr_tracking.repo_id and card scope refer to different repos
+    //   - either side cannot be resolved to a local path
+    //   - the card has no recoverable canonical repo at all
     let pr_tracking_repo_id = repo_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let card_scope_repo_id = load_card_dispatch_info_pg(pool, card_id)
-        .await
-        .and_then(|info| info.repo_id);
-    if let (Some(pr_repo), Some(card_repo)) =
-        (pr_tracking_repo_id.as_deref(), card_scope_repo_id.as_deref())
-    {
-        if historical_target_repo_differs_from_card(Some(pr_repo), Some(card_repo)) {
+    if let Some(pr_repo) = pr_tracking_repo_id.as_deref() {
+        // `resolve_card_target_repo_ref` already encodes the
+        // "card.repo_id or default repo" fallback, so a NULL
+        // `kanban_cards.repo_id` does not silently bypass the check.
+        let card_scope_repo = resolve_card_target_repo_ref(pool, card_id, context).await;
+        let mismatch = match card_scope_repo.as_deref() {
+            Some(card_repo) => {
+                historical_target_repo_differs_from_card(Some(pr_repo), Some(card_repo))
+            }
+            // No anchor to verify against — reject to fail-closed.
+            None => true,
+        };
+        if mismatch {
             tracing::warn!(
-                "[dispatch] Review dispatch for card {}: pr_tracking.repo_id '{}' does not match card repo_id '{}' — refusing pr_tracking head_sha {} (#2254 item 6)",
+                "[dispatch] Review dispatch for card {}: pr_tracking.repo_id '{}' cannot be proven equivalent to card scope '{:?}' — refusing pr_tracking head_sha {} (#2254 item 6)",
                 card_id,
                 pr_repo,
-                card_repo,
+                card_scope_repo.as_deref(),
                 &reviewed_commit[..8.min(reviewed_commit.len())]
             );
             return Ok(None);
@@ -3684,6 +3727,113 @@ mod pg_rereview_tests {
         assert!(
             target.is_none(),
             "pr_tracking head_sha bound to a different repo_id must be refused: {target:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Item 6 (Codex round-3): when `kanban_cards.repo_id` is NULL and
+    /// pr_tracking.repo_id is non-empty and *cannot* be proven equivalent
+    /// to any card-side anchor, the resolver must refuse the head_sha.
+    /// Previously the `if let (Some, Some)` gate let this slip through.
+    #[tokio::test]
+    async fn pg_rereview_rejects_pr_tracking_when_card_repo_id_is_null_and_unresolvable() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let card_id = "card-pg-rereview-null-card-repo";
+        let other_repo = init_test_repo();
+        let other_repo_dir = other_repo.path().to_str().unwrap().to_string();
+        let foreign_commit = git_commit(&other_repo_dir, "fix: unrelated");
+
+        // Card with NULL repo_id — the resolver has no anchor to validate
+        // pr_tracking.repo_id against.
+        pg_seed_card(&pool, card_id, Some(11_555), None).await;
+        pg_seed_agent(&pool, "agent-null", Some("nd"), Some("na")).await;
+        sqlx::query(
+            "INSERT INTO pr_tracking (card_id, repo_id, worktree_path, branch, head_sha, state)
+             VALUES ($1, $2, $3, 'main', $4, 'wait-ci')",
+        )
+        .bind(card_id)
+        .bind(&other_repo_dir)
+        .bind(&other_repo_dir)
+        .bind(&foreign_commit)
+        .execute(&pool)
+        .await
+        .expect("seed pr_tracking");
+
+        let target = resolve_pr_tracking_review_target_pg(&pool, card_id, None)
+            .await
+            .expect("resolver must succeed");
+        assert!(
+            target.is_none(),
+            "card.repo_id NULL + non-empty pr_tracking.repo_id must reject when equivalence cannot be proven: {target:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Item 4 (Codex round-3): a concurrent writer can clean the tree just
+    /// long enough for one retry probe to see it clean, then immediately
+    /// re-dirty. The stability re-check must catch that and fall back to
+    /// commit-only review.
+    #[tokio::test]
+    async fn pg_rereview_drops_worktree_when_dirty_returns_after_first_clean_probe() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let card_id = "card-pg-rereview-flapping-dirty";
+        let repo = init_test_repo();
+        let repo_dir = repo.path().to_str().unwrap().to_string();
+        let tracked = repo.path().join("tracked.rs");
+        std::fs::write(&tracked, "clean\n").unwrap();
+        run_git(&repo_dir, &["add", "tracked.rs"]);
+        let reviewed_commit = git_commit(&repo_dir, "fix: target");
+        // Start dirty.
+        std::fs::write(&tracked, "writer burst 1\n").unwrap();
+
+        pg_seed_card(&pool, card_id, Some(11_666), Some(&repo_dir)).await;
+        pg_seed_agent(&pool, "agent-flap", Some("fd"), Some("fa")).await;
+        sqlx::query(
+            "INSERT INTO pr_tracking (card_id, repo_id, worktree_path, branch, head_sha, state)
+             VALUES ($1, $2, $3, 'main', $4, 'wait-ci')",
+        )
+        .bind(card_id)
+        .bind(&repo_dir)
+        .bind(&repo_dir)
+        .bind(&reviewed_commit)
+        .execute(&pool)
+        .await
+        .expect("seed pr_tracking");
+
+        // Background writer: clean the file just before the post-backoff
+        // probe, then dirty it again during the stability gap.
+        let cleanup_path = tracked.clone();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+            std::fs::write(&cleanup_path, "clean\n").unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            std::fs::write(&cleanup_path, "writer burst 2\n").unwrap();
+        });
+
+        let pg_context = build_review_context(
+            &pool,
+            card_id,
+            "agent-flap",
+            &json!({ "rereview": true, "reason": "flapping" }),
+            ReviewTargetTrust::Untrusted,
+            TargetRepoSource::CardScopeDefault,
+        )
+        .await
+        .expect("rereview should still build a commit-only context");
+        writer.await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pg_context).unwrap();
+        assert_eq!(parsed["reviewed_commit"], reviewed_commit);
+        assert!(
+            parsed.get("worktree_path").is_none(),
+            "flapping dirty must not be accepted by the retry — got {parsed}"
         );
 
         pool.close().await;

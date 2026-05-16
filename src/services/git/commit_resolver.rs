@@ -144,8 +144,21 @@ pub fn git_tracked_change_paths(repo_dir: &str) -> Option<Vec<String>> {
 /// tracked changes" via `unwrap_or_default()`. This variant lets those sites
 /// distinguish the two outcomes.
 pub fn git_tracked_change_paths_strict(repo_dir: &str) -> Result<Vec<String>, String> {
+    // `--no-optional-locks` + `GIT_OPTIONAL_LOCKS=0` prevent `git status` from
+    // attempting to refresh/lock the index. This is critical for read-only
+    // worktrees (read-only `.git/index`, read-only filesystem mounts, or a
+    // clean checkout being inspected by a concurrent reviewer) — without it,
+    // a benign read-only environment can return a permission/index-lock error
+    // and our fail-closed callers (#2254 bonus) would reject a legitimately
+    // clean worktree. See Codex round-3 review on PR for this fix.
     let output = git_command()
-        .args(["status", "--porcelain", "--untracked-files=no"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ])
         .current_dir(repo_dir)
         .output()
         .map_err(|err| format!("git status spawn failed for {repo_dir}: {err}"))?;
