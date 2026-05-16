@@ -5710,9 +5710,9 @@ mod cancel_recv_toctou_tests {
         assert!(!is_done_setting_terminal_frame(&StreamMessage::Text {
             content: "hi".to_string(),
         }));
-        assert!(!is_done_setting_terminal_frame(&StreamMessage::OutputOffset {
-            offset: 42,
-        }));
+        assert!(!is_done_setting_terminal_frame(
+            &StreamMessage::OutputOffset { offset: 42 }
+        ));
     }
 
     /// #2289 Codex review follow-up: the post-recv re-sample is gated on
