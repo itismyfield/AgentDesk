@@ -419,6 +419,7 @@ pub(crate) async fn cmd_review_decision(
                     comment: comment.map(str::to_string),
                     commit_sha: None,
                     dispatch_id,
+                    out_of_scope: None,
                 };
                 let (status, body) = crate::server::routes::review_verdict::submit_review_decision(
                     State(state),
