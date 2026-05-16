@@ -1459,32 +1459,66 @@ fn execute_streaming_local_tui_tmux(
             session_id: None,
         });
     } else {
-        // #2171: log the post-turn composer-readiness snapshot so we get
-        // telemetry on whether the pane-marker detector matches reality
-        // in production. This is intentionally non-fatal: the rollout
-        // tail already produced an assistant response, so the turn is
-        // complete regardless of what the visual detector thinks. Once
-        // we have enough telemetry to trust the detector, follow-up
-        // prompt injection (separate PR) can gate on it via
-        // `codex_tui::input::send_followup_prompt`.
-        let snapshot =
-            crate::services::codex_tui::input::prompt_readiness_snapshot(tmux_session_name);
-        tracing::debug!(
-            tmux_session = tmux_session_name,
-            composer_marker_detected = snapshot.composer_marker_detected,
-            tmux_pane_alive = snapshot.tmux_pane_alive,
-            capture_available = snapshot.capture_available,
-            "codex tui post-turn input readiness snapshot"
-        );
-
-        let _ = sender.send(StreamMessage::RuntimeReady {
-            handoff: RuntimeHandoff::CodexTui {
-                rollout_path: tail_result.rollout_path.display().to_string(),
-                thread_id: tail_result.session_id,
-                tmux_session_name: tmux_session_name.to_string(),
-                last_offset: tail_result.final_offset,
-            },
-        });
+        // #2325: gate the RuntimeReady handoff on the Codex TUI composer
+        // actually being ready for input. RuntimeReady is the signal the
+        // turn-bridge uses to publish CodexTui handoff state that
+        // downstream recovery / watcher-relay paths assume corresponds
+        // to a live, input-ready pane (see
+        // `services::discord::turn_bridge::mod::RuntimeHandoff::CodexTui`
+        // branch). If we publish RuntimeReady against a tmux session
+        // whose composer never came back up, downstream consumers will
+        // operate on a non-ready handoff. Bound the wait at the
+        // follow-up budget (45s) so a hung TUI is escalated quickly.
+        match crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
+            tmux_session_name,
+            crate::services::codex_tui::input::PromptReadinessKind::Followup,
+            cancel_token_for_post_tail.as_ref(),
+        ) {
+            Ok(()) => {
+                let _ = sender.send(StreamMessage::RuntimeReady {
+                    handoff: RuntimeHandoff::CodexTui {
+                        rollout_path: tail_result.rollout_path.display().to_string(),
+                        thread_id: tail_result.session_id,
+                        tmux_session_name: tmux_session_name.to_string(),
+                        last_offset: tail_result.final_offset,
+                    },
+                });
+            }
+            Err(error)
+                if crate::services::codex_tui::input::is_prompt_ready_cancelled_error(&error) =>
+            {
+                // Cancel beats deadline / session-death — match the
+                // post-tail cancel-suppression behaviour above: emit no
+                // further StreamMessage and let the bridge's cancel arm
+                // drive finalisation.
+                tracing::info!(
+                    tmux_session = tmux_session_name,
+                    "Codex TUI input readiness wait cancelled post-turn; suppressing RuntimeReady"
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                // Timeout or session-dead surfaces as an operator-visible
+                // Done so the bridge finalises the turn instead of
+                // emitting RuntimeReady against a hung / dead pane.
+                tracing::warn!(
+                    tmux_session = tmux_session_name,
+                    error = %error,
+                    "Codex TUI composer never became input-ready after assistant response; suppressing RuntimeReady"
+                );
+                let user_message =
+                    if crate::services::codex_tui::input::is_session_dead_error(&error) {
+                        "⚠ Codex TUI session ended before becoming input-ready.".to_string()
+                    } else {
+                        "⚠ Codex TUI did not return to input-ready state after the response."
+                            .to_string()
+                    };
+                let _ = sender.send(StreamMessage::Done {
+                    result: user_message,
+                    session_id: tail_result.session_id.clone(),
+                });
+            }
+        }
     }
 
     Ok(())
