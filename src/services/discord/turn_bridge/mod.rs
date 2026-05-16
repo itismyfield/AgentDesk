@@ -1412,15 +1412,19 @@ fn handle_watcher_runtime_handoff(
     inflight_state.last_offset = last_offset;
     // #2235 NOTE: we deliberately do NOT durably save the row here.
     // `watcher_owns_live_relay` is still `false` at this point and only flips
-    // to `true` after the watcher is successfully claimed and either spawned
-    // (line ~1391) or handed off to the standby relay (line ~1331). A save
-    // before that flag is set would leak a v8 row with the new handoff shape
-    // alongside `watcher_owns_live_relay = false`, which on restart would
-    // make the restored watcher yield to a phantom bridge owner (codex
-    // adversarial review on #2235). The existing branch-specific saves at
-    // the post-flag flip points plus the centralized `state_dirty` flush
-    // already cover the durable-stamp guarantee for watcher-owned
-    // RuntimeReady paths.
+    // to `true` after the watcher is successfully claimed and spawned (the
+    // leader-branch path below). A save before that flag is set would leak a
+    // v8 row with the new handoff shape alongside `watcher_owns_live_relay =
+    // false`, which on restart would make the restored watcher yield to a
+    // phantom bridge owner (codex adversarial review on #2235). The
+    // existing branch-specific saves at the post-flag flip points plus the
+    // centralized `state_dirty` flush already cover the durable-stamp
+    // guarantee for watcher-owned RuntimeReady paths.
+    //
+    // #2263: the standby branch is INTENTIONALLY not covered by this
+    // invariant — see the in-branch comment near the
+    // `*standby_relay_owns_output = true` assignment for why the flag
+    // stays `false` on standby and the trade-off vs duplicate delivery.
 
     // #226: Atomic claim via try_claim_watcher
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1497,6 +1501,53 @@ fn handle_watcher_runtime_handoff(
                         std::time::Duration::from_secs(900),
                     ));
                     *standby_relay_owns_output = true;
+                    // #2263: intentionally leave `watcher_owns_live_relay = false`
+                    // on the standby branch.
+                    //
+                    // The flag's downstream contract in
+                    // `tmux::watcher_should_yield_to_inflight_state` is
+                    // narrowly "the restored TMUX WATCHER itself owns
+                    // delivery for this turn — do not yield". The standby
+                    // branch never spawns a watcher (the briefly-claimed
+                    // slot was just removed at line ~1477); the
+                    // `standby_relay` task is a separate, non-persisted
+                    // delivery owner whose ownership is NOT representable
+                    // by this single boolean.
+                    //
+                    // Setting the flag to `true` here would over-claim
+                    // ownership for any watcher restored against this
+                    // state on a different node (or after failover) — it
+                    // would short-circuit the yield gate and let a
+                    // restored watcher deliver concurrently with a still-
+                    // alive standby_relay, producing duplicate Discord
+                    // posts (codex adversarial review on #2263).
+                    //
+                    // The cost of keeping it `false` is the phantom-
+                    // bridge yield window: on restart, a restored watcher
+                    // whose tmux offset overlaps `turn_start_offset` will
+                    // yield to a bridge owner that died with the original
+                    // standby process and will suppress relay for the
+                    // overlapping batch. The inflight row is then cleared
+                    // by the `INFLIGHT_STALENESS_THRESHOLD_SECS` (300s)
+                    // staleness path in `classify_inflight_diagnostic_state`
+                    // (router/message_handler.rs) and the recovery-engine
+                    // sweep, after which a follow-up user turn proceeds
+                    // normally. The completed standby_relay response that
+                    // landed before the crash is preserved on Discord (it
+                    // was posted before the process died); the failure
+                    // mode is the user-visible stall on the FOLLOW-UP
+                    // turn until staleness sweep, NOT a dropped response.
+                    //
+                    // A typed `relay_owner_kind` (Watcher / StandbyRelay
+                    // / None) plus an owner-lease timestamp would allow
+                    // distinguishing dead-standby from live-standby and
+                    // remove this stall entirely. That refactor is
+                    // tracked separately and is out of scope for #2263.
+                    //
+                    // Per-turn in-process state is still correctly tracked
+                    // by `standby_relay_owns_output = true` above; that
+                    // local flag is what gates the bridge's terminal
+                    // delivery suppression for the current turn.
                     let _ = save_inflight_state(inflight_state);
                 } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2906,6 +2957,19 @@ pub(super) fn spawn_turn_bridge(
                                                 std::time::Duration::from_secs(900),
                                             ));
                                             standby_relay_owns_output = true;
+                                            // #2263: see the helper-fn
+                                            // `handle_watcher_runtime_handoff`
+                                            // standby branch — intentionally
+                                            // leave `watcher_owns_live_relay = false`
+                                            // because the standby_relay task
+                                            // is not a tmux watcher, and the
+                                            // yield-gate flag would over-claim
+                                            // ownership for a watcher restored
+                                            // by a different node, risking
+                                            // duplicate Discord delivery.
+                                            // Per-turn delivery ownership is
+                                            // already captured by
+                                            // `standby_relay_owns_output`.
                                             let _ = save_inflight_state(&inflight_state);
                                         } else {
                                             let ts = chrono::Local::now().format("%H:%M:%S");
