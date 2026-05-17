@@ -394,11 +394,27 @@ async fn hard_stop_unresponsive_provider_cli_turn(
     // worked the provider exits within milliseconds and we proceed to the
     // re-probe immediately; the 1.5s upper bound is now a safety net for
     // pathological providers that swallow SIGINT.
-    if let Some(target_pid) = interrupt_outcome.fallback_sigint_pid {
-        wait_for_pid_exit(target_pid, PROVIDER_HARD_STOP_GRACE).await;
+    //
+    // Codex review HIGH: the wait_for_pid_exit return value must NOT be
+    // discarded. If it returns `true` the SIGINT target genuinely exited —
+    // continuing to pass that stale PID through `hard_stop_pid_for_unresponsive_provider`
+    // → `kill_pid_tree` risks killing an unrelated process if the OS has
+    // recycled the PID by then. Track the effective fallback locally so
+    // escalation can only target a currently-observed provider PID from
+    // the tmux pane probe when the original SIGINT target has exited.
+    let effective_fallback_sigint_pid = if let Some(target_pid) =
+        interrupt_outcome.fallback_sigint_pid
+    {
+        let exited = wait_for_pid_exit(target_pid, PROVIDER_HARD_STOP_GRACE).await;
+        if exited {
+            None
+        } else {
+            Some(target_pid)
+        }
     } else {
         tokio::time::sleep(PROVIDER_HARD_STOP_GRACE).await;
-    }
+        None
+    };
 
     let tracked_child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
     let provider_for_probe = provider.clone();
@@ -438,7 +454,7 @@ async fn hard_stop_unresponsive_provider_cli_turn(
         session_alive,
         ready_for_input,
         current_provider_pid,
-        interrupt_outcome.fallback_sigint_pid,
+        effective_fallback_sigint_pid,
         pane_pid,
     ) else {
         return;
