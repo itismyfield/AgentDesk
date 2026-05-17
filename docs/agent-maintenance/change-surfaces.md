@@ -340,6 +340,16 @@ The remaining giant-file modules under `src/services/` not covered above:
 - `src/services/codex_tui/rollout_tail.rs` (1031) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix.
+- `src/services/codex_tui/input.rs` (~1072) — Codex TUI input readiness
+  detector and prompt delivery surface (#2399 hardened the post-turn
+  handoff deadline). Treat as giant-file territory; split before adding
+  non-bugfix behavior beyond the readiness/cancel contract.
+- `src/services/claude_tui/hook_bundle.rs` (~1152) — Claude/Codex hook
+  bundle renderer + trust-hash canonicalization. Includes the #2210/#2259
+  startup self-check and the gated Codex-CLI integration test. Treat as
+  giant-file territory; split (e.g. extract a `codex_trust_hash` module
+  and a separate integration-test file) before adding non-bugfix hook
+  surfaces.
 - `src/services/memory/memento.rs` (2479).
 - `src/services/observability/mod.rs` (1158) and
   `src/services/observability/pg_io.rs` (1312).
