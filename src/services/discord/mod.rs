@@ -2200,26 +2200,21 @@ async fn mailbox_cancel_active_turn_with_reason(
         .channel_binding(&channel_id)
         .map(|binding| binding.tmux_session_name)
         .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
-    // Issue #2335 (medium, Codex round 3): set `cancel_source` on the
-    // active turn token BEFORE the mailbox handler flips `cancelled`.
-    // Previously the order was reversed (await `cancel_active_turn` →
-    // then `set_cancel_source` on the returned token), so a running turn
-    // observing `cancelled=true` could persist the fallback
-    // `turn_bridge_cancelled` label before the voice-specific reason
-    // was written. We also do NOT overwrite an existing source when
-    // a prior cancel is still in flight (`already_stopping` case) so a
-    // later voice cancel cannot corrupt the earlier watchdog/text stop
-    // attribution.
-    let pre_cancel_token = shared.mailbox(channel_id).cancel_token().await;
-    let already_cancelled = pre_cancel_token
-        .as_ref()
-        .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
-    if let Some(ref token) = pre_cancel_token
-        && !already_cancelled
-    {
-        token.set_cancel_source(reason);
-    }
-    let result = shared.mailbox(channel_id).cancel_active_turn().await;
+    // Issue #2374 — the reason-write and the `cancelled` flip are now
+    // performed atomically by the mailbox actor (see
+    // `ChannelMailboxMsg::CancelActiveTurnWithReason`). The previous
+    // design (introduced by PR #2373 for issue #2335) read the active
+    // token from the actor, wrote `cancel_source` on it from the caller
+    // task, then sent the actor a `CancelActiveTurn`. That kept the
+    // ordering correct for a single canceller but allowed two concurrent
+    // cancellers to both fetch the same token, race on
+    // `set_cancel_source`, and lose one of the reasons. Owning the write
+    // inside the actor serializes both transitions per channel and
+    // removes the small ordering window.
+    let result = shared
+        .mailbox(channel_id)
+        .cancel_active_turn_with_reason(reason.to_string())
+        .await;
     #[cfg(unix)]
     if result.token.is_some() {
         // #1309: in-memory publish is synchronous (instant suppression);
@@ -2230,22 +2225,22 @@ async fn mailbox_cancel_active_turn_with_reason(
     result
 }
 
-async fn mailbox_cancel_active_turn_if_current_with_reason(
+/// #2374 Codex round-1 fix (HIGH-1) — identity-guarded variant for the
+/// voice handoff cancel path. Cancels the active turn on `channel_id`
+/// ONLY when its `user_message_id` matches `handoff_message_id`. An
+/// unguarded cancel from the tombstone retry path could otherwise kill
+/// an unrelated turn that happened to start on the same target channel
+/// after the original handoff turn finalized.
+///
+/// Recording the tombstone is the caller's responsibility (see
+/// [`record_voice_handoff_cancel_tombstone`]) so a tombstone can be
+/// written even when no active turn is present (HIGH-2 fix).
+pub(crate) async fn mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
     shared: &SharedData,
     channel_id: ChannelId,
-    expected_token: Arc<CancelToken>,
+    handoff_message_id: MessageId,
     reason: &str,
 ) -> CancelActiveTurnResult {
-    // Issue #2335 (medium, Codex round 3): do NOT overwrite an existing
-    // cancel_source when the token is already cancelled — that would
-    // let a later voice cancel corrupt the original watchdog/text-stop
-    // attribution.
-    if !expected_token
-        .cancelled
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        expected_token.set_cancel_source(reason);
-    }
     let tmux_session_name = shared
         .tmux_watchers
         .channel_binding(&channel_id)
@@ -2253,7 +2248,48 @@ async fn mailbox_cancel_active_turn_if_current_with_reason(
         .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
     let result = shared
         .mailbox(channel_id)
-        .cancel_active_turn_if_current(expected_token)
+        .cancel_active_turn_if_user_message_with_reason(handoff_message_id, reason.to_string())
+        .await;
+    #[cfg(unix)]
+    if result.token.is_some() {
+        tmux::record_recent_turn_stop(channel_id, tmux_session_name.as_deref(), reason).await;
+    }
+    result
+}
+
+/// #2374 Codex round-1 fix (HIGH-2) — record the voice handoff
+/// cancel-tombstone unconditionally when a cancel is observed for a
+/// known `handoff_message_id`. The original PR only recorded a
+/// tombstone when the target mailbox cancel returned a live token,
+/// missing the cases where the target turn had not yet started (intake
+/// race) or had already finalized. In both cases a later retry for the
+/// same handoff must still observe the tombstone and discard itself.
+pub(crate) fn record_voice_handoff_cancel_tombstone(
+    handoff_message_id: MessageId,
+    reason: impl Into<String>,
+) {
+    crate::voice::cancel_tombstone::global_store().record(handoff_message_id, reason);
+}
+
+async fn mailbox_cancel_active_turn_if_current_with_reason(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    expected_token: Arc<CancelToken>,
+    reason: &str,
+) -> CancelActiveTurnResult {
+    // Issue #2374 — actor-owned reason write. The `if_current` guard is
+    // preserved so a stale caller cannot cancel a freshly-restarted turn
+    // that happens to live on the same channel. The same
+    // already-cancelled protection PR #2373 added to the caller-side
+    // write is now enforced inside the actor handler itself.
+    let tmux_session_name = shared
+        .tmux_watchers
+        .channel_binding(&channel_id)
+        .map(|binding| binding.tmux_session_name)
+        .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
+    let result = shared
+        .mailbox(channel_id)
+        .cancel_active_turn_if_current_with_reason(expected_token, reason.to_string())
         .await;
     #[cfg(unix)]
     if result.token.is_some() {

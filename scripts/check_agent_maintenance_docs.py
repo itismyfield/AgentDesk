@@ -41,7 +41,7 @@ LAST_REFRESHED_RE = re.compile(
     r"(?:"
     r"against\s+`main`\s+@\s+`(?P<commit>[0-9a-f]{7,40})`"
     r"|manual:\s+(?P<manual_anchor>[^)]+)"
-    r"|against\s+(?P<issue_anchor>#\d+[^)]*)"
+    r"|against\s+(?:PR\s+)?(?P<issue_anchor>#\d+[^)]*)"
     r")"
     r"\)\.?\s*$"
 )

@@ -133,6 +133,8 @@ enum ServerWorkerId {
     DmReplyRetry,
     WsBatchFlusher,
     RoutineRuntime,
+    SessionDiscovery,
+    WatcherSupervisor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,7 +233,7 @@ pub(crate) struct WorkerSpec {
     pub(crate) notes: &'static str,
 }
 
-pub(crate) const WORKER_SPECS: [WorkerSpec; 9] = [
+pub(crate) const WORKER_SPECS: [WorkerSpec; 11] = [
     WorkerSpec {
         id: ServerWorkerId::GithubSync,
         name: "github_sync_loop",
@@ -352,6 +354,46 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 9] = [
         execution_scope: WorkerExecutionScope::LeaderOnly,
         health_owner: "failed DM notification rows and retry tracing",
         notes: "Skips the immediate tick and only starts retries after the first interval",
+    },
+    WorkerSpec {
+        id: ServerWorkerId::SessionDiscovery,
+        name: "session_discovery_loop",
+        kind: WorkerKind::TokioTask,
+        target: "services::cluster::session_discovery::run_discovery_loop",
+        responsibility: "Enumerate tmux sessions, match to channel bindings, maintain SessionRegistry",
+        owner: "server::worker_registry",
+        start_stage: WorkerStartStage::AfterBootReconcile,
+        start_order: 65,
+        restart_policy: WorkerRestartPolicy::LoopOwned,
+        shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
+        execution_scope: WorkerExecutionScope::WorkerLocal,
+        health_owner: "SessionRegistry contents and /api/cluster/sessions diagnostic",
+        notes: "Worker-local because tmux is host-scoped — every node must enumerate its own \
+                sessions for the cluster registry. Reconcile is instance_id-scoped so peers \
+                cannot stomp each other's entries. Boot reconcile runs immediately; subsequent \
+                polls every 10s. External request_discovery_tick() nudges fire an immediate tick \
+                for E3 event hooks.",
+    },
+    WorkerSpec {
+        id: ServerWorkerId::WatcherSupervisor,
+        name: "watcher_supervisor_loop",
+        kind: WorkerKind::TokioTask,
+        target: "services::cluster::watcher_supervisor::run_watcher_supervisor_loop",
+        responsibility: "Spawn/teardown session-bound StreamRelay tasks in response to SessionRegistry events",
+        owner: "server::worker_registry",
+        start_stage: WorkerStartStage::AfterBootReconcile,
+        start_order: 67,
+        restart_policy: WorkerRestartPolicy::LoopOwned,
+        shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
+        execution_scope: WorkerExecutionScope::WorkerLocal,
+        health_owner: "watcher-supervisor tracing + per-relay metrics",
+        notes: "Epic #2285 / E3 (#2345), activated by E4 (#2346). Gated by \
+                cluster.session_bound_relay_enabled (default true since E4); flipping the flag \
+                off restores the legacy turn-bound watcher as the sole delivery path. \
+                Worker-local because tmux is host-scoped — relays live next to the sessions \
+                they observe. Uses RegistryAdapterSink (observation-only) so flag-on activation \
+                does not double-deliver alongside the still-active legacy tmux watcher; a \
+                follow-up issue swaps the legacy spawn site for direct sink-driven delivery.",
     },
     WorkerSpec {
         id: ServerWorkerId::WsBatchFlusher,
@@ -649,6 +691,51 @@ impl SupervisedWorkerRegistry {
                 });
                 Ok(Some(buffer))
             }
+            ServerWorkerId::SessionDiscovery => {
+                let Some(discovery_pg_pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
+                };
+                let instance_id = Some(self.cluster_runtime.instance_id().to_string());
+                let shutdown = self.shutdown.clone();
+                // Worker-local (not register_leader_tokio): tmux is host-scoped,
+                // so every node must enumerate its own sessions. The registry's
+                // reconcile_for_node is instance_id-scoped to keep peers from
+                // stomping each other's entries.
+                self.register_tokio(spec, async move {
+                    crate::services::cluster::session_discovery::run_discovery_loop(
+                        instance_id,
+                        discovery_pg_pool,
+                        crate::services::cluster::session_discovery::DiscoveryConfig::default(),
+                        shutdown,
+                    )
+                    .await;
+                });
+                Ok(None)
+            }
+            ServerWorkerId::WatcherSupervisor => {
+                if !self.config.cluster.session_bound_relay_enabled {
+                    self.log_skip(spec, "cluster.session_bound_relay_enabled=false");
+                    return Ok(None);
+                }
+                let shutdown = self.shutdown.clone();
+                // Worker-local: tmux is host-scoped, so every node supervises
+                // its own relays. No leader gating — peer hosts can't observe
+                // each other's sessions anyway.
+                self.register_tokio(spec, async move {
+                    // E4 (#2346): the supervisor runs against the production
+                    // observation sink. Delivery still flows through the
+                    // legacy turn-bound watcher; the sink only records frame
+                    // metrics so the new path's lifecycle is exercised end-
+                    // to-end before subsequent issues swap the legacy spawn
+                    // site for direct sink-driven delivery.
+                    crate::services::cluster::registry_adapter_sink::run_with_registry_adapter_sink(
+                        shutdown,
+                    )
+                    .await;
+                });
+                Ok(None)
+            }
             ServerWorkerId::RoutineRuntime => {
                 if !self.config.routines.enabled {
                     self.log_skip(spec, "routines.enabled=false");
@@ -941,7 +1028,7 @@ mod tests {
 
     #[test]
     fn long_lived_workers_have_explicit_supervision_metadata() {
-        assert_eq!(WORKER_SPECS.len(), 9);
+        assert_eq!(WORKER_SPECS.len(), 11);
         assert!(
             WORKER_SPECS
                 .windows(2)
@@ -952,7 +1039,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.start_stage == WorkerStartStage::AfterBootReconcile)
                 .count(),
-            8
+            10
         );
         assert_eq!(
             WORKER_SPECS
@@ -980,7 +1067,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.execution_scope == WorkerExecutionScope::WorkerLocal)
                 .count(),
-            2
+            4
         );
         assert!(WORKER_SPECS.iter().all(|spec| !spec.owner.is_empty()));
         assert!(
