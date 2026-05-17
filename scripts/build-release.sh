@@ -178,6 +178,16 @@ if [ -d "routines" ]; then
   fi
 fi
 
+# Launchd-migrated shell entrypoints used by bundled routine prompts.
+if [ -d "scripts/launchd-migrated" ]; then
+  mkdir -p "$STAGING/scripts/launchd-migrated"
+  if command -v rsync &>/dev/null; then
+    rsync -a --delete "scripts/launchd-migrated/" "$STAGING/scripts/launchd-migrated/"
+  else
+    cp -R "scripts/launchd-migrated/." "$STAGING/scripts/launchd-migrated/"
+  fi
+fi
+
 # Managed skills
 if [ -d "skills" ]; then
   mkdir -p "$STAGING/skills"

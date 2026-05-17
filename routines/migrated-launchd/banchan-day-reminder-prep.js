@@ -34,7 +34,7 @@ agentdesk.routines.register({
         "Run the migrated launchd job 'banchan-day-reminder.prep' for routine_id=" +
           ctx.routine.id,
         "Invoke the existing shell pipeline exactly as launchd does:",
-        "  /Users/itismyfield/.local/bin/banchan-day-reminder-prep.sh",
+        "  /Users/itismyfield/.adk/release/scripts/launchd-migrated/banchan-day-reminder-prep.sh",
         "The skill performs calendar lookup; NO_REPLY is the correct result on",
         "non-반찬데이 days. Do not second-guess the skill's calendar logic.",
         "Return a one-line status summary (success | NO_REPLY | error: <msg>).",

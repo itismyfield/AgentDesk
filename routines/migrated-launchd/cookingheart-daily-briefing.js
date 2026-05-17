@@ -28,7 +28,7 @@ agentdesk.routines.register({
         "Run the migrated launchd job 'cookingheart-daily-briefing' for routine_id=" +
           ctx.routine.id,
         "Invoke the existing shell pipeline exactly as launchd does:",
-        "  /Users/itismyfield/.local/bin/cookingheart-daily-briefing.sh",
+        "  /Users/itismyfield/.adk/release/scripts/launchd-migrated/cookingheart-daily-briefing.sh",
         "This preserves the original prompt body, target channel, and skill path.",
         "Return a one-line status summary (success | NO_REPLY | error: <msg>).",
       ].join("\n"),

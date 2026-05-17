@@ -57,6 +57,7 @@ RESOLVED_RELEASE_SIGNING_MODE=""
 DASHBOARD_SOURCE=""
 STAGED_BINARY=""
 POLICIES_STAGED=""
+LAUNCHD_MIGRATED_STAGED=""
 DEPLOY_ALL_NODES="${AGENTDESK_DEPLOY_ALL_NODES:-0}"
 DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
@@ -494,6 +495,9 @@ _cleanup_on_exit() {
     if [ -n "${POLICIES_STAGED:-}" ] && [ -d "$POLICIES_STAGED" ]; then
         rm -rf "$POLICIES_STAGED" 2>/dev/null || true
     fi
+    if [ -n "${LAUNCHD_MIGRATED_STAGED:-}" ] && [ -d "$LAUNCHD_MIGRATED_STAGED" ]; then
+        rm -rf "$LAUNCHD_MIGRATED_STAGED" 2>/dev/null || true
+    fi
     if [ -n "${DEPLOY_MKDIR_LOCK_DIR:-}" ] && [ -d "$DEPLOY_MKDIR_LOCK_DIR" ]; then
         rm -rf "$DEPLOY_MKDIR_LOCK_DIR" 2>/dev/null || true
     fi
@@ -843,6 +847,19 @@ else
     echo "  Skipping routine staging — existing $ADK_REL/routines/ will be retained."
 fi
 
+# Stage launchd-migrated shell entrypoints before stopping release so routines
+# can invoke the same release-owned path on whichever node holds leadership.
+if [ -d "$REPO/scripts/launchd-migrated" ]; then
+    echo "▸ Staging launchd-migrated entrypoints..."
+    LAUNCHD_MIGRATED_STAGED="$ADK_REL/scripts/launchd-migrated.new"
+    rm -rf "$LAUNCHD_MIGRATED_STAGED"
+    mkdir -p "$LAUNCHD_MIGRATED_STAGED"
+    rsync -a --delete "$REPO/scripts/launchd-migrated/" "$LAUNCHD_MIGRATED_STAGED/"
+else
+    echo "⚠ Launchd-migrated entrypoint source missing: $REPO/scripts/launchd-migrated"
+    echo "  Skipping launchd-migrated entrypoint staging — existing $ADK_REL/scripts/launchd-migrated/ will be retained."
+fi
+
 # Wait for active turns to finish before stopping the server.
 # dcserver SIGTERM preserves turn state (#43e3cacc): tmux sessions stay alive
 # and the watcher silent-reattaches after restart. What the drain gate guards
@@ -1036,6 +1053,15 @@ if [ -n "${ROUTINES_STAGED:-}" ] && [ -d "$ROUTINES_STAGED" ]; then
     mv "$ROUTINES_STAGED" "$ADK_REL/routines"
     ROUTINES_STAGED=""
     rm -rf "$ADK_REL/routines.old"
+fi
+
+if [ -n "${LAUNCHD_MIGRATED_STAGED:-}" ] && [ -d "$LAUNCHD_MIGRATED_STAGED" ]; then
+    mkdir -p "$ADK_REL/scripts"
+    rm -rf "$ADK_REL/scripts/launchd-migrated.old"
+    [ -d "$ADK_REL/scripts/launchd-migrated" ] && mv "$ADK_REL/scripts/launchd-migrated" "$ADK_REL/scripts/launchd-migrated.old"
+    mv "$LAUNCHD_MIGRATED_STAGED" "$ADK_REL/scripts/launchd-migrated"
+    LAUNCHD_MIGRATED_STAGED=""
+    rm -rf "$ADK_REL/scripts/launchd-migrated.old"
 fi
 
 if [ -n "${PROMPTS_STAGED:-}" ] && [ -d "$PROMPTS_STAGED" ]; then
