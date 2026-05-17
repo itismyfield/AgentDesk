@@ -1444,16 +1444,16 @@ mod tests {
         assert!(matches!(result, ReadOutputResult::Completed { .. }));
         let messages: Vec<_> = rx.iter().collect();
         assert!(
-            messages.iter().any(
-                |m| matches!(m, StreamMessage::Text { content } if content == "segment1")
-            ),
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment1")),
             "segment1 must be emitted; got {:?}",
             messages
         );
         assert!(
-            messages.iter().any(
-                |m| matches!(m, StreamMessage::Text { content } if content == "segment2")
-            ),
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
             "segment2 must be emitted after the inter-segment pause; got {:?}",
             messages
         );
@@ -1529,9 +1529,9 @@ mod tests {
         assert!(matches!(result, ReadOutputResult::Completed { .. }));
         let messages: Vec<_> = rx.iter().collect();
         assert!(
-            messages.iter().any(
-                |m| matches!(m, StreamMessage::Text { content } if content == "segment2")
-            ),
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
             "segment2 must be emitted after the tool call resolves; got {:?}",
             messages
         );
