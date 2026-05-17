@@ -123,6 +123,175 @@ async fn edit_placeholder_safe(
         .is_ok()
 }
 
+/// Outcome of pre-flight checking whether the placeholder message on Discord
+/// is still a placeholder (and therefore safe to overwrite with an abandoned
+/// badge) or has already been replaced with a delivered response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaceholderProbe {
+    /// The current Discord content still matches a known placeholder pattern.
+    /// Safe to overwrite with the abandoned badge.
+    StillPlaceholder,
+    /// Discord content has been replaced with a real response. Do NOT
+    /// overwrite — the user has been served. Caller should still drop the
+    /// inflight state file so the sweeper does not re-trigger every pass.
+    AlreadyDelivered,
+    /// Discord returned 404 / 403 / 410 — the message or channel is
+    /// permanently gone. Any edit attempt would fail; evict the state row.
+    MessageGone,
+    /// Probe could not determine the message state (transient Discord error,
+    /// rate-limit, transport failure, 5xx). Caller MUST leave the inflight
+    /// row untouched so a later sweep can retry; do NOT delete the state
+    /// file and do NOT issue any destructive edit.
+    ProbeFailed,
+}
+
+/// True for HTTP status codes that signal the placeholder message will
+/// never come back: 404 NOT_FOUND, 403 FORBIDDEN, 410 GONE. Anything else
+/// (5xx, 429 rate-limit, no status at all) is treated as transient.
+///
+/// Split out so the classification can be unit-tested without constructing
+/// the `#[non_exhaustive]` `serenity::http::ErrorResponse`.
+fn is_permanent_message_gone_status(status: u16) -> bool {
+    matches!(status, 404 | 403 | 410)
+}
+
+/// Classify a `serenity::Error` from `Http::get_message` into a permanent
+/// "message is gone" (404 / 403 / 410) vs a transient failure that should
+/// be retried on the next sweep pass.
+fn classify_get_message_error(err: &serenity::Error) -> PlaceholderProbe {
+    if let serenity::Error::Http(http_err) = err {
+        if let Some(status) = http_err.status_code() {
+            if is_permanent_message_gone_status(status.as_u16()) {
+                return PlaceholderProbe::MessageGone;
+            }
+        }
+    }
+    PlaceholderProbe::ProbeFailed
+}
+
+/// Fetch the current Discord message content and classify whether it is
+/// still a placeholder. The fetch itself uses the same `http` handle as the
+/// sweeper edits, so we inherit the same rate-limit / proxy behavior.
+///
+/// Transient probe failures (network errors, rate limits, 5xx) return
+/// `ProbeFailed` — callers must NOT take destructive action in that case.
+async fn probe_placeholder_state(
+    http: &Arc<serenity::Http>,
+    channel_id: u64,
+    message_id: u64,
+) -> PlaceholderProbe {
+    if channel_id == 0 || message_id == 0 {
+        // No addressable message at all → treat as permanently gone so
+        // the cap-bounded controller map does not retain a zero row.
+        return PlaceholderProbe::MessageGone;
+    }
+    let channel = serenity::ChannelId::new(channel_id);
+    let message = serenity::MessageId::new(message_id);
+    match http.get_message(channel, message).await {
+        Ok(msg) => {
+            if is_message_still_placeholder(&msg.content) {
+                PlaceholderProbe::StillPlaceholder
+            } else {
+                PlaceholderProbe::AlreadyDelivered
+            }
+        }
+        Err(err) => {
+            let outcome = classify_get_message_error(&err);
+            match outcome {
+                PlaceholderProbe::MessageGone => {
+                    tracing::debug!(
+                        "[placeholder_sweeper] message gone for {}/{} (permanent: {})",
+                        channel_id,
+                        message_id,
+                        err
+                    );
+                }
+                _ => {
+                    tracing::debug!(
+                        "[placeholder_sweeper] probe failed for {}/{} (transient — \
+                         will retry next sweep): {}",
+                        channel_id,
+                        message_id,
+                        err
+                    );
+                }
+            }
+            outcome
+        }
+    }
+}
+
+/// True when `content` still looks like a placeholder card the sweeper itself
+/// (or the streaming pipeline) might have produced — i.e. not a user-facing
+/// response body. Conservative: only known placeholder shapes pass.
+///
+/// Patterns recognised as placeholder:
+///   - Streaming spinner block: starts with one of the braille spinner
+///     glyphs followed by a space, e.g. `⠋ Processing...` or
+///     `⠹ ⚙ Bash: cargo build`. Produced by
+///     [`build_placeholder_status_block`] / [`build_processing_status_block`].
+///   - Monitor handoff card: the **first line** of the message matches one
+///     of the canonical Korean header strings emitted by
+///     [`monitor_handoff_header`] exactly (modulo the optional `: {detail}`
+///     suffix that the Failed variants append). We deliberately do NOT use
+///     looser prefixes like `{emoji} **` — a real assistant response can
+///     legitimately begin with `✅ **Done**`, `⚠ **주의**`, or
+///     `❌ **Error**` and those must be protected from sweeper overwrite.
+///
+/// Anything else (real prose, code blocks, embeds rendered as text) is
+/// treated as a delivered response and protected from sweeper overwrite.
+pub(super) fn is_message_still_placeholder(content: &str) -> bool {
+    const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    // Exact canonical header strings produced by `monitor_handoff_header`
+    // in `src/services/discord/formatting.rs`. Keep in lockstep with that
+    // function; `handoff_card_headers_are_placeholder` and
+    // `delivered_response_with_status_style_prefix_is_not_placeholder`
+    // pin the in/out boundaries.
+    const HANDOFF_HEADERS_EXACT: &[&str] = &[
+        "📬 **메시지 대기 중**",
+        "🔄 **백그라운드 처리 중**",
+        "🔄 **응답 처리 중**",
+        "✅ **백그라운드 완료**",
+        "✅ **응답 완료**",
+        "⏱ **백그라운드 타임아웃**",
+        "⏱ **응답 타임아웃**",
+        "⚠ **백그라운드 중단** (모니터 연결 끊김)",
+        "⚠ **응답 중단**",
+    ];
+    // Failed states render as `❌ **{label}**[: {detail}]`. Accept the bare
+    // header plus the header-with-detail-prefix variant.
+    const HANDOFF_FAILED_HEADERS: &[&str] = &["❌ **백그라운드 실패**", "❌ **응답 실패**"];
+
+    let trimmed = content.trim_start();
+    if trimmed.is_empty() {
+        // Empty / whitespace-only message: nothing user-visible to protect.
+        // Treat as still-placeholder so the sweeper proceeds with the abort
+        // edit (which gives the user a clearer terminal state).
+        return true;
+    }
+
+    let mut chars = trimmed.chars();
+    if let Some(first) = chars.next() {
+        if SPINNER_FRAMES.contains(&first) {
+            // Spinner block must be `{spinner}{whitespace}…` to count.
+            if chars.next().map(|c| c.is_whitespace()).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+
+    // First-line-bounded match: handoff cards put the header on its own
+    // first line. Comparing only the first line avoids accidental matches
+    // inside long prose continuations or embedded code blocks.
+    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim_end();
+    if HANDOFF_HEADERS_EXACT.iter().any(|h| first_line == *h) {
+        return true;
+    }
+    HANDOFF_FAILED_HEADERS
+        .iter()
+        .any(|h| first_line == *h || first_line.starts_with(&format!("{h}: ")))
+}
+
 /// Run a single sweep pass for the given provider. Public for testability —
 /// callers in the bootstrap path schedule this on a fixed cadence via
 /// `spawn_placeholder_sweeper`.
@@ -189,9 +358,68 @@ async fn run_placeholder_sweep_pass(
         // sweeper can still abandon them if the owning process actually dies
         // — only the live ones keep advancing mtime. Treat all states
         // uniformly here.
-        match classify_age(age_secs) {
+        let decision = classify_age(age_secs);
+        // #2415: defensive probe. The streaming pipeline can hand off live
+        // relay to a delegated owner (watcher / standby) that updates the
+        // Discord message in place without mirroring `full_response` /
+        // `response_sent_offset` back into the persisted inflight state.
+        // The placeholder-only gate above therefore lets the row through
+        // even though the user already received the answer. Fetch the
+        // current Discord content BEFORE any destructive edit (stalled at
+        // 60s OR abandoned at 300s) and skip the overwrite when the
+        // message body no longer looks like a placeholder.
+        //
+        // Codex round 1 HIGH on PR #2417:
+        //   1. The probe must gate the Stalled branch too — same data-loss
+        //      class kicks in 60s after handoff, not just 300s.
+        //   2. Transient probe errors (5xx / network / rate limit) MUST
+        //      leave the inflight state untouched so a later sweep can
+        //      retry. Only permanent failures (404 / 403 / 410) classify
+        //      as MessageGone and trigger eviction.
+        let probe = if matches!(decision, SweepDecision::Stalled | SweepDecision::Abandoned) {
+            probe_placeholder_state(http, state.channel_id, state.current_msg_id).await
+        } else {
+            PlaceholderProbe::StillPlaceholder
+        };
+        // Transient probe failure: leave everything for next sweep.
+        // Applies to both stalled and abandoned classifications.
+        if matches!(probe, PlaceholderProbe::ProbeFailed) {
+            tracing::debug!(
+                "[placeholder_sweeper] skipping {:?} pass for {}/{} — probe failed, \
+                 will retry next sweep (#2415)",
+                decision,
+                state.channel_id,
+                state.current_msg_id
+            );
+            continue;
+        }
+        match decision {
             SweepDecision::Active => {}
             SweepDecision::Stalled => {
+                // Codex round 1 HIGH-1 on PR #2417: if the Discord
+                // content has already been replaced by a real response
+                // (delivered class), the stalled-edit at 60s would clobber
+                // it just like the abandoned path used to. Skip the edit.
+                // Leave the inflight state on disk — the abandoned branch
+                // at 300s will probe again and finalize eviction (or
+                // re-skip on transient failure).
+                if matches!(probe, PlaceholderProbe::AlreadyDelivered) {
+                    tracing::info!(
+                        "[placeholder_sweeper] skipped stalled overwrite for {}/{} — \
+                         content already delivered, deferring state eviction to \
+                         abandoned pass (#2415)",
+                        state.channel_id,
+                        state.current_msg_id
+                    );
+                    continue;
+                }
+                // MessageGone @ Stalled: the message is permanently gone.
+                // An edit would fail anyway. Leave state for the abandoned
+                // pass to fully evict — Stalled is purely advisory and
+                // does not own eviction semantics.
+                if matches!(probe, PlaceholderProbe::MessageGone) {
+                    continue;
+                }
                 if !stalled_tracker.mark_pending(provider, &state) {
                     continue;
                 }
@@ -212,6 +440,57 @@ async fn run_placeholder_sweep_pass(
                 }
             }
             SweepDecision::Abandoned => {
+                match probe {
+                    PlaceholderProbe::AlreadyDelivered => {
+                        // Response already on screen. Do NOT overwrite —
+                        // just evict the stale inflight row so the sweeper
+                        // does not retry every pass for the rest of the
+                        // process lifetime.
+                        if inflight_state_still_same_turn(provider, &state, age_secs) {
+                            finalize_abandoned_mailbox(shared, provider, &state).await;
+                            let _ = delete_inflight_state_file(provider, state.channel_id);
+                            if let (Some(provider_kind), msg_id) = (
+                                ProviderKind::from_str(&state.provider),
+                                state.current_msg_id,
+                            ) {
+                                if msg_id != 0 {
+                                    let key = super::placeholder_controller::PlaceholderKey {
+                                        provider: provider_kind,
+                                        channel_id: serenity::ChannelId::new(state.channel_id),
+                                        message_id: serenity::MessageId::new(msg_id),
+                                    };
+                                    shared.placeholder_controller.detach(&key);
+                                }
+                            }
+                        }
+                        tracing::info!(
+                            "[placeholder_sweeper] skipped abandon overwrite for {}/{} — \
+                             content already delivered, state evicted (#2415)",
+                            state.channel_id,
+                            state.current_msg_id
+                        );
+                        continue;
+                    }
+                    PlaceholderProbe::MessageGone => {
+                        // The Discord message is permanently unreachable
+                        // (404 / 403 / 410). An edit attempt would fail
+                        // anyway; drop the inflight row.
+                        if inflight_state_still_same_turn(provider, &state, age_secs) {
+                            finalize_abandoned_mailbox(shared, provider, &state).await;
+                            let _ = delete_inflight_state_file(provider, state.channel_id);
+                        }
+                        continue;
+                    }
+                    PlaceholderProbe::ProbeFailed => {
+                        // Already handled above by the early `continue`.
+                        // This arm is unreachable but kept for exhaustive
+                        // matching clarity.
+                        continue;
+                    }
+                    PlaceholderProbe::StillPlaceholder => {
+                        // Fall through to the original abort-edit path.
+                    }
+                }
                 let text = build_abandoned_placeholder(&state);
                 let edited = edit_placeholder_safe(
                     http,
@@ -446,6 +725,146 @@ pub(super) fn spawn_placeholder_sweeper(
             tokio::time::sleep(tokio::time::Duration::from_secs(SWEEP_INTERVAL_SECS)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod probe_classification_tests {
+    use super::is_permanent_message_gone_status;
+
+    #[test]
+    fn permanent_statuses_classified_as_gone() {
+        assert!(is_permanent_message_gone_status(404));
+        assert!(is_permanent_message_gone_status(403));
+        assert!(is_permanent_message_gone_status(410));
+    }
+
+    #[test]
+    fn transient_statuses_classified_as_retryable() {
+        // 5xx server errors → retry next sweep
+        assert!(!is_permanent_message_gone_status(500));
+        assert!(!is_permanent_message_gone_status(502));
+        assert!(!is_permanent_message_gone_status(503));
+        assert!(!is_permanent_message_gone_status(504));
+        // 429 rate limit → retry next sweep
+        assert!(!is_permanent_message_gone_status(429));
+        // 408 request timeout → retry next sweep
+        assert!(!is_permanent_message_gone_status(408));
+        // 401 unauthorized: transient credential rotation; do not evict
+        assert!(!is_permanent_message_gone_status(401));
+        // Hypothetical 2xx that somehow landed in the error path
+        assert!(!is_permanent_message_gone_status(200));
+        // Edge: 0 (no status code available)
+        assert!(!is_permanent_message_gone_status(0));
+    }
+}
+
+#[cfg(test)]
+mod is_message_still_placeholder_tests {
+    use super::is_message_still_placeholder;
+
+    #[test]
+    fn spinner_prefixed_placeholder_is_placeholder() {
+        assert!(is_message_still_placeholder("⠋ Processing..."));
+        assert!(is_message_still_placeholder("⠹ ⚙ Bash: cargo build"));
+        assert!(is_message_still_placeholder("⠧ mcp__memento__recall"));
+        // All 10 braille spinner glyphs recognised.
+        for ch in ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] {
+            let s = format!("{} working", ch);
+            assert!(
+                is_message_still_placeholder(&s),
+                "frame {ch} not recognised"
+            );
+        }
+    }
+
+    #[test]
+    fn handoff_card_headers_are_placeholder() {
+        assert!(is_message_still_placeholder("🔄 **응답 처리 중**\nfooter"));
+        assert!(is_message_still_placeholder("🔄 **백그라운드 처리 중**"));
+        assert!(is_message_still_placeholder("📬 **메시지 대기 중**"));
+        assert!(is_message_still_placeholder("⏱ **응답 타임아웃**"));
+        assert!(is_message_still_placeholder("❌ **응답 실패**: foo"));
+        assert!(is_message_still_placeholder("✅ **응답 완료**"));
+        assert!(is_message_still_placeholder(
+            "⚠ **응답 중단**\n브릿지 또는 세션이 종료되었습니다."
+        ));
+    }
+
+    #[test]
+    fn delivered_response_with_status_style_prefix_is_not_placeholder() {
+        // Codex round 2 HIGH on PR #2417: assistant output legitimately
+        // starts with status-style emoji + bold prose. These must be
+        // protected from sweeper overwrite — they look like handoff
+        // headers but are NOT the canonical Korean header strings.
+        assert!(!is_message_still_placeholder("✅ **Done**"));
+        assert!(!is_message_still_placeholder("✅ **Done**\n결과 요약..."));
+        assert!(!is_message_still_placeholder(
+            "⚠ **주의**: 이 부분 확인 필요"
+        ));
+        assert!(!is_message_still_placeholder("⚠ **Warning**"));
+        assert!(!is_message_still_placeholder(
+            "❌ **Error**: file not found"
+        ));
+        assert!(!is_message_still_placeholder("❌ **Build failed**"));
+        assert!(!is_message_still_placeholder(
+            "🔄 **Retry attempted**\nsecond paragraph"
+        ));
+        assert!(!is_message_still_placeholder("📬 **Inbox**: 3 unread"));
+        assert!(!is_message_still_placeholder("⏱ **Elapsed**: 1.2s"));
+        // English equivalents of the Korean headers must not match either.
+        assert!(!is_message_still_placeholder("✅ **Response complete**"));
+        assert!(!is_message_still_placeholder("⚠ **Response aborted**"));
+        // Header text with extra trailing content beyond the `**` close on
+        // the same line — e.g. a response title that uses the same Korean
+        // bold + emoji pattern — must NOT match.
+        assert!(!is_message_still_placeholder(
+            "✅ **응답 완료** — 검토 결과 정상 동작"
+        ));
+        assert!(!is_message_still_placeholder("⚠ **응답 중단** 이거 농담"));
+    }
+
+    #[test]
+    fn delivered_response_text_is_not_placeholder() {
+        // Plain English prose
+        assert!(!is_message_still_placeholder(
+            "Sure — here is the answer you asked for."
+        ));
+        // Korean prose
+        assert!(!is_message_still_placeholder(
+            "네, 알려드리겠습니다. 첫 번째로 ..."
+        ));
+        // Code block
+        assert!(!is_message_still_placeholder("```rust\nfn main() {}\n```"));
+        // Markdown heading
+        assert!(!is_message_still_placeholder(
+            "## 결과\n\n분석 완료했습니다."
+        ));
+        // Leading bullet that happens to start with an emoji that is NOT
+        // a placeholder header marker should not be classified as
+        // placeholder.
+        assert!(!is_message_still_placeholder("🟢 status: green"));
+    }
+
+    #[test]
+    fn spinner_without_space_is_not_placeholder() {
+        // Spinner char as part of regular content (no separating whitespace)
+        // is not a placeholder.
+        assert!(!is_message_still_placeholder("⠋text"));
+    }
+
+    #[test]
+    fn empty_content_treated_as_placeholder() {
+        // Empty message: nothing user-visible to protect.
+        assert!(is_message_still_placeholder(""));
+        assert!(is_message_still_placeholder("   "));
+        assert!(is_message_still_placeholder("\n\n"));
+    }
+
+    #[test]
+    fn leading_whitespace_does_not_mask_placeholder_shape() {
+        assert!(is_message_still_placeholder("   ⠋ Processing..."));
+        assert!(is_message_still_placeholder("\n🔄 **응답 처리 중**"));
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
