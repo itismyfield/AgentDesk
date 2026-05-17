@@ -179,10 +179,10 @@
 | `kanban::hooks` | `src/kanban/hooks.rs` | 770 |  |
 | `kanban::review_tuning` | `src/kanban/review_tuning.rs` | 461 |  |
 | `kanban::state_machine` | `src/kanban/state_machine.rs` | 64 |  |
-| `kanban::terminal_cleanup` | `src/kanban/terminal_cleanup.rs` | 372 |  |
+| `kanban::terminal_cleanup` | `src/kanban/terminal_cleanup.rs` | 791 |  |
 | `kanban::test_support` | `src/kanban/test_support.rs` | 484 |  |
 | `kanban::transition_cleanup` | `src/kanban/transition_cleanup.rs` | 574 |  |
-| `kanban::transition_core` | `src/kanban/transition_core.rs` | 1108 | giant-file |
+| `kanban::transition_core` | `src/kanban/transition_core.rs` | 1120 | giant-file |
 | `launch` | `src/launch.rs` | 57 |  |
 | `logging` | `src/logging.rs` | 160 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 65 |  |

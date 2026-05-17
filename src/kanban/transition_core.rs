@@ -101,7 +101,8 @@ async fn transition_status_with_opts_pg_inner(
          WHERE kanban_card_id = $1
            AND dispatch_type = 'review'
            AND status = 'completed'
-           AND ($2::timestamptz IS NULL OR COALESCE(completed_at, updated_at) >= $2::timestamptz)
+           AND $2::timestamptz IS NOT NULL
+           AND COALESCE(completed_at, updated_at) >= $2::timestamptz
          ORDER BY COALESCE(completed_at, updated_at) DESC, id DESC
          LIMIT 1",
     )
@@ -634,18 +635,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_review_without_review_entered_at_keeps_latest_pass_behavior() {
+    async fn review_without_review_entered_at_does_not_accept_historical_pass_verdict() {
         let pg_db = KanbanPgDatabase::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let engine = test_engine_with_pg(pool.clone());
-        seed_card_pg(&pool, "card-legacy-review-pass", "review").await;
+        seed_card_pg(&pool, "card-null-review-entered-pass", "review").await;
 
         sqlx::query(
             "INSERT INTO task_dispatches (
                 id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
                 created_at, updated_at, completed_at
              ) VALUES (
-                'review-legacy-pass', 'card-legacy-review-pass', 'agent-1', 'review', 'completed',
+                'review-null-entered-pass', 'card-null-review-entered-pass', 'agent-1', 'review', 'completed',
                 'legacy pass', $1::jsonb,
                 NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '5 minutes'
              )",
@@ -658,15 +659,26 @@ mod tests {
         let result = transition_status_with_opts_pg_only(
             &pool,
             &engine,
-            "card-legacy-review-pass",
+            "card-null-review-entered-pass",
             "done",
             "system",
             crate::engine::transition::ForceIntent::None,
         )
         .await;
         assert!(
-            result.is_ok(),
-            "cards without review_entered_at must preserve the legacy pass verdict behavior"
+            result.is_err(),
+            "cards without review_entered_at must fail closed instead of accepting historical review verdicts"
+        );
+
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM kanban_cards WHERE id = 'card-null-review-entered-pass'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            status, "review",
+            "null review_entered_at must leave the card in review"
         );
         pg_db.close_pool_and_drop(pool).await;
     }
