@@ -4370,6 +4370,11 @@ pub(super) fn spawn_turn_bridge(
         // prompt_too_long / transport_error / recovery_retry), and when
         // there is no tmux session bound to the inflight. Consumers below
         // treat `None` as "no gate ran — proceed with legacy behaviour".
+        #[cfg(unix)]
+        let bridge_early_gate_blocks_mailbox_release;
+        #[cfg(not(unix))]
+        let bridge_early_gate_blocks_mailbox_release = false;
+        #[cfg(unix)]
         #[allow(unused_assignments, unused_mut)]
         let mut bridge_tui_gate_outcome_early: Option<super::tmux::TuiCompletionGateOutcome> = None;
         #[cfg(unix)]
@@ -4403,13 +4408,13 @@ pub(super) fn spawn_turn_bridge(
                     );
                 }
             }
+            // Convenience: short-circuit the mailbox / active-turn cleanup
+            // sites below when the early gate timed out.
+            bridge_early_gate_blocks_mailbox_release = matches!(
+                bridge_tui_gate_outcome_early,
+                Some(super::tmux::TuiCompletionGateOutcome::TimedOut)
+            );
         }
-        // Convenience: short-circuit the mailbox / active-turn cleanup sites
-        // below when the early gate timed out.
-        let bridge_early_gate_blocks_mailbox_release = matches!(
-            bridge_tui_gate_outcome_early,
-            Some(super::tmux::TuiCompletionGateOutcome::TimedOut)
-        );
         let has_queued_turns = if bridge_relay_delegated_to_watcher {
             // #1452 (Codex P1): the actual `mailbox_finalize_owed.store(true,
             // Release)` happens EARLIER, at the watcher-unpause site in the

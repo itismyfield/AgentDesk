@@ -355,6 +355,7 @@ async fn complete_recovery_visible_turn(
     // already call `clear_inflight_state` unconditionally; this is a
     // safety net for any branch that emits TurnCompleted without doing
     // so. user_msg_id guard defeats Pitfall #1 (next turn race).
+    #[cfg(unix)]
     super::tmux::emit_explicit_inflight_cleanup_signal(
         provider,
         channel_id,
