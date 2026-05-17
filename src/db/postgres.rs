@@ -1350,13 +1350,21 @@ mod tests {
             .await
             .expect("undo 0058 json_extract migration");
 
-        let (down_array_value, down_lax_value, down_malformed_path, down_volatility): (
+        let (
+            down_literal_value,
+            down_array_value,
+            down_lax_value,
+            down_malformed_path,
+            down_volatility,
+        ): (
+            Option<String>,
             Option<String>,
             Option<String>,
             Option<String>,
             String,
         ) = sqlx::query_as(
             "SELECT
+                json_extract('{\"phase_gate\":{\"run_id\":\"run-object\"}}'::jsonb, '$.phase_gate.run_id'),
                 json_extract('{\"items\":[{\"id\":\"first\"}]}'::jsonb, '$.items[0].id'),
                 json_extract('{\"phase_gate\":[{\"run_id\":\"run-array\"}]}'::jsonb, '$.phase_gate.run_id'),
                 json_extract('{}'::jsonb, '$['),
@@ -1367,10 +1375,18 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("query 0058 json_extract down behavior");
-        assert_eq!(down_array_value.as_deref(), Some("first"));
-        assert_eq!(down_lax_value.as_deref(), Some("run-array"));
+        // After `down`, json_extract is restored verbatim from
+        // 0002_sqlite_compat_functions.sql: literal-key navigation only
+        // (the path regex `^\$((\.[A-Za-z0-9_]+)*)$` rejects anything with
+        // brackets), no jsonpath operators, and IMMUTABLE volatility.
+        // Positive case: pure literal-key navigation still works (this is
+        // the legacy 0057-era contract we are restoring).
+        assert_eq!(down_literal_value.as_deref(), Some("run-object"));
+        // Negative cases: bracket paths and lax auto-unwrapping are gone.
+        assert_eq!(down_array_value, None);
+        assert_eq!(down_lax_value, None);
         assert_eq!(down_malformed_path, None);
-        assert_eq!(down_volatility, "s");
+        assert_eq!(down_volatility, "i");
 
         close_test_pool(pool, "db::postgres json_extract test pool")
             .await

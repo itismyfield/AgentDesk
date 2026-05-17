@@ -354,38 +354,12 @@
   text-wrap: balance;
 }
 
-.settings-term,
 .settings-count-chip {
-  white-space: nowrap;
-}
-
-.setting-key-token {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  vertical-align: bottom;
   white-space: nowrap;
 }
 
 .settings-search-summary {
   text-wrap: pretty;
-}
-
-.settings-audit-disclosure summary::-webkit-details-marker {
-  display: none;
-}
-
-.settings-audit-disclosure summary::after {
-  align-self: center;
-  color: var(--th-text-muted);
-  content: "+";
-  flex-shrink: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.settings-audit-disclosure[open] summary::after {
-  content: "-";
 }
 
 @media (max-width: 1180px) {
@@ -440,8 +414,18 @@
     padding-inline: 0.4rem;
   }
   .setting-row .setting-row-grid {
-    grid-template-columns: 1fr !important;
+    grid-template-columns: minmax(0, 1fr) auto !important;
     gap: 0.625rem !important;
+  }
+  .setting-row .setting-row-grid > :first-child {
+    grid-column: 1 / -1;
+  }
+  .setting-row .setting-row-grid > :nth-child(2) {
+    grid-column: 1;
+  }
+  .setting-row .setting-row-grid > :nth-child(3) {
+    grid-column: 2;
+    justify-self: end;
   }
   /* FSM editor PC/mobile split — JS controls which surface renders, but the
      spec class names provide a CSS-driven fallback for grid sizing. */

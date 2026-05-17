@@ -13,7 +13,7 @@ export default function PipelineVisualEditorStatus({ ctx }: Props) {
 
   return (
     <>
-      {(ctx.error || ctx.success || ctx.preservedKeys.length > 0) && (
+      {(ctx.error || ctx.success) && (
         <div className="space-y-2">
           {ctx.error && (
             <div
@@ -29,17 +29,6 @@ export default function PipelineVisualEditorStatus({ ctx }: Props) {
               style={STATUS_SUCCESS_STYLE}
             >
               {ctx.success}
-            </div>
-          )}
-          {ctx.preservedKeys.length > 0 && (
-            <div
-              className="rounded-[22px] border px-4 py-3 text-xs leading-6 sm:text-sm"
-              style={STATUS_INFO_STYLE}
-            >
-              {tr("시각 편집기 밖의 override 키는 저장 시 유지됩니다.", "Non-visual override keys are preserved on save.")}{" "}
-              <span style={{ color: "var(--th-text-primary)" }}>
-                {ctx.preservedKeys.join(", ")}
-              </span>
             </div>
           )}
         </div>

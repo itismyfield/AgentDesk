@@ -374,7 +374,6 @@ export function metaFromConfigEntry(
   }
 
   const flags: SettingFlag[] = [];
-  if (!readOnly) flags.push("kv_meta");
   if (overrideActive) flags.push("live_override");
   if (!readOnly && isDangerousConfigKey(entry.key)) flags.push("alert");
   if (readOnly) flags.push("read_only");
@@ -525,22 +524,22 @@ export const SETTING_GROUPS: SettingGroupMeta[] = [
     id: "voice",
     nameKo: "음성",
     nameEn: "Voice",
-    descKo: "voice-lobby와 에이전트별 wake word, alias, 민감도를 관리합니다.",
-    descEn: "Voice-lobby plus per-agent wake words, aliases, and sensitivity.",
+    descKo: "음성 채널, 호출 이름, 인식 민감도를 관리합니다.",
+    descEn: "Voice channels, call names, and recognition sensitivity.",
   },
   {
     id: "onboarding",
     nameKo: "온보딩",
     nameEn: "Onboarding",
-    descKo: "신규 워크스페이스가 처음 겪는 경로와 위저드 전용 키입니다.",
-    descEn: "First-run path and wizard-managed keys for new workspaces.",
+    descKo: "봇, 서버, 소유자 연결 상태를 확인합니다.",
+    descEn: "Review bot, server, and owner connection status.",
   },
   {
     id: "general",
     nameKo: "일반",
     nameEn: "General",
-    descKo: "회사 정보, 표시 환경, 메타 설정.",
-    descEn: "Company identity, display environment, and meta settings.",
+    descKo: "회사 정보와 기본 화면 환경을 관리합니다.",
+    descEn: "Company identity and default display preferences.",
   },
 ];
 
@@ -560,4 +559,3 @@ export function configCategoryToGroup(category: string, key: string): SettingGro
   if (category === "system") return "pipeline";
   return "pipeline";
 }
-

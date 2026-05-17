@@ -6,7 +6,7 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-05-17 (against `main` @ `cfef5b4fae6f129fa6ee7f4b6eb48588712c28c0`).
+> Last refreshed: 2026-05-17 (against PR #2369 voice/turn_link.rs + maintenance.rs giant-file registration).
 
 ## Read This First
 
@@ -252,6 +252,9 @@
   - `src/server/worker_registry.rs` (1040 lines; supervised-worker registry,
     leader-only worker lifecycle, and per-spec restart/shutdown policy —
     bugfix-only after #2202 regression-guard test pushed it past the threshold).
+  - `src/server/maintenance.rs` (1049 lines; periodic maintenance loops —
+    queue stale-inflight sweep, dispatch hygiene, leader-only cadence tasks;
+    crossed threshold incidentally during voice-runtime adjacent work).
 - active_callsite_coverage: n/a.
 - invariants: config precedence, runtime path generation, kanban state, receipt
   persistence, and GitHub sync must keep their existing owner-specific
@@ -365,6 +368,10 @@ The remaining giant-file modules under `src/services/` not covered above:
   `src/services/qwen_tmux_wrapper.rs` (1194).
 - `src/services/turn_orchestrator.rs` (2070).
 - `src/services/session_backend.rs` (1053).
+- `src/voice/turn_link.rs` (1282 lines) — VoiceTurnLink durable store + GC
+  (#2362 / #2164 voice epic A); covers per-utterance status row + advisory-lock
+  serialization + PG-backed reconciliation. Split focused helpers before adding
+  non-bugfix behavior outside the foundational store contract.
 
 Same rule: `bugfix` only without a split issue.
 
