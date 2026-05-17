@@ -42,12 +42,22 @@ const HOT_SWAP_HANDOFF_MAX_AGE_SECS: u64 = 900; // 15 minutes
 /// `updated_at` is rewritten on every `save_inflight_state` call but is
 /// **not** a true heartbeat — a healthy foreground model/tool call can
 /// legitimately go silent for multiple minutes (long Bash, slow LLM
-/// stream, large Read). We therefore align the THREAD-GUARD trigger with
-/// `placeholder_sweeper::ABANDON_THRESHOLD_SECS` (300s = 5 min): by then
-/// the placeholder sweeper has *already* replaced the message with its
-/// terminal "abandoned" form, so any further "active turn" claim is
-/// definitively stale. False-positive cleanup of a live turn is much
-/// worse than slightly delayed recovery (issue #1446).
+/// stream, large Read).
+///
+/// History: this constant used to be aligned with
+/// `placeholder_sweeper::ABANDON_THRESHOLD_SECS` (then 300s) so the
+/// "definitely stale" gate fired exactly when the sweeper had already
+/// replaced the placeholder with its terminal "abandoned" form. After
+/// #2427 (#2436 / #2437 / #2438) the explicit-signal wires (pane death,
+/// heartbeat-gap inflight sweeper, generation-mismatch bulk invalidate,
+/// TurnCompleted idempotent guard) make the sweeper a pure safety net
+/// — its abandon timer was relaxed to 1800s (30 min). The 300s figure
+/// here is retained because it gates **new** user-message dispatch
+/// (THREAD-GUARD) and the stall-watchdog (#1446): both want to recover
+/// quickly once an explicit signal failed to fire, and the explicit
+/// wires above are expected to clear the cleanup hit within seconds.
+/// False-positive cleanup of a live turn is still much worse than
+/// slightly delayed recovery (issue #1446).
 pub(super) const INFLIGHT_STALENESS_THRESHOLD_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -900,6 +910,98 @@ pub(super) fn mark_all_inflight_states_restart_mode(
         }
     }
     updated
+}
+
+/// #2436 (#2427 B wire) guard-checked clear. Only removes the inflight
+/// state file for `(provider, channel_id)` when the on-disk row still
+/// matches the expected `user_msg_id` AND is not a `restart_mode`
+/// planned-restart row AND is not a `rebind_origin` synthetic row.
+///
+/// This is the safety guard that the heartbeat-gap sweeper relies on:
+/// between the watcher map snapshot and the file-system cleanup, a new
+/// turn may have written a fresh inflight row for the same channel (new
+/// `user_msg_id`). Removing it would orphan the new turn's placeholder.
+/// Planned-restart / hot-swap rows must also survive because their
+/// retention is intentionally extended for recovery. Rebind-origin rows
+/// do not own a real Discord turn at all and are owned by the rebind
+/// API caller.
+///
+/// Returns `true` only when a matching row was found and deleted.
+pub(crate) fn clear_inflight_state_if_matches(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected_user_msg_id: u64,
+) -> bool {
+    let Some(state) = load_inflight_state(provider, channel_id) else {
+        return false;
+    };
+    if state.user_msg_id != expected_user_msg_id {
+        return false;
+    }
+    if state.restart_mode.is_some() {
+        return false;
+    }
+    if state.rebind_origin {
+        return false;
+    }
+    clear_inflight_state(provider, channel_id)
+}
+
+/// #2437 (#2427 C wire) boot-time bulk invalidate. Removes inflight
+/// state files whose `restart_generation` does not match
+/// `current_generation` AND that are NOT planned-restart rows. The
+/// planned-restart gate in `stale_removal_reason` (this file, the
+/// `state.restart_mode.is_some()` branch) already handles its own
+/// generation-mismatch eviction with `DRAIN_RESTART_MAX_AGE_SECS` /
+/// `HOT_SWAP_HANDOFF_MAX_AGE_SECS` retention — do not double-evict
+/// those here or recovery will lose handoff rows from the prior
+/// generation.
+///
+/// Skips:
+///   * `state.restart_mode.is_some()` — planned restart / hot-swap.
+///   * `state.rebind_origin` — rebind API owns these, not generation.
+///   * `state.restart_generation == Some(current_generation)` — this
+///     generation's own rows.
+///
+/// Returns the number of state files removed. Intended to be called
+/// **once per provider** at dcserver boot, BEFORE
+/// `restore_inflight_turns`, so recovery does not revive a row from a
+/// generation whose tmux session no longer exists.
+pub(crate) fn invalidate_stale_generation(
+    provider: &ProviderKind,
+    current_generation: u64,
+) -> usize {
+    let states = load_inflight_states(provider);
+    let mut removed = 0usize;
+    for state in states {
+        if state.restart_mode.is_some() {
+            continue;
+        }
+        if state.rebind_origin {
+            continue;
+        }
+        if state.restart_generation == Some(current_generation) {
+            continue;
+        }
+        if clear_inflight_state(provider, state.channel_id) {
+            removed += 1;
+            crate::services::observability::emit_inflight_lifecycle_event(
+                provider.as_str(),
+                state.channel_id,
+                state.dispatch_id.as_deref(),
+                None,
+                None,
+                "evict_stale_generation",
+                serde_json::json!({
+                    "reason": "generation_mismatch_boot",
+                    "row_generation": state.restart_generation,
+                    "current_generation": current_generation,
+                    "user_msg_id": state.user_msg_id,
+                }),
+            );
+        }
+    }
+    removed
 }
 
 /// Load a single inflight state by provider + channel_id (returns None if missing).
