@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,12 +10,29 @@ use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested};
 
 const DEFAULT_ROLLOUT_WAIT_SECS: u64 = 30;
-const DEFAULT_TERMINAL_DRAIN_MS: u64 = 750;
+// #2419: Codex assistant turns naturally produce burst-pause-burst output as
+// the model alternates between text segments and tool-call reasoning. The
+// previous 750ms drain was too short — any inter-segment silence longer than
+// that caused the tailer to emit `Done` and shut down, truncating the relay
+// to Discord while the codex CLI was still streaming. 5s safely covers the
+// observed natural pause band (~3s) without unduly delaying turn completion
+// after the genuine final segment. Tool-call gating (see
+// `RolloutParseState::pending_tool_calls`) is the structural complement that
+// suppresses drain entirely while one or more tools are in flight.
+const DEFAULT_TERMINAL_DRAIN_MS: u64 = 5000;
 /// Upper bound on how long the tailer will sit at EOF waiting for the assistant
 /// response to begin streaming. Without this guard, a stuck Codex TUI (tool
 /// loop, network hang, etc.) keeps the tailer thread alive indefinitely and the
 /// caller never sees a terminal `StreamMessage::Done`.
 const DEFAULT_ASSISTANT_RESPONSE_DEADLINE_SECS: u64 = 30 * 60;
+/// #2419 follow-up: bounded recovery for a pending tool call whose matching
+/// `function_call_output` never arrives (hung tool, malformed line, call_id
+/// mismatch, Codex schema skew). Without this, `has_pending_tool_call()`
+/// would hold the drain gate shut forever while the tmux pane stays alive,
+/// stranding the Discord turn. 5 minutes of inactivity after the last
+/// lifecycle event is well past any realistic tool runtime — at that point
+/// we surface a terminal Done so the bridge can advance.
+const DEFAULT_PENDING_TOOL_CALL_DEADLINE_SECS: u64 = 5 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolloutTailOutcome {
@@ -39,6 +57,12 @@ pub struct RolloutTailOptions {
     /// Maximum time the tailer waits at EOF for the assistant text to begin
     /// streaming. `None` disables the deadline (used by `replay_rollout_file`).
     pub assistant_response_deadline: Option<Duration>,
+    /// #2419 follow-up: bounded recovery deadline for a pending tool call
+    /// that never resolves (hung tool / malformed line / call_id skew).
+    /// Measured as inactivity since the last lifecycle event. `None`
+    /// disables the deadline; used by `replay_rollout_file` and by tests
+    /// that want the legacy unbounded behaviour.
+    pub pending_tool_call_deadline: Option<Duration>,
 }
 
 impl Default for RolloutTailOptions {
@@ -48,6 +72,9 @@ impl Default for RolloutTailOptions {
             terminal_drain: Duration::from_millis(DEFAULT_TERMINAL_DRAIN_MS),
             assistant_response_deadline: Some(Duration::from_secs(
                 DEFAULT_ASSISTANT_RESPONSE_DEADLINE_SECS,
+            )),
+            pending_tool_call_deadline: Some(Duration::from_secs(
+                DEFAULT_PENDING_TOOL_CALL_DEADLINE_SECS,
             )),
         }
     }
@@ -60,12 +87,34 @@ struct RolloutParseState {
     saw_assistant_text: bool,
     lines_read: usize,
     bytes_read: u64,
+    /// #2419: tracks tool calls that are currently in flight (observed
+    /// `function_call` / `custom_tool_call` lines whose matching `*_output`
+    /// line has not arrived yet). Keyed by `call_id` so that multiple
+    /// concurrent tool calls are tracked independently — a single boolean
+    /// would be cleared by the first tool output even while later calls
+    /// remain pending, allowing the drain timer to fire prematurely.
+    ///
+    /// `pending_tool_calls_unkeyed` is a fallback counter for lines that
+    /// omit `call_id` (defensive — Codex normally emits one).
+    pending_tool_calls: HashSet<String>,
+    pending_tool_calls_unkeyed: usize,
+    /// #2419: set by `process_rollout_line` per-call when a rollout record
+    /// represents lifecycle activity (assistant text, tool-call lifecycle,
+    /// reasoning) even if no `StreamMessage` ends up being emitted (e.g. an
+    /// empty `function_call_output`). Used to refresh the drain clock so
+    /// the timer does not fire immediately after a silent tool resolution
+    /// while the post-tool assistant text is still being written.
+    lifecycle_activity: bool,
 }
 
 impl RolloutParseState {
     fn record(&mut self, line_len: usize) {
         self.lines_read += 1;
         self.bytes_read += line_len as u64;
+    }
+
+    fn has_pending_tool_call(&self) -> bool {
+        !self.pending_tool_calls.is_empty() || self.pending_tool_calls_unkeyed > 0
     }
 }
 
@@ -157,6 +206,7 @@ fn tail_latest_rollout_for_cwd_with_handoff_options(
         is_alive,
         options.terminal_drain,
         options.assistant_response_deadline,
+        options.pending_tool_call_deadline,
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
@@ -179,6 +229,7 @@ pub fn replay_rollout_file(
         None,
         || false,
         Duration::ZERO,
+        None,
         None,
     )?;
     match result {
@@ -205,6 +256,7 @@ pub fn tail_rollout_file_from_offset(
         is_alive,
         defaults.terminal_drain,
         defaults.assistant_response_deadline,
+        defaults.pending_tool_call_deadline,
     )
     .map(|result| result.0)
 }
@@ -328,6 +380,7 @@ fn tail_resumed_rollout_for_session_with_handoff_options(
         is_alive,
         options.terminal_drain,
         options.assistant_response_deadline,
+        options.pending_tool_call_deadline,
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
@@ -551,6 +604,7 @@ fn tail_rollout_file_until_assistant_response(
     mut is_alive: impl FnMut() -> bool,
     terminal_drain: Duration,
     assistant_response_deadline: Option<Duration>,
+    pending_tool_call_deadline: Option<Duration>,
 ) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     let mut file = std::fs::File::open(rollout_path)
         .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?;
@@ -595,7 +649,10 @@ fn tail_rollout_file_until_assistant_response(
                     last_output_at = Some(Instant::now());
                     continue;
                 }
-                if state.saw_assistant_text {
+                // #2419: only consider the turn drainable when no tool call
+                // is currently in flight. Otherwise the natural silence while
+                // codex waits for the tool result would trip the timer.
+                if state.saw_assistant_text && !state.has_pending_tool_call() {
                     if terminal_drain.is_zero()
                         || last_output_at.is_some_and(|at| at.elapsed() >= terminal_drain)
                     {
@@ -607,6 +664,45 @@ fn tail_rollout_file_until_assistant_response(
                             outcome(&state, current_offset),
                         ));
                     }
+                }
+                // #2419 follow-up (Codex review HIGH): bounded recovery for
+                // a pending tool call whose `*_output` never arrives (hung
+                // tool, malformed line, call_id skew). Without this, the
+                // drain gate stays shut forever while the pane is alive and
+                // the Discord turn hangs. After `pending_tool_call_deadline`
+                // of inactivity past the last lifecycle event we surface a
+                // terminal Done with a warning so the upstream advances.
+                if state.saw_assistant_text
+                    && state.has_pending_tool_call()
+                    && let Some(deadline) = pending_tool_call_deadline
+                    && last_output_at.is_some_and(|at| at.elapsed() >= deadline)
+                {
+                    let elapsed_secs = last_output_at
+                        .map(|at| at.elapsed().as_secs())
+                        .unwrap_or_default();
+                    tracing::warn!(
+                        rollout_path = %rollout_path.display(),
+                        elapsed_secs,
+                        pending_keyed = state.pending_tool_calls.len(),
+                        pending_unkeyed = state.pending_tool_calls_unkeyed,
+                        "Codex rollout tail tool-call deadline expired; emitting Done to unblock turn"
+                    );
+                    let mut result_text = state.final_text.clone();
+                    let warning = format!(
+                        "\n\n⚠ Codex tool call did not resolve within {}s — emitting partial response.",
+                        elapsed_secs
+                    );
+                    result_text.push_str(&warning);
+                    sender.send(StreamMessage::Done {
+                        result: result_text,
+                        session_id: state.session_id.clone(),
+                    });
+                    return Ok((
+                        ReadOutputResult::Completed {
+                            offset: current_offset,
+                        },
+                        outcome(&state, current_offset),
+                    ));
                 }
                 if !is_alive() {
                     let result = if state.saw_assistant_text {
@@ -770,12 +866,19 @@ fn process_rollout_line(
         return false;
     };
 
+    // #2419: capture lifecycle activity per-line. Tool-call/tool-output
+    // records count as activity even when they do not produce a
+    // StreamMessage (empty output, missing name, etc.), so the drain clock
+    // must refresh on them too.
+    state.lifecycle_activity = false;
     let messages = rollout_messages(&json, state);
     let emitted = !messages.is_empty();
     for message in messages {
         sender.send(message);
     }
-    emitted
+    let activity = emitted || state.lifecycle_activity;
+    state.lifecycle_activity = false;
+    activity
 }
 
 fn process_rollout_line_bytes(
@@ -821,11 +924,48 @@ fn response_item_messages(json: &Value, state: &mut RolloutParseState) -> Vec<St
     };
     match payload.get("type").and_then(Value::as_str).unwrap_or("") {
         "message" => response_message_items(payload, state),
-        "function_call" | "custom_tool_call" => tool_call_message(payload).into_iter().collect(),
+        "function_call" | "custom_tool_call" => {
+            // #2419: a tool call has started — suppress terminal_drain Done
+            // until the matching output line arrives. Track by `call_id` so
+            // that concurrent tool calls all hold the gate open until each
+            // one resolves independently.
+            match payload.get("call_id").and_then(Value::as_str) {
+                Some(id) if !id.is_empty() => {
+                    state.pending_tool_calls.insert(id.to_string());
+                }
+                _ => {
+                    state.pending_tool_calls_unkeyed =
+                        state.pending_tool_calls_unkeyed.saturating_add(1);
+                }
+            }
+            // #2419: lifecycle activity — refresh drain clock even if the
+            // tool_call_message ends up empty (e.g. missing name field).
+            state.lifecycle_activity = true;
+            tool_call_message(payload).into_iter().collect()
+        }
         "function_call_output" | "custom_tool_call_output" => {
+            // #2419: tool call resolved — release that specific call's hold
+            // on the drain gate. Other pending calls (if any) keep it shut.
+            match payload.get("call_id").and_then(Value::as_str) {
+                Some(id) if !id.is_empty() => {
+                    state.pending_tool_calls.remove(id);
+                }
+                _ => {
+                    state.pending_tool_calls_unkeyed =
+                        state.pending_tool_calls_unkeyed.saturating_sub(1);
+                }
+            }
+            // #2419: lifecycle activity — drain clock must be reset even
+            // when the tool output is empty, otherwise EOF immediately after
+            // an empty resolution can fire the drain timer before the
+            // post-tool assistant text is appended.
+            state.lifecycle_activity = true;
             tool_result_message(payload).into_iter().collect()
         }
-        "reasoning" => vec![StreamMessage::redacted_thinking()],
+        "reasoning" => {
+            state.lifecycle_activity = true;
+            vec![StreamMessage::redacted_thinking()]
+        }
         _ => Vec::new(),
     }
 }
@@ -1114,6 +1254,7 @@ mod tests {
                 wait_for_rollout: Duration::from_millis(10),
                 terminal_drain: Duration::ZERO,
                 assistant_response_deadline: None,
+                pending_tool_call_deadline: None,
             },
         )
         .unwrap();
@@ -1169,6 +1310,7 @@ mod tests {
                 wait_for_rollout: Duration::from_millis(10),
                 terminal_drain: Duration::ZERO,
                 assistant_response_deadline: None,
+                pending_tool_call_deadline: None,
             },
         )
         .unwrap();
@@ -1252,6 +1394,7 @@ mod tests {
             || true, // pane stays alive — only the deadline rescues us
             Duration::ZERO,
             Some(Duration::from_millis(150)),
+            None,
         )
         .unwrap();
         drop(tx);
@@ -1303,6 +1446,7 @@ mod tests {
                 || true,
                 Duration::ZERO,
                 Some(Duration::from_secs(5)),
+                None,
             )
         });
 
@@ -1351,6 +1495,410 @@ mod tests {
                 .iter()
                 .all(|m| !matches!(m, StreamMessage::Done { .. })),
             "post-cancel Done must NOT be relayed; got messages={:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn two_segments_with_long_pause_emits_full_response() {
+        // #2419 regression: codex CLI emits assistant text in
+        // burst-pause-burst patterns. With the old 750ms drain a >1s inter-
+        // segment silence caused the tailer to emit Done and shut down,
+        // truncating Discord relay. With drain=2s the second segment must
+        // still land in the same turn after a 1s pause.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"two-seg\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-two-seg.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        // First segment is present from the start so the tail picks it up
+        // and starts the drain countdown.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment1"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                Duration::from_secs(2),
+                Some(Duration::from_secs(10)),
+                None,
+            )
+        });
+
+        // Pause longer than the old 750ms default but shorter than the new
+        // 2s drain used here. The tailer must NOT have finished yet.
+        std::thread::sleep(Duration::from_millis(1100));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment2"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment1")),
+            "segment1 must be emitted; got {:?}",
+            messages
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            "segment2 must be emitted after the inter-segment pause; got {:?}",
+            messages
+        );
+        // Done's `result` accumulates both segments separated by blank line.
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result.contains("segment1") && result.contains("segment2")
+        ));
+    }
+
+    #[test]
+    fn tool_call_pause_does_not_emit_premature_done() {
+        // #2419: while a tool_call is in flight the assistant naturally goes
+        // silent. The drain timer must be suppressed for that window so
+        // segment2 (post-tool) still lands in the same turn.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"tool-pause\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-tool-pause.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        // Pre-write: segment1 + function_call (no output yet). The drain
+        // timer would normally trip on the ensuing silence — pending_tool_call
+        // must suppress it.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment1"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"c1"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                // Short drain — without the tool-call gate, this would fire
+                // during the silence and emit Done before segment2 arrives.
+                Duration::from_millis(150),
+                Some(Duration::from_secs(10)),
+                None,
+            )
+        });
+
+        // Sleep long enough that drain WOULD have fired without gating.
+        std::thread::sleep(Duration::from_millis(600));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment2"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            "segment2 must be emitted after the tool call resolves; got {:?}",
+            messages
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result.contains("segment1") && result.contains("segment2")
+        ));
+    }
+
+    #[test]
+    fn multiple_concurrent_tool_calls_keep_drain_gate_closed() {
+        // #2419 (Codex review HIGH): two tool_call lines emitted before any
+        // outputs arrive. The first matching output must NOT clear the
+        // drain gate while the second call is still pending — otherwise
+        // EOF + drain elapsed would emit Done before segment2.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"two-tool\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-two-tool.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment1"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"a","arguments":"{}","call_id":"c1"}}
+{"type":"response_item","payload":{"type":"function_call","name":"b","arguments":"{}","call_id":"c2"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok-1"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                Duration::from_millis(150),
+                Some(Duration::from_secs(10)),
+                None,
+            )
+        });
+
+        // Long enough that drain WOULD fire if c2 were not still pending.
+        std::thread::sleep(Duration::from_millis(600));
+
+        // Now resolve c2 and append segment2 — both must land in the turn.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c2","output":"ok-2"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment2"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            "segment2 must be emitted after BOTH concurrent tool calls resolve; got {:?}",
+            messages
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result.contains("segment1") && result.contains("segment2")
+        ));
+    }
+
+    #[test]
+    fn empty_tool_output_refreshes_drain_clock() {
+        // #2419 (Codex review HIGH): a long-running tool call resolves with
+        // an empty output (no StreamMessage emitted). Without lifecycle
+        // refresh, `last_output_at` would still point at the original
+        // tool_call timestamp, so the very next EOF tick would observe
+        // elapsed > drain and emit Done before the post-tool assistant
+        // text was appended. With refresh, the clock restarts at the empty
+        // output and segment2 still lands in the same turn.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"empty-out\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-empty-out.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+
+        // Phase 1: segment1 + tool_call (tool now running, drain gate held
+        // shut by pending_tool_calls).
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment1"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"silent","arguments":"{}","call_id":"c-empty"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                Duration::from_millis(250),
+                Some(Duration::from_secs(10)),
+                None,
+            )
+        });
+
+        // Phase 2: simulate a slow tool — silence for longer than drain.
+        // pending_tool_call gate must keep drain suppressed here.
+        std::thread::sleep(Duration::from_millis(400));
+
+        // Phase 3: empty tool output arrives. No StreamMessage emitted.
+        // Without lifecycle refresh, last_output_at still ≈ tool_call
+        // timestamp (t≈0), and the very next EOF tick would fire Done.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c-empty","output":""}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        // Phase 4: a short post-tool gap (< drain) — small enough that a
+        // properly-refreshed clock has NOT yet elapsed. Then segment2.
+        std::thread::sleep(Duration::from_millis(150));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment2"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            "segment2 must land after empty tool output refreshes drain clock; got {:?}",
+            messages
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result.contains("segment1") && result.contains("segment2")
+        ));
+    }
+
+    #[test]
+    fn stuck_tool_call_deadline_emits_recovery_done() {
+        // #2419 follow-up (Codex review HIGH round 2): assistant text was
+        // already streamed, then a tool call was emitted but its output
+        // never arrives (hung tool / mismatched call_id / schema skew).
+        // The pane stays alive, so without a bounded recovery deadline the
+        // tail would sleep forever and the Discord turn would hang. With
+        // `pending_tool_call_deadline` the tail must surface a terminal
+        // Done with a warning so the bridge advances.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"stuck-tool\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-stuck.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"never_returns","arguments":"{}","call_id":"c-stuck"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let (result, _outcome) = tail_rollout_file_until_assistant_response(
+            &rollout,
+            0,
+            None,
+            &tx,
+            None,
+            || true, // pane stays alive forever
+            Duration::from_secs(60),
+            Some(Duration::from_secs(60)),
+            // Short bounded recovery deadline — without this the tail
+            // would block forever.
+            Some(Duration::from_millis(200)),
+        )
+        .unwrap();
+        drop(tx);
+
+        assert!(
+            matches!(result, ReadOutputResult::Completed { .. }),
+            "tail must surface Completed once the pending-tool deadline expires; got {:?}",
+            result
+        );
+        let messages: Vec<_> = rx.iter().collect();
+        let done = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m, StreamMessage::Done { .. }));
+        assert!(
+            matches!(
+                done,
+                Some(StreamMessage::Done { result, .. })
+                    if result.contains("hello") && result.contains("did not resolve")
+            ),
+            "Done must contain prior assistant text and the recovery warning; got {:?}",
             messages
         );
     }

@@ -35,6 +35,31 @@ fn resolve_exec_timeout_ms(timeout_ms: Option<u64>) -> u64 {
         .unwrap_or(DEFAULT_EXEC_TIMEOUT_MS)
 }
 
+/// Shorten the caller-supplied exec timeout to fit within the current
+/// bridge-op deadline (if any). Without this clamp, an `agentdesk.exec`
+/// invoked from a hot-reloaded policy could block the runtime lock for the
+/// full 30s default while the QuickJS interrupt handler (which only fires
+/// between bytecode instructions) waits in vain for a tick (#2378).
+///
+/// Returns `Err(message)` if the deadline has already passed — callers
+/// should surface this to JS as an error string so the policy can decide
+/// how to recover.
+fn clamp_exec_timeout_to_bridge_deadline(timeout_ms: u64) -> Result<u64, String> {
+    match crate::engine::loader::bridge_op_deadline_remaining() {
+        None => Ok(timeout_ms),
+        Some(remaining) if remaining.is_zero() => {
+            Err("bridge deadline passed before exec started".to_string())
+        }
+        Some(remaining) => {
+            // Convert to ms via saturating math so a near-MAX Duration never
+            // overflows. We then take the smaller of the two budgets so the
+            // child can never outlive the JS eval that spawned it.
+            let remaining_ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX);
+            Ok(timeout_ms.min(remaining_ms))
+        }
+    }
+}
+
 #[cfg(windows)]
 fn is_powershell_script(path: &OsStr) -> bool {
     std::path::Path::new(path)
@@ -98,12 +123,19 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                 let command_path = std::env::var_os(exec_override_env_var(&cmd))
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| std::ffi::OsString::from(&cmd));
-                match run_exec_command(
-                    &cmd,
-                    command_path.as_os_str(),
-                    &args,
-                    resolve_exec_timeout_ms(timeout_ms),
-                ) {
+                let requested_timeout_ms = resolve_exec_timeout_ms(timeout_ms);
+                // #2378: clamp the child timeout to whatever budget the
+                // currently-running JS eval has left. The QuickJS interrupt
+                // handler can't fire while we're in this Rust callback, so
+                // without the clamp a 30s default could blow past a 2s
+                // hot-reload deadline.
+                let effective_timeout_ms =
+                    match clamp_exec_timeout_to_bridge_deadline(requested_timeout_ms) {
+                        Ok(ms) => ms,
+                        Err(message) => return format!("ERROR: {}", message),
+                    };
+                match run_exec_command(&cmd, command_path.as_os_str(), &args, effective_timeout_ms)
+                {
                     Ok(output) if output.status.success() => {
                         String::from_utf8_lossy(&output.stdout).trim().to_string()
                     }
@@ -266,6 +298,17 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                     .split_once(':')
                     .map(|(_, name)| name)
                     .unwrap_or(&session_key);
+                // #2378: short-circuit if the current JS eval's bridge-op
+                // deadline has already passed. A blocking tmux `.output()`
+                // call against a hung tmux server would otherwise hold the
+                // runtime lock indefinitely.
+                if matches!(
+                    crate::engine::loader::bridge_op_deadline_remaining(),
+                    Some(d) if d.is_zero()
+                ) {
+                    return r#"{"ok":false,"error":"bridge deadline passed before session.sendCommand started"}"#
+                        .to_string();
+                }
                 match crate::services::platform::tmux::send_keys(tmux_name, &[&command, "Enter"]) {
                     Ok(out) if out.status.success() => {
                         format!(
@@ -295,6 +338,17 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                 .split_once(':')
                 .map(|(_, name)| name)
                 .unwrap_or(&session_key);
+            // #2378: short-circuit if the current JS eval's bridge-op
+            // deadline has already passed. The audit record is intentionally
+            // skipped in this case — it would be misleading to log an
+            // attempted termination we did not actually issue.
+            if matches!(
+                crate::engine::loader::bridge_op_deadline_remaining(),
+                Some(d) if d.is_zero()
+            ) {
+                return r#"{"ok":false,"error":"bridge deadline passed before session.kill started"}"#
+                    .to_string();
+            }
             crate::services::termination_audit::record_termination_for_tmux(
                 tmux_name,
                 None,
@@ -424,6 +478,50 @@ mod inflight_list_tests {
             );
             assert_eq!(parsed["dispatch_id"], "dispatch-1");
         });
+    }
+}
+
+#[cfg(test)]
+mod bridge_deadline_tests {
+    use super::*;
+    use crate::engine::loader::ScopedBridgeDeadline;
+    use std::time::Duration;
+
+    /// #2378: with no deadline armed, the clamp must return the requested
+    /// timeout unchanged so live-engine `agentdesk.exec` calls (which run
+    /// outside any bounded eval) retain their full configured budget.
+    #[test]
+    fn clamp_is_noop_without_armed_deadline() {
+        assert_eq!(clamp_exec_timeout_to_bridge_deadline(30_000), Ok(30_000));
+    }
+
+    /// #2378: when a deadline is armed and still in the future, the clamp
+    /// must return at most the remaining budget. Without this clamp a
+    /// 30s `agentdesk.exec` invoked from a hot-reloaded policy could hold
+    /// the runtime lock for 30s — defeating the QuickJS deadline.
+    #[test]
+    fn clamp_shortens_to_remaining_budget_when_armed() {
+        let _scope = ScopedBridgeDeadline::new(Duration::from_millis(200));
+        let clamped =
+            clamp_exec_timeout_to_bridge_deadline(30_000).expect("deadline still in the future");
+        assert!(
+            clamped <= 200,
+            "clamp must shorten 30s timeout to remaining ≤200ms budget, got {clamped}ms"
+        );
+    }
+
+    /// #2378: once the armed deadline has passed, the clamp must
+    /// short-circuit with an error so the bridge op does not start a
+    /// blocking child it cannot enforce a deadline against.
+    #[test]
+    fn clamp_returns_error_after_deadline_elapses() {
+        let _scope = ScopedBridgeDeadline::new(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(40));
+        let result = clamp_exec_timeout_to_bridge_deadline(30_000);
+        assert!(
+            matches!(result, Err(ref msg) if msg.contains("deadline passed")),
+            "expected deadline-passed error, got: {result:?}"
+        );
     }
 }
 
