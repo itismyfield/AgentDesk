@@ -907,6 +907,57 @@ mod is_message_still_placeholder_tests {
     }
 }
 
+#[cfg(test)]
+mod safety_net_threshold_tests {
+    //! #2438 (#2427 final): pin the safety-net threshold relationships
+    //! so a future refactor cannot accidentally invert them. The
+    //! placeholder sweeper is now the LAST cleanup layer — every
+    //! explicit-signal wire (D / A / B / C) must have time to fire
+    //! before the sweeper does anything destructive.
+    use super::{
+        ABANDON_THRESHOLD_SECS, INITIAL_DELAY_SECS, STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS,
+    };
+
+    #[test]
+    fn stall_threshold_is_at_least_five_minutes() {
+        // Five minutes (300s) matches `INFLIGHT_MAX_AGE_SECS` —
+        // anything fresher than that the load path itself will not GC.
+        assert!(STALL_THRESHOLD_SECS >= 300);
+    }
+
+    #[test]
+    fn abandon_threshold_is_at_least_thirty_minutes() {
+        // The abandon path is the last destructive action the sweeper
+        // can take. Thirty minutes is the floor: long-running tools
+        // (compilation, large refactors, deep ripgrep) routinely run
+        // 10–20 minutes; we add another 10 minutes of safety margin
+        // on top.
+        assert!(ABANDON_THRESHOLD_SECS >= 1800);
+    }
+
+    #[test]
+    fn abandon_strictly_greater_than_stall() {
+        // The stall → abandoned ladder must remain monotonic.
+        assert!(ABANDON_THRESHOLD_SECS > STALL_THRESHOLD_SECS);
+    }
+
+    #[test]
+    fn initial_delay_lets_recovery_settle() {
+        // Recovery retries (#2428 H5) burn up to ~120s on retry
+        // backoff alone. Boot recovery needs at least that plus
+        // headroom before the sweeper starts judging staleness.
+        assert!(INITIAL_DELAY_SECS >= 180);
+    }
+
+    #[test]
+    fn sweep_interval_is_within_a_minute() {
+        // We don't want the safety-net log latency to drift higher
+        // than one minute. 30s is the current cadence; pin the
+        // upper bound.
+        assert!(SWEEP_INTERVAL_SECS <= 60);
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::*;
