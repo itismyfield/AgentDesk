@@ -119,6 +119,9 @@
   - `src/services/discord/health/recovery.rs` (1433 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior).
   - `src/services/discord/placeholder_controller.rs` (1237 lines).
+  - `src/services/discord/placeholder_sweeper.rs` (1022 lines; placeholder
+    sweep loop and delivered-response idempotency surface — bugfix only
+    outside a split plan).
   - `src/services/discord/router/message_handler.rs` (7013 lines).
   - `src/services/discord/meeting_orchestrator.rs` (3779 lines).
   - `src/services/discord/turn_bridge/mod.rs` (4267 lines).
