@@ -453,6 +453,30 @@ mod tests {
     }
 }
 
+/// #2452 H6: dedup guard for `auto_retry_with_history`. Kept at module
+/// scope so the explicit-release path
+/// (`TurnGateway::schedule_retry_with_history_with_completion` →
+/// `release_retry_pending`) can drop the entry as soon as the matching
+/// retry-turn finishes scheduling. The previous design used a hardcoded
+/// 30s sleep on a detached task; that gave a 30s lockout window even
+/// when scheduling succeeded in <100ms.
+use std::sync::LazyLock;
+static RETRY_PENDING: LazyLock<dashmap::DashSet<u64>> = LazyLock::new(dashmap::DashSet::new);
+
+/// #2452 H6: explicit release for the auto-retry dedup lockout. Callers
+/// using `schedule_retry_with_history_with_completion` invoke this once
+/// the retry-spawn future has resolved (or the 120s safety net fires).
+pub(in crate::services::discord) fn release_retry_pending(channel_id: ChannelId) {
+    RETRY_PENDING.remove(&channel_id.get());
+}
+
+/// #2452 H6: test-only helper to inspect the dedup set without exposing
+/// its internals broadly.
+#[cfg(test)]
+pub(in crate::services::discord) fn retry_pending_contains(channel_id: ChannelId) -> bool {
+    RETRY_PENDING.contains(&channel_id.get())
+}
+
 /// Auto-retry a failed resume by fetching recent Discord history,
 /// storing it in kv_meta for the router to inject into the LLM prompt,
 /// and queueing the original message as an internal intervention.
@@ -467,18 +491,24 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
 
-    // Dedup guard: use a static set to prevent turn_bridge + watcher from
-    // both firing auto-retry for the same channel simultaneously.
-    use std::sync::LazyLock;
-    static RETRY_PENDING: LazyLock<dashmap::DashSet<u64>> =
-        LazyLock::new(|| dashmap::DashSet::new());
+    // Dedup guard: prevent turn_bridge + watcher from both firing
+    // auto-retry for the same channel simultaneously.
     if !RETRY_PENDING.insert(channel_id.get()) {
         tracing::warn!("  [{ts}] ⏭ auto-retry: skipped (dedup) for channel {channel_id}");
         return;
     }
-    // Clean up guard after 30 seconds (allow future retries)
+    // #2452 H6 graduation: the lockout release is now driven by an
+    // explicit completion oneshot wired through `TurnGateway::
+    // schedule_retry_with_history_with_completion`. The 30s sleep that
+    // used to live here remains only as a 120s safety net on the
+    // explicit-completion path below; this fire-and-forget legacy
+    // wrapper (no caller-visible completion) keeps the original
+    // sleep-based release so the public surface stays compatible for
+    // callers that don't care about prompt release.
     let ch_id = channel_id.get();
     tokio::spawn(async move {
+        // Capped at 30s for back-compat — callers wanting prompt release
+        // should use the `_with_completion` variant.
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
         RETRY_PENDING.remove(&ch_id);
     });

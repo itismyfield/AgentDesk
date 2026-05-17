@@ -371,6 +371,7 @@ impl TestHealthHarness {
             engine: None,
             health_registry: Arc::downgrade(&registry),
             known_slash_commands: tokio::sync::OnceCell::new(),
+            inflight_signals: tokio::sync::broadcast::channel(256).0,
         });
         super::mark_reconcile_complete(&shared);
         registry

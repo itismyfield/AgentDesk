@@ -15,7 +15,7 @@ use super::outbound::result::DeliveryResult;
 use super::outbound::{DiscordOutboundClient, OutboundDeduper};
 use super::router;
 use super::router::handle_text_message;
-use super::turn_bridge::auto_retry_with_history;
+use super::turn_bridge::{auto_retry_with_history, release_retry_pending};
 use super::{
     Intervention, SharedData, formatting, rate_limit_wait, resolve_discord_bot_provider,
     validate_live_channel_routing,
@@ -66,6 +66,34 @@ pub(super) trait TurnGateway: Send + Sync {
         user_message_id: MessageId,
         user_text: &'a str,
     ) -> GatewayFuture<'a, ()>;
+
+    /// #2452 H6 graduation: variant of `schedule_retry_with_history` that
+    /// returns a `oneshot::Sender<()>` to the caller via the
+    /// `completion_tx` parameter; the implementor MUST signal completion
+    /// (success OR failure) on this channel when scheduling has finished
+    /// so the caller can release any pending-retry lockout immediately
+    /// instead of waiting on a fixed wall-clock timer.
+    ///
+    /// Default implementation delegates to `schedule_retry_with_history`
+    /// and immediately drops `completion_tx`, which causes the
+    /// `recv().await` on the matching `oneshot::Receiver` to resolve with
+    /// `Err(RecvError)` — semantically equivalent to "completion signal
+    /// arrived" for the lockout-release path. Implementors that can
+    /// observe the actual retry-turn completion edge should override this
+    /// to send `()` only after the retry truly completes.
+    fn schedule_retry_with_history_with_completion<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        user_message_id: MessageId,
+        user_text: &'a str,
+        completion_tx: tokio::sync::oneshot::Sender<()>,
+    ) -> GatewayFuture<'a, ()> {
+        Box::pin(async move {
+            self.schedule_retry_with_history(channel_id, user_message_id, user_text)
+                .await;
+            let _ = completion_tx.send(());
+        })
+    }
 
     fn dispatch_queued_turn<'a>(
         &'a self,
@@ -489,6 +517,33 @@ impl TurnGateway for DiscordGateway {
                 user_text,
             )
             .await;
+        })
+    }
+
+    fn schedule_retry_with_history_with_completion<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        user_message_id: MessageId,
+        user_text: &'a str,
+        completion_tx: tokio::sync::oneshot::Sender<()>,
+    ) -> GatewayFuture<'a, ()> {
+        Box::pin(async move {
+            auto_retry_with_history(
+                &self.http,
+                &self.shared,
+                &self.provider,
+                channel_id,
+                user_message_id,
+                user_text,
+            )
+            .await;
+            // #2452 H6: explicit release path — once scheduling has
+            // resolved, drop the dedup lockout immediately so a
+            // subsequent stale-resume detection on the same channel can
+            // schedule another retry without waiting on the 30s sleep
+            // fallback inside `auto_retry_with_history`.
+            release_retry_pending(channel_id);
+            let _ = completion_tx.send(());
         })
     }
 

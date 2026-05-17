@@ -1097,6 +1097,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         engine,
         health_registry: Arc::downgrade(&health_registry),
         known_slash_commands: tokio::sync::OnceCell::new(),
+        // #2448: capacity 256 gives ~hundreds of in-flight turns headroom
+        // before a slow listener triggers `RecvError::Lagged`. The standby
+        // relay subscriber falls back to file polling on lag.
+        inflight_signals: tokio::sync::broadcast::channel(256).0,
     });
 
     // Phase 5.2 of intake-node-routing (issue #2009): populate

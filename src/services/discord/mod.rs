@@ -1450,6 +1450,14 @@ pub(crate) struct SharedData {
     /// Used by the router to distinguish known slash commands from arbitrary
     /// `/`-prefixed user text that should fall through to the AI provider.
     pub(super) known_slash_commands: tokio::sync::OnceCell<std::collections::HashSet<String>>,
+    /// #2448: process-wide broadcast of explicit inflight-lifecycle signals.
+    /// turn_bridge's `CompletionGuard` publishes `InflightSignal::Completed`
+    /// on terminal drop so subscribers (currently `run_standby_relay`) can
+    /// exit immediately instead of polling against a 15min wall-clock
+    /// timeout. Capacity is intentionally generous so a brief listener
+    /// hiccup yields `RecvError::Lagged` rather than dropped channels.
+    pub(in crate::services::discord) inflight_signals:
+        tokio::sync::broadcast::Sender<inflight::InflightSignal>,
 }
 
 impl SharedData {
@@ -2154,6 +2162,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         engine: None,
         health_registry: std::sync::Weak::new(),
         known_slash_commands: tokio::sync::OnceCell::new(),
+        inflight_signals: tokio::sync::broadcast::channel(256).0,
     })
 }
 

@@ -44,8 +44,8 @@ pub(super) use completion_guard::{
     runtime_db_fallback_complete_with_result, streaming_final_complete_dispatch_with_result,
 };
 pub(super) use recovery_text::{
-    auto_retry_with_history, build_session_retry_context_from_history, store_session_retry_context,
-    take_session_retry_context_for_turn_with_audit,
+    auto_retry_with_history, build_session_retry_context_from_history, release_retry_pending,
+    store_session_retry_context, take_session_retry_context_for_turn_with_audit,
 };
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(crate) use tmux_runtime::TmuxCleanupPolicy;
@@ -55,6 +55,47 @@ pub(super) use tmux_runtime::cancel_token_has_tmux_session;
 pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::stop_active_turn;
+
+/// #2452 H6 graduation: schedule the history-aware auto-retry via the
+/// gateway's `_with_completion` variant, then release the
+/// `RETRY_PENDING` dedup lockout AS SOON AS the gateway's completion
+/// oneshot resolves. A 120s `tokio::time::timeout` safety net guarantees
+/// the lockout cannot leak indefinitely even if the spawned scheduler
+/// panics or wedges before sending on `completion_tx`.
+///
+/// The legacy 30s sleep inside `auto_retry_with_history` is preserved as
+/// a back-compat fallback for callers that hit the trait's default
+/// `_with_completion` impl (which sends on `completion_tx` immediately
+/// after the inner `auto_retry_with_history` returns) — both paths
+/// remove the same `channel_id` from the `RETRY_PENDING` set, so a
+/// double-remove is a no-op.
+fn spawn_retry_with_history_with_release(
+    gateway: std::sync::Arc<dyn gateway::TurnGateway>,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    retry_text: String,
+) {
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        gateway
+            .schedule_retry_with_history_with_completion(
+                channel_id,
+                user_msg_id,
+                &retry_text,
+                completion_tx,
+            )
+            .await;
+    });
+    tokio::spawn(async move {
+        // 120s safety net: if completion_tx is dropped without a send
+        // (panic, wedged future), the recv resolves with Err and we still
+        // release. If 120s elapses with neither send nor drop, force
+        // release so the lockout cannot leak forever.
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(120), completion_rx).await;
+        release_retry_pending(channel_id);
+    });
+}
 
 pub(super) fn classify_turn_finished_dispatch_kind(
     dispatch_context: Option<&str>,
@@ -1933,7 +1974,12 @@ fn handle_watcher_runtime_handoff(
                         cancel_for_standby,
                         shared_for_standby,
                         provider_for_standby,
-                        std::time::Duration::from_secs(900),
+                        // #2448: bumped from 900s (15min) heuristic stop
+                        // signal to a 1800s (30min) safety backstop. The
+                        // authoritative exit signal is now
+                        // `InflightSignal::Completed`, broadcast by
+                        // `CompletionGuard` on bridge drop.
+                        std::time::Duration::from_secs(1800),
                     ));
                     *standby_relay_owns_output = true;
                     // #2263: intentionally leave `watcher_owns_live_relay = false`
@@ -2181,6 +2227,28 @@ pub(super) fn spawn_turn_bridge(
         let mut api_friction_reports = Vec::new();
         let mut transcript_events = Vec::<SessionTranscriptEvent>::new();
         let mut resume_failure_detected = false;
+        // #2451 H5 graduation: `StreamMessage::Init { session_id, .. }` is
+        // the explicit provider handshake — it lands as soon as the
+        // provider has a live session bound to the new turn. We use its
+        // arrival as the authoritative "resume succeeded" witness so the
+        // empty-response classification no longer has to guess from
+        // `turn_start.elapsed() < 10s`. The elapsed-time heuristic is
+        // retained only as a 30s safety backstop.
+        let mut session_handshake_seen = false;
+        // #2451: snapshot whether the channel had a prior provider
+        // session_id at turn-start time. The previous logic re-read
+        // `shared.core.sessions` at empty-response classification time,
+        // which races with `reset_session_for_auto_retry` and produces
+        // false negatives ("session was already cleared, so we never
+        // attempted resume"). Capturing this once at the top closes the
+        // race.
+        let had_prior_session_id_at_turn_start = {
+            let data = shared_owned.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .and_then(|s| s.session_id.as_ref())
+                .is_some()
+        };
         let mut terminal_session_reset_required = false;
         let mut recovery_retry = false;
         let mut last_adk_heartbeat = std::time::Instant::now();
@@ -2204,15 +2272,35 @@ pub(super) fn spawn_turn_bridge(
         let completion_tx = bridge.completion_tx;
         // Guard: ensure completion_tx fires even if the task panics or
         // exits early, preventing the parent from hanging on completion_rx.
-        struct CompletionGuard(Option<tokio::sync::oneshot::Sender<()>>);
+        //
+        // #2448: also publish an explicit `InflightSignal::Completed`
+        // broadcast on drop so any per-turn relay tasks (currently the
+        // standby JSONL relay) can exit immediately instead of polling
+        // against a wall-clock deadline. The broadcast send is best-effort
+        // — if no subscriber is registered, `send` returns Err and we
+        // ignore it.
+        struct CompletionGuard {
+            tx: Option<tokio::sync::oneshot::Sender<()>>,
+            broadcaster: tokio::sync::broadcast::Sender<super::inflight::InflightSignal>,
+            channel_id: ChannelId,
+        }
         impl Drop for CompletionGuard {
             fn drop(&mut self) {
-                if let Some(tx) = self.0.take() {
+                if let Some(tx) = self.tx.take() {
                     let _ = tx.send(());
                 }
+                let _ = self
+                    .broadcaster
+                    .send(super::inflight::InflightSignal::Completed {
+                        channel_id: self.channel_id.get(),
+                    });
             }
         }
-        let _completion_guard = CompletionGuard(completion_tx);
+        let _completion_guard = CompletionGuard {
+            tx: completion_tx,
+            broadcaster: shared_owned.inflight_signals.clone(),
+            channel_id,
+        };
 
         // Guard: ensure inflight state file is cleaned up even if the task
         // panics or exits early.  On the normal path we defuse the guard
@@ -2380,8 +2468,27 @@ pub(super) fn spawn_turn_bridge(
                 break 'outer;
             }
 
+            // #2449 H3 graduation: the post-Done 50ms sleep used to be a
+            // heuristic "wait a bit for trailing control frames" guard.
+            // The authoritative signal is the explicit handoff frame
+            // (`TmuxReady` / `ProcessReady` / `RuntimeReady`); each of
+            // those handlers clears `terminal_control_drain_until` to
+            // `None`, which exits the outer `while` immediately. We keep
+            // a small wake interval here as a safety backstop so the
+            // drain window deadline can fire when no handoff is coming
+            // (handoff-ambiguous providers), but bound it tightly to
+            // remaining drain time so it never over-sleeps once the
+            // window naturally closes.
             let loop_sleep = if done {
-                tokio::time::Duration::from_millis(50)
+                let now = std::time::Instant::now();
+                let drain_remaining = terminal_control_drain_until
+                    .and_then(|deadline| deadline.checked_duration_since(now))
+                    .unwrap_or_else(|| tokio::time::Duration::from_millis(5));
+                // Cap at 5ms — small enough that a handoff arriving
+                // immediately after the wake is processed within one tick,
+                // large enough to avoid hot-spinning when the bridge truly
+                // is waiting for the drain deadline.
+                drain_remaining.min(tokio::time::Duration::from_millis(5))
             } else {
                 tokio::time::Duration::from_millis(1000)
             };
@@ -2489,6 +2596,12 @@ pub(super) fn spawn_turn_bridge(
                             new_raw_provider_session_id =
                                 raw_session_id.or_else(|| Some(sid.clone()));
                             inflight_state.session_id = Some(sid);
+                            // #2451 H5: explicit handshake witness — the
+                            // provider has answered with a bound session.
+                            // Any subsequent empty-response classification
+                            // can rely on this instead of elapsed-time
+                            // guessing.
+                            session_handshake_seen = true;
                             state_dirty = true;
                         }
                         StreamMessage::Text { content } => {
@@ -3152,15 +3265,24 @@ pub(super) fn spawn_turn_bridge(
                             }
                             state_dirty = true;
                             done = true;
-                            // Some warm-followup providers emit terminal Done
-                            // before the immediately-following TmuxReady /
-                            // ProcessReady control message. Keep draining
-                            // briefly so ownership handoff is not decided from
-                            // a partial terminal frame.
-                            terminal_control_drain_until = Some(
-                                std::time::Instant::now()
-                                    + std::time::Duration::from_millis(250),
-                            );
+                            // #2449 H4 graduation: only arm the 250ms drain
+                            // window when handoff is genuinely ambiguous.
+                            // If a runtime handoff has already been observed
+                            // (`tmux_handed_off` flipped or
+                            // `inflight_state.runtime_kind` stamped), the
+                            // ownership question is already settled and any
+                            // further drain just delays bridge exit by up to
+                            // 250ms. The drain remains armed for
+                            // warm-followup providers that emit `Done` before
+                            // their handoff frame — in those cases the
+                            // handoff arm clears the deadline to `None` as
+                            // soon as the frame lands.
+                            if !tmux_handed_off && inflight_state.runtime_kind.is_none() {
+                                terminal_control_drain_until = Some(
+                                    std::time::Instant::now()
+                                        + std::time::Duration::from_millis(250),
+                                );
+                            }
                         }
                         StreamMessage::Error {
                             message, stderr, ..
@@ -3436,7 +3558,11 @@ pub(super) fn spawn_turn_bridge(
                                                 cancel_for_standby,
                                                 shared_for_standby,
                                                 provider_for_standby,
-                                                std::time::Duration::from_secs(900),
+                                                // #2448: see TmuxReady branch
+                                                // — timeout demoted to safety
+                                                // backstop after broadcast
+                                                // exit signal landed.
+                                                std::time::Duration::from_secs(1800),
                                             ));
                                             standby_relay_owns_output = true;
                                             // #2263: see the helper-fn
@@ -4415,14 +4541,15 @@ pub(super) fn spawn_turn_bridge(
                 "recovery session died",
             )
             .await;
-            // Auto-retry with Discord history
-            let gateway_c = gateway.clone();
-            let retry_text = user_text_owned.clone();
-            tokio::spawn(async move {
-                gateway_c
-                    .schedule_retry_with_history(channel_id, user_msg_id, &retry_text)
-                    .await;
-            });
+            // #2452 H6: schedule the auto-retry via the explicit
+            // completion path so the dedup lockout is released as soon
+            // as scheduling resolves (≤ 120s safety net inside helper).
+            spawn_retry_with_history_with_release(
+                gateway.clone(),
+                channel_id,
+                user_msg_id,
+                user_text_owned.clone(),
+            );
             // Replace placeholder with recovery notice (don't delete — avoids visual gap)
             let _ = gateway
                 .edit_message(
@@ -4680,26 +4807,33 @@ pub(super) fn spawn_turn_bridge(
                     "resume failed in response output",
                 )
                 .await;
-                // Auto-retry with Discord history context
-                let gateway_c = gateway.clone();
-                let retry_text = user_text_owned.clone();
-                tokio::spawn(async move {
-                    gateway_c
-                        .schedule_retry_with_history(channel_id, user_msg_id, &retry_text)
-                        .await;
-                });
+                // #2452 H6: explicit completion path — see helper docs.
+                spawn_retry_with_history_with_release(
+                    gateway.clone(),
+                    channel_id,
+                    user_msg_id,
+                    user_text_owned.clone(),
+                );
                 full_response = String::new(); // Suppress error message to user
             } else if full_response.is_empty() {
-                let quick_exit = turn_start.elapsed().as_secs() < 10;
-                let quick_empty_resume = if quick_exit && rx_disconnected {
-                    let data = shared_owned.core.lock().await;
-                    data.sessions
-                        .get(&channel_id)
-                        .and_then(|s| s.session_id.as_ref())
-                        .is_some()
-                } else {
-                    false
-                };
+                // #2451 H5 graduation: the authoritative resume-failure
+                // witness is the absence of `StreamMessage::Init` after a
+                // turn that attempted resume. `attempted_resume` is the
+                // turn-start snapshot of the provider session_id (taken
+                // before any reset_session_for_auto_retry side effect),
+                // and `session_handshake_seen` is flipped inside the
+                // `Init` handler. The old `quick_exit < 10s` test is kept
+                // as a 30s safety backstop for providers whose `Init`
+                // emission is unreliable (e.g. gemini may not emit Init
+                // on resume success).
+                let attempted_resume = had_prior_session_id_at_turn_start;
+                let resume_likely_failed_by_handshake =
+                    attempted_resume && !session_handshake_seen && rx_disconnected;
+                // Backstop only — wider threshold to keep false positives
+                // away from healthy fast turns.
+                let quick_exit_backstop = turn_start.elapsed().as_secs() < 30;
+                let quick_empty_resume =
+                    resume_likely_failed_by_handshake || (quick_exit_backstop && rx_disconnected && attempted_resume);
                 // Fallback: try to extract response from tmux output file
                 if quick_empty_resume {
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -4752,13 +4886,13 @@ pub(super) fn spawn_turn_bridge(
                         "stale session_id in recovered output",
                     )
                     .await;
-                    let gateway_c = gateway.clone();
-                    let retry_text = user_text_owned.clone();
-                    tokio::spawn(async move {
-                        gateway_c
-                            .schedule_retry_with_history(channel_id, user_msg_id, &retry_text)
-                            .await;
-                    });
+                    // #2452 H6: explicit completion path — see helper docs.
+                    spawn_retry_with_history_with_release(
+                        gateway.clone(),
+                        channel_id,
+                        user_msg_id,
+                        user_text_owned.clone(),
+                    );
                     full_response = String::new();
                 } else {
                     // Check for resume failure via other methods
@@ -4788,30 +4922,38 @@ pub(super) fn spawn_turn_bridge(
                             "stale session_id in output file",
                         )
                         .await;
-                        let gateway_c = gateway.clone();
-                        let retry_text = user_text_owned.clone();
-                        tokio::spawn(async move {
-                            gateway_c
-                                .schedule_retry_with_history(channel_id, user_msg_id, &retry_text)
-                                .await;
-                        });
+                        // #2452 H6: explicit completion path — see helper.
+                        spawn_retry_with_history_with_release(
+                            gateway.clone(),
+                            channel_id,
+                            user_msg_id,
+                            user_text_owned.clone(),
+                        );
                         full_response = String::new();
                     }
-                    // Method 2: quick exit (<10s) + empty response + had a session_id to resume
-                    if !resume_failed && quick_exit && rx_disconnected {
-                        let attempted_resume = {
-                            let data = shared_owned.core.lock().await;
-                            data.sessions
-                                .get(&channel_id)
-                                .and_then(|s| s.session_id.as_ref())
-                                .is_some()
-                        };
-                        if attempted_resume {
+                    // #2451 H5 Method 2: authoritative resume-failure
+                    // classification via the explicit `Init` handshake
+                    // witness. The legacy `quick_exit < 10s` test now
+                    // serves only as the 30s safety backstop above. If
+                    // `attempted_resume` was true AND we never saw `Init`
+                    // AND rx disconnected, the provider almost certainly
+                    // failed to bind the prior session_id. The original
+                    // `core.sessions` re-fetch is replaced by the
+                    // turn-start snapshot so the recheck cannot race a
+                    // prior reset_session_for_auto_retry.
+                    if !resume_failed
+                        && rx_disconnected
+                        && attempted_resume
+                        && (!session_handshake_seen || quick_exit_backstop)
+                    {
+                        {
                             resume_failed = true;
                             resume_failure_detected = true;
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!(
-                                "  [{ts}] ⚠ Quick exit with empty response — auto-retrying with fresh session (channel {})",
+                                "  [{ts}] ⚠ Empty response with no Init handshake (session_handshake_seen={}, elapsed={}s) — auto-retrying with fresh session (channel {})",
+                                session_handshake_seen,
+                                turn_start.elapsed().as_secs(),
                                 channel_id
                             );
                             reset_session_for_auto_retry(
@@ -4825,17 +4967,13 @@ pub(super) fn spawn_turn_bridge(
                                 "quick exit with empty response",
                             )
                             .await;
-                            let gateway_c = gateway.clone();
-                            let retry_text = user_text_owned.clone();
-                            tokio::spawn(async move {
-                                gateway_c
-                                    .schedule_retry_with_history(
-                                        channel_id,
-                                        user_msg_id,
-                                        &retry_text,
-                                    )
-                                    .await;
-                            });
+                            // #2452 H6: explicit completion path.
+                            spawn_retry_with_history_with_release(
+                                gateway.clone(),
+                                channel_id,
+                                user_msg_id,
+                                user_text_owned.clone(),
+                            );
                             full_response = String::new();
                         }
                     }

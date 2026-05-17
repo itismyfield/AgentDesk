@@ -958,6 +958,18 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
     states
 }
 
+/// #2448: explicit completion signal published from the turn_bridge
+/// CompletionGuard so downstream listeners (currently the standby JSONL
+/// relay) can exit promptly instead of polling against a wall-clock
+/// timeout. Variants are intentionally narrow; add cases as new
+/// listeners need them.
+#[derive(Debug, Clone)]
+pub(in crate::services::discord) enum InflightSignal {
+    /// The turn_bridge task for `channel_id` reached its terminal drop —
+    /// any per-turn relay tasks bound to this channel may now exit.
+    Completed { channel_id: u64 },
+}
+
 /// #1446 Layer 1 — `inflight_state_is_stale` is a pure helper with no
 /// filesystem or runtime dependencies, so we keep its test always-on
 /// (`#[cfg(test)]`) rather than gating it on the `legacy-sqlite-tests`

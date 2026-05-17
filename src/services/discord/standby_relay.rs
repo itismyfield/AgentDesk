@@ -31,11 +31,18 @@ use serenity::model::id::{ChannelId, MessageId};
 
 use super::SharedData;
 use super::formatting;
-use super::inflight::InflightTurnState;
+use super::inflight::{InflightSignal, InflightTurnState};
 use crate::services::provider::ProviderKind;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(900); // 15 min
+/// #2448 graduation: the 900s (15min) cap was the heuristic stop signal —
+/// "after this long the primary turn is presumed dead". Now that
+/// `CompletionGuard` broadcasts `InflightSignal::Completed` explicitly,
+/// the wall-clock deadline is demoted to a pure safety backstop: it only
+/// fires when neither the broadcast (same-node) nor the on-disk inflight
+/// poll (cross-node) ever observe completion. 30 min comfortably covers
+/// any sane long-running turn.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 const MAX_FILE_BYTES_PER_TICK: u64 = 1_048_576; // 1 MiB safety cap
 const INFLIGHT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -59,6 +66,12 @@ pub(super) async fn run_standby_relay(
     let mut last_inflight_heartbeat = Instant::now();
     // Buffer for incomplete trailing line across reads.
     let mut tail_buf = String::new();
+    // #2448: subscribe BEFORE the first poll tick so a `Completed` broadcast
+    // emitted while we are setting up is queued instead of lost. Lag is
+    // expected on heavy load — `RecvError::Lagged` is treated as "you may
+    // have missed an exit-eligible signal" and triggers a force-poll +
+    // state re-fetch on the next tick (matches the issue pitfalls section).
+    let mut inflight_signals = shared.inflight_signals.subscribe();
     let ts_start = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts_start}] 👁 standby_relay started for channel {} from offset {} (placeholder={:?})",
@@ -80,11 +93,40 @@ pub(super) async fn run_standby_relay(
         if Instant::now() > deadline {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
-                "  [{ts}] ⚠ standby_relay timeout for channel {} (offset={}, no result event)",
+                "  [{ts}] ⚠ standby_relay deadline reached for channel {} (offset={}, no completion signal or result event observed in {}s — safety backstop)",
                 channel_id.get(),
-                current_offset
+                current_offset,
+                timeout.as_secs()
             );
             return;
+        }
+        // #2448: drain the broadcast queue NON-blocking before each poll
+        // tick. If we observe `Completed { channel_id: self }` here, the
+        // primary turn_bridge has dropped its `CompletionGuard` and any
+        // residual JSONL `result` event was either consumed by the bridge
+        // (leader path) or will land on the next file-poll tick. Either
+        // way the relay can exit promptly.
+        loop {
+            use tokio::sync::broadcast::error::TryRecvError;
+            match inflight_signals.try_recv() {
+                Ok(InflightSignal::Completed { channel_id: c }) if c == channel_id.get() => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 👁 standby_relay exit on InflightSignal::Completed for channel {} (offset={})",
+                        channel_id.get(),
+                        current_offset
+                    );
+                    return;
+                }
+                Ok(_) => continue, // other channels — ignore
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Lagged(_)) => {
+                    // Force-poll on next tick; re-fetch state happens via
+                    // the inflight heartbeat path below.
+                    break;
+                }
+                Err(TryRecvError::Closed) => break, // sender dropped — keep polling
+            }
         }
         if last_inflight_heartbeat.elapsed() >= INFLIGHT_HEARTBEAT_INTERVAL {
             refresh_standby_inflight_heartbeat(
