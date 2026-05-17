@@ -412,10 +412,37 @@ pub async fn upsert_issue_spec(
 /// `SessionDiscovery` (Epic #2285 / E2, issue #2344). Read-only — the registry
 /// itself is leader-only writeable, but the snapshot is safe to expose on any
 /// node so dashboards can scrape every host.
+///
+/// E5 (#2412) augments each entry with a `relay_frames_received` field
+/// sourced from the supervisor-owned [`RelayProducerRegistry`], so operators
+/// can confirm the session-bound relay is no longer a zero-frame path after
+/// `cluster.session_bound_relay_enabled` was flipped on. A field of `0` on a
+/// session that should be producing output is the canonical signal that the
+/// producer wiring regressed.
 pub async fn list_sessions(_state: State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let registry = crate::services::cluster::session_registry::global_session_registry();
     let entries = registry.list_matched();
-    let sessions: Vec<serde_json::Value> = entries.iter().map(|e| e.to_json()).collect();
+    let producers =
+        crate::services::cluster::relay_producer_registry::global_relay_producer_registry();
+    let frames_by_session = producers.frames_received_snapshot();
+
+    let sessions: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            let mut obj = e.to_json();
+            let frames = frames_by_session
+                .get(&e.matched.expected_session_name)
+                .copied()
+                .unwrap_or(0);
+            if let serde_json::Value::Object(map) = &mut obj {
+                map.insert(
+                    "relay_frames_received".to_string(),
+                    serde_json::Value::Number(frames.into()),
+                );
+            }
+            obj
+        })
+        .collect();
     let payload = json!({
         "count": sessions.len(),
         "sessions": sessions,

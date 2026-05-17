@@ -88,10 +88,9 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal_pane_d
     channel_id: ChannelId,
     expected_tmux_session_name: &str,
 ) {
-    let Some(state) = crate::services::discord::inflight::load_inflight_state(
-        provider,
-        channel_id.get(),
-    ) else {
+    let Some(state) =
+        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
+    else {
         return;
     };
     if state.tmux_session_name.as_deref() != Some(expected_tmux_session_name) {
@@ -107,6 +106,59 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal_pane_d
     }
     let expected_user_msg_id = state.user_msg_id;
     emit_explicit_inflight_cleanup_signal(provider, channel_id, expected_user_msg_id, "pane_dead");
+}
+
+/// E5 (#2412): forward a freshly-read tmux output chunk into the
+/// supervisor-owned [`StreamRelay`] (if one exists for the session). The
+/// supervisor's [`RelayProducerRegistry`] is the bridge — it hands the
+/// production tmux watcher a clonable
+/// [`crate::services::cluster::stream_relay::RelayProducer`] keyed by
+/// `tmux_session_name`. The producer's MPSC absorbs the chunk; the
+/// relay task drains it into the configured [`RelaySink`]
+/// ([`crate::services::cluster::registry_adapter_sink::RegistryAdapterSink`]
+/// in production, where it counts the frame for the
+/// `/api/cluster/sessions` diagnostic).
+///
+/// `cached_producer` caches a single producer clone to avoid taking the
+/// registry RwLock on every chunk read; it is refreshed from the registry
+/// when the cache is empty or when an attempted send observed a torn-down
+/// relay (`try_send_frame` returned `false`). When the registry has no
+/// producer for this session (flag off, supervisor not running, or this
+/// session simply not in the registry's matched set) the function is a
+/// total no-op and adds no measurable overhead vs the pre-E5 hot path.
+fn forward_chunk_to_supervisor_relay(
+    tmux_session_name: &str,
+    chunk: &[u8],
+    registry: &std::sync::Arc<
+        crate::services::cluster::relay_producer_registry::RelayProducerRegistry,
+    >,
+    cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
+) {
+    if chunk.is_empty() {
+        return;
+    }
+    if cached_producer.is_none() {
+        *cached_producer = registry.get_producer(tmux_session_name);
+    }
+    let Some(producer) = cached_producer.as_ref() else {
+        return;
+    };
+    // The relay treats each `try_send_frame` call as one frame. We pass the
+    // chunk verbatim (UTF-8 lossy) rather than re-splitting on newlines so
+    // partial JSONL lines that split across reads stay together — the
+    // legacy reader does its own newline buffering in
+    // `process_watcher_lines`. Tmux output is JSONL, so any downstream
+    // structured-consumer the supervisor sink grows in a later issue can
+    // do the same newline buffering.
+    let payload = String::from_utf8_lossy(chunk).into_owned();
+    let still_alive = producer.try_send_frame(payload);
+    if !still_alive {
+        // Relay was torn down between our registry read and the send —
+        // drop the cache so the next chunk re-resolves. If the supervisor
+        // republishes for the same session name (Updated event), the
+        // next call will hit the new producer.
+        *cached_producer = None;
+    }
 }
 
 async fn persist_watcher_provider_session_id(
@@ -361,6 +413,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         "  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset}"
     );
 
+    // E5 (#2412): cache the supervisor-owned StreamRelay producer for this
+    // tmux session, if the supervisor is running and has matched the
+    // session. `None` covers three legitimate cases:
+    //   1. `cluster.session_bound_relay_enabled = false` (supervisor never
+    //      spawned, registry empty).
+    //   2. SessionDiscovery hasn't yet observed this session — the cache is
+    //      refreshed below per chunk-read in that case.
+    //   3. This watcher attached to a session the registry doesn't know
+    //      (e.g. legacy session name pattern). The legacy delivery path is
+    //      unaffected; the supervisor-owned relay simply stays uninvolved.
+    let producer_registry =
+        crate::services::cluster::relay_producer_registry::global_relay_producer_registry();
+    // Cached clone so we don't take the registry RwLock on every chunk. The
+    // supervisor only ever publishes ONE producer per session name, but it
+    // CAN republish after an Updated event (channel rebind). We refresh on
+    // miss and after every send-failure (relay torn down → producer stale).
+    let mut cached_relay_producer = producer_registry.get_producer(&tmux_session_name);
+
     // #1134: mark the attach moment so `record_first_relay` (below) can compute
     // attach→first-relay latency. Single instrumentation point covers all
     // spawn sites (recovery_engine, turn_bridge, tmux self-recovery).
@@ -608,7 +678,25 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         .await;
 
         let (data, new_offset) = match read_result {
-            Ok(Ok(Ok((data, off)))) => (data, off),
+            Ok(Ok(Ok((data, off)))) => {
+                // E5 (#2412): mirror the freshly-read chunk into the
+                // supervisor-owned StreamRelay if one exists for this
+                // session. This is the *producer* side of the supervisor
+                // pipeline — without this call, `try_send_frame` is never
+                // invoked in production and the new relay path is dark
+                // (the bug #2412 fixes). Failures are silent: legacy
+                // delivery via the rest of this function is the source of
+                // truth; the supervisor-owned path observes via
+                // `RegistryAdapterSink` until the legacy spawn site is
+                // gated off in a later epic-#2285 issue.
+                forward_chunk_to_supervisor_relay(
+                    &tmux_session_name,
+                    &data,
+                    &producer_registry,
+                    &mut cached_relay_producer,
+                );
+                (data, off)
+            }
             _ => {
                 match tmux_liveness_decision(
                     cancel.load(Ordering::Relaxed),
@@ -877,6 +965,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 match read_more {
                     Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
                         current_offset = off;
+                        // E5 (#2412): producer-side wiring for the
+                        // supervisor-owned StreamRelay. Same rationale as
+                        // the outer read site (~25 lines up in this fn) —
+                        // every chunk read off the tmux output file is also
+                        // pushed into the relay's MPSC so the new path
+                        // receives frames in production. Without this the
+                        // E3/E4 supervisor was operating on an empty pipe
+                        // and `cluster.session_bound_relay_enabled` had to
+                        // stay `false`.
+                        forward_chunk_to_supervisor_relay(
+                            &tmux_session_name,
+                            &chunk,
+                            &producer_registry,
+                            &mut cached_relay_producer,
+                        );
                         maybe_refresh_watcher_activity_heartbeat(
                             None::<&crate::db::Db>,
                             shared.pg_pool.as_ref(),

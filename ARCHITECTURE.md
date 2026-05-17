@@ -369,6 +369,7 @@ src/
 │   │   ├── intake_worker.rs
 │   │   ├── mod.rs
 │   │   ├── registry_adapter_sink.rs
+│   │   ├── relay_producer_registry.rs
 │   │   ├── session_discovery.rs
 │   │   ├── session_matcher.rs
 │   │   ├── session_registry.rs
@@ -696,6 +697,7 @@ src/
 │   │   └── playback.rs
 │   ├── announce_meta.rs
 │   ├── barge_in.rs
+│   ├── cancel_tombstone.rs
 │   ├── commands.rs
 │   ├── config.rs
 │   ├── metrics.rs

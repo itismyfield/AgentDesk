@@ -26,7 +26,6 @@ import type {
   SettingsTr,
 } from "./SettingsPanelTypes";
 
-const FsmEditor = lazy(() => import("../agent-manager/FsmEditor"));
 const PipelineVisualEditor = lazy(() => import("../agent-manager/PipelineVisualEditor"));
 
 interface SettingsPipelinePanelProps {
@@ -132,10 +131,10 @@ export function SettingsPipelinePanel({
           </SettingsCallout>
 
           <SettingsSubsection
-            title={tr("FSM 비주얼 에디터", "FSM visual editor")}
+            title={tr("세부 흐름 편집기", "Detailed workflow editor")}
             description={tr(
-              "대상을 고른 뒤 상태와 전환을 캔버스에서 조정합니다.",
-              "Pick a target, then adjust stages and transitions on the canvas.",
+              "대상을 고른 뒤 단계, 전환, 실행 순서를 한 화면에서 조정합니다.",
+              "Pick a target, then adjust stages, transitions, and execution order in one editor.",
             )}
           >
             {pipelineSelectorLoading && pipelineRepos.length === 0 ? (
@@ -201,47 +200,23 @@ export function SettingsPipelinePanel({
                     <Suspense
                       fallback={(
                         <SettingsEmptyState className="text-sm">
-                          {tr("FSM 에디터를 준비하는 중...", "Preparing FSM editor...")}
+                          {tr("세부 흐름 편집기를 준비하는 중...", "Preparing workflow editor...")}
                         </SettingsEmptyState>
                       )}
                     >
-                      <FsmEditor
+                      <PipelineVisualEditor
                         tr={tr}
                         locale={isKo ? "ko" : "en"}
                         repo={selectedPipelineRepo}
                         agents={pipelineAgents}
                         selectedAgentId={selectedPipelineAgentId}
+                        defaultCollapsed={false}
                       />
                     </Suspense>
-
-                    <SettingsSubsection
-                      title={tr("세부 흐름 편집기", "Detailed workflow editor")}
-                      description={tr(
-                        "단계별 실행 순서와 제한 시간을 더 자세히 조정합니다.",
-                        "Fine-tune execution order and time limits for each stage.",
-                      )}
-                    >
-                      <Suspense
-                        fallback={(
-                          <SettingsEmptyState className="text-sm">
-                            {tr("고급 파이프라인 편집기를 준비하는 중...", "Preparing advanced pipeline editor...")}
-                          </SettingsEmptyState>
-                        )}
-                      >
-                        <PipelineVisualEditor
-                          tr={tr}
-                          locale={isKo ? "ko" : "en"}
-                          repo={selectedPipelineRepo}
-                          agents={pipelineAgents}
-                          selectedAgentId={selectedPipelineAgentId}
-                          variant="advanced"
-                        />
-                      </Suspense>
-                    </SettingsSubsection>
                   </div>
                 ) : (
                   <SettingsEmptyState className="text-sm">
-                    {tr("repo를 선택하면 FSM 에디터가 열립니다.", "Select a repo to open the FSM editor.")}
+                    {tr("저장소를 선택하면 편집기가 열립니다.", "Select a repository to open the editor.")}
                   </SettingsEmptyState>
                 )}
               </div>

@@ -63,6 +63,8 @@
   - `src/engine/transition.rs` (1309 lines, giant-file).
   - `src/engine/ops/kanban_ops.rs` (1116 lines, giant-file).
   - `src/engine/ops/db_ops.rs` (1652 lines, giant-file).
+  - `src/engine/loader.rs` (1670 lines, giant-file) — engine loader / QuickJS
+    validator surface; split before adding non-bugfix behavior.
   - `src/engine/intent.rs` (873 lines, retained migration-sensitive surface).
   - `src/pipeline.rs` (2125 lines, giant-file).
 - active_callsite_coverage: n/a (no canonical replacement yet).
@@ -120,6 +122,9 @@
   - `src/services/discord/health/recovery.rs` (1433 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior).
   - `src/services/discord/placeholder_controller.rs` (1237 lines).
+  - `src/services/discord/placeholder_sweeper.rs` (1022 lines; placeholder
+    sweep loop and delivered-response idempotency surface — bugfix only
+    outside a split plan).
   - `src/services/discord/router/message_handler.rs` (7013 lines).
   - `src/services/discord/meeting_orchestrator.rs` (3779 lines).
   - `src/services/discord/turn_bridge/mod.rs` (4267 lines).
@@ -359,6 +364,8 @@ The remaining giant-file modules under `src/services/` not covered above:
   (GitClient extraction).
 - `src/services/platform/binary_resolver.rs` (1377).
 - `src/services/mcp_config.rs` (1072).
+- `src/services/process.rs` (1158) — process lifecycle / PID-tree identity
+  surface. Split before adding non-bugfix behavior.
 - `src/services/routines/{store.rs (2755), loader.rs (2013),
   discord_log.rs (1056)}` — durable routine storage, script loading, and
   Discord notification plumbing. Split before broadening behavior outside the

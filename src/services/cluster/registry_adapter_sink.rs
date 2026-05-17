@@ -257,4 +257,92 @@ mod tests {
         registry.remove(&m.expected_session_name);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), supervisor).await;
     }
+
+    /// E5 (#2412): end-to-end producer-side activation. This is the test
+    /// the issue's acceptance criterion calls for — frames flow into the
+    /// supervisor-owned StreamRelay (NOT a sibling probe relay) from the
+    /// producer registry, prove they land in the sink, and confirm
+    /// `/api/cluster/sessions` would see a non-zero
+    /// `relay_frames_received`.
+    #[tokio::test]
+    async fn supervisor_owned_relay_receives_frames_via_producer_registry() {
+        use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
+        use crate::services::cluster::session_registry::SessionRegistry;
+        use crate::services::cluster::watcher_supervisor::{
+            SupervisorConfig, run_watcher_supervisor_loop_with_registry_and_producers,
+        };
+
+        let registry = Arc::new(SessionRegistry::new());
+        let producers = Arc::new(RelayProducerRegistry::new());
+        let sink_arc = Arc::new(RegistryAdapterSink::new());
+        let sink_trait: Arc<dyn RelaySink> = sink_arc.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let registry_clone = registry.clone();
+        let producers_clone = producers.clone();
+        let sink_clone = sink_trait.clone();
+        let shutdown_clone = shutdown.clone();
+        let supervisor = tokio::spawn(async move {
+            run_watcher_supervisor_loop_with_registry_and_producers(
+                SupervisorConfig::for_test(),
+                sink_clone,
+                shutdown_clone,
+                registry_clone,
+                producers_clone,
+            )
+            .await;
+        });
+
+        let m = matched("c-e5-prod");
+        registry.upsert(m.clone(), Some("mac-mini"));
+
+        // Wait until the supervisor publishes the producer.
+        let mut producer = None;
+        for _ in 0..200 {
+            if let Some(p) = producers.get_producer(&m.expected_session_name) {
+                producer = Some(p);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let producer = producer.expect("supervisor must publish producer for matched session");
+
+        for i in 0..3 {
+            assert!(
+                producer.try_send_frame(format!("e5-frame-{i}")),
+                "producer-side send must succeed"
+            );
+        }
+
+        // The supervisor-owned relay drains into the adapter sink — wait
+        // until the per-session counter reaches the expected value. This is
+        // the assertion that #2412 explicitly demanded ("new code path
+        // actually receives frames from production tmux output when flag is
+        // on").
+        for _ in 0..200 {
+            if sink_arc.frames_for(&m.expected_session_name) >= 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            sink_arc.frames_for(&m.expected_session_name),
+            3,
+            "supervisor-owned relay must deliver every producer frame to the sink"
+        );
+
+        // /api/cluster/sessions diagnostic feed — frame count must be visible
+        // per session so an unintended zero-frame regression is detectable
+        // (acceptance criterion 3).
+        let frames_snapshot = producers.frames_received_snapshot();
+        assert_eq!(
+            frames_snapshot.get(&m.expected_session_name).copied(),
+            Some(3),
+            "per-session frame count must be retrievable for diagnostics"
+        );
+
+        shutdown.store(true, Ordering::Release);
+        registry.remove(&m.expected_session_name);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), supervisor).await;
+    }
 }

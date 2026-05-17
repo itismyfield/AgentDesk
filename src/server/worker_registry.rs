@@ -387,12 +387,14 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 11] = [
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
         execution_scope: WorkerExecutionScope::WorkerLocal,
         health_owner: "watcher-supervisor tracing + per-relay metrics",
-        notes: "Epic #2285 / E3 (#2345), activated by E4 (#2346). Gated by \
-                cluster.session_bound_relay_enabled (default true since E4); flipping the flag \
+        notes: "Epic #2285 / E3 (#2345), wired through E4 (#2411) and E5 (#2412). Gated by \
+                cluster.session_bound_relay_enabled (default true since E5); flipping the flag \
                 off restores the legacy turn-bound watcher as the sole delivery path. \
                 Worker-local because tmux is host-scoped — relays live next to the sessions \
                 they observe. Uses RegistryAdapterSink (observation-only) so flag-on activation \
-                does not double-deliver alongside the still-active legacy tmux watcher; a \
+                does not double-deliver alongside the still-active legacy tmux watcher. E5 wires \
+                the producer side via RelayProducerRegistry so tmux_watcher pushes every chunk \
+                it reads into the supervisor-owned relay — the new path is no longer dark. A \
                 follow-up issue swaps the legacy spawn site for direct sink-driven delivery.",
     },
     WorkerSpec {
@@ -723,12 +725,15 @@ impl SupervisedWorkerRegistry {
                 // its own relays. No leader gating — peer hosts can't observe
                 // each other's sessions anyway.
                 self.register_tokio(spec, async move {
-                    // E4 (#2346): the supervisor runs against the production
-                    // observation sink. Delivery still flows through the
-                    // legacy turn-bound watcher; the sink only records frame
-                    // metrics so the new path's lifecycle is exercised end-
-                    // to-end before subsequent issues swap the legacy spawn
-                    // site for direct sink-driven delivery.
+                    // E4 (#2411) + E5 (#2412): the supervisor runs against
+                    // the production observation sink. Delivery still flows
+                    // through the legacy turn-bound watcher; the sink only
+                    // records frame metrics. E5 added the producer side —
+                    // `tmux_watcher` now publishes every read chunk into
+                    // the supervisor-owned relay via
+                    // `RelayProducerRegistry`, so the new path actually
+                    // receives frames in production instead of being a
+                    // dark pipe.
                     crate::services::cluster::registry_adapter_sink::run_with_registry_adapter_sink(
                         shutdown,
                     )

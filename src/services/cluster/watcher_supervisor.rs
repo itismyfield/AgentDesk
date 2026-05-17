@@ -32,14 +32,18 @@
 //!
 //! ## Flag gate
 //!
-//! `cluster.session_bound_relay_enabled` (default `true` since E4 / #2346).
+//! `cluster.session_bound_relay_enabled` (default `true` since E5 / #2412).
 //! When `false`, the supervisor is not started by the worker registry and
 //! the legacy turn-bound relay path remains the only delivery channel —
 //! that escape hatch lets operators disable the new path if a regression
 //! surfaces. Under the default-on configuration the supervisor runs against
 //! the production observation sink
-//! ([`super::registry_adapter_sink::RegistryAdapterSink`]); the legacy
-//! turn-bound watcher still owns Discord delivery during the E4 release.
+//! ([`super::registry_adapter_sink::RegistryAdapterSink`]) and the
+//! production tmux frame producer (`services::discord::tmux_watcher`)
+//! pushes frames into the supervisor-owned relay via
+//! [`super::relay_producer_registry::RelayProducerRegistry`]. The legacy
+//! turn-bound watcher still owns Discord delivery; the new path is
+//! observation-only until a later issue swaps the legacy spawn site.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,6 +52,7 @@ use std::time::Duration;
 
 use tokio::sync::broadcast::error::RecvError;
 
+use super::relay_producer_registry::{RelayProducerRegistry, global_relay_producer_registry};
 use super::session_registry::{
     RegisteredSession, RegistryChange, SessionRegistry, global_session_registry,
 };
@@ -112,24 +117,40 @@ impl ActiveRelays {
 /// handle that the caller must `await` for graceful shutdown on removals,
 /// so the supervisor loop can drop locks before awaiting. Pure synchronous
 /// helper — easy to unit-test without spinning the broadcast loop.
+///
+/// `producers` is the side-table that exposes a clonable
+/// [`super::stream_relay::RelayProducer`] keyed by tmux session name. The
+/// production tmux frame producer (`tmux_watcher`) looks up its session
+/// there; E5 (#2412) wires this up so the supervisor-owned relay actually
+/// receives frames instead of being a dark pipe (see issue body).
 fn apply_change(
     active: &mut ActiveRelays,
     change: &RegistryChange,
     sink: &Arc<dyn RelaySink>,
+    producers: &RelayProducerRegistry,
 ) -> Option<StreamRelayHandle> {
     match change {
         RegistryChange::Added(entry) => {
-            spawn_if_absent(active, entry, sink);
+            spawn_if_absent(active, entry, sink, producers);
             None
         }
         RegistryChange::Updated(entry) => {
             // Tear down and respawn: channel binding may have changed, and
-            // the relay caches the matched channel id internally.
-            let old = active.remove(&entry.matched.expected_session_name);
-            spawn_if_absent(active, entry, sink);
+            // the relay caches the matched channel id internally. The
+            // producer registry follows the same lifecycle — deregister
+            // first so an in-flight watcher write either hits the old
+            // (about-to-drain) producer or sees `None`; respawn re-registers
+            // under the same session name.
+            let session = entry.matched.expected_session_name.clone();
+            producers.deregister(&session);
+            let old = active.remove(&session);
+            spawn_if_absent(active, entry, sink, producers);
             old
         }
-        RegistryChange::Removed { session_name } => active.remove(session_name),
+        RegistryChange::Removed { session_name } => {
+            producers.deregister(session_name);
+            active.remove(session_name)
+        }
     }
 }
 
@@ -137,6 +158,7 @@ fn spawn_if_absent(
     active: &mut ActiveRelays,
     entry: &RegisteredSession,
     sink: &Arc<dyn RelaySink>,
+    producers: &RelayProducerRegistry,
 ) {
     let session = entry.matched.expected_session_name.clone();
     if active.contains(&session) {
@@ -153,6 +175,11 @@ fn spawn_if_absent(
         "watcher-supervisor: spawning StreamRelay"
     );
     let handle = spawn_stream_relay(entry.matched.clone(), sink.clone());
+    // Publish the producer BEFORE inserting into `active` so a parallel
+    // tmux watcher tick that beats the insert still finds the producer —
+    // try_send_frame on a freshly-spawned relay is safe (the relay task is
+    // already polling rx).
+    producers.register(session.clone(), handle.producer());
     active.insert(session, handle);
 }
 
@@ -164,6 +191,7 @@ fn full_reconcile(
     active: &mut ActiveRelays,
     registry: &SessionRegistry,
     sink: &Arc<dyn RelaySink>,
+    producers: &RelayProducerRegistry,
 ) -> Vec<StreamRelayHandle> {
     let snapshot = registry.list_matched();
     let live_names: std::collections::HashSet<String> = snapshot
@@ -180,6 +208,7 @@ fn full_reconcile(
     let mut to_shutdown = Vec::with_capacity(stale.len());
     for name in stale {
         if let Some(handle) = active.remove(&name) {
+            producers.deregister(&name);
             tracing::info!(
                 session = %name,
                 "watcher-supervisor: tearing down relay during reconcile (no registry entry)"
@@ -188,7 +217,7 @@ fn full_reconcile(
         }
     }
     for entry in &snapshot {
-        spawn_if_absent(active, entry, sink);
+        spawn_if_absent(active, entry, sink, producers);
     }
     to_shutdown
 }
@@ -211,21 +240,45 @@ pub async fn run_watcher_supervisor_loop(
     shutdown: Arc<AtomicBool>,
 ) {
     let registry = global_session_registry();
-    run_watcher_supervisor_loop_with_registry(config, sink, shutdown, registry).await;
+    let producers = global_relay_producer_registry();
+    run_watcher_supervisor_loop_with_registry_and_producers(
+        config, sink, shutdown, registry, producers,
+    )
+    .await;
 }
 
-/// Test-friendly variant — accepts an explicit registry.
+/// Test-friendly variant — accepts an explicit registry. Uses the global
+/// producer registry; tests that need their own producer registry use
+/// [`run_watcher_supervisor_loop_with_registry_and_producers`] directly.
 pub async fn run_watcher_supervisor_loop_with_registry(
     config: SupervisorConfig,
     sink: Arc<dyn RelaySink>,
     shutdown: Arc<AtomicBool>,
     registry: Arc<SessionRegistry>,
 ) {
+    let producers = global_relay_producer_registry();
+    run_watcher_supervisor_loop_with_registry_and_producers(
+        config, sink, shutdown, registry, producers,
+    )
+    .await;
+}
+
+/// Full-control variant. The E5 (#2412) end-to-end test uses this to inject
+/// a fresh `RelayProducerRegistry` so the supervisor's producer-registry
+/// publish path is exercised without leaking handles into the global
+/// singleton between tests.
+pub async fn run_watcher_supervisor_loop_with_registry_and_producers(
+    config: SupervisorConfig,
+    sink: Arc<dyn RelaySink>,
+    shutdown: Arc<AtomicBool>,
+    registry: Arc<SessionRegistry>,
+    producers: Arc<RelayProducerRegistry>,
+) {
     let mut rx = registry.subscribe();
     let mut active = ActiveRelays::default();
 
     // Boot reconcile: pick up anything already in the registry.
-    let initial_teardowns = full_reconcile(&mut active, &registry, &sink);
+    let initial_teardowns = full_reconcile(&mut active, &registry, &sink, &producers);
     for handle in initial_teardowns {
         handle.shutdown().await;
     }
@@ -241,7 +294,7 @@ pub async fn run_watcher_supervisor_loop_with_registry(
         }
         match rx.recv().await {
             Ok(change) => {
-                let to_shutdown = apply_change(&mut active, &change, &sink);
+                let to_shutdown = apply_change(&mut active, &change, &sink, &producers);
                 if let Some(handle) = to_shutdown {
                     handle.shutdown().await;
                 }
@@ -251,7 +304,7 @@ pub async fn run_watcher_supervisor_loop_with_registry(
                     skipped,
                     "watcher-supervisor: broadcast lagged; running full reconcile"
                 );
-                let teardowns = full_reconcile(&mut active, &registry, &sink);
+                let teardowns = full_reconcile(&mut active, &registry, &sink, &producers);
                 for handle in teardowns {
                     handle.shutdown().await;
                 }
@@ -278,7 +331,8 @@ pub async fn run_watcher_supervisor_loop_with_registry(
         active_relays = active.len(),
         "watcher-supervisor shutting down — draining active relays"
     );
-    for (_session, handle) in active.drain() {
+    for (session, handle) in active.drain() {
+        producers.deregister(&session);
         handle.shutdown().await;
     }
 }
@@ -460,13 +514,26 @@ mod tests {
             first_seen_at: chrono::Utc::now(),
             last_seen_at: chrono::Utc::now(),
         };
-        let to_shutdown1 = apply_change(&mut active, &RegistryChange::Added(entry.clone()), &sink);
+        let producers = RelayProducerRegistry::new();
+        let to_shutdown1 = apply_change(
+            &mut active,
+            &RegistryChange::Added(entry.clone()),
+            &sink,
+            &producers,
+        );
         assert!(to_shutdown1.is_none());
         assert_eq!(active.len(), 1);
+        assert_eq!(producers.len(), 1);
         // Second Added for the same session must NOT spawn a second relay.
-        let to_shutdown2 = apply_change(&mut active, &RegistryChange::Added(entry.clone()), &sink);
+        let to_shutdown2 = apply_change(
+            &mut active,
+            &RegistryChange::Added(entry.clone()),
+            &sink,
+            &producers,
+        );
         assert!(to_shutdown2.is_none());
         assert_eq!(active.len(), 1, "duplicate Added is idempotent");
+        assert_eq!(producers.len(), 1);
 
         // Removed yields the previous handle for shutdown.
         let removed = apply_change(
@@ -475,6 +542,7 @@ mod tests {
                 session_name: m.expected_session_name.clone(),
             },
             &sink,
+            &producers,
         );
         assert!(removed.is_some());
         assert_eq!(active.len(), 0);
@@ -496,19 +564,180 @@ mod tests {
             first_seen_at: chrono::Utc::now(),
             last_seen_at: chrono::Utc::now(),
         };
-        let _ = apply_change(&mut active, &RegistryChange::Added(entry.clone()), &sink);
+        let producers = RelayProducerRegistry::new();
+        let _ = apply_change(
+            &mut active,
+            &RegistryChange::Added(entry.clone()),
+            &sink,
+            &producers,
+        );
         assert_eq!(active.len(), 1);
+        assert_eq!(producers.len(), 1);
 
         let mut updated = entry.clone();
         updated.matched.agent_id = "agent-renamed".to_string();
-        let prev = apply_change(&mut active, &RegistryChange::Updated(updated), &sink);
+        let prev = apply_change(
+            &mut active,
+            &RegistryChange::Updated(updated),
+            &sink,
+            &producers,
+        );
         assert!(
             prev.is_some(),
             "Updated must return the previous handle for teardown"
         );
         assert_eq!(active.len(), 1);
+        assert_eq!(
+            producers.len(),
+            1,
+            "Updated keeps exactly one producer entry (deregister-then-register)"
+        );
         if let Some(handle) = prev {
             handle.shutdown().await;
         }
+    }
+
+    /// E5 (#2412): the supervisor must register a clonable producer for each
+    /// spawned relay so the production tmux frame producer can resolve a
+    /// session name to a handle without poking at supervisor internals.
+    /// Without this wiring the relay would receive zero frames in
+    /// production (which was the bug #2412 spun off from #2411 to fix).
+    #[tokio::test]
+    async fn supervisor_publishes_producer_for_each_spawn() {
+        use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
+
+        let registry = Arc::new(SessionRegistry::new());
+        let producers = Arc::new(RelayProducerRegistry::new());
+        let sink: Arc<CountingSink> = Arc::new(CountingSink::default());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let registry_clone = registry.clone();
+        let producers_clone = producers.clone();
+        let sink_clone: Arc<dyn RelaySink> = sink.clone();
+        let shutdown_clone = shutdown.clone();
+        let supervisor = tokio::spawn(async move {
+            run_watcher_supervisor_loop_with_registry_and_producers(
+                SupervisorConfig::for_test(),
+                sink_clone,
+                shutdown_clone,
+                registry_clone,
+                producers_clone,
+            )
+            .await;
+        });
+
+        let m = matched("c-prod", ProviderKind::Claude);
+        registry.upsert(m.clone(), Some("mac-mini"));
+
+        // Wait until the supervisor reacts to the Added event.
+        wait_for(
+            || producers.get_producer(&m.expected_session_name).is_some(),
+            "supervisor publishes producer for newly-added session",
+        )
+        .await;
+
+        // The producer must actually push frames into the supervisor-owned
+        // relay (the bug #2412 fixes is `try_send_frame` was never called).
+        let producer = producers
+            .get_producer(&m.expected_session_name)
+            .expect("producer present");
+        for _ in 0..4 {
+            assert!(producer.try_send_frame("payload".into()));
+        }
+        // Frames flow through the relay into the CountingSink.
+        wait_for(
+            || sink.count(&m.expected_session_name) >= 4,
+            "sink observes producer-pushed frames",
+        )
+        .await;
+
+        // Removal deregisters the producer.
+        registry.remove(&m.expected_session_name);
+        wait_for(
+            || producers.get_producer(&m.expected_session_name).is_none(),
+            "supervisor deregisters producer on Removed",
+        )
+        .await;
+
+        shutdown.store(true, Ordering::Release);
+        // Publish a no-op event so the recv() unblocks.
+        let m2 = matched("c-prod-unblock", ProviderKind::Codex);
+        registry.upsert(m2, Some("mac-mini"));
+        let _ = tokio::time::timeout(Duration::from_secs(2), supervisor).await;
+    }
+
+    /// E5 (#2412) regression: cached `RelayProducer` clones outliving the
+    /// supervisor must NOT wedge the relay's shutdown. Pre-fix, the cached
+    /// clone (e.g. `tmux_watcher::cached_relay_producer`) kept the channel
+    /// open and the relay loop blocked on `rx.recv().await` forever — the
+    /// supervisor's `Removed`/`Updated` teardown then stalled inside
+    /// `handle.shutdown().await`. With receiver-side cancellation, teardown
+    /// completes promptly regardless of surviving sender clones.
+    #[tokio::test]
+    async fn supervisor_teardown_completes_with_outliving_producer_clone() {
+        use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
+
+        let registry = Arc::new(SessionRegistry::new());
+        let producers = Arc::new(RelayProducerRegistry::new());
+        let sink: Arc<CountingSink> = Arc::new(CountingSink::default());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let registry_clone = registry.clone();
+        let producers_clone = producers.clone();
+        let sink_clone: Arc<dyn RelaySink> = sink.clone();
+        let shutdown_clone = shutdown.clone();
+        let supervisor = tokio::spawn(async move {
+            run_watcher_supervisor_loop_with_registry_and_producers(
+                SupervisorConfig::for_test(),
+                sink_clone,
+                shutdown_clone,
+                registry_clone,
+                producers_clone,
+            )
+            .await;
+        });
+
+        let m = matched("c-wedge", ProviderKind::Claude);
+        registry.upsert(m.clone(), Some("mac-mini"));
+
+        // Wait until supervisor publishes the producer, then snapshot a
+        // clone and HOLD IT — this mimics `tmux_watcher::cached_relay_producer`
+        // pinning a sender across the supervisor's Removed teardown.
+        wait_for(
+            || producers.get_producer(&m.expected_session_name).is_some(),
+            "supervisor publishes producer",
+        )
+        .await;
+        let cached_clone = producers
+            .get_producer(&m.expected_session_name)
+            .expect("producer registered");
+
+        // Remove the session. Pre-fix, the supervisor's `handle.shutdown().await`
+        // wedged here because `cached_clone` kept the mpsc channel open.
+        let removed_at = std::time::Instant::now();
+        registry.remove(&m.expected_session_name);
+        wait_for(
+            || producers.get_producer(&m.expected_session_name).is_none(),
+            "supervisor deregisters producer after removal",
+        )
+        .await;
+        assert!(
+            removed_at.elapsed() < Duration::from_secs(5),
+            "supervisor teardown must not wedge on cached clone"
+        );
+
+        // The cached clone observes the shutdown flag — further sends fail
+        // fast instead of silently enqueueing into a dead channel.
+        assert!(
+            !cached_clone.try_send_frame("post-shutdown".into()),
+            "cached producer clone must refuse sends once relay has shut down"
+        );
+
+        // Supervisor itself shuts down cleanly.
+        shutdown.store(true, Ordering::Release);
+        let m_unblock = matched("c-wedge-unblock", ProviderKind::Codex);
+        registry.upsert(m_unblock, Some("mac-mini"));
+        let exited = tokio::time::timeout(Duration::from_secs(2), supervisor).await;
+        assert!(exited.is_ok(), "supervisor exits cleanly");
     }
 }

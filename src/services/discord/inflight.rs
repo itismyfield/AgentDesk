@@ -1510,12 +1510,8 @@ mod stall_recovery_tests {
         save_inflight_state_in_root(temp.path(), &next_turn).unwrap();
 
         // Stale completion for previous turn user_msg_id = 50 arrives now.
-        let outcome = clear_inflight_state_if_matches_in_root(
-            temp.path(),
-            &ProviderKind::Claude,
-            321,
-            50,
-        );
+        let outcome =
+            clear_inflight_state_if_matches_in_root(temp.path(), &ProviderKind::Claude, 321, 50);
         assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
 
         let still_there = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
@@ -1587,12 +1583,8 @@ mod stall_recovery_tests {
         let state = build_inflight_for_guard_tests(ProviderKind::Qwen, 8, 12_345);
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
-        let outcome = clear_inflight_state_if_matches_in_root(
-            temp.path(),
-            &ProviderKind::Qwen,
-            8,
-            0,
-        );
+        let outcome =
+            clear_inflight_state_if_matches_in_root(temp.path(), &ProviderKind::Qwen, 8, 0);
         assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
         assert_eq!(
             load_inflight_states_from_root(temp.path(), &ProviderKind::Qwen).len(),
@@ -1604,12 +1596,8 @@ mod stall_recovery_tests {
     #[test]
     fn clear_inflight_state_if_matches_missing_is_noop() {
         let temp = TempDir::new().unwrap();
-        let outcome = clear_inflight_state_if_matches_in_root(
-            temp.path(),
-            &ProviderKind::Claude,
-            42,
-            999,
-        );
+        let outcome =
+            clear_inflight_state_if_matches_in_root(temp.path(), &ProviderKind::Claude, 42, 999);
         assert_eq!(outcome, GuardedClearOutcome::Missing);
     }
 }
