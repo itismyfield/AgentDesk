@@ -2,7 +2,7 @@ use std::process::Output;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
@@ -197,15 +197,36 @@ fn wait_for_prompt_ready(session_name: &str, readiness: PromptReadinessKind) -> 
     let timeout = readiness.timeout();
     let start = Instant::now();
 
-    // 1) Event-driven fast path. Register a waiter on the global Notify *before*
-    //    checking the snapshot, so an Stop event that arrives in the gap below
-    //    is not missed (Notify::notified() is permit-buffered for the holder).
+    // 1) Cheap pre-check — if the prompt marker is already visible (common for
+    //    fresh turns at cold boot or follow-ups where the previous Stop has
+    //    already redrawn the prompt) we must NOT pay the hook event budget.
+    //    `notify_waiters()` does not buffer permits, so a Stop that fired
+    //    before this call would otherwise force us to wait the full event
+    //    budget despite the TUI being ready. This pre-check closes that gap.
+    let pre_snapshot = prompt_readiness_snapshot(session_name);
+    if pre_snapshot.prompt_marker_detected {
+        tracing::debug!(
+            tmux_session_name = session_name,
+            readiness = readiness.label(),
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "claude_tui prompt ready on pre-snapshot (no event wait needed)"
+        );
+        return Ok(());
+    }
+    if !pre_snapshot.tmux_pane_alive {
+        return Err("claude tui session died before prompt input was ready".to_string());
+    }
+
+    // 2) Event-driven fast path. Register a waiter on the global Notify so we
+    //    are woken as soon as the next Stop/SubagentStop hook arrives.
+    //    `Notify::notified()` only buffers a permit for `notify_one()`, not
+    //    `notify_waiters()`; the pre-check above plus the post-event snapshot
+    //    re-check below cover both edges of the race.
     let notify = crate::services::claude_tui::hook_server::prompt_ready_notify();
     let fast_path = wait_for_prompt_ready_event(notify, readiness.event_budget());
 
-    // Re-check the snapshot once regardless of fast-path outcome — the marker
-    // may already be visible (cheap success), and after a Stop the TUI needs
-    // a brief moment to redraw the prompt.
+    // Re-check the snapshot once regardless of fast-path outcome — after a
+    // Stop the TUI needs a brief moment to redraw the prompt marker.
     if matches!(fast_path, HookFastPathOutcome::Ready) {
         std::thread::sleep(PROMPT_READY_POST_EVENT_SETTLE);
     }
@@ -253,10 +274,34 @@ fn wait_for_prompt_ready_event(notify: Arc<Notify>, budget: Duration) -> HookFas
     };
 
     match Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
-        Err(_) => {
-            // No ambient runtime (e.g. unit tests outside `#[tokio::test]`).
-            // Spin up a minimal current-thread runtime for the wait.
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            // Safe to park the worker thread because the multi-thread runtime
+            // has other workers to keep driving tasks during the block.
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        }
+        _ => {
+            // Either no ambient runtime, or a current-thread runtime where
+            // `block_in_place` would panic and parking the only worker would
+            // deadlock the runtime. Run the wait on a dedicated thread with
+            // its own minimal current-thread runtime so we never block the
+            // caller's runtime.
+            wait_on_dedicated_thread(fut)
+        }
+    }
+}
+
+/// Drive `fut` to completion on a fresh OS thread with its own current-thread
+/// Tokio runtime. The thread join itself is a plain blocking syscall, which is
+/// safe regardless of the caller's runtime flavor (multi-thread or current-
+/// thread). Returns `Pending` if we fail to spawn or build the runtime so the
+/// polling fallback can take over.
+fn wait_on_dedicated_thread<F>(fut: F) -> HookFastPathOutcome
+where
+    F: std::future::Future<Output = HookFastPathOutcome> + Send + 'static,
+{
+    match std::thread::Builder::new()
+        .name("claude-tui-prompt-ready".to_string())
+        .spawn(move || {
             match tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .build()
@@ -270,6 +315,20 @@ fn wait_for_prompt_ready_event(notify: Arc<Notify>, budget: Duration) -> HookFas
                     HookFastPathOutcome::Pending
                 }
             }
+        }) {
+        Ok(handle) => handle.join().unwrap_or_else(|panic| {
+            tracing::warn!(
+                "prompt readiness fast-path worker panicked: {:?}; falling back to polling",
+                panic
+            );
+            HookFastPathOutcome::Pending
+        }),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to spawn prompt readiness fast-path worker; falling back to polling"
+            );
+            HookFastPathOutcome::Pending
         }
     }
 }
@@ -536,6 +595,34 @@ line 13";
         .expect("blocking task panicked");
 
         assert_eq!(outcome, HookFastPathOutcome::Pending);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fast_path_does_not_panic_on_current_thread_runtime() {
+        // Regression: `tokio::task::block_in_place` panics on current-thread
+        // runtimes. Many AgentDesk worker entry points (cluster watchers,
+        // turn-bridge, doctor, etc.) build current-thread runtimes, so the
+        // hook fast-path must never assume multi-thread. Budget is short so
+        // the test stays fast.
+        let notify = Arc::new(Notify::new());
+        let outcome = wait_for_prompt_ready_event(notify, Duration::from_millis(20));
+        assert_eq!(outcome, HookFastPathOutcome::Pending);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fast_path_returns_ready_on_current_thread_runtime_when_notify_fires() {
+        // Even on a current-thread runtime the dedicated worker thread we
+        // spawn for the wait must observe a `notify_waiters` signal that
+        // fires after the waiter registers.
+        let notify = Arc::new(Notify::new());
+        let trigger = notify.clone();
+        let task = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            trigger.notify_waiters();
+        });
+        let outcome = wait_for_prompt_ready_event(notify, Duration::from_secs(2));
+        task.join().expect("trigger thread joined");
+        assert_eq!(outcome, HookFastPathOutcome::Ready);
     }
 
     #[test]
