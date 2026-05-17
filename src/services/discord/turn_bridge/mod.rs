@@ -5729,6 +5729,7 @@ mod cancel_recv_toctou_tests {
             message: "provider rpc failed".to_string(),
             stdout: String::new(),
             stderr: String::new(),
+            exit_code: None,
         })
         .expect("send Error");
         token
@@ -5757,6 +5758,7 @@ mod cancel_recv_toctou_tests {
             message: String::new(),
             stdout: String::new(),
             stderr: String::new(),
+            exit_code: None,
         }));
         // Sample of non-terminal variants that must NOT trip the gate.
         assert!(!is_done_setting_terminal_frame(&StreamMessage::Text {
