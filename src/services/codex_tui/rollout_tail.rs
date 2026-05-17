@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,8 +17,8 @@ const DEFAULT_ROLLOUT_WAIT_SECS: u64 = 30;
 // to Discord while the codex CLI was still streaming. 5s safely covers the
 // observed natural pause band (~3s) without unduly delaying turn completion
 // after the genuine final segment. Tool-call gating (see
-// `RolloutParseState::pending_tool_call`) is the structural complement that
-// suppresses drain entirely while a tool is in flight.
+// `RolloutParseState::pending_tool_calls`) is the structural complement that
+// suppresses drain entirely while one or more tools are in flight.
 const DEFAULT_TERMINAL_DRAIN_MS: u64 = 5000;
 /// Upper bound on how long the tailer will sit at EOF waiting for the assistant
 /// response to begin streaming. Without this guard, a stuck Codex TUI (tool
@@ -69,19 +70,34 @@ struct RolloutParseState {
     saw_assistant_text: bool,
     lines_read: usize,
     bytes_read: u64,
-    /// #2419: tracks whether the rollout has observed a `function_call` /
-    /// `custom_tool_call` without a matching `*_output` line yet. While a
-    /// tool is in flight the assistant naturally goes silent (the model is
-    /// awaiting tool results), so the terminal-drain timer would otherwise
-    /// fire prematurely and truncate the relay. Gating the drain on this
-    /// flag suppresses early Done emission across the tool-call window.
-    pending_tool_call: bool,
+    /// #2419: tracks tool calls that are currently in flight (observed
+    /// `function_call` / `custom_tool_call` lines whose matching `*_output`
+    /// line has not arrived yet). Keyed by `call_id` so that multiple
+    /// concurrent tool calls are tracked independently — a single boolean
+    /// would be cleared by the first tool output even while later calls
+    /// remain pending, allowing the drain timer to fire prematurely.
+    ///
+    /// `pending_tool_calls_unkeyed` is a fallback counter for lines that
+    /// omit `call_id` (defensive — Codex normally emits one).
+    pending_tool_calls: HashSet<String>,
+    pending_tool_calls_unkeyed: usize,
+    /// #2419: set by `process_rollout_line` per-call when a rollout record
+    /// represents lifecycle activity (assistant text, tool-call lifecycle,
+    /// reasoning) even if no `StreamMessage` ends up being emitted (e.g. an
+    /// empty `function_call_output`). Used to refresh the drain clock so
+    /// the timer does not fire immediately after a silent tool resolution
+    /// while the post-tool assistant text is still being written.
+    lifecycle_activity: bool,
 }
 
 impl RolloutParseState {
     fn record(&mut self, line_len: usize) {
         self.lines_read += 1;
         self.bytes_read += line_len as u64;
+    }
+
+    fn has_pending_tool_call(&self) -> bool {
+        !self.pending_tool_calls.is_empty() || self.pending_tool_calls_unkeyed > 0
     }
 }
 
@@ -614,7 +630,7 @@ fn tail_rollout_file_until_assistant_response(
                 // #2419: only consider the turn drainable when no tool call
                 // is currently in flight. Otherwise the natural silence while
                 // codex waits for the tool result would trip the timer.
-                if state.saw_assistant_text && !state.pending_tool_call {
+                if state.saw_assistant_text && !state.has_pending_tool_call() {
                     if terminal_drain.is_zero()
                         || last_output_at.is_some_and(|at| at.elapsed() >= terminal_drain)
                     {
@@ -789,12 +805,19 @@ fn process_rollout_line(
         return false;
     };
 
+    // #2419: capture lifecycle activity per-line. Tool-call/tool-output
+    // records count as activity even when they do not produce a
+    // StreamMessage (empty output, missing name, etc.), so the drain clock
+    // must refresh on them too.
+    state.lifecycle_activity = false;
     let messages = rollout_messages(&json, state);
     let emitted = !messages.is_empty();
     for message in messages {
         sender.send(message);
     }
-    emitted
+    let activity = emitted || state.lifecycle_activity;
+    state.lifecycle_activity = false;
+    activity
 }
 
 fn process_rollout_line_bytes(
@@ -842,17 +865,46 @@ fn response_item_messages(json: &Value, state: &mut RolloutParseState) -> Vec<St
         "message" => response_message_items(payload, state),
         "function_call" | "custom_tool_call" => {
             // #2419: a tool call has started — suppress terminal_drain Done
-            // until the matching output line arrives. See `pending_tool_call`
-            // doc comment on `RolloutParseState`.
-            state.pending_tool_call = true;
+            // until the matching output line arrives. Track by `call_id` so
+            // that concurrent tool calls all hold the gate open until each
+            // one resolves independently.
+            match payload.get("call_id").and_then(Value::as_str) {
+                Some(id) if !id.is_empty() => {
+                    state.pending_tool_calls.insert(id.to_string());
+                }
+                _ => {
+                    state.pending_tool_calls_unkeyed =
+                        state.pending_tool_calls_unkeyed.saturating_add(1);
+                }
+            }
+            // #2419: lifecycle activity — refresh drain clock even if the
+            // tool_call_message ends up empty (e.g. missing name field).
+            state.lifecycle_activity = true;
             tool_call_message(payload).into_iter().collect()
         }
         "function_call_output" | "custom_tool_call_output" => {
-            // #2419: tool call resolved — re-arm the drain gate.
-            state.pending_tool_call = false;
+            // #2419: tool call resolved — release that specific call's hold
+            // on the drain gate. Other pending calls (if any) keep it shut.
+            match payload.get("call_id").and_then(Value::as_str) {
+                Some(id) if !id.is_empty() => {
+                    state.pending_tool_calls.remove(id);
+                }
+                _ => {
+                    state.pending_tool_calls_unkeyed =
+                        state.pending_tool_calls_unkeyed.saturating_sub(1);
+                }
+            }
+            // #2419: lifecycle activity — drain clock must be reset even
+            // when the tool output is empty, otherwise EOF immediately after
+            // an empty resolution can fire the drain timer before the
+            // post-tool assistant text is appended.
+            state.lifecycle_activity = true;
             tool_result_message(payload).into_iter().collect()
         }
-        "reasoning" => vec![StreamMessage::redacted_thinking()],
+        "reasoning" => {
+            state.lifecycle_activity = true;
+            vec![StreamMessage::redacted_thinking()]
+        }
         _ => Vec::new(),
     }
 }
@@ -1533,6 +1585,179 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
             "segment2 must be emitted after the tool call resolves; got {:?}",
+            messages
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result.contains("segment1") && result.contains("segment2")
+        ));
+    }
+
+    #[test]
+    fn multiple_concurrent_tool_calls_keep_drain_gate_closed() {
+        // #2419 (Codex review HIGH): two tool_call lines emitted before any
+        // outputs arrive. The first matching output must NOT clear the
+        // drain gate while the second call is still pending — otherwise
+        // EOF + drain elapsed would emit Done before segment2.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"two-tool\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-two-tool.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment1"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"a","arguments":"{}","call_id":"c1"}}
+{"type":"response_item","payload":{"type":"function_call","name":"b","arguments":"{}","call_id":"c2"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok-1"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                Duration::from_millis(150),
+                Some(Duration::from_secs(10)),
+            )
+        });
+
+        // Long enough that drain WOULD fire if c2 were not still pending.
+        std::thread::sleep(Duration::from_millis(600));
+
+        // Now resolve c2 and append segment2 — both must land in the turn.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c2","output":"ok-2"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment2"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            "segment2 must be emitted after BOTH concurrent tool calls resolve; got {:?}",
+            messages
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result.contains("segment1") && result.contains("segment2")
+        ));
+    }
+
+    #[test]
+    fn empty_tool_output_refreshes_drain_clock() {
+        // #2419 (Codex review HIGH): a long-running tool call resolves with
+        // an empty output (no StreamMessage emitted). Without lifecycle
+        // refresh, `last_output_at` would still point at the original
+        // tool_call timestamp, so the very next EOF tick would observe
+        // elapsed > drain and emit Done before the post-tool assistant
+        // text was appended. With refresh, the clock restarts at the empty
+        // output and segment2 still lands in the same turn.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"empty-out\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-empty-out.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+
+        // Phase 1: segment1 + tool_call (tool now running, drain gate held
+        // shut by pending_tool_calls).
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment1"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"silent","arguments":"{}","call_id":"c-empty"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                Duration::from_millis(250),
+                Some(Duration::from_secs(10)),
+            )
+        });
+
+        // Phase 2: simulate a slow tool — silence for longer than drain.
+        // pending_tool_call gate must keep drain suppressed here.
+        std::thread::sleep(Duration::from_millis(400));
+
+        // Phase 3: empty tool output arrives. No StreamMessage emitted.
+        // Without lifecycle refresh, last_output_at still ≈ tool_call
+        // timestamp (t≈0), and the very next EOF tick would fire Done.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c-empty","output":""}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        // Phase 4: a short post-tool gap (< drain) — small enough that a
+        // properly-refreshed clock has NOT yet elapsed. Then segment2.
+        std::thread::sleep(Duration::from_millis(150));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment2"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            "segment2 must land after empty tool output refreshes drain clock; got {:?}",
             messages
         );
         assert!(matches!(
