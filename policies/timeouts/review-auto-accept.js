@@ -90,6 +90,37 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
             }
             // #117: sync canonical review state
             agentdesk.reviewState.sync(sc.id, "rework_pending", { last_decision: "auto_accept" });
+            // #2200 sub-fix 1 (`stale-state`): stamp the originating
+            // review-decision dispatch with dispatch-scoped proof so a
+            // late /api/review-decision retry can idempotently finalize
+            // instead of returning 409. We mark status=completed with
+            // result.completion_source=review_auto_accept_policy and
+            // result.decision=auto_accept. Only applies to dispatches
+            // that are still pending/dispatched — never overwrite a
+            // dispatch that has already terminated.
+            try {
+              agentdesk.db.execute(
+                "UPDATE task_dispatches " +
+                  "SET status = 'completed', " +
+                  "    result = ?, " +
+                  "    completed_at = COALESCE(completed_at, datetime('now')), " +
+                  "    updated_at = datetime('now') " +
+                  "WHERE kanban_card_id = ? " +
+                  "  AND dispatch_type = 'review-decision' " +
+                  "  AND status IN ('pending', 'dispatched')",
+                [
+                  '{"decision":"auto_accept","completion_source":"review_auto_accept_policy"}',
+                  sc.id,
+                ]
+              );
+            } catch (rdStampErr) {
+              agentdesk.log.warn(
+                "[timeout] Auto-accept could not stamp originating review-decision dispatch for " +
+                  sc.id +
+                  " (non-fatal): " +
+                  rdStampErr
+              );
+            }
             agentdesk.log.warn("[timeout] Auto-accepted suggestions for card " + sc.id + " — rework dispatch created");
           } catch (e) {
             var autoAcceptReason = "Auto-accept rework dispatch failed: " + e;
