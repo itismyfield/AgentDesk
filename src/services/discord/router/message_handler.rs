@@ -1503,7 +1503,11 @@ async fn start_reserved_headless_turn_with_owner(
         request_owner,
         ai_screen::sanitize_user_input(&effective_prompt),
     ));
-    let context_prompt = context_chunks.join("\n\n");
+    let context_prompt = crate::services::provider::compact_resumed_provider_turn_prompt(
+        &provider,
+        session_id.as_deref(),
+        context_chunks.join("\n\n"),
+    );
 
     let discord_context = build_system_discord_context(
         channel_name.as_deref(),
@@ -1932,13 +1936,19 @@ async fn start_reserved_headless_turn_with_owner(
             provider_execution_context,
             || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let system_prompt_for_turn =
+                        crate::services::provider::system_prompt_for_provider_turn(
+                            &provider_for_blocking,
+                            session_id_clone.as_deref(),
+                            &system_prompt_owned,
+                        );
                     match &provider_for_blocking {
                         ProviderKind::Claude => claude::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
                             tx.clone(),
-                            Some(&system_prompt_owned),
+                            system_prompt_for_turn,
                             Some(&allowed_tools),
                             Some(cancel_token_clone),
                             remote_profile.as_ref(),
@@ -1956,7 +1966,7 @@ async fn start_reserved_headless_turn_with_owner(
                             session_id_clone.as_deref(),
                             &current_path_clone,
                             tx.clone(),
-                            Some(&system_prompt_owned),
+                            system_prompt_for_turn,
                             Some(&allowed_tools),
                             Some(cancel_token_clone),
                             remote_profile.as_ref(),
@@ -1974,7 +1984,7 @@ async fn start_reserved_headless_turn_with_owner(
                             session_id_clone.as_deref(),
                             &current_path_clone,
                             tx.clone(),
-                            Some(&system_prompt_owned),
+                            system_prompt_for_turn,
                             Some(&allowed_tools),
                             Some(cancel_token_clone),
                             remote_profile.as_ref(),
@@ -1989,7 +1999,7 @@ async fn start_reserved_headless_turn_with_owner(
                             session_id_clone.as_deref(),
                             &current_path_clone,
                             tx.clone(),
-                            Some(&system_prompt_owned),
+                            system_prompt_for_turn,
                             Some(&allowed_tools),
                             Some(cancel_token_clone),
                             remote_profile.as_ref(),
@@ -2004,7 +2014,7 @@ async fn start_reserved_headless_turn_with_owner(
                             session_id_clone.as_deref(),
                             &current_path_clone,
                             tx.clone(),
-                            Some(&system_prompt_owned),
+                            system_prompt_for_turn,
                             Some(&allowed_tools),
                             Some(cancel_token_clone),
                             remote_profile.as_ref(),
@@ -4063,7 +4073,11 @@ pub(in crate::services::discord) async fn handle_text_message(
         request_owner,
         sanitized_input,
     ));
-    let context_prompt = context_chunks.join("\n\n");
+    let context_prompt = crate::services::provider::compact_resumed_provider_turn_prompt(
+        &provider,
+        session_id.as_deref(),
+        context_chunks.join("\n\n"),
+    );
 
     // Build Discord context info
     let discord_context = {
@@ -4777,13 +4791,19 @@ pub(in crate::services::discord) async fn handle_text_message(
             provider_execution_context,
             || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let system_prompt_for_turn =
+                        crate::services::provider::system_prompt_for_provider_turn(
+                            &provider_for_blocking,
+                            session_id_clone.as_deref(),
+                            &system_prompt_owned,
+                        );
                     match &provider_for_blocking {
                         ProviderKind::Claude => claude::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
                             tx.clone(),
-                            Some(&system_prompt_owned),
+                            system_prompt_for_turn,
                             Some(&allowed_tools),
                             Some(cancel_token_clone),
                             remote_profile.as_ref(),
@@ -4801,7 +4821,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                             session_id_clone.as_deref(),
                             &current_path_clone,
                             tx.clone(),
-                            Some(&system_prompt_owned),
+                            system_prompt_for_turn,
                             Some(&allowed_tools),
                             Some(cancel_token_clone),
                             remote_profile.as_ref(),
@@ -4819,7 +4839,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                             session_id_clone.as_deref(),
                             &current_path_clone,
                             tx.clone(),
-                            Some(&system_prompt_owned),
+                            system_prompt_for_turn,
                             Some(&allowed_tools),
                             Some(cancel_token_clone),
                             remote_profile.as_ref(),
@@ -4834,7 +4854,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                             session_id_clone.as_deref(),
                             &current_path_clone,
                             tx.clone(),
-                            Some(&system_prompt_owned),
+                            system_prompt_for_turn,
                             Some(&allowed_tools),
                             Some(cancel_token_clone),
                             remote_profile.as_ref(),
@@ -4849,7 +4869,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                             session_id_clone.as_deref(),
                             &current_path_clone,
                             tx.clone(),
-                            Some(&system_prompt_owned),
+                            system_prompt_for_turn,
                             Some(&allowed_tools),
                             Some(cancel_token_clone),
                             remote_profile.as_ref(),
