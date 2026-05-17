@@ -69,6 +69,13 @@ struct RolloutParseState {
     saw_assistant_text: bool,
     lines_read: usize,
     bytes_read: u64,
+    /// #2419: tracks whether the rollout has observed a `function_call` /
+    /// `custom_tool_call` without a matching `*_output` line yet. While a
+    /// tool is in flight the assistant naturally goes silent (the model is
+    /// awaiting tool results), so the terminal-drain timer would otherwise
+    /// fire prematurely and truncate the relay. Gating the drain on this
+    /// flag suppresses early Done emission across the tool-call window.
+    pending_tool_call: bool,
 }
 
 impl RolloutParseState {
@@ -604,7 +611,10 @@ fn tail_rollout_file_until_assistant_response(
                     last_output_at = Some(Instant::now());
                     continue;
                 }
-                if state.saw_assistant_text {
+                // #2419: only consider the turn drainable when no tool call
+                // is currently in flight. Otherwise the natural silence while
+                // codex waits for the tool result would trip the timer.
+                if state.saw_assistant_text && !state.pending_tool_call {
                     if terminal_drain.is_zero()
                         || last_output_at.is_some_and(|at| at.elapsed() >= terminal_drain)
                     {
@@ -830,8 +840,16 @@ fn response_item_messages(json: &Value, state: &mut RolloutParseState) -> Vec<St
     };
     match payload.get("type").and_then(Value::as_str).unwrap_or("") {
         "message" => response_message_items(payload, state),
-        "function_call" | "custom_tool_call" => tool_call_message(payload).into_iter().collect(),
+        "function_call" | "custom_tool_call" => {
+            // #2419: a tool call has started — suppress terminal_drain Done
+            // until the matching output line arrives. See `pending_tool_call`
+            // doc comment on `RolloutParseState`.
+            state.pending_tool_call = true;
+            tool_call_message(payload).into_iter().collect()
+        }
         "function_call_output" | "custom_tool_call_output" => {
+            // #2419: tool call resolved — re-arm the drain gate.
+            state.pending_tool_call = false;
             tool_result_message(payload).into_iter().collect()
         }
         "reasoning" => vec![StreamMessage::redacted_thinking()],
