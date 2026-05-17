@@ -262,10 +262,11 @@ pub fn emit_turn_cancelled(
 
 /// Inflight lifecycle observability: pair-tracking events so external monitors
 /// can detect cleanup leaks. `kind` is the lifecycle phase identifier:
-/// `"delegated_to_watcher"`, `"cleared_by_bridge"`, `"cleared_by_watcher"`,
-/// `"leak_detected_completed_stale"`. `delegated_to_watcher` and
-/// `cleared_by_watcher` should pair 1:1; a sustained drift between counters
-/// indicates the bridge handed off cleanup but the watcher never executed it.
+/// `"delegated_to_watcher"`, `"delegated_to_standby_relay"`,
+/// `"cleared_by_bridge"`, `"cleared_by_watcher"`, `"cleared_by_standby_relay"`,
+/// `"leak_detected_completed_stale"`. Delegated/cleared events should pair
+/// 1:1 per owner; a sustained drift between counters indicates the bridge
+/// handed off cleanup but the delegated relay never executed it.
 /// `leak_detected_completed_stale` fires from the stall-watchdog when an
 /// inflight is healthy/synced but the mailbox is idle past the staleness
 /// threshold — the smoking-gun signal for the deadlock-manager alarm pattern.

@@ -951,6 +951,54 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity(
     clear_inflight_state_if_matches_identity_in_root(&root, provider, channel_id, expected)
 }
 
+pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_after_delivery(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+    full_response: &str,
+    response_sent_offset: usize,
+    last_offset: u64,
+) -> (GuardedClearOutcome, bool) {
+    let Some(root) = inflight_runtime_root() else {
+        return (GuardedClearOutcome::Missing, false);
+    };
+    clear_inflight_state_if_matches_identity_after_delivery_in_root(
+        &root,
+        provider,
+        channel_id,
+        expected,
+        expected_turn_start_offset,
+        full_response,
+        response_sent_offset,
+        last_offset,
+    )
+}
+
+pub(in crate::services::discord) fn refresh_inflight_last_offset_if_matches_identity(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+    output_path: &str,
+    expected_current_msg_id: Option<u64>,
+    last_offset: u64,
+) -> bool {
+    let Some(root) = inflight_runtime_root() else {
+        return false;
+    };
+    refresh_inflight_last_offset_if_matches_identity_in_root(
+        &root,
+        provider,
+        channel_id,
+        expected,
+        expected_turn_start_offset,
+        output_path,
+        expected_current_msg_id,
+        last_offset,
+    )
+}
+
 /// Root-explicit variant for unit tests. Production callers should use
 /// [`clear_inflight_state_if_matches`].
 pub(super) fn clear_inflight_state_if_matches_in_root(
@@ -1066,6 +1114,138 @@ fn clear_inflight_state_if_matches_identity_in_root(
             GuardedClearOutcome::IoError
         }
     }
+}
+
+fn normalize_response_sent_offset(full_response: &str, response_sent_offset: usize) -> usize {
+    let mut offset = response_sent_offset.min(full_response.len());
+    while offset > 0 && !full_response.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+    full_response: &str,
+    response_sent_offset: usize,
+    last_offset: u64,
+) -> (GuardedClearOutcome, bool) {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return (GuardedClearOutcome::IoError, false);
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return (GuardedClearOutcome::Missing, false);
+    };
+    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return (GuardedClearOutcome::Missing, false);
+    };
+    if state.restart_mode.is_some() {
+        return (GuardedClearOutcome::PlannedRestartSkipped, false);
+    }
+    if state.rebind_origin {
+        return (GuardedClearOutcome::RebindOriginSkipped, false);
+    }
+    if expected.user_msg_id == 0 || !expected.matches_state(&state) {
+        return (GuardedClearOutcome::UserMsgMismatch, false);
+    }
+    if let Some(expected_offset) = expected_turn_start_offset {
+        if state.turn_start_offset != Some(expected_offset) {
+            return (GuardedClearOutcome::UserMsgMismatch, false);
+        }
+    }
+
+    let mut delivered_state = state;
+    delivered_state.full_response = full_response.to_string();
+    delivered_state.response_sent_offset =
+        normalize_response_sent_offset(full_response, response_sent_offset);
+    delivered_state.last_offset = last_offset;
+    delivered_state.updated_at = now_string();
+
+    let mirrored_delivery = match serde_json::to_string_pretty(&delivered_state)
+        .map_err(|error| error.to_string())
+        .and_then(|json| atomic_write(&path, &json))
+    {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                expected_user_msg_id = expected.user_msg_id,
+                error = %error,
+                "inflight delivery mirror failed before identity-guarded clear"
+            );
+            false
+        }
+    };
+
+    let outcome = match fs::remove_file(&path) {
+        Ok(()) => GuardedClearOutcome::Cleared,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                expected_user_msg_id = expected.user_msg_id,
+                error = %error,
+                "inflight identity-guarded delivery clear remove_file failed; treating as IoError so sweeper retries"
+            );
+            GuardedClearOutcome::IoError
+        }
+    };
+    (outcome, mirrored_delivery)
+}
+
+fn refresh_inflight_last_offset_if_matches_identity_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+    output_path: &str,
+    expected_current_msg_id: Option<u64>,
+    last_offset: u64,
+) -> bool {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return false;
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(mut state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return false;
+    };
+    if state.restart_mode.is_some() || state.rebind_origin {
+        return false;
+    }
+    if state.output_path.as_deref() != Some(output_path) {
+        return false;
+    }
+    if let Some(expected_msg_id) = expected_current_msg_id {
+        if state.current_msg_id != expected_msg_id {
+            return false;
+        }
+    }
+    if expected.user_msg_id == 0 || !expected.matches_state(&state) {
+        return false;
+    }
+    if let Some(expected_offset) = expected_turn_start_offset {
+        if state.turn_start_offset != Some(expected_offset) {
+            return false;
+        }
+    }
+
+    state.last_offset = last_offset;
+    state.updated_at = now_string();
+    serde_json::to_string_pretty(&state)
+        .map_err(|error| error.to_string())
+        .and_then(|json| atomic_write(&path, &json))
+        .is_ok()
 }
 
 fn inflight_state_allows_idle_tmux_repair_state(state: &InflightTurnState) -> bool {
@@ -1502,10 +1682,12 @@ pub(in crate::services::discord) enum InflightSignal {
 mod stall_recovery_tests {
     use super::{
         GuardedClearOutcome, INFLIGHT_STALENESS_THRESHOLD_SECS, InflightRestartMode,
-        InflightTurnIdentity, InflightTurnState, clear_inflight_state_if_matches_identity_in_root,
-        clear_inflight_state_if_matches_in_root, inflight_state_allows_idle_tmux_repair_state,
-        inflight_state_is_stale, inflight_state_path, load_inflight_states_from_root,
-        lock_inflight_state_path, save_inflight_state_in_root,
+        InflightTurnIdentity, InflightTurnState,
+        clear_inflight_state_if_matches_identity_after_delivery_in_root,
+        clear_inflight_state_if_matches_identity_in_root, clear_inflight_state_if_matches_in_root,
+        inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale, inflight_state_path,
+        load_inflight_states_from_root, lock_inflight_state_path, normalize_response_sent_offset,
+        refresh_inflight_last_offset_if_matches_identity_in_root, save_inflight_state_in_root,
     };
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::provider::ProviderKind;
@@ -1963,6 +2145,166 @@ mod stall_recovery_tests {
         assert_eq!(
             still_there[0].tmux_session_name, old_turn.tmux_session_name,
             "test must cover same-named respawn"
+        );
+    }
+
+    #[test]
+    fn identity_delivery_clear_removes_matching_turn() {
+        let temp = TempDir::new().unwrap();
+        let state = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        let identity = InflightTurnIdentity::from_state(&state);
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let (outcome, mirrored) = clear_inflight_state_if_matches_identity_after_delivery_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            321,
+            &identity,
+            state.turn_start_offset,
+            "hello\nworld",
+            "hello\nworld".len(),
+            99,
+        );
+
+        assert_eq!(outcome, GuardedClearOutcome::Cleared);
+        assert!(mirrored);
+        assert!(load_inflight_states_from_root(temp.path(), &ProviderKind::Claude).is_empty());
+    }
+
+    #[test]
+    fn identity_delivery_clear_does_not_overwrite_fresh_turn() {
+        let temp = TempDir::new().unwrap();
+        let mut old_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        old_turn.started_at = "2026-05-17 10:00:00".to_string();
+        save_inflight_state_in_root(temp.path(), &old_turn).unwrap();
+        let old_identity = InflightTurnIdentity::from_state(&old_turn);
+
+        let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
+        fresh_turn.started_at = "2026-05-17 10:00:05".to_string();
+        fresh_turn.user_text = "fresh prompt".to_string();
+        save_inflight_state_in_root(temp.path(), &fresh_turn).unwrap();
+
+        let (outcome, mirrored) = clear_inflight_state_if_matches_identity_after_delivery_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            321,
+            &old_identity,
+            old_turn.turn_start_offset,
+            "stale delivered response",
+            "stale delivered response".len(),
+            99,
+        );
+
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+        assert!(!mirrored);
+        let still_there = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(still_there.len(), 1);
+        assert_eq!(still_there[0].started_at, fresh_turn.started_at);
+        assert_eq!(still_there[0].user_text, "fresh prompt");
+        assert!(still_there[0].full_response.is_empty());
+        assert_eq!(still_there[0].response_sent_offset, 0);
+    }
+
+    #[test]
+    fn identity_delivery_clear_checks_turn_start_offset() {
+        let temp = TempDir::new().unwrap();
+        let state = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        let identity = InflightTurnIdentity::from_state(&state);
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let (outcome, mirrored) = clear_inflight_state_if_matches_identity_after_delivery_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            321,
+            &identity,
+            Some(999),
+            "stale delivered response",
+            "stale delivered response".len(),
+            99,
+        );
+
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+        assert!(!mirrored);
+        let still_there = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(still_there.len(), 1);
+        assert!(still_there[0].full_response.is_empty());
+        assert_eq!(still_there[0].response_sent_offset, 0);
+    }
+
+    #[test]
+    fn identity_heartbeat_refresh_updates_matching_turn_under_lock() {
+        let temp = TempDir::new().unwrap();
+        let state = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        let identity = InflightTurnIdentity::from_state(&state);
+        let output_path = state.output_path.clone().expect("test output path");
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let refreshed = refresh_inflight_last_offset_if_matches_identity_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            321,
+            &identity,
+            state.turn_start_offset,
+            &output_path,
+            Some(state.current_msg_id),
+            123,
+        );
+
+        assert!(refreshed);
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].last_offset, 123);
+    }
+
+    #[test]
+    fn identity_heartbeat_refresh_does_not_overwrite_fresh_turn() {
+        let temp = TempDir::new().unwrap();
+        let mut old_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        old_turn.current_msg_id = 0;
+        old_turn.started_at = "2026-05-17 10:00:00".to_string();
+        let old_identity = InflightTurnIdentity::from_state(&old_turn);
+        let output_path = old_turn.output_path.clone().expect("test output path");
+        save_inflight_state_in_root(temp.path(), &old_turn).unwrap();
+
+        let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
+        fresh_turn.current_msg_id = 0;
+        fresh_turn.user_msg_id = 101;
+        fresh_turn.started_at = "2026-05-17 10:00:05".to_string();
+        fresh_turn.output_path = Some(output_path.clone());
+        fresh_turn.last_offset = 20;
+        save_inflight_state_in_root(temp.path(), &fresh_turn).unwrap();
+
+        let refreshed = refresh_inflight_last_offset_if_matches_identity_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            321,
+            &old_identity,
+            old_turn.turn_start_offset,
+            &output_path,
+            None,
+            123,
+        );
+
+        assert!(!refreshed);
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].user_msg_id, 101);
+        assert_eq!(loaded[0].started_at, "2026-05-17 10:00:05");
+        assert_eq!(loaded[0].last_offset, 20);
+    }
+
+    #[test]
+    fn delivery_response_sent_offset_stays_on_utf8_boundary() {
+        let response = "안녕";
+        let first_char_middle = 1;
+
+        assert_eq!(
+            normalize_response_sent_offset(response, first_char_middle),
+            0
+        );
+        assert_eq!(
+            normalize_response_sent_offset(response, response.len() + 100),
+            response.len()
         );
     }
 

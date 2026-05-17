@@ -31,7 +31,9 @@ use serenity::model::id::{ChannelId, MessageId};
 
 use super::SharedData;
 use super::formatting::{self, ReplaceLongMessageOutcome};
-use super::inflight::{InflightSignal, InflightTurnState};
+use super::inflight::{
+    GuardedClearOutcome, InflightSignal, InflightTurnIdentity, InflightTurnState,
+};
 use crate::services::provider::ProviderKind;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -46,6 +48,36 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 const MAX_FILE_BYTES_PER_TICK: u64 = 1_048_576; // 1 MiB safety cap
 const INFLIGHT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Debug)]
+pub(in crate::services::discord) struct StandbyRelayTurnBinding {
+    identity: InflightTurnIdentity,
+    dispatch_id: Option<String>,
+    session_key: Option<String>,
+    turn_start_offset: Option<u64>,
+}
+
+impl StandbyRelayTurnBinding {
+    pub(in crate::services::discord) fn from_state(state: &InflightTurnState) -> Self {
+        Self {
+            identity: InflightTurnIdentity::from_state(state),
+            dispatch_id: state.dispatch_id.clone(),
+            session_key: state.session_key.clone(),
+            turn_start_offset: state.turn_start_offset,
+        }
+    }
+
+    fn turn_id(&self, channel_id: ChannelId) -> Option<String> {
+        if self.identity.user_msg_id == 0 {
+            return None;
+        }
+        Some(format!(
+            "discord:{}:{}",
+            channel_id.get(),
+            self.identity.user_msg_id
+        ))
+    }
+}
+
 /// Spawned per-turn on cluster-standby nodes. Returns when:
 /// - `cancel` or `shared.shutting_down` flips to true,
 /// - the JSONL emits a `{"type":"result"}` event and we deliver the response,
@@ -55,6 +87,7 @@ pub(super) async fn run_standby_relay(
     channel_id: ChannelId,
     placeholder_msg_id: Option<MessageId>,
     output_path: String,
+    turn_binding: StandbyRelayTurnBinding,
     start_offset: u64,
     cancel: Arc<AtomicBool>,
     shared: Arc<SharedData>,
@@ -164,6 +197,7 @@ pub(super) async fn run_standby_relay(
                 channel_id,
                 &output_path,
                 placeholder_msg_id,
+                &turn_binding,
                 standby_heartbeat_offset(
                     current_offset,
                     pending_result_retry_offset,
@@ -184,11 +218,14 @@ pub(super) async fn run_standby_relay(
             )
             .await;
             if delivered {
-                clear_standby_inflight_state(
+                complete_standby_inflight_state(
                     &provider,
                     channel_id,
                     &output_path,
                     placeholder_msg_id,
+                    &turn_binding,
+                    result_text,
+                    current_offset,
                 );
                 return;
             }
@@ -323,30 +360,171 @@ fn refresh_standby_inflight_heartbeat(
     channel_id: ChannelId,
     output_path: &str,
     placeholder_msg_id: Option<MessageId>,
+    turn_binding: &StandbyRelayTurnBinding,
     current_offset: u64,
 ) {
-    let Some(mut state) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
-        return;
-    };
-    if !standby_inflight_matches(&state, output_path, placeholder_msg_id) {
-        return;
-    }
-    state.last_offset = current_offset;
-    let _ = super::inflight::save_inflight_state(&state);
+    let expected_current_msg_id = placeholder_msg_id.map(|msg| msg.get());
+    let _ = super::inflight::refresh_inflight_last_offset_if_matches_identity(
+        provider,
+        channel_id.get(),
+        &turn_binding.identity,
+        turn_binding.turn_start_offset,
+        output_path,
+        expected_current_msg_id,
+        current_offset,
+    );
 }
 
-fn clear_standby_inflight_state(
+fn clear_outcome_label(outcome: GuardedClearOutcome) -> &'static str {
+    match outcome {
+        GuardedClearOutcome::Cleared => "cleared",
+        GuardedClearOutcome::UserMsgMismatch => "user_msg_mismatch",
+        GuardedClearOutcome::PlannedRestartSkipped => "planned_restart_skipped",
+        GuardedClearOutcome::RebindOriginSkipped => "rebind_origin_skipped",
+        GuardedClearOutcome::Missing => "missing",
+        GuardedClearOutcome::IoError => "io_error",
+    }
+}
+
+fn emit_standby_completion_event(
     provider: &ProviderKind,
     channel_id: ChannelId,
     output_path: &str,
     placeholder_msg_id: Option<MessageId>,
+    turn_binding: &StandbyRelayTurnBinding,
+    outcome_label: &str,
+    response_text: &str,
+    current_offset: u64,
+    mirrored_response: bool,
 ) {
+    let turn_id = turn_binding.turn_id(channel_id);
+    crate::services::observability::emit_inflight_lifecycle_event(
+        provider.as_str(),
+        channel_id.get(),
+        turn_binding.dispatch_id.as_deref(),
+        turn_binding.session_key.as_deref(),
+        turn_id.as_deref(),
+        "cleared_by_standby_relay",
+        serde_json::json!({
+            "outcome": outcome_label,
+            "expected_user_msg_id": turn_binding.identity.user_msg_id,
+            "expected_started_at": turn_binding.identity.started_at.as_str(),
+            "expected_tmux_session_name": turn_binding.identity.tmux_session_name.as_deref(),
+            "expected_turn_start_offset": turn_binding.turn_start_offset,
+            "placeholder_msg_id": placeholder_msg_id.map(|msg| msg.get()),
+            "output_path": output_path,
+            "current_offset": current_offset,
+            "response_len": response_text.len(),
+            "mirrored_response_before_clear": mirrored_response,
+        }),
+    );
+}
+
+fn complete_standby_inflight_state(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    output_path: &str,
+    placeholder_msg_id: Option<MessageId>,
+    turn_binding: &StandbyRelayTurnBinding,
+    response_text: &str,
+    current_offset: u64,
+) -> GuardedClearOutcome {
     let Some(state) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
-        return;
+        emit_standby_completion_event(
+            provider,
+            channel_id,
+            output_path,
+            placeholder_msg_id,
+            turn_binding,
+            clear_outcome_label(GuardedClearOutcome::Missing),
+            response_text,
+            current_offset,
+            false,
+        );
+        return GuardedClearOutcome::Missing;
     };
-    if standby_inflight_matches(&state, output_path, placeholder_msg_id) {
-        let _ = super::inflight::delete_inflight_state_file(provider, channel_id.get());
+    if !standby_inflight_matches(&state, output_path, placeholder_msg_id) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel = channel_id.get(),
+            output_path = output_path,
+            placeholder_msg_id = placeholder_msg_id.map(|msg| msg.get()),
+            "[{ts}] ⚠ standby_relay skipped inflight cleanup because the on-disk row no longer matches this relay"
+        );
+        emit_standby_completion_event(
+            provider,
+            channel_id,
+            output_path,
+            placeholder_msg_id,
+            turn_binding,
+            "precheck_mismatch",
+            response_text,
+            current_offset,
+            false,
+        );
+        return GuardedClearOutcome::UserMsgMismatch;
     }
+
+    let user_msg_id = turn_binding.identity.user_msg_id;
+    let (outcome, mirrored_response) =
+        super::inflight::clear_inflight_state_if_matches_identity_after_delivery(
+            provider,
+            channel_id.get(),
+            &turn_binding.identity,
+            turn_binding.turn_start_offset,
+            response_text,
+            response_text.len(),
+            current_offset,
+        );
+    let outcome_label = clear_outcome_label(outcome);
+    emit_standby_completion_event(
+        provider,
+        channel_id,
+        output_path,
+        placeholder_msg_id,
+        turn_binding,
+        outcome_label,
+        response_text,
+        current_offset,
+        mirrored_response,
+    );
+
+    match outcome {
+        GuardedClearOutcome::Cleared | GuardedClearOutcome::Missing => {
+            tracing::debug!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                outcome = outcome_label,
+                "standby_relay completed delegated inflight cleanup"
+            );
+        }
+        GuardedClearOutcome::UserMsgMismatch => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                user_msg_id = user_msg_id,
+                "[{ts}] ⚠ standby_relay did not clear inflight because the guarded identity no longer matches"
+            );
+        }
+        GuardedClearOutcome::PlannedRestartSkipped | GuardedClearOutcome::RebindOriginSkipped => {
+            tracing::debug!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                outcome = outcome_label,
+                "standby_relay preserved inflight row after delegated completion"
+            );
+        }
+        GuardedClearOutcome::IoError => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                "standby_relay failed to clear inflight after delegated completion; sweeper will see mirrored response state"
+            );
+        }
+    }
+    outcome
 }
 
 async fn deliver_response(
@@ -535,6 +713,221 @@ mod tests {
         assert_eq!(standby_heartbeat_offset(250, Some(120), None), 120);
         assert_eq!(standby_heartbeat_offset(250, None, Some(180)), 180);
         assert_eq!(standby_heartbeat_offset(250, Some(120), Some(180)), 120);
+    }
+
+    fn with_isolated_runtime_root<F: FnOnce()>(f: F) {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("create temp runtime dir for standby relay test");
+        unsafe {
+            std::env::set_var(
+                "AGENTDESK_ROOT_DIR",
+                tmp.path().to_str().expect("temp path must be valid utf-8"),
+            );
+        }
+        f();
+        unsafe {
+            std::env::remove_var("AGENTDESK_ROOT_DIR");
+        }
+    }
+
+    #[test]
+    fn standby_completion_clears_matching_inflight_with_identity_guard() {
+        with_isolated_runtime_root(|| {
+            let provider = ProviderKind::Codex;
+            let channel_id = ChannelId::new(1234);
+            let state = InflightTurnState::new(
+                provider.clone(),
+                channel_id.get(),
+                None,
+                42,
+                100,
+                5678,
+                "test".to_string(),
+                None,
+                Some("tmux".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                None,
+                12,
+            );
+            let binding = StandbyRelayTurnBinding::from_state(&state);
+            super::super::inflight::save_inflight_state(&state).expect("save inflight");
+
+            let outcome = complete_standby_inflight_state(
+                &provider,
+                channel_id,
+                "/tmp/out.jsonl",
+                Some(MessageId::new(5678)),
+                &binding,
+                "done",
+                88,
+            );
+
+            assert_eq!(outcome, GuardedClearOutcome::Cleared);
+            assert!(
+                super::super::inflight::load_inflight_state(&provider, channel_id.get()).is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn standby_completion_keeps_mismatched_placeholder_inflight() {
+        with_isolated_runtime_root(|| {
+            let provider = ProviderKind::Codex;
+            let channel_id = ChannelId::new(1235);
+            let state = InflightTurnState::new(
+                provider.clone(),
+                channel_id.get(),
+                None,
+                42,
+                100,
+                5678,
+                "test".to_string(),
+                None,
+                Some("tmux".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                None,
+                12,
+            );
+            let binding = StandbyRelayTurnBinding::from_state(&state);
+            super::super::inflight::save_inflight_state(&state).expect("save inflight");
+
+            let outcome = complete_standby_inflight_state(
+                &provider,
+                channel_id,
+                "/tmp/out.jsonl",
+                Some(MessageId::new(9999)),
+                &binding,
+                "done",
+                88,
+            );
+
+            assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+            let loaded = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+                .expect("mismatched inflight should remain");
+            assert_eq!(loaded.current_msg_id, 5678);
+            assert!(loaded.full_response.is_empty());
+        });
+    }
+
+    #[test]
+    fn standby_completion_uses_captured_identity_when_fresh_turn_reuses_output() {
+        with_isolated_runtime_root(|| {
+            let provider = ProviderKind::Codex;
+            let channel_id = ChannelId::new(1236);
+            let mut old_state = InflightTurnState::new(
+                provider.clone(),
+                channel_id.get(),
+                None,
+                42,
+                100,
+                0,
+                "old prompt".to_string(),
+                None,
+                Some("tmux".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                None,
+                12,
+            );
+            old_state.started_at = "2026-05-17 10:00:00".to_string();
+            let binding = StandbyRelayTurnBinding::from_state(&old_state);
+            super::super::inflight::save_inflight_state(&old_state).expect("save old inflight");
+
+            let mut fresh_state = InflightTurnState::new(
+                provider.clone(),
+                channel_id.get(),
+                None,
+                42,
+                101,
+                0,
+                "fresh prompt".to_string(),
+                None,
+                Some("tmux".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                None,
+                20,
+            );
+            fresh_state.started_at = "2026-05-17 10:00:05".to_string();
+            super::super::inflight::save_inflight_state(&fresh_state)
+                .expect("replace with fresh inflight");
+
+            let outcome = complete_standby_inflight_state(
+                &provider,
+                channel_id,
+                "/tmp/out.jsonl",
+                None,
+                &binding,
+                "stale delivered response",
+                88,
+            );
+
+            assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+            let loaded = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+                .expect("fresh inflight should remain");
+            assert_eq!(loaded.user_msg_id, 101);
+            assert_eq!(loaded.started_at, "2026-05-17 10:00:05");
+            assert!(loaded.full_response.is_empty());
+            assert_eq!(loaded.response_sent_offset, 0);
+        });
+    }
+
+    #[test]
+    fn standby_heartbeat_uses_captured_identity_when_fresh_turn_reuses_output() {
+        with_isolated_runtime_root(|| {
+            let provider = ProviderKind::Codex;
+            let channel_id = ChannelId::new(1237);
+            let mut old_state = InflightTurnState::new(
+                provider.clone(),
+                channel_id.get(),
+                None,
+                42,
+                100,
+                0,
+                "old prompt".to_string(),
+                None,
+                Some("tmux".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                None,
+                12,
+            );
+            old_state.started_at = "2026-05-17 10:00:00".to_string();
+            let binding = StandbyRelayTurnBinding::from_state(&old_state);
+            super::super::inflight::save_inflight_state(&old_state).expect("save old inflight");
+
+            let mut fresh_state = InflightTurnState::new(
+                provider.clone(),
+                channel_id.get(),
+                None,
+                42,
+                101,
+                0,
+                "fresh prompt".to_string(),
+                None,
+                Some("tmux".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                None,
+                20,
+            );
+            fresh_state.started_at = "2026-05-17 10:00:05".to_string();
+            super::super::inflight::save_inflight_state(&fresh_state)
+                .expect("replace with fresh inflight");
+
+            refresh_standby_inflight_heartbeat(
+                &provider,
+                channel_id,
+                "/tmp/out.jsonl",
+                None,
+                &binding,
+                88,
+            );
+
+            let loaded = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+                .expect("fresh inflight should remain");
+            assert_eq!(loaded.user_msg_id, 101);
+            assert_eq!(loaded.last_offset, 20);
+            assert_eq!(loaded.started_at, "2026-05-17 10:00:05");
+        });
     }
 
     /// #2448 acceptance — `tokio::sync::broadcast` capacity 256 must

@@ -1962,6 +1962,8 @@ fn handle_watcher_runtime_handoff(
                         Some(serenity::MessageId::new(inflight_state.current_msg_id))
                     };
                     let output_path_for_standby = output_path.clone();
+                    let turn_binding_for_standby =
+                        super::standby_relay::StandbyRelayTurnBinding::from_state(&inflight_state);
                     let cancel_for_standby = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let shared_for_standby = shared_owned.clone();
                     let provider_for_standby = provider.clone();
@@ -1970,6 +1972,7 @@ fn handle_watcher_runtime_handoff(
                         channel_id,
                         placeholder_msg_id_opt,
                         output_path_for_standby,
+                        turn_binding_for_standby,
                         last_offset,
                         cancel_for_standby,
                         shared_for_standby,
@@ -3540,8 +3543,11 @@ pub(super) fn spawn_turn_bridge(
                                                     Some(serenity::MessageId::new(
                                                         inflight_state.current_msg_id,
                                                     ))
-                                                };
+                                            };
                                             let output_path_for_standby = output_path.clone();
+                                            let turn_binding_for_standby = super::standby_relay::StandbyRelayTurnBinding::from_state(
+                                                &inflight_state,
+                                            );
                                             // Use a fresh cancel Arc, independent
                                             // from the watcher's `cancel` (which
                                             // is shared via `handle.cancel`).
@@ -3555,6 +3561,7 @@ pub(super) fn spawn_turn_bridge(
                                                 channel_id,
                                                 placeholder_msg_id_opt,
                                                 output_path_for_standby,
+                                                turn_binding_for_standby,
                                                 last_offset,
                                                 cancel_for_standby,
                                                 shared_for_standby,

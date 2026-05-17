@@ -407,7 +407,7 @@
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 587 |  |
 | `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 465 |  |
 | `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 140 |  |
-| `services::discord::inflight` | `src/services/discord/inflight.rs` | 2688 | giant-file |
+| `services::discord::inflight` | `src/services/discord/inflight.rs` | 3030 | giant-file |
 | `services::discord::inflight_heartbeat_sweeper` | `src/services/discord/inflight_heartbeat_sweeper.rs` | 292 |  |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 817 |  |
 | `services::discord::jsonl_watcher` | `src/services/discord/jsonl_watcher.rs` | 252 |  |
@@ -476,7 +476,7 @@
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 392 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
 | `services::discord::stall_recovery` | `src/services/discord/stall_recovery.rs` | 119 |  |
-| `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 558 |  |
+| `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 951 |  |
 | `services::discord::streaming_finalizer` | `src/services/discord/streaming_finalizer.rs` | 252 |  |
 | `services::discord::tmux` | `src/services/discord/tmux.rs` | 6294 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 324 |  |
@@ -490,7 +490,7 @@
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
 | `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4008 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 710 |  |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 6473 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 6480 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2458 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 88 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 194 |  |
@@ -550,7 +550,7 @@
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 474 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 437 |  |
 | `services::observability` | `src/services/observability/mod.rs` | 1158 | giant-file |
-| `services::observability::emit` | `src/services/observability/emit.rs` | 476 |  |
+| `services::observability::emit` | `src/services/observability/emit.rs` | 477 |  |
 | `services::observability::events` | `src/services/observability/events.rs` | 399 |  |
 | `services::observability::helpers` | `src/services/observability/helpers.rs` | 188 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
