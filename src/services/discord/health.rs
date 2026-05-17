@@ -2244,6 +2244,18 @@ fn manual_dedup_key(
     )
 }
 
+/// #2368 — the voice dispatch path owns the `voice:` correlation_id
+/// namespace via `voice_announce_delivery_id`. Outbound deduping is
+/// scoped by `(bot, target, correlation_id, semantic_event_id)`, so an
+/// authenticated `bot=announce` caller submitting a forged voice-shaped
+/// id can collide with a real voice announce and either block delivery
+/// (treated as duplicate) or hijack the recorded message_id mapping.
+/// Refuse any caller-supplied correlation_id that targets this
+/// namespace; only the internal voice path generates these.
+pub(crate) fn is_reserved_voice_correlation_id(correlation_id: &str) -> bool {
+    correlation_id.starts_with("voice:")
+}
+
 fn parse_channel_id_for_manual(channel_id: &str) -> Result<ChannelId, ManualDeliveryOutcome> {
     channel_id
         .parse::<u64>()
@@ -2343,6 +2355,23 @@ pub async fn handle_send<'a>(
         (Some(correlation_id), Some(semantic_event_id))
             if !correlation_id.trim().is_empty() && !semantic_event_id.trim().is_empty() =>
         {
+            // #2368 — reject caller-supplied delivery_ids that target the
+            // reserved `voice:` correlation namespace. The voice path
+            // owns this namespace via `voice_announce_delivery_id`; an
+            // authenticated `bot=announce` caller could otherwise forge
+            // a voice-shaped delivery_id and hijack or block a
+            // legitimate voice announce by colliding on the outbound
+            // dedup key.
+            if is_reserved_voice_correlation_id(correlation_id) {
+                return (
+                    "400 Bad Request",
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "correlation_id namespace 'voice:' is reserved (#2368)",
+                    })
+                    .to_string(),
+                );
+            }
             Some(ManualOutboundDeliveryId {
                 correlation_id,
                 semantic_event_id,
@@ -3203,6 +3232,44 @@ mod manual_v3_delivery_tests {
             }
             other => panic!("expected Sent(duplicate), got {other:?}"),
         }
+    }
+
+    // #2368 — forgery guard: handle_send must refuse caller-supplied
+    // delivery_ids that target the reserved `voice:` correlation
+    // namespace, so a `bot=announce` caller cannot hijack or block a
+    // legitimate voice announce by colliding on the outbound dedup key.
+    #[test]
+    fn is_reserved_voice_correlation_id_matches_voice_namespace() {
+        assert!(super::is_reserved_voice_correlation_id("voice:1:2:utt"));
+        assert!(super::is_reserved_voice_correlation_id("voice:"));
+        assert!(!super::is_reserved_voice_correlation_id("notify:42"));
+        assert!(!super::is_reserved_voice_correlation_id("voic:1:2:utt"));
+        assert!(!super::is_reserved_voice_correlation_id(""));
+    }
+
+    #[tokio::test]
+    async fn handle_send_rejects_forged_voice_correlation_id() {
+        // No HealthRegistry is needed — the guard fires before any
+        // outbound delivery work. We satisfy the signature with a
+        // best-effort stub: the failure path returns before consulting
+        // the registry. Use the public re-export via `super::*`.
+        // To exercise the guard without a registry we call the parser
+        // helper directly through the function entry point.
+        let body = serde_json::json!({
+            "target": "channel:123",
+            "content": "hijack attempt",
+            "bot": "announce",
+            "correlation_id": "voice:7001:8002:utt-victim",
+            "semantic_event_id": "announce:generation:1",
+        })
+        .to_string();
+        let registry = HealthRegistry::new();
+        let (status, response) = super::handle_send(&registry, None, None, &body).await;
+        assert_eq!(status, "400 Bad Request");
+        assert!(
+            response.contains("voice:"),
+            "rejection body must mention the reserved namespace, got {response}"
+        );
     }
 }
 

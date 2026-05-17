@@ -2083,12 +2083,50 @@ impl VoiceBargeInRuntime {
                             // concurrent cancel can record the
                             // tombstone DURING synthesis; without
                             // re-checking we would still play the ack.
+                            //
+                            // #2403 — Codex round-2 HIGH: the original
+                            // round-1 fix only suppressed the ack. The
+                            // background turn the handoff just started
+                            // could keep running because the
+                            // synthesis-window cancel never propagated
+                            // to the target channel mailbox nor wrote
+                            // a tombstone visible to retried cancels.
+                            // Apply the same record-tombstone +
+                            // identity-guarded mailbox cancel the
+                            // pre-synthesis branch does.
                             let tombstone_after_synth = handoff_message_id.and_then(|id| {
                                 crate::voice::cancel_tombstone::global_store().lookup(id)
                             });
-                            if cancel_token.cancelled.load(Ordering::Relaxed)
-                                || tombstone_after_synth.is_some()
-                            {
+                            let local_cancel_after_synth =
+                                cancel_token.cancelled.load(Ordering::Relaxed);
+                            if local_cancel_after_synth || tombstone_after_synth.is_some() {
+                                let target_cancel_label: &'static str =
+                                    "voice_foreground_cancel_during_handoff";
+                                if let Some(handoff_id) = handoff_message_id {
+                                    super::record_voice_handoff_cancel_tombstone(
+                                        handoff_id,
+                                        target_cancel_label,
+                                    );
+                                    let result = super::mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
+                                        shared,
+                                        target_channel_id,
+                                        handoff_id,
+                                        target_cancel_label,
+                                    )
+                                    .await;
+                                    tracing::info!(
+                                        source_channel_id = source_channel_id.get(),
+                                        target_channel_id = target_channel_id.get(),
+                                        turn_id = %turn_id,
+                                        target_cancelled = result.token.is_some(),
+                                        already_stopping = result.already_stopping,
+                                        observed_via_tombstone =
+                                            tombstone_after_synth.is_some() && !local_cancel_after_synth,
+                                        handoff_message_id = handoff_id.get(),
+                                        "voice background handoff cancelled DURING ack synthesis — \
+                                         tombstone refreshed and target cancel issued (#2403)"
+                                    );
+                                }
                                 log_cancel_suppressed("post_background_handoff_play");
                                 return true;
                             }
@@ -2121,6 +2159,28 @@ impl VoiceBargeInRuntime {
         true
     }
 
+    /// #2392 — 3-phase persist-before-publish dispatch.
+    ///
+    /// Phases:
+    /// 1. **Reserve** — compute deterministic `correlation_id` from
+    ///    `(guild_id, voice_channel_id, utterance_id, generation)` and
+    ///    insert a pending row in BOTH the in-memory pending map and the
+    ///    PG side store. The pending PG row carries `message_id = NULL`
+    ///    so the partial unique index on `correlation_id` rejects double
+    ///    reservations (Codex HIGH-3 vs PR #2446).
+    /// 2. **Publish** — `driver.start()` posts the announce-bot message
+    ///    and returns `message_id`.
+    /// 3. **Bind** — promote the pending in-memory reservation into the
+    ///    committed `message_id`-keyed marker AND `UPDATE` the PG row to
+    ///    fill in the `message_id`. Both steps happen synchronously
+    ///    after publish returns so a fast downstream turn's terminal
+    ///    delivery cannot miss the marker.
+    ///
+    /// Refuses dispatch entirely (returns `Err`) when `guild_id` is not
+    /// available or no PG pool is configured: the original local-only
+    /// fallback was the source of #2355 HIGH-2 and #2392's pre-persist
+    /// race. There is no race-prone fallback left — see #2392 / #2355
+    /// design notes.
     async fn dispatch_voice_background_handoff(
         &self,
         shared: &Arc<SharedData>,
@@ -2139,97 +2199,206 @@ impl VoiceBargeInRuntime {
             summary,
             &announcement.language,
         );
-        let outcome = driver
+
+        // #2392 §5 — fail closed when prerequisites for the 3-phase flow
+        // are missing. Without guild_id we cannot compute the correlation
+        // namespace; without a PG pool the durable reservation is
+        // skipped. Either path falls back to the race window the issue
+        // closes, so refuse entirely. The caller logs and emits the
+        // foreground "background handoff failed" error message as if a
+        // publish error had occurred.
+        let Some(guild_id) = guild_id else {
+            return Err(
+                "voice background handoff dispatch requires a registered voice guild_id (#2392 fail-closed)"
+                    .to_string(),
+            );
+        };
+        let Some(pool) = shared.pg_pool.clone() else {
+            return Err(
+                "voice background handoff dispatch requires a Postgres pool for durable reservation (#2392 fail-closed)"
+                    .to_string(),
+            );
+        };
+
+        let generation = default_voice_announce_generation() + 1;
+        let delivery_id = super::voice_background_driver::voice_announce_delivery_id(
+            guild_id,
+            source_channel_id,
+            &announcement.utterance_id,
+            generation,
+        );
+        let correlation_id = delivery_id.correlation_id.clone();
+        let agent_id = self
+            .active_voice_routes
+            .get(&source_channel_id.get())
+            .map(|entry| entry.agent_id.clone());
+        let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+            voice_channel_id: source_channel_id.get(),
+            background_channel_id: target_channel_id.get(),
+            agent_id,
+            local_only_fallback: false,
+        };
+
+        // Phase 1A — in-memory reservation. Refuses overwrite so a stale
+        // retry that reused the same correlation_id cannot silently
+        // displace a live reservation.
+        if crate::voice::announce_meta::global_store()
+            .reserve_pending_handoff(&correlation_id, meta.clone())
+            .is_err()
+        {
+            return Err(format!(
+                "voice background handoff already has a pending reservation for correlation_id={correlation_id} (#2392 collision)"
+            ));
+        }
+
+        // Phase 1B — durable reservation. The partial unique index on
+        // `correlation_id` rejects a duplicate; the failure is treated
+        // as a hard error so the in-memory reservation is rolled back
+        // and dispatch is refused (no publish happens — fail-closed,
+        // #2355 HIGH-2).
+        if let Err(error) =
+            crate::voice::announce_meta::reserve_handoff_durable(&pool, &correlation_id, &meta)
+                .await
+        {
+            crate::voice::announce_meta::global_store()
+                .cancel_pending_reservation(&correlation_id);
+            return Err(format!(
+                "voice background handoff durable reservation failed (#2392): {error}"
+            ));
+        }
+
+        // Phase 2 — publish. On error, both reservations are cleaned up
+        // before propagating the error so no orphan rows leak.
+        let outcome = match driver
             .start(VoiceBackgroundStartRequest {
-                guild_id,
+                guild_id: Some(guild_id),
                 voice_channel_id: source_channel_id,
                 channel_id: target_channel_id,
                 shared,
                 utterance_id: &announcement.utterance_id,
-                generation: default_voice_announce_generation() + 1,
+                generation,
                 message_content: &prompt,
             })
-            .await?;
-        // #2236: stamp a typed marker keyed by the posted message id so the
-        // turn bridge can route the background turn's spoken summary back to
-        // the foreground voice channel WITHOUT inspecting the prompt body.
-        // The previous design matched a hardcoded Korean prefix on
-        // `user_text`, which any user could type to hijack routing.
-        //
-        // #2274: also write through to the durable PG side store so the
-        // marker survives a dcserver restart while the background turn is
-        // still running. The in-memory store remains the hot read path; PG
-        // is the durable source of truth and is consulted as a fallback by
-        // terminal-delivery callers when the in-memory store misses.
-        if let Some(message_id) = outcome.message_id {
-            let agent_id = self
-                .active_voice_routes
-                .get(&source_channel_id.get())
-                .map(|entry| entry.agent_id.clone());
-            let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
-                voice_channel_id: source_channel_id.get(),
-                background_channel_id: target_channel_id.get(),
-                agent_id,
-                local_only_fallback: false,
-            };
-            crate::voice::announce_meta::global_store().insert_handoff(message_id, meta.clone());
-            // #2274 Codex round-2 finding: a durable-write failure here used
-            // to leave the local marker as-is, but the terminal-delivery path
-            // (PG-authoritative since the round-1 fix) would then observe
-            // `Ok(None)` from PG and silently refuse to route the spoken
-            // summary. That is a regression vs the pre-#2274 local-only
-            // behaviour. We restore the local-only fallback by flipping the
-            // explicit `local_only_fallback` flag on the in-memory marker
-            // and emitting an operator-visible warn so persistence failures
-            // are not invisible. The flag is scoped to exactly the
-            // persist-failed case: PG-loaded / rehydrated markers always
-            // carry `local_only_fallback = false`, and once the durable
-            // claim succeeds the local copy is `forget_handoff` ed, so the
-            // fallback path cannot double-route.
-            if let Some(pool) = shared.pg_pool.as_ref() {
-                if let Err(error) =
-                    crate::voice::announce_meta::persist_handoff_durable(pool, message_id, &meta)
-                        .await
-                {
-                    tracing::warn!(
-                        error = %error,
-                        message_id = message_id.get(),
-                        source_channel_id = source_channel_id.get(),
-                        target_channel_id = target_channel_id.get(),
-                        utterance_id = %announcement.utterance_id,
-                        "voice background handoff durable persistence failed; falling back to local-only marker so the spoken summary is not dropped"
-                    );
-                    if crate::voice::announce_meta::global_store()
-                        .mark_handoff_local_only_fallback(message_id)
-                    {
-                        tracing::warn!(
-                            event = "voice_background_handoff_local_only_fallback",
-                            message_id = message_id.get(),
-                            source_channel_id = source_channel_id.get(),
-                            target_channel_id = target_channel_id.get(),
-                            utterance_id = %announcement.utterance_id,
-                            "voice background handoff marker flagged local-only fallback; terminal delivery may consume the local marker without a backing PG row"
-                        );
-                    }
-                }
-            } else {
-                tracing::debug!(
-                    message_id = message_id.get(),
-                    "voice background handoff durable persistence skipped — postgres pool unavailable"
-                );
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.rollback_pending_handoff_reservation(
+                    &pool,
+                    &correlation_id,
+                    "publish_error",
+                )
+                .await;
+                return Err(error);
             }
-        } else {
+        };
+
+        // Phase 3 — bind. The publish driver currently always returns a
+        // message_id with `Ok`, but defensively handle the `None` case
+        // by rolling back so a future driver variant cannot regress the
+        // invariant silently.
+        let Some(message_id) = outcome.message_id else {
+            self.rollback_pending_handoff_reservation(
+                &pool,
+                &correlation_id,
+                "publish_missing_message_id",
+            )
+            .await;
+            return Err(
+                "voice background handoff publish returned no message_id (#2392 invariant)"
+                    .to_string(),
+            );
+        };
+
+        // 3A — in-memory bind. Promotes pending → committed under the
+        // same store the terminal-delivery readers consult.
+        if crate::voice::announce_meta::global_store()
+            .bind_pending_to_message_id(&correlation_id, message_id)
+            .is_none()
+        {
             tracing::warn!(
+                correlation_id = %correlation_id,
+                message_id = message_id.get(),
                 source_channel_id = source_channel_id.get(),
                 target_channel_id = target_channel_id.get(),
                 utterance_id = %announcement.utterance_id,
-                "voice background handoff dispatch returned no message_id; spoken summary routing will fall back to legacy prefix detection"
+                "voice background handoff in-memory bind found no pending reservation (#2392); reservation may have expired between publish and bind"
             );
         }
+
+        // 3B — durable bind. A failure here means the row sits in PG
+        // with message_id=NULL even though publish succeeded — the
+        // terminal-delivery `take_handoff_durable` filters on
+        // `message_id = $1` so it would never match. We log loudly and
+        // attempt to cancel the pending row to keep the table tidy.
+        match crate::voice::announce_meta::bind_handoff_message_id_durable(
+            &pool,
+            &correlation_id,
+            message_id,
+        )
+        .await
+        {
+            Ok(0) => {
+                tracing::warn!(
+                    correlation_id = %correlation_id,
+                    message_id = message_id.get(),
+                    "voice background handoff durable bind affected 0 rows (#2392); reservation may have been GC'd between reserve and bind"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    correlation_id = %correlation_id,
+                    message_id = message_id.get(),
+                    "voice background handoff durable bind failed (#2392); spoken summary may be lost — in-memory marker is the only record"
+                );
+                // Best-effort: try to remove the orphan pending row.
+                let _ = crate::voice::announce_meta::cancel_pending_handoff_durable(
+                    &pool,
+                    &correlation_id,
+                )
+                .await;
+            }
+        }
+
         Ok(VoiceBackgroundHandoffOutcome {
             turn_id: outcome.turn_id,
-            handoff_message_id: outcome.message_id,
+            handoff_message_id: Some(message_id),
         })
+    }
+
+    /// #2392 — rollback helper used by every dispatch failure path. Drops
+    /// the in-memory pending reservation and best-effort deletes the
+    /// durable pending row. `reason` is logged at info-level for
+    /// observability; PG-level errors during cleanup are downgraded to
+    /// warns because the row will be GC'd by TTL even if cleanup fails.
+    async fn rollback_pending_handoff_reservation(
+        &self,
+        pool: &sqlx::PgPool,
+        correlation_id: &str,
+        reason: &'static str,
+    ) {
+        crate::voice::announce_meta::global_store().cancel_pending_reservation(correlation_id);
+        match crate::voice::announce_meta::cancel_pending_handoff_durable(pool, correlation_id)
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    correlation_id,
+                    reason,
+                    "voice background handoff pending reservation rolled back (#2392)"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    correlation_id,
+                    reason,
+                    "voice background handoff pending reservation rollback failed (#2392); pending row will be GC'd by TTL"
+                );
+            }
+        }
     }
 
     async fn start_voice_turn(

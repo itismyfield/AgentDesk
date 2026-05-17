@@ -19,7 +19,7 @@
 //! - [`DiscordOutboundClient`] is the transport trait that test doubles
 //!   implement.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use poise::serenity_prelude::{ChannelId, MessageId};
@@ -434,9 +434,38 @@ pub(crate) trait DiscordOutboundClient: Send + Sync {
 ///
 /// Follow-up slices can swap this for a Postgres table
 /// (`discord_outbound_dedup`) without touching callers.
+///
+/// #2368 — also tracks an `in_flight` set. Two concurrent retries that
+/// race lookup→send→record could both observe an empty lookup, both
+/// publish, and both record. The atomic `reserve_in_flight` primitive
+/// closes that window: the second caller observes the reservation and
+/// can either short-circuit as a duplicate or wait. Callers that did
+/// NOT win the reservation MUST NOT publish a second copy.
+#[derive(Default)]
+struct OutboundDeduperInner {
+    delivered: HashMap<String, String>,
+    in_flight: HashSet<String>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct OutboundDeduper {
-    inner: Arc<Mutex<HashMap<String, String>>>,
+    inner: Arc<Mutex<OutboundDeduperInner>>,
+}
+
+/// Outcome of a `reserve_in_flight` attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OutboundDeduperReservation {
+    /// No prior delivery, no concurrent in-flight send. The caller now
+    /// owns the in-flight slot for `key` and MUST eventually call either
+    /// `record` (success) or `release_in_flight` (failure).
+    Acquired,
+    /// A prior successful delivery exists. The caller MUST treat its
+    /// send as a duplicate and short-circuit to the stored message_id.
+    AlreadyDelivered { message_id: String },
+    /// Another caller is currently sending for the same key. The caller
+    /// MUST treat its send as a duplicate and skip — concurrent retries
+    /// of the same outbox row would otherwise double-deliver.
+    AlreadyInFlight,
 }
 
 impl OutboundDeduper {
@@ -447,12 +476,48 @@ impl OutboundDeduper {
     /// Returns the previously-delivered message id, if any.
     pub(crate) fn lookup(&self, key: &str) -> Option<String> {
         let guard = self.inner.lock().ok()?;
-        guard.get(key).cloned()
+        guard.delivered.get(key).cloned()
     }
 
     pub(crate) fn record(&self, key: &str, message_id: &str) {
         if let Ok(mut guard) = self.inner.lock() {
-            guard.insert(key.to_string(), message_id.to_string());
+            guard
+                .delivered
+                .insert(key.to_string(), message_id.to_string());
+            // A successful record clears any in-flight reservation the
+            // caller held for the same key. Idempotent: if no
+            // reservation exists, the remove is a no-op.
+            guard.in_flight.remove(key);
+        }
+    }
+
+    /// #2368 atomic primitive — lookup + in-flight reserve in a single
+    /// critical section. Callers that observe `Acquired` MUST follow up
+    /// with `record` on success or `release_in_flight` on failure;
+    /// callers that observe `AlreadyDelivered` or `AlreadyInFlight`
+    /// MUST NOT publish a second copy.
+    pub(crate) fn reserve_in_flight(&self, key: &str) -> OutboundDeduperReservation {
+        let Ok(mut guard) = self.inner.lock() else {
+            // Poisoned lock — fail closed by reporting in-flight so
+            // callers do not double-publish.
+            return OutboundDeduperReservation::AlreadyInFlight;
+        };
+        if let Some(message_id) = guard.delivered.get(key) {
+            return OutboundDeduperReservation::AlreadyDelivered {
+                message_id: message_id.clone(),
+            };
+        }
+        if !guard.in_flight.insert(key.to_string()) {
+            return OutboundDeduperReservation::AlreadyInFlight;
+        }
+        OutboundDeduperReservation::Acquired
+    }
+
+    /// #2368 — drop an in-flight reservation when the send failed and no
+    /// `record` will be called. Idempotent.
+    pub(crate) fn release_in_flight(&self, key: &str) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.in_flight.remove(key);
         }
     }
 }
@@ -1046,5 +1111,68 @@ mod tests {
         assert!(out.ends_with("[… truncated]"));
         // Ensure no char was split (round-trip to String succeeds).
         assert!(out.chars().count() <= 110 + 20);
+    }
+}
+
+// #2368 — OutboundDeduper atomic reserve_in_flight primitive tests.
+// These are NOT gated on the legacy-sqlite-tests feature so they always
+// run in the standard `cargo test` invocation.
+#[cfg(test)]
+mod deduper_concurrency_tests {
+    use super::{OutboundDeduper, OutboundDeduperReservation};
+
+    #[test]
+    fn reserve_in_flight_acquired_on_empty_state() {
+        let d = OutboundDeduper::new();
+        match d.reserve_in_flight("key-a") {
+            OutboundDeduperReservation::Acquired => {}
+            other => panic!("expected Acquired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reserve_in_flight_returns_already_in_flight_for_second_caller() {
+        let d = OutboundDeduper::new();
+        let _first = d.reserve_in_flight("key-a");
+        match d.reserve_in_flight("key-a") {
+            OutboundDeduperReservation::AlreadyInFlight => {}
+            other => panic!("expected AlreadyInFlight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reserve_in_flight_returns_already_delivered_when_record_present() {
+        let d = OutboundDeduper::new();
+        d.record("key-a", "discord-message-id-1");
+        match d.reserve_in_flight("key-a") {
+            OutboundDeduperReservation::AlreadyDelivered { message_id } => {
+                assert_eq!(message_id, "discord-message-id-1");
+            }
+            other => panic!("expected AlreadyDelivered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn release_in_flight_lets_a_subsequent_caller_acquire() {
+        let d = OutboundDeduper::new();
+        let _first = d.reserve_in_flight("key-a");
+        d.release_in_flight("key-a");
+        match d.reserve_in_flight("key-a") {
+            OutboundDeduperReservation::Acquired => {}
+            other => panic!("expected Acquired after release, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_clears_in_flight_slot() {
+        let d = OutboundDeduper::new();
+        let _first = d.reserve_in_flight("key-a");
+        d.record("key-a", "msg-1");
+        // A subsequent reserve now sees the recorded delivery, not the
+        // stale in-flight reservation the first caller forgot to clear.
+        match d.reserve_in_flight("key-a") {
+            OutboundDeduperReservation::AlreadyDelivered { .. } => {}
+            other => panic!("expected AlreadyDelivered, got {other:?}"),
+        }
     }
 }

@@ -78,10 +78,28 @@ struct StoredVoiceBackgroundHandoffMeta {
     expires_at: Instant,
 }
 
+/// In-memory "pending" reservation for the persist-before-publish flow
+/// (#2392). Keyed by `correlation_id` (deterministic from
+/// `(guild_id, voice_channel_id, utterance_id, generation)`), it carries
+/// the meta payload until `bind_pending_to_message_id` promotes it into
+/// the committed `handoff_entries` map after publish returns. The
+/// `expires_at` matches `HANDOFF_META_TTL` so a reservation that never
+/// gets bound (publish error, dispatcher crash) eventually disappears.
+#[derive(Debug, Clone)]
+struct PendingHandoffReservation {
+    meta: VoiceBackgroundHandoffMeta,
+    expires_at: Instant,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct VoiceAnnouncementMetaStore {
     entries: RwLock<HashMap<u64, StoredVoiceTranscriptAnnouncement>>,
     handoff_entries: RwLock<HashMap<u64, StoredVoiceBackgroundHandoffMeta>>,
+    /// #2392 — reservations made BEFORE publish so the durable record
+    /// exists before any caller can observe the announce-bot MESSAGE_CREATE
+    /// webhook. Promoted to `handoff_entries` by `bind_pending_to_message_id`
+    /// or removed by `cancel_pending_reservation` on publish failure.
+    pending_handoff_entries: RwLock<HashMap<String, PendingHandoffReservation>>,
 }
 
 impl VoiceAnnouncementMetaStore {
@@ -158,6 +176,95 @@ impl VoiceAnnouncementMetaStore {
         }
     }
 
+    /// #2392 — reserve a pending handoff record keyed by `correlation_id`
+    /// BEFORE publish. Returns `Err(())` when a reservation already exists
+    /// for `correlation_id` — silent overwrite was flagged by Codex
+    /// review against PR #2446 (HIGH-3). Successful reservation must be
+    /// followed by either `bind_pending_to_message_id` (publish succeeded)
+    /// or `cancel_pending_reservation` (publish failed). A leaked
+    /// reservation eventually evaporates via the same TTL as a committed
+    /// entry.
+    pub(crate) fn reserve_pending_handoff(
+        &self,
+        correlation_id: &str,
+        meta: VoiceBackgroundHandoffMeta,
+    ) -> Result<(), ()> {
+        let mut entries = self.pending_handoff_entries.write().map_err(|_| ())?;
+        let now = Instant::now();
+        prune_pending_expired_locked(&mut entries, now);
+        if entries.contains_key(correlation_id) {
+            return Err(());
+        }
+        entries.insert(
+            correlation_id.to_string(),
+            PendingHandoffReservation {
+                meta,
+                expires_at: now + HANDOFF_META_TTL,
+            },
+        );
+        Ok(())
+    }
+
+    /// #2392 — promote a pending reservation into the committed
+    /// `message_id`-keyed marker map. Returns the meta payload if a
+    /// pending reservation existed; otherwise returns `None`. Callers
+    /// MUST treat `None` as a programmer error (or a TTL expiry between
+    /// reserve and bind) and emit a warning.
+    ///
+    /// This method takes the pending lock and the committed lock in a
+    /// deterministic order (pending → committed) inside a single call so
+    /// that `get_handoff` / `take_handoff`, which only look at the
+    /// committed map, observe the marker atomically once the publish has
+    /// returned and the dispatcher is in the bind step. The pending map
+    /// is intentionally invisible to those readers — terminal-delivery
+    /// readers look up by `message_id`, which only exists after publish.
+    pub(crate) fn bind_pending_to_message_id(
+        &self,
+        correlation_id: &str,
+        message_id: MessageId,
+    ) -> Option<VoiceBackgroundHandoffMeta> {
+        let mut pending = self.pending_handoff_entries.write().ok()?;
+        let now = Instant::now();
+        prune_pending_expired_locked(&mut pending, now);
+        let reservation = pending.remove(correlation_id)?;
+        let remaining = reservation
+            .expires_at
+            .checked_duration_since(now)
+            .unwrap_or(Duration::from_secs(1));
+        drop(pending);
+
+        let mut entries = self.handoff_entries.write().ok()?;
+        prune_handoff_expired_locked(&mut entries, now);
+        entries.insert(
+            message_id.get(),
+            StoredVoiceBackgroundHandoffMeta {
+                meta: reservation.meta.clone(),
+                expires_at: now + remaining,
+            },
+        );
+        Some(reservation.meta)
+    }
+
+    /// #2392 — drop a pending reservation that will never be bound
+    /// (publish error before message_id is available, or dispatcher
+    /// chose to abort). Idempotent.
+    pub(crate) fn cancel_pending_reservation(&self, correlation_id: &str) {
+        if let Ok(mut pending) = self.pending_handoff_entries.write() {
+            pending.remove(correlation_id);
+        }
+    }
+
+    /// #2392 test/observability helper — true iff a pending reservation
+    /// exists for `correlation_id`. Used by the unit tests that verify
+    /// the lifecycle (reserve → bind | cancel) leaves no leak.
+    #[cfg(test)]
+    pub(crate) fn pending_contains(&self, correlation_id: &str) -> bool {
+        self.pending_handoff_entries
+            .read()
+            .map(|guard| guard.contains_key(correlation_id))
+            .unwrap_or(false)
+    }
+
     /// Flip the `local_only_fallback` flag on an in-memory marker. Called
     /// at dispatch time when the durable PG write failed (or no pool was
     /// available), so the terminal-delivery path knows it is safe to fall
@@ -220,6 +327,13 @@ fn prune_handoff_expired_locked(
     entries.retain(|_, stored| stored.expires_at > now);
 }
 
+fn prune_pending_expired_locked(
+    entries: &mut HashMap<String, PendingHandoffReservation>,
+    now: Instant,
+) {
+    entries.retain(|_, stored| stored.expires_at > now);
+}
+
 fn prune_expired_locked(
     entries: &mut HashMap<u64, StoredVoiceTranscriptAnnouncement>,
     now: Instant,
@@ -232,6 +346,83 @@ pub(crate) fn global_store() -> &'static VoiceAnnouncementMetaStore {
     STORE.get_or_init(VoiceAnnouncementMetaStore::default)
 }
 
+/// #2392 — insert a pending handoff row to the durable PG store keyed by
+/// `correlation_id` BEFORE publish. `message_id` is left NULL until
+/// `bind_handoff_message_id_durable` runs after publish returns. The
+/// `voice_background_handoff_meta_correlation_id_unique` partial unique
+/// index rejects double reservations at the schema level (Codex HIGH-3
+/// against PR #2446).
+///
+/// Returns Ok on a successful insert. Returns Err on a duplicate
+/// correlation_id (caller must NOT proceed with publish) or on a PG
+/// transport error (caller must NOT proceed with publish — fail-closed,
+/// #2355 HIGH-2).
+pub(crate) async fn reserve_handoff_durable(
+    pool: &PgPool,
+    correlation_id: &str,
+    meta: &VoiceBackgroundHandoffMeta,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO voice_background_handoff_meta (
+             correlation_id, message_id,
+             voice_channel_id, background_channel_id, agent_id
+         ) VALUES ($1, NULL, $2, $3, $4)",
+    )
+    .bind(correlation_id)
+    .bind(meta.voice_channel_id.to_string())
+    .bind(meta.background_channel_id.to_string())
+    .bind(meta.agent_id.as_ref())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// #2392 — promote a pending reservation in PG into a committed
+/// message_id-keyed marker after publish returns. The UPDATE is keyed by
+/// `correlation_id` and explicitly guards `message_id IS NULL` so a
+/// retry after a transient transport blip cannot accidentally rebind to
+/// a different message_id (which would orphan the original publish in
+/// Discord without a marker).
+///
+/// Returns Ok(()) on a successful bind. Returns Ok with no-op semantics
+/// (zero rows affected) if the pending row was already consumed or never
+/// existed — the caller logs and abandons routing. Returns Err on PG
+/// transport error so the caller can decide between local-only fallback
+/// (#2355 design) and dropping the handoff.
+pub(crate) async fn bind_handoff_message_id_durable(
+    pool: &PgPool,
+    correlation_id: &str,
+    message_id: MessageId,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE voice_background_handoff_meta
+         SET message_id = $2, updated_at = NOW()
+         WHERE correlation_id = $1 AND message_id IS NULL",
+    )
+    .bind(correlation_id)
+    .bind(message_id.get().to_string())
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// #2392 — delete a pending PG reservation when publish failed. Keyed by
+/// (`correlation_id`, `message_id IS NULL`) so a row that has already
+/// been bound cannot be accidentally erased by a late cleanup attempt.
+pub(crate) async fn cancel_pending_handoff_durable(
+    pool: &PgPool,
+    correlation_id: &str,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM voice_background_handoff_meta
+         WHERE correlation_id = $1 AND message_id IS NULL",
+    )
+    .bind(correlation_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Persist a voice-background handoff marker to the durable side store
 /// (#2274). The process-local in-memory store remains the hot read path;
 /// this PG row is the durable source of truth that survives a dcserver
@@ -239,6 +430,14 @@ pub(crate) fn global_store() -> &'static VoiceAnnouncementMetaStore {
 ///
 /// `ON CONFLICT … DO UPDATE` resets `consumed_at` to NULL so retries from
 /// a re-dispatched handoff path can reuse the same `message_id`.
+///
+/// #2392: this is the legacy direct-insert variant. New dispatch sites
+/// MUST use the 3-phase `reserve_handoff_durable` → publish →
+/// `bind_handoff_message_id_durable` flow. This entry point is kept only
+/// for tests and the no-guild_id fallback path; the dispatcher refuses
+/// dispatch entirely when guild_id is missing (#2392 acceptance — no
+/// race-prone fallback survives).
+#[allow(dead_code)]
 pub(crate) async fn persist_handoff_durable(
     pool: &PgPool,
     message_id: MessageId,
@@ -248,7 +447,7 @@ pub(crate) async fn persist_handoff_durable(
         "INSERT INTO voice_background_handoff_meta (
              message_id, voice_channel_id, background_channel_id, agent_id
          ) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (message_id) DO UPDATE
+         ON CONFLICT (message_id) WHERE message_id IS NOT NULL DO UPDATE
          SET voice_channel_id = EXCLUDED.voice_channel_id,
              background_channel_id = EXCLUDED.background_channel_id,
              agent_id = EXCLUDED.agent_id,
@@ -622,6 +821,242 @@ mod tests {
 
         // Drain the in-memory store entry to keep test isolation tight.
         let _ = global_store().take_handoff(message_id);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[test]
+    fn reserve_then_bind_promotes_to_committed() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let correlation_id = "voice:1:2:utt-abc";
+        let meta = handoff_meta(900, 800, Some("agent"));
+
+        store
+            .reserve_pending_handoff(correlation_id, meta.clone())
+            .expect("first reservation succeeds");
+        assert!(
+            store.pending_contains(correlation_id),
+            "pending entry must exist after reserve"
+        );
+        // get_handoff/take_handoff intentionally do NOT see pending entries.
+        assert!(
+            store.get_handoff(MessageId::new(7)).is_none(),
+            "committed map must not surface pending entries — readers key on message_id"
+        );
+
+        let bound = store
+            .bind_pending_to_message_id(correlation_id, MessageId::new(7))
+            .expect("bind promotes pending → committed");
+        assert_eq!(bound, meta);
+        assert!(
+            !store.pending_contains(correlation_id),
+            "pending entry must be removed after bind"
+        );
+        assert_eq!(
+            store.get_handoff(MessageId::new(7)),
+            Some(meta),
+            "committed entry must be visible to terminal-delivery readers"
+        );
+    }
+
+    #[test]
+    fn reserve_rejects_duplicate_correlation_id() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let correlation_id = "voice:1:2:utt-abc";
+        store
+            .reserve_pending_handoff(correlation_id, handoff_meta(1, 2, None))
+            .expect("first reservation succeeds");
+        // #2392 — Codex HIGH-3 against PR #2446: silent overwrite of a
+        // pending reservation must be rejected so the second caller
+        // does not blow away the first dispatcher's in-flight state.
+        assert!(
+            store
+                .reserve_pending_handoff(correlation_id, handoff_meta(3, 4, None))
+                .is_err(),
+            "duplicate reservation must fail-closed"
+        );
+    }
+
+    #[test]
+    fn cancel_pending_reservation_clears_entry() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let correlation_id = "voice:1:2:utt-abc";
+        store
+            .reserve_pending_handoff(correlation_id, handoff_meta(1, 2, None))
+            .expect("reserve");
+        store.cancel_pending_reservation(correlation_id);
+        assert!(
+            !store.pending_contains(correlation_id),
+            "cancel_pending_reservation must clear the entry so dispatch can retry"
+        );
+        // A subsequent reservation now succeeds because the slot is empty.
+        store
+            .reserve_pending_handoff(correlation_id, handoff_meta(3, 4, None))
+            .expect("post-cancel re-reserve succeeds");
+    }
+
+    #[test]
+    fn bind_with_no_reservation_returns_none() {
+        let store = VoiceAnnouncementMetaStore::default();
+        assert!(
+            store
+                .bind_pending_to_message_id("voice:0:0:none", MessageId::new(123))
+                .is_none(),
+            "bind without a prior reservation must report None — callers log and abandon"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reserve_pending_durable_rejects_duplicate_correlation_id() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let correlation_id = "voice:1000:2000:dup-test";
+        let meta = handoff_meta(1234, 5678, Some("agent"));
+
+        reserve_handoff_durable(&pool, correlation_id, &meta)
+            .await
+            .expect("first reservation");
+        let second = reserve_handoff_durable(&pool, correlation_id, &meta).await;
+        assert!(
+            second.is_err(),
+            "second reservation with the same correlation_id must fail — Codex HIGH-3 vs PR #2446"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bind_durable_promotes_pending_to_message_id() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let correlation_id = "voice:1000:2000:bind-test";
+        let meta = handoff_meta(1234, 5678, Some("agent"));
+
+        reserve_handoff_durable(&pool, correlation_id, &meta)
+            .await
+            .expect("reserve");
+
+        // Pending row must NOT be visible to a take_handoff_durable
+        // call keyed by message_id — the partial filter `message_id = $1`
+        // naturally excludes the NULL row, but assert explicitly so a
+        // future schema change cannot regress this.
+        let pre_bind = take_handoff_durable(&pool, MessageId::new(99_999))
+            .await
+            .expect("take pre-bind");
+        assert!(
+            pre_bind.is_none(),
+            "pending row must not be consumable before bind"
+        );
+
+        let rows = bind_handoff_message_id_durable(&pool, correlation_id, MessageId::new(99_999))
+            .await
+            .expect("bind durable");
+        assert_eq!(rows, 1, "bind must affect exactly one row");
+
+        let claimed = take_handoff_durable(&pool, MessageId::new(99_999))
+            .await
+            .expect("take post-bind")
+            .expect("bound row must be claimable");
+        assert_eq!(claimed, meta);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_pending_durable_removes_only_unbound_rows() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let unbound = "voice:1000:2000:cancel-unbound";
+        let bound = "voice:1000:2000:cancel-bound";
+        let meta = handoff_meta(11, 22, None);
+
+        reserve_handoff_durable(&pool, unbound, &meta)
+            .await
+            .expect("reserve unbound");
+        reserve_handoff_durable(&pool, bound, &meta)
+            .await
+            .expect("reserve bound");
+        bind_handoff_message_id_durable(&pool, bound, MessageId::new(42))
+            .await
+            .expect("bind bound");
+
+        let deleted = cancel_pending_handoff_durable(&pool, unbound)
+            .await
+            .expect("cancel unbound");
+        assert_eq!(deleted, 1, "unbound row must be cancellable");
+
+        // Bound row must survive — cancel guards on `message_id IS NULL`.
+        let deleted_bound = cancel_pending_handoff_durable(&pool, bound)
+            .await
+            .expect("cancel bound");
+        assert_eq!(
+            deleted_bound, 0,
+            "bound rows must NOT be deletable via the pending-cancel path"
+        );
+        let still_there = take_handoff_durable(&pool, MessageId::new(42))
+            .await
+            .expect("take bound");
+        assert!(
+            still_there.is_some(),
+            "bound row must remain claimable after a misdirected pending-cancel"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2392 — race regression: concurrently spawn two dispatchers that
+    /// reserve different correlation_ids and verify both reservations
+    /// land cleanly with no cross-contamination. Also asserts that two
+    /// tasks racing on the SAME correlation_id resolve to exactly one
+    /// winning reservation (Codex HIGH-3 was an interleaving check).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_reservations_with_distinct_correlation_ids_both_succeed() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let meta = handoff_meta(11, 22, None);
+
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let meta_a = meta.clone();
+        let meta_b = meta.clone();
+        let task_a = tokio::spawn(async move {
+            reserve_handoff_durable(&pool_a, "voice:1:2:concurrent-a", &meta_a).await
+        });
+        let task_b = tokio::spawn(async move {
+            reserve_handoff_durable(&pool_b, "voice:1:2:concurrent-b", &meta_b).await
+        });
+        let (res_a, res_b) = tokio::try_join!(task_a, task_b).expect("join");
+        assert!(res_a.is_ok() && res_b.is_ok(), "distinct ids must both win");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_reservations_with_same_correlation_id_collide_to_exactly_one() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let meta = handoff_meta(11, 22, None);
+        let cid = "voice:1:2:race";
+
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let meta_a = meta.clone();
+        let meta_b = meta.clone();
+        let task_a =
+            tokio::spawn(async move { reserve_handoff_durable(&pool_a, cid, &meta_a).await });
+        let task_b =
+            tokio::spawn(async move { reserve_handoff_durable(&pool_b, cid, &meta_b).await });
+        let (res_a, res_b) = tokio::try_join!(task_a, task_b).expect("join");
+        let winners = [&res_a, &res_b].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            winners, 1,
+            "exactly one of two concurrent reservations on the same correlation_id must win"
+        );
 
         pool.close().await;
         pg_db.drop().await;
