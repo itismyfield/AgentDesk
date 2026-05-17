@@ -218,7 +218,7 @@ pub async fn slot_has_active_dispatch_excluding_pg(
     }
 
     let rows = sqlx::query(
-        "SELECT id, dispatch_type, context
+        "SELECT id, dispatch_type, status, context
          FROM task_dispatches
          WHERE to_agent_id = $1
            AND status IN ('pending', 'dispatched')",
@@ -238,6 +238,9 @@ pub async fn slot_has_active_dispatch_excluding_pg(
             continue;
         }
         let dispatch_type: Option<String> = row.try_get("dispatch_type").ok().flatten();
+        let status: String = row.try_get("status").map_err(|error| {
+            format!("read postgres dispatch status for {agent_id}:{slot_index}: {error}")
+        })?;
         let context: Option<String> = row.try_get("context").ok().flatten();
         let Some(context) = context else {
             continue;
@@ -267,6 +270,9 @@ pub async fn slot_has_active_dispatch_excluding_pg(
             "review" | "review-decision" | "create-pr"
         );
         if is_review_class {
+            if status == "pending" {
+                return Ok(true);
+            }
             let has_live_session = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS (
                      SELECT 1

@@ -263,6 +263,7 @@ fn active_dispatch_slot_guard_sql(agent_expr: &str, slot_expr: &str) -> String {
                AND (COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->'phase_gate' IS NULL
                AND (
                    COALESCE(d.dispatch_type, 'implementation') NOT IN ('review', 'review-decision', 'create-pr')
+                   OR d.status = 'pending'
                    OR EXISTS (
                        SELECT 1
                        FROM sessions s
@@ -286,6 +287,7 @@ fn active_dispatch_slot_exists_sql(agent_expr: &str, slot_expr: &str) -> String 
                AND (COALESCE(NULLIF(d.context, ''), '{{}}')::jsonb)->'phase_gate' IS NULL
                AND (
                    COALESCE(d.dispatch_type, 'implementation') NOT IN ('review', 'review-decision', 'create-pr')
+                   OR d.status = 'pending'
                    OR EXISTS (
                        SELECT 1
                        FROM sessions s

@@ -995,7 +995,12 @@ async fn sync_dispatch_terminal_entries_on_pg_tx_result(
             AND (
                   e.dispatch_id = $1
                OR COALESCE(
-                    (SELECT status FROM task_dispatches WHERE id = e.dispatch_id),
+                    (
+                        SELECT status
+                        FROM task_dispatches
+                        WHERE id = e.dispatch_id
+                        FOR SHARE
+                    ),
                     ''
                   ) IN ('cancelled', 'failed', 'superseded')
             )
@@ -1006,7 +1011,12 @@ async fn sync_dispatch_terminal_entries_on_pg_tx_result(
             AND (
                   e.dispatch_id = $1
                OR COALESCE(
-                    (SELECT status FROM task_dispatches WHERE id = e.dispatch_id),
+                    (
+                        SELECT status
+                        FROM task_dispatches
+                        WHERE id = e.dispatch_id
+                        FOR SHARE
+                    ),
                     ''
                   ) IN ('cancelled', 'failed', 'superseded')
                OR EXISTS (
@@ -1016,7 +1026,8 @@ async fn sync_dispatch_terminal_entries_on_pg_tx_result(
                       AND h.dispatch_id = $1
                )
             )
-         )",
+         )
+         FOR UPDATE OF e",
     )
     .bind(dispatch_id)
     .bind(new_status)
@@ -1069,11 +1080,14 @@ async fn sync_dispatch_terminal_entries_on_pg_tx_result(
                         "UPDATE auto_queue_entries
                          SET dispatch_id = $1,
                              slot_index = $2
-                         WHERE id = $3",
+                         WHERE id = $3
+                           AND dispatch_id IS NULL
+                           AND status = $4",
                     )
                     .bind(&linked_dispatch_id)
                     .bind(slot_index)
                     .bind(&entry_id)
+                    .bind(new_status)
                     .execute(&mut **tx)
                     .await
                     .map_err(|error| {

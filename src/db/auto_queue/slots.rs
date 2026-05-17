@@ -175,6 +175,7 @@ pub async fn slot_has_active_dispatch_excluding_pg(
            AND id != $3
            AND (
                COALESCE(dispatch_type, 'implementation') NOT IN ('review', 'review-decision', 'create-pr')
+               OR status = 'pending'
                OR EXISTS (
                    SELECT 1
                    FROM sessions s

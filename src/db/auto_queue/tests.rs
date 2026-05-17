@@ -33,12 +33,12 @@ mod resume_session_context_tests {
 #[cfg(test)]
 mod dispatch_terminal_sync_pg_tests {
     use super::{
-        ENTRY_STATUS_DONE, ENTRY_STATUS_SKIPPED, ENTRY_STATUS_USER_CANCELLED,
+        ENTRY_STATUS_DONE, ENTRY_STATUS_FAILED, ENTRY_STATUS_SKIPPED, ENTRY_STATUS_USER_CANCELLED,
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation,
         allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg,
         finalize_completed_dispatch_terminal_entry_on_pg_tx, save_phase_gate_state_on_pg,
-        slot_has_recent_terminal_auto_queue_dispatch_pg, sync_dispatch_terminal_entries_on_pg_tx,
-        update_entry_status_on_pg,
+        slot_has_active_dispatch_pg, slot_has_recent_terminal_auto_queue_dispatch_pg,
+        sync_dispatch_terminal_entries_on_pg_tx, update_entry_status_on_pg,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use chrono::{DateTime, Utc};
@@ -682,6 +682,97 @@ mod dispatch_terminal_sync_pg_tests {
     }
 
     #[tokio::test]
+    async fn pending_review_dispatch_without_session_blocks_slot_reuse_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, to_agent_id, dispatch_type, status, context)
+             VALUES ('dispatch-pending-review-slot', 'agent-1', 'review', 'pending', $1)",
+        )
+        .bind(serde_json::json!({"slot_index": 0}).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed pending review dispatch");
+
+        assert!(
+            slot_has_active_dispatch_pg(&pool, "agent-1", 0)
+                .await
+                .expect("query pending review dispatch"),
+            "pending review dispatches must occupy the slot before a provider session attaches"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn pending_review_dispatch_without_session_blocks_slot_reset_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, to_agent_id, dispatch_type, status, context)
+             VALUES ('dispatch-pending-review-reset', 'agent-1', 'review', 'pending', $1)",
+        )
+        .bind(serde_json::json!({"slot_index": 0}).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed pending review dispatch");
+
+        let err = crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding_pg(
+            &pool, "agent-1", 0, None, None,
+        )
+        .await
+        .expect_err("pending review dispatch must block slot reset before session attach");
+        assert!(err.contains("has active dispatch"));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn allocate_slot_for_group_agent_pg_rejects_pending_review_slot_blocker() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "UPDATE auto_queue_slots
+             SET assigned_run_id = NULL,
+                 assigned_thread_group = NULL
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+        )
+        .execute(&pool)
+        .await
+        .expect("free seed slot");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, context)
+             VALUES ('dispatch-pending-review-claim', NULL, 'agent-1', 'review', 'pending', $1)",
+        )
+        .bind(serde_json::json!({"slot_index": 0}).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed pending review slot dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase)
+             VALUES ('entry-after-pending-review', 'run-1', NULL, 'agent-1', 'pending', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed pending entry");
+
+        let allocation = allocate_slot_for_group_agent_pg(&pool, "run-1", 0, "agent-1")
+            .await
+            .expect("allocation probe should succeed");
+        assert_eq!(
+            allocation, None,
+            "a pending review dispatch without a session must keep its slot busy"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
     async fn phase_gate_state_save_is_idempotent_for_dispatch_rows_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
@@ -1056,6 +1147,107 @@ mod dispatch_terminal_sync_pg_tests {
         assert_eq!(
             slot_run(&pool, "agent-1", 0).await.as_deref(),
             Some("run-1")
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn dispatch_terminal_sync_does_not_restore_stale_dispatch_link_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES ('card-sync-race', 'Card Sync Race', 'in_progress', 'agent-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed card");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, context)
+             VALUES
+                ('dispatch-sync-old', 'card-sync-race', 'agent-1',
+                 'implementation', 'failed', '{}'),
+                ('dispatch-sync-new', 'card-sync-race', 'agent-1',
+                 'implementation', 'pending', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed dispatches");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index,
+                 thread_group, batch_phase)
+             VALUES ('entry-sync-race', 'run-1', 'card-sync-race', 'agent-1',
+                     'dispatched', 'dispatch-sync-old', 0, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed entry");
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION test_reassign_entry_during_terminal_sync()
+             RETURNS TRIGGER AS $$
+             BEGIN
+                 IF NEW.id = 'entry-sync-race'
+                    AND NEW.status = 'failed'
+                    AND NEW.dispatch_id IS NULL THEN
+                     UPDATE auto_queue_entries
+                     SET dispatch_id = 'dispatch-sync-new',
+                         slot_index = 1
+                     WHERE id = NEW.id;
+                 END IF;
+                 RETURN NEW;
+             END;
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("create reassign trigger function");
+        sqlx::query(
+            "CREATE TRIGGER test_reassign_entry_during_terminal_sync_trigger
+             AFTER UPDATE ON auto_queue_entries
+             FOR EACH ROW EXECUTE FUNCTION test_reassign_entry_during_terminal_sync()",
+        )
+        .execute(&pool)
+        .await
+        .expect("create reassign trigger");
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        let changed = sync_dispatch_terminal_entries_on_pg_tx(
+            &mut tx,
+            "dispatch-sync-old",
+            ENTRY_STATUS_FAILED,
+            "test_runtime_finalizer",
+            true,
+        )
+        .await
+        .expect("sync dispatch terminal");
+        tx.commit().await.expect("commit tx");
+
+        assert_eq!(changed, 1);
+        let row = sqlx::query(
+            "SELECT status, dispatch_id, slot_index
+             FROM auto_queue_entries
+             WHERE id = 'entry-sync-race'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("entry row");
+        assert_eq!(
+            row.try_get::<String, _>("status").unwrap(),
+            ENTRY_STATUS_FAILED
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("dispatch_id")
+                .unwrap()
+                .as_deref(),
+            Some("dispatch-sync-new")
+        );
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("slot_index").unwrap(),
+            Some(1)
         );
 
         pool.close().await;

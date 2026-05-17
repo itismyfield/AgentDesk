@@ -75,13 +75,13 @@
 | `db` | `src/db/mod.rs` | 345 |  |
 | `db::agents` | `src/db/agents.rs` | 1166 | giant-file |
 | `db::auto_queue` | `src/db/auto_queue/mod.rs` | 20 |  |
-| `db::auto_queue::claim` | `src/db/auto_queue/claim.rs` | 736 |  |
+| `db::auto_queue::claim` | `src/db/auto_queue/claim.rs` | 738 |  |
 | `db::auto_queue::consultation` | `src/db/auto_queue/consultation.rs` | 112 |  |
-| `db::auto_queue::entries` | `src/db/auto_queue/entries.rs` | 1491 | giant-file |
+| `db::auto_queue::entries` | `src/db/auto_queue/entries.rs` | 1505 | giant-file |
 | `db::auto_queue::phase_gates` | `src/db/auto_queue/phase_gates.rs` | 2901 | giant-file |
 | `db::auto_queue::queries` | `src/db/auto_queue/queries.rs` | 533 |  |
 | `db::auto_queue::runs` | `src/db/auto_queue/runs.rs` | 291 |  |
-| `db::auto_queue::slots` | `src/db/auto_queue/slots.rs` | 208 |  |
+| `db::auto_queue::slots` | `src/db/auto_queue/slots.rs` | 209 |  |
 | `db::auto_queue::test_support` | `src/db/auto_queue/test_support.rs` | 178 |  |
 | `db::automation_candidates` | `src/db/automation_candidates.rs` | 995 |  |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
@@ -311,7 +311,7 @@
 | `services::api_friction::tests::processing` | `src/services/api_friction/tests/processing.rs` | 169 |  |
 | `services::auto_queue` | `src/services/auto_queue.rs` | 1897 | giant-file |
 | `services::auto_queue::activate_bridge` | `src/services/auto_queue/activate_bridge.rs` | 24 |  |
-| `services::auto_queue::activate_command` | `src/services/auto_queue/activate_command.rs` | 1213 | giant-file |
+| `services::auto_queue::activate_command` | `src/services/auto_queue/activate_command.rs` | 1251 | giant-file |
 | `services::auto_queue::activate_preflight` | `src/services/auto_queue/activate_preflight.rs` | 199 |  |
 | `services::auto_queue::activate_route` | `src/services/auto_queue/activate_route.rs` | 19 |  |
 | `services::auto_queue::cancel_run` | `src/services/auto_queue/cancel_run.rs` | 1032 | giant-file |
@@ -330,7 +330,7 @@
 | `services::auto_queue::route_generate` | `src/services/auto_queue/route_generate.rs` | 734 |  |
 | `services::auto_queue::route_request_generate` | `src/services/auto_queue/route_request_generate.rs` | 368 |  |
 | `services::auto_queue::route_types` | `src/services/auto_queue/route_types.rs` | 152 |  |
-| `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 441 |  |
+| `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 447 |  |
 | `services::auto_queue::slot_routes` | `src/services/auto_queue/slot_routes.rs` | 322 |  |
 | `services::auto_queue::view` | `src/services/auto_queue/view.rs` | 333 |  |
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 |  |

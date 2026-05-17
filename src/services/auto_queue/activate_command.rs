@@ -499,7 +499,7 @@ pub(crate) async fn activate_with_deps_pg(
         }
     }
 
-    let mut dispatched_groups_this_activate = 0_i64;
+    let mut new_dispatches_this_activate = 0_i64;
     for group in &groups_to_dispatch {
         // #2034 + #2048 F4: cap on TOTAL active turns. Refresh from DB at
         // every iteration so policy-driven follow-ups (review-decision,
@@ -523,18 +523,16 @@ pub(crate) async fn activate_with_deps_pg(
         .bind(&run_id)
         .fetch_one(pool)
         .await
-        .unwrap_or(active_turn_count + dispatched_groups_this_activate);
+        .unwrap_or(active_turn_count + new_dispatches_this_activate);
         if active_turn_count_now >= max_concurrent {
             break;
         }
-        if (active_turn_count + dispatched_groups_this_activate) >= max_concurrent {
-            break;
-        }
-        // Legacy guard preserved as a no-op fallback so that impl-only runs
-        // (where active_turn_count == active_group_count) keep the same
-        // termination behaviour even if turn_count is briefly under-counted
-        // due to dispatch row write lag.
-        if (active_group_count + dispatched_groups_this_activate) >= max_concurrent {
+        if activate_fallback_capacity_reached(
+            active_turn_count,
+            active_group_count,
+            new_dispatches_this_activate,
+            max_concurrent,
+        ) {
             break;
         }
 
@@ -608,9 +606,6 @@ pub(crate) async fn activate_with_deps_pg(
         };
 
         if initial_state.entry_status != "pending" {
-            if initial_state.entry_status == "dispatched" {
-                dispatched_groups_this_activate += 1;
-            }
             continue;
         }
 
@@ -677,7 +672,6 @@ pub(crate) async fn activate_with_deps_pg(
                     "[auto-queue] failed to attach existing PG dispatch {dispatch_id} to entry {entry_id}: {error}"
                 );
             }
-            dispatched_groups_this_activate += 1;
             continue;
         }
 
@@ -708,7 +702,6 @@ pub(crate) async fn activate_with_deps_pg(
                 entry_log_ctx.clone(),
                 "[auto-queue] entry {entry_id} is no longer pending before slot allocation; concurrent activate likely claimed it"
             );
-            dispatched_groups_this_activate += 1;
             continue;
         }
 
@@ -1014,7 +1007,7 @@ pub(crate) async fn activate_with_deps_pg(
             );
         }
 
-        dispatched_groups_this_activate += 1;
+        new_dispatches_this_activate += 1;
         dispatched.push(deps.entry_json_pg(pool, &entry_id).await);
     }
 
@@ -1166,6 +1159,20 @@ pub(crate) async fn activate_with_deps_pg(
     )
 }
 
+fn activate_fallback_capacity_reached(
+    active_turn_count: i64,
+    active_group_count: i64,
+    new_dispatches_this_activate: i64,
+    max_concurrent: i64,
+) -> bool {
+    (active_turn_count + new_dispatches_this_activate) >= max_concurrent
+        // Legacy guard preserved as a no-op fallback so that impl-only runs
+        // (where active_turn_count == active_group_count) keep the same
+        // termination behaviour even if turn_count is briefly under-counted
+        // due to dispatch row write lag.
+        || (active_group_count + new_dispatches_this_activate) >= max_concurrent
+}
+
 /// #2048 F4: RAII guard that releases the per-run `aq_activate` session
 /// advisory lock acquired at the start of `activate_with_deps_pg`. We can't
 /// hold the lock across the (many) early `return` sites without a closure
@@ -1175,6 +1182,37 @@ pub(crate) async fn activate_with_deps_pg(
 struct ActivateLockReleaseGuard {
     conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
     run_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::activate_fallback_capacity_reached;
+
+    #[test]
+    fn fallback_capacity_counts_only_new_dispatches_this_activate() {
+        let active_turn_count = 2;
+        let active_group_count = 2;
+        let max_concurrent = 3;
+
+        assert!(
+            !activate_fallback_capacity_reached(
+                active_turn_count,
+                active_group_count,
+                0,
+                max_concurrent,
+            ),
+            "visiting already-active or reattached groups must not consume the remaining slot"
+        );
+        assert!(
+            activate_fallback_capacity_reached(
+                active_turn_count,
+                active_group_count,
+                1,
+                max_concurrent,
+            ),
+            "one newly-created dispatch should consume the last available slot"
+        );
+    }
 }
 
 impl ActivateLockReleaseGuard {
