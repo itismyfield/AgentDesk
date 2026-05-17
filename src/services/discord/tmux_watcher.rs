@@ -69,6 +69,17 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal(
                 "skipping explicit inflight cleanup — rebind_origin row (#2427 Pitfall #5)"
             );
         }
+        crate::services::discord::inflight::GuardedClearOutcome::IoError => {
+            // Surfaces filesystem failures explicitly so the operator can
+            // see the sweeper's 1800s safety-net is the only thing
+            // catching the failed cleanup. Caller does not clear watcher.
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                reason = reason,
+                "explicit inflight cleanup failed with IO error — sweeper safety-net will retry"
+            );
+        }
     }
 }
 

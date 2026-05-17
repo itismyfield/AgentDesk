@@ -52,6 +52,11 @@ pub(crate) struct HeartbeatSweepReport {
     pub heartbeat_stale: usize,
     pub evicted: usize,
     pub cancelled: usize,
+    /// Codex review HIGH on PR #2460: surface cleanup IO failures so the
+    /// operator can see the safety-net (placeholder_sweeper 1800s) is the
+    /// only thing recovering — instead of every error being silently
+    /// bucketed as Missing/no-op.
+    pub io_errors: usize,
 }
 
 /// Single pass over the tmux watcher registry. Returns counts for the
@@ -180,6 +185,21 @@ fn run_heartbeat_sweep_pass_inner(
                     candidate.channel_id,
                     outcome,
                 );
+            }
+            super::inflight::GuardedClearOutcome::IoError => {
+                // Codex review HIGH on PR #2460: cleanup IO error must not
+                // be silently swallowed. Skip the watcher cancel so the
+                // inflight row remains visible to the next sweeper tick;
+                // the 1800s safety-net still bounds worst case, but the
+                // explicit warn surfaces broken filesystems before that.
+                tracing::warn!(
+                    "[heartbeat_sweeper] cleanup IoError for {}/{} — \
+                     skipping watcher cancel; sweeper will retry next tick",
+                    candidate.provider.as_str(),
+                    candidate.channel_id,
+                );
+                report.io_errors += 1;
+                continue;
             }
         }
         cancel_watcher_by_session_name(shared, &candidate.tmux_session_name);
