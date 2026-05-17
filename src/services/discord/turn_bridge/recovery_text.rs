@@ -617,3 +617,44 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
         tracing::warn!("  [{ts}] ⏭ auto-retry: follow-up deduped for channel {channel_id}");
     }
 }
+
+#[cfg(test)]
+mod retry_pending_tests {
+    use super::{RETRY_PENDING, release_retry_pending, retry_pending_contains};
+    use serenity::all::ChannelId;
+
+    /// #2452 H6 acceptance — first probe is the spec line "Test: simulate
+    /// retry that resolves completion_rx -> lockout released immediately".
+    /// We exercise the release path directly because the surrounding
+    /// scheduling future requires a live Discord HTTP / SharedData
+    /// fixture that the legacy-sqlite-tests gate already covers.
+    #[test]
+    fn release_retry_pending_removes_dedup_entry() {
+        // Use an arbitrary channel id unlikely to collide with other tests
+        // (the static set is process-global). We insert first to model the
+        // pre-existing lockout, then assert release drops it.
+        let channel = ChannelId::new(900_000_000_000_002_452);
+        RETRY_PENDING.insert(channel.get());
+        assert!(retry_pending_contains(channel));
+
+        release_retry_pending(channel);
+
+        assert!(!retry_pending_contains(channel));
+    }
+
+    /// #2452 H6: releasing a not-pending channel must be a safe no-op.
+    /// Re-running the release path after the 120s safety net would
+    /// otherwise double-remove on the dashmap.
+    #[test]
+    fn release_retry_pending_is_idempotent() {
+        let channel = ChannelId::new(900_000_000_000_002_453);
+        // Ensure not present.
+        RETRY_PENDING.remove(&channel.get());
+        assert!(!retry_pending_contains(channel));
+
+        release_retry_pending(channel);
+        release_retry_pending(channel);
+
+        assert!(!retry_pending_contains(channel));
+    }
+}

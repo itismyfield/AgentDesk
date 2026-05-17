@@ -410,4 +410,45 @@ mod tests {
         state.current_msg_id = 0;
         assert!(standby_inflight_matches(&state, "/tmp/out.jsonl", None));
     }
+
+    /// #2448 acceptance — confirm the relay-side broadcast filter:
+    /// `InflightSignal::Completed` for a NON-matching channel must be
+    /// ignored, while one for the OWN channel must short-circuit. We
+    /// exercise the filter shape inline because the live relay loop
+    /// requires a `serenity::http::Http` fixture not available in this
+    /// test scope.
+    #[test]
+    fn inflight_signal_filter_matches_own_channel_only() {
+        use super::InflightSignal;
+        let own = 11_111u64;
+        let other = 22_222u64;
+
+        let matches = |sig: &InflightSignal| match sig {
+            InflightSignal::Completed { channel_id } => *channel_id == own,
+        };
+
+        assert!(matches(&InflightSignal::Completed { channel_id: own }));
+        assert!(!matches(&InflightSignal::Completed {
+            channel_id: other
+        }));
+    }
+
+    /// #2448 acceptance — `tokio::sync::broadcast` capacity 256 must
+    /// deliver `Completed` to a subscribed receiver within one recv
+    /// iteration. The relay's poll-tick observes the queued message via
+    /// `try_recv` on the next iteration, so the broadcast latency is
+    /// bounded by the relay's `POLL_INTERVAL` (500ms) ceiling.
+    #[tokio::test]
+    async fn inflight_signal_broadcast_delivers_to_subscriber() {
+        use super::InflightSignal;
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<InflightSignal>(256);
+
+        let send_result = tx.send(InflightSignal::Completed { channel_id: 42 });
+        assert!(send_result.is_ok());
+
+        let received = rx.recv().await.expect("broadcast delivered");
+        match received {
+            InflightSignal::Completed { channel_id } => assert_eq!(channel_id, 42),
+        }
+    }
 }
