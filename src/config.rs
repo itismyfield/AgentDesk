@@ -1638,10 +1638,13 @@ fn default_cluster_lease_ttl_secs() -> u64 {
     30
 }
 fn default_session_bound_relay_enabled() -> bool {
-    // Epic #2285 / E4 (#2346): flipped to `true` once the supervisor runs
-    // against the production observation sink. Operators can disable to
-    // restore pre-E4 behavior; future epic #2285 issues remove the toggle.
-    true
+    // Epic #2285 / E4 (#2346): STAYS `false` until the production tmux
+    // frame producer is wired into the supervisor-owned StreamRelay.
+    // Codex review of #2411 surfaced that `spawn_if_absent` only stores a
+    // relay handle but nothing pushes frames into it — flipping default
+    // on now would silently drop streamed output. The producer-side
+    // wiring lands in a follow-up.
+    false
 }
 fn default_memory_backend() -> String {
     "auto".into()
