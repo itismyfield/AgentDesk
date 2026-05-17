@@ -270,20 +270,31 @@ fn marker_is_stale(marker: &HookRelayFailureMarker, now: DateTime<Utc>) -> bool 
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::MutexGuard;
 
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
+    /// Guard that serializes every test mutation of `AGENTDESK_ROOT_DIR`
+    /// against the process-global lock shared with `credential.rs`, the
+    /// integration harness, and other env-touching tests. Without this
+    /// cross-module lock, concurrent tests would race on the same env var
+    /// and intermittently observe each other's tempdirs (issue #2444).
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
     }
 
     impl EnvVarGuard {
         fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let previous = std::env::var_os(key);
             unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
+            Self {
+                key,
+                previous,
+                _lock: lock,
+            }
         }
     }
 
@@ -330,7 +341,6 @@ mod tests {
 
     #[test]
     fn relay_failure_marker_directories_are_provider_scoped() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp_dir.path());
 
@@ -342,7 +352,6 @@ mod tests {
 
     #[test]
     fn relay_failure_marker_round_trips_for_session() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp_dir.path());
 
@@ -369,7 +378,6 @@ mod tests {
 
     #[test]
     fn relay_failure_marker_write_publishes_only_complete_json_file() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp_dir.path());
 
@@ -398,7 +406,6 @@ mod tests {
 
     #[test]
     fn drain_prunes_stale_unmatched_markers() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp_dir.path());
         let marker_dir = failure_marker_dir("claude").unwrap();
