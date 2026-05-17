@@ -312,6 +312,12 @@ pub struct EnumeratedSession {
     /// `#{pane_current_command}` of the session's active pane — empty when
     /// tmux couldn't resolve a pane (rare; treated as "unknown" by callers).
     pub pane_current_command: String,
+    /// `#{pane_pid}` of the session's active pane. `0` when tmux couldn't
+    /// resolve a pane (e.g. dying session) — callers must treat zero as
+    /// "no fallback available". Lets the matcher fall back to the live
+    /// process argv when `pane_current_command` is unreliable (e.g.
+    /// providers that rewrite their own process title — see #2470).
+    pub pane_pid: u32,
 }
 
 /// List every tmux session along with its active pane's `pane_current_command`.
@@ -329,7 +335,7 @@ pub fn list_sessions_with_pane_command() -> Result<Vec<EnumeratedSession>, Strin
         .args([
             "list-sessions",
             "-F",
-            "#{session_name}|#{pane_current_command}",
+            "#{session_name}|#{pane_current_command}|#{pane_pid}",
         ])
         .output()
         .map_err(|e| format!("tmux list-sessions failed: {e}"))?;
@@ -342,18 +348,81 @@ pub fn list_sessions_with_pane_command() -> Result<Vec<EnumeratedSession>, Strin
         if line.is_empty() {
             continue;
         }
-        let mut parts = line.splitn(2, '|');
+        let mut parts = line.splitn(3, '|');
         let session_name = parts.next().unwrap_or("").trim().to_string();
         if session_name.is_empty() {
             continue;
         }
         let pane_current_command = parts.next().unwrap_or("").trim().to_string();
+        let pane_pid = parts
+            .next()
+            .unwrap_or("")
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(0);
         sessions.push(EnumeratedSession {
             session_name,
             pane_current_command,
+            pane_pid,
         });
     }
     Ok(sessions)
+}
+
+/// Read the executable path of a live process by PID, used as a fallback
+/// fingerprint when `pane_current_command` is unreliable. Providers that
+/// rewrite their own process title (e.g. claude code 2.1.143 sets the title
+/// to its version string) cause tmux's `#{pane_current_command}` to report
+/// the rewritten value, hiding the underlying binary. The kernel's argv[0]
+/// is preserved, so reading it lets the matcher recover the real binary.
+///
+/// Returns `None` when the PID is zero/missing, the OS call fails, or the
+/// output is empty. Callers should treat `None` as "no fallback available"
+/// and propagate the original pane-command result.
+///
+/// Implementation notes:
+/// - macOS: `ps -p PID -o args=` — `args` is the verbatim argv, unaffected by
+///   `setproctitle` rewriting (`comm` *is* affected, so we avoid it).
+/// - Linux: `/proc/{PID}/cmdline` — NUL-separated argv, immune to title rewrites.
+/// - Windows: no implementation today (the discovery loop runs on macOS/Linux
+///   hosts; if a Windows operator host materialises we'll add `wmic` later).
+pub fn read_process_argv0(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "args="])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let first = line.split_whitespace().next()?;
+        if first.is_empty() {
+            return None;
+        }
+        Some(first.to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read(format!("/proc/{}/cmdline", pid)).ok()?;
+        let first = raw.split(|&b| b == 0).next()?;
+        if first.is_empty() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(first).to_string())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 /// Check if a session has any live (non-dead) panes.

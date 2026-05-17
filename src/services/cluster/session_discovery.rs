@@ -238,15 +238,33 @@ pub fn reconcile_from_enumeration(
     directory: &ChannelDirectory,
     registry: &SessionRegistry,
 ) -> TickReport {
+    reconcile_from_enumeration_with_argv_probe(
+        instance_id,
+        enumeration,
+        directory,
+        registry,
+        crate::services::platform::tmux::read_process_argv0,
+    )
+}
+
+/// `argv0_probe` is injected so tests can simulate a process-title-rewriting
+/// provider (e.g. claude code 2.1.143 setting its title to `2.1.143`) without
+/// spawning a real process. Production uses
+/// [`crate::services::platform::tmux::read_process_argv0`].
+pub(crate) fn reconcile_from_enumeration_with_argv_probe(
+    instance_id: Option<&str>,
+    enumeration: Vec<EnumeratedSession>,
+    directory: &ChannelDirectory,
+    registry: &SessionRegistry,
+    argv0_probe: fn(u32) -> Option<String>,
+) -> TickReport {
     let enumerated = enumeration.len();
     let mut matches: Vec<MatchedChannel> = Vec::new();
     let mut preserve_present: Vec<String> = Vec::new();
     for session in enumeration {
-        let outcome = match_session_detailed(
-            &session.session_name,
-            Some(&session.pane_current_command),
-            directory,
-        );
+        let effective_pane_cmd = resolve_effective_pane_command(&session, argv0_probe);
+        let outcome =
+            match_session_detailed(&session.session_name, Some(&effective_pane_cmd), directory);
         match outcome {
             MatchOutcome::Matched(matched) => matches.push(matched),
             MatchOutcome::Rejected(reason) => {
@@ -275,6 +293,37 @@ pub fn reconcile_from_enumeration(
         enumerated,
         matched,
         changes,
+    }
+}
+
+/// Pick the most authoritative fingerprint string for provider detection.
+///
+/// Prefers `pane_current_command` when it already maps to a known provider —
+/// that's the cheap path and matches the documented contract. Falls back to
+/// the live process argv[0] when the pane command is non-empty but doesn't
+/// resolve (e.g. claude code 2.1.143 sets its process title to the version
+/// string, hiding the underlying `claude` binary). Returns the original pane
+/// command when no fallback is possible so empty/whitespace inputs still
+/// surface as the retryable `PaneProviderUnknown` rejection.
+fn resolve_effective_pane_command(
+    session: &EnumeratedSession,
+    argv0_probe: fn(u32) -> Option<String>,
+) -> String {
+    let pane_cmd = session.pane_current_command.trim();
+    // Empty → leave as-is; matcher handles it as PaneProviderUnknown.
+    // Already known → no probe needed.
+    // Already a managed wrapper → no probe needed; matcher trusts the
+    // session-name-encoded provider.
+    if pane_cmd.is_empty()
+        || crate::services::cluster::session_matcher::detect_provider_from_pane_command(pane_cmd)
+            .is_some()
+        || crate::services::cluster::session_matcher::is_agentdesk_managed_wrapper_command(pane_cmd)
+    {
+        return session.pane_current_command.clone();
+    }
+    match argv0_probe(session.pane_pid) {
+        Some(argv0) if !argv0.is_empty() => argv0,
+        _ => session.pane_current_command.clone(),
     }
 }
 
@@ -449,6 +498,26 @@ mod tests {
         EnumeratedSession {
             session_name: session.to_string(),
             pane_current_command: pane.to_string(),
+            pane_pid: 0,
+        }
+    }
+
+    fn enumerated_with_pid(session: &str, pane: &str, pid: u32) -> EnumeratedSession {
+        EnumeratedSession {
+            session_name: session.to_string(),
+            pane_current_command: pane.to_string(),
+            pane_pid: pid,
+        }
+    }
+
+    /// Test probe: maps a few known PIDs to argv0 strings. PIDs not in this
+    /// table return `None`, simulating a failed `ps`/proc lookup.
+    fn fake_argv_probe(pid: u32) -> Option<String> {
+        match pid {
+            100 => Some("/Users/me/.local/bin/claude".to_string()),
+            101 => Some("/opt/homebrew/bin/codex".to_string()),
+            // PID 102 simulates an exited process — probe yields None.
+            _ => None,
         }
     }
 
@@ -686,6 +755,97 @@ mod tests {
         );
 
         assert_eq!(report.matched, 1, "snowflake fallback must still match");
+    }
+
+    /// Regression for #2470: claude code 2.1.143 rewrites its process title to
+    /// the version string ("2.1.143"), so `pane_current_command` no longer
+    /// resolves to `claude`. The matcher must fall back to argv[0], which is
+    /// preserved by the kernel and still says `claude`.
+    #[test]
+    fn reconcile_falls_back_to_argv_when_pane_command_is_version_string() {
+        let channel_name = "adk-cc";
+        let directory = ChannelDirectory::from_bindings(vec![binding_named(
+            "1479671298497183835",
+            channel_name,
+            "project-agentdesk",
+            ProviderKind::Claude,
+        )]);
+        let registry = SessionRegistry::new();
+        let live_session = expected_session_name_for(None, &ProviderKind::Claude, channel_name);
+
+        // pane_current_command = "2.1.143" (version), pane_pid = 100 → argv0 = ".../claude"
+        let report = reconcile_from_enumeration_with_argv_probe(
+            Some(NODE_A),
+            vec![enumerated_with_pid(&live_session, "2.1.143", 100)],
+            &directory,
+            &registry,
+            fake_argv_probe,
+        );
+
+        assert_eq!(
+            report.matched, 1,
+            "argv0 fallback must recover provider when pane_current_command is a version string"
+        );
+        assert!(registry.lookup(&live_session).is_some());
+    }
+
+    /// argv0 probe failures (process exited, missing PID) must NOT promote the
+    /// session — preserve the existing PaneProviderMismatch semantics so a
+    /// stale session doesn't get a watcher attached on speculation.
+    #[test]
+    fn reconcile_does_not_match_when_argv_probe_fails() {
+        let channel_name = "adk-cc";
+        let directory = ChannelDirectory::from_bindings(vec![binding_named(
+            "1479671298497183835",
+            channel_name,
+            "project-agentdesk",
+            ProviderKind::Claude,
+        )]);
+        let registry = SessionRegistry::new();
+        let live_session = expected_session_name_for(None, &ProviderKind::Claude, channel_name);
+
+        // PID 999 not in fake_argv_probe table → probe returns None.
+        let report = reconcile_from_enumeration_with_argv_probe(
+            Some(NODE_A),
+            vec![enumerated_with_pid(&live_session, "2.1.143", 999)],
+            &directory,
+            &registry,
+            fake_argv_probe,
+        );
+
+        assert_eq!(
+            report.matched, 0,
+            "argv0 probe failure must keep PaneProviderMismatch reject"
+        );
+        assert!(registry.lookup(&live_session).is_none());
+    }
+
+    /// When `pane_current_command` already resolves to a provider, we must
+    /// NOT spend a `ps` call. Confirms the fast-path skips the probe.
+    #[test]
+    fn reconcile_skips_argv_probe_when_pane_command_already_resolves() {
+        let channel_name = "adk-cc";
+        let directory = ChannelDirectory::from_bindings(vec![binding_named(
+            "1479671298497183835",
+            channel_name,
+            "project-agentdesk",
+            ProviderKind::Claude,
+        )]);
+        let registry = SessionRegistry::new();
+        let live_session = expected_session_name_for(None, &ProviderKind::Claude, channel_name);
+
+        // pane_cmd already = "claude" → fast path. probe would return None for
+        // PID 999 (forcing a reject) — if the fast path failed to skip it we'd
+        // mismatch. matched=1 proves the probe never ran.
+        let report = reconcile_from_enumeration_with_argv_probe(
+            Some(NODE_A),
+            vec![enumerated_with_pid(&live_session, "claude", 999)],
+            &directory,
+            &registry,
+            fake_argv_probe,
+        );
+
+        assert_eq!(report.matched, 1);
     }
 
     #[test]
