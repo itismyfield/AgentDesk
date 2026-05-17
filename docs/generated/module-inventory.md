@@ -336,7 +336,7 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 |  |
-| `services::claude` | `src/services/claude.rs` | 3889 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 3998 | giant-file |
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 6 |  |
 | `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1164 | giant-file |
 | `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 427 |  |
@@ -355,7 +355,7 @@
 | `services::cluster::session_registry` | `src/services/cluster/session_registry.rs` | 572 |  |
 | `services::cluster::stream_relay` | `src/services/cluster/stream_relay.rs` | 874 |  |
 | `services::cluster::watcher_supervisor` | `src/services/cluster/watcher_supervisor.rs` | 858 |  |
-| `services::codex` | `src/services/codex.rs` | 3276 | giant-file |
+| `services::codex` | `src/services/codex.rs` | 3320 | giant-file |
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 744 |  |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 3 |  |

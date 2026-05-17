@@ -556,13 +556,122 @@ pub fn execute_command_simple_with_timeout(
     label: &str,
 ) -> Result<String, String> {
     let prompt = prompt.to_string();
+    execute_command_simple_with_timeout_worker(timeout, label, "claude", move |cancel_for_worker| {
+        execute_command_simple_cancellable(&prompt, Some(&cancel_for_worker))
+    })
+}
+
+fn execute_command_simple_with_timeout_worker<F>(
+    timeout: std::time::Duration,
+    label: &str,
+    provider_name: &'static str,
+    run_worker: F,
+) -> Result<String, String>
+where
+    F: FnOnce(std::sync::Arc<CancelToken>) -> Result<String, String> + Send + 'static,
+{
+    let label_owned = label.to_string();
+    let cancel_token = std::sync::Arc::new(CancelToken::new());
+    let cancel_for_worker = std::sync::Arc::clone(&cancel_token);
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(execute_command_simple(&prompt));
+    let worker = std::thread::spawn(move || {
+        let result = run_worker(std::sync::Arc::clone(&cancel_for_worker));
+        *cancel_for_worker
+            .child_pid
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        let _ = tx.send(result);
     });
+
     match rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(_) => Err(format!("{label} timeout after {}s", timeout.as_secs())),
+        Ok(result) => {
+            let _ = worker.join();
+            result
+        }
+        Err(_) => {
+            if let Ok(result) = rx.try_recv() {
+                tracing::debug!(
+                    provider = provider_name,
+                    stage = %label_owned,
+                    "execute_command_simple_with_timeout completed in race with timeout; skipping kill"
+                );
+                let _ = worker.join();
+                return result;
+            }
+
+            tracing::warn!(
+                provider = provider_name,
+                stage = %label_owned,
+                timeout_secs = timeout.as_secs(),
+                "execute_command_simple_with_timeout timed out; cancelling and killing child"
+            );
+            cancel_token.cancel_with_tmux_cleanup();
+            let child_pid = cancel_token
+                .child_pid
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            let child_pid_was_none = child_pid.is_none();
+            if let Some(pid) = child_pid {
+                tracing::warn!(
+                    provider = provider_name,
+                    stage = %label_owned,
+                    child_pid = pid,
+                    "execute_command_simple_with_timeout sending SIGTERM/SIGKILL to child process group"
+                );
+                kill_pid_tree(pid);
+            } else {
+                tracing::warn!(
+                    provider = provider_name,
+                    stage = %label_owned,
+                    "execute_command_simple_with_timeout had no registered child PID at cancel time"
+                );
+            }
+
+            if let Ok(result) = rx.recv_timeout(std::time::Duration::from_secs(3)) {
+                let _ = worker.join();
+                if child_pid_was_none {
+                    tracing::debug!(
+                        provider = provider_name,
+                        stage = %label_owned,
+                        "execute_command_simple_with_timeout drained natural result after no child PID snapshot"
+                    );
+                    return result;
+                }
+            } else {
+                tracing::warn!(
+                    provider = provider_name,
+                    stage = %label_owned,
+                    "execute_command_simple_with_timeout worker did not drain within 3s; abandoning join"
+                );
+            }
+
+            Err(format!(
+                "{label_owned} timeout after {}s",
+                timeout.as_secs()
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod simple_timeout_2387_tests {
+    use super::execute_command_simple_with_timeout_worker;
+    use std::time::Duration;
+
+    #[test]
+    fn timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none() {
+        let result = execute_command_simple_with_timeout_worker(
+            Duration::from_millis(10),
+            "claude 2387 regression",
+            "claude",
+            |_cancel_token| {
+                std::thread::sleep(Duration::from_millis(40));
+                Ok("claude natural completion".to_string())
+            },
+        );
+
+        assert_eq!(result.unwrap(), "claude natural completion");
     }
 }
 

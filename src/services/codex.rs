@@ -580,12 +580,26 @@ pub fn execute_command_simple_with_timeout(
     label: &str,
 ) -> Result<String, String> {
     let prompt = prompt.to_string();
+    execute_command_simple_with_timeout_worker(timeout, label, "codex", move |cancel_for_worker| {
+        execute_command_simple_cancellable(&prompt, Some(&cancel_for_worker))
+    })
+}
+
+fn execute_command_simple_with_timeout_worker<F>(
+    timeout: Duration,
+    label: &str,
+    provider_name: &'static str,
+    run_worker: F,
+) -> Result<String, String>
+where
+    F: FnOnce(std::sync::Arc<CancelToken>) -> Result<String, String> + Send + 'static,
+{
     let label_owned = label.to_string();
     let cancel_token = std::sync::Arc::new(CancelToken::new());
     let cancel_for_worker = std::sync::Arc::clone(&cancel_token);
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let result = execute_command_simple_cancellable(&prompt, Some(&cancel_for_worker));
+        let result = run_worker(std::sync::Arc::clone(&cancel_for_worker));
         // Clear the registered child PID *before* sending the result.
         // The Child has already been reaped by wait_with_output() inside
         // execute_command_simple_cancellable, so the kernel may recycle
@@ -614,19 +628,19 @@ pub fn execute_command_simple_with_timeout(
             // would be a stray SIGKILL to an unrelated process.
             if let Ok(result) = rx.try_recv() {
                 tracing::debug!(
-                    provider = "codex",
+                    provider = provider_name,
                     stage = %label_owned,
-                    "codex execute_command_simple_with_timeout completed in race with timeout; skipping kill"
+                    "execute_command_simple_with_timeout completed in race with timeout; skipping kill"
                 );
                 let _ = worker.join();
                 return result;
             }
 
             tracing::warn!(
-                provider = "codex",
+                provider = provider_name,
                 stage = %label_owned,
                 timeout_secs = timeout.as_secs(),
-                "codex execute_command_simple_with_timeout timed out; cancelling and killing child"
+                "execute_command_simple_with_timeout timed out; cancelling and killing child"
             );
             cancel_token.cancel_with_tmux_cleanup();
             // Snapshot under lock and clear, so any concurrent observer
@@ -634,14 +648,15 @@ pub fn execute_command_simple_with_timeout(
             let child_pid = cancel_token
                 .child_pid
                 .lock()
-                .map(|mut guard| guard.take())
-                .unwrap_or(None);
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            let child_pid_was_none = child_pid.is_none();
             if let Some(pid) = child_pid {
                 tracing::warn!(
-                    provider = "codex",
+                    provider = provider_name,
                     stage = %label_owned,
                     child_pid = pid,
-                    "codex execute_command_simple_with_timeout sending SIGTERM/SIGKILL to child process group"
+                    "execute_command_simple_with_timeout sending SIGTERM/SIGKILL to child process group"
                 );
                 // kill_pid_tree sends SIGTERM to the process group (or
                 // PID fallback), waits ~200ms, then escalates to SIGKILL
@@ -651,9 +666,9 @@ pub fn execute_command_simple_with_timeout(
                 kill_pid_tree(pid);
             } else {
                 tracing::warn!(
-                    provider = "codex",
+                    provider = provider_name,
                     stage = %label_owned,
-                    "codex execute_command_simple_with_timeout had no registered child PID at cancel time"
+                    "execute_command_simple_with_timeout had no registered child PID at cancel time"
                 );
             }
             // Bounded drain: wait up to 3s for the worker to observe the
@@ -662,13 +677,21 @@ pub fn execute_command_simple_with_timeout(
             // otherwise drop the JoinHandle and let the OS reap the
             // thread when this process exits, rather than blocking the
             // caller forever on a stuck wait_with_output.
-            if rx.recv_timeout(Duration::from_secs(3)).is_ok() {
+            if let Ok(result) = rx.recv_timeout(Duration::from_secs(3)) {
                 let _ = worker.join();
+                if child_pid_was_none {
+                    tracing::debug!(
+                        provider = provider_name,
+                        stage = %label_owned,
+                        "execute_command_simple_with_timeout drained natural result after no child PID snapshot"
+                    );
+                    return result;
+                }
             } else {
                 tracing::warn!(
-                    provider = "codex",
+                    provider = provider_name,
                     stage = %label_owned,
-                    "codex execute_command_simple_with_timeout worker did not drain within 3s; abandoning join"
+                    "execute_command_simple_with_timeout worker did not drain within 3s; abandoning join"
                 );
             }
             Err(format!(
@@ -676,6 +699,27 @@ pub fn execute_command_simple_with_timeout(
                 timeout.as_secs()
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod simple_timeout_2387_tests {
+    use super::execute_command_simple_with_timeout_worker;
+    use std::time::Duration;
+
+    #[test]
+    fn timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none() {
+        let result = execute_command_simple_with_timeout_worker(
+            Duration::from_millis(10),
+            "codex 2387 regression",
+            "codex",
+            |_cancel_token| {
+                std::thread::sleep(Duration::from_millis(40));
+                Ok("codex natural completion".to_string())
+            },
+        );
+
+        assert_eq!(result.unwrap(), "codex natural completion");
     }
 }
 
