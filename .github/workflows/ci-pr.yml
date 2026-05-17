@@ -254,7 +254,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        # macOS PR lane temporarily disabled to unblock issue throughput
+        # (2026-05-17). Agents run on macOS locally and verify
+        # `cargo build --bin agentdesk` before pushing, so PR-time macOS
+        # coverage is largely redundant. Nightly (`ci-nightly.yml`) still
+        # exercises macOS daily so cross-OS Rust drift cannot land
+        # silently for more than 24h. Restore by adding `macos-latest`
+        # back to this matrix once issue backlog stabilises.
+        os: [windows-latest]
     steps:
       # Event-gate self-hosted runner sanity check (defence-in-depth).
       # The `runs-on` expression above already restricts self-hosted
