@@ -358,6 +358,8 @@ The remaining giant-file modules under `src/services/` not covered above:
   (GitClient extraction).
 - `src/services/platform/binary_resolver.rs` (1377).
 - `src/services/mcp_config.rs` (1072).
+- `src/services/process.rs` (1158) — process lifecycle / PID-tree identity
+  surface. Split before adding non-bugfix behavior.
 - `src/services/routines/{store.rs (2755), loader.rs (2013),
   discord_log.rs (1056)}` — durable routine storage, script loading, and
   Discord notification plumbing. Split before broadening behavior outside the
