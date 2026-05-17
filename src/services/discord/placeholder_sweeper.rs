@@ -123,6 +123,104 @@ async fn edit_placeholder_safe(
         .is_ok()
 }
 
+/// Outcome of pre-flight checking whether the placeholder message on Discord
+/// is still a placeholder (and therefore safe to overwrite with an abandoned
+/// badge) or has already been replaced with a delivered response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaceholderProbe {
+    /// The current Discord content still matches a known placeholder pattern.
+    /// Safe to overwrite with the abandoned badge.
+    StillPlaceholder,
+    /// Discord content has been replaced with a real response. Do NOT
+    /// overwrite — the user has been served. Caller should still drop the
+    /// inflight state file so the sweeper does not re-trigger every pass.
+    AlreadyDelivered,
+    /// Discord returned 404 / forbidden / the channel is gone. Treat like
+    /// delivered: any abort edit would be a no-op or further user confusion,
+    /// and the state file should still be evicted so the sweeper stops
+    /// rescanning a dead row.
+    MessageGone,
+}
+
+/// Fetch the current Discord message content and classify whether it is
+/// still a placeholder. The fetch itself uses the same `http` handle as the
+/// sweeper edits, so we inherit the same rate-limit / proxy behavior.
+async fn probe_placeholder_state(
+    http: &Arc<serenity::Http>,
+    channel_id: u64,
+    message_id: u64,
+) -> PlaceholderProbe {
+    if channel_id == 0 || message_id == 0 {
+        return PlaceholderProbe::MessageGone;
+    }
+    let channel = serenity::ChannelId::new(channel_id);
+    let message = serenity::MessageId::new(message_id);
+    match http.get_message(channel, message).await {
+        Ok(msg) => {
+            if is_message_still_placeholder(&msg.content) {
+                PlaceholderProbe::StillPlaceholder
+            } else {
+                PlaceholderProbe::AlreadyDelivered
+            }
+        }
+        Err(err) => {
+            tracing::debug!(
+                "[placeholder_sweeper] fetch failed for {}/{} (treating as gone): {}",
+                channel_id,
+                message_id,
+                err
+            );
+            PlaceholderProbe::MessageGone
+        }
+    }
+}
+
+/// True when `content` still looks like a placeholder card the sweeper itself
+/// (or the streaming pipeline) might have produced — i.e. not a user-facing
+/// response body. Conservative: only known placeholder shapes pass.
+///
+/// Patterns recognised as placeholder:
+///   - Streaming spinner block: starts with one of the braille spinner
+///     glyphs followed by a space, e.g. `⠋ Processing...` or
+///     `⠹ ⚙ Bash: cargo build`. Produced by
+///     [`build_placeholder_status_block`] / [`build_processing_status_block`].
+///   - Monitor handoff card: starts with a known status header marker
+///     emitted by [`monitor_handoff_header`] — `🔄 **`, `📬 **`, `⏱ **`,
+///     `❌ **`, `✅ **`, `⚠ **`. These all begin with an emoji + bold-open,
+///     a shape user-authored responses essentially never use as a prefix.
+///
+/// Anything else (real prose, code blocks, embeds rendered as text) is
+/// treated as a delivered response and protected from sweeper overwrite.
+pub(super) fn is_message_still_placeholder(content: &str) -> bool {
+    const SPINNER_FRAMES: &[char] =
+        &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    const HANDOFF_HEADER_PREFIXES: &[&str] = &[
+        "🔄 **", "📬 **", "⏱ **", "❌ **", "✅ **", "⚠ **",
+    ];
+
+    let trimmed = content.trim_start();
+    if trimmed.is_empty() {
+        // Empty / whitespace-only message: nothing user-visible to protect.
+        // Treat as still-placeholder so the sweeper proceeds with the abort
+        // edit (which gives the user a clearer terminal state).
+        return true;
+    }
+
+    let mut chars = trimmed.chars();
+    if let Some(first) = chars.next() {
+        if SPINNER_FRAMES.contains(&first) {
+            // Spinner block must be `{spinner}{whitespace}…` to count.
+            if chars.next().map(|c| c.is_whitespace()).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+
+    HANDOFF_HEADER_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
 /// Run a single sweep pass for the given provider. Public for testability —
 /// callers in the bootstrap path schedule this on a fixed cadence via
 /// `spawn_placeholder_sweeper`.
@@ -212,6 +310,62 @@ async fn run_placeholder_sweep_pass(
                 }
             }
             SweepDecision::Abandoned => {
+                // #2415: defensive probe. The streaming pipeline can hand
+                // off live relay to a delegated owner (watcher / standby)
+                // that updates the Discord message in place without
+                // mirroring `full_response` / `response_sent_offset` back
+                // into the persisted inflight state. The placeholder-only
+                // gate above therefore lets the row through even though
+                // the user already received the answer. Fetch the current
+                // Discord content and skip the destructive overwrite when
+                // the message body no longer looks like a placeholder.
+                let probe =
+                    probe_placeholder_state(http, state.channel_id, state.current_msg_id).await;
+                match probe {
+                    PlaceholderProbe::AlreadyDelivered => {
+                        // Response already on screen. Do NOT overwrite —
+                        // just evict the stale inflight row so the sweeper
+                        // does not retry every pass for the rest of the
+                        // process lifetime.
+                        if inflight_state_still_same_turn(provider, &state, age_secs) {
+                            finalize_abandoned_mailbox(shared, provider, &state).await;
+                            let _ = delete_inflight_state_file(provider, state.channel_id);
+                            if let (Some(provider_kind), msg_id) = (
+                                ProviderKind::from_str(&state.provider),
+                                state.current_msg_id,
+                            ) {
+                                if msg_id != 0 {
+                                    let key = super::placeholder_controller::PlaceholderKey {
+                                        provider: provider_kind,
+                                        channel_id: serenity::ChannelId::new(state.channel_id),
+                                        message_id: serenity::MessageId::new(msg_id),
+                                    };
+                                    shared.placeholder_controller.detach(&key);
+                                }
+                            }
+                        }
+                        tracing::info!(
+                            "[placeholder_sweeper] skipped abandon overwrite for {}/{} — \
+                             content already delivered, state evicted (#2415)",
+                            state.channel_id,
+                            state.current_msg_id
+                        );
+                        continue;
+                    }
+                    PlaceholderProbe::MessageGone => {
+                        // The Discord message is unreachable (deleted /
+                        // 403 / channel gone). An edit attempt would fail
+                        // anyway; just drop the inflight row.
+                        if inflight_state_still_same_turn(provider, &state, age_secs) {
+                            finalize_abandoned_mailbox(shared, provider, &state).await;
+                            let _ = delete_inflight_state_file(provider, state.channel_id);
+                        }
+                        continue;
+                    }
+                    PlaceholderProbe::StillPlaceholder => {
+                        // Fall through to the original abort-edit path.
+                    }
+                }
                 let text = build_abandoned_placeholder(&state);
                 let edited = edit_placeholder_safe(
                     http,
