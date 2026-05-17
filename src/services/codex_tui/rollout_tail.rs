@@ -2437,4 +2437,256 @@ mod tests {
             Some(StreamMessage::Done { result, .. }) if result == "after tool"
         ));
     }
+
+    #[test]
+    fn legacy_cli_long_pause_does_not_emit_premature_done() {
+        // #2453: a legacy Codex CLI (no `event_msg` records at all) emits
+        // assistant text in burst-pause-burst. With the old uniform 5s
+        // terminal drain a >5s pause would Done after burst1, truncating
+        // burst2. The `legacy_terminal_drain` bump (15s default) must
+        // absorb a 6s inter-burst pause and let burst2 land in the same
+        // turn.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"legacy-burst\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-legacy-burst.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"burst1"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                // Base drain stays 1s (legacy CLIs still need a *short* base
+                // so the test runs fast). The legacy override (3s) is what
+                // matters here — without #2453 the inter-burst silence of
+                // 1.5s would fire the drain prematurely.
+                Duration::from_secs(1),
+                Some(Duration::from_secs(30)),
+                None,
+                true,
+                Some(Duration::from_secs(3)),
+                true,
+            )
+        });
+
+        // Sleep 1.5s — past the base 1s drain but well inside the legacy 3s
+        // drain. Without #2453, burst1's Done would already have fired.
+        std::thread::sleep(Duration::from_millis(1500));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"burst2"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "burst1")),
+            "burst1 must be emitted; got {:?}",
+            messages
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "burst2")),
+            "burst2 must be emitted after the legacy-drain-protected pause; got {:?}",
+            messages
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result.contains("burst1") && result.contains("burst2")
+        ));
+    }
+
+    #[test]
+    fn modern_cli_keeps_base_drain_when_event_msg_seen() {
+        // #2453 dual: when the rollout DOES carry an `event_msg` record
+        // (modern CLI fingerprint), the tail must NOT apply the legacy
+        // drain bump — modern CLIs rely on the shorter base drain so a
+        // Done that arrives without `task_complete` (e.g. token_count
+        // only) still flushes promptly.
+        let body = concat!(
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1,"output_tokens":1}}}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"modern"}]}}"#,
+            "\n",
+        );
+        let (messages, elapsed) = run_tail_with_options(
+            body,
+            Duration::from_millis(250),
+            Some(Duration::from_secs(30)),
+            // Disable the task_complete fast-path so termination MUST come
+            // from the drain. If the legacy bump leaked in here, this test
+            // would take 10s+.
+            false,
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "modern CLI with event_msg must use base drain, not legacy bump (took {:?})",
+            elapsed
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. }) if result == "modern"
+        ));
+    }
+
+    #[test]
+    fn tool_first_pending_call_deadline_fires_without_assistant_text() {
+        // #2429 HIGH 2: a `function_call` emitted BEFORE any assistant
+        // text that never resolves used to fall back to the 30 min
+        // assistant_response_deadline. With
+        // `apply_pending_tool_deadline_without_assistant_text=true` (the
+        // default) the bounded pending-tool deadline now fires, surfacing
+        // a tool-first warning so the bridge can advance.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout-tool-first.jsonl");
+        let initial = concat!(
+            r#"{"type":"session_meta","payload":{"id":"tool-first","cwd":"/tmp/repo"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"hang","arguments":"{}","call_id":"hang-1"}}"#,
+            "\n",
+        );
+        std::fs::write(&rollout, initial).unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        writer.write_all(b"").unwrap();
+        drop(writer);
+
+        let (tx, rx) = mpsc::channel();
+        let (result, _outcome) = tail_rollout_file_until_assistant_response(
+            &rollout,
+            0,
+            None,
+            &tx,
+            None,
+            || true, // pane stays alive — only the deadline rescues us
+            Duration::from_secs(60),
+            // Long global deadline so we KNOW the tool-call deadline is
+            // what fires, not the assistant-response deadline.
+            Some(Duration::from_secs(60)),
+            // Short bounded recovery deadline.
+            Some(Duration::from_millis(200)),
+            true,
+            None,
+            // The behaviour under test.
+            true,
+        )
+        .unwrap();
+        drop(tx);
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        let done = messages
+            .iter()
+            .find_map(|m| {
+                if let StreamMessage::Done { result, .. } = m {
+                    Some(result.as_str())
+                } else {
+                    None
+                }
+            })
+            .expect("tool-first Done must be emitted by the pending-tool deadline");
+        assert!(
+            done.contains("before any assistant text"),
+            "tool-first Done should carry the no-text warning copy; got {:?}",
+            done
+        );
+    }
+
+    #[test]
+    fn tool_first_pending_call_deadline_can_be_disabled() {
+        // #2429 HIGH 2 escape hatch: if an operator wants the pre-#2429
+        // behaviour (deadline only after assistant text), setting the
+        // flag to `false` must restore it — the tool-first hang stays
+        // pinned by the pending-call gate and only the global
+        // assistant_response_deadline can rescue it.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout-tool-first-disabled.jsonl");
+        let initial = concat!(
+            r#"{"type":"session_meta","payload":{"id":"tool-first-off","cwd":"/tmp/repo"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"hang","arguments":"{}","call_id":"hang-1"}}"#,
+            "\n",
+        );
+        std::fs::write(&rollout, initial).unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        writer.write_all(b"").unwrap();
+        drop(writer);
+
+        let (tx, rx) = mpsc::channel();
+        let (result, _outcome) = tail_rollout_file_until_assistant_response(
+            &rollout,
+            0,
+            None,
+            &tx,
+            None,
+            || true,
+            Duration::from_secs(60),
+            // The global deadline is the only rescue path with the flag off.
+            Some(Duration::from_millis(400)),
+            // Short pending-tool deadline; would fire first if the flag
+            // were on. With the flag off the tail must ignore it.
+            Some(Duration::from_millis(100)),
+            true,
+            None,
+            // The behaviour under test.
+            false,
+        )
+        .unwrap();
+        drop(tx);
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        let done = messages
+            .iter()
+            .find_map(|m| {
+                if let StreamMessage::Done { result, .. } = m {
+                    Some(result.as_str())
+                } else {
+                    None
+                }
+            })
+            .expect("global assistant-response deadline must rescue the turn");
+        assert!(
+            done.contains("no assistant response"),
+            "with the flag off the global assistant-response deadline copy must surface; got {:?}",
+            done
+        );
+    }
 }
