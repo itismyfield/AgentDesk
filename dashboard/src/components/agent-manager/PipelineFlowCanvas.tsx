@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, type CSSProperties } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   Background,
   Controls,
@@ -305,12 +305,51 @@ export default function PipelineFlowCanvas({
     [isFsmVariant, onConnectTransition],
   );
 
+  const minimapAllowed = !useScrollableMobileFsmCanvas;
+  const [miniMapVisible, setMiniMapVisible] = useState(minimapAllowed);
+  const miniMapHideTimerRef = useRef<number | null>(null);
+
+  const clearMiniMapHideTimer = useCallback(() => {
+    if (miniMapHideTimerRef.current !== null) {
+      window.clearTimeout(miniMapHideTimerRef.current);
+      miniMapHideTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleMiniMapHide = useCallback(() => {
+    if (!minimapAllowed) return;
+    clearMiniMapHideTimer();
+    miniMapHideTimerRef.current = window.setTimeout(() => {
+      setMiniMapVisible(false);
+      miniMapHideTimerRef.current = null;
+    }, 3200);
+  }, [clearMiniMapHideTimer, minimapAllowed]);
+
+  const revealMiniMap = useCallback(() => {
+    if (!minimapAllowed) return;
+    setMiniMapVisible(true);
+    scheduleMiniMapHide();
+  }, [minimapAllowed, scheduleMiniMapHide]);
+
+  useEffect(() => {
+    if (!minimapAllowed) {
+      setMiniMapVisible(false);
+      clearMiniMapHideTimer();
+      return clearMiniMapHideTimer;
+    }
+    setMiniMapVisible(true);
+    scheduleMiniMapHide();
+    return clearMiniMapHideTimer;
+  }, [clearMiniMapHideTimer, graph.edges.length, graph.nodes.length, minimapAllowed, scheduleMiniMapHide]);
+
   return (
     <div className="space-y-3">
       <div
         className="overflow-hidden rounded-[24px] border p-2 sm:p-3"
         style={isFsmVariant ? FSM_FLOW_SHELL_STYLE : FLOW_SHELL_STYLE}
         data-testid={useScrollableMobileFsmCanvas ? "fsm-canvas-scroll" : undefined}
+        onFocusCapture={revealMiniMap}
+        onPointerMove={revealMiniMap}
       >
         <div
           className="rounded-[20px]"
@@ -347,11 +386,28 @@ export default function PipelineFlowCanvas({
               color={isFsmVariant ? "rgba(148, 163, 184, 0.22)" : "rgba(148, 163, 184, 0.18)"}
             />
             <Controls showInteractive={false} position="bottom-left" />
-            {!useScrollableMobileFsmCanvas && (
+            {minimapAllowed && (
               <MiniMap
                 pannable
                 zoomable
                 position="bottom-right"
+                maskColor="rgba(2, 6, 23, 0.52)"
+                nodeBorderRadius={8}
+                nodeStrokeColor="rgba(226, 232, 240, 0.36)"
+                style={{
+                  width: 148,
+                  height: 88,
+                  borderRadius: 18,
+                  overflow: "hidden",
+                  border: "1px solid rgba(148, 163, 184, 0.24)",
+                  background: "rgba(15, 23, 42, 0.72)",
+                  boxShadow: "0 16px 36px rgba(0, 0, 0, 0.34)",
+                  opacity: miniMapVisible ? 0.82 : 0,
+                  pointerEvents: miniMapVisible ? "auto" : "none",
+                  transform: miniMapVisible ? "translateY(0)" : "translateY(8px)",
+                  transition: "opacity 180ms ease, transform 180ms ease",
+                  backdropFilter: "blur(10px)",
+                }}
                 nodeColor={(node) => {
                   const graphNode = (node.data as PipelineStateNodeData).node;
                   return isFsmVariant ? fsmStateTone(graphNode.id).stroke : "var(--th-accent-primary)";
@@ -387,7 +443,10 @@ export default function PipelineFlowCanvas({
               className="ml-auto"
               style={{ fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace" }}
             >
-              {`states:${graph.nodes.length} · transitions:${graph.edges.length}`}
+              {tr(
+                `상태:${graph.nodes.length} · 전환:${graph.edges.length}`,
+                `states:${graph.nodes.length} · transitions:${graph.edges.length}`,
+              )}
             </span>
           </>
         ) : (

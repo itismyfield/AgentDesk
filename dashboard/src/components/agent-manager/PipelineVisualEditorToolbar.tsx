@@ -50,18 +50,7 @@ function FsmToolbar({ ctx, actions }: Props) {
             {tr("칸반 상태 머신 · 비주얼 에디터", "Kanban state machine · visual editor")}
           </div>
           <div className="flex flex-wrap items-center gap-2 text-[11px] leading-5" style={MUTED_TEXT_STYLE}>
-            <span>{tr("엣지를 클릭해 훅/정책을 편집합니다.", "Select an edge to edit hook and policy.")}</span>
-            <code
-              className="rounded-md border px-2 py-0.5"
-              style={{
-                borderColor: "color-mix(in srgb, var(--th-border) 78%, transparent)",
-                background: "color-mix(in srgb, var(--th-overlay-subtle) 90%, transparent)",
-                color: "var(--th-text-secondary)",
-                fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-              }}
-            >
-              kv_meta.kanban_fsm
-            </code>
+            <span>{tr("선을 클릭해 전환 조건을 조정합니다.", "Select a line to adjust transition rules.")}</span>
           </div>
           <SelectedAgentLine ctx={ctx} size={18} />
           <div className="flex flex-wrap gap-2">
@@ -143,7 +132,7 @@ function AdvancedToolbar({ ctx, actions }: Props) {
             opacity: ctx.saving || !ctx.overrideExists ? 0.45 : 1,
           }}
         >
-          {tr("오버라이드 상속", "Clear override")}
+          {tr("기본 흐름 사용", "Use default flow")}
         </button>
         <SaveButton ctx={ctx} actions={actions} label={tr("변경 저장", "Save changes")} />
       </div>
@@ -183,7 +172,7 @@ function LevelSwitch({ ctx, actions }: Props) {
           color: ctx.level === "repo" ? "var(--th-text-primary)" : "var(--th-text-muted)",
         }}
       >
-        {tr("레포 레벨", "Repo level")}
+        {tr("저장소 기준", "Repository")}
       </button>
       <button
         onClick={() => actions.setLevel("agent")}
@@ -195,7 +184,7 @@ function LevelSwitch({ ctx, actions }: Props) {
           opacity: ctx.selectedAgentId ? 1 : 0.45,
         }}
       >
-        {tr("에이전트 레벨", "Agent level")}
+        {tr("에이전트 기준", "Agent")}
       </button>
     </div>
   );
