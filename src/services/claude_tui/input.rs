@@ -157,7 +157,22 @@ fn send_prompt_with_readiness(
 ) -> Result<(), String> {
     let actions = plan_prompt_submit(prompt)?;
     wait_for_prompt_ready(session_name, readiness)?;
-    run_actions(session_name, &actions)
+    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+        "claude",
+        session_name,
+        prompt,
+    );
+    match run_actions(session_name, &actions) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                "claude",
+                session_name,
+                prompt,
+            );
+            Err(error)
+        }
+    }
 }
 
 pub fn send_cancel(session_name: &str) -> Result<(), String> {

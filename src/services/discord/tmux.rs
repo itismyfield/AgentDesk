@@ -2386,8 +2386,19 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     fn test_watcher_handle(tmux_session_name: &str) -> TmuxWatcherHandle {
+        test_watcher_handle_with_output_path(
+            tmux_session_name,
+            &format!("/tmp/{tmux_session_name}.jsonl"),
+        )
+    }
+
+    fn test_watcher_handle_with_output_path(
+        tmux_session_name: &str,
+        output_path: &str,
+    ) -> TmuxWatcherHandle {
         TmuxWatcherHandle {
             tmux_session_name: tmux_session_name.to_string(),
+            output_path: output_path.to_string(),
             paused: Arc::new(AtomicBool::new(true)),
             resume_offset: Arc::new(std::sync::Mutex::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -2626,6 +2637,39 @@ mod tests {
         );
         assert!(watchers.contains_key(&channel_a));
         assert!(!watchers.contains_key(&channel_b));
+        watchers.assert_invariants_for_tests();
+    }
+
+    #[test]
+    fn claim_or_reuse_watcher_replaces_same_tmux_when_output_path_changes() {
+        let watchers = TmuxWatcherRegistry::new();
+        let channel_a = ChannelId::new(1485506232256168134);
+        let channel_b = ChannelId::new(1485506232256168135);
+        let tmux_name = "AgentDesk-codex-adk-cdx-path-change";
+
+        let initial =
+            test_watcher_handle_with_output_path(tmux_name, "/tmp/prelaunch-wrapper.jsonl");
+        let initial_cancel = initial.cancel.clone();
+        assert!(super::try_claim_watcher(&watchers, channel_a, initial));
+
+        let outcome = claim_or_reuse_watcher(
+            &watchers,
+            channel_b,
+            test_watcher_handle_with_output_path(tmux_name, "/tmp/provider-runtime.jsonl"),
+            &ProviderKind::Codex,
+            "unit-test-output-path-change",
+        );
+
+        assert_eq!(outcome.action(), WatcherClaimAction::SpawnReplacedStale);
+        assert_eq!(outcome.owner_channel_id(), channel_b);
+        assert!(
+            initial_cancel.load(Ordering::Relaxed),
+            "same-tmux watcher on the wrong output path must be cancelled"
+        );
+        let watcher = watchers.get(&channel_b).expect("replacement watcher");
+        assert_eq!(watcher.tmux_session_name, tmux_name);
+        assert_eq!(watcher.output_path, "/tmp/provider-runtime.jsonl");
+        assert!(!watchers.contains_key(&channel_a));
         watchers.assert_invariants_for_tests();
     }
 

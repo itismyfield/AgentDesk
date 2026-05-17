@@ -1924,6 +1924,7 @@ pub(super) async fn restore_inflight_turns(
                             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let handle = TmuxWatcherHandle {
                             tmux_session_name: tmux_session_name.clone(),
+                            output_path: output_path.clone(),
                             paused: paused.clone(),
                             resume_offset: resume_offset.clone(),
                             cancel: cancel.clone(),
@@ -2972,6 +2973,7 @@ pub(super) async fn restore_inflight_turns(
                     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let handle = TmuxWatcherHandle {
                     tmux_session_name: tmux_session_name.clone(),
+                    output_path: output_path.clone(),
                     paused: paused.clone(),
                     resume_offset: resume_offset.clone(),
                     cancel: cancel.clone(),
@@ -3714,6 +3716,7 @@ pub(crate) async fn rebind_inflight_for_channel(
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let handle = TmuxWatcherHandle {
                 tmux_session_name: tmux_session_name.clone(),
+                output_path: output_path.clone(),
                 paused: paused.clone(),
                 resume_offset: resume_offset.clone(),
                 cancel: cancel.clone(),

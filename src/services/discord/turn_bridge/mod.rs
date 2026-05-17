@@ -1913,6 +1913,7 @@ fn handle_watcher_runtime_handoff(
     let mailbox_finalize_owed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = TmuxWatcherHandle {
         tmux_session_name: tmux_session_name.clone(),
+        output_path: output_path.clone(),
         paused: paused.clone(),
         resume_offset: resume_offset.clone(),
         cancel: cancel.clone(),
@@ -3440,6 +3441,7 @@ pub(super) fn spawn_turn_bridge(
                                 Arc::new(std::sync::atomic::AtomicBool::new(false));
                             let handle = TmuxWatcherHandle {
                                 tmux_session_name: tmux_session_name.clone(),
+                                output_path: output_path.clone(),
                                 paused: paused.clone(),
                                 resume_offset: resume_offset.clone(),
                                 cancel: cancel.clone(),

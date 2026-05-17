@@ -540,6 +540,7 @@ src/
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
+│   │   ├── tui_prompt_relay.rs
 │   │   ├── voice_background_driver.rs
 │   │   ├── voice_barge_in.rs
 │   │   └── voice_routing.rs
@@ -674,6 +675,7 @@ src/
 │   ├── tmux_diagnostics.rs
 │   ├── tmux_wrapper.rs
 │   ├── tool_output_guard.rs
+│   ├── tui_prompt_dedupe.rs
 │   ├── turn_cancel_finalizer.rs
 │   ├── turn_lifecycle.rs
 │   └── turn_orchestrator.rs

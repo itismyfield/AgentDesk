@@ -492,6 +492,11 @@ fn prepare_codex_tui_hook_overrides(
         session_id: hook_session_id.to_string(),
         agentdesk_exe: current_agentdesk_exe_for_hook_bundle(),
     };
+    crate::services::tui_prompt_dedupe::register_provider_session(
+        ProviderKind::Codex.as_str(),
+        hook_session_id,
+        tmux_session_name,
+    );
     codex_hook_config_overrides(&config)
 }
 
@@ -1312,6 +1317,14 @@ fn execute_streaming_local_tui_tmux(
 
     std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Failed to write Codex TUI launch script: {}", e))?;
+    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+        ProviderKind::Codex.as_str(),
+        tmux_session_name,
+        prompt,
+    );
+    if let Some(channel_id) = report_channel_id {
+        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
+    }
 
     let tmux_result = crate::services::platform::tmux::create_session(
         tmux_session_name,
@@ -1323,6 +1336,11 @@ fn execute_streaming_local_tui_tmux(
         let stderr = String::from_utf8_lossy(&tmux_result.stderr);
         let _ = std::fs::remove_file(&owner_path);
         let _ = std::fs::remove_file(&script_path);
+        crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+            ProviderKind::Codex.as_str(),
+            tmux_session_name,
+            prompt,
+        );
         return Err(format!("tmux error: {}", stderr));
     }
 
@@ -1352,7 +1370,7 @@ fn execute_streaming_local_tui_tmux(
             .selected_session_id
             .as_deref()
             .ok_or_else(|| "Codex TUI resume selected without session id".to_string())?;
-        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session_with_handoff(
+        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session_with_handoff_for_tmux(
             std::path::Path::new(working_dir),
             selected_session_id,
             rollout_path,
@@ -1361,14 +1379,18 @@ fn execute_streaming_local_tui_tmux(
             sender.clone(),
             cancel_token,
             || tmux_session_has_live_pane(tmux_session_name),
+            tmux_session_name,
+            Some(prompt),
         )
     } else {
-        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff(
+        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
             std::path::Path::new(working_dir),
             rollout_modified_since,
             sender.clone(),
             cancel_token,
             || tmux_session_has_live_pane(tmux_session_name),
+            tmux_session_name,
+            Some(prompt),
         )
     };
     let cancel_observed =
@@ -1495,6 +1517,23 @@ fn execute_streaming_local_tui_tmux(
             cancel_token_for_post_tail.as_ref(),
         ) {
             Ok(()) => {
+                let relay_output_path =
+                    crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
+                let relay_last_offset = std::fs::metadata(&relay_output_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                    tmux_session_name,
+                    crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+                        output_path: tail_result.rollout_path.display().to_string(),
+                        relay_output_path: Some(relay_output_path),
+                        input_fifo_path: None,
+                        session_id: tail_result.session_id.clone(),
+                        last_offset: tail_result.final_offset,
+                        relay_last_offset: Some(relay_last_offset),
+                    },
+                );
                 let _ = sender.send(StreamMessage::RuntimeReady {
                     handoff: RuntimeHandoff::CodexTui {
                         rollout_path: tail_result.rollout_path.display().to_string(),

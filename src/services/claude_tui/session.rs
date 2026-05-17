@@ -49,6 +49,11 @@ pub fn prepare_claude_tui_launch(
 ) -> Result<ClaudeTuiSessionFiles, String> {
     let files = config.session_files();
     let result = (|| {
+        crate::services::tui_prompt_dedupe::register_provider_session(
+            "claude",
+            &config.session_id,
+            &config.tmux_session_name,
+        );
         write_claude_hook_settings(
             &files.hook_settings_path,
             &HookBundleConfig {

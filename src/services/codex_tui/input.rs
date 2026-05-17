@@ -383,7 +383,22 @@ fn send_prompt_with_readiness(
     if cancel_requested(cancel_token.map(Arc::as_ref)) {
         return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
     }
-    run_actions(session_name, &actions)
+    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+        "codex",
+        session_name,
+        prompt,
+    );
+    match run_actions(session_name, &actions) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                "codex",
+                session_name,
+                prompt,
+            );
+            Err(error)
+        }
+    }
 }
 
 pub fn send_cancel(session_name: &str) -> Result<(), String> {
