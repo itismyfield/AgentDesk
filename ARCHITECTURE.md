@@ -368,6 +368,7 @@ src/
 │   │   ├── intake_routing.rs
 │   │   ├── intake_worker.rs
 │   │   ├── mod.rs
+│   │   ├── registry_adapter_sink.rs
 │   │   ├── session_discovery.rs
 │   │   ├── session_matcher.rs
 │   │   ├── session_registry.rs
@@ -704,6 +705,7 @@ src/
 │   ├── receiver.rs
 │   ├── sanitizer.rs
 │   ├── stt.rs
+│   ├── turn_link.rs
 │   └── utils.rs
 ├── bootstrap.rs
 ├── config.rs
