@@ -835,13 +835,15 @@ pub struct ClusterConfig {
     pub dispatch_routing: ClusterDispatchRoutingConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub semaphores: BTreeMap<String, ClusterSemaphoreConfig>,
-    /// Epic #2285 / E3 gate. When `true`, the new session-bound
-    /// `WatcherSupervisor` + `StreamRelay` infrastructure is wired in; when
-    /// `false` (default), the legacy per-turn watcher branching remains the
-    /// sole relay path. E3 (#2345) lands the infrastructure with the flag
-    /// defaulting OFF so there is no behavior change. The follow-up migration
-    /// (#2346 / E4) flips the flag and removes the legacy branching.
-    #[serde(default)]
+    /// Epic #2285 / E3 + E4 gate. When `true` (default since E4 / #2346), the
+    /// session-bound `WatcherSupervisor` + `StreamRelay` infrastructure runs in
+    /// production against the observation-only `RegistryAdapterSink`. The
+    /// legacy per-turn tmux watcher remains the authoritative Discord delivery
+    /// path during the E4 release; subsequent epic #2285 issues migrate the
+    /// turn-bound spawn sites to consume from the supervisor directly. Setting
+    /// the flag to `false` restores pre-E4 behavior by skipping the supervisor
+    /// entirely.
+    #[serde(default = "default_session_bound_relay_enabled")]
     pub session_bound_relay_enabled: bool,
 }
 
@@ -860,7 +862,7 @@ impl Default for ClusterConfig {
             blackout_windows: BTreeMap::new(),
             dispatch_routing: ClusterDispatchRoutingConfig::default(),
             semaphores: BTreeMap::new(),
-            session_bound_relay_enabled: false,
+            session_bound_relay_enabled: default_session_bound_relay_enabled(),
         }
     }
 }
@@ -1634,6 +1636,15 @@ fn default_cluster_heartbeat_interval_secs() -> u64 {
 }
 fn default_cluster_lease_ttl_secs() -> u64 {
     30
+}
+fn default_session_bound_relay_enabled() -> bool {
+    // Epic #2285 / E4 (#2346): STAYS `false` until the production tmux
+    // frame producer is wired into the supervisor-owned StreamRelay.
+    // Codex review of #2411 surfaced that `spawn_if_absent` only stores a
+    // relay handle but nothing pushes frames into it — flipping default
+    // on now would silently drop streamed output. The producer-side
+    // wiring lands in a follow-up.
+    false
 }
 fn default_memory_backend() -> String {
     "auto".into()
