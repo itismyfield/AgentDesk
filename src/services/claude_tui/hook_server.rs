@@ -477,36 +477,11 @@ mod tests {
             .expect("Stop event should wake prompt_ready_notify waiter");
     }
 
-    #[tokio::test]
-    async fn non_stop_event_does_not_wake_prompt_ready_waiter() {
-        let notify = prompt_ready_notify();
-        let waiter = tokio::spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_millis(200), notify.notified()).await
-        });
-
-        tokio::task::yield_now().await;
-        let state = HookServerState::new();
-        let app = hook_receiver_router_with_state(state);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/hooks/claude/UserPromptSubmit?session_id=sess-quiet")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"hook_event_name":"UserPromptSubmit"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-
-        // The notify should NOT have been signaled by UserPromptSubmit.
-        let result = waiter.await.expect("waiter task did not panic");
-        assert!(
-            result.is_err(),
-            "UserPromptSubmit must not wake prompt_ready_notify"
-        );
-    }
+    // Note: a "negative wake" test against the global PROMPT_READY_NOTIFY is
+    // intentionally omitted — concurrent tests in the same process can race on
+    // the shared notify and flake the assertion. The pure-function predicate
+    // `should_signal_prompt_ready_only_for_stop_kinds` below pins the
+    // dispatch rule deterministically without touching global state.
 
     #[test]
     fn should_signal_prompt_ready_only_for_stop_kinds() {

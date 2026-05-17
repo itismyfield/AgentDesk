@@ -1,5 +1,9 @@
 use std::process::Output;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use tokio::runtime::Handle;
+use tokio::sync::Notify;
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 const PROMPT_READY_CAPTURE_SCROLLBACK: i32 = -80;
@@ -7,6 +11,14 @@ const PROMPT_READY_DEBUG_TAIL_LINES: usize = 24;
 const PROMPT_READY_DEBUG_TAIL_BYTES: usize = 4096;
 pub const FRESH_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const FOLLOWUP_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
+/// Maximum time we let the hook-event fast path block before falling back to
+/// the legacy pane-scrape polling loop. Fresh turns historically need a bit
+/// more headroom (cold start, MCP load) than follow-ups.
+const FRESH_PROMPT_READY_EVENT_BUDGET: Duration = Duration::from_secs(10);
+const FOLLOWUP_PROMPT_READY_EVENT_BUDGET: Duration = Duration::from_secs(5);
+/// Brief settle delay between hook arrival and the post-event snapshot check
+/// so the TUI has time to redraw the prompt marker after Stop.
+const PROMPT_READY_POST_EVENT_SETTLE: Duration = Duration::from_millis(50);
 const PROMPT_READY_TIMEOUT_ERROR_PREFIX: &str = "timeout waiting for claude tui";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,12 +35,28 @@ impl PromptReadinessKind {
         }
     }
 
+    fn event_budget(self) -> Duration {
+        match self {
+            Self::FreshTurn => FRESH_PROMPT_READY_EVENT_BUDGET,
+            Self::Followup => FOLLOWUP_PROMPT_READY_EVENT_BUDGET,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::FreshTurn => "fresh",
             Self::Followup => "follow-up",
         }
     }
+}
+
+/// Outcome of the hook-event fast path. `Ready` short-circuits the polling
+/// fallback; `Pending` (timeout or post-event snapshot still not ready) falls
+/// through to the legacy pane-scrape loop using the remaining budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HookFastPathOutcome {
+    Ready,
+    Pending,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,6 +196,90 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
 fn wait_for_prompt_ready(session_name: &str, readiness: PromptReadinessKind) -> Result<(), String> {
     let timeout = readiness.timeout();
     let start = Instant::now();
+
+    // 1) Event-driven fast path. Register a waiter on the global Notify *before*
+    //    checking the snapshot, so an Stop event that arrives in the gap below
+    //    is not missed (Notify::notified() is permit-buffered for the holder).
+    let notify = crate::services::claude_tui::hook_server::prompt_ready_notify();
+    let fast_path = wait_for_prompt_ready_event(notify, readiness.event_budget());
+
+    // Re-check the snapshot once regardless of fast-path outcome — the marker
+    // may already be visible (cheap success), and after a Stop the TUI needs
+    // a brief moment to redraw the prompt.
+    if matches!(fast_path, HookFastPathOutcome::Ready) {
+        std::thread::sleep(PROMPT_READY_POST_EVENT_SETTLE);
+    }
+    let snapshot = prompt_readiness_snapshot(session_name);
+    if snapshot.prompt_marker_detected {
+        tracing::debug!(
+            tmux_session_name = session_name,
+            readiness = readiness.label(),
+            hook_event_fast_path_hit = matches!(fast_path, HookFastPathOutcome::Ready),
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "claude_tui prompt ready via hook event fast path"
+        );
+        return Ok(());
+    }
+    if !snapshot.tmux_pane_alive {
+        return Err("claude tui session died before prompt input was ready".to_string());
+    }
+
+    if !matches!(fast_path, HookFastPathOutcome::Ready) {
+        // Fast path did not fire within its budget — keep the original warn
+        // visibility so missing Stop hooks remain debuggable.
+        tracing::warn!(
+            tmux_session_name = session_name,
+            readiness = readiness.label(),
+            event_budget_ms = readiness.event_budget().as_millis() as u64,
+            "claude_tui hook didn't fire within budget, falling back to pane-scrape polling"
+        );
+    }
+
+    wait_for_prompt_ready_polling(session_name, readiness, timeout, start)
+}
+
+/// Sync wrapper that awaits the global prompt-ready notify with a bounded
+/// budget. Returns `Ready` if the hook fired in time, `Pending` otherwise.
+///
+/// The caller must obtain the `notify` handle *before* triggering whatever
+/// might race against the hook arrival, otherwise an early Stop signal is
+/// dropped (`notify_waiters` only wakes already-registered waiters).
+fn wait_for_prompt_ready_event(notify: Arc<Notify>, budget: Duration) -> HookFastPathOutcome {
+    let fut = async move {
+        tokio::select! {
+            _ = notify.notified() => HookFastPathOutcome::Ready,
+            _ = tokio::time::sleep(budget) => HookFastPathOutcome::Pending,
+        }
+    };
+
+    match Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => {
+            // No ambient runtime (e.g. unit tests outside `#[tokio::test]`).
+            // Spin up a minimal current-thread runtime for the wait.
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+            {
+                Ok(rt) => rt.block_on(fut),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to build local runtime for prompt readiness fast path; falling back to polling"
+                    );
+                    HookFastPathOutcome::Pending
+                }
+            }
+        }
+    }
+}
+
+fn wait_for_prompt_ready_polling(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+    timeout: Duration,
+    start: Instant,
+) -> Result<(), String> {
     let mut wait_interval = Duration::from_millis(100);
     loop {
         let snapshot = prompt_readiness_snapshot(session_name);
@@ -372,6 +484,85 @@ line 13";
     fn prompt_ready_timeouts_are_split_for_fresh_and_followup_turns() {
         assert_eq!(PromptReadinessKind::FreshTurn.timeout().as_secs(), 120);
         assert_eq!(PromptReadinessKind::Followup.timeout().as_secs(), 45);
+    }
+
+    #[test]
+    fn event_budget_is_shorter_than_full_timeout() {
+        // The event-budget is meant to fail fast and yield to the polling
+        // fallback long before the legacy timeout would fire.
+        for kind in [PromptReadinessKind::FreshTurn, PromptReadinessKind::Followup] {
+            assert!(
+                kind.event_budget() < kind.timeout(),
+                "event budget for {:?} must be smaller than legacy timeout",
+                kind
+            );
+        }
+        // Fresh starts get more headroom than follow-ups.
+        assert!(
+            PromptReadinessKind::FreshTurn.event_budget()
+                > PromptReadinessKind::Followup.event_budget()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fast_path_returns_ready_when_notify_fires_within_budget() {
+        let notify = Arc::new(Notify::new());
+        let trigger = notify.clone();
+        // Fire the signal shortly after the waiter registers.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            trigger.notify_waiters();
+        });
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            wait_for_prompt_ready_event(notify, Duration::from_secs(2))
+        })
+        .await
+        .expect("blocking task panicked");
+
+        assert_eq!(outcome, HookFastPathOutcome::Ready);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fast_path_returns_pending_when_budget_elapses_without_notify() {
+        let notify = Arc::new(Notify::new());
+        let outcome = tokio::task::spawn_blocking(move || {
+            wait_for_prompt_ready_event(notify, Duration::from_millis(50))
+        })
+        .await
+        .expect("blocking task panicked");
+
+        assert_eq!(outcome, HookFastPathOutcome::Pending);
+    }
+
+    #[test]
+    fn fast_path_works_without_ambient_runtime() {
+        // Exercises the fallback runtime branch that callers without tokio
+        // runtime hit (e.g. plain sync test contexts). Budget is short enough
+        // to keep the test cheap.
+        let notify = Arc::new(Notify::new());
+        let outcome = wait_for_prompt_ready_event(notify, Duration::from_millis(30));
+        assert_eq!(outcome, HookFastPathOutcome::Pending);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn global_prompt_ready_notify_round_trips_via_hook_server_helper() {
+        // End-to-end wiring sanity: hook_server::signal_prompt_ready_for_test
+        // wakes the same global Notify that input.rs consumes.
+        let notify = crate::services::claude_tui::hook_server::prompt_ready_notify();
+        let waiter_notify = notify.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            crate::services::claude_tui::hook_server::signal_prompt_ready_for_test();
+        });
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            wait_for_prompt_ready_event(waiter_notify, Duration::from_secs(2))
+        })
+        .await
+        .expect("blocking task panicked");
+
+        assert_eq!(outcome, HookFastPathOutcome::Ready);
     }
 
     #[test]
