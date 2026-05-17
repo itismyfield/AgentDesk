@@ -25,6 +25,17 @@ const DEFAULT_ROLLOUT_WAIT_SECS: u64 = 30;
 /// `RolloutParseState::pending_tool_calls`) is the structural complement that
 /// suppresses drain entirely while one or more tools are in flight.
 const DEFAULT_TERMINAL_DRAIN_MS: u64 = 5000;
+/// Issue #2453: legacy Codex CLI builds (no `event_msg` records at all in the
+/// rollout) cannot benefit from the `task_complete` fast-path nor the
+/// token-count refresh signal. The 5s terminal drain stays structurally
+/// fragile against burst-pause-burst patterns with >5s mid-response pauses.
+/// When the tail observes ZERO `event_msg` records on a turn — the
+/// canonical legacy-CLI fingerprint — the drain budget is bumped to this
+/// longer value so a single quiet window must persist that long before the
+/// tail flushes `Done`. Modern CLIs always emit at least one `event_msg`
+/// (token_count is emitted alongside every message) and therefore retain the
+/// shorter 5s drain. See issue #2453 / PR #2432 follow-up.
+const DEFAULT_LEGACY_TERMINAL_DRAIN_MS: u64 = 15000;
 /// Upper bound on how long the tailer will sit at EOF waiting for the assistant
 /// response to begin streaming. Without this guard, a stuck Codex TUI (tool
 /// loop, network hang, etc.) keeps the tailer thread alive indefinitely and the
@@ -74,6 +85,21 @@ pub struct RolloutTailOptions {
     /// bypassing `terminal_drain`. Set to `false` to force the legacy
     /// drain-only behaviour as an emergency runtime escape hatch.
     pub enable_task_complete_fast_path: bool,
+    /// #2453: extended drain budget applied when the tail observes ZERO
+    /// `event_msg` records during the turn (legacy Codex CLI fingerprint).
+    /// Modern CLIs emit at least one `event_msg` (typically `token_count`)
+    /// per message, so this branch only activates against legacy/unknown
+    /// rollout writers. Setting this to `terminal_drain` (or `None`)
+    /// restores the pre-#2453 behaviour where a single uniform drain
+    /// governs every variant.
+    pub legacy_terminal_drain: Option<Duration>,
+    /// #2429 (HIGH 2 follow-up): also enforce the pending-tool-call deadline
+    /// when no assistant text has been observed yet. Previously the
+    /// recovery branch was guarded on `state.saw_assistant_text`, which
+    /// meant a tool-first stuck call could pin the turn until the global
+    /// `assistant_response_deadline` (30 min). Defaults to `true` so a
+    /// tool-only hang surfaces inside the bounded pending-tool budget.
+    pub apply_pending_tool_deadline_without_assistant_text: bool,
 }
 
 impl Default for RolloutTailOptions {
@@ -88,6 +114,8 @@ impl Default for RolloutTailOptions {
                 DEFAULT_PENDING_TOOL_CALL_DEADLINE_SECS,
             )),
             enable_task_complete_fast_path: true,
+            legacy_terminal_drain: Some(Duration::from_millis(DEFAULT_LEGACY_TERMINAL_DRAIN_MS)),
+            apply_pending_tool_deadline_without_assistant_text: true,
         }
     }
 }
@@ -131,6 +159,14 @@ struct RolloutParseState {
     /// the turn produced no `response_item/message` assistant text (e.g. a
     /// tool-only turn).
     task_complete_fallback_text: Option<String>,
+    /// #2453: set the first time the tail observes ANY `event_msg` rollout
+    /// record (e.g. `token_count`, `agent_reasoning`, `task_complete`).
+    /// Modern Codex CLI builds emit at least one such record per turn —
+    /// typically `token_count` after each message. When this flag stays
+    /// `false` at EOF, the tail is reading a legacy rollout writer and
+    /// must apply the longer `legacy_terminal_drain` to absorb >5s mid-
+    /// response pauses without truncating bursts.
+    seen_any_event_msg: bool,
 }
 
 impl RolloutParseState {
@@ -234,6 +270,8 @@ fn tail_latest_rollout_for_cwd_with_handoff_options(
         options.assistant_response_deadline,
         options.pending_tool_call_deadline,
         options.enable_task_complete_fast_path,
+        options.legacy_terminal_drain,
+        options.apply_pending_tool_deadline_without_assistant_text,
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
@@ -257,6 +295,8 @@ pub fn replay_rollout_file(
         || false,
         Duration::ZERO,
         None,
+        None,
+        true,
         None,
         true,
     )?;
@@ -286,6 +326,8 @@ pub fn tail_rollout_file_from_offset(
         defaults.assistant_response_deadline,
         defaults.pending_tool_call_deadline,
         defaults.enable_task_complete_fast_path,
+        defaults.legacy_terminal_drain,
+        defaults.apply_pending_tool_deadline_without_assistant_text,
     )
     .map(|result| result.0)
 }
@@ -411,6 +453,8 @@ fn tail_resumed_rollout_for_session_with_handoff_options(
         options.assistant_response_deadline,
         options.pending_tool_call_deadline,
         options.enable_task_complete_fast_path,
+        options.legacy_terminal_drain,
+        options.apply_pending_tool_deadline_without_assistant_text,
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
@@ -636,6 +680,8 @@ fn tail_rollout_file_until_assistant_response(
     assistant_response_deadline: Option<Duration>,
     pending_tool_call_deadline: Option<Duration>,
     enable_task_complete_fast_path: bool,
+    legacy_terminal_drain: Option<Duration>,
+    apply_pending_tool_deadline_without_assistant_text: bool,
 ) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     let mut file = std::fs::File::open(rollout_path)
         .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?;
@@ -727,9 +773,30 @@ fn tail_rollout_file_until_assistant_response(
                 // #2419: only consider the turn drainable when no tool call
                 // is currently in flight. Otherwise the natural silence while
                 // codex waits for the tool result would trip the timer.
+                //
+                // #2453: when the tail has yet to observe ANY `event_msg`
+                // record (legacy Codex CLI fingerprint), bump the drain to
+                // `legacy_terminal_drain`. Modern CLIs emit at least one
+                // `event_msg` per message, so this branch only widens the
+                // drain for legacy writers that lack the structural signals
+                // (token_count refresh, task_complete fast-path) the 5s
+                // default leans on. The bump is applied only when the
+                // configured legacy drain is strictly longer than the
+                // base drain — `terminal_drain.is_zero()` (replay) and
+                // shorter overrides stay verbatim.
+                let effective_drain = if state.seen_any_event_msg
+                    || terminal_drain.is_zero()
+                {
+                    terminal_drain
+                } else {
+                    match legacy_terminal_drain {
+                        Some(legacy) if legacy > terminal_drain => legacy,
+                        _ => terminal_drain,
+                    }
+                };
                 if state.saw_assistant_text && !state.has_pending_tool_call() {
-                    if terminal_drain.is_zero()
-                        || last_output_at.is_some_and(|at| at.elapsed() >= terminal_drain)
+                    if effective_drain.is_zero()
+                        || last_output_at.is_some_and(|at| at.elapsed() >= effective_drain)
                     {
                         emit_done(&sender, &state);
                         return Ok((
@@ -747,27 +814,50 @@ fn tail_rollout_file_until_assistant_response(
                 // the Discord turn hangs. After `pending_tool_call_deadline`
                 // of inactivity past the last lifecycle event we surface a
                 // terminal Done with a warning so the upstream advances.
-                if state.saw_assistant_text
-                    && state.has_pending_tool_call()
+                //
+                // #2429 HIGH 2 (tool-first stuck calls bypass recovery):
+                // when `apply_pending_tool_deadline_without_assistant_text`
+                // is enabled (default), the deadline also fires for a tool
+                // that hangs BEFORE any assistant text has been emitted —
+                // previously such turns fell back to the 30 min global
+                // deadline. The warning copy distinguishes the no-text case
+                // so operators can spot tool-first stuck calls in logs.
+                let tool_deadline_gate = state.has_pending_tool_call()
+                    && (state.saw_assistant_text
+                        || apply_pending_tool_deadline_without_assistant_text);
+                if tool_deadline_gate
                     && let Some(deadline) = pending_tool_call_deadline
                     && last_output_at.is_some_and(|at| at.elapsed() >= deadline)
                 {
                     let elapsed_secs = last_output_at
                         .map(|at| at.elapsed().as_secs())
                         .unwrap_or_default();
+                    let tool_first = !state.saw_assistant_text;
                     tracing::warn!(
                         rollout_path = %rollout_path.display(),
                         elapsed_secs,
                         pending_keyed = state.pending_tool_calls.len(),
                         pending_unkeyed = state.pending_tool_calls_unkeyed,
+                        tool_first,
                         "Codex rollout tail tool-call deadline expired; emitting Done to unblock turn"
                     );
                     let mut result_text = state.final_text.clone();
-                    let warning = format!(
-                        "\n\n⚠ Codex tool call did not resolve within {}s — emitting partial response.",
-                        elapsed_secs
-                    );
-                    result_text.push_str(&warning);
+                    let warning = if tool_first {
+                        format!(
+                            "⚠ Codex tool call did not resolve within {}s before any assistant text — emitting empty response to unblock turn.",
+                            elapsed_secs
+                        )
+                    } else {
+                        format!(
+                            "\n\n⚠ Codex tool call did not resolve within {}s — emitting partial response.",
+                            elapsed_secs
+                        )
+                    };
+                    if tool_first {
+                        result_text = warning;
+                    } else {
+                        result_text.push_str(&warning);
+                    }
                     sender.send(StreamMessage::Done {
                         result: result_text,
                         session_id: state.session_id.clone(),
@@ -1118,6 +1208,11 @@ fn tool_result_message(payload: &Value) -> Option<StreamMessage> {
 
 fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<StreamMessage> {
     let payload = json.get("payload")?;
+    // #2453: any `event_msg` record fingerprints a modern Codex CLI. The
+    // drain decision in the read loop branches on this flag — legacy
+    // writers (no event_msg whatsoever) use the longer drain so a >5s
+    // burst-pause-burst response does not truncate.
+    state.seen_any_event_msg = true;
     match payload.get("type").and_then(Value::as_str)? {
         "token_count" => token_count_status(payload),
         "agent_reasoning" => Some(StreamMessage::redacted_thinking()),
@@ -1359,6 +1454,8 @@ mod tests {
                 assistant_response_deadline: None,
                 pending_tool_call_deadline: None,
                 enable_task_complete_fast_path: true,
+                legacy_terminal_drain: None,
+                apply_pending_tool_deadline_without_assistant_text: true,
             },
         )
         .unwrap();
@@ -1416,6 +1513,8 @@ mod tests {
                 assistant_response_deadline: None,
                 pending_tool_call_deadline: None,
                 enable_task_complete_fast_path: true,
+                legacy_terminal_drain: None,
+                apply_pending_tool_deadline_without_assistant_text: true,
             },
         )
         .unwrap();
@@ -1501,6 +1600,8 @@ mod tests {
             Some(Duration::from_millis(150)),
             None,
             true,
+            None,
+            true,
         )
         .unwrap();
         drop(tx);
@@ -1552,6 +1653,8 @@ mod tests {
                 || true,
                 Duration::ZERO,
                 Some(Duration::from_secs(5)),
+                None,
+                true,
                 None,
                 true,
             )
@@ -1648,6 +1751,8 @@ mod tests {
                 Some(Duration::from_secs(10)),
                 None,
                 true,
+                None,
+                true,
             )
         });
 
@@ -1735,6 +1840,8 @@ mod tests {
                 Some(Duration::from_secs(10)),
                 None,
                 true,
+                None,
+                true,
             )
         });
 
@@ -1810,6 +1917,8 @@ mod tests {
                 || true,
                 Duration::from_millis(150),
                 Some(Duration::from_secs(10)),
+                None,
+                true,
                 None,
                 true,
             )
@@ -1892,6 +2001,8 @@ mod tests {
                 || true,
                 Duration::from_millis(250),
                 Some(Duration::from_secs(10)),
+                None,
+                true,
                 None,
                 true,
             )
@@ -1990,6 +2101,8 @@ mod tests {
             // would block forever.
             Some(Duration::from_millis(200)),
             true,
+            None,
+            true,
         )
         .unwrap();
         drop(tx);
@@ -2071,6 +2184,8 @@ mod tests {
             deadline,
             None,
             enable_task_complete_fast_path,
+            None,
+            true,
         )
         .unwrap();
         let elapsed = started.elapsed();
@@ -2288,6 +2403,8 @@ mod tests {
                 || true,
                 Duration::from_secs(30),
                 Some(Duration::from_secs(60)),
+                None,
+                true,
                 None,
                 true,
             )
