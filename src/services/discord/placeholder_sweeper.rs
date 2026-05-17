@@ -192,11 +192,8 @@ async fn probe_placeholder_state(
 /// Anything else (real prose, code blocks, embeds rendered as text) is
 /// treated as a delivered response and protected from sweeper overwrite.
 pub(super) fn is_message_still_placeholder(content: &str) -> bool {
-    const SPINNER_FRAMES: &[char] =
-        &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    const HANDOFF_HEADER_PREFIXES: &[&str] = &[
-        "🔄 **", "📬 **", "⏱ **", "❌ **", "✅ **", "⚠ **",
-    ];
+    const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    const HANDOFF_HEADER_PREFIXES: &[&str] = &["🔄 **", "📬 **", "⏱ **", "❌ **", "✅ **", "⚠ **"];
 
     let trimmed = content.trim_start();
     if trimmed.is_empty() {
@@ -614,7 +611,10 @@ mod is_message_still_placeholder_tests {
         // All 10 braille spinner glyphs recognised.
         for ch in ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] {
             let s = format!("{} working", ch);
-            assert!(is_message_still_placeholder(&s), "frame {ch} not recognised");
+            assert!(
+                is_message_still_placeholder(&s),
+                "frame {ch} not recognised"
+            );
         }
     }
 
