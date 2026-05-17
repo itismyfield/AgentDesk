@@ -4511,6 +4511,32 @@ pub(super) fn spawn_turn_bridge(
             inflight_state.long_running_placeholder_active = false;
             let _ = save_inflight_state(&inflight_state);
         }
+        if !cancelled && relay_owns_output_at_stream_end {
+            let relay_owned_pending_retarget_matches_active =
+                if let Some((active_key, _, _, _)) = long_running_placeholder_active.as_ref() {
+                    pending_long_running_retarget_after_state_save
+                        .as_ref()
+                        .is_some_and(|(pending_key, _, _, _, _)| pending_key == active_key)
+                } else {
+                    false
+                };
+            if relay_owned_pending_retarget_matches_active
+                && let Some((key, _, _, _)) = long_running_placeholder_active.take()
+            {
+                let _ = pending_long_running_retarget_after_state_save.take();
+                shared_owned.placeholder_controller.detach(&key);
+                shared_owned
+                    .placeholder_controller
+                    .unpin_placeholder_message(
+                        gateway.as_ref(),
+                        &key,
+                        "relay_stream_end_before_retarget_persisted",
+                    )
+                    .await;
+                inflight_state.long_running_placeholder_active = false;
+                let _ = save_inflight_state(&inflight_state);
+            }
+        }
         if !cancelled && !relay_owns_output_at_stream_end {
             if let Some((key, _, _, _)) = long_running_placeholder_active.take() {
                 let target = if transport_error || rx_disconnected {
