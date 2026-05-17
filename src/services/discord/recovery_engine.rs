@@ -30,20 +30,32 @@ fn tmux_session_has_live_pane(_name: &str) -> bool {
 }
 
 /// #2428 H5: exponential backoff (+ jitter) for the 3-attempt recovery retry
-/// loops in this module. Replaces the previous fixed `1s` gap so transient
-/// failures are retried sooner while still capping the worst-case wait at
-/// roughly the previous total (≈2s + jitter).
+/// loops in this module. Replaces the previous fixed `1s` gap with an
+/// exponential schedule that *preserves the old wall-clock budget*.
+///
+/// Budget contract (Codex pass-1 review):
+/// - Old: 3 attempts × 1000ms gap → wait between attempts = 1000ms + 1000ms = **2000ms**
+///   total grace window before declaring tmux/finalize recovery failed.
+/// - New: gap schedule = `[700, 1300, 2000]` ms + 0..=100ms jitter, callers
+///   sleep on attempt 1 and 2 (`if attempt < 3`). Wait between attempts =
+///   `700 + 1300 = 2000ms ±200ms`. **Total budget preserved** while
+///   distributing the gaps exponentially so a transient failure that resolves
+///   in <1s wakes ~300ms earlier on average.
+/// - The third slot (`2000ms`) is reachable only if a future change bumps
+///   the loop past 3 attempts; it caps the per-gap wait without exploding the
+///   total when more attempts are added.
 ///
 /// `attempt` is 1-indexed and matches the loop variable: it is the attempt
 /// that *just failed*, and the returned duration is how long to wait before
 /// the next attempt. Callers should only invoke this when another attempt
 /// will actually be tried (typically `if attempt < 3`).
 pub(super) fn recovery_retry_backoff(attempt: u32) -> std::time::Duration {
-    // Base schedule between attempts 1→2, 2→3, …: 200ms, 500ms, 2000ms.
-    // Clamped to MAX_BASE_MS so unusually high attempt counts (which today
-    // do not happen, but might if a follow-up bumps the cap) do not stall
-    // recovery indefinitely.
-    const SCHEDULE_MS: [u64; 3] = [200, 500, 2000];
+    // Gap schedule between attempts 1→2, 2→3, 3→4, …: 700ms, 1300ms, 2000ms.
+    // The 700 + 1300 = 2000ms sum is what makes the 3-attempt total grace
+    // window equal to the old fixed-1s × 3 budget. Do not adjust either of
+    // the first two values without also reviewing every caller and updating
+    // the budget contract above.
+    const SCHEDULE_MS: [u64; 3] = [700, 1300, 2000];
     const MAX_BASE_MS: u64 = 2000;
     let idx = attempt.saturating_sub(1) as usize;
     let base_ms = SCHEDULE_MS
@@ -64,17 +76,17 @@ mod recovery_retry_backoff_tests {
     use std::time::Duration;
 
     #[test]
-    fn backoff_attempt_1_is_in_200_to_300_ms() {
+    fn backoff_attempt_1_is_in_700_to_800_ms() {
         let d = recovery_retry_backoff(1);
-        assert!(d >= Duration::from_millis(200), "got {d:?}");
-        assert!(d <= Duration::from_millis(300), "got {d:?}");
+        assert!(d >= Duration::from_millis(700), "got {d:?}");
+        assert!(d <= Duration::from_millis(800), "got {d:?}");
     }
 
     #[test]
-    fn backoff_attempt_2_is_in_500_to_600_ms() {
+    fn backoff_attempt_2_is_in_1300_to_1400_ms() {
         let d = recovery_retry_backoff(2);
-        assert!(d >= Duration::from_millis(500), "got {d:?}");
-        assert!(d <= Duration::from_millis(600), "got {d:?}");
+        assert!(d >= Duration::from_millis(1300), "got {d:?}");
+        assert!(d <= Duration::from_millis(1400), "got {d:?}");
     }
 
     #[test]
@@ -97,8 +109,21 @@ mod recovery_retry_backoff_tests {
         // Defensive: a caller passing 0 should not get a divide-by-zero or
         // a tiny instant-retry; behave like attempt 1.
         let d = recovery_retry_backoff(0);
-        assert!(d >= Duration::from_millis(200), "got {d:?}");
-        assert!(d <= Duration::from_millis(300), "got {d:?}");
+        assert!(d >= Duration::from_millis(700), "got {d:?}");
+        assert!(d <= Duration::from_millis(800), "got {d:?}");
+    }
+
+    #[test]
+    fn backoff_preserves_3_attempt_total_budget() {
+        // Budget contract: 3-attempt loop with sleeps on attempts 1 and 2
+        // must equal the old fixed-1s × 3 budget (= 2000ms wait time)
+        // within the jitter envelope. This is the regression the Codex
+        // pass-1 review flagged.
+        let total = recovery_retry_backoff(1) + recovery_retry_backoff(2);
+        // Lower bound: 700 + 1300 = 2000ms with zero jitter on both calls.
+        assert!(total >= Duration::from_millis(2000), "got {total:?}");
+        // Upper bound: 800 + 1400 = 2200ms with max jitter on both calls.
+        assert!(total <= Duration::from_millis(2200), "got {total:?}");
     }
 }
 
