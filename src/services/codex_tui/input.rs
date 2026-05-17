@@ -337,6 +337,15 @@ pub fn wait_until_codex_tui_input_ready(
         if let Some(err) = cancel_check() {
             return Err(err);
         }
+        // Codex review HIGH on PR #2457: deadline check must run BEFORE
+        // marker detection so a snapshot that arrives post-deadline is
+        // converted to timeout instead of silently emitting RuntimeReady
+        // past the bridge's 250ms drain window. The previous order
+        // (marker check first → deadline check after) let a slow tmux
+        // capture-pane succeed minutes late.
+        if Instant::now() >= deadline {
+            return Err(timeout_error(&snapshot));
+        }
         if snapshot.composer_marker_detected {
             return Ok(());
         }
@@ -345,14 +354,6 @@ pub fn wait_until_codex_tui_input_ready(
                 return Err(err);
             }
             return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
-        }
-        // #2399 HIGH 1: re-check the deadline after the capture too. A
-        // slow `tmux capture-pane` can consume the entire budget on its
-        // own; without this branch we would sleep below and only notice
-        // at the top of the next iteration, returning success/error
-        // ~1.x × budget after the caller asked.
-        if Instant::now() >= deadline {
-            return Err(timeout_error(&snapshot));
         }
         // #2399 HIGH 1: cap the sleep to the remaining budget so the
         // backoff never overshoots `deadline`. `saturating_sub` returns

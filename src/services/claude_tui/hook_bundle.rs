@@ -1073,8 +1073,20 @@ mod tests {
         // standard config-override flag) so the parser actually loads our
         // bundle. A parse failure at this step is the regression we are
         // testing for.
-        let probe_subcommands: &[&[&str]] =
-            &[&["config", "show"], &["--help"], &["config", "list"]];
+        // Codex review HIGH on PR #2457: top-level `--help` exits 0 without
+        // loading the config, so the previous probe set ([config show,
+        // --help, config list]) was a false positive on codex-cli >= 0.130
+        // where `config show`/`config list` are unsupported. Put
+        // `exec --help` first — exec is the actual hook-evaluating entry
+        // point, so an invalid `[hooks]` block makes exec fail-fast even
+        // with `--help`. The remaining subcommands are kept as fallbacks
+        // for older Codex CLIs that still support them.
+        let probe_subcommands: &[&[&str]] = &[
+            &["exec", "--help"],
+            &["config", "show"],
+            &["--help"],
+            &["config", "list"],
+        ];
         let mut accepted = false;
         let mut last_failure: Option<(Vec<String>, String, String)> = None;
         for subcommand in probe_subcommands {
