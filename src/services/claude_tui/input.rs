@@ -403,8 +403,9 @@ line 13";
     // `is_prompt_ready_timeout_error` to identify the timeout branch.
     #[test]
     fn busy_followup_wait_timeout_message_uses_followup_label() {
-        let synthetic =
-            format!("{PROMPT_READY_TIMEOUT_ERROR_PREFIX} follow-up prompt input readiness after 45s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; capture_available=true");
+        let synthetic = format!(
+            "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} follow-up prompt input readiness after 45s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; capture_available=true"
+        );
         assert!(is_prompt_ready_timeout_error(&synthetic));
         assert!(synthetic.contains("follow-up"));
         assert!(synthetic.contains("45s"));
@@ -416,10 +417,7 @@ line 13";
     // (so callers can fall back to the busy notice deterministically).
     #[test]
     fn wait_for_prompt_ready_is_public_and_returns_err_for_missing_session() {
-        let session_name = format!(
-            "agentdesk-test-missing-{}",
-            std::process::id()
-        );
+        let session_name = format!("agentdesk-test-missing-{}", std::process::id());
         let result = wait_for_prompt_ready(&session_name, PromptReadinessKind::Followup);
         assert!(
             result.is_err(),
