@@ -93,6 +93,98 @@ async fn complete_watcher_status_panel_v2(
     }
 }
 
+/// #2161 — TUI completion gate. Callers ask `run_tui_completion_gate` to
+/// confirm the underlying tmux pane has reached a `Ready for input`
+/// quiescent state before pushing `StatusEvent::TurnCompleted` to the live
+/// status panel.
+///
+/// Only `RuntimeHandoffKind::ClaudeTui` turns are gated; other runtime kinds
+/// return `NotGated` (= emit immediately) so existing completion contracts
+/// stay unchanged (see `should_gate_completion_for_tui_quiescence` in
+/// `tmux.rs` for the full matrix).
+///
+/// The wait is bounded by `TUI_COMPLETION_QUIESCENCE_TIMEOUT`. On `TimedOut`
+/// the caller MUST suppress the `TurnCompleted` emit — promoting the panel
+/// to `✅ 응답 완료` on a still-busy pane reproduces the bug this gate
+/// exists to prevent (Codex review #2161 H2). The placeholder sweeper and
+/// next-turn intake reconcile the lingering Active panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum TuiCompletionGateOutcome {
+    NotGated,
+    ConfirmedIdle,
+    TimedOut,
+}
+
+impl TuiCompletionGateOutcome {
+    /// `true` when callers should proceed with emitting the user-visible
+    /// `TurnCompleted` status event. `false` only on `TimedOut`, where
+    /// the pane is still busy past the bounded wait and emitting would
+    /// reproduce the #2161 premature-completion bug. The placeholder
+    /// sweeper / next-turn intake reconciles the still-Active panel later.
+    pub(in crate::services::discord) fn should_emit_completion(self) -> bool {
+        match self {
+            Self::NotGated | Self::ConfirmedIdle => true,
+            Self::TimedOut => false,
+        }
+    }
+}
+
+pub(in crate::services::discord) async fn run_tui_completion_gate(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    task_notification_kind: Option<crate::services::agent_protocol::TaskNotificationKind>,
+) -> TuiCompletionGateOutcome {
+    let inflight =
+        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get());
+    let runtime_kind = inflight.as_ref().and_then(|state| state.runtime_kind);
+    let rebind_origin = inflight
+        .as_ref()
+        .map(|state| state.rebind_origin)
+        .unwrap_or(false);
+
+    if !crate::services::discord::tmux::should_gate_completion_for_tui_quiescence(
+        runtime_kind,
+        rebind_origin,
+        task_notification_kind,
+    ) {
+        return TuiCompletionGateOutcome::NotGated;
+    }
+
+    let started_at = tokio::time::Instant::now();
+    loop {
+        let session_name = tmux_session_name.to_string();
+        let ready = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || {
+                crate::services::provider::tmux_session_ready_for_input(&session_name)
+            }),
+        )
+        .await
+        .unwrap_or(Ok(false))
+        .unwrap_or(false);
+
+        if ready {
+            return TuiCompletionGateOutcome::ConfirmedIdle;
+        }
+        if started_at.elapsed() >= crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                gate = "tui_completion_quiescence",
+                "[{ts}] \u{26a0} TUI pane was not yet idle after {:?} — suppressing turn-complete status to avoid premature completion (#2161); placeholder sweeper / next-turn intake will reconcile",
+                crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT,
+            );
+            return TuiCompletionGateOutcome::TimedOut;
+        }
+        tokio::time::sleep(crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_POLL_INTERVAL)
+            .await;
+    }
+}
+
 pub(in crate::services::discord) async fn tmux_output_watcher(
     channel_id: ChannelId,
     http: Arc<serenity::Http>,
@@ -2444,7 +2536,34 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
 
-        if terminal_output_committed {
+        // #2161 TUI completion gate: ClaudeTui sessions can land a
+        // `result` JSONL event before the interactive pane is actually
+        // quiescent. Without this gate the user sees `응답 완료` on
+        // Discord while the tmux pane still shows `almost done thinking`
+        // and subsequent relay messages continue past the completion
+        // marker.
+        //
+        // On gate timeout (Codex H2) we deliberately do NOT emit
+        // `TurnCompleted` — the placeholder sweeper / next-turn intake
+        // will close the lingering Active panel rather than mark a hung
+        // pane as completed.
+        //
+        // Codex round-2 H1: the gate outcome is now also threaded into the
+        // dispatch finalization step below so a still-busy ClaudeTui pane
+        // does not drain queued turns into a busy-followup notice.
+        let watcher_tui_gate_outcome = if terminal_output_committed {
+            run_tui_completion_gate(
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                task_notification_kind,
+            )
+            .await
+        } else {
+            TuiCompletionGateOutcome::NotGated
+        };
+
+        if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
             complete_watcher_status_panel_v2(
                 &http,
                 &shared,
@@ -2649,7 +2768,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .and_then(|session| session.validated_path(channel_id.get()))
         };
 
-        let dispatch_ok = if let Some(did) = resolved_did.as_deref() {
+        // #2161 (Codex round-2 H1): if the TUI quiescence gate timed out
+        // above, treat the watcher dispatch finalization as "preserved":
+        // don't complete the dispatch, don't kick off queued work, and
+        // leave inflight alone so the next watcher pass / placeholder
+        // sweeper observes the still-busy pane and reconciles.
+        let dispatch_ok = if matches!(watcher_tui_gate_outcome, TuiCompletionGateOutcome::TimedOut)
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %watcher_provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                "[{ts}] ⚠ watcher: dispatch finalization deferred — TUI quiescence gate timed out (#2161)"
+            );
+            false
+        } else if let Some(did) = resolved_did.as_deref() {
             let finalization =
                 crate::services::discord::streaming_finalizer::finalize_watcher_streaming_dispatch(
                     crate::services::discord::streaming_finalizer::WatcherStreamingFinalRequest {

@@ -2165,12 +2165,14 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("topbar")).toContainText(/설정|Settings/);
   });
 
-  test("settings: glossary, search feedback, and wrapping guard stay stable", async ({ page }) => {
+  test("settings: search feedback and user-facing copy stay stable", async ({ page }) => {
     await page.goto("/settings?settingsPanel=runtime");
 
     await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
-    await expect(page.getByText(/용어 빠른 정의|Quick term definitions/)).toBeVisible();
     await expect(page.getByText("TTL").first()).toBeVisible();
+    await expect(page.getByText(/용어 빠른 정의|Quick term definitions/)).toHaveCount(0);
+    await expect(page.locator(".setting-key-token")).toHaveCount(0);
+    await expect(page.getByText("kv_meta")).toHaveCount(0);
 
     await page.getByTestId("settings-search-input").fill("TTL");
     await expect(page.getByTestId("settings-search-summary")).toBeVisible();
@@ -2277,22 +2279,9 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("pipeline-selection-title")).toBeVisible({ timeout: 1500 });
     await expect(page.getByTestId("pipeline-refresh-indicator")).toBeVisible();
     await expect(page.getByTestId("pipeline-selection-title")).toContainText("backlog → ready");
-    await expect(page.getByTestId("settings-audit-notes")).toBeAttached();
-    await expect
-      .poll(() =>
-        page
-          .getByTestId("settings-audit-notes")
-          .evaluate((node) => (node as HTMLDetailsElement).open),
-      )
-      .toBe(false);
-    await page.getByTestId("settings-audit-summary").click();
-    await expect
-      .poll(() =>
-        page
-          .getByTestId("settings-audit-notes")
-          .evaluate((node) => (node as HTMLDetailsElement).open),
-      )
-      .toBe(true);
+    await expect(page.getByTestId("settings-audit-notes")).toHaveCount(0);
+    await expect(page.getByText(/audit 노트|Audit notes/)).toHaveCount(0);
+    await expect(page.getByText("kv_meta")).toHaveCount(0);
     await expect(page.getByTestId("pipeline-refresh-indicator")).toBeHidden({ timeout: 3000 });
   });
 

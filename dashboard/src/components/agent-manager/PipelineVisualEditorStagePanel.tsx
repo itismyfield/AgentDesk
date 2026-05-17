@@ -109,7 +109,7 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
           ]}
         />
         <NumberField ctx={ctx} label={tr("타임아웃(분)", "Timeout (min)")} value={stage.timeout_minutes} min={1} onChange={(value) => actions.updateStage(index, { timeout_minutes: Math.max(1, value || 60) })} />
-        <AgentSelect ctx={ctx} label={tr("담당 에이전트 override", "Agent override")} value={stage.agent_override_id} emptyLabel={tr("카드 담당자", "Card assignee")} onChange={(value) => actions.updateStage(index, { agent_override_id: value })} />
+        <AgentSelect ctx={ctx} label={tr("담당 에이전트 조정", "Agent adjustment")} value={stage.agent_override_id} emptyLabel={tr("카드 담당자", "Card assignee")} onChange={(value) => actions.updateStage(index, { agent_override_id: value })} />
         <AgentSelect ctx={ctx} label={tr("적용 대상 에이전트", "Applies to agent")} value={stage.applies_to_agent_id} emptyLabel={tr("전체", "All agents")} onChange={(value) => actions.updateStage(index, { applies_to_agent_id: value })} />
         <SelectField
           label={tr("실패 시", "On failure")}

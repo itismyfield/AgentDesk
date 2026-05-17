@@ -407,3 +407,18 @@ pub async fn upsert_issue_spec(
         Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
     }
 }
+
+/// Diagnostic readout of the per-process `SessionRegistry` populated by
+/// `SessionDiscovery` (Epic #2285 / E2, issue #2344). Read-only — the registry
+/// itself is leader-only writeable, but the snapshot is safe to expose on any
+/// node so dashboards can scrape every host.
+pub async fn list_sessions(_state: State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    let registry = crate::services::cluster::session_registry::global_session_registry();
+    let entries = registry.list_matched();
+    let sessions: Vec<serde_json::Value> = entries.iter().map(|e| e.to_json()).collect();
+    let payload = json!({
+        "count": sessions.len(),
+        "sessions": sessions,
+    });
+    (StatusCode::OK, Json(payload))
+}
