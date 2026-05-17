@@ -19,8 +19,8 @@ export default function PipelineVisualEditorPhaseGatePanel({ ctx, actions }: Pro
     <div className="space-y-3">
       <p className="text-xs" style={MUTED_TEXT_STYLE}>
         {tr(
-          "visual editor 안에서 override의 phase gate 블록도 함께 편집합니다.",
-          "The visual editor also edits the override phase gate block in place.",
+          "검토 통과 조건과 전달 대상을 함께 조정합니다.",
+          "Tune review pass conditions and the handoff target together.",
         )}
       </p>
       <div className="grid gap-3 sm:grid-cols-2">

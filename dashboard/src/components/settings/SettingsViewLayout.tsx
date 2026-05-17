@@ -1,8 +1,7 @@
-import { Check, Eye, Info } from "lucide-react";
+import { Check } from "lucide-react";
 import { Modal } from "../common/overlay/Modal";
 import { SurfaceCard as SettingsCard } from "../common/SurfacePrimitives";
 import { SettingsGeneralPanel } from "./SettingsGeneralPanel";
-import { SettingsGlossary } from "./SettingsKnowledge";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { SettingsOnboardingOverlay } from "./SettingsOnboardingOverlay";
 import { SettingsOnboardingPanel } from "./SettingsOnboardingPanel";
@@ -197,30 +196,15 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
 
     if (activePanel === "pipeline") {
       return (
-        <>
-          <button
-            type="button"
-            onClick={() =>
-              document
-                .getElementById("settings-audit-notes")
-                ?.scrollIntoView({ behavior: "smooth", block: "start" })
-            }
-            className={secondaryActionClass}
-            style={secondaryActionStyle}
-          >
-            <Eye size={12} />
-            {tr("audit 노트", "Audit notes")}
-          </button>
-          <button
-            onClick={handleConfigSave}
-            disabled={configSaving || !configDirty}
-            className={primaryActionClass}
-            style={primaryActionStyle}
-          >
-            <Check size={12} />
-            {configSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
-          </button>
-        </>
+        <button
+          onClick={handleConfigSave}
+          disabled={configSaving || !configDirty}
+          className={primaryActionClass}
+          style={primaryActionStyle}
+        >
+          <Check size={12} />
+          {configSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
+        </button>
       );
     }
 
@@ -276,42 +260,6 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
     );
   };
 
-  const settingsInfoNotice = (
-    <div
-      className="flex items-start gap-3 rounded-[18px] border px-4 py-4 sm:px-5"
-      style={{
-        borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-        background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-      }}
-    >
-      <div
-        className="grid h-7 w-7 shrink-0 place-items-center rounded-[10px]"
-        style={{
-          background: "var(--th-accent-primary-soft)",
-          color: "var(--th-accent-primary)",
-        }}
-      >
-        <Info size={14} />
-      </div>
-      <div className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-        {tr("whitelist된 ", "Only whitelisted ")}
-        <code
-          className="rounded px-1.5 py-0.5 text-[12px]"
-          style={{
-            fontFamily: "var(--font-mono)",
-            color: "var(--th-text)",
-            background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
-          }}
-        >
-          kv_meta
-        </code>{" "}
-        {tr(
-          "키와 agentdesk.yaml 음성 설정만 편집합니다. read-only 항목도 숨기지 않고 현재 상태를 그대로 보여줍니다.",
-          "keys and agentdesk.yaml voice settings are editable. Read-only items stay visible so the current state remains explicit.",
-        )}
-      </div>
-    </div>
-  );
   const dangerousConfigLabels =
     pendingDangerousConfigSave?.keys.map((key: string) => getDangerousConfigLabel(key, isKo)).join(", ") ?? "";
 
@@ -326,8 +274,8 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
           <div className="page-title">{tr("설정", "Settings")}</div>
           <div className="page-sub">
             {tr(
-              "카탈로그에서 꺼내 쓰는 kv_meta 설정",
-              "Catalog-driven kv_meta configuration",
+              "대시보드 표시, 운영 흐름, 음성 설정을 관리합니다.",
+              "Manage dashboard display, operating flow, and voice settings.",
             )}
           </div>
         </div>
@@ -348,9 +296,6 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
         />
 
         <div className="min-w-0 space-y-4">
-          {settingsInfoNotice}
-          <SettingsGlossary isKo={isKo} />
-
           <SettingsCard
             id="settings-panel-content"
             role="tabpanel"

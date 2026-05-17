@@ -1,6 +1,6 @@
 import { ChevronDown } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import type { SettingFlag, SettingRowMeta, SettingSource } from "./SettingsModel";
+import type { SettingFlag, SettingRowMeta } from "./SettingsModel";
 import { SurfaceCard as SettingsCard } from "../common/SurfacePrimitives";
 
 function flagTone(flag: SettingFlag): { bg: string; fg: string; border: string } {
@@ -47,16 +47,6 @@ function flagLabel(flag: SettingFlag, isKo: boolean): string {
   return flag;
 }
 
-function settingSourceLabel(source: SettingSource, isKo: boolean): string {
-  if (source === "repo_canonical") return isKo ? "repo 정본" : "repo canonical";
-  if (source === "runtime_config") return isKo ? "런타임 설정" : "runtime config";
-  if (source === "kv_meta") return "kv_meta";
-  if (source === "live_override") return isKo ? "실시간 override" : "live override";
-  if (source === "legacy_readonly") return isKo ? "legacy alias" : "legacy alias";
-  if (source === "computed") return isKo ? "유도값" : "computed";
-  return source;
-}
-
 interface SettingRowProps {
   meta: SettingRowMeta;
   isKo: boolean;
@@ -80,18 +70,18 @@ export function SettingRow({
   const labelText = isKo ? meta.labelKo ?? meta.key : meta.labelEn ?? meta.key;
   const hintText = isKo ? meta.hintKo : meta.hintEn;
   const readOnly = !meta.editable;
+  const visibleFlags = meta.flags.filter((flag) => flag !== "kv_meta");
 
   const renderDefaultControl = () => {
     if (renderControl) return renderControl(meta);
     if (readOnly) {
       return (
         <div
-          className="w-full truncate rounded-xl px-3 py-2 text-xs"
+          className="w-full truncate rounded-xl px-3 py-2 text-sm"
           style={{
             background: "color-mix(in srgb, var(--th-bg-surface) 60%, transparent)",
             border: "1px dashed color-mix(in srgb, var(--th-border) 70%, transparent)",
             color: "var(--th-text-muted)",
-            fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
           }}
         >
           {String(meta.effectiveValue ?? "")}
@@ -157,12 +147,11 @@ export function SettingRow({
             meta.inputKind === "number" ? Number(event.target.value) : event.target.value,
           )
         }
-        className="w-full rounded-xl px-3 py-2 text-xs"
+        className="w-full rounded-xl px-3 py-2 text-sm"
         style={{
           background: "var(--th-bg-surface)",
           border: "1px solid color-mix(in srgb, var(--th-border) 70%, transparent)",
           color: "var(--th-text)",
-          fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
         }}
       />
     );
@@ -180,7 +169,7 @@ export function SettingRow({
             <span className="setting-row-label text-sm font-medium" style={{ color: "var(--th-text)" }}>
               {labelText}
             </span>
-            {meta.flags.map((flag) => {
+            {visibleFlags.map((flag) => {
               const tone = flagTone(flag);
               return (
                 <span
@@ -198,17 +187,6 @@ export function SettingRow({
               {hintText}
             </div>
           ) : null}
-          <code
-            className="setting-key-token mt-1 inline-block rounded px-1 py-px text-[10px]"
-            title={meta.key}
-            style={{
-              background: "color-mix(in srgb, var(--th-overlay-medium) 80%, transparent)",
-              color: "var(--th-text-muted)",
-              fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-            }}
-          >
-            {meta.key}
-          </code>
         </div>
         <div className="min-w-0">
           {controlOverlay ?? renderDefaultControl()}
@@ -245,43 +223,22 @@ export function SettingRow({
         >
           <div>
             <span style={{ color: "var(--th-text-muted)" }}>{tr("기본값:", "Default:")} </span>
-            <code
-              style={{
-                fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-                color: "var(--th-text)",
-              }}
-            >
+            <span style={{ color: "var(--th-text)" }}>
               {meta.defaultValue === undefined || meta.defaultValue === null
                 ? tr("없음", "—")
                 : String(meta.defaultValue)}
-            </code>
-          </div>
-          <div>
-            <span style={{ color: "var(--th-text-muted)" }}>{tr("저장 레이어:", "Storage:")} </span>
-            <code
-              style={{
-                fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-                color: "var(--th-text)",
-              }}
-            >
-              {settingSourceLabel(meta.source, isKo)}
-            </code>
-            {meta.storageLayerKo || meta.storageLayerEn ? (
-              <span className="ml-1" style={{ color: "var(--th-text-muted)" }}>
-                · {tr(meta.storageLayerKo ?? "", meta.storageLayerEn ?? "")}
-              </span>
-            ) : null}
-          </div>
-          <div>
-            <span style={{ color: "var(--th-text-muted)" }}>{tr("편집 가능:", "Editable:")} </span>
-            <span style={{ color: "var(--th-text)" }}>
-              {meta.editable ? tr("예", "yes") : tr("아니오 (읽기 전용)", "no (read-only)")}
             </span>
           </div>
           <div>
-            <span style={{ color: "var(--th-text-muted)" }}>{tr("재시작 필요:", "Restart required:")} </span>
+            <span style={{ color: "var(--th-text-muted)" }}>{tr("상태:", "Status:")} </span>
             <span style={{ color: "var(--th-text)" }}>
-              {meta.restartRequired ? tr("예", "yes") : tr("아니오", "no")}
+              {meta.editable ? tr("수정 가능", "Editable") : tr("읽기 전용", "Read-only")}
+            </span>
+          </div>
+          <div>
+            <span style={{ color: "var(--th-text-muted)" }}>{tr("적용:", "Applies:")} </span>
+            <span style={{ color: "var(--th-text)" }}>
+              {meta.restartRequired ? tr("저장 후 재시작 필요", "After restart") : tr("저장 후 반영", "After save")}
             </span>
           </div>
           {meta.restartNoteKo || meta.restartNoteEn ? (

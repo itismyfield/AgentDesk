@@ -61,7 +61,7 @@ function FsmTransitionPanel({ ctx, actions }: Props) {
 
       <div className="grid gap-3">
         <SelectField
-          label={tr("Event", "Event")}
+          label={tr("전환 이벤트", "Event")}
           value={ctx.selectedFsmEvent}
           onChange={(value) => actions.updateFsmTransitionEvent(ctx.selectedTransitionIndex, value)}
           options={ctx.fsmEventOptions}
@@ -69,7 +69,7 @@ function FsmTransitionPanel({ ctx, actions }: Props) {
         />
         <div>
           <SelectField
-            label={tr("Hook", "Hook")}
+            label={tr("실행 훅", "Hook")}
             value={ctx.selectedFsmHook}
             onChange={(value) => actions.updateFsmEventHook(ctx.selectedFsmEvent, value)}
             options={ctx.fsmHookOptions}
@@ -84,7 +84,7 @@ function FsmTransitionPanel({ ctx, actions }: Props) {
           </p>
         </div>
         <SelectField
-          label={tr("Policy", "Policy")}
+          label={tr("전환 정책", "Policy")}
           value={selectedTransition.type}
           onChange={(value) =>
             actions.updateTransition(ctx.selectedTransitionIndex, {

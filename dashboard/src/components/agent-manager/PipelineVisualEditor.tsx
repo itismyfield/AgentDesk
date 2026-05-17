@@ -368,11 +368,11 @@ export default function PipelineVisualEditor({
   );
   const editorTitle = isFsmVariant
     ? tr("FSM 비주얼 에디터", "FSM visual editor")
-    : tr("고급 / Agent별 파이프라인 편집기", "Advanced / agent-specific pipeline editor");
+    : tr("세부 흐름 편집기", "Detailed workflow editor");
   const editorHelpText = isFsmVariant
     ? tr(
-        "엣지를 선택해 우측 280px 패널에서 event, hook, policy를 조정합니다. 기본 FSM 저장은 기존 파이프라인 override 엔드포인트를 사용합니다.",
-        "Select an edge and tune its event, hook, and policy from the 280px side panel. Saving uses the existing pipeline override endpoints.",
+        "선을 선택해 오른쪽 패널에서 전환 이름과 실행 조건을 조정합니다.",
+        "Select a line and tune its transition name and execution rule in the side panel.",
       )
     : tr(
         "노드는 상태, 화살표는 전환입니다. 노드/전환을 눌러 우측 속성을 수정하고, 하단에서 스테이지를 함께 편집합니다.",

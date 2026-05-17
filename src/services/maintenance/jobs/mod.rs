@@ -28,6 +28,12 @@
 //!     inflight state files, unrelocated `discord_uploads/*`, and any other
 //!     zombie resources (see `crate::reconcile::reconcile_zombie_resources`).
 //!
+//! The `voice.turn_link_gc` job (#2362 / #2164 Voice A) is intentionally
+//! NOT registered here — it lives on the production
+//! `server::maintenance::MaintenanceJobRegistry` so it runs through the
+//! leader-only worker_registry::MaintenanceScheduler path that owns
+//! persistent state in PG (same path as `storage.cancel_tombstone_prune`).
+//!
 //! Log rotation for `dcserver.stdout.log` / `dcserver.stderr.log` is intentionally
 //! deferred to a follow-up — it requires wiring `tracing-appender::rolling` into
 //! the existing `logging.rs` subscriber init, which is out of scope for this PR.

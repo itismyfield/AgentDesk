@@ -12,7 +12,6 @@ import {
   CompactFieldCard,
   GroupLabel,
 } from "./SettingsPanels";
-import { SettingsAuditNotes } from "./SettingsKnowledge";
 import {
   ADVANCED_PIPELINE_CATEGORIES,
   PRIMARY_PIPELINE_CATEGORIES,
@@ -126,8 +125,8 @@ export function SettingsPipelinePanel({
           >
             <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
               {tr(
-                "이 섹션은 whitelist된 개별 `kv_meta` 키만 편집합니다. read-only 항목도 숨기지 않고 현재 상태를 드러내며, `context_clear_*` 같은 API 바깥 항목은 아래 audit 노트에서 별도로 정리합니다.",
-                "This section edits only whitelisted individual `kv_meta` keys. Read-only items remain visible as status, and API-outside items such as `context_clear_*` are tracked in the audit notes below.",
+                "작업이 어떤 단계로 이동하는지 정합니다. 변경 후 저장하면 이후 작업 흐름에 반영됩니다.",
+                "Set how work moves between stages. Saved changes apply to upcoming workflow changes.",
               )}
             </p>
           </SettingsCallout>
@@ -135,8 +134,8 @@ export function SettingsPipelinePanel({
           <SettingsSubsection
             title={tr("FSM 비주얼 에디터", "FSM visual editor")}
             description={tr(
-              "repo/agent 범위를 먼저 고른 뒤, 상태 전환 event·hook·policy를 전용 FSM 캔버스에서 조정합니다.",
-              "Pick the repo or agent scope first, then tune transition events, hooks, and policies on the dedicated FSM canvas.",
+              "대상을 고른 뒤 상태와 전환을 캔버스에서 조정합니다.",
+              "Pick a target, then adjust stages and transitions on the canvas.",
             )}
           >
             {pipelineSelectorLoading && pipelineRepos.length === 0 ? (
@@ -155,10 +154,10 @@ export function SettingsPipelinePanel({
               <div className="space-y-4">
                 <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
                   <CompactFieldCard
-                    label={tr("대상 repo", "Target repo")}
+                    label={tr("대상 저장소", "Target repository")}
                     description={tr(
-                      "기본 FSM은 repo 레벨에서 편집하고, 필요할 때만 agent override로 내려갑니다.",
-                      "Start at the repo-level FSM and only drop to an agent override when needed.",
+                      "기본 작업 흐름을 적용할 저장소입니다.",
+                      "The repository this default workflow applies to.",
                     )}
                   >
                     <select
@@ -175,10 +174,10 @@ export function SettingsPipelinePanel({
                     </select>
                   </CompactFieldCard>
                   <CompactFieldCard
-                    label={tr("에이전트 override", "Agent override")}
+                    label={tr("에이전트별 조정", "Agent-specific adjustments")}
                     description={tr(
-                      "선택하면 editor 안에서 agent 레벨 전환을 활성화합니다.",
-                      "Selecting an agent enables the agent-level path inside the editor.",
+                      "특정 에이전트에만 다른 흐름을 적용할 때 선택합니다.",
+                      "Choose this only when one agent needs a different workflow.",
                     )}
                   >
                     <select
@@ -216,10 +215,10 @@ export function SettingsPipelinePanel({
                     </Suspense>
 
                     <SettingsSubsection
-                      title={tr("고급 / Agent별 파이프라인 편집기", "Advanced / agent-specific pipeline editor")}
+                      title={tr("세부 흐름 편집기", "Detailed workflow editor")}
                       description={tr(
-                        "FSM 바깥의 state hook, timeout, phase gate, stage 실행 순서는 아래 고급 편집기에서 따로 다룹니다.",
-                        "State hooks, timeouts, phase gates, and stage execution stay in the advanced editor below.",
+                        "단계별 실행 순서와 제한 시간을 더 자세히 조정합니다.",
+                        "Fine-tune execution order and time limits for each stage.",
                       )}
                     >
                       <Suspense
@@ -261,8 +260,6 @@ export function SettingsPipelinePanel({
               <Fragment key={category}>{renderPipelineCategory(category)}</Fragment>
             ))}
           </div>
-
-          <SettingsAuditNotes isKo={isKo} />
         </div>
       )}
     </div>
