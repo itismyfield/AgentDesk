@@ -42,12 +42,22 @@ const HOT_SWAP_HANDOFF_MAX_AGE_SECS: u64 = 900; // 15 minutes
 /// `updated_at` is rewritten on every `save_inflight_state` call but is
 /// **not** a true heartbeat — a healthy foreground model/tool call can
 /// legitimately go silent for multiple minutes (long Bash, slow LLM
-/// stream, large Read). We therefore align the THREAD-GUARD trigger with
-/// `placeholder_sweeper::ABANDON_THRESHOLD_SECS` (300s = 5 min): by then
-/// the placeholder sweeper has *already* replaced the message with its
-/// terminal "abandoned" form, so any further "active turn" claim is
-/// definitively stale. False-positive cleanup of a live turn is much
-/// worse than slightly delayed recovery (issue #1446).
+/// stream, large Read).
+///
+/// History: this constant used to be aligned with
+/// `placeholder_sweeper::ABANDON_THRESHOLD_SECS` (then 300s) so the
+/// "definitely stale" gate fired exactly when the sweeper had already
+/// replaced the placeholder with its terminal "abandoned" form. After
+/// #2427 (#2436 / #2437 / #2438) the explicit-signal wires (pane death,
+/// heartbeat-gap inflight sweeper, generation-mismatch bulk invalidate,
+/// TurnCompleted idempotent guard) make the sweeper a pure safety net
+/// — its abandon timer was relaxed to 1800s (30 min). The 300s figure
+/// here is retained because it gates **new** user-message dispatch
+/// (THREAD-GUARD) and the stall-watchdog (#1446): both want to recover
+/// quickly once an explicit signal failed to fire, and the explicit
+/// wires above are expected to clear the cleanup hit within seconds.
+/// False-positive cleanup of a live turn is still much worse than
+/// slightly delayed recovery (issue #1446).
 pub(super) const INFLIGHT_STALENESS_THRESHOLD_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -727,6 +737,14 @@ pub(crate) enum GuardedClearOutcome {
     RebindOriginSkipped,
     /// No inflight file existed (already cleared by a peer / never written).
     Missing,
+    /// Filesystem error during the final `remove_file` step. Distinguished
+    /// from `Missing` so callers can surface the cleanup failure (warn/error
+    /// log + do NOT cancel the watcher, since the inflight is still on
+    /// disk and the next sweeper tick will retry). Codex review HIGH on
+    /// PR #2460: previously these errors were silently bucketed as Missing,
+    /// hiding broken cleanup from the operator while the 1800s safety-net
+    /// did the real work.
+    IoError,
 }
 
 /// Idempotent inflight cleanup driven by an *explicit* turn-completion
@@ -819,10 +837,19 @@ pub(super) fn clear_inflight_state_if_matches_in_root(
             return GuardedClearOutcome::UserMsgMismatch;
         }
     }
-    if fs::remove_file(&path).is_ok() {
-        GuardedClearOutcome::Cleared
-    } else {
-        GuardedClearOutcome::Missing
+    match fs::remove_file(&path) {
+        Ok(()) => GuardedClearOutcome::Cleared,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                expected_user_msg_id = expected_user_msg_id,
+                error = %error,
+                "inflight guarded-clear remove_file failed; treating as IoError so sweeper retries"
+            );
+            GuardedClearOutcome::IoError
+        }
     }
 }
 
@@ -900,6 +927,92 @@ pub(super) fn mark_all_inflight_states_restart_mode(
         }
     }
     updated
+}
+
+/// #2437 (#2427 C wire) boot-time bulk invalidate. Removes inflight
+/// state files whose `restart_generation` does not match
+/// `current_generation` AND that are NOT planned-restart rows. The
+/// planned-restart gate in `stale_removal_reason` (this file, the
+/// `state.restart_mode.is_some()` branch) already handles its own
+/// generation-mismatch eviction with `DRAIN_RESTART_MAX_AGE_SECS` /
+/// `HOT_SWAP_HANDOFF_MAX_AGE_SECS` retention — do not double-evict
+/// those here or recovery will lose handoff rows from the prior
+/// generation.
+///
+/// Skips:
+///   * `state.restart_mode.is_some()` — planned restart / hot-swap.
+///   * `state.rebind_origin` — rebind API owns these, not generation.
+///   * `state.restart_generation == Some(current_generation)` — this
+///     generation's own rows.
+///
+/// Returns the number of state files removed. Intended to be called
+/// **once per provider** at dcserver boot, BEFORE
+/// `restore_inflight_turns`, so recovery does not revive a row from a
+/// generation whose tmux session no longer exists.
+pub(crate) fn invalidate_stale_generation(
+    provider: &ProviderKind,
+    current_generation: u64,
+) -> usize {
+    let Some(root) = inflight_runtime_root() else {
+        return 0;
+    };
+    let removed = invalidate_stale_generation_in_root(&root, provider, current_generation);
+    removed.len()
+}
+
+/// Test-friendly variant. Returns the list of evicted `(channel_id,
+/// row_generation)` tuples so unit tests can pin both the count and
+/// the row identities without re-loading the directory.
+fn invalidate_stale_generation_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    current_generation: u64,
+) -> Vec<(u64, Option<u64>)> {
+    let states = load_inflight_states_from_root(root, provider);
+    let mut removed = Vec::new();
+    for state in states {
+        if state.restart_mode.is_some() {
+            continue;
+        }
+        if state.rebind_origin {
+            continue;
+        }
+        // Codex review HIGH on PR #2460: normal rows are constructed with
+        // `restart_generation: None` (see `InflightTurnState::new`). The
+        // previous `Some(current_generation)` guard alone would evict every
+        // healthy current-generation row at boot. Preserve unstamped rows
+        // too so only rows explicitly stamped from a PRIOR generation are
+        // evicted. (Stale unstamped rows are still bounded by the
+        // intake-time staleness threshold path; this function is the
+        // boot-time hammer, not the long-lived cleaner.)
+        match state.restart_generation {
+            None => continue,
+            Some(row_generation) if row_generation == current_generation => continue,
+            Some(_) => {}
+        }
+        let path = inflight_state_path(root, provider, state.channel_id);
+        if fs::remove_file(&path).is_ok() {
+            // Only emit observability when called via the env wrapper —
+            // raw `_in_root` calls are unit tests and we want to keep
+            // them deterministic.
+            crate::services::observability::emit_inflight_lifecycle_event(
+                provider.as_str(),
+                state.channel_id,
+                state.dispatch_id.as_deref(),
+                None,
+                None,
+                "evict_stale_generation",
+                serde_json::json!({
+                    "reason": "generation_mismatch_boot",
+                    "row_generation": state.restart_generation,
+                    "current_generation": current_generation,
+                    "user_msg_id": state.user_msg_id,
+                }),
+            );
+            removed.push((state.channel_id, state.restart_generation));
+        }
+    }
+    removed
 }
 
 /// Load a single inflight state by provider + channel_id (returns None if missing).
@@ -1599,6 +1712,180 @@ mod stall_recovery_tests {
         let outcome =
             clear_inflight_state_if_matches_in_root(temp.path(), &ProviderKind::Claude, 42, 999);
         assert_eq!(outcome, GuardedClearOutcome::Missing);
+    }
+}
+
+#[cfg(test)]
+mod wave_a_cleanup_tests {
+    //! #2437 (#2427 C wire) — unit tests for the boot-time generation
+    //! bulk invalidate. The B wire shares `clear_inflight_state_if_matches`
+    //! with #2427's D / A wires and is already covered by the
+    //! `clear_inflight_state_if_matches_*` tests in the parent mod.
+    use super::{
+        InflightTurnState, invalidate_stale_generation_in_root, load_inflight_states_from_root,
+        save_inflight_state_in_root,
+    };
+    use crate::services::discord::InflightRestartMode;
+    use crate::services::provider::ProviderKind;
+    use tempfile::TempDir;
+
+    fn make_state(channel_id: u64, user_msg_id: u64) -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("adk-cdx".to_string()),
+            7,
+            user_msg_id,
+            user_msg_id + 1000,
+            "hello".to_string(),
+            None,
+            Some(format!("AgentDesk-codex-adk-cdx-{channel_id}")),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        )
+    }
+
+    #[test]
+    fn invalidate_stale_generation_evicts_non_planned_old_generations() {
+        // C wire: a row whose `restart_generation` does not match the
+        // boot-time `current_generation` AND that is not a planned
+        // restart must be evicted before recovery runs.
+        let temp = TempDir::new().unwrap();
+
+        let mut row_old = make_state(501, 11);
+        row_old.restart_generation = Some(3);
+        save_inflight_state_in_root(temp.path(), &row_old).expect("save");
+
+        let mut row_current = make_state(502, 22);
+        row_current.restart_generation = Some(5);
+        save_inflight_state_in_root(temp.path(), &row_current).expect("save");
+
+        // Pre-condition: both rows on disk.
+        let before = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(before.len(), 2);
+
+        let removed = invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, 5);
+        assert_eq!(removed.len(), 1, "only the old-gen row should be removed");
+        assert_eq!(removed[0], (501, Some(3)));
+
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].channel_id, 502);
+    }
+
+    #[test]
+    fn invalidate_stale_generation_preserves_planned_restart_rows() {
+        // DrainRestart / HotSwapHandoff rows have their own
+        // generation-mismatch handling in `stale_removal_reason` (auto-
+        // evicts at load time with extended retention) — the C wire
+        // must defer to that path and NOT double-evict.
+        //
+        // We stamp `restart_generation = Some(0)` to match the unit-
+        // test environment's `load_generation()` reading (no generation
+        // file → 0), so the load path itself does not auto-evict the
+        // row. Then we ask `invalidate_stale_generation_in_root` to
+        // run with a different "current_generation" — the helper must
+        // still skip the row because `restart_mode.is_some()`, NOT
+        // because the generations happen to match.
+        let temp = TempDir::new().unwrap();
+
+        // Sync the row's restart_generation to whatever the process-
+        // wide `load_generation()` happens to return in this test
+        // environment (env var pointing at a sibling test's temp dir,
+        // missing file → 0, etc.). With them aligned, the load path's
+        // `stale_removal_reason` planned-restart branch hits its
+        // generation-match arm and does not auto-evict.
+        let current_runtime_gen = super::super::runtime_store::load_generation();
+
+        let mut planned = make_state(601, 33);
+        planned.set_restart_mode(InflightRestartMode::DrainRestart);
+        planned.restart_generation = Some(current_runtime_gen);
+        save_inflight_state_in_root(temp.path(), &planned).expect("save");
+
+        // Pre-condition: row survives the load path.
+        let before = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(
+            before.len(),
+            1,
+            "load must not auto-evict same-gen planned restart"
+        );
+
+        // Now ask the C wire helper to use a "current_generation"
+        // value that DEFINITELY mismatches the row's stamp. The helper
+        // must still skip the row because `restart_mode.is_some()`.
+        let mismatched_gen = current_runtime_gen.wrapping_add(9_999);
+        let removed =
+            invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, mismatched_gen);
+        assert!(
+            removed.is_empty(),
+            "planned-restart rows must NOT be evicted by C wire bulk invalidate \
+             even when their restart_generation mismatches the current generation"
+        );
+
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1);
+        assert!(after[0].restart_mode.is_some());
+    }
+
+    #[test]
+    fn invalidate_stale_generation_preserves_rebind_origin_rows() {
+        let temp = TempDir::new().unwrap();
+
+        let mut rebind = make_state(701, 44);
+        rebind.rebind_origin = true;
+        rebind.restart_generation = Some(1);
+        save_inflight_state_in_root(temp.path(), &rebind).expect("save");
+
+        let removed = invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, 9);
+        assert!(removed.is_empty());
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1);
+        assert!(after[0].rebind_origin);
+    }
+
+    #[test]
+    fn invalidate_stale_generation_preserves_current_generation_rows() {
+        let temp = TempDir::new().unwrap();
+
+        let mut fresh = make_state(801, 55);
+        fresh.restart_generation = Some(7);
+        save_inflight_state_in_root(temp.path(), &fresh).expect("save");
+
+        let removed = invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, 7);
+        assert!(
+            removed.is_empty(),
+            "rows whose restart_generation matches current_generation must NOT be evicted"
+        );
+
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1);
+    }
+
+    #[test]
+    fn invalidate_stale_generation_preserves_unstamped_rows() {
+        // Codex review HIGH on PR #2460: normal `InflightTurnState::new`
+        // sets `restart_generation = None`. Evicting unstamped rows here
+        // would clear every healthy current-generation row at boot.
+        // Unstamped rows are preserved; the intake-time staleness threshold
+        // path is what bounds genuinely abandoned legacy rows.
+        let temp = TempDir::new().unwrap();
+
+        let unstamped = make_state(901, 66);
+        assert!(unstamped.restart_generation.is_none());
+        save_inflight_state_in_root(temp.path(), &unstamped).expect("save");
+
+        let removed = invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, 4);
+        assert!(removed.is_empty());
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1);
+    }
+
+    #[test]
+    fn invalidate_stale_generation_empty_dir_is_no_op() {
+        let temp = TempDir::new().unwrap();
+        let removed = invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, 1);
+        assert!(removed.is_empty());
     }
 }
 

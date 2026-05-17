@@ -12,6 +12,7 @@ mod idle_detector;
 pub(crate) mod idle_recap;
 mod idle_recap_interaction;
 mod inflight;
+mod inflight_heartbeat_sweeper;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
 mod mcp_credential_watcher;

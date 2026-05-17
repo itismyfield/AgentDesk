@@ -37,16 +37,35 @@ use crate::services::provider::ProviderKind;
 
 /// Age (seconds since `updated_at`) at which a placeholder is treated as
 /// stalled. Below this threshold the sweeper does nothing.
-pub(crate) const STALL_THRESHOLD_SECS: u64 = 60;
+///
+/// #2438 (#2427 final): bumped 60 → 300 after the four explicit-signal
+/// wires landed (D: TurnCompleted, A: pane death, B: heartbeat-gap
+/// inflight sweeper, C: generation-mismatch bulk invalidate). The
+/// sweeper is now a pure safety net; the explicit signals catch the
+/// common "completion hook missed" cases within seconds, so the
+/// time-based stall edit only fires when *all four* signals are silent
+/// — i.e. a real bug. 300s also matches `INFLIGHT_MAX_AGE_SECS` so the
+/// stall edit cannot precede the load path's own GC.
+pub(crate) const STALL_THRESHOLD_SECS: u64 = 300;
 
 /// Age at which the placeholder is treated as abandoned. The sweeper edits
 /// the message to its terminal "abandoned" form and clears the inflight
 /// state file.
-pub(crate) const ABANDON_THRESHOLD_SECS: u64 = 300;
+///
+/// #2438 (#2427 final): bumped 300 → 1800 (30 min). At this point the
+/// sweeper is the **last** layer: every explicit signal that should
+/// have cleaned the inflight row has had ample time to fire. A row
+/// that reaches 30 minutes without a cleanup signal is a leaked
+/// inflight (hook miss, missing wire, unexpected silent stall) and we
+/// want the warn log to flag it as such for triage. False-positive
+/// cleanup of a 25-minute legitimate long-running tool is far worse
+/// than a 30-minute extra wait before the eventual safety-net abort,
+/// so the threshold is set conservatively high.
+pub(crate) const ABANDON_THRESHOLD_SECS: u64 = 1800;
 
 /// Polling interval for `spawn_placeholder_sweeper`. Picked low enough that
-/// the stall transition (60s) is observed within ≤ ~1 polling delay, but
-/// high enough that we do not spam Discord edits on idle startups.
+/// the stall transition is observed within ≤ ~1 polling delay, but high
+/// enough that we do not spam Discord edits on idle startups.
 pub(crate) const SWEEP_INTERVAL_SECS: u64 = 30;
 
 /// Emit a low-volume liveness log even when no placeholder transitions were
@@ -57,7 +76,12 @@ pub(crate) const SWEEP_HEARTBEAT_INTERVAL_SWEEPS: u64 = 120;
 /// the boot-up window where active turns from the previous generation are
 /// still being recovered and may legitimately appear stalled while
 /// inflight-state migration is in progress.
-pub(crate) const INITIAL_DELAY_SECS: u64 = 90;
+///
+/// #2438 (#2427 final): bumped 90 → 180 to absorb the recovery-engine
+/// retry budget (#2428 H5) at boot. Recovery now needs more time to
+/// settle before the sweeper can safely classify a row as stalled
+/// without racing the recovery sweep itself.
+pub(crate) const INITIAL_DELAY_SECS: u64 = 180;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepDecision {
@@ -491,6 +515,22 @@ async fn run_placeholder_sweep_pass(
                         // Fall through to the original abort-edit path.
                     }
                 }
+                // #2438 (#2427 final): time-based abandon is now a pure
+                // safety net — the four explicit-signal wires (D
+                // TurnCompleted / A pane death / B heartbeat-gap / C
+                // generation-mismatch) should have evicted this row long
+                // before age reaches `ABANDON_THRESHOLD_SECS` (1800s).
+                // A row that lands here is a leaked inflight. Log it as
+                // SAFETY-NET so triage can hunt the missing hook.
+                tracing::warn!(
+                    "[sweeper SAFETY-NET] abandoning inflight age={age_secs}s — \
+                     explicit cleanup signal missed for {provider}/{channel} (msg {msg_id}); \
+                     investigate (pane_dead/generation/heartbeat hooks)",
+                    age_secs = age_secs,
+                    provider = provider.as_str(),
+                    channel = state.channel_id,
+                    msg_id = state.current_msg_id,
+                );
                 let text = build_abandoned_placeholder(&state);
                 let edited = edit_placeholder_safe(
                     http,
@@ -864,6 +904,57 @@ mod is_message_still_placeholder_tests {
     fn leading_whitespace_does_not_mask_placeholder_shape() {
         assert!(is_message_still_placeholder("   ⠋ Processing..."));
         assert!(is_message_still_placeholder("\n🔄 **응답 처리 중**"));
+    }
+}
+
+#[cfg(test)]
+mod safety_net_threshold_tests {
+    //! #2438 (#2427 final): pin the safety-net threshold relationships
+    //! so a future refactor cannot accidentally invert them. The
+    //! placeholder sweeper is now the LAST cleanup layer — every
+    //! explicit-signal wire (D / A / B / C) must have time to fire
+    //! before the sweeper does anything destructive.
+    use super::{
+        ABANDON_THRESHOLD_SECS, INITIAL_DELAY_SECS, STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS,
+    };
+
+    #[test]
+    fn stall_threshold_is_at_least_five_minutes() {
+        // Five minutes (300s) matches `INFLIGHT_MAX_AGE_SECS` —
+        // anything fresher than that the load path itself will not GC.
+        assert!(STALL_THRESHOLD_SECS >= 300);
+    }
+
+    #[test]
+    fn abandon_threshold_is_at_least_thirty_minutes() {
+        // The abandon path is the last destructive action the sweeper
+        // can take. Thirty minutes is the floor: long-running tools
+        // (compilation, large refactors, deep ripgrep) routinely run
+        // 10–20 minutes; we add another 10 minutes of safety margin
+        // on top.
+        assert!(ABANDON_THRESHOLD_SECS >= 1800);
+    }
+
+    #[test]
+    fn abandon_strictly_greater_than_stall() {
+        // The stall → abandoned ladder must remain monotonic.
+        assert!(ABANDON_THRESHOLD_SECS > STALL_THRESHOLD_SECS);
+    }
+
+    #[test]
+    fn initial_delay_lets_recovery_settle() {
+        // Recovery retries (#2428 H5) burn up to ~120s on retry
+        // backoff alone. Boot recovery needs at least that plus
+        // headroom before the sweeper starts judging staleness.
+        assert!(INITIAL_DELAY_SECS >= 180);
+    }
+
+    #[test]
+    fn sweep_interval_is_within_a_minute() {
+        // We don't want the safety-net log latency to drift higher
+        // than one minute. 30s is the current cadence; pin the
+        // upper bound.
+        assert!(SWEEP_INTERVAL_SECS <= 60);
     }
 }
 
