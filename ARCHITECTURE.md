@@ -493,7 +493,9 @@ src/
 │   │   ├── idle_recap.rs
 │   │   ├── idle_recap_interaction.rs
 │   │   ├── inflight.rs
+│   │   ├── inflight_heartbeat_sweeper.rs
 │   │   ├── internal_api.rs
+│   │   ├── jsonl_watcher.rs
 │   │   ├── mcp_credential_watcher.rs
 │   │   ├── meeting_artifact_store.rs
 │   │   ├── meeting_orchestrator.rs
