@@ -602,6 +602,79 @@ pub(super) fn spawn_placeholder_sweeper(
     });
 }
 
+#[cfg(test)]
+mod is_message_still_placeholder_tests {
+    use super::is_message_still_placeholder;
+
+    #[test]
+    fn spinner_prefixed_placeholder_is_placeholder() {
+        assert!(is_message_still_placeholder("⠋ Processing..."));
+        assert!(is_message_still_placeholder("⠹ ⚙ Bash: cargo build"));
+        assert!(is_message_still_placeholder("⠧ mcp__memento__recall"));
+        // All 10 braille spinner glyphs recognised.
+        for ch in ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] {
+            let s = format!("{} working", ch);
+            assert!(is_message_still_placeholder(&s), "frame {ch} not recognised");
+        }
+    }
+
+    #[test]
+    fn handoff_card_headers_are_placeholder() {
+        assert!(is_message_still_placeholder("🔄 **응답 처리 중**\nfooter"));
+        assert!(is_message_still_placeholder("🔄 **백그라운드 처리 중**"));
+        assert!(is_message_still_placeholder("📬 **메시지 대기 중**"));
+        assert!(is_message_still_placeholder("⏱ **응답 타임아웃**"));
+        assert!(is_message_still_placeholder("❌ **응답 실패**: foo"));
+        assert!(is_message_still_placeholder("✅ **응답 완료**"));
+        assert!(is_message_still_placeholder(
+            "⚠ **응답 중단**\n브릿지 또는 세션이 종료되었습니다."
+        ));
+    }
+
+    #[test]
+    fn delivered_response_text_is_not_placeholder() {
+        // Plain English prose
+        assert!(!is_message_still_placeholder(
+            "Sure — here is the answer you asked for."
+        ));
+        // Korean prose
+        assert!(!is_message_still_placeholder(
+            "네, 알려드리겠습니다. 첫 번째로 ..."
+        ));
+        // Code block
+        assert!(!is_message_still_placeholder("```rust\nfn main() {}\n```"));
+        // Markdown heading
+        assert!(!is_message_still_placeholder(
+            "## 결과\n\n분석 완료했습니다."
+        ));
+        // Leading bullet that happens to start with an emoji that is NOT
+        // a placeholder header marker should not be classified as
+        // placeholder.
+        assert!(!is_message_still_placeholder("🟢 status: green"));
+    }
+
+    #[test]
+    fn spinner_without_space_is_not_placeholder() {
+        // Spinner char as part of regular content (no separating whitespace)
+        // is not a placeholder.
+        assert!(!is_message_still_placeholder("⠋text"));
+    }
+
+    #[test]
+    fn empty_content_treated_as_placeholder() {
+        // Empty message: nothing user-visible to protect.
+        assert!(is_message_still_placeholder(""));
+        assert!(is_message_still_placeholder("   "));
+        assert!(is_message_still_placeholder("\n\n"));
+    }
+
+    #[test]
+    fn leading_whitespace_does_not_mask_placeholder_shape() {
+        assert!(is_message_still_placeholder("   ⠋ Processing..."));
+        assert!(is_message_still_placeholder("\n🔄 **응답 처리 중**"));
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::*;
