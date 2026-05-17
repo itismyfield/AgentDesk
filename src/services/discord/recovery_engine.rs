@@ -1527,7 +1527,10 @@ pub(super) async fn restore_inflight_turns(
                                     );
                                     if attempt < 3 {
                                         // #2428 H5: exponential backoff + jitter.
-                                        tokio::time::sleep(recovery_retry_backoff(u32::from(attempt))).await;
+                                        tokio::time::sleep(recovery_retry_backoff(u32::from(
+                                            attempt,
+                                        )))
+                                        .await;
                                     }
                                 }
                             }
@@ -1605,7 +1608,8 @@ pub(super) async fn restore_inflight_turns(
                             }
                             if attempt < 3 {
                                 // #2428 H5: exponential backoff + jitter.
-                                tokio::time::sleep(recovery_retry_backoff(u32::from(attempt))).await;
+                                tokio::time::sleep(recovery_retry_backoff(u32::from(attempt)))
+                                    .await;
                             }
                         }
                         // API retries exhausted — runtime-root DB fallback.
@@ -2126,8 +2130,10 @@ pub(super) async fn restore_inflight_turns(
                                         );
                                         if attempt < 3 {
                                             // #2428 H5: exponential backoff + jitter.
-                                            tokio::time::sleep(recovery_retry_backoff(u32::from(attempt)))
-                                                .await;
+                                            tokio::time::sleep(recovery_retry_backoff(u32::from(
+                                                attempt,
+                                            )))
+                                            .await;
                                         }
                                     }
                                 }
@@ -2369,8 +2375,10 @@ pub(super) async fn restore_inflight_turns(
                                         );
                                         if attempt < 3 {
                                             // #2428 H5: exponential backoff + jitter.
-                                            tokio::time::sleep(recovery_retry_backoff(u32::from(attempt)))
-                                                .await;
+                                            tokio::time::sleep(recovery_retry_backoff(u32::from(
+                                                attempt,
+                                            )))
+                                            .await;
                                         }
                                     }
                                 }
