@@ -11,6 +11,7 @@ import {
   dashboardBootstrapQueryKey,
   fetchDashboardBootstrap,
 } from "./app/bootstrapQuery";
+import { warmStatsEntryCache } from "./app/statsWarmup";
 import AppShell from "./app/AppShell";
 import { useI18n } from "./i18n";
 
@@ -53,6 +54,11 @@ export default function App() {
   const { wsConnected } = useDashboardSocket(handleWsEvent);
   const { t } = useI18n();
   const data = bootstrapQuery.data;
+
+  useEffect(() => {
+    if (!data) return undefined;
+    return warmStatsEntryCache();
+  }, [data]);
 
   if (!data) {
     return (

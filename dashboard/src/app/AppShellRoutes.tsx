@@ -9,6 +9,7 @@ const OfficeView = lazy(() => import("../components/OfficeView"));
 const AchievementsPage = lazy(() => import("../components/AchievementsPage"));
 const StatsPageView = lazy(() => import("../components/StatsPageView"));
 const OpsPageView = lazy(() => import("../components/OpsPageView"));
+const RoutinesPageView = lazy(() => import("../components/RoutinesPageView"));
 const KanbanTab = lazy(() => import("../components/agent-manager/KanbanTab"));
 const AgentManagerView = lazy(() => import("../components/AgentManagerView"));
 const MeetingsAndSkillsPage = lazy(() => import("../components/MeetingsAndSkillsPage"));
@@ -232,6 +233,7 @@ export default function AppShellRoutes({ ctx }: { ctx: any }) {
                   />
                 }
               />
+              <Route path="/routines" element={<RoutinesPageView />} />
               <Route
                 path="/ops"
                 element={

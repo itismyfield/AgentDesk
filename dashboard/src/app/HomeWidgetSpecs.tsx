@@ -3,6 +3,7 @@ import { ChevronRight, Flame, Gauge, Sparkles, Target, Zap } from "lucide-react"
 
 import AgentAvatar from "../components/AgentAvatar";
 import { AgentQualityWidget } from "../components/dashboard/ExtraWidgets";
+import { RoutinesTimelineWidget } from "../components/dashboard/RoutinesTimelineWidget";
 import { MiniRateLimitBar } from "../components/office-view/OfficeInsightPanel";
 import { DailyMissions, StreakCounter } from "../components/gamification/GamificationShared";
 import { HomeMetricTile, HomeWidgetShell } from "./HomeOverviewWidgets";
@@ -448,6 +449,16 @@ export function buildHomeWidgetSpecs(ctx: any) {
               })}
             </div>
           </HomeWidgetShell>
+        ),
+      },
+      routines: {
+        className: "lg:col-span-12",
+        render: () => (
+          <RoutinesTimelineWidget
+            t={t}
+            localeTag={localeTag}
+            language={isKo ? "ko" : "en"}
+          />
         ),
       },
 

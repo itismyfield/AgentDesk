@@ -5,6 +5,7 @@ export type AppRouteId =
   | "office"
   | "agents"
   | "kanban"
+  | "routines"
   | "stats"
   | "ops"
   | "meetings"
@@ -84,6 +85,17 @@ export const APP_ROUTES: AppRouteEntry[] = [
     descriptionEn: "Track work status and dispatches.",
     paletteIcon: "📋",
     shortcutKey: "4",
+  },
+  {
+    id: "routines",
+    path: "/routines",
+    section: "workspace",
+    labelKo: "루틴",
+    labelEn: "Routines",
+    descriptionKo: "예약된 자동 작업을 시간순으로 확인합니다.",
+    descriptionEn: "Review scheduled routine jobs chronologically.",
+    paletteIcon: "🗓️",
+    shortcutKey: "r",
   },
   {
     id: "ops",

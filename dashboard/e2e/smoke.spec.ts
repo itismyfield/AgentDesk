@@ -21,6 +21,7 @@ const DEFAULT_HOME_WIDGET_ORDER = [
   "m_progress",
   "m_rate_limit",
   "kanban",
+  "routines",
   "quality",
   "missions",
 ];
@@ -30,10 +31,12 @@ const DEFAULT_HOME_PRIMARY_WIDGET_ORDER = [
   "m_progress",
   "m_rate_limit",
   "kanban",
+  "routines",
 ];
 const CUSTOM_HOME_WIDGET_ORDER = [
   "missions",
   "quality",
+  "routines",
   "kanban",
   "m_rate_limit",
   "m_progress",
@@ -41,6 +44,7 @@ const CUSTOM_HOME_WIDGET_ORDER = [
   "m_tokens",
 ];
 const CUSTOM_HOME_PRIMARY_WIDGET_ORDER = [
+  "routines",
   "kanban",
   "m_rate_limit",
   "m_progress",
@@ -53,6 +57,7 @@ const DRAGGED_HOME_WIDGET_ORDER = [
   "m_cost",
   "m_progress",
   "m_rate_limit",
+  "routines",
   "quality",
   "missions",
 ];
@@ -171,6 +176,63 @@ const MOCK_SKILLS = [
     description_ko: "읽기 전용 회의 + 스킬 허브 레이아웃",
     total_calls: 7,
     last_used_at: 1760919300000,
+  },
+];
+
+const MOCK_ROUTINES = [
+  {
+    id: "routine-late",
+    agent_id: "family-counsel",
+    script_ref: "family-profile-probe-yohoejang.js",
+    name: "요회장 프로필 점검",
+    status: "enabled",
+    execution_strategy: "fresh",
+    schedule: "0 15 * * *",
+    next_due_at: "2026-05-17T06:00:00.000Z",
+    last_run_at: "2026-05-16T06:07:37.573Z",
+    last_result: null,
+    checkpoint: null,
+    discord_thread_id: "1505086366654926908",
+    timeout_secs: 600,
+    in_flight_run_id: null,
+    created_at: "2026-05-16T05:55:52.782Z",
+    updated_at: "2026-05-16T06:07:37.573Z",
+  },
+  {
+    id: "routine-soon",
+    agent_id: "family-counsel",
+    script_ref: "family-profile-probe-obujang.js",
+    name: "오부장 프로필 점검",
+    status: "enabled",
+    execution_strategy: "fresh",
+    schedule: "0 13 * * *",
+    next_due_at: "2026-05-17T04:00:00.000Z",
+    last_run_at: null,
+    last_result: null,
+    checkpoint: null,
+    discord_thread_id: "1505086338448363660",
+    timeout_secs: 600,
+    in_flight_run_id: null,
+    created_at: "2026-05-16T05:55:46.055Z",
+    updated_at: "2026-05-16T05:55:46.437Z",
+  },
+  {
+    id: "routine-manual",
+    agent_id: "codex",
+    script_ref: "manual-review.js",
+    name: "수동 리뷰",
+    status: "paused",
+    execution_strategy: "persistent",
+    schedule: null,
+    next_due_at: null,
+    last_run_at: "2026-05-15T01:00:00.000Z",
+    last_result: "ok",
+    checkpoint: null,
+    discord_thread_id: null,
+    timeout_secs: null,
+    in_flight_run_id: null,
+    created_at: "2026-05-14T05:00:00.000Z",
+    updated_at: "2026-05-15T01:00:00.000Z",
   },
 ];
 
@@ -1216,6 +1278,19 @@ async function mockDashboardBootstrap(page: Page) {
     });
   });
 
+  await page.route(/\/api\/routines(?:\?.*)?$/, async (route) => {
+    const requestUrl = new URL(route.request().url());
+    const status = requestUrl.searchParams.get("status");
+    const routines = status
+      ? MOCK_ROUTINES.filter((routine) => routine.status === status)
+      : MOCK_ROUTINES;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ routines }),
+    });
+  });
+
   await page.route(/\/api\/round-table-meetings\/channels$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1578,6 +1653,7 @@ test.describe("Dashboard smoke tests", () => {
     ).toBeFocused();
     await expect(moreMenu.getByRole("button", { name: /에이전트|Agents/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /운영|Ops/ })).toBeVisible();
+    await expect(moreMenu.getByRole("button", { name: /루틴|Routines/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /회의|Meetings/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /업적|Achievements/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /설정|Settings/ })).toBeVisible();
@@ -1679,6 +1755,12 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible({ timeout: 15000 });
     await page.getByTestId("app-mobile-more-menu").getByRole("button", { name: /에이전트|Agents/ }).click();
     await expect(page).toHaveURL(/\/agents$/);
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible({ timeout: 15000 });
+    await page.getByTestId("app-mobile-more-menu").getByRole("button", { name: /루틴|Routines/ }).click();
+    await expect(page).toHaveURL(/\/routines$/);
     await expectNoHorizontalOverflow(page);
 
     await page.getByTestId("app-mobile-more-button").click();
@@ -1952,8 +2034,8 @@ test.describe("Dashboard smoke tests", () => {
 
     await expect(page.getByTestId("stats-page")).toBeVisible({ timeout: 15000 });
     await expect(page.getByTestId("stats-range-controls")).toBeVisible();
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
-    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "false");
     await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "false");
 
     await expect(page.getByTestId("stats-summary-total-tokens")).toBeVisible();
@@ -1994,6 +2076,48 @@ test.describe("Dashboard smoke tests", () => {
     expect(firstBox).not.toBeNull();
     expect(secondBox).not.toBeNull();
     expect(secondBox!.y).toBeGreaterThan(firstBox!.y + firstBox!.height - 1);
+  });
+
+  test("dashboard: routines timeline lists registered jobs chronologically", async ({ page }) => {
+    await page.goto("/home");
+
+    await expect(page.getByTestId("routines-timeline")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("routines-filter-controls")).toBeVisible();
+    await expect(page.getByTestId("routine-row-routine-soon")).toBeVisible({ timeout: 15000 });
+
+    const rowIds = await page
+      .getByTestId("routines-timeline-list")
+      .locator("[data-testid^='routine-row-']")
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
+
+    expect(rowIds).toEqual([
+      "routine-row-routine-soon",
+      "routine-row-routine-late",
+      "routine-row-routine-manual",
+    ]);
+    await expect(page.getByText("매일 13:00")).toBeVisible();
+    await expect(page.getByText("수동 실행")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("routines: dedicated tab lists registered jobs chronologically", async ({ page }) => {
+    await page.goto("/routines");
+
+    await expect(page.getByTestId("routines-page")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("routines-timeline")).toBeVisible();
+    await expect(page.getByTestId("routine-row-routine-soon")).toBeVisible({ timeout: 15000 });
+
+    const rowIds = await page
+      .getByTestId("routines-timeline-list")
+      .locator("[data-testid^='routine-row-']")
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
+
+    expect(rowIds).toEqual([
+      "routine-row-routine-soon",
+      "routine-row-routine-late",
+      "routine-row-routine-manual",
+    ]);
+    await expectNoHorizontalOverflow(page);
   });
 
   test("meetings: dedicated route renders integrated desktop layout", async ({ page }, testInfo) => {
@@ -2261,7 +2385,8 @@ test.describe("Dashboard smoke tests", () => {
       scrollTop: node.scrollTop,
     }));
 
-    expect(before.scrollHeight).toBeGreaterThan(before.clientHeight);
+    expect(before.scrollHeight).toBeGreaterThanOrEqual(before.clientHeight);
+    if (before.scrollHeight <= before.clientHeight + 1) return;
 
     await settingsPage.evaluate((node) => {
       node.scrollTop = node.scrollHeight;

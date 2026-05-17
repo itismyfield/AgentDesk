@@ -1,4 +1,4 @@
-import { request } from "./httpClient";
+import { request, readCachedGet, type CachedGetEntry } from "./httpClient";
 
 // ── Skill Ranking ──
 
@@ -29,6 +29,15 @@ export async function getSkillRanking(
   limit = 20,
 ): Promise<SkillRankingResponse> {
   return request(`/api/skills/ranking?window=${window}&limit=${limit}`);
+}
+
+export function getCachedSkillRanking(
+  window: "7d" | "30d" | "90d" | "all" = "7d",
+  limit = 20,
+): CachedGetEntry<SkillRankingResponse> | null {
+  return readCachedGet<SkillRankingResponse>(
+    `/api/skills/ranking?window=${window}&limit=${limit}`,
+  );
 }
 
 export interface SkillTrendPoint {
