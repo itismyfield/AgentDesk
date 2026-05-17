@@ -266,6 +266,7 @@ export default function DepartmentFormModal({
             compact
             className="h-11 w-11"
             style={{ padding: 0 }}
+            aria-label={tr("닫기", "Close")}
           >
             ✕
           </SurfaceActionButton>

@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { useI18n } from "../../i18n";
 
 const EmojiPickerLibraryPanel = lazy(() => import("./EmojiPickerLibraryPanel"));
 
@@ -42,6 +43,7 @@ export default function EmojiPicker({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const { t: tr } = useI18n();
 
   useEffect(() => {
     if (!open) return;
@@ -69,14 +71,18 @@ export default function EmojiPicker({
         style={{ background: "var(--th-input-bg)", borderColor: "var(--th-input-border)" }}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={value ? `Change emoji (current: ${value})` : "Open emoji picker"}
+        aria-label={
+          value
+            ? tr({ ko: `이모지 변경 (현재: ${value})`, en: `Change emoji (current: ${value})` })
+            : tr({ ko: "이모지 선택기 열기", en: "Open emoji picker" })
+        }
       >
         {value || "❓"}
       </button>
       {open && (
         <div
           role="dialog"
-          aria-label="Choose an emoji"
+          aria-label={tr({ ko: "이모지 선택", en: "Choose an emoji" })}
           className="absolute left-0 top-full z-[60] mt-1 overflow-hidden rounded-xl shadow-2xl"
           style={{
             background:

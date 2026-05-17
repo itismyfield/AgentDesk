@@ -330,7 +330,7 @@ function ClosedIssueList({ issues, isKo, onClose }: { issues: ClosedIssueItem[];
       title={isKo ? "오늘 완료" : "Closed today"}
       description={isKo ? "오늘 GitHub에서 닫힌 이슈를 빠르게 훑습니다." : "Quick scan of GitHub issues closed today."}
       className="mt-3"
-      actions={<SurfaceActionButton tone="neutral" compact onClick={onClose}>✕</SurfaceActionButton>}
+      actions={<SurfaceActionButton tone="neutral" compact onClick={onClose} aria-label={isKo ? "닫기" : "Close"}>✕</SurfaceActionButton>}
     >
       {issues.length === 0 ? (
         <SurfaceNotice className="mt-2" compact>
