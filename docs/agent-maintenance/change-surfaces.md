@@ -379,6 +379,13 @@ The remaining giant-file modules under `src/services/` not covered above:
   (#2362 / #2164 voice epic A); covers per-utterance status row + advisory-lock
   serialization + PG-backed reconciliation. Split focused helpers before adding
   non-bugfix behavior outside the foundational store contract.
+- `src/voice/announce_meta.rs` (1110 lines) — voice background handoff marker
+  store (in-memory + durable PG) and the 3-phase persist-before-publish
+  reserve/bind/cancel primitives shipped by #2392 (cleanup wave G). Carries
+  the durable side store, the rehydrate-from-PG path, GC, and the
+  reservation lifecycle the dispatcher uses to close the pre-persist race.
+  Split focused helpers before adding non-bugfix behavior outside that
+  reservation contract.
 
 Same rule: `bugfix` only without a split issue.
 
