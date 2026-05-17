@@ -258,4 +258,3 @@ mod tests {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), supervisor).await;
     }
 }
-
