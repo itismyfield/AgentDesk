@@ -1231,23 +1231,63 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             .await
             .recovery_started_at
         {
-            if started.elapsed() < std::time::Duration::from_secs(60) {
+            // #2443 — `recovery_done.wait()` is the deterministic graduation
+            // signal for this skip. `restore_tmux_watchers` is a one-shot
+            // caller (the loop body simply `continue`s and the upper
+            // restore-loop tick reruns later), so we cannot block here for
+            // ~60s. Instead, we race a *short* `recovery_done.wait()` against
+            // a near-zero timeout: if recovery has already completed (latch
+            // set), we proceed immediately; otherwise we fall through to the
+            // legacy 60s skip / stale-cleanup heuristic which acts as the
+            // hook-miss safety net the issue body asked us to retain.
+            //
+            // The 100ms grace window catches the common case where recovery
+            // completed *just before* the watcher loop reached this check
+            // (the producer in `mailbox_clear_recovery_marker` / `finish_turn`
+            // calls `mark_done()` *after* clearing `recovery_started_at`, so
+            // a clean completion already short-circuits via the snapshot
+            // being `None` — this branch only runs when the snapshot still
+            // sees a started marker, i.e. we *just* missed the wake-up).
+            let recovery_done =
+                crate::services::turn_orchestrator::ChannelMailboxRegistry::global_recovery_done(
+                    *channel_id,
+                );
+            let recovery_completed = if let Some(signal) = recovery_done.as_ref() {
+                tokio::time::timeout(std::time::Duration::from_millis(100), signal.wait())
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+
+            if recovery_completed {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] ⏳ watcher skip for {} — recovery in progress ({:.0}s ago)",
+                    "  [{ts}] ✅ recovery_done signal observed for {} — proceeding with watcher restore",
+                    session_name
+                );
+                super::super::mailbox_clear_recovery_marker(&shared, *channel_id).await;
+            } else if started.elapsed() < std::time::Duration::from_secs(60) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ⏳ watcher skip for {} — recovery in progress ({:.0}s ago, hook-miss fallback)",
                     session_name,
                     started.elapsed().as_secs_f64()
                 );
                 continue;
+            } else {
+                // Stale recovery — remove marker and proceed with watcher.
+                // Reaching this branch means the 60s hook-miss fallback
+                // tripped; track it so we can monitor `recovery_done`
+                // signal coverage in the field.
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ clearing stale recovery marker for {} ({:.0}s elapsed) — recovery_done hook missed",
+                    session_name,
+                    started.elapsed().as_secs_f64()
+                );
+                super::super::mailbox_clear_recovery_marker(&shared, *channel_id).await;
             }
-            // Stale recovery — remove marker and proceed with watcher
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⚠ clearing stale recovery marker for {} ({:.0}s elapsed)",
-                session_name,
-                started.elapsed().as_secs_f64()
-            );
-            super::super::mailbox_clear_recovery_marker(&shared, *channel_id).await;
         }
 
         if let Some((owner_channel_id, cancelled)) =
