@@ -184,11 +184,13 @@ fn is_voice_background_handoff_prompt(user_msg_id: MessageId, _text: &str) -> bo
 async fn voice_background_completion_target(
     mapped_voice_channel_id: Option<ChannelId>,
     user_msg_id: MessageId,
-    _user_text: &str,
+    user_text: &str,
     channel_id: ChannelId,
     pool: Option<&sqlx::PgPool>,
 ) -> Option<ChannelId> {
     let store = crate::voice::announce_meta::global_store();
+    let handoff_correlation_id =
+        crate::voice::prompt::parse_voice_background_handoff_correlation_id(user_text);
     // #2274 Codex review finding #1: when a PG pool is available the
     // durable `UPDATE ... SET consumed_at = NOW() RETURNING ...` claim is
     // ALWAYS authoritative for one-shot consumption, even when an
@@ -205,20 +207,90 @@ async fn voice_background_completion_target(
                 meta
             }
             Ok(None) => {
-                // #2274 Codex round-2 finding: a dispatch whose durable
-                // PG write failed will have flipped `local_only_fallback`
-                // on the in-memory marker. In that case the local marker
-                // is the only record of the handoff — refusing to route
-                // would silently drop the spoken summary, regressing
-                // pre-#2274 behaviour under DB unavailability. We
-                // consume the local marker (one-shot, take_handoff) and
-                // emit a `voice_background_handoff_local_only_fallback`
-                // warn so operators see persistence is failing.
-                //
-                // If the marker is present without the flag, we still
-                // refuse — that case (PG row gone but local copy lives)
-                // matches the round-1 duplicate-routing prevention.
-                if let Some(local) = store.get_handoff(user_msg_id) {
+                if let Some(correlation_id) = handoff_correlation_id.as_deref() {
+                    match crate::voice::announce_meta::take_handoff_reservation_durable(
+                        pool,
+                        correlation_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(meta)) => {
+                            store.cancel_handoff_reservation(correlation_id);
+                            store.forget_handoff(user_msg_id);
+                            meta
+                        }
+                        Ok(None) => {
+                            if let Some(local) = store.get_handoff_reservation(correlation_id) {
+                                if local.local_only_fallback {
+                                    if let Some(consumed) =
+                                        store.take_handoff_reservation(correlation_id)
+                                    {
+                                        tracing::warn!(
+                                            event = "voice_background_handoff_local_only_fallback",
+                                            user_msg_id = user_msg_id.get(),
+                                            channel_id = channel_id.get(),
+                                            correlation_id,
+                                            marker_voice_channel_id = consumed.voice_channel_id,
+                                            marker_background_channel_id =
+                                                consumed.background_channel_id,
+                                            "durable PG reservation absent but local reservation is flagged local-only fallback; routing spoken summary from in-memory reservation"
+                                        );
+                                        consumed
+                                    } else {
+                                        return None;
+                                    }
+                                } else {
+                                    tracing::info!(
+                                        event = "voice_background_handoff_durable_already_consumed",
+                                        user_msg_id = user_msg_id.get(),
+                                        channel_id = channel_id.get(),
+                                        correlation_id,
+                                        "in-memory reservation present but durable PG reservation is absent or already consumed; refusing to route to avoid duplicate spoken summary"
+                                    );
+                                    store.cancel_handoff_reservation(correlation_id);
+                                    return None;
+                                }
+                            } else if let Some(local) = store.get_handoff(user_msg_id) {
+                                if local.local_only_fallback {
+                                    if let Some(consumed) = store.take_handoff(user_msg_id) {
+                                        tracing::warn!(
+                                            event = "voice_background_handoff_local_only_fallback",
+                                            user_msg_id = user_msg_id.get(),
+                                            channel_id = channel_id.get(),
+                                            marker_voice_channel_id = consumed.voice_channel_id,
+                                            marker_background_channel_id =
+                                                consumed.background_channel_id,
+                                            "durable PG row absent but local marker is flagged local-only fallback (dispatch-time persist failure); routing spoken summary from in-memory marker"
+                                        );
+                                        consumed
+                                    } else {
+                                        return None;
+                                    }
+                                } else {
+                                    tracing::info!(
+                                        event = "voice_background_handoff_durable_already_consumed",
+                                        user_msg_id = user_msg_id.get(),
+                                        channel_id = channel_id.get(),
+                                        "in-memory marker present but durable PG row is absent or already consumed; refusing to route to avoid duplicate spoken summary"
+                                    );
+                                    store.forget_handoff(user_msg_id);
+                                    return None;
+                                }
+                            } else {
+                                return None;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                user_msg_id = user_msg_id.get(),
+                                correlation_id,
+                                "voice_background_handoff durable reservation claim failed; refusing to route spoken summary"
+                            );
+                            return None;
+                        }
+                    }
+                } else if let Some(local) = store.get_handoff(user_msg_id) {
                     if local.local_only_fallback {
                         if let Some(consumed) = store.take_handoff(user_msg_id) {
                             tracing::warn!(
@@ -229,9 +301,6 @@ async fn voice_background_completion_target(
                                 marker_background_channel_id = consumed.background_channel_id,
                                 "durable PG row absent but local marker is flagged local-only fallback (dispatch-time persist failure); routing spoken summary from in-memory marker"
                             );
-                            // Re-bind the surviving meta so the downstream
-                            // channel-match / reverse-lookup checks below
-                            // can operate on it uniformly.
                             consumed
                         } else {
                             // Lost the race against another take_handoff
@@ -267,7 +336,11 @@ async fn voice_background_completion_target(
         // persisted the marker in the first place. Single-node, no-PG
         // deployments cannot duplicate routing because there is only
         // one consumer.
-        store.take_handoff(user_msg_id)?
+        store.take_handoff(user_msg_id).or_else(|| {
+            handoff_correlation_id
+                .as_deref()
+                .and_then(|correlation_id| store.take_handoff_reservation(correlation_id))
+        })?
     };
     if meta.background_channel_id != channel_id.get() {
         tracing::warn!(
@@ -552,6 +625,71 @@ mod dispatch_kind_tests {
         )
         .await;
         assert_eq!(again, None);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2392: a very fast background turn can finish after the announce
+    /// message is published but before the post-publish `message_id` bind
+    /// runs. The pre-publish durable reservation plus prompt correlation
+    /// marker must still let terminal delivery claim the handoff exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_completion_target_claims_pre_publish_reservation_by_correlation() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let user_msg_id = MessageId::new(7_750_001);
+        let correlation_id = "voice-bg:99990000111122223333444455556666";
+        let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+            voice_channel_id: 316,
+            background_channel_id: 216,
+            agent_id: Some("project-agentdesk".to_string()),
+            local_only_fallback: false,
+        };
+        crate::voice::announce_meta::persist_handoff_reservation_durable(
+            &pool,
+            correlation_id,
+            &meta,
+        )
+        .await
+        .expect("persist pre-publish reservation");
+        let user_text = crate::voice::prompt::append_voice_background_handoff_marker(
+            "Voice foreground handed this request to the background agent.",
+            correlation_id,
+        );
+
+        let resolved = voice_background_completion_target(
+            None,
+            user_msg_id,
+            &user_text,
+            ChannelId::new(216),
+            Some(&pool),
+        )
+        .await;
+        assert_eq!(resolved, Some(ChannelId::new(316)));
+
+        assert!(
+            !crate::voice::announce_meta::bind_handoff_durable_message_id(
+                &pool,
+                correlation_id,
+                user_msg_id,
+            )
+            .await
+            .expect("late bind after correlation claim"),
+            "late bind must not resurrect a reservation already claimed by terminal delivery"
+        );
+        assert!(
+            voice_background_completion_target(
+                None,
+                user_msg_id,
+                &user_text,
+                ChannelId::new(216),
+                Some(&pool),
+            )
+            .await
+            .is_none(),
+            "correlation reservation is one-shot"
+        );
 
         pool.close().await;
         pg_db.drop().await;

@@ -2133,86 +2133,169 @@ impl VoiceBargeInRuntime {
             summary,
             &announcement.language,
         );
-        let outcome = driver
+        let correlation_id = crate::voice::prompt::new_voice_background_handoff_correlation_id();
+        let prompt =
+            crate::voice::prompt::append_voice_background_handoff_marker(&prompt, &correlation_id);
+        let generation = default_voice_announce_generation() + 1;
+        let agent_id = self
+            .active_voice_routes
+            .get(&source_channel_id.get())
+            .map(|entry| entry.agent_id.clone());
+        let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+            voice_channel_id: source_channel_id.get(),
+            background_channel_id: target_channel_id.get(),
+            agent_id,
+            local_only_fallback: false,
+        };
+        let store = crate::voice::announce_meta::global_store();
+        store.reserve_handoff(&correlation_id, meta.clone());
+        let mut durable_reserved = false;
+        if let Some(pool) = shared.pg_pool.as_ref() {
+            match crate::voice::announce_meta::persist_handoff_reservation_durable(
+                pool,
+                &correlation_id,
+                &meta,
+            )
+            .await
+            {
+                Ok(()) => {
+                    durable_reserved = true;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        correlation_id = %correlation_id,
+                        source_channel_id = source_channel_id.get(),
+                        target_channel_id = target_channel_id.get(),
+                        utterance_id = %announcement.utterance_id,
+                        "voice background handoff durable reservation failed before publish; falling back to local-only marker"
+                    );
+                    if store.mark_handoff_reservation_local_only_fallback(&correlation_id) {
+                        tracing::warn!(
+                            event = "voice_background_handoff_local_only_fallback",
+                            correlation_id = %correlation_id,
+                            source_channel_id = source_channel_id.get(),
+                            target_channel_id = target_channel_id.get(),
+                            utterance_id = %announcement.utterance_id,
+                            "voice background handoff reservation flagged local-only fallback before publish"
+                        );
+                    }
+                }
+            }
+        } else {
+            tracing::debug!(
+                correlation_id = %correlation_id,
+                "voice background handoff durable reservation skipped — postgres pool unavailable"
+            );
+        }
+
+        let outcome = match driver
             .start(VoiceBackgroundStartRequest {
                 guild_id,
                 voice_channel_id: source_channel_id,
                 channel_id: target_channel_id,
                 shared,
                 utterance_id: &announcement.utterance_id,
-                generation: default_voice_announce_generation() + 1,
+                generation,
                 message_content: &prompt,
             })
-            .await?;
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                store.cancel_handoff_reservation(&correlation_id);
+                if durable_reserved {
+                    if let Some(pool) = shared.pg_pool.as_ref() {
+                        if let Err(cancel_error) =
+                            crate::voice::announce_meta::cancel_handoff_reservation_durable(
+                                pool,
+                                &correlation_id,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %cancel_error,
+                                correlation_id = %correlation_id,
+                                "voice background handoff durable reservation cleanup failed after publish error"
+                            );
+                        }
+                    }
+                }
+                return Err(error);
+            }
+        };
+
         // #2236: stamp a typed marker keyed by the posted message id so the
         // turn bridge can route the background turn's spoken summary back to
-        // the foreground voice channel WITHOUT inspecting the prompt body.
-        // The previous design matched a hardcoded Korean prefix on
-        // `user_text`, which any user could type to hijack routing.
-        //
-        // #2274: also write through to the durable PG side store so the
-        // marker survives a dcserver restart while the background turn is
-        // still running. The in-memory store remains the hot read path; PG
-        // is the durable source of truth and is consulted as a fallback by
-        // terminal-delivery callers when the in-memory store misses.
+        // the foreground voice channel WITHOUT relying on user-authored prompt
+        // text. #2392 moves the stamp to a pre-publish reservation: if an
+        // immediate completion beats this bind, terminal delivery claims the
+        // reservation by the correlation marker and this late bind becomes a
+        // no-op instead of resurrecting the handoff.
         if let Some(message_id) = outcome.message_id {
-            let agent_id = self
-                .active_voice_routes
-                .get(&source_channel_id.get())
-                .map(|entry| entry.agent_id.clone());
-            let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
-                voice_channel_id: source_channel_id.get(),
-                background_channel_id: target_channel_id.get(),
-                agent_id,
-                local_only_fallback: false,
-            };
-            crate::voice::announce_meta::global_store().insert_handoff(message_id, meta.clone());
-            // #2274 Codex round-2 finding: a durable-write failure here used
-            // to leave the local marker as-is, but the terminal-delivery path
-            // (PG-authoritative since the round-1 fix) would then observe
-            // `Ok(None)` from PG and silently refuse to route the spoken
-            // summary. That is a regression vs the pre-#2274 local-only
-            // behaviour. We restore the local-only fallback by flipping the
-            // explicit `local_only_fallback` flag on the in-memory marker
-            // and emitting an operator-visible warn so persistence failures
-            // are not invisible. The flag is scoped to exactly the
-            // persist-failed case: PG-loaded / rehydrated markers always
-            // carry `local_only_fallback = false`, and once the durable
-            // claim succeeds the local copy is `forget_handoff` ed, so the
-            // fallback path cannot double-route.
-            if let Some(pool) = shared.pg_pool.as_ref() {
-                if let Err(error) =
-                    crate::voice::announce_meta::persist_handoff_durable(pool, message_id, &meta)
+            if !store.bind_handoff_message_id(&correlation_id, message_id) {
+                tracing::info!(
+                    correlation_id = %correlation_id,
+                    message_id = message_id.get(),
+                    source_channel_id = source_channel_id.get(),
+                    target_channel_id = target_channel_id.get(),
+                    utterance_id = %announcement.utterance_id,
+                    "voice background handoff local reservation was already consumed before message-id bind"
+                );
+            }
+            if durable_reserved {
+                if let Some(pool) = shared.pg_pool.as_ref() {
+                    match crate::voice::announce_meta::bind_handoff_durable_message_id(
+                        pool,
+                        &correlation_id,
+                        message_id,
+                    )
+                    .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::info!(
+                                correlation_id = %correlation_id,
+                                message_id = message_id.get(),
+                                source_channel_id = source_channel_id.get(),
+                                target_channel_id = target_channel_id.get(),
+                                utterance_id = %announcement.utterance_id,
+                                "voice background handoff durable reservation was already consumed before message-id bind"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                correlation_id = %correlation_id,
+                                message_id = message_id.get(),
+                                source_channel_id = source_channel_id.get(),
+                                target_channel_id = target_channel_id.get(),
+                                utterance_id = %announcement.utterance_id,
+                                "voice background handoff durable reservation bind failed"
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            store.cancel_handoff_reservation(&correlation_id);
+            if durable_reserved {
+                if let Some(pool) = shared.pg_pool.as_ref() {
+                    if let Err(error) =
+                        crate::voice::announce_meta::cancel_handoff_reservation_durable(
+                            pool,
+                            &correlation_id,
+                        )
                         .await
-                {
-                    tracing::warn!(
-                        error = %error,
-                        message_id = message_id.get(),
-                        source_channel_id = source_channel_id.get(),
-                        target_channel_id = target_channel_id.get(),
-                        utterance_id = %announcement.utterance_id,
-                        "voice background handoff durable persistence failed; falling back to local-only marker so the spoken summary is not dropped"
-                    );
-                    if crate::voice::announce_meta::global_store()
-                        .mark_handoff_local_only_fallback(message_id)
                     {
                         tracing::warn!(
-                            event = "voice_background_handoff_local_only_fallback",
-                            message_id = message_id.get(),
-                            source_channel_id = source_channel_id.get(),
-                            target_channel_id = target_channel_id.get(),
-                            utterance_id = %announcement.utterance_id,
-                            "voice background handoff marker flagged local-only fallback; terminal delivery may consume the local marker without a backing PG row"
+                            error = %error,
+                            correlation_id = %correlation_id,
+                            "voice background handoff durable reservation cleanup failed after missing message id"
                         );
                     }
                 }
-            } else {
-                tracing::debug!(
-                    message_id = message_id.get(),
-                    "voice background handoff durable persistence skipped — postgres pool unavailable"
-                );
             }
-        } else {
             tracing::warn!(
                 source_channel_id = source_channel_id.get(),
                 target_channel_id = target_channel_id.get(),

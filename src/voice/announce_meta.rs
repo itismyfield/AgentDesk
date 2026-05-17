@@ -30,6 +30,7 @@ const HANDOFF_META_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// (`gc_expired_voice_background_handoff_meta_pg`) deletes them. Mirrors
 /// the in-memory `HANDOFF_META_TTL` — see that constant for the rationale.
 pub(crate) const DURABLE_HANDOFF_META_TTL_SECS: i64 = 24 * 60 * 60;
+const DURABLE_HANDOFF_PENDING_PREFIX: &str = "pending:";
 
 #[derive(Debug, Clone)]
 struct StoredVoiceTranscriptAnnouncement {
@@ -82,6 +83,7 @@ struct StoredVoiceBackgroundHandoffMeta {
 pub(crate) struct VoiceAnnouncementMetaStore {
     entries: RwLock<HashMap<u64, StoredVoiceTranscriptAnnouncement>>,
     handoff_entries: RwLock<HashMap<u64, StoredVoiceBackgroundHandoffMeta>>,
+    pending_handoff_entries: RwLock<HashMap<String, StoredVoiceBackgroundHandoffMeta>>,
 }
 
 impl VoiceAnnouncementMetaStore {
@@ -120,6 +122,78 @@ impl VoiceAnnouncementMetaStore {
 
     pub(crate) fn insert_handoff(&self, message_id: MessageId, meta: VoiceBackgroundHandoffMeta) {
         self.insert_handoff_with_remaining_ttl(message_id, meta, HANDOFF_META_TTL);
+    }
+
+    pub(crate) fn reserve_handoff(&self, correlation_id: &str, meta: VoiceBackgroundHandoffMeta) {
+        if let Ok(mut entries) = self.pending_handoff_entries.write() {
+            let now = Instant::now();
+            prune_pending_handoff_expired_locked(&mut entries, now);
+            entries.insert(
+                correlation_id.to_string(),
+                StoredVoiceBackgroundHandoffMeta {
+                    meta,
+                    expires_at: now + HANDOFF_META_TTL,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn bind_handoff_message_id(
+        &self,
+        correlation_id: &str,
+        message_id: MessageId,
+    ) -> bool {
+        let stored = {
+            let Ok(mut pending) = self.pending_handoff_entries.write() else {
+                return false;
+            };
+            let now = Instant::now();
+            prune_pending_handoff_expired_locked(&mut pending, now);
+            pending.remove(correlation_id)
+        };
+        let Some(stored) = stored else {
+            return false;
+        };
+        if let Ok(mut entries) = self.handoff_entries.write() {
+            let now = Instant::now();
+            prune_handoff_expired_locked(&mut entries, now);
+            entries.insert(
+                message_id.get(),
+                StoredVoiceBackgroundHandoffMeta {
+                    meta: stored.meta,
+                    expires_at: now + HANDOFF_META_TTL,
+                },
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn cancel_handoff_reservation(&self, correlation_id: &str) -> bool {
+        let Ok(mut entries) = self.pending_handoff_entries.write() else {
+            return false;
+        };
+        let now = Instant::now();
+        prune_pending_handoff_expired_locked(&mut entries, now);
+        entries.remove(correlation_id).is_some()
+    }
+
+    pub(crate) fn mark_handoff_reservation_local_only_fallback(
+        &self,
+        correlation_id: &str,
+    ) -> bool {
+        let Ok(mut entries) = self.pending_handoff_entries.write() else {
+            return false;
+        };
+        let now = Instant::now();
+        prune_pending_handoff_expired_locked(&mut entries, now);
+        if let Some(stored) = entries.get_mut(correlation_id) {
+            stored.meta.local_only_fallback = true;
+            true
+        } else {
+            false
+        }
     }
 
     /// Insert with an explicit remaining-lifetime override. Used by
@@ -196,6 +270,28 @@ impl VoiceAnnouncementMetaStore {
         entries.remove(&message_id.get()).map(|stored| stored.meta)
     }
 
+    pub(crate) fn get_handoff_reservation(
+        &self,
+        correlation_id: &str,
+    ) -> Option<VoiceBackgroundHandoffMeta> {
+        let mut entries = self.pending_handoff_entries.write().ok()?;
+        let now = Instant::now();
+        prune_pending_handoff_expired_locked(&mut entries, now);
+        entries
+            .get(correlation_id)
+            .map(|stored| stored.meta.clone())
+    }
+
+    pub(crate) fn take_handoff_reservation(
+        &self,
+        correlation_id: &str,
+    ) -> Option<VoiceBackgroundHandoffMeta> {
+        let mut entries = self.pending_handoff_entries.write().ok()?;
+        let now = Instant::now();
+        prune_pending_handoff_expired_locked(&mut entries, now);
+        entries.remove(correlation_id).map(|stored| stored.meta)
+    }
+
     /// #2266: non-consuming clone of the stored announcement so the intake-gate
     /// busy-channel paths can embed the payload in the queued `Intervention`
     /// WITHOUT draining the store. The active dispatch path still calls
@@ -220,6 +316,13 @@ fn prune_handoff_expired_locked(
     entries.retain(|_, stored| stored.expires_at > now);
 }
 
+fn prune_pending_handoff_expired_locked(
+    entries: &mut HashMap<String, StoredVoiceBackgroundHandoffMeta>,
+    now: Instant,
+) {
+    entries.retain(|_, stored| stored.expires_at > now);
+}
+
 fn prune_expired_locked(
     entries: &mut HashMap<u64, StoredVoiceTranscriptAnnouncement>,
     now: Instant,
@@ -232,13 +335,22 @@ pub(crate) fn global_store() -> &'static VoiceAnnouncementMetaStore {
     STORE.get_or_init(VoiceAnnouncementMetaStore::default)
 }
 
+fn durable_pending_message_id(correlation_id: &str) -> String {
+    format!("{DURABLE_HANDOFF_PENDING_PREFIX}{correlation_id}")
+}
+
+fn is_durable_pending_message_id(message_id: &str) -> bool {
+    message_id.starts_with(DURABLE_HANDOFF_PENDING_PREFIX)
+}
+
 /// Persist a voice-background handoff marker to the durable side store
 /// (#2274). The process-local in-memory store remains the hot read path;
 /// this PG row is the durable source of truth that survives a dcserver
 /// restart partway through a long background turn.
 ///
-/// `ON CONFLICT … DO UPDATE` resets `consumed_at` to NULL so retries from
-/// a re-dispatched handoff path can reuse the same `message_id`.
+/// `ON CONFLICT … DO UPDATE` deliberately refuses to update rows that were
+/// already consumed. A late publish/persist retry must not resurrect a
+/// handoff after terminal delivery has claimed it (#2392).
 pub(crate) async fn persist_handoff_durable(
     pool: &PgPool,
     message_id: MessageId,
@@ -251,8 +363,8 @@ pub(crate) async fn persist_handoff_durable(
          ON CONFLICT (message_id) DO UPDATE
          SET voice_channel_id = EXCLUDED.voice_channel_id,
              background_channel_id = EXCLUDED.background_channel_id,
-             agent_id = EXCLUDED.agent_id,
-             consumed_at = NULL",
+             agent_id = EXCLUDED.agent_id
+         WHERE voice_background_handoff_meta.consumed_at IS NULL",
     )
     .bind(message_id.get().to_string())
     .bind(meta.voice_channel_id.to_string())
@@ -261,6 +373,74 @@ pub(crate) async fn persist_handoff_durable(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Pre-publish durable reservation for a voice-background handoff (#2392).
+/// The row is keyed by a synthetic pending id until Discord returns the real
+/// message id. If terminal delivery wins the race before bind, it claims this
+/// row by parsing the correlation marker embedded in the announce prompt.
+pub(crate) async fn persist_handoff_reservation_durable(
+    pool: &PgPool,
+    correlation_id: &str,
+    meta: &VoiceBackgroundHandoffMeta,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO voice_background_handoff_meta (
+             message_id, voice_channel_id, background_channel_id, agent_id
+         ) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (message_id) DO UPDATE
+         SET voice_channel_id = EXCLUDED.voice_channel_id,
+             background_channel_id = EXCLUDED.background_channel_id,
+             agent_id = EXCLUDED.agent_id
+         WHERE voice_background_handoff_meta.consumed_at IS NULL",
+    )
+    .bind(durable_pending_message_id(correlation_id))
+    .bind(meta.voice_channel_id.to_string())
+    .bind(meta.background_channel_id.to_string())
+    .bind(meta.agent_id.as_ref())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Promote a pending durable reservation to the actual Discord message id.
+/// Returns `false` when the pending row was already consumed by the
+/// correlation fallback or was otherwise absent; callers must not insert a
+/// fresh actual-message row in that case, or they would resurrect a consumed
+/// handoff (#2392).
+pub(crate) async fn bind_handoff_durable_message_id(
+    pool: &PgPool,
+    correlation_id: &str,
+    message_id: MessageId,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE voice_background_handoff_meta
+         SET message_id = $1
+         WHERE message_id = $2
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $3)",
+    )
+    .bind(message_id.get().to_string())
+    .bind(durable_pending_message_id(correlation_id))
+    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub(crate) async fn cancel_handoff_reservation_durable(
+    pool: &PgPool,
+    correlation_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM voice_background_handoff_meta
+         WHERE message_id = $1
+           AND consumed_at IS NULL",
+    )
+    .bind(durable_pending_message_id(correlation_id))
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Non-destructive read used to check whether a marker exists for a given
@@ -296,6 +476,43 @@ pub(crate) async fn load_handoff_durable(
             })?,
             agent_id,
             // A row that came from PG is durable by definition.
+            local_only_fallback: false,
+        })
+    })
+    .transpose()
+}
+
+pub(crate) async fn take_handoff_reservation_durable(
+    pool: &PgPool,
+    correlation_id: &str,
+) -> Result<Option<VoiceBackgroundHandoffMeta>, sqlx::Error> {
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "UPDATE voice_background_handoff_meta
+         SET consumed_at = NOW()
+         WHERE message_id = $1
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $2)
+         RETURNING voice_channel_id, background_channel_id, agent_id",
+    )
+    .bind(durable_pending_message_id(correlation_id))
+    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|(voice_channel_id, background_channel_id, agent_id)| {
+        Ok::<_, sqlx::Error>(VoiceBackgroundHandoffMeta {
+            voice_channel_id: voice_channel_id.parse().map_err(|error| {
+                sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("voice_channel_id not u64: {error}"),
+                )))
+            })?,
+            background_channel_id: background_channel_id.parse().map_err(|error| {
+                sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("background_channel_id not u64: {error}"),
+                )))
+            })?,
+            agent_id,
             local_only_fallback: false,
         })
     })
@@ -387,6 +604,9 @@ pub(crate) async fn rehydrate_handoffs_from_pg(pool: &PgPool) -> Result<u64, sql
     let store = global_store();
     let mut count: u64 = 0;
     for (message_id, voice_channel_id, background_channel_id, agent_id, age_secs) in rows {
+        if is_durable_pending_message_id(&message_id) {
+            continue;
+        }
         let Ok(message_id_u64) = message_id.parse::<u64>() else {
             tracing::warn!(
                 message_id,
@@ -508,6 +728,48 @@ mod tests {
     }
 
     #[test]
+    fn pending_handoff_reservation_can_win_before_message_bind() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let message_id = MessageId::new(201);
+        let correlation_id = "voice-bg:0123456789abcdef0123456789abcdef";
+        let meta = VoiceBackgroundHandoffMeta {
+            voice_channel_id: 301,
+            background_channel_id: 201,
+            agent_id: Some("project-agentdesk".to_string()),
+            local_only_fallback: false,
+        };
+
+        store.reserve_handoff(correlation_id, meta.clone());
+        assert!(store.get_handoff(message_id).is_none());
+        assert_eq!(store.take_handoff_reservation(correlation_id), Some(meta));
+
+        assert!(
+            !store.bind_handoff_message_id(correlation_id, message_id),
+            "late bind must not recreate a consumed pending reservation"
+        );
+        assert!(store.get_handoff(message_id).is_none());
+    }
+
+    #[test]
+    fn pending_handoff_reservation_binds_to_message_id() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let message_id = MessageId::new(202);
+        let correlation_id = "voice-bg:abcdef0123456789abcdef0123456789";
+        let meta = VoiceBackgroundHandoffMeta {
+            voice_channel_id: 302,
+            background_channel_id: 202,
+            agent_id: None,
+            local_only_fallback: false,
+        };
+
+        store.reserve_handoff(correlation_id, meta.clone());
+
+        assert!(store.bind_handoff_message_id(correlation_id, message_id));
+        assert!(store.get_handoff_reservation(correlation_id).is_none());
+        assert_eq!(store.take_handoff(message_id), Some(meta));
+    }
+
+    #[test]
     fn handoff_store_returns_none_when_absent() {
         let store = VoiceAnnouncementMetaStore::default();
         assert!(store.get_handoff(MessageId::new(999)).is_none());
@@ -563,6 +825,87 @@ mod tests {
                 .expect("second take")
                 .is_none(),
             "second take must report None — claim is one-shot"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_handoff_persist_does_not_resurrect_consumed_row() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(81_051);
+        let expected = handoff_meta(710, 610, Some("project-agentdesk"));
+        let replacement = handoff_meta(711, 611, Some("other-agent"));
+
+        persist_handoff_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable handoff");
+        take_handoff_durable(&pool, message_id)
+            .await
+            .expect("take durable handoff")
+            .expect("row claimed");
+
+        persist_handoff_durable(&pool, message_id, &replacement)
+            .await
+            .expect("late persist must not fail");
+
+        assert!(
+            take_handoff_durable(&pool, message_id)
+                .await
+                .expect("take after late persist")
+                .is_none(),
+            "late persist must not clear consumed_at and resurrect the row"
+        );
+        let stored_voice_channel_id: String = sqlx::query_scalar(
+            "SELECT voice_channel_id
+             FROM voice_background_handoff_meta
+             WHERE message_id = $1",
+        )
+        .bind(message_id.get().to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("consumed row remains for GC");
+        assert_eq!(
+            stored_voice_channel_id,
+            expected.voice_channel_id.to_string()
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_pending_handoff_claim_before_bind_prevents_resurrection() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(81_061);
+        let correlation_id = "voice-bg:11112222333344445555666677778888";
+        let expected = handoff_meta(712, 612, Some("project-agentdesk"));
+
+        persist_handoff_reservation_durable(&pool, correlation_id, &expected)
+            .await
+            .expect("persist pending durable handoff");
+
+        let claimed = take_handoff_reservation_durable(&pool, correlation_id)
+            .await
+            .expect("claim pending durable handoff")
+            .expect("pending reservation is claimable before bind");
+        assert_eq!(claimed, expected);
+
+        assert!(
+            !bind_handoff_durable_message_id(&pool, correlation_id, message_id)
+                .await
+                .expect("late bind after claim"),
+            "late bind must report that the pending row was already consumed"
+        );
+        assert!(
+            load_handoff_durable(&pool, message_id)
+                .await
+                .expect("load actual message id after late bind")
+                .is_none(),
+            "late bind must not create an actual-message row after correlation claim"
         );
 
         pool.close().await;

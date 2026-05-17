@@ -16,6 +16,8 @@ pub(crate) struct VoiceTranscriptAnnouncement {
 }
 
 const VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX: &str = "ADK_VOICE_TRANSCRIPT v1";
+const VOICE_BACKGROUND_HANDOFF_PREFIX: &str = "ADK_VOICE_BACKGROUND_HANDOFF v1";
+const VOICE_BACKGROUND_HANDOFF_CORRELATION_PREFIX: &str = "voice-bg:";
 const TRANSCRIPT_TAG_PREFIX: &str = "user_transcript_";
 
 pub(crate) fn voice_bridge_prompt(
@@ -231,6 +233,39 @@ pub(crate) fn voice_background_result_summary_prompt(
     lines.join("\n")
 }
 
+pub(crate) fn new_voice_background_handoff_correlation_id() -> String {
+    format!(
+        "{VOICE_BACKGROUND_HANDOFF_CORRELATION_PREFIX}{}",
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+pub(crate) fn append_voice_background_handoff_marker(prompt: &str, correlation_id: &str) -> String {
+    format!(
+        "{}\n\n||{} correlation_id={}||",
+        prompt.trim_end(),
+        VOICE_BACKGROUND_HANDOFF_PREFIX,
+        correlation_id
+    )
+}
+
+pub(crate) fn parse_voice_background_handoff_correlation_id(text: &str) -> Option<String> {
+    let header = text
+        .lines()
+        .find_map(voice_background_handoff_header_line)?;
+    let rest = header.strip_prefix(VOICE_BACKGROUND_HANDOFF_PREFIX)?;
+    for token in rest.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        let value = parse_header_value(value);
+        if key == "correlation_id" && is_valid_voice_background_handoff_correlation_id(&value) {
+            return Some(value);
+        }
+    }
+    None
+}
+
 pub(crate) fn build_voice_transcript_announcement(
     transcript: &str,
     _user_id: u64,
@@ -341,6 +376,18 @@ fn voice_transcript_header_line(line: &str) -> Option<&str> {
         .then_some(unspoiled)
 }
 
+fn voice_background_handoff_header_line(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let unspoiled = trimmed
+        .strip_prefix("||")
+        .and_then(|value| value.strip_suffix("||"))
+        .unwrap_or(trimmed)
+        .trim();
+    unspoiled
+        .starts_with(VOICE_BACKGROUND_HANDOFF_PREFIX)
+        .then_some(unspoiled)
+}
+
 pub(crate) fn parse_authorized_voice_transcript_announcement(
     text: &str,
     author_id: u64,
@@ -391,6 +438,13 @@ fn is_valid_transcript_nonce(nonce: &str) -> bool {
         && nonce
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn is_valid_voice_background_handoff_correlation_id(correlation_id: &str) -> bool {
+    let Some(raw) = correlation_id.strip_prefix(VOICE_BACKGROUND_HANDOFF_CORRELATION_PREFIX) else {
+        return false;
+    };
+    raw.len() == 32 && raw.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn extract_transcript_between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
@@ -627,5 +681,23 @@ mod tests {
         assert!(prompt.contains("하드 제한: 180자"));
         let nonce = transcript_nonce_from_prompt(&prompt);
         assert!(prompt.contains(&nonce_transcript_fence(nonce, result)));
+    }
+
+    #[test]
+    fn voice_background_handoff_marker_round_trips_correlation_id() {
+        let correlation_id = new_voice_background_handoff_correlation_id();
+        let prompt = append_voice_background_handoff_marker("do the work", &correlation_id);
+
+        assert_eq!(
+            parse_voice_background_handoff_correlation_id(&prompt),
+            Some(correlation_id)
+        );
+    }
+
+    #[test]
+    fn voice_background_handoff_marker_rejects_untrusted_shape() {
+        let spoofed = "||ADK_VOICE_BACKGROUND_HANDOFF v1 correlation_id=not-random||";
+
+        assert!(parse_voice_background_handoff_correlation_id(spoofed).is_none());
     }
 }

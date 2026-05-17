@@ -5,7 +5,7 @@
 
 - Production Rust modules: `606`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `117`
+- Giant files: `118`
 
 ## Namespace Summary
 
@@ -490,7 +490,7 @@
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
 | `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4030 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 710 |  |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 6899 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 7037 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2474 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 88 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 194 |  |
@@ -504,7 +504,7 @@
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1536 | giant-file |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 150 |  |
 | `services::discord::voice_background_driver` | `src/services/discord/voice_background_driver.rs` | 359 |  |
-| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 4361 | giant-file |
+| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 4444 | giant-file |
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 160 |  |
 | `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 1849 | giant-file |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 255 |  |
@@ -633,14 +633,14 @@
 | `utils::loopback_url` | `src/utils/loopback_url.rs` | 58 |  |
 | `utils::wip_detect` | `src/utils/wip_detect.rs` | 244 |  |
 | `voice` | `src/voice/mod.rs` | 17 |  |
-| `voice::announce_meta` | `src/voice/announce_meta.rs` | 675 |  |
+| `voice::announce_meta` | `src/voice/announce_meta.rs` | 1018 | giant-file |
 | `voice::barge_in` | `src/voice/barge_in.rs` | 925 |  |
 | `voice::cancel_tombstone` | `src/voice/cancel_tombstone.rs` | 201 |  |
 | `voice::commands` | `src/voice/commands.rs` | 835 |  |
 | `voice::config` | `src/voice/config.rs` | 518 |  |
 | `voice::metrics` | `src/voice/metrics.rs` | 301 |  |
 | `voice::progress` | `src/voice/progress.rs` | 445 |  |
-| `voice::prompt` | `src/voice/prompt.rs` | 631 |  |
+| `voice::prompt` | `src/voice/prompt.rs` | 703 |  |
 | `voice::receiver` | `src/voice/receiver.rs` | 1473 | giant-file |
 | `voice::sanitizer` | `src/voice/sanitizer.rs` | 325 |  |
 | `voice::stt` | `src/voice/stt.rs` | 736 |  |
