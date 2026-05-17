@@ -4456,14 +4456,77 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
     let watcher_tmux_name = inflight_tmux_name.clone();
     let watcher_output_path = inflight_output_path.clone();
+    // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.
+    // If the first snapshot says busy, run wait_for_prompt_ready (Followup kind,
+    // ~45s default) via spawn_blocking. If the wait succeeds AND a fresh
+    // diagnostic now says ready, fall through to normal dispatch instead of
+    // dropping the user's message. Only emit the busy notice if the wait
+    // times out / errors, or if the post-wait diagnostic is still busy.
     #[cfg(unix)]
-    if let Some(diagnostic) = claude_tui_busy_followup_diagnostic(
-        shared,
-        &provider,
-        channel_id,
-        tmux_session_name.as_deref(),
-        remote_profile.is_some(),
-    ) {
+    let claude_tui_busy_diagnostic = {
+        let initial = claude_tui_busy_followup_diagnostic(
+            shared,
+            &provider,
+            channel_id,
+            tmux_session_name.as_deref(),
+            remote_profile.is_some(),
+        );
+        if let Some(initial_diagnostic) = initial {
+            let wait_session_name = initial_diagnostic.tmux_session_name.clone();
+            let wait_result = tokio::task::spawn_blocking(move || {
+                crate::services::claude_tui::input::wait_for_prompt_ready(
+                    &wait_session_name,
+                    crate::services::claude_tui::input::PromptReadinessKind::Followup,
+                )
+            })
+            .await
+            .unwrap_or_else(|join_err| {
+                Err(format!("wait_for_prompt_ready join error: {join_err}"))
+            });
+            let post_wait_diagnostic = claude_tui_busy_followup_diagnostic(
+                shared,
+                &provider,
+                channel_id,
+                tmux_session_name.as_deref(),
+                remote_profile.is_some(),
+            );
+            match (wait_result, post_wait_diagnostic) {
+                (Ok(()), None) => {
+                    tracing::info!(
+                        channel_id = channel_id.get(),
+                        user_msg_id = user_msg_id.get(),
+                        tmux_session_name = %initial_diagnostic.tmux_session_name,
+                        "claude_tui follow-up: busy at first check, became ready after wait_for_prompt_ready"
+                    );
+                    None
+                }
+                (Ok(()), Some(diag)) => {
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        user_msg_id = user_msg_id.get(),
+                        "claude_tui follow-up: wait_for_prompt_ready returned Ok but post-wait diagnostic still busy"
+                    );
+                    Some(diag)
+                }
+                (Err(err), diag_opt) => {
+                    let timed_out =
+                        crate::services::claude_tui::input::is_prompt_ready_timeout_error(&err);
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        user_msg_id = user_msg_id.get(),
+                        timed_out,
+                        error = %err,
+                        "claude_tui follow-up: wait_for_prompt_ready failed; emitting busy notice"
+                    );
+                    Some(diag_opt.unwrap_or(initial_diagnostic))
+                }
+            }
+        } else {
+            None
+        }
+    };
+    #[cfg(unix)]
+    if let Some(diagnostic) = claude_tui_busy_diagnostic {
         let diagnostic_json = diagnostic.to_json();
         tracing::warn!(
             channel_id = channel_id.get(),
