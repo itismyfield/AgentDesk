@@ -369,24 +369,27 @@ pub fn list_sessions_with_pane_command() -> Result<Vec<EnumeratedSession>, Strin
     Ok(sessions)
 }
 
-/// Read the executable path of a live process by PID, used as a fallback
-/// fingerprint when `pane_current_command` is unreliable. Providers that
+/// Read the command line of a live process by PID, used as a fallback
+/// fingerprint source when `pane_current_command` is unreliable. Providers that
 /// rewrite their own process title (e.g. claude code 2.1.143 sets the title
 /// to its version string) cause tmux's `#{pane_current_command}` to report
-/// the rewritten value, hiding the underlying binary. The kernel's argv[0]
-/// is preserved, so reading it lets the matcher recover the real binary.
+/// the rewritten value, hiding the underlying binary. Wrapper-based panes can
+/// also report a generic runner such as `node` while the provider-specific
+/// companion path appears later in argv.
 ///
 /// Returns `None` when the PID is zero/missing, the OS call fails, or the
 /// output is empty. Callers should treat `None` as "no fallback available"
 /// and propagate the original pane-command result.
 ///
 /// Implementation notes:
-/// - macOS: `ps -p PID -o args=` — `args` is the verbatim argv, unaffected by
-///   `setproctitle` rewriting (`comm` *is* affected, so we avoid it).
-/// - Linux: `/proc/{PID}/cmdline` — NUL-separated argv, immune to title rewrites.
+/// - macOS: `ps -ww -p PID -o args=` — `args` includes the full command line
+///   and `-ww` avoids width truncation.
+/// - Linux: `/proc/{PID}/exe` plus `/proc/{PID}/cmdline`; `cmdline` can be
+///   overwritten by process-title tricks, so include the kernel executable
+///   symlink as a stable first candidate.
 /// - Windows: no implementation today (the discovery loop runs on macOS/Linux
 ///   hosts; if a Windows operator host materialises we'll add `wmic` later).
-pub fn read_process_argv0(pid: u32) -> Option<String> {
+pub fn read_process_args(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
     }
@@ -394,28 +397,37 @@ pub fn read_process_argv0(pid: u32) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         let out = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "args="])
+            .args(["-ww", "-p", &pid.to_string(), "-o", "args="])
             .output()
             .ok()?;
         if !out.status.success() {
             return None;
         }
         let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let first = line.split_whitespace().next()?;
-        if first.is_empty() {
+        if line.is_empty() {
             return None;
         }
-        Some(first.to_string())
+        Some(line)
     }
 
     #[cfg(target_os = "linux")]
     {
+        let exe = std::fs::read_link(format!("/proc/{}/exe", pid))
+            .ok()
+            .map(|path| path.display().to_string());
         let raw = std::fs::read(format!("/proc/{}/cmdline", pid)).ok()?;
-        let first = raw.split(|&b| b == 0).next()?;
-        if first.is_empty() {
+        let mut args: Vec<String> = raw
+            .split(|&b| b == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).to_string())
+            .collect();
+        if let Some(exe) = exe {
+            args.insert(0, exe);
+        }
+        if args.is_empty() {
             return None;
         }
-        Some(String::from_utf8_lossy(first).to_string())
+        Some(args.join(" "))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
