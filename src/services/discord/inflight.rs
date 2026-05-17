@@ -428,6 +428,29 @@ impl InflightTurnState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct InflightTurnIdentity {
+    pub user_msg_id: u64,
+    pub started_at: String,
+    pub tmux_session_name: Option<String>,
+}
+
+impl InflightTurnIdentity {
+    pub(in crate::services::discord) fn from_state(state: &InflightTurnState) -> Self {
+        Self {
+            user_msg_id: state.user_msg_id,
+            started_at: state.started_at.clone(),
+            tmux_session_name: state.tmux_session_name.clone(),
+        }
+    }
+
+    fn matches_state(&self, state: &InflightTurnState) -> bool {
+        self.user_msg_id == state.user_msg_id
+            && self.started_at == state.started_at
+            && self.tmux_session_name == state.tmux_session_name
+    }
+}
+
 /// #2235: tolerant deserializer for `runtime_kind`. A newer binary may write
 /// a `RuntimeHandoffKind` variant this binary does not know about; serde's
 /// default `deny_unknown_variants` posture would propagate a parse error and
@@ -537,6 +560,9 @@ pub(super) fn delete_inflight_state_file(provider: &ProviderKind, channel_id: u6
         return false;
     };
     let path = inflight_state_path(&root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return false;
+    };
     fs::remove_file(path).is_ok()
 }
 
@@ -546,6 +572,47 @@ fn inflight_provider_dir(root: &Path, provider: &ProviderKind) -> PathBuf {
 
 fn inflight_state_path(root: &Path, provider: &ProviderKind, channel_id: u64) -> PathBuf {
     inflight_provider_dir(root, provider).join(format!("{channel_id}.json"))
+}
+
+struct InflightStateFileLock {
+    _file: fs::File,
+}
+
+impl Drop for InflightStateFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // Best effort unlock; closing the fd would release it anyway.
+            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+fn inflight_state_lock_path(path: &Path) -> PathBuf {
+    path.with_extension("json.lock")
+}
+
+fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
+    let lock_path = inflight_state_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+    }
+    Ok(InflightStateFileLock { _file: file })
 }
 
 fn now_string() -> String {
@@ -751,6 +818,7 @@ fn save_inflight_state_create_new_in_root(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
     }
+    let _lock = lock_inflight_state_path(&path).map_err(CreateNewInflightError::Internal)?;
     validate_inflight_state_for_save(
         root,
         &path,
@@ -793,6 +861,7 @@ fn save_inflight_state_in_root(root: &Path, state: &InflightTurnState) -> Result
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    let _lock = lock_inflight_state_path(&path)?;
     validate_inflight_state_for_save(
         root,
         &path,
@@ -810,6 +879,9 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
         return false;
     };
     let path = inflight_state_path(&root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return false;
+    };
     fs::remove_file(path).is_ok()
 }
 
@@ -868,6 +940,17 @@ pub(crate) fn clear_inflight_state_if_matches(
     clear_inflight_state_if_matches_in_root(&root, provider, channel_id, expected_user_msg_id)
 }
 
+pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    clear_inflight_state_if_matches_identity_in_root(&root, provider, channel_id, expected)
+}
+
 /// Root-explicit variant for unit tests. Production callers should use
 /// [`clear_inflight_state_if_matches`].
 pub(super) fn clear_inflight_state_if_matches_in_root(
@@ -877,6 +960,9 @@ pub(super) fn clear_inflight_state_if_matches_in_root(
     expected_user_msg_id: u64,
 ) -> GuardedClearOutcome {
     let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedClearOutcome::IoError;
+    };
     let Ok(data) = fs::read_to_string(&path) else {
         return GuardedClearOutcome::Missing;
     };
@@ -894,13 +980,9 @@ pub(super) fn clear_inflight_state_if_matches_in_root(
     if expected_user_msg_id == 0 || state.user_msg_id != expected_user_msg_id {
         return GuardedClearOutcome::UserMsgMismatch;
     }
-    // Codex round-2 HIGH-2: TOCTOU between the read above and remove
-    // below. The inflight save path uses an atomic write+rename
-    // (`save_inflight_state_in_root`), so a successful save between our
-    // read and remove changes the file's (dev, inode). We re-stat right
-    // before removing and bail if the identity changed — that means a
-    // newer turn has already taken ownership of the slot and we must
-    // not delete it.
+    // #2450: save and guarded-clear share the same sidecar lock, so the
+    // read/validate/unlink sequence below cannot race a concurrent
+    // atomic-write rename for a fresh turn.
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -913,12 +995,9 @@ pub(super) fn clear_inflight_state_if_matches_in_root(
         if pre.dev() != post.dev() || pre.ino() != post.ino() {
             return GuardedClearOutcome::UserMsgMismatch;
         }
-        // Final re-read + re-validate before unlink. This is still not
-        // strictly atomic against another rename racing between the
-        // re-read and `remove_file`, but combined with the (dev, ino)
-        // check above it narrows the window to the kernel-level rename
-        // syscall window, which is the same window every other reader
-        // of this file already lives with.
+        // Final re-read + re-validate before unlink keeps the older
+        // corruption/mismatch protections intact while the sidecar lock
+        // closes the save-vs-clear race.
         let Ok(reread) = fs::read_to_string(&path) else {
             return GuardedClearOutcome::Missing;
         };
@@ -942,6 +1021,47 @@ pub(super) fn clear_inflight_state_if_matches_in_root(
                 expected_user_msg_id = expected_user_msg_id,
                 error = %error,
                 "inflight guarded-clear remove_file failed; treating as IoError so sweeper retries"
+            );
+            GuardedClearOutcome::IoError
+        }
+    }
+}
+
+fn clear_inflight_state_if_matches_identity_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+) -> GuardedClearOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedClearOutcome::IoError;
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return GuardedClearOutcome::Missing;
+    };
+    if state.restart_mode.is_some() {
+        return GuardedClearOutcome::PlannedRestartSkipped;
+    }
+    if state.rebind_origin {
+        return GuardedClearOutcome::RebindOriginSkipped;
+    }
+    if expected.user_msg_id == 0 || !expected.matches_state(&state) {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => GuardedClearOutcome::Cleared,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                expected_user_msg_id = expected.user_msg_id,
+                error = %error,
+                "inflight identity-guarded clear remove_file failed; treating as IoError so sweeper retries"
             );
             GuardedClearOutcome::IoError
         }
@@ -989,6 +1109,9 @@ pub(super) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &s
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
+        let Ok(_lock) = lock_inflight_state_path(&path) else {
+            continue;
+        };
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
@@ -1086,6 +1209,26 @@ fn invalidate_stale_generation_in_root(
             Some(_) => {}
         }
         let path = inflight_state_path(root, provider, state.channel_id);
+        let Ok(_lock) = lock_inflight_state_path(&path) else {
+            continue;
+        };
+        let Some(state) = read_inflight_state_content(&path) else {
+            continue;
+        };
+        if state.provider_kind().as_ref() != Some(provider) {
+            continue;
+        }
+        if state.restart_mode.is_some() {
+            continue;
+        }
+        if state.rebind_origin {
+            continue;
+        }
+        match state.restart_generation {
+            None => continue,
+            Some(row_generation) if row_generation == current_generation => continue,
+            Some(_) => {}
+        }
         if fs::remove_file(&path).is_ok() {
             // Only emit observability when called via the env wrapper —
             // raw `_in_root` calls are unit tests and we want to keep
@@ -1187,6 +1330,46 @@ fn stale_removal_reason(
     }
 }
 
+fn parse_inflight_state_content(content: &str) -> serde_json::Result<InflightTurnState> {
+    let mut state = serde_json::from_str::<InflightTurnState>(content)?;
+    // #2235: the tolerant `runtime_kind` deserializer collapses both
+    // "field absent" (legacy v7 rows) and "present-but-unknown variant"
+    // (rows written by a future binary) to `runtime_kind = None`.
+    // Recovery treats these two cases differently — absent legacy rows
+    // recover via heuristics; present-unknown rows silent-skip. Re-parse
+    // the JSON as a value to disambiguate and record the verdict on the
+    // transient `runtime_kind_unknown_on_disk` flag.
+    if state.runtime_kind.is_none()
+        && let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(content)
+        && let Some(raw_runtime) = raw_value.get("runtime_kind")
+        && let Some(raw_str) = raw_runtime.as_str()
+        && !raw_str.is_empty()
+        && !matches!(
+            raw_str,
+            "legacy_tmux_wrapper" | "claude_tui" | "codex_tui" | "process_backend"
+        )
+    {
+        state.runtime_kind_unknown_on_disk = true;
+    }
+    Ok(state)
+}
+
+fn read_inflight_state_content(path: &Path) -> Option<InflightTurnState> {
+    let content = fs::read_to_string(path).ok()?;
+    parse_inflight_state_content(&content).ok()
+}
+
+fn stale_removal_reason_for_path(
+    path: &Path,
+    state: &InflightTurnState,
+    current_generation: u64,
+) -> Option<String> {
+    let meta = fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let age = modified.elapsed().ok()?;
+    stale_removal_reason(state, age.as_secs(), current_generation)
+}
+
 fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<InflightTurnState> {
     let dir = inflight_provider_dir(root, provider);
     let Ok(entries) = fs::read_dir(dir) else {
@@ -1208,53 +1391,66 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
             );
             continue;
         };
-        let Ok(mut state) = serde_json::from_str::<InflightTurnState>(&content) else {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⚠ removing malformed inflight state file: {}",
-                path.display()
-            );
-            let _ = fs::remove_file(&path);
-            continue;
-        };
-        // #2235: the tolerant `runtime_kind` deserializer collapses both
-        // "field absent" (legacy v7 rows) and "present-but-unknown variant"
-        // (rows written by a future binary) to `runtime_kind = None`.
-        // Recovery treats these two cases differently — absent legacy rows
-        // recover via heuristics; present-unknown rows silent-skip. Re-parse
-        // the JSON as a value to disambiguate and record the verdict on the
-        // transient `runtime_kind_unknown_on_disk` flag.
-        if state.runtime_kind.is_none() {
-            if let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(&content)
-                && let Some(raw_runtime) = raw_value.get("runtime_kind")
-                && let Some(raw_str) = raw_runtime.as_str()
-                && !raw_str.is_empty()
-                && !matches!(
-                    raw_str,
-                    "legacy_tmux_wrapper" | "claude_tui" | "codex_tui" | "process_backend"
-                )
-            {
-                state.runtime_kind_unknown_on_disk = true;
+        let mut state = match parse_inflight_state_content(&content) {
+            Ok(state) => state,
+            Err(_) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ⚠ removing malformed inflight state file: {}",
+                    path.display()
+                );
+                let Ok(_lock) = lock_inflight_state_path(&path) else {
+                    continue;
+                };
+                match read_inflight_state_content(&path) {
+                    Some(locked_state) => locked_state,
+                    None => {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                }
             }
-        }
+        };
         if state.provider_kind().as_ref() != Some(provider) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ⚠ removing inflight state with provider mismatch: {}",
                 path.display()
             );
-            let _ = fs::remove_file(&path);
-            continue;
+            let Ok(_lock) = lock_inflight_state_path(&path) else {
+                continue;
+            };
+            let Some(locked_state) = read_inflight_state_content(&path) else {
+                let _ = fs::remove_file(&path);
+                continue;
+            };
+            if locked_state.provider_kind().as_ref() != Some(provider) {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            state = locked_state;
         }
-        if let Ok(meta) = fs::metadata(&path)
-            && let Ok(modified) = meta.modified()
-            && let Ok(age) = modified.elapsed()
-            && let Some(reason) = stale_removal_reason(&state, age.as_secs(), current_generation)
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
-            let _ = fs::remove_file(&path);
-            continue;
+        if stale_removal_reason_for_path(&path, &state, current_generation).is_some() {
+            let Ok(_lock) = lock_inflight_state_path(&path) else {
+                continue;
+            };
+            let Some(locked_state) = read_inflight_state_content(&path) else {
+                let _ = fs::remove_file(&path);
+                continue;
+            };
+            if locked_state.provider_kind().as_ref() != Some(provider) {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            if let Some(reason) =
+                stale_removal_reason_for_path(&path, &locked_state, current_generation)
+            {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            state = locked_state;
         }
         if let Some(tmux_session_name) = state
             .tmux_session_name
@@ -1306,9 +1502,10 @@ pub(in crate::services::discord) enum InflightSignal {
 mod stall_recovery_tests {
     use super::{
         GuardedClearOutcome, INFLIGHT_STALENESS_THRESHOLD_SECS, InflightRestartMode,
-        InflightTurnState, clear_inflight_state_if_matches_in_root,
-        inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale,
-        load_inflight_states_from_root, save_inflight_state_in_root,
+        InflightTurnIdentity, InflightTurnState, clear_inflight_state_if_matches_identity_in_root,
+        clear_inflight_state_if_matches_in_root, inflight_state_allows_idle_tmux_repair_state,
+        inflight_state_is_stale, inflight_state_path, load_inflight_states_from_root,
+        lock_inflight_state_path, save_inflight_state_in_root,
     };
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::provider::ProviderKind;
@@ -1739,6 +1936,75 @@ mod stall_recovery_tests {
         assert_eq!(still_there[0].user_msg_id, 100);
     }
 
+    #[test]
+    fn identity_guard_preserves_same_named_respawn() {
+        let temp = TempDir::new().unwrap();
+        let mut old_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        old_turn.started_at = "2026-05-17 10:00:00".to_string();
+        save_inflight_state_in_root(temp.path(), &old_turn).unwrap();
+        let old_identity = InflightTurnIdentity::from_state(&old_turn);
+
+        let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 101);
+        fresh_turn.started_at = "2026-05-17 10:00:05".to_string();
+        fresh_turn.user_text = "fresh prompt".to_string();
+        save_inflight_state_in_root(temp.path(), &fresh_turn).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_identity_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            321,
+            &old_identity,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+
+        let still_there = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(still_there.len(), 1);
+        assert_eq!(still_there[0].started_at, "2026-05-17 10:00:05");
+        assert_eq!(
+            still_there[0].tmux_session_name, old_turn.tmux_session_name,
+            "test must cover same-named respawn"
+        );
+    }
+
+    #[test]
+    fn guarded_clear_and_save_race_preserves_fresh_state() {
+        let temp = TempDir::new().unwrap();
+        let root = std::sync::Arc::new(temp.path().to_path_buf());
+
+        for iteration in 0..20 {
+            let mut old_turn = build_inflight_for_guard_tests(ProviderKind::Codex, 777, 100);
+            old_turn.started_at = format!("2026-05-17 10:00:{iteration:02}");
+            save_inflight_state_in_root(root.as_ref(), &old_turn).unwrap();
+            let old_identity = InflightTurnIdentity::from_state(&old_turn);
+
+            let mut fresh_turn = build_inflight_for_guard_tests(ProviderKind::Codex, 777, 101);
+            fresh_turn.started_at = format!("2026-05-17 10:01:{iteration:02}");
+            fresh_turn.user_text = "fresh prompt".to_string();
+
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let clear_root = root.clone();
+            let clear_barrier = barrier.clone();
+            let clear_handle = std::thread::spawn(move || {
+                clear_barrier.wait();
+                clear_inflight_state_if_matches_identity_in_root(
+                    clear_root.as_ref(),
+                    &ProviderKind::Codex,
+                    777,
+                    &old_identity,
+                )
+            });
+
+            barrier.wait();
+            save_inflight_state_in_root(root.as_ref(), &fresh_turn).unwrap();
+            let _ = clear_handle.join().expect("clear thread should not panic");
+
+            let loaded = load_inflight_states_from_root(root.as_ref(), &ProviderKind::Codex);
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].started_at, fresh_turn.started_at);
+            assert_eq!(loaded[0].user_text, "fresh prompt");
+        }
+    }
+
     /// #2427 — planned-restart markers must survive the explicit-signal
     /// hook because their lifetime is owned by the next dcserver boot's
     /// recovery. We bypass `load_inflight_states_from_root` here (which
@@ -1820,6 +2086,34 @@ mod stall_recovery_tests {
             clear_inflight_state_if_matches_in_root(temp.path(), &ProviderKind::Claude, 42, 999);
         assert_eq!(outcome, GuardedClearOutcome::Missing);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_inflight_states_revalidates_malformed_row_under_lock() {
+        let temp = TempDir::new().unwrap();
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, 18_001);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ definitely not valid json").unwrap();
+        let lock = lock_inflight_state_path(&path).unwrap();
+        let root = temp.path().to_path_buf();
+
+        let loader =
+            std::thread::spawn(move || load_inflight_states_from_root(&root, &ProviderKind::Codex));
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut fresh = build_inflight_for_guard_tests(ProviderKind::Codex, 18_001, 88_001);
+        fresh.user_msg_id = 88_001;
+        std::fs::write(&path, serde_json::to_string_pretty(&fresh).unwrap()).unwrap();
+        drop(lock);
+
+        let states = loader.join().unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].user_msg_id, 88_001);
+        assert_eq!(
+            load_inflight_states_from_root(temp.path(), &ProviderKind::Codex).len(),
+            1
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1829,8 +2123,8 @@ mod wave_a_cleanup_tests {
     //! with #2427's D / A wires and is already covered by the
     //! `clear_inflight_state_if_matches_*` tests in the parent mod.
     use super::{
-        InflightTurnState, invalidate_stale_generation_in_root, load_inflight_states_from_root,
-        save_inflight_state_in_root,
+        InflightTurnState, inflight_state_path, invalidate_stale_generation_in_root,
+        load_inflight_states_from_root, lock_inflight_state_path, save_inflight_state_in_root,
     };
     use crate::services::discord::InflightRestartMode;
     use crate::services::provider::ProviderKind;
@@ -1993,6 +2287,39 @@ mod wave_a_cleanup_tests {
         let temp = TempDir::new().unwrap();
         let removed = invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, 1);
         assert!(removed.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalidate_stale_generation_revalidates_row_under_lock() {
+        let temp = TempDir::new().unwrap();
+
+        let mut stale = make_state(951, 77);
+        stale.restart_generation = Some(1);
+        save_inflight_state_in_root(temp.path(), &stale).expect("save stale");
+
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, stale.channel_id);
+        let lock = lock_inflight_state_path(&path).unwrap();
+        let root = temp.path().to_path_buf();
+        let invalidator = std::thread::spawn(move || {
+            invalidate_stale_generation_in_root(&root, &ProviderKind::Codex, 2)
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut fresh = make_state(951, 78);
+        fresh.restart_generation = Some(2);
+        std::fs::write(&path, serde_json::to_string_pretty(&fresh).unwrap()).unwrap();
+        drop(lock);
+
+        let removed = invalidator.join().unwrap();
+        assert!(
+            removed.is_empty(),
+            "fresh same-generation row written before the delete lock was acquired must survive"
+        );
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].restart_generation, Some(2));
+        assert_eq!(after[0].user_msg_id, 78);
     }
 }
 

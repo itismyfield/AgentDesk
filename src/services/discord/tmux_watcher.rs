@@ -77,6 +77,22 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal(
         channel_id.get(),
         expected_user_msg_id,
     );
+    log_explicit_inflight_cleanup_outcome(
+        provider,
+        channel_id,
+        expected_user_msg_id,
+        reason,
+        outcome,
+    );
+}
+
+fn log_explicit_inflight_cleanup_outcome(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_msg_id: u64,
+    reason: &'static str,
+    outcome: crate::services::discord::inflight::GuardedClearOutcome,
+) {
     match outcome {
         crate::services::discord::inflight::GuardedClearOutcome::Cleared => {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -151,6 +167,7 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal_pane_d
     provider: &ProviderKind,
     channel_id: ChannelId,
     expected_tmux_session_name: &str,
+    expected_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
 ) {
     let Some(state) =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
@@ -168,8 +185,94 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal_pane_d
         );
         return;
     }
-    let expected_user_msg_id = state.user_msg_id;
-    emit_explicit_inflight_cleanup_signal(provider, channel_id, expected_user_msg_id, "pane_dead");
+    let Some(identity) = expected_identity else {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel = channel_id.get(),
+            expected_tmux_session_name,
+            "pane-dead inflight cleanup skipped because watcher attach identity is unavailable (#2450)"
+        );
+        return;
+    };
+    let outcome = crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
+        provider,
+        channel_id.get(),
+        identity,
+    );
+    log_explicit_inflight_cleanup_outcome(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "pane_dead",
+        outcome,
+    );
+}
+
+fn matching_watcher_turn_identity(
+    state: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+) -> Option<crate::services::discord::inflight::InflightTurnIdentity> {
+    state
+        .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name))
+        .map(crate::services::discord::inflight::InflightTurnIdentity::from_state)
+}
+
+fn refresh_watcher_turn_identity(
+    current: &mut Option<crate::services::discord::inflight::InflightTurnIdentity>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) {
+    let inflight =
+        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get());
+    *current = matching_watcher_turn_identity(inflight.as_ref(), tmux_session_name);
+}
+
+#[cfg(test)]
+mod pane_dead_identity_tests {
+    use super::*;
+    use crate::services::discord::inflight::InflightTurnState;
+
+    fn state_for_turn(user_msg_id: u64, tmux_session_name: &str) -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx".to_string()),
+            7,
+            user_msg_id,
+            user_msg_id + 1,
+            "prompt".to_string(),
+            None,
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        )
+    }
+
+    #[test]
+    fn watcher_identity_refreshes_for_next_turn_on_same_long_lived_session() {
+        let first = state_for_turn(100, "AgentDesk-codex-adk-cdx");
+        let second = state_for_turn(200, "AgentDesk-codex-adk-cdx");
+        let mut identity = matching_watcher_turn_identity(Some(&first), "AgentDesk-codex-adk-cdx");
+        assert_eq!(identity.as_ref().unwrap().user_msg_id, 100);
+
+        identity = matching_watcher_turn_identity(Some(&second), "AgentDesk-codex-adk-cdx");
+
+        assert_eq!(identity.unwrap().user_msg_id, 200);
+    }
+
+    #[test]
+    fn watcher_identity_does_not_adopt_different_session_name() {
+        let first = state_for_turn(100, "AgentDesk-codex-adk-cdx");
+        let second = state_for_turn(200, "AgentDesk-codex-adk-cdx-fresh");
+        let mut identity = matching_watcher_turn_identity(Some(&first), "AgentDesk-codex-adk-cdx");
+        assert_eq!(identity.as_ref().unwrap().user_msg_id, 100);
+
+        identity = matching_watcher_turn_identity(Some(&second), "AgentDesk-codex-adk-cdx");
+
+        assert!(identity.is_none());
+    }
 }
 
 /// E5 (#2412): forward a freshly-read tmux output chunk into the
@@ -550,6 +653,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         parse_provider_and_channel_from_tmux_name(&tmux_session_name).and_then(|(pk, _)| {
             crate::services::discord::inflight::load_inflight_state(&pk, channel_id.get())
         });
+    let mut watcher_turn_identity =
+        matching_watcher_turn_identity(restored_inflight.as_ref(), &tmux_session_name);
     let mut last_relayed_offset: Option<u64> = restored_inflight
         .as_ref()
         .and_then(|s| s.last_watcher_relayed_offset);
@@ -633,6 +738,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
             break;
         }
+
+        refresh_watcher_turn_identity(
+            &mut watcher_turn_identity,
+            &watcher_provider,
+            channel_id,
+            &tmux_session_name,
+        );
 
         // If paused (Discord handler is processing its own turn), keep the
         // liveness monitor active so a dead pane still clears watcher state.
@@ -3664,6 +3776,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let sess_for_inflight = tmux_session_name.clone();
             let provider_for_inflight = provider.clone();
             let channel_id_inflight = channel_id;
+            let watcher_identity_for_inflight = watcher_turn_identity.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 let pane_alive = tmux_session_has_live_pane(&sess_for_inflight);
                 if pane_alive {
@@ -3675,6 +3788,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &provider_for_inflight,
                     channel_id_inflight,
                     &sess_for_inflight,
+                    watcher_identity_for_inflight.as_ref(),
                 );
             })
             .await;
