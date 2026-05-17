@@ -30,7 +30,7 @@ agentdesk.routines.register({
         "Run the migrated launchd job 'family-morning-briefing.yohoejang' for routine_id=" +
           ctx.routine.id,
         "Invoke the existing shell pipeline exactly as launchd does:",
-        "  /Users/itismyfield/.local/bin/family-morning-briefing-yohoejang.sh",
+        "  /Users/itismyfield/.adk/release/scripts/launchd-migrated/family-morning-briefing-yohoejang.sh",
         "Preserve the original prompt body, target channel, weather/calendar/reminders",
         "skill path, and Discord destination unchanged.",
         "Return a one-line status summary (success | NO_REPLY | error: <msg>).",

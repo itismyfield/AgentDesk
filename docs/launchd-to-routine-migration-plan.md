@@ -9,9 +9,11 @@ de-duplicates by removing the launchd plist once parity is confirmed.
 
 All routine scripts live under `routines/migrated-launchd/`. Each routine's
 `tick()` returns `action: "agent"` with a prompt instructing the attached
-agent to invoke the same `~/.local/bin/*.sh` (or repo `scripts/*.sh`) entry
-point the launchd plist used. This preserves the original prompt body,
-target Discord channel, skill path, and any side effects unchanged.
+agent to invoke the repo-deployed entrypoint under
+`/Users/itismyfield/.adk/release/scripts/launchd-migrated/`. The entrypoints
+were copied from the original `~/.local/bin/*.sh` launchd targets and are
+deployed by `adk-release`, so leadership can move between eligible nodes
+without a manual script rsync.
 
 ## The 12 jobs
 
@@ -24,16 +26,18 @@ target Discord channel, skill path, and any side effects unchanged.
 | 5 | `com.itismyfield.cookingheart-daily-briefing` | `migrated-launchd/cookingheart-daily-briefing.js` | `0 19 * * *` | `project-agentdesk` | cutover (stage-paused) |
 | 6 | `com.itismyfield.family-morning-briefing.obujang` | `migrated-launchd/family-morning-briefing-obujang.js` | `30 6 * * *` | `personal-obiseo` | cutover (stage-paused) |
 | 7 | `com.itismyfield.family-morning-briefing.yohoejang` | `migrated-launchd/family-morning-briefing-yohoejang.js` | `31 6 * * *` | `personal-yobiseo` | cutover (stage-paused) |
-| 8 | `com.itismyfield.memento-daily-report` | `migrated-launchd/memento-daily-report.js` | `0 9 * * *` | **TODO** | scripts-only (not attached) |
-| 9 | `com.itismyfield.memento-hygiene` | `migrated-launchd/memento-hygiene.js` | `0 6 * * *` | **TODO** | scripts-only (not attached) |
-| 10 | `com.itismyfield.memory-merge` | `migrated-launchd/memory-merge.js` | `0 6 * * *` | **TODO** | scripts-only (not attached) |
+| 8 | `com.itismyfield.memento-daily-report` | `migrated-launchd/memento-daily-report.js` | `0 9 * * *` | `personal-obiseo` | cutover (stage-paused) |
+| 9 | `com.itismyfield.memento-hygiene` | `migrated-launchd/memento-hygiene.js` | `0 6 * * *` | `personal-obiseo` | cutover (stage-paused) |
+| 10 | `com.itismyfield.memory-merge` | `migrated-launchd/memory-merge.js` | `0 6 * * *` | `project-agentdesk` | cutover (stage-paused) |
 | 11 | `com.itismyfield.token-daily-report` | `migrated-launchd/token-daily-report.js` | `0 7 * * *` | `token-manager` | cutover (stage-paused) |
 | 12 | `com.agentdesk.queue-stability-batch` | `migrated-launchd/queue-stability-batch.js` | `0 4 * * *` | `project-agentdesk` | parallel-run (idempotent) |
 
-Jobs 8/9/10 have no agent owner yet (the issue marks them `(담당자 확정
-필요)`). The routine scripts ship for staging, but **do not attach them via
-`POST /api/routines` until the operator picks an `agent_id`**. The launchd
-plists keep firing in the meantime — no regression.
+Owner decision for jobs 8/9/10: the two Memento store jobs belong to
+`personal-obiseo` because they operate on the operator-private Memento
+store/reporting channel; `memory-merge` belongs to `project-agentdesk`
+because it maintains the AgentDesk-managed memory tier files and skill
+catalog. They still use the stage-paused cutover flow because they mutate
+external memory state and must not true-parallel-run with launchd.
 
 ## Routine cron timezone
 
@@ -43,19 +47,17 @@ launchd `StartCalendarInterval` wall-clock times exactly. DST is not a
 factor in Asia/Seoul (KST is UTC+9 year-round, no DST), so no off-by-one
 hour shift is possible between launchd and the routine scheduler.
 
-## Operator: attach routines (once dcserver is up + scripts mirrored)
+## Operator: attach routines (once dcserver is up + release is deployed)
 
 Run on whichever node is the cluster leader. The workspace containing
 `routines/migrated-launchd/` must be deployed before the script loader
-will see the new files. Do **not** run any of the attach commands below
-until the Cross-leader-prerequisite step has mirrored the
-`~/.local/bin/*.sh` entrypoints to every node eligible to hold the
-routine-runtime lease.
+will see the new files, and `scripts/launchd-migrated/` must be deployed
+under `/Users/itismyfield/.adk/release/scripts/launchd-migrated/`.
 
 The attach commands are split into three groups: Group A
 (parallel-run-safe, attach with schedule), Group B (cutover via
 stage-paused — attach without schedule, then PATCH schedule at cutover
-time), and Group C (do not attach until agent_id is decided).
+time), and Group C (memory-state jobs; also stage-paused).
 
 ### Group A — attach with schedule (parallel-run safe: only job 12)
 
@@ -182,45 +184,67 @@ done
 # Expected: every row reports "paused".
 ```
 
-### Group C — DO NOT ATTACH (jobs 8, 9, 10 — agent_id TBD)
+### Group C — stage-paused attach without schedule (memory-state jobs: 8, 9, 10)
 
 The launchd plists for memento-daily-report, memento-hygiene, and
-memory-merge keep firing while the agent owner is decided. Once an
-`agent_id` is chosen, attach via the Group B pattern (no schedule, then
-pause, then PATCH schedule at cutover) — these jobs mutate external
-state (memento store / merged memory files), so true parallel-run is
-not safe.
+memory-merge keep firing until cutover. Attach these via the Group B
+pattern (no schedule, then pause, then PATCH schedule at cutover) because
+they mutate external state (memento store / merged memory files), so true
+parallel-run is not safe.
+
+```bash
+# Job 8 — memento-daily-report (cutover schedule: 0 9 * * *)
+ID8=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/memento-daily-report.js",
+  "name": "memento-daily-report",
+  "agent_id": "personal-obiseo",
+  "execution_strategy": "fresh",
+  "timeout_secs": 1800
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID8/pause" -X POST
+
+# Job 9 — memento-hygiene (cutover schedule: 0 6 * * *)
+ID9=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/memento-hygiene.js",
+  "name": "memento-hygiene",
+  "agent_id": "personal-obiseo",
+  "execution_strategy": "fresh",
+  "timeout_secs": 1800
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID9/pause" -X POST
+
+# Job 10 — memory-merge (cutover schedule: 0 6 * * *)
+ID10=$(curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
+  "script_ref": "migrated-launchd/memory-merge.js",
+  "name": "memory-merge",
+  "agent_id": "project-agentdesk",
+  "execution_strategy": "fresh",
+  "timeout_secs": 1800
+}' | jq -r '.routine.id')
+curl -sf "$API/api/routines/$ID10/pause" -X POST
+```
 
 ## Cross-leader prerequisite — script availability
 
-**All 12 shell entrypoints currently live only on mac-mini** under
-`/Users/itismyfield/.local/bin/*.sh`; the §3 entrypoint
-`scripts/queue-stability-batch.sh` is in this repo and is present
-wherever the workspace is deployed. Routines invoke the absolute path,
-so a routine that fires while the `routine-runtime` lease is held by a
-node missing the script will fail.
+Jobs 1–11 now invoke scripts staged by `adk-release` at
+`/Users/itismyfield/.adk/release/scripts/launchd-migrated/*.sh`; the
+helper `run-claude-message-job.sh` is staged in the same directory and
+called via the script's own directory. Cross-leader failover therefore
+uses the release artifact instead of host-local `~/.local/bin` state.
 
-Before attaching any of jobs 1–11, the operator **must mirror the
-scripts to every node eligible to hold the `routine-runtime` lease**:
+Before attaching any migrated job, deploy the release on every node
+eligible to hold the `routine-runtime` lease and verify the directory:
 
 ```bash
-# Run from mac-book (or whichever non-mac-mini leader candidate exists):
-rsync -av mac-mini:/Users/itismyfield/.local/bin/{agent-feedback-briefing,ai-integrated-briefing,banchan-day-reminder-prep,banchan-day-reminder-cook,cookingheart-daily-briefing,family-morning-briefing-obujang,family-morning-briefing-yohoejang,memento-daily-report,memento-hygiene,memory-merge,token-daily-report,run-claude-message-job}.sh /Users/itismyfield/.local/bin/
-chmod +x /Users/itismyfield/.local/bin/*.sh
-# Verify parity:
-ssh mac-mini 'ls -l ~/.local/bin/*.sh' | sort
-ls -l /Users/itismyfield/.local/bin/*.sh | sort
+ls -l /Users/itismyfield/.adk/release/scripts/launchd-migrated/*.sh | sort
 ```
-
-The two listings must match before any of jobs 1–11 is attached.
 
 No supported `preferred-leader` / `execution_scope` knob currently exists
 to pin `routine-runtime` to mac-mini (`WORKER_SPECS` declares it
 hardcoded `LeaderOnly`; the only way to keep the lease on mac-mini is to
-keep mac-book down or out of the cluster). Mirroring scripts is the
-only safe option. Long-term, move the entrypoints into the repo (e.g.
-`scripts/launchd-migrated/`) and have `adk-release` deploy them so the
-release artifact is the source of truth.
+keep mac-book down or out of the cluster). The release-deployed
+entrypoint directory is the supported source of truth for routine
+execution.
 
 ## Verification window (≥24 hours)
 
@@ -342,12 +366,11 @@ cutover protocol.
    `mv ~/Library/LaunchAgents/com.agentdesk.queue-stability-batch.plist
    ~/Library/LaunchAgents.disabled/` so Rollback C is avoidable.
 
-### Jobs 8/9/10 — TODO agent_id
+### Jobs 8/9/10 — memory-state cutover
 
-Do not attach these until the operator picks an `agent_id`. The launchd
-plists keep firing in the meantime. Once the owner is chosen, follow
-the stage-paused → cutover protocol (these jobs probably also write
-external state, so safer than true parallel-run).
+These now have concrete owners, but still use the stage-paused →
+cutover protocol. The launchd plists keep firing until the cutover
+moment because these jobs write/report Memento and memory-tier state.
 
 ### Per-routine observability
 
@@ -434,5 +457,5 @@ re-spawns `routine-runtime` on the new leader, so the migrated jobs fire
 regardless of which physical node (mac-mini or mac-book) is leader at
 schedule time — unlike launchd, which only fires on the node where the
 plist is loaded (currently mac-mini). This is the principal reliability
-gain of the migration **once the entrypoint scripts are mirrored to
-every eligible leader** (see Cross-leader prerequisite above).
+gain of the migration **once the release-deployed entrypoint directory
+exists on every eligible leader** (see Cross-leader prerequisite above).
