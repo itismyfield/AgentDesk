@@ -52,11 +52,22 @@ use crate::services::provider::{
 
 /// A single channel → (agent_id, provider) binding entry. The matcher only
 /// needs this minimal projection from the live AgentChannelBindings table.
+///
+/// `tmux_segment` is the channel **name** used to build the tmux session name
+/// (e.g. `adk-cc`). It is distinct from `channel_id` (the Discord snowflake)
+/// because operators dispatch by channel name in `agentdesk.yaml`'s
+/// `channels.<provider>.name`, so the live tmux session string is
+/// `AgentDesk-{provider}-{name}` — not `AgentDesk-{provider}-{snowflake}`.
+///
+/// When `tmux_segment` is `None` (legacy bindings with only a snowflake), the
+/// directory falls back to using `channel_id` as the segment. That preserves
+/// existing behavior for callers that haven't been migrated yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelBinding {
     pub channel_id: String,
     pub agent_id: String,
     pub provider: ProviderKind,
+    pub tmux_segment: Option<String>,
 }
 
 /// In-memory directory of channel bindings. Callers (E2 discovery, the CLI
@@ -140,14 +151,28 @@ impl ChannelDirectory {
     {
         let mut directory = Self::new();
         for binding in bindings {
-            let key = expected_session_name_for(None, &binding.provider, &binding.channel_id);
+            let key = expected_session_name_for(
+                None,
+                &binding.provider,
+                binding
+                    .tmux_segment
+                    .as_deref()
+                    .unwrap_or(&binding.channel_id),
+            );
             directory.by_session_name.insert(key, binding);
         }
         directory
     }
 
     pub fn insert(&mut self, binding: ChannelBinding) -> Result<(), DirectoryBuildError> {
-        let key = expected_session_name_for(None, &binding.provider, &binding.channel_id);
+        let key = expected_session_name_for(
+            None,
+            &binding.provider,
+            binding
+                .tmux_segment
+                .as_deref()
+                .unwrap_or(&binding.channel_id),
+        );
         if let Some(existing) = self.by_session_name.get(&key) {
             if existing != &binding {
                 // Same expected session name but the binding differs in *any*
@@ -476,6 +501,7 @@ mod tests {
             channel_id: channel_id.to_string(),
             agent_id: agent_id.to_string(),
             provider,
+            tmux_segment: None,
         }
     }
 
