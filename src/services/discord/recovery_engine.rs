@@ -4712,6 +4712,7 @@ mod tests {
             rebind_origin: false,
             long_running_placeholder_active: false,
             watcher_owns_live_relay: false,
+            turn_source: crate::services::discord::inflight::TurnSource::Managed,
         };
 
         assert!(
@@ -4838,6 +4839,7 @@ mod tests {
             rebind_origin: false,
             long_running_placeholder_active: false,
             watcher_owns_live_relay: false,
+            turn_source: crate::services::discord::inflight::TurnSource::Managed,
         };
 
         save_missing_session_handoff(

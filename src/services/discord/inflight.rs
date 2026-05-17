@@ -197,6 +197,53 @@ pub(super) struct InflightTurnState {
     /// stream or terminal-replace assistant text while this is true.
     #[serde(default)]
     pub watcher_owns_live_relay: bool,
+    /// #2285 audit trail — origin of the turn that produced this inflight.
+    /// Recorded for diagnostics; the session-bound relay does NOT branch on
+    /// this value (epic #2285 acceptance criterion E: relay is decided by
+    /// `SessionMatcher` membership, not by turn source). Defaults to
+    /// `Managed` for legacy rows that pre-date this field.
+    #[serde(default)]
+    pub turn_source: TurnSource,
+}
+
+/// Origin of a turn whose state is captured in [`InflightTurnState`]. Pure
+/// audit metadata for #2285 / #2161 — callers must not branch relay or
+/// completion semantics on this value; the session-bound relay (epic #2285
+/// E1–E5) treats every matched session uniformly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::services::discord) enum TurnSource {
+    /// AgentDesk-launched tmux session via the normal Discord intake path.
+    /// This is the historical default for every legacy row.
+    #[default]
+    Managed,
+    /// Triggered by a Monitor pattern auto-turn synthesised on top of an
+    /// existing managed session (`TaskNotificationKind::MonitorAutoTurn`).
+    MonitorTriggered,
+    /// User typed directly into the tmux pane (SSH / local tty) while the
+    /// pane was bound to a Discord channel. Detected by the watcher when
+    /// rollout activity advances without a Discord-origin inflight in
+    /// place.
+    ExternalInput,
+    /// AgentDesk discovered a session created externally (e.g. operator ran
+    /// `tmux new -s <expected>` and started a provider) and adopted it via
+    /// `SessionDiscovery` + `SessionRegistry` (epic #2285 E2). Distinct
+    /// from `ExternalInput` (which keeps an existing Discord-bound session
+    /// running) — `ExternalAdopted` is the *first* time AgentDesk sees the
+    /// session.
+    ExternalAdopted,
+}
+
+impl TurnSource {
+    /// Stable wire representation for audit logs / metrics labels.
+    pub(in crate::services::discord) fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::MonitorTriggered => "monitor_triggered",
+            Self::ExternalInput => "external_input",
+            Self::ExternalAdopted => "external_adopted",
+        }
+    }
 }
 
 impl InflightTurnState {
@@ -268,6 +315,7 @@ impl InflightTurnState {
             rebind_origin: false,
             long_running_placeholder_active: false,
             watcher_owns_live_relay: false,
+            turn_source: TurnSource::Managed,
         }
     }
 
