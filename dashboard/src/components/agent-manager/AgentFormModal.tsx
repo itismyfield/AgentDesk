@@ -124,7 +124,7 @@ export default function AgentFormModal({
           <h3 className="text-base font-bold" style={{ color: "var(--th-text-heading)" }}>
             {isEdit ? tr("직원 정보 수정", "Edit Agent") : tr("신규 직원 채용", "Hire New Agent")}
           </h3>
-          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-11 w-11" style={{ padding: 0 }} aria-label="Close">
+          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-11 w-11" style={{ padding: 0 }} aria-label={tr("닫기", "Close")}>
             ✕
           </SurfaceActionButton>
         </div>
