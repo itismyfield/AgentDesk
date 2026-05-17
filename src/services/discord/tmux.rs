@@ -1194,6 +1194,10 @@ async fn finish_monitor_auto_turn_if_claimed(
     }
 }
 
+fn advance_buffer_start_offset(start_offset: u64, before_len: usize, after_len: usize) -> u64 {
+    start_offset.saturating_add(before_len.saturating_sub(after_len) as u64)
+}
+
 fn ensure_monitor_auto_turn_inflight(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -2324,6 +2328,18 @@ pub(super) use self::tmux_output_stream::{
     WatcherToolState, build_watcher_placeholder_status_block, flush_placeholder_live_events,
     force_next_watcher_status_update, process_watcher_lines,
 };
+
+#[cfg(test)]
+mod buffer_offset_tests {
+    use super::advance_buffer_start_offset;
+
+    #[test]
+    fn advance_buffer_start_offset_tracks_drained_leftover_tail() {
+        assert_eq!(advance_buffer_start_offset(100, 80, 30), 150);
+        assert_eq!(advance_buffer_start_offset(100, 30, 80), 100);
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::FallbackPlaceholderCleanupDecision;

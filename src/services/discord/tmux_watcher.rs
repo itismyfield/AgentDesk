@@ -621,6 +621,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     // outer-scope `all_data` carries that leftover into the next watcher loop
     // iteration so the next turn does not need to wait for fresh disk reads.
     let mut all_data = String::new();
+    let mut all_data_start_offset = current_offset;
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
     let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
@@ -1002,7 +1003,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // #1216: append to the outer-scope `all_data` so any leftover from a
         // previous iteration (multi-turn buffer split at the first `result`)
         // is processed before the new disk read.
+        if all_data.is_empty() {
+            all_data_start_offset = data_start_offset;
+        }
         all_data.push_str(&String::from_utf8_lossy(&data));
+        let turn_data_start_offset = all_data_start_offset;
         let mut state = StreamLineState::new();
         let stream_seed = watcher_stream_seed(restored_turn.take());
         let mut full_response = stream_seed.full_response;
@@ -1026,12 +1031,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut monitor_auto_turn_preamble_injected = false;
 
         // Process any complete lines we already have
+        let initial_buffer_len = all_data.len();
         let initial_outcome = process_watcher_lines(
             &mut all_data,
             &mut state,
             &mut full_response,
             &mut tool_state,
         );
+        all_data_start_offset =
+            advance_buffer_start_offset(turn_data_start_offset, initial_buffer_len, all_data.len());
         let live_events_dirty = flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
         let mut found_result = initial_outcome.found_result;
         let mut is_prompt_too_long = initial_outcome.is_prompt_too_long;
@@ -1085,6 +1093,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             monitor_auto_turn_deferred = monitor_auto_turn_deferred || start.deferred;
             if !start.acquired {
                 all_data.clear();
+                all_data_start_offset = current_offset;
                 continue;
             }
             ensure_monitor_auto_turn_inflight(
@@ -1116,6 +1125,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if was_paused && !monitor_auto_turn_deferred {
             // A Discord turn took over — discard what we read
             all_data.clear();
+            all_data_start_offset = current_offset;
             continue;
         }
         if !found_result {
@@ -1190,12 +1200,23 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             &mut last_activity_heartbeat_at,
                         );
                         ready_for_input_tracker.record_output();
+                        if all_data.is_empty() {
+                            all_data_start_offset =
+                                current_offset.saturating_sub(chunk.len() as u64);
+                        }
                         all_data.push_str(&String::from_utf8_lossy(&chunk));
+                        let chunk_buffer_start_offset = all_data_start_offset;
+                        let chunk_buffer_len = all_data.len();
                         let outcome = process_watcher_lines(
                             &mut all_data,
                             &mut state,
                             &mut full_response,
                             &mut tool_state,
+                        );
+                        all_data_start_offset = advance_buffer_start_offset(
+                            chunk_buffer_start_offset,
+                            chunk_buffer_len,
+                            all_data.len(),
                         );
                         if flush_placeholder_live_events(&shared, channel_id, &mut tool_state) {
                             force_next_watcher_status_update(&mut last_status_update);
@@ -1839,6 +1860,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             )
             .await;
             all_data.clear();
+            all_data_start_offset = current_offset;
             continue;
         }
 
@@ -2708,6 +2730,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     .map(TaskNotificationKind::as_str)
                     .unwrap_or("none")
             );
+            let mut retry_terminal_delivery_from_offset = false;
             let mut relay_ok = true;
             let mut direct_send_delivered = false;
             match placeholder_msg_id {
@@ -2786,6 +2809,43 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     }
                                 }
                             }
+                            Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
+                                sent_chunks,
+                                total_chunks,
+                                failed_chunk_index,
+                                sent_continuation_message_ids,
+                                cleanup_errors,
+                                error,
+                            }) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::warn!(
+                                    "  [{ts}] ⚠ watcher: terminal response partially delivered in channel {} msg {} (sent_chunks={}, total_chunks={}, failed_chunk_index={}, cleaned_continuations={}, cleanup_errors={}, error={}); preserving inflight for retry",
+                                    channel_id.get(),
+                                    msg_id.get(),
+                                    sent_chunks,
+                                    total_chunks,
+                                    failed_chunk_index,
+                                    sent_continuation_message_ids.len(),
+                                    cleanup_errors.len(),
+                                    error
+                                );
+                                record_placeholder_cleanup(
+                                    &shared,
+                                    &watcher_provider,
+                                    channel_id,
+                                    msg_id,
+                                    &tmux_session_name,
+                                    PlaceholderCleanupOperation::EditTerminal,
+                                    PlaceholderCleanupOutcome::failed(format!(
+                                        "{error}; cleaned_continuations={}; cleanup_errors={}",
+                                        sent_continuation_message_ids.len(),
+                                        cleanup_errors.len()
+                                    )),
+                                    "watcher_terminal_relay_partial_continuation_failure",
+                                );
+                                relay_ok = false;
+                                retry_terminal_delivery_from_offset = true;
+                            }
                             Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
@@ -2831,7 +2891,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
             if relay_ok {
                 if direct_send_delivered || !has_current_response {
-                    last_relayed_offset = Some(data_start_offset);
+                    last_relayed_offset = Some(turn_data_start_offset);
                     // #1270 codex P2: snapshot the current `.generation` mtime
                     // on every successful relay so the local regression check
                     // has a real baseline. Without this, normal relay paths
@@ -2857,7 +2917,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 channel_id.get(),
                             )
                         {
-                            inflight.last_watcher_relayed_offset = Some(data_start_offset);
+                            inflight.last_watcher_relayed_offset = Some(turn_data_start_offset);
                             // #1270: persist the matching `.generation` mtime
                             // alongside the offset so a replacement watcher
                             // (e.g. after dcserver restart) can disambiguate
@@ -2872,6 +2932,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     }
                 }
                 clear_provider_overload_retry_state(channel_id);
+            }
+            if retry_terminal_delivery_from_offset {
+                current_offset = turn_data_start_offset;
+                all_data.clear();
+                all_data_start_offset = current_offset;
+                relay_coord
+                    .relay_slot
+                    .store(0, std::sync::atomic::Ordering::Release);
+                sleep_or_jsonl_event(tokio::time::Duration::from_millis(500), &jsonl_notify).await;
+                continue 'watcher_loop;
             }
             relay_ok
         } else if relay_decision.suppressed {

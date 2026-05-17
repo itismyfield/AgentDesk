@@ -36,6 +36,10 @@ fn record_turn_bridge_terminal_replace_cleanup(
     );
 }
 
+fn replace_outcome_commits_terminal_delivery(outcome: &ReplaceLongMessageOutcome) -> bool {
+    matches!(outcome, ReplaceLongMessageOutcome::EditedOriginal)
+}
+
 pub(super) fn turn_bridge_replace_outcome_committed(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -66,6 +70,29 @@ pub(super) fn turn_bridge_replace_outcome_committed(
                 message_id,
                 tmux_session_name,
                 super::super::placeholder_cleanup::PlaceholderCleanupOutcome::failed(edit_error),
+                source,
+            );
+            false
+        }
+        Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
+            sent_chunks,
+            total_chunks,
+            failed_chunk_index,
+            sent_continuation_message_ids,
+            cleanup_errors,
+            error,
+        }) => {
+            record_turn_bridge_terminal_replace_cleanup(
+                shared,
+                provider,
+                channel_id,
+                message_id,
+                tmux_session_name,
+                super::super::placeholder_cleanup::PlaceholderCleanupOutcome::failed(format!(
+                    "partial continuation failure: sent_chunks={sent_chunks}, total_chunks={total_chunks}, failed_chunk_index={failed_chunk_index}, cleaned_continuations={}, cleanup_errors={}, error={error}",
+                    sent_continuation_message_ids.len(),
+                    cleanup_errors.len()
+                )),
                 source,
             );
             false
@@ -112,9 +139,11 @@ pub(super) fn should_fail_dispatch_after_terminal_delivery(
 #[cfg(test)]
 mod tests {
     use super::{
+        replace_outcome_commits_terminal_delivery,
         should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery,
     };
+    use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 
     #[test]
     fn work_dispatch_completion_requires_terminal_delivery_commit() {
@@ -181,6 +210,33 @@ mod tests {
             false,
             false,
             "final response delivered",
+        ));
+    }
+
+    #[test]
+    fn partial_continuation_failure_does_not_commit_terminal_delivery() {
+        let outcome = ReplaceLongMessageOutcome::PartialContinuationFailure {
+            sent_chunks: 1,
+            total_chunks: 3,
+            failed_chunk_index: 1,
+            sent_continuation_message_ids: Vec::new(),
+            cleanup_errors: Vec::new(),
+            error: "HTTP 500".to_string(),
+        };
+
+        assert!(!replace_outcome_commits_terminal_delivery(&outcome));
+        assert!(!should_complete_work_dispatch_after_terminal_delivery(
+            true,
+            replace_outcome_commits_terminal_delivery(&outcome),
+            false,
+            false,
+            false,
+            "final response with missing continuation",
+        ));
+        assert!(!should_fail_dispatch_after_terminal_delivery(
+            true,
+            replace_outcome_commits_terminal_delivery(&outcome),
+            false,
         ));
     }
 

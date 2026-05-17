@@ -30,7 +30,7 @@ use serde_json::Value;
 use serenity::model::id::{ChannelId, MessageId};
 
 use super::SharedData;
-use super::formatting;
+use super::formatting::{self, ReplaceLongMessageOutcome};
 use super::inflight::{InflightSignal, InflightTurnState};
 use crate::services::provider::ProviderKind;
 
@@ -66,6 +66,9 @@ pub(super) async fn run_standby_relay(
     let mut last_inflight_heartbeat = Instant::now();
     // Buffer for incomplete trailing line across reads.
     let mut tail_buf = String::new();
+    let mut tail_start_offset = start_offset;
+    let mut pending_result_text: Option<String> = None;
+    let mut pending_result_retry_offset: Option<u64> = None;
     // #2448: subscribe BEFORE the first poll tick so a `Completed` broadcast
     // emitted while we are setting up is queued instead of lost. Lag is
     // expected on heavy load — `RecvError::Lagged` is treated as "you may
@@ -109,7 +112,10 @@ pub(super) async fn run_standby_relay(
         loop {
             use tokio::sync::broadcast::error::TryRecvError;
             match inflight_signals.try_recv() {
-                Ok(InflightSignal::Completed { channel_id: c }) if c == channel_id.get() => {
+                Ok(InflightSignal::Completed { channel_id: c })
+                    if c == channel_id.get()
+                        && standby_completed_signal_exits(pending_result_text.as_deref()) =>
+                {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
                         "  [{ts}] 👁 standby_relay exit on InflightSignal::Completed for channel {} (offset={})",
@@ -117,6 +123,9 @@ pub(super) async fn run_standby_relay(
                         current_offset
                     );
                     return;
+                }
+                Ok(InflightSignal::Completed { channel_id: c }) if c == channel_id.get() => {
+                    continue;
                 }
                 Ok(_) => continue, // other channels — ignore
                 Err(TryRecvError::Empty) => break,
@@ -129,11 +138,12 @@ pub(super) async fn run_standby_relay(
                     // the on-disk inflight authoritatively: if terminal
                     // (file gone or pointing at a different output), the
                     // turn already completed and we should exit now.
-                    if super::inflight::load_inflight_state(&provider, channel_id.get())
-                        .map(|state| {
-                            !standby_inflight_matches(&state, &output_path, placeholder_msg_id)
-                        })
-                        .unwrap_or(true)
+                    if pending_result_text.is_none()
+                        && super::inflight::load_inflight_state(&provider, channel_id.get())
+                            .map(|state| {
+                                !standby_inflight_matches(&state, &output_path, placeholder_msg_id)
+                            })
+                            .unwrap_or(true)
                     {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(
@@ -154,9 +164,36 @@ pub(super) async fn run_standby_relay(
                 channel_id,
                 &output_path,
                 placeholder_msg_id,
-                current_offset,
+                standby_heartbeat_offset(
+                    current_offset,
+                    pending_result_retry_offset,
+                    (!tail_buf.is_empty()).then_some(tail_start_offset),
+                ),
             );
             last_inflight_heartbeat = Instant::now();
+        }
+
+        if let Some(result_text) = pending_result_text.as_deref() {
+            let delivered = deliver_response(
+                &http,
+                channel_id,
+                placeholder_msg_id,
+                &shared,
+                &provider,
+                result_text,
+            )
+            .await;
+            if delivered {
+                clear_standby_inflight_state(
+                    &provider,
+                    channel_id,
+                    &output_path,
+                    placeholder_msg_id,
+                );
+                return;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
         }
 
         let file_size = match std::fs::metadata(&output_path) {
@@ -171,8 +208,9 @@ pub(super) async fn run_standby_relay(
             continue;
         }
 
-        let read_to = (current_offset + MAX_FILE_BYTES_PER_TICK).min(file_size);
-        let new_chunk = match read_file_range(&output_path, current_offset, read_to) {
+        let read_from = current_offset;
+        let read_to = (read_from + MAX_FILE_BYTES_PER_TICK).min(file_size);
+        let new_chunk = match read_file_range(&output_path, read_from, read_to) {
             Ok(s) => s,
             Err(_) => {
                 tokio::time::sleep(POLL_INTERVAL).await;
@@ -183,6 +221,11 @@ pub(super) async fn run_standby_relay(
 
         // Stitch any prior incomplete tail with the new chunk and process
         // line-by-line. Keep the trailing partial line (no '\n') for next tick.
+        let stitched_start_offset = if tail_buf.is_empty() {
+            read_from
+        } else {
+            tail_start_offset
+        };
         let stitched = if tail_buf.is_empty() {
             new_chunk
         } else {
@@ -192,37 +235,30 @@ pub(super) async fn run_standby_relay(
         };
         let mut last_complete_end = 0usize;
         let bytes = stitched.as_bytes();
+        let mut found_result_text = None;
         for (idx, b) in bytes.iter().enumerate() {
             if *b == b'\n' {
-                let line = &stitched[last_complete_end..idx];
+                let line_start = last_complete_end;
+                let line = &stitched[line_start..idx];
                 last_complete_end = idx + 1;
                 if line.trim().is_empty() {
                     continue;
                 }
                 if let Some(result_text) = extract_result_text(line) {
-                    let delivered = deliver_response(
-                        &http,
-                        channel_id,
-                        placeholder_msg_id,
-                        &shared,
-                        &provider,
-                        &result_text,
-                    )
-                    .await;
-                    if delivered {
-                        clear_standby_inflight_state(
-                            &provider,
-                            channel_id,
-                            &output_path,
-                            placeholder_msg_id,
-                        );
-                    }
-                    return;
+                    pending_result_retry_offset =
+                        Some(stitched_start_offset.saturating_add(line_start as u64));
+                    found_result_text = Some(result_text);
+                    break;
                 }
             }
         }
+        if let Some(result_text) = found_result_text {
+            pending_result_text = Some(result_text);
+            continue;
+        }
         if last_complete_end < stitched.len() {
             tail_buf = stitched[last_complete_end..].to_string();
+            tail_start_offset = stitched_start_offset.saturating_add(last_complete_end as u64);
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -266,6 +302,20 @@ fn standby_inflight_matches(
     } else {
         true
     }
+}
+
+fn standby_completed_signal_exits(pending_result_text: Option<&str>) -> bool {
+    pending_result_text.is_none()
+}
+
+fn standby_heartbeat_offset(
+    current_offset: u64,
+    pending_result_retry_offset: Option<u64>,
+    incomplete_tail_start_offset: Option<u64>,
+) -> u64 {
+    pending_result_retry_offset
+        .or(incomplete_tail_start_offset)
+        .unwrap_or(current_offset)
 }
 
 fn refresh_standby_inflight_heartbeat(
@@ -322,7 +372,8 @@ async fn deliver_response(
             .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             match outcome {
-                Ok(_) => {
+                Ok(ReplaceLongMessageOutcome::EditedOriginal)
+                | Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }) => {
                     tracing::info!(
                         "  [{ts}] 👁 standby_relay ✓ delivered terminal response (edit) channel {} msg {} ({} chars)",
                         channel_id.get(),
@@ -330,6 +381,27 @@ async fn deliver_response(
                         chars
                     );
                     true
+                }
+                Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
+                    sent_chunks,
+                    total_chunks,
+                    failed_chunk_index,
+                    sent_continuation_message_ids,
+                    cleanup_errors,
+                    error,
+                }) => {
+                    tracing::warn!(
+                        "  [{ts}] ⚠ standby_relay partially delivered terminal response in channel {} msg {} (sent_chunks={}, total_chunks={}, failed_chunk_index={}, cleaned_continuations={}, cleanup_errors={}, error={})",
+                        channel_id.get(),
+                        msg_id.get(),
+                        sent_chunks,
+                        total_chunks,
+                        failed_chunk_index,
+                        sent_continuation_message_ids.len(),
+                        cleanup_errors.len(),
+                        error
+                    );
+                    false
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -449,6 +521,20 @@ mod tests {
 
         assert!(matches(&InflightSignal::Completed { channel_id: own }));
         assert!(!matches(&InflightSignal::Completed { channel_id: other }));
+    }
+
+    #[test]
+    fn completed_signal_does_not_exit_while_result_delivery_is_pending() {
+        assert!(standby_completed_signal_exits(None));
+        assert!(!standby_completed_signal_exits(Some("final response")));
+    }
+
+    #[test]
+    fn heartbeat_offset_rewinds_to_pending_result_until_delivery_commits() {
+        assert_eq!(standby_heartbeat_offset(250, None, None), 250);
+        assert_eq!(standby_heartbeat_offset(250, Some(120), None), 120);
+        assert_eq!(standby_heartbeat_offset(250, None, Some(180)), 180);
+        assert_eq!(standby_heartbeat_offset(250, Some(120), Some(180)), 120);
     }
 
     /// #2448 acceptance — `tokio::sync::broadcast` capacity 256 must
