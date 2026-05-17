@@ -627,4 +627,105 @@ mod tests {
             handle.shutdown().await;
         }
     }
+
+    /// #2409 finding #1 regression — `full_reconcile` must detect rebinds and
+    /// tear down the stale handle, not just spawn missing sessions. We
+    /// simulate a rebind by hand-installing an active relay whose binding
+    /// differs from what the registry currently has, then running the
+    /// reconcile path directly. The stale handle must come back in the
+    /// teardown list, and the post-reconcile handle must carry the new
+    /// binding.
+    #[tokio::test]
+    async fn full_reconcile_respawns_rebound_session() {
+        let registry = Arc::new(SessionRegistry::new());
+        let sink: Arc<dyn RelaySink> = Arc::new(CountingSink::default());
+
+        // Install the *new* binding in the registry first — that's what
+        // would be present after the lagged event would have updated it.
+        let session_channel = "c-reb";
+        let new_binding = matched(session_channel, ProviderKind::Claude);
+        registry.upsert(new_binding.clone(), Some("mac-mini"));
+
+        // Hand-install an active relay carrying the *old* binding (same
+        // tmux session name, different agent_id / channel_id). This mimics
+        // the post-lag state where the relay was spawned before the rebind.
+        let mut active = ActiveRelays::default();
+        let mut old_binding = new_binding.clone();
+        old_binding.channel_id = "c-old-pre-rebind".to_string();
+        old_binding.agent_id = "agent-pre-rebind".to_string();
+        let old_handle =
+            super::super::stream_relay::spawn_stream_relay(old_binding.clone(), sink.clone());
+        active.insert(new_binding.expected_session_name.clone(), old_handle);
+
+        let teardowns = full_reconcile(&mut active, &registry, &sink);
+
+        assert_eq!(
+            teardowns.len(),
+            1,
+            "rebound session must be in the teardown list"
+        );
+        assert_eq!(
+            teardowns[0].matched().channel_id,
+            "c-old-pre-rebind",
+            "teardown carries the STALE handle"
+        );
+        assert_eq!(active.len(), 1, "respawned handle remains active");
+        let respawned = active
+            .by_session
+            .get(&new_binding.expected_session_name)
+            .expect("respawned handle present");
+        assert_eq!(
+            respawned.matched().channel_id, new_binding.channel_id,
+            "respawned handle carries the NEW binding"
+        );
+        assert_eq!(
+            respawned.matched().agent_id, new_binding.agent_id,
+            "respawned handle carries the NEW agent id"
+        );
+
+        for handle in teardowns {
+            handle.shutdown().await;
+        }
+        for (_, handle) in active.drain() {
+            handle.shutdown().await;
+        }
+    }
+
+    /// #2409 finding #4 regression — flipping the shutdown flag while no
+    /// registry event is in flight must still drive the supervisor out of
+    /// its idle `recv` and into the drain path. The notifier wakes the
+    /// `tokio::select!`, the flag is observed, and the task exits.
+    #[tokio::test]
+    async fn idle_supervisor_observes_shutdown_via_notify() {
+        let registry = Arc::new(SessionRegistry::new());
+        let sink: Arc<dyn RelaySink> = Arc::new(CountingSink::default());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+
+        let registry_clone = registry.clone();
+        let sink_clone = sink.clone();
+        let shutdown_clone = shutdown.clone();
+        let notify_clone = notify.clone();
+        let supervisor = tokio::spawn(async move {
+            run_watcher_supervisor_loop_with_registry(
+                SupervisorConfig::for_test(),
+                sink_clone,
+                shutdown_clone,
+                registry_clone,
+                Some(notify_clone),
+            )
+            .await;
+        });
+
+        // Let boot reconcile run, then go idle. We deliberately publish NO
+        // registry event — only the notifier should drive the exit.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        shutdown.store(true, Ordering::Release);
+        notify.notify_waiters();
+
+        tokio::time::timeout(Duration::from_secs(2), supervisor)
+            .await
+            .expect("supervisor must exit via notify without a registry event")
+            .expect("supervisor task did not panic");
+    }
 }

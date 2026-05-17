@@ -610,4 +610,97 @@ mod tests {
         sink.unblock.notify_waiters();
         handle.shutdown().await;
     }
+
+    /// #2409 finding #2 regression — every delivered frame carries the
+    /// routing binding snapshot, so sinks never re-derive channel_id /
+    /// agent_id / provider from the (potentially truncated) session name.
+    #[tokio::test]
+    async fn frames_carry_binding_snapshot() {
+        let sink = Arc::new(CapturingSink::default());
+        let matched = matched_for("c-bind-1234567890");
+        let handle = spawn_stream_relay(matched.clone(), sink.clone());
+        assert!(handle.try_send_frame("hello".into()));
+        flush_pending().await;
+        let delivered = sink.delivered();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].binding.channel_id, matched.channel_id);
+        assert_eq!(delivered[0].binding.agent_id, matched.agent_id);
+        assert_eq!(delivered[0].binding.provider, matched.provider);
+        assert_eq!(
+            delivered[0].binding.expected_session_name,
+            matched.expected_session_name
+        );
+        // Sanity: the Arc-shared binding identity matches the handle's
+        // matched() to confirm rebind detection upstream still works.
+        assert_eq!(
+            delivered[0].binding.expected_session_name,
+            handle.matched().expected_session_name
+        );
+        handle.shutdown().await;
+    }
+
+    /// #2409 finding #3 regression — the queue is real drop-oldest: when the
+    /// buffer is full, the *oldest* frames are evicted and the *newest* one
+    /// makes it into the queue. Without this, final completion markers would
+    /// be silently lost behind a stale backlog.
+    #[tokio::test]
+    async fn drop_oldest_preserves_newest_frame() {
+        // Tiny capacity (1) so every push beyond the first MUST evict the
+        // older one. A blocking sink keeps the consumer parked so the
+        // producer alone drives the eviction policy.
+        struct LatchSink {
+            release: tokio::sync::Notify,
+            frames: Mutex<Vec<StreamFrame>>,
+        }
+        #[async_trait]
+        impl RelaySink for LatchSink {
+            async fn deliver(&self, frame: &StreamFrame) -> Result<(), RelaySinkError> {
+                self.release.notified().await;
+                self.frames.lock().unwrap().push(frame.clone());
+                Ok(())
+            }
+        }
+        let sink = Arc::new(LatchSink {
+            release: tokio::sync::Notify::new(),
+            frames: Mutex::new(Vec::new()),
+        });
+        let handle = spawn_stream_relay_with_buffer(
+            matched_for("c-newest"),
+            sink.clone() as Arc<dyn RelaySink>,
+            1,
+        );
+
+        // Let the relay task pop the first frame and park inside deliver().
+        assert!(handle.try_send_frame("seed-consumer-park".into()));
+        flush_pending().await;
+
+        // Now flood while the consumer is parked. Capacity is 1, so each
+        // push beyond the first must evict the previous queued frame and
+        // leave only the most recent one behind.
+        for i in 0..20 {
+            assert!(handle.try_send_frame(format!("frame-{i}")));
+        }
+        let snap = handle.metrics().snapshot();
+        assert!(
+            snap.dropped_frames >= 19,
+            "expected at least 19 evictions with capacity=1, got {snap:?}"
+        );
+
+        // Release the sink: it delivers the parked frame ("seed"), then the
+        // single remaining queued frame must be the LAST one we pushed.
+        sink.release.notify_waiters();
+        flush_pending().await;
+        // Drain the relay by closing — its drain loop delivers the last
+        // queued frame, then we inspect what landed. notify_waiters() may
+        // need to fire again as drain delivers extra frames; we issue a
+        // second notify to release the drain path's deliver_frame.
+        sink.release.notify_waiters();
+        handle.shutdown().await;
+        let delivered = sink.frames.lock().unwrap();
+        let last = delivered.last().expect("at least one frame delivered");
+        assert_eq!(
+            last.payload, "frame-19",
+            "newest frame survives drop-oldest backpressure (got {delivered:?})"
+        );
+    }
 }
