@@ -100,6 +100,14 @@ pub struct RolloutTailOptions {
     /// `assistant_response_deadline` (30 min). Defaults to `true` so a
     /// tool-only hang surfaces inside the bounded pending-tool budget.
     pub apply_pending_tool_deadline_without_assistant_text: bool,
+    /// Optional tmux session owner used to classify rollout user messages as
+    /// SSH-direct input versus Discord-routed duplicates.
+    pub tmux_session_name: Option<String>,
+    /// Discord-origin prompt that launched this Codex TUI turn. Initial
+    /// launch/resume can take longer than the short global pending TTL, so
+    /// the tail keeps a turn-local copy until the matching rollout user
+    /// message is observed.
+    pub discord_origin_prompt: Option<String>,
 }
 
 impl Default for RolloutTailOptions {
@@ -116,6 +124,8 @@ impl Default for RolloutTailOptions {
             enable_task_complete_fast_path: true,
             legacy_terminal_drain: Some(Duration::from_millis(DEFAULT_LEGACY_TERMINAL_DRAIN_MS)),
             apply_pending_tool_deadline_without_assistant_text: true,
+            tmux_session_name: None,
+            discord_origin_prompt: None,
         }
     }
 }
@@ -167,6 +177,12 @@ struct RolloutParseState {
     /// must apply the longer `legacy_terminal_drain` to absorb >5s mid-
     /// response pauses without truncating bursts.
     seen_any_event_msg: bool,
+    /// Optional tmux session owner used to classify rollout user messages as
+    /// SSH-direct input versus Discord-routed duplicates.
+    tmux_session_name: Option<String>,
+    /// Turn-local launch prompt used to suppress the first matching rollout
+    /// user message even when the global pending TTL has elapsed.
+    discord_origin_prompt: Option<String>,
 }
 
 impl RolloutParseState {
@@ -222,6 +238,28 @@ pub fn tail_latest_rollout_for_cwd_with_handoff(
     )
 }
 
+pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(
+    cwd: &Path,
+    modified_since: SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+    tmux_session_name: &str,
+    discord_origin_prompt: Option<&str>,
+) -> Result<CodexTuiTailResult, String> {
+    let mut options = RolloutTailOptions::default();
+    options.tmux_session_name = Some(tmux_session_name.to_string());
+    options.discord_origin_prompt = discord_origin_prompt.map(ToString::to_string);
+    tail_latest_rollout_for_cwd_with_handoff_options(
+        cwd,
+        modified_since,
+        sender,
+        cancel_token,
+        is_alive,
+        options,
+    )
+}
+
 pub fn tail_latest_rollout_for_cwd_with_options(
     cwd: &Path,
     modified_since: SystemTime,
@@ -272,6 +310,8 @@ fn tail_latest_rollout_for_cwd_with_handoff_options(
         options.enable_task_complete_fast_path,
         options.legacy_terminal_drain,
         options.apply_pending_tool_deadline_without_assistant_text,
+        options.tmux_session_name,
+        options.discord_origin_prompt,
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
@@ -299,6 +339,8 @@ pub fn replay_rollout_file(
         true,
         None,
         true,
+        None,
+        None,
     )?;
     match result {
         ReadOutputResult::Completed { .. } | ReadOutputResult::SessionDied { .. } => Ok(outcome),
@@ -328,6 +370,8 @@ pub fn tail_rollout_file_from_offset(
         defaults.enable_task_complete_fast_path,
         defaults.legacy_terminal_drain,
         defaults.apply_pending_tool_deadline_without_assistant_text,
+        defaults.tmux_session_name,
+        defaults.discord_origin_prompt,
     )
     .map(|result| result.0)
 }
@@ -381,6 +425,38 @@ pub fn tail_resumed_rollout_for_session_with_handoff(
         cancel_token,
         is_alive,
         RolloutTailOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
+    cwd: &Path,
+    session_id: &str,
+    previous_rollout_path: &Path,
+    previous_start_offset: u64,
+    modified_since: SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+    tmux_session_name: &str,
+    discord_origin_prompt: Option<&str>,
+) -> Result<CodexTuiTailResult, String> {
+    let sessions_dir = default_codex_sessions_dir()
+        .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
+    let mut options = RolloutTailOptions::default();
+    options.tmux_session_name = Some(tmux_session_name.to_string());
+    options.discord_origin_prompt = discord_origin_prompt.map(ToString::to_string);
+    tail_resumed_rollout_for_session_with_handoff_options(
+        cwd,
+        session_id,
+        previous_rollout_path,
+        previous_start_offset,
+        modified_since,
+        &sessions_dir,
+        sender,
+        cancel_token,
+        is_alive,
+        options,
     )
 }
 
@@ -455,6 +531,8 @@ fn tail_resumed_rollout_for_session_with_handoff_options(
         options.enable_task_complete_fast_path,
         options.legacy_terminal_drain,
         options.apply_pending_tool_deadline_without_assistant_text,
+        options.tmux_session_name,
+        options.discord_origin_prompt,
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
@@ -682,6 +760,8 @@ fn tail_rollout_file_until_assistant_response(
     enable_task_complete_fast_path: bool,
     legacy_terminal_drain: Option<Duration>,
     apply_pending_tool_deadline_without_assistant_text: bool,
+    tmux_session_name: Option<String>,
+    discord_origin_prompt: Option<String>,
 ) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     let mut file = std::fs::File::open(rollout_path)
         .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?;
@@ -695,6 +775,8 @@ fn tail_rollout_file_until_assistant_response(
 
     let mut state = RolloutParseState {
         session_id: initial_session_id,
+        tmux_session_name,
+        discord_origin_prompt,
         ..RolloutParseState::default()
     };
     let mut current_offset = seek_offset;
@@ -1035,6 +1117,7 @@ fn process_rollout_line(
     // must refresh on them too.
     state.lifecycle_activity = false;
     let messages = rollout_messages(&json, state);
+    observe_rollout_user_prompt(&json, state);
     let emitted = !messages.is_empty();
     for message in messages {
         sender.send(message);
@@ -1063,6 +1146,45 @@ fn rollout_messages(json: &Value, state: &mut RolloutParseState) -> Vec<StreamMe
         "event_msg" => event_msg_message(json, state).into_iter().collect(),
         _ => Vec::new(),
     }
+}
+
+fn observe_rollout_user_prompt(json: &Value, state: &mut RolloutParseState) {
+    let Some(tmux_session_name) = state.tmux_session_name.clone() else {
+        return;
+    };
+    let Some(prompt) = crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt(json)
+    else {
+        return;
+    };
+    if state
+        .discord_origin_prompt
+        .as_deref()
+        .is_some_and(|expected| {
+            crate::services::tui_prompt_dedupe::prompts_match(expected, &prompt)
+        })
+    {
+        crate::services::tui_prompt_dedupe::record_suppressed_discord_origin_prompt(
+            "codex",
+            &tmux_session_name,
+            &prompt,
+        );
+        state.discord_origin_prompt = None;
+        tracing::debug!(
+            tmux_session_name,
+            "suppressed Codex launch prompt observed in rollout"
+        );
+        return;
+    }
+    let observation = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux(
+        "codex",
+        &tmux_session_name,
+        &prompt,
+    );
+    tracing::debug!(
+        tmux_session_name,
+        observation = ?observation,
+        "observed Codex rollout user prompt"
+    );
 }
 
 fn session_meta_message(json: &Value, state: &mut RolloutParseState) -> Option<StreamMessage> {
@@ -1235,7 +1357,16 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
             }
             None
         }
-        _ => None,
+        _ => {
+            // #2477: Codex emits a mix of progress/lifecycle event_msg records
+            // while long tools and subagents are still running. Most of them
+            // do not map to a user-visible StreamMessage, but they still prove
+            // the turn is alive. Refresh the EOF drain clock so the
+            // saw_assistant_text fallback cannot finalize the turn in the
+            // middle of a natural tool/subagent pause.
+            state.lifecycle_activity = true;
+            None
+        }
     }
 }
 
@@ -1454,6 +1585,8 @@ mod tests {
                 enable_task_complete_fast_path: true,
                 legacy_terminal_drain: None,
                 apply_pending_tool_deadline_without_assistant_text: true,
+                tmux_session_name: None,
+                discord_origin_prompt: None,
             },
         )
         .unwrap();
@@ -1513,6 +1646,8 @@ mod tests {
                 enable_task_complete_fast_path: true,
                 legacy_terminal_drain: None,
                 apply_pending_tool_deadline_without_assistant_text: true,
+                tmux_session_name: None,
+                discord_origin_prompt: None,
             },
         )
         .unwrap();
@@ -1600,6 +1735,8 @@ mod tests {
             true,
             None,
             true,
+            None,
+            None,
         )
         .unwrap();
         drop(tx);
@@ -1655,6 +1792,8 @@ mod tests {
                 true,
                 None,
                 true,
+                None,
+                None,
             )
         });
 
@@ -1751,6 +1890,8 @@ mod tests {
                 true,
                 None,
                 true,
+                None,
+                None,
             )
         });
 
@@ -1840,6 +1981,8 @@ mod tests {
                 true,
                 None,
                 true,
+                None,
+                None,
             )
         });
 
@@ -1919,6 +2062,8 @@ mod tests {
                 true,
                 None,
                 true,
+                None,
+                None,
             )
         });
 
@@ -2003,6 +2148,8 @@ mod tests {
                 true,
                 None,
                 true,
+                None,
+                None,
             )
         });
 
@@ -2057,6 +2204,125 @@ mod tests {
     }
 
     #[test]
+    fn progress_event_msg_refreshes_drain_clock() {
+        // #2477: Codex progress/subagent event_msg records may not produce a
+        // visible StreamMessage. They still indicate the turn is active, so
+        // they must refresh the drain clock between assistant bursts.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"progress-pause\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-progress-pause.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment1"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                Duration::from_millis(300),
+                Some(Duration::from_secs(10)),
+                None,
+                true,
+                None,
+                true,
+                None,
+                None,
+            )
+        });
+
+        std::thread::sleep(Duration::from_millis(150));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"event_msg","payload":{"type":"exec_command_progress","message":"still running"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        std::thread::sleep(Duration::from_millis(200));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment2"}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"segment1\n\nsegment2"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            "segment2 must be emitted after progress-only activity refreshes drain; got {:?}",
+            messages
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result.contains("segment1") && result.contains("segment2")
+        ));
+    }
+
+    #[test]
+    fn launch_discord_prompt_suppresses_late_rollout_user_message() {
+        let tmux_session_name = format!("AgentDesk-codex-launch-dedupe-{}", std::process::id());
+        let json = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "slow launch prompt" }
+                ]
+            }
+        });
+        let mut state = RolloutParseState {
+            tmux_session_name: Some(tmux_session_name.clone()),
+            discord_origin_prompt: Some("slow launch prompt".to_string()),
+            ..RolloutParseState::default()
+        };
+
+        observe_rollout_user_prompt(&json, &mut state);
+
+        assert!(state.discord_origin_prompt.is_none());
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::observe_prompt_by_tmux(
+                "codex",
+                &tmux_session_name,
+                "slow launch prompt",
+            ),
+            crate::services::tui_prompt_dedupe::PromptObservation::SuppressedRecentDuplicate
+        );
+    }
+
+    #[test]
     fn stuck_tool_call_deadline_emits_recovery_done() {
         // #2419 follow-up (Codex review HIGH round 2): assistant text was
         // already streamed, then a tool call was emitted but its output
@@ -2101,6 +2367,8 @@ mod tests {
             true,
             None,
             true,
+            None,
+            None,
         )
         .unwrap();
         drop(tx);
@@ -2184,6 +2452,8 @@ mod tests {
             enable_task_complete_fast_path,
             None,
             true,
+            None,
+            None,
         )
         .unwrap();
         let elapsed = started.elapsed();
@@ -2405,6 +2675,8 @@ mod tests {
                 true,
                 None,
                 true,
+                None,
+                None,
             )
         });
         // Give the tail enough time to ingest the pre-output entries and
@@ -2484,6 +2756,8 @@ mod tests {
                 true,
                 Some(Duration::from_secs(3)),
                 true,
+                None,
+                None,
             )
         });
 
@@ -2602,6 +2876,8 @@ mod tests {
             None,
             // The behaviour under test.
             true,
+            None,
+            None,
         )
         .unwrap();
         drop(tx);
@@ -2666,6 +2942,8 @@ mod tests {
             None,
             // The behaviour under test.
             false,
+            None,
+            None,
         )
         .unwrap();
         drop(tx);

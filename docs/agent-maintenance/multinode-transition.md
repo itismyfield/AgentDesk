@@ -4,7 +4,7 @@
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test
 > execution path from one dcserver node to multiple nodes.
 >
-> Last refreshed: 2026-05-01 (against #876 worker_nodes bootstrap, #877 leader-only self-fence, and #878 dispatch_outbox claim ownership).
+> Last refreshed: 2026-05-18 (against #2431 SSH-direct TUI relay ownership).
 
 ## Read This First
 
@@ -113,6 +113,10 @@
 - active_callsite_coverage: node-local. Session rows and inflight files help
   recovery, but the live tmux pane, FIFO, output JSONL, watcher handle, and relay
   slot are process/node-local.
+- 2026-05-18 refresh: SSH-direct TUI prompt relay is still node-local. Codex
+  wrapper JSONL and rollout JSONL carry separate output paths/offsets, and
+  watcher ownership must be claimed by both tmux session and output path before
+  any future multinode routing can move this surface.
 - invariants: `heartbeat_capability_registry_routing`,
   `resource_locks_before_exclusive_editor_test`.
 - allowed_changes: `bugfix`, or `new_feature` only when routed through the

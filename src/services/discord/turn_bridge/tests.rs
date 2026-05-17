@@ -253,6 +253,7 @@ impl TurnGateway for CleanupFallbackQueueGateway {
 fn test_watcher_handle(tmux_session_name: &str, paused: bool) -> super::super::TmuxWatcherHandle {
     super::super::TmuxWatcherHandle {
         tmux_session_name: tmux_session_name.to_string(),
+        output_path: format!("/tmp/{tmux_session_name}.jsonl"),
         paused: Arc::new(AtomicBool::new(paused)),
         resume_offset: Arc::new(std::sync::Mutex::new(None)),
         cancel: Arc::new(AtomicBool::new(false)),

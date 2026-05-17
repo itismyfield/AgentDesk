@@ -620,6 +620,7 @@ impl TestHealthHarness {
             ChannelId::new(channel_id),
             super::TmuxWatcherHandle {
                 tmux_session_name: format!("test-seeded-watcher-{channel_id}"),
+                output_path: format!("/tmp/test-seeded-watcher-{channel_id}.jsonl"),
                 paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 resume_offset: Arc::new(std::sync::Mutex::new(None)),
                 cancel: cancel.clone(),
@@ -644,6 +645,7 @@ impl TestHealthHarness {
             ChannelId::new(channel_id),
             super::TmuxWatcherHandle {
                 tmux_session_name: tmux_session_name.to_string(),
+                output_path: format!("/tmp/{tmux_session_name}.jsonl"),
                 paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 resume_offset: Arc::new(std::sync::Mutex::new(None)),
                 cancel: cancel.clone(),

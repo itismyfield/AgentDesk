@@ -1102,6 +1102,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         // relay subscriber falls back to file polling on lag.
         inflight_signals: tokio::sync::broadcast::channel(256).0,
     });
+    super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
     // Phase 5.2 of intake-node-routing (issue #2009): populate
     // `cached_bot_token` BEFORE the gateway lease check so the

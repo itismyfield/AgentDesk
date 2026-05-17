@@ -75,6 +75,7 @@ mod tmux_overload_retry;
 mod tmux_reaper;
 #[cfg(unix)]
 mod tmux_restart_handoff;
+mod tui_prompt_relay;
 mod turn_bridge;
 mod voice_background_driver;
 mod voice_barge_in;
@@ -824,6 +825,10 @@ pub(super) struct TmuxWatcherHandle {
     /// Tmux session this watcher owns. Used to enforce the single-watcher
     /// policy when the same session is reattached through another path.
     pub(super) tmux_session_name: String,
+    /// JSONL/transcript path this watcher tails for the session. A single tmux
+    /// session can change relay files when it graduates from the prelaunch
+    /// wrapper to a provider-native TUI handoff.
+    pub(super) output_path: String,
     /// Signal to pause monitoring (while Discord handler reads its own turn)
     pub(super) paused: Arc<std::sync::atomic::AtomicBool>,
     /// After Discord handler finishes its turn, set this offset so watcher resumes from here
@@ -1854,6 +1859,7 @@ pub(crate) mod test_harness_exports {
         let pause_epoch = Arc::new(AtomicU64::new(0));
         let inner = TmuxWatcherHandle {
             tmux_session_name: tmux_session_name.to_string(),
+            output_path: format!("/tmp/{tmux_session_name}.jsonl"),
             paused: paused.clone(),
             resume_offset: Arc::new(std::sync::Mutex::new(None)),
             cancel: cancel.clone(),

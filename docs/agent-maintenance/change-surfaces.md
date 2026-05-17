@@ -158,6 +158,11 @@
   (#1283 contract, see `src/services/discord/watchers/lifecycle.rs`).
 - allowed_changes: `bugfix` only on `tmux.rs` and the giant Discord modules.
   `extraction` requires a follow-up issue.
+- 2026-05-18 refresh: #2431/#2475/#2477/#2478 touched `tmux.rs`,
+  `tmux_watcher.rs`, watcher lifecycle, and the new TUI prompt relay/dedupe
+  helpers for SSH-direct prompt relay. The migration-sensitive invariant remains
+  one owner per `(tmux_session, output_path)` and separate runtime-vs-relay
+  offsets for Codex rollout wrappers.
 - tests: `src/integration_tests/tests/*` cancel/recovery suites.
 - related_issues: #964, #1112, #1138, #1222, #1223, #1283.
 

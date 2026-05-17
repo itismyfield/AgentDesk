@@ -328,6 +328,10 @@ fn forward_chunk_to_supervisor_relay(
     }
 }
 
+fn terminal_event_consumed_offset(current_offset: u64, unprocessed_tail: &str) -> u64 {
+    current_offset.saturating_sub(unprocessed_tail.len() as u64)
+}
+
 async fn persist_watcher_provider_session_id(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -3182,6 +3186,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &provider_kind,
             channel_id.get(),
         );
+        if terminal_output_committed
+            && !lifecycle_stage_paused
+            && inflight_state.as_ref().is_some_and(|state| {
+                state.turn_source == crate::services::discord::inflight::TurnSource::ExternalInput
+            })
+        {
+            crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+                &tmux_session_name,
+                &output_path,
+                terminal_event_consumed_offset(current_offset, &all_data),
+            );
+        }
         let watcher_session_id = state.last_session_id.clone();
         if terminal_output_committed {
             persist_watcher_provider_session_id(
@@ -3978,4 +3994,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] 👁 tmux watcher stopped for #{tmux_session_name}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_event_consumed_offset;
+
+    #[test]
+    fn terminal_event_consumed_offset_excludes_buffered_tail() {
+        assert_eq!(terminal_event_consumed_offset(128, "next-turn\n"), 118);
+        assert_eq!(terminal_event_consumed_offset(8, "longer-than-offset"), 0);
+    }
 }

@@ -634,6 +634,7 @@ fn attach_paused_turn_watcher(
         let mailbox_finalize_owed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handle = TmuxWatcherHandle {
             tmux_session_name: tmux_session_name.clone(),
+            output_path: output_path.clone(),
             paused: paused.clone(),
             resume_offset: resume_offset.clone(),
             cancel: cancel.clone(),
@@ -8868,6 +8869,7 @@ mod tests {
             owner_channel,
             TmuxWatcherHandle {
                 tmux_session_name: tmux_name.clone(),
+                output_path: "/tmp/agentdesk-test-owner-output.jsonl".to_string(),
                 paused: owner_paused.clone(),
                 resume_offset: Arc::new(std::sync::Mutex::new(None)),
                 cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),

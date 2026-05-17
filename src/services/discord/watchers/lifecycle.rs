@@ -265,6 +265,70 @@ pub(super) fn watcher_has_post_work_ready_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::tmux_watcher_now_ms;
+    use poise::serenity_prelude::ChannelId;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+
+    fn test_watcher_handle(tmux_session_name: &str, output_path: &str) -> TmuxWatcherHandle {
+        TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: output_path.to_string(),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(AtomicI64::new(tmux_watcher_now_ms())),
+            mailbox_finalize_owed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn same_tmux_different_output_path_replaces_watcher() {
+        let watchers = TmuxWatcherRegistry::new();
+        let channel_a = ChannelId::new(1485506232256168134);
+        let channel_b = ChannelId::new(1485506232256168135);
+        let tmux_name = "AgentDesk-codex-adk-cdx-path-change";
+
+        let initial = test_watcher_handle(tmux_name, "/tmp/prelaunch-wrapper.jsonl");
+        let initial_cancel = initial.cancel.clone();
+        assert!(try_claim_watcher(&watchers, channel_a, initial));
+
+        let outcome = claim_or_reuse_watcher(
+            &watchers,
+            channel_b,
+            test_watcher_handle(tmux_name, "/tmp/provider-runtime.jsonl"),
+            &ProviderKind::Codex,
+            "unit-test-output-path-change",
+        );
+
+        assert_eq!(outcome.action, WatcherClaimAction::SpawnReplacedStale);
+        assert_eq!(outcome.owner_channel_id(), channel_b);
+        assert!(initial_cancel.load(Ordering::Relaxed));
+        let watcher = watchers.get(&channel_b).expect("replacement watcher");
+        assert_eq!(watcher.output_path, "/tmp/provider-runtime.jsonl");
+        assert!(!watchers.contains_key(&channel_a));
+    }
+
+    #[test]
+    fn restore_scan_only_skips_same_live_output_path() {
+        assert!(restore_scan_should_skip_existing_watcher(
+            false,
+            "/tmp/wrapper.jsonl",
+            "/tmp/wrapper.jsonl"
+        ));
+        assert!(!restore_scan_should_skip_existing_watcher(
+            false,
+            "/tmp/prelaunch.jsonl",
+            "/tmp/restored.jsonl"
+        ));
+        assert!(!restore_scan_should_skip_existing_watcher(
+            true,
+            "/tmp/wrapper.jsonl",
+            "/tmp/wrapper.jsonl"
+        ));
+    }
 
     #[test]
     fn post_work_ready_evidence_ignores_task_notification_only_turns() {
@@ -840,10 +904,22 @@ impl WatcherClaimOutcome {
 pub(super) fn find_watcher_by_tmux_session(
     watchers: &TmuxWatcherRegistry,
     tmux_session_name: &str,
-) -> Option<(ChannelId, bool)> {
-    watchers
-        .owner_channel_for_tmux_session(tmux_session_name)
-        .zip(watchers.tmux_session_is_stale(tmux_session_name))
+) -> Option<(ChannelId, bool, String)> {
+    let owner = watchers.owner_channel_for_tmux_session(tmux_session_name)?;
+    let entry = watchers.by_tmux_session.get(tmux_session_name)?;
+    Some((
+        owner,
+        entry.heartbeat_stale() || entry.cancel.load(std::sync::atomic::Ordering::Relaxed),
+        entry.output_path.clone(),
+    ))
+}
+
+fn restore_scan_should_skip_existing_watcher(
+    cancelled: bool,
+    existing_output_path: &str,
+    restored_output_path: &str,
+) -> bool {
+    !cancelled && existing_output_path == restored_output_path
 }
 
 /// #226/#1170: Atomically claim a tmux session for watcher creation.
@@ -856,9 +932,16 @@ pub(in crate::services::discord) fn try_claim_watcher(
 ) -> bool {
     let guard = lock_tmux_watcher_registry();
     let requested_tmux = handle.tmux_session_name.clone();
+    let requested_output_path = handle.output_path.clone();
     if let Some(existing) = find_watcher_by_tmux_session(watchers, &requested_tmux) {
-        if existing.1 {
-            watchers.remove_tmux_session_locked(&guard, &requested_tmux);
+        if existing.1 || existing.2 != requested_output_path {
+            if let Some((_, existing_handle)) =
+                watchers.remove_tmux_session_locked(&guard, &requested_tmux)
+            {
+                existing_handle
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         } else {
             record_watcher_invariant(
                 true,
@@ -870,6 +953,7 @@ pub(in crate::services::discord) fn try_claim_watcher(
                 serde_json::json!({
                     "existing_channel_id": existing.0.get(),
                     "tmux_session_name": requested_tmux,
+                    "output_path": requested_output_path,
                     "watcher_slots": watchers.len(),
                 }),
             );
@@ -930,12 +1014,13 @@ pub(super) fn claim_watcher(
 ) -> WatcherClaimOutcome {
     let guard = lock_tmux_watcher_registry();
     let requested_tmux = handle.tmux_session_name.clone();
+    let requested_output_path = handle.output_path.clone();
     let mut removed_stale_same_tmux = false;
 
-    if let Some((existing_channel_id, existing_cancelled)) =
+    if let Some((existing_channel_id, existing_cancelled, existing_output_path)) =
         find_watcher_by_tmux_session(watchers, &requested_tmux)
     {
-        if existing_cancelled {
+        if existing_cancelled || existing_output_path != requested_output_path {
             if let Some((_, existing_handle)) =
                 watchers.remove_tmux_session_locked(&guard, &requested_tmux)
             {
@@ -963,6 +1048,7 @@ pub(super) fn claim_watcher(
                     "source": source,
                     "existing_channel_id": existing_channel_id.get(),
                     "tmux_session_name": requested_tmux,
+                    "output_path": requested_output_path,
                     "watcher_slots": watchers.len(),
                 }),
             );
@@ -1290,20 +1376,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             }
         }
 
-        if let Some((owner_channel_id, cancelled)) =
-            find_watcher_by_tmux_session(&shared.tmux_watchers, session_name)
-        {
-            if !cancelled {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ⏭ watcher skip for {} — tmux session already watched by channel {}",
-                    session_name,
-                    owner_channel_id
-                );
-                continue;
-            }
-        }
-
         // Accept either the new persistent location or the legacy /tmp
         // location — older wrappers still write to /tmp, and a dcserver
         // restart that lost /tmp files should not falsely flag a live
@@ -1318,6 +1390,33 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             );
             continue;
         };
+
+        if let Some((owner_channel_id, cancelled, existing_output_path)) =
+            find_watcher_by_tmux_session(&shared.tmux_watchers, session_name)
+        {
+            if restore_scan_should_skip_existing_watcher(
+                cancelled,
+                &existing_output_path,
+                &output_path,
+            ) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ⏭ watcher skip for {} — tmux session already watched by channel {}",
+                    session_name,
+                    owner_channel_id
+                );
+                continue;
+            }
+            if !cancelled {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ↻ watcher replace for {} — existing output path {} differs from restored output path {}",
+                    session_name,
+                    existing_output_path,
+                    output_path
+                );
+            }
+        }
 
         // Old-gen sessions: adopt instead of killing.
         // The tmux session and Claude CLI process are still alive from the
@@ -1583,6 +1682,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
         let handle = TmuxWatcherHandle {
             tmux_session_name: pw.session_name.clone(),
+            output_path: pw.output_path.clone(),
             paused: paused.clone(),
             resume_offset: resume_offset.clone(),
             cancel: cancel.clone(),
