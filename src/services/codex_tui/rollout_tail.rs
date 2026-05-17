@@ -9,7 +9,16 @@ use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested};
 
 const DEFAULT_ROLLOUT_WAIT_SECS: u64 = 30;
-const DEFAULT_TERMINAL_DRAIN_MS: u64 = 750;
+// #2419: Codex assistant turns naturally produce burst-pause-burst output as
+// the model alternates between text segments and tool-call reasoning. The
+// previous 750ms drain was too short — any inter-segment silence longer than
+// that caused the tailer to emit `Done` and shut down, truncating the relay
+// to Discord while the codex CLI was still streaming. 5s safely covers the
+// observed natural pause band (~3s) without unduly delaying turn completion
+// after the genuine final segment. Tool-call gating (see
+// `RolloutParseState::pending_tool_call`) is the structural complement that
+// suppresses drain entirely while a tool is in flight.
+const DEFAULT_TERMINAL_DRAIN_MS: u64 = 5000;
 /// Upper bound on how long the tailer will sit at EOF waiting for the assistant
 /// response to begin streaming. Without this guard, a stuck Codex TUI (tool
 /// loop, network hang, etc.) keeps the tailer thread alive indefinitely and the
