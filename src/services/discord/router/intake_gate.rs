@@ -2232,14 +2232,26 @@ mod thread_guard_stale_pure_tests {
     /// previous value (or removes the var) on drop. Used so the always-on
     /// test does not leak state into adjacent test runs that may also rely
     /// on the runtime root.
+    ///
+    /// #2444 follow-up: acquires `shared_test_env_lock()` so this writer
+    /// serializes with every other AGENTDESK_ROOT_DIR mutator in the test
+    /// binary (claude_tui::hook_relay, credential, integration tests etc),
+    /// closing the cross-module env race that survived the wave-D fix.
     struct EnvRootGuard {
         previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
     impl EnvRootGuard {
         fn set(path: &std::path::Path) -> Self {
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
             unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
-            Self { previous }
+            Self {
+                previous,
+                _lock: lock,
+            }
         }
     }
     impl Drop for EnvRootGuard {
