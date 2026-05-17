@@ -165,7 +165,10 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
     }
 }
 
-fn wait_for_prompt_ready(session_name: &str, readiness: PromptReadinessKind) -> Result<(), String> {
+pub fn wait_for_prompt_ready(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+) -> Result<(), String> {
     let timeout = readiness.timeout();
     let start = Instant::now();
     let mut wait_interval = Duration::from_millis(100);
@@ -382,6 +385,44 @@ line 13";
         assert!(!is_prompt_ready_timeout_error(
             "claude tui session died before prompt input was ready"
         ));
+    }
+
+    // #2416: when the busy-followup wait path bails because the tmux session
+    // never came alive, the dead-session error must NOT be classified as a
+    // timeout. The caller relies on this split to decide between "wait again"
+    // and "emit the busy notice".
+    #[test]
+    fn busy_followup_wait_session_died_error_is_not_a_timeout() {
+        let err = "claude tui session died before prompt input was ready".to_string();
+        assert!(!is_prompt_ready_timeout_error(&err));
+    }
+
+    // #2416: the Followup timeout copy is what the busy-followup wait path
+    // surfaces to the caller. Lock the prefix so both call sites
+    // (claude.rs and discord/router/message_handler.rs) can rely on
+    // `is_prompt_ready_timeout_error` to identify the timeout branch.
+    #[test]
+    fn busy_followup_wait_timeout_message_uses_followup_label() {
+        let synthetic = format!(
+            "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} follow-up prompt input readiness after 45s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; capture_available=true"
+        );
+        assert!(is_prompt_ready_timeout_error(&synthetic));
+        assert!(synthetic.contains("follow-up"));
+        assert!(synthetic.contains("45s"));
+    }
+
+    // #2416: wait_for_prompt_ready must be reachable as a public API so the
+    // busy-followup wait+retry paths in claude.rs and the Discord router can
+    // call it. Trying to call it on a non-existent session must return Err
+    // (so callers can fall back to the busy notice deterministically).
+    #[test]
+    fn wait_for_prompt_ready_is_public_and_returns_err_for_missing_session() {
+        let session_name = format!("agentdesk-test-missing-{}", std::process::id());
+        let result = wait_for_prompt_ready(&session_name, PromptReadinessKind::Followup);
+        assert!(
+            result.is_err(),
+            "wait_for_prompt_ready on a missing session must return Err; got {result:?}"
+        );
     }
 
     #[test]
