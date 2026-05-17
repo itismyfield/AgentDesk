@@ -171,8 +171,12 @@ pub const EXPLICIT_AUTH_MUTATION_ROUTES: &[&str] = &[
     "kanban: batch-transition",
     "kanban: force-transition",
     "auto-queue: submit_order",
-    "auto-queue: phase-gate repair",
 ];
+
+/// Mutation routes that fail closed unless an operator auth mechanism is
+/// configured. These routes are still useful in the boot audit because they
+/// explain why an endpoint may reject all callers on auth-less installs.
+pub const FAIL_CLOSED_OPERATOR_MUTATION_ROUTES: &[&str] = &["auto-queue: phase-gate repair"];
 
 /// Emits a structured boot-time audit identifying whether the explicit-auth
 /// mutation routes will fail-open with the current configuration. Called
@@ -204,6 +208,7 @@ pub fn audit_explicit_auth_routes_on_boot(config: &crate::config::Config) {
             auth_token_configured = token_set,
             manager_channel_configured = channel_set,
             mutation_routes = EXPLICIT_AUTH_MUTATION_ROUTES.len(),
+            fail_closed_operator_routes = ?FAIL_CLOSED_OPERATOR_MUTATION_ROUTES,
             "explicit-auth mutation routes will require Bearer token and/or x-channel-id"
         );
         return;
@@ -212,10 +217,12 @@ pub fn audit_explicit_auth_routes_on_boot(config: &crate::config::Config) {
         auth_token_configured = false,
         manager_channel_configured = false,
         mutation_routes = ?EXPLICIT_AUTH_MUTATION_ROUTES,
+        fail_closed_operator_routes = ?FAIL_CLOSED_OPERATOR_MUTATION_ROUTES,
         host = %config.server.host,
         port = config.server.port,
         "FAIL-OPEN: neither server.auth_token nor kanban.manager_channel_id is configured — \
-         the listed mutation endpoints accept any caller that can reach the bind address. \
+         the mutation_routes endpoints accept any caller that can reach the bind address; \
+         fail_closed_operator_routes reject all callers until auth is configured. \
          Restrict the bind host (e.g. 127.0.0.1) or configure server.auth_token before exposing to untrusted clients. (#2257)"
     );
 }
@@ -241,6 +248,15 @@ mod audit_explicit_auth_routes_tests {
             sorted.len(),
             EXPLICIT_AUTH_MUTATION_ROUTES.len(),
             "duplicate label in EXPLICIT_AUTH_MUTATION_ROUTES — audit log will report misleading counts"
+        );
+        assert!(!FAIL_CLOSED_OPERATOR_MUTATION_ROUTES.is_empty());
+        let mut sorted = FAIL_CLOSED_OPERATOR_MUTATION_ROUTES.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            FAIL_CLOSED_OPERATOR_MUTATION_ROUTES.len(),
+            "duplicate label in FAIL_CLOSED_OPERATOR_MUTATION_ROUTES — audit log will report misleading counts"
         );
     }
 

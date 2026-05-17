@@ -10348,6 +10348,37 @@ async fn resume_run_skips_phase_gate_blocked_runs_pg_path() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_phase_gate_fails_closed_without_operator_auth_config() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router_with_config(db, engine, crate::config::Config::default(), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/queue/runs/run-repair-auth/phase-gates/repair")
+                .header("content-type", "application/json")
+                .header("x-agent-id", "spoofed-agent")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"],
+        "phase-gate repair requires server.auth_token or kanban.manager_channel_id to be configured"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repair_phase_gate_reevaluates_failed_terminal_dispatch_pg_path() {
     crate::pipeline::ensure_loaded();
 
@@ -10465,19 +10496,18 @@ async fn repair_phase_gate_reevaluates_failed_terminal_dispatch_pg_path() {
     .await
     .unwrap();
 
-    let app = test_api_router_with_pg(
-        db,
-        engine,
-        crate::config::Config::default(),
-        None,
-        pg_pool.clone(),
-    );
+    let mut config = crate::config::Config::default();
+    config.server.auth_token = Some("repair-token".to_string());
+    let app = test_api_router_with_pg(db, engine, config, None, pg_pool.clone());
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/queue/runs/run-repair-gate-pg/phase-gates/repair")
                 .header("content-type", "application/json")
+                .header("authorization", "Bearer repair-token")
+                .header("idempotency-key", "repair-route-double-click")
                 .body(Body::from(r#"{"phase":1}"#))
                 .unwrap(),
         )
@@ -10495,6 +10525,29 @@ async fn repair_phase_gate_reevaluates_failed_terminal_dispatch_pg_path() {
     assert_eq!(json["run_status"], "active");
     assert_eq!(json["outcomes"][0]["outcome"], "cleared");
     assert_eq!(json["outcomes"][0]["run_resumed"], true);
+
+    let replay = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/queue/runs/run-repair-gate-pg/phase-gates/repair")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer repair-token")
+                .header("idempotency-key", "repair-route-double-click")
+                .body(Body::from(r#"{"phase":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_body = axum::body::to_bytes(replay.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let replay_json: serde_json::Value = serde_json::from_slice(&replay_body).unwrap();
+    assert_eq!(
+        replay_json, json,
+        "same Idempotency-Key must replay verbatim"
+    );
 
     let remaining_gates = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT

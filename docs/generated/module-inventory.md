@@ -78,7 +78,7 @@
 | `db::auto_queue::claim` | `src/db/auto_queue/claim.rs` | 738 |  |
 | `db::auto_queue::consultation` | `src/db/auto_queue/consultation.rs` | 112 |  |
 | `db::auto_queue::entries` | `src/db/auto_queue/entries.rs` | 1505 | giant-file |
-| `db::auto_queue::phase_gates` | `src/db/auto_queue/phase_gates.rs` | 2901 | giant-file |
+| `db::auto_queue::phase_gates` | `src/db/auto_queue/phase_gates.rs` | 2963 | giant-file |
 | `db::auto_queue::queries` | `src/db/auto_queue/queries.rs` | 533 |  |
 | `db::auto_queue::runs` | `src/db/auto_queue/runs.rs` | 291 |  |
 | `db::auto_queue::slots` | `src/db/auto_queue/slots.rs` | 209 |  |
@@ -209,7 +209,7 @@
 | `server::maintenance` | `src/server/maintenance.rs` | 1094 | giant-file |
 | `server::multinode_regression` | `src/server/multinode_regression.rs` | 419 |  |
 | `server::resource_locks` | `src/server/resource_locks.rs` | 412 |  |
-| `server::routes` | `src/server/routes/mod.rs` | 426 |  |
+| `server::routes` | `src/server/routes/mod.rs` | 442 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 1181 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1886 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
@@ -228,7 +228,7 @@
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 43 |  |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1411 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 |  |
-| `server::routes::docs` | `src/server/routes/docs.rs` | 6221 | giant-file |
+| `server::routes::docs` | `src/server/routes/docs.rs` | 6227 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 13 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 93 |  |
@@ -316,7 +316,7 @@
 | `services::auto_queue::activate_route` | `src/services/auto_queue/activate_route.rs` | 19 |  |
 | `services::auto_queue::cancel_run` | `src/services/auto_queue/cancel_run.rs` | 1032 | giant-file |
 | `services::auto_queue::command` | `src/services/auto_queue/command.rs` | 808 |  |
-| `services::auto_queue::control_routes` | `src/services/auto_queue/control_routes.rs` | 753 |  |
+| `services::auto_queue::control_routes` | `src/services/auto_queue/control_routes.rs` | 826 |  |
 | `services::auto_queue::dispatch_assignment_command` | `src/services/auto_queue/dispatch_assignment_command.rs` | 101 |  |
 | `services::auto_queue::dispatch_command` | `src/services/auto_queue/dispatch_command.rs` | 927 |  |
 | `services::auto_queue::dispatch_query` | `src/services/auto_queue/dispatch_query.rs` | 126 |  |

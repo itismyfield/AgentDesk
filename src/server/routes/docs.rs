@@ -4408,7 +4408,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/queue/runs/{id}/phase-gates/repair",
             "auto-queue",
-            "Re-evaluate terminal phase-gate dispatch results for a paused run, including gates already marked failed. Use this before /api/queue/resume when blocked_runs indicates a pending/failed phase gate and the dispatch result has been repaired or persisted late.",
+            "Operator-only repair endpoint. Re-evaluate terminal phase-gate dispatch results for a paused run, including gates already marked failed. Requires server.auth_token or kanban.manager_channel_id to be configured; accepts Idempotency-Key for replay-safe double clicks. Use this before /api/queue/resume when blocked_runs indicates a pending/failed phase gate and the dispatch result has been repaired or persisted late.",
         )
         .with_params([
             ("id", path_param("Auto-queue run ID")),
@@ -4435,17 +4435,23 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "candidate_dispatches": 1,
                 "cleared_gates": 1,
                 "failed_gates": 0,
+                "orphan_gates_skipped": 0,
                 "blocking_gates_remaining": 0,
                 "run_status": "active",
                 "outcomes": [{"dispatch_id": "dispatch-gate-1", "phase": 1, "outcome": "cleared", "run_resumed": true, "run_finalized": false}]
             }),
         )
         .with_error_example(
+            403,
+            json!({"path": {"id": "run-1"}}),
+            json!({"error": "phase-gate repair requires server.auth_token or kanban.manager_channel_id to be configured"}),
+        )
+        .with_error_example(
             404,
             json!({"path": {"id": "run-ghost"}}),
             json!({"error": "auto-queue run not found: run-ghost"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/queue/runs/run-1/phase-gates/repair -H 'Content-Type: application/json' -d '{\"phase\":1}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/queue/runs/run-1/phase-gates/repair -H 'Authorization: Bearer <token>' -H 'Idempotency-Key: <uuid>' -H 'Content-Type: application/json' -d '{\"phase\":1}'"),
         ep(
             "POST",
             "/api/queue/runs/{id}/restore",

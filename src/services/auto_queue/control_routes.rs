@@ -362,6 +362,69 @@ fn parse_idempotency_key_header(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+fn trimmed_repair_header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn configured_repair_operator_auth(config: &crate::config::Config) -> (Option<&str>, Option<&str>) {
+    let token = config
+        .server
+        .auth_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let channel_id = config
+        .kanban
+        .manager_channel_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    (token, channel_id)
+}
+
+fn require_phase_gate_repair_operator_auth(
+    config: &crate::config::Config,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let (expected_token, expected_channel_id) = configured_repair_operator_auth(config);
+    if expected_token.is_none() && expected_channel_id.is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "phase-gate repair requires server.auth_token or kanban.manager_channel_id to be configured"
+            })),
+        ));
+    }
+
+    if let Some(expected_token) = expected_token {
+        let provided = trimmed_repair_header_value(headers, "authorization")
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(str::trim);
+        if provided != Some(expected_token) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "phase-gate repair requires explicit Bearer token"})),
+            ));
+        }
+    }
+
+    if let Some(expected_channel_id) = expected_channel_id {
+        let provided_channel_id = trimmed_repair_header_value(headers, "x-channel-id");
+        if provided_channel_id != Some(expected_channel_id) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "phase-gate repair requires PMD channel authorization"})),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// POST /api/queue/runs/{id}/phase-gates/repair
 pub async fn repair_phase_gates(
     State(state): State<AppState>,
@@ -370,9 +433,7 @@ pub async fn repair_phase_gates(
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let mut caller = RepairCaller::from_headers(&headers);
-    if let Err(response) =
-        crate::server::routes::kanban::require_explicit_bearer_token(&headers, "phase-gate repair")
-    {
+    if let Err(response) = require_phase_gate_repair_operator_auth(&state.config, &headers) {
         // Unverified caller — explicitly mark the audit field so a spoofed
         // `x-agent-id` doesn't masquerade as a real principal in logs.
         audit_phase_gate_repair_rejected(&id, &caller, "unauthorized", "authorization failed");
@@ -473,9 +534,20 @@ pub async fn repair_phase_gates(
                     run_id = %id,
                     key = %key,
                     error = %error,
-                    "phase-gate repair idempotency claim failed; proceeding without dedup"
+                    "phase-gate repair idempotency claim failed; rejecting before mutation"
                 );
-                None
+                audit_phase_gate_repair_rejected(
+                    &id,
+                    &caller,
+                    "idempotency_claim_failed",
+                    "failed to claim Idempotency-Key before mutation",
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "failed to claim Idempotency-Key before mutation"
+                    })),
+                );
             }
         }
     } else {
@@ -551,7 +623,8 @@ pub async fn repair_phase_gates(
     // structured error paths (400 / 404 / 500) — because Stripe's
     // contract guarantees the same response on replay regardless of
     // whether the original request "succeeded". On the rare write
-    // failure we log and continue; the slot will eventually be GC'd.
+    // failure we log and continue; the mutation is already committed, and
+    // the slot will eventually be GC'd.
     if let Some(key) = idempotency_slot.as_ref() {
         let status_u16 = status.as_u16();
         let body_value = response_body.0.clone();
