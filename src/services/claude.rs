@@ -1598,14 +1598,17 @@ fn execute_streaming_local_tui_tmux(
 
     if session_exists && has_live_pane && resume {
         debug_log("Existing Claude TUI tmux session found — sending follow-up");
-        let start_offset = std::fs::metadata(&transcript_path)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
         if let Some(ref token) = cancel_token {
             *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(tmux_session_name.to_string());
         }
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
+        // #2416: a single busy_waited flag tells the offset-capture site below
+        // that we need to re-read transcript length after the wait succeeded,
+        // because the previous TUI turn may have appended bytes while we were
+        // waiting (otherwise the follow-up reader would treat previous-turn
+        // bytes as new-turn output).
+        let mut busy_waited = false;
         if let Some(snapshot) = claude_tui_followup_busy_before_submit(tmux_session_name) {
             // #2416: instead of dropping the user's message when the TUI is busy,
             // wait for the next prompt-ready window using the existing
@@ -1616,6 +1619,7 @@ fn execute_streaming_local_tui_tmux(
                 crate::services::claude_tui::input::PromptReadinessKind::Followup,
             ) {
                 Ok(()) => {
+                    busy_waited = true;
                     debug_log(&format!(
                         "Claude TUI follow-up: busy at first check, became ready after wait (session={})",
                         tmux_session_name
@@ -1657,6 +1661,35 @@ fn execute_streaming_local_tui_tmux(
                     return Ok(());
                 }
             }
+        }
+        // #2416: capture the transcript offset AFTER the optional busy wait so
+        // that any bytes the previous TUI turn appended while we were waiting
+        // are not replayed as part of this follow-up's output window. This
+        // closes a Codex-flagged HIGH (stale offset → duplicate / early-done
+        // delivery accounting).
+        let start_offset = std::fs::metadata(&transcript_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        // #2416: also honour cancellation that may have flipped during the
+        // up-to-45s busy wait. Without this, a user stop reaction / watchdog
+        // cancellation arriving mid-wait would still inject the prompt as
+        // soon as the TUI returns to ready. Closes a Codex-flagged HIGH.
+        if busy_waited && crate::services::provider::cancel_requested(cancel_token.as_deref()) {
+            debug_log(&format!(
+                "Claude TUI follow-up: cancellation observed after busy wait, aborting injection (session={})",
+                tmux_session_name
+            ));
+            log_producer_exit(
+                "tui_warm_followup_cancelled_after_busy_wait",
+                Some(&resolved_session_id),
+                report_channel_id,
+                0,
+                serde_json::json!({
+                    "tmux_session_name": tmux_session_name,
+                    "transcript_path": transcript_path_string,
+                }),
+            );
+            return Ok(());
         }
         crate::services::claude_tui::input::send_followup_prompt(tmux_session_name, prompt)?;
         let hook_events_after = chrono::Utc::now();

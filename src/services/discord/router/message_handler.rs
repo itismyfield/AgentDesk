@@ -4490,8 +4490,29 @@ pub(in crate::services::discord) async fn handle_text_message(
                 tmux_session_name.as_deref(),
                 remote_profile.is_some(),
             );
-            match (wait_result, post_wait_diagnostic) {
-                (Ok(()), None) => {
+            // #2416: cancellation may have flipped during the up-to-45s wait
+            // (user stop reaction, watchdog, etc.). If it did, do NOT continue
+            // to inject the prompt — fall into the busy-notice / cleanup branch
+            // below by surfacing the initial diagnostic. Closes a Codex-flagged
+            // HIGH on the Discord path mirroring the same fix in claude.rs.
+            let cancel_observed_after_wait = cancel_token
+                .cancelled
+                .load(std::sync::atomic::Ordering::Relaxed);
+            match (
+                wait_result,
+                post_wait_diagnostic,
+                cancel_observed_after_wait,
+            ) {
+                (_, _, true) => {
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        user_msg_id = user_msg_id.get(),
+                        tmux_session_name = %initial_diagnostic.tmux_session_name,
+                        "claude_tui follow-up: cancellation observed after busy wait; aborting injection"
+                    );
+                    Some(initial_diagnostic)
+                }
+                (Ok(()), None, _) => {
                     tracing::info!(
                         channel_id = channel_id.get(),
                         user_msg_id = user_msg_id.get(),
@@ -4500,7 +4521,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     );
                     None
                 }
-                (Ok(()), Some(diag)) => {
+                (Ok(()), Some(diag), _) => {
                     tracing::warn!(
                         channel_id = channel_id.get(),
                         user_msg_id = user_msg_id.get(),
@@ -4508,7 +4529,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     );
                     Some(diag)
                 }
-                (Err(err), diag_opt) => {
+                (Err(err), diag_opt, _) => {
                     let timed_out =
                         crate::services::claude_tui::input::is_prompt_ready_timeout_error(&err);
                     tracing::warn!(
