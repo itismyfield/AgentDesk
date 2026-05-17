@@ -912,60 +912,6 @@ pub(super) fn mark_all_inflight_states_restart_mode(
     updated
 }
 
-/// #2436 (#2427 B wire) guard-checked clear. Only removes the inflight
-/// state file for `(provider, channel_id)` when the on-disk row still
-/// matches the expected `user_msg_id` AND is not a `restart_mode`
-/// planned-restart row AND is not a `rebind_origin` synthetic row.
-///
-/// This is the safety guard that the heartbeat-gap sweeper relies on:
-/// between the watcher map snapshot and the file-system cleanup, a new
-/// turn may have written a fresh inflight row for the same channel (new
-/// `user_msg_id`). Removing it would orphan the new turn's placeholder.
-/// Planned-restart / hot-swap rows must also survive because their
-/// retention is intentionally extended for recovery. Rebind-origin rows
-/// do not own a real Discord turn at all and are owned by the rebind
-/// API caller.
-///
-/// Returns `true` only when a matching row was found and deleted.
-pub(crate) fn clear_inflight_state_if_matches(
-    provider: &ProviderKind,
-    channel_id: u64,
-    expected_user_msg_id: u64,
-) -> bool {
-    let Some(root) = inflight_runtime_root() else {
-        return false;
-    };
-    clear_inflight_state_if_matches_in_root(&root, provider, channel_id, expected_user_msg_id)
-}
-
-/// Test-friendly variant of `clear_inflight_state_if_matches` that
-/// takes an explicit runtime root instead of consulting the runtime
-/// environment. Production callers should use the env-driven wrapper.
-fn clear_inflight_state_if_matches_in_root(
-    root: &Path,
-    provider: &ProviderKind,
-    channel_id: u64,
-    expected_user_msg_id: u64,
-) -> bool {
-    let path = inflight_state_path(root, provider, channel_id);
-    let Ok(data) = fs::read_to_string(&path) else {
-        return false;
-    };
-    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
-        return false;
-    };
-    if state.user_msg_id != expected_user_msg_id {
-        return false;
-    }
-    if state.restart_mode.is_some() {
-        return false;
-    }
-    if state.rebind_origin {
-        return false;
-    }
-    fs::remove_file(path).is_ok()
-}
-
 /// #2437 (#2427 C wire) boot-time bulk invalidate. Removes inflight
 /// state files whose `restart_generation` does not match
 /// `current_generation` AND that are NOT planned-restart rows. The
@@ -1744,12 +1690,13 @@ mod stall_recovery_tests {
 
 #[cfg(test)]
 mod wave_a_cleanup_tests {
-    //! #2436 / #2437 (#2427 wave A) — unit tests for the explicit-
-    //! signal cleanup helpers.
+    //! #2437 (#2427 C wire) — unit tests for the boot-time generation
+    //! bulk invalidate. The B wire shares `clear_inflight_state_if_matches`
+    //! with #2427's D / A wires and is already covered by the
+    //! `clear_inflight_state_if_matches_*` tests in the parent mod.
     use super::{
-        InflightTurnState, clear_inflight_state_if_matches_in_root,
-        invalidate_stale_generation_in_root, load_inflight_states_from_root,
-        save_inflight_state_in_root,
+        InflightTurnState, invalidate_stale_generation_in_root,
+        load_inflight_states_from_root, save_inflight_state_in_root,
     };
     use crate::services::discord::InflightRestartMode;
     use crate::services::provider::ProviderKind;
@@ -1770,106 +1717,6 @@ mod wave_a_cleanup_tests {
             Some("/tmp/in.fifo".to_string()),
             0,
         )
-    }
-
-    #[test]
-    fn clear_inflight_state_if_matches_evicts_on_user_msg_id_match() {
-        let temp = TempDir::new().unwrap();
-        let state = make_state(101, 42);
-        save_inflight_state_in_root(temp.path(), &state).expect("save");
-
-        let cleared = clear_inflight_state_if_matches_in_root(
-            temp.path(),
-            &ProviderKind::Codex,
-            101,
-            42,
-        );
-        assert!(cleared, "matching user_msg_id should evict");
-
-        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
-        assert!(loaded.is_empty(), "row file should be gone");
-    }
-
-    #[test]
-    fn clear_inflight_state_if_matches_preserves_on_user_msg_id_mismatch() {
-        // The watcher map snapshot may carry a stale user_msg_id from a
-        // turn that just completed; a new turn already wrote a fresh
-        // row for the same channel. The guard must NOT delete it.
-        let temp = TempDir::new().unwrap();
-        let state = make_state(202, 999);
-        save_inflight_state_in_root(temp.path(), &state).expect("save");
-
-        let cleared = clear_inflight_state_if_matches_in_root(
-            temp.path(),
-            &ProviderKind::Codex,
-            202,
-            42, // wrong user_msg_id
-        );
-        assert!(!cleared, "mismatched user_msg_id must NOT evict");
-
-        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
-        assert_eq!(loaded.len(), 1, "row file must survive");
-        assert_eq!(loaded[0].user_msg_id, 999);
-    }
-
-    #[test]
-    fn clear_inflight_state_if_matches_preserves_planned_restart() {
-        // Planned-restart rows have intentionally extended retention
-        // (DRAIN_RESTART_MAX_AGE_SECS / HOT_SWAP_HANDOFF_MAX_AGE_SECS).
-        // The B-wire sweeper must never evict them even when
-        // user_msg_id matches.
-        let temp = TempDir::new().unwrap();
-        let mut state = make_state(303, 77);
-        state.set_restart_mode(InflightRestartMode::DrainRestart);
-        save_inflight_state_in_root(temp.path(), &state).expect("save");
-
-        let cleared = clear_inflight_state_if_matches_in_root(
-            temp.path(),
-            &ProviderKind::Codex,
-            303,
-            77,
-        );
-        assert!(!cleared, "planned-restart rows must survive heartbeat-gap eviction");
-
-        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
-        assert_eq!(loaded.len(), 1);
-        assert!(loaded[0].restart_mode.is_some());
-    }
-
-    #[test]
-    fn clear_inflight_state_if_matches_preserves_rebind_origin() {
-        // Rebind-origin rows are synthesised by /api/inflight/rebind
-        // and do not represent a real Discord turn — they are owned by
-        // the rebind API caller, not the watcher loop, so the watcher
-        // heartbeat is irrelevant to their lifecycle.
-        let temp = TempDir::new().unwrap();
-        let mut state = make_state(404, 88);
-        state.rebind_origin = true;
-        save_inflight_state_in_root(temp.path(), &state).expect("save");
-
-        let cleared = clear_inflight_state_if_matches_in_root(
-            temp.path(),
-            &ProviderKind::Codex,
-            404,
-            88,
-        );
-        assert!(!cleared, "rebind-origin rows must survive heartbeat-gap eviction");
-
-        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
-        assert_eq!(loaded.len(), 1);
-        assert!(loaded[0].rebind_origin);
-    }
-
-    #[test]
-    fn clear_inflight_state_if_matches_no_row_is_no_op() {
-        let temp = TempDir::new().unwrap();
-        let cleared = clear_inflight_state_if_matches_in_root(
-            temp.path(),
-            &ProviderKind::Codex,
-            999,
-            1,
-        );
-        assert!(!cleared);
     }
 
     #[test]

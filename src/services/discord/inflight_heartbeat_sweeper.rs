@@ -137,37 +137,50 @@ fn run_heartbeat_sweep_pass_inner(
         let was_planned_restart = state.restart_mode.is_some();
         let was_rebind_origin = state.rebind_origin;
 
-        let evicted = super::inflight::clear_inflight_state_if_matches(
+        let outcome = super::inflight::clear_inflight_state_if_matches(
             &candidate.provider,
             candidate.channel_id,
             user_msg_id,
         );
-        if evicted {
-            report.evicted += 1;
-            crate::services::observability::emit_inflight_lifecycle_event(
-                candidate.provider.as_str(),
-                candidate.channel_id,
-                dispatch_id_for_event.as_deref(),
-                None,
-                None,
-                "evict_heartbeat_gap",
-                serde_json::json!({
-                    "reason": "watcher_heartbeat_stale",
-                    "user_msg_id": user_msg_id,
-                    "tmux_session_name": candidate.tmux_session_name,
-                }),
-            );
-        } else if !was_planned_restart && !was_rebind_origin {
-            // The guard rejected eviction because either:
-            //   * the row was replaced mid-pass by a new turn, or
-            //   * the row was already gone.
-            // Either way we still want to cancel the now-orphan watcher.
-            tracing::debug!(
-                "[heartbeat_sweeper] eviction guard skipped for {}/{} \
-                 — row changed or vanished mid-pass",
-                candidate.provider.as_str(),
-                candidate.channel_id
-            );
+        match outcome {
+            super::inflight::GuardedClearOutcome::Cleared => {
+                report.evicted += 1;
+                crate::services::observability::emit_inflight_lifecycle_event(
+                    candidate.provider.as_str(),
+                    candidate.channel_id,
+                    dispatch_id_for_event.as_deref(),
+                    None,
+                    None,
+                    "evict_heartbeat_gap",
+                    serde_json::json!({
+                        "reason": "watcher_heartbeat_stale",
+                        "user_msg_id": user_msg_id,
+                        "tmux_session_name": candidate.tmux_session_name,
+                    }),
+                );
+            }
+            super::inflight::GuardedClearOutcome::UserMsgMismatch
+            | super::inflight::GuardedClearOutcome::Missing => {
+                if !was_planned_restart && !was_rebind_origin {
+                    tracing::debug!(
+                        "[heartbeat_sweeper] guard rejected eviction for {}/{} \
+                         outcome={:?} — row changed or vanished mid-pass",
+                        candidate.provider.as_str(),
+                        candidate.channel_id,
+                        outcome,
+                    );
+                }
+            }
+            super::inflight::GuardedClearOutcome::PlannedRestartSkipped
+            | super::inflight::GuardedClearOutcome::RebindOriginSkipped => {
+                tracing::debug!(
+                    "[heartbeat_sweeper] guard preserved {}/{} ({:?}) — \
+                     not the B wire's job to evict",
+                    candidate.provider.as_str(),
+                    candidate.channel_id,
+                    outcome,
+                );
+            }
         }
         cancel_watcher_by_session_name(shared, &candidate.tmux_session_name);
         report.cancelled += 1;
