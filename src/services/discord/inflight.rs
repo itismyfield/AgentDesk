@@ -749,7 +749,27 @@ pub(crate) fn clear_inflight_state_if_matches(
     channel_id: u64,
     expected_user_msg_id: u64,
 ) -> GuardedClearOutcome {
-    let Some(state) = load_inflight_state(provider, channel_id) else {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    clear_inflight_state_if_matches_in_root(&root, provider, channel_id, expected_user_msg_id)
+}
+
+/// Root-explicit variant for unit tests. Production callers should use
+/// [`clear_inflight_state_if_matches`].
+pub(super) fn clear_inflight_state_if_matches_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected_user_msg_id: u64,
+) -> GuardedClearOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        // Malformed file: treat like Missing — the loader-side eviction
+        // will GC the malformed payload on the next read.
         return GuardedClearOutcome::Missing;
     };
     if state.restart_mode.is_some() {
@@ -761,10 +781,9 @@ pub(crate) fn clear_inflight_state_if_matches(
     if expected_user_msg_id == 0 || state.user_msg_id != expected_user_msg_id {
         return GuardedClearOutcome::UserMsgMismatch;
     }
-    if clear_inflight_state(provider, channel_id) {
+    if fs::remove_file(&path).is_ok() {
         GuardedClearOutcome::Cleared
     } else {
-        // File vanished between our read and remove (peer cleared it).
         GuardedClearOutcome::Missing
     }
 }
@@ -1028,7 +1047,8 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
 #[cfg(test)]
 mod stall_recovery_tests {
     use super::{
-        INFLIGHT_STALENESS_THRESHOLD_SECS, InflightTurnState,
+        GuardedClearOutcome, INFLIGHT_STALENESS_THRESHOLD_SECS, InflightRestartMode,
+        InflightTurnState, clear_inflight_state_if_matches_in_root,
         inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale,
         load_inflight_states_from_root, save_inflight_state_in_root,
     };
@@ -1400,6 +1420,159 @@ mod stall_recovery_tests {
         assert_eq!(loaded[0].channel_id, 111);
         assert!(valid_path.exists());
         assert!(!malformed_path.exists());
+    }
+
+    fn build_inflight_for_guard_tests(
+        provider: ProviderKind,
+        channel_id: u64,
+        user_msg_id: u64,
+    ) -> InflightTurnState {
+        InflightTurnState::new(
+            provider,
+            channel_id,
+            Some("adk".to_string()),
+            42,
+            100,
+            user_msg_id,
+            "user prompt".to_string(),
+            None,
+            Some("AgentDesk-claude-adk".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        )
+    }
+
+    /// #2427 D/A wire — happy path. When the on-disk inflight has a
+    /// matching `user_msg_id` and is neither a planned-restart marker
+    /// nor a rebind origin, the explicit signal removes it.
+    #[test]
+    fn clear_inflight_state_if_matches_removes_matching_turn() {
+        let temp = TempDir::new().unwrap();
+        let state = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        let user_msg_id = state.user_msg_id;
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            321,
+            user_msg_id,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::Cleared);
+        assert!(load_inflight_states_from_root(temp.path(), &ProviderKind::Claude).is_empty());
+    }
+
+    /// #2427 Pitfall #1 — stale TurnCompleted carrying the previous
+    /// turn's `user_msg_id` must NOT delete the next turn's inflight.
+    #[test]
+    fn clear_inflight_state_if_matches_protects_next_turn_against_stale_signal() {
+        let temp = TempDir::new().unwrap();
+        let next_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        save_inflight_state_in_root(temp.path(), &next_turn).unwrap();
+
+        // Stale completion for previous turn user_msg_id = 50 arrives now.
+        let outcome = clear_inflight_state_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            321,
+            50,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+
+        let still_there = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(still_there.len(), 1);
+        assert_eq!(still_there[0].user_msg_id, 100);
+    }
+
+    /// #2427 — planned-restart markers must survive the explicit-signal
+    /// hook because their lifetime is owned by the next dcserver boot's
+    /// recovery. We bypass `load_inflight_states_from_root` here (which
+    /// has its own retention-eviction side-effect) and assert directly
+    /// on the file system that the row is intact after the guarded
+    /// clear refused to touch it.
+    #[test]
+    fn clear_inflight_state_if_matches_preserves_planned_restart() {
+        let temp = TempDir::new().unwrap();
+        let mut state = build_inflight_for_guard_tests(ProviderKind::Codex, 555, 333);
+        state.restart_mode = Some(InflightRestartMode::DrainRestart);
+        state.restart_generation = Some(7);
+        let user_msg_id = state.user_msg_id;
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            555,
+            user_msg_id,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::PlannedRestartSkipped);
+
+        let provider_dir = temp.path().join(ProviderKind::Codex.as_str());
+        let path = provider_dir.join("555.json");
+        assert!(
+            path.exists(),
+            "planned-restart marker file should survive guarded clear"
+        );
+    }
+
+    /// #2427 Pitfall #5 — rebind_origin rows are owned by the
+    /// `/api/inflight/rebind` API. The explicit signal must NOT touch
+    /// them even when user_msg_id matches.
+    #[test]
+    fn clear_inflight_state_if_matches_preserves_rebind_origin() {
+        let temp = TempDir::new().unwrap();
+        let mut state = build_inflight_for_guard_tests(ProviderKind::Gemini, 901, 444);
+        state.rebind_origin = true;
+        let user_msg_id = state.user_msg_id;
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Gemini,
+            901,
+            user_msg_id,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::RebindOriginSkipped);
+        assert_eq!(
+            load_inflight_states_from_root(temp.path(), &ProviderKind::Gemini).len(),
+            1
+        );
+    }
+
+    /// `expected_user_msg_id = 0` is the "no guard available" sentinel —
+    /// refuse to clear so the helper never accidentally deletes a row
+    /// it cannot authenticate against.
+    #[test]
+    fn clear_inflight_state_if_matches_refuses_zero_guard() {
+        let temp = TempDir::new().unwrap();
+        let state = build_inflight_for_guard_tests(ProviderKind::Qwen, 8, 12_345);
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Qwen,
+            8,
+            0,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+        assert_eq!(
+            load_inflight_states_from_root(temp.path(), &ProviderKind::Qwen).len(),
+            1
+        );
+    }
+
+    /// No on-disk row → `Missing`. Idempotency safety net.
+    #[test]
+    fn clear_inflight_state_if_matches_missing_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let outcome = clear_inflight_state_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            42,
+            999,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::Missing);
     }
 }
 
