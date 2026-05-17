@@ -135,22 +135,54 @@ enum PlaceholderProbe {
     /// overwrite — the user has been served. Caller should still drop the
     /// inflight state file so the sweeper does not re-trigger every pass.
     AlreadyDelivered,
-    /// Discord returned 404 / forbidden / the channel is gone. Treat like
-    /// delivered: any abort edit would be a no-op or further user confusion,
-    /// and the state file should still be evicted so the sweeper stops
-    /// rescanning a dead row.
+    /// Discord returned 404 / 403 / 410 — the message or channel is
+    /// permanently gone. Any edit attempt would fail; evict the state row.
     MessageGone,
+    /// Probe could not determine the message state (transient Discord error,
+    /// rate-limit, transport failure, 5xx). Caller MUST leave the inflight
+    /// row untouched so a later sweep can retry; do NOT delete the state
+    /// file and do NOT issue any destructive edit.
+    ProbeFailed,
+}
+
+/// True for HTTP status codes that signal the placeholder message will
+/// never come back: 404 NOT_FOUND, 403 FORBIDDEN, 410 GONE. Anything else
+/// (5xx, 429 rate-limit, no status at all) is treated as transient.
+///
+/// Split out so the classification can be unit-tested without constructing
+/// the `#[non_exhaustive]` `serenity::http::ErrorResponse`.
+fn is_permanent_message_gone_status(status: u16) -> bool {
+    matches!(status, 404 | 403 | 410)
+}
+
+/// Classify a `serenity::Error` from `Http::get_message` into a permanent
+/// "message is gone" (404 / 403 / 410) vs a transient failure that should
+/// be retried on the next sweep pass.
+fn classify_get_message_error(err: &serenity::Error) -> PlaceholderProbe {
+    if let serenity::Error::Http(http_err) = err {
+        if let Some(status) = http_err.status_code() {
+            if is_permanent_message_gone_status(status.as_u16()) {
+                return PlaceholderProbe::MessageGone;
+            }
+        }
+    }
+    PlaceholderProbe::ProbeFailed
 }
 
 /// Fetch the current Discord message content and classify whether it is
 /// still a placeholder. The fetch itself uses the same `http` handle as the
 /// sweeper edits, so we inherit the same rate-limit / proxy behavior.
+///
+/// Transient probe failures (network errors, rate limits, 5xx) return
+/// `ProbeFailed` — callers must NOT take destructive action in that case.
 async fn probe_placeholder_state(
     http: &Arc<serenity::Http>,
     channel_id: u64,
     message_id: u64,
 ) -> PlaceholderProbe {
     if channel_id == 0 || message_id == 0 {
+        // No addressable message at all → treat as permanently gone so
+        // the cap-bounded controller map does not retain a zero row.
         return PlaceholderProbe::MessageGone;
     }
     let channel = serenity::ChannelId::new(channel_id);
@@ -164,13 +196,27 @@ async fn probe_placeholder_state(
             }
         }
         Err(err) => {
-            tracing::debug!(
-                "[placeholder_sweeper] fetch failed for {}/{} (treating as gone): {}",
-                channel_id,
-                message_id,
-                err
-            );
-            PlaceholderProbe::MessageGone
+            let outcome = classify_get_message_error(&err);
+            match outcome {
+                PlaceholderProbe::MessageGone => {
+                    tracing::debug!(
+                        "[placeholder_sweeper] message gone for {}/{} (permanent: {})",
+                        channel_id,
+                        message_id,
+                        err
+                    );
+                }
+                _ => {
+                    tracing::debug!(
+                        "[placeholder_sweeper] probe failed for {}/{} (transient — \
+                         will retry next sweep): {}",
+                        channel_id,
+                        message_id,
+                        err
+                    );
+                }
+            }
+            outcome
         }
     }
 }
@@ -284,9 +330,68 @@ async fn run_placeholder_sweep_pass(
         // sweeper can still abandon them if the owning process actually dies
         // — only the live ones keep advancing mtime. Treat all states
         // uniformly here.
-        match classify_age(age_secs) {
+        let decision = classify_age(age_secs);
+        // #2415: defensive probe. The streaming pipeline can hand off live
+        // relay to a delegated owner (watcher / standby) that updates the
+        // Discord message in place without mirroring `full_response` /
+        // `response_sent_offset` back into the persisted inflight state.
+        // The placeholder-only gate above therefore lets the row through
+        // even though the user already received the answer. Fetch the
+        // current Discord content BEFORE any destructive edit (stalled at
+        // 60s OR abandoned at 300s) and skip the overwrite when the
+        // message body no longer looks like a placeholder.
+        //
+        // Codex round 1 HIGH on PR #2417:
+        //   1. The probe must gate the Stalled branch too — same data-loss
+        //      class kicks in 60s after handoff, not just 300s.
+        //   2. Transient probe errors (5xx / network / rate limit) MUST
+        //      leave the inflight state untouched so a later sweep can
+        //      retry. Only permanent failures (404 / 403 / 410) classify
+        //      as MessageGone and trigger eviction.
+        let probe = if matches!(decision, SweepDecision::Stalled | SweepDecision::Abandoned) {
+            probe_placeholder_state(http, state.channel_id, state.current_msg_id).await
+        } else {
+            PlaceholderProbe::StillPlaceholder
+        };
+        // Transient probe failure: leave everything for next sweep.
+        // Applies to both stalled and abandoned classifications.
+        if matches!(probe, PlaceholderProbe::ProbeFailed) {
+            tracing::debug!(
+                "[placeholder_sweeper] skipping {:?} pass for {}/{} — probe failed, \
+                 will retry next sweep (#2415)",
+                decision,
+                state.channel_id,
+                state.current_msg_id
+            );
+            continue;
+        }
+        match decision {
             SweepDecision::Active => {}
             SweepDecision::Stalled => {
+                // Codex round 1 HIGH-1 on PR #2417: if the Discord
+                // content has already been replaced by a real response
+                // (delivered class), the stalled-edit at 60s would clobber
+                // it just like the abandoned path used to. Skip the edit.
+                // Leave the inflight state on disk — the abandoned branch
+                // at 300s will probe again and finalize eviction (or
+                // re-skip on transient failure).
+                if matches!(probe, PlaceholderProbe::AlreadyDelivered) {
+                    tracing::info!(
+                        "[placeholder_sweeper] skipped stalled overwrite for {}/{} — \
+                         content already delivered, deferring state eviction to \
+                         abandoned pass (#2415)",
+                        state.channel_id,
+                        state.current_msg_id
+                    );
+                    continue;
+                }
+                // MessageGone @ Stalled: the message is permanently gone.
+                // An edit would fail anyway. Leave state for the abandoned
+                // pass to fully evict — Stalled is purely advisory and
+                // does not own eviction semantics.
+                if matches!(probe, PlaceholderProbe::MessageGone) {
+                    continue;
+                }
                 if !stalled_tracker.mark_pending(provider, &state) {
                     continue;
                 }
@@ -307,17 +412,6 @@ async fn run_placeholder_sweep_pass(
                 }
             }
             SweepDecision::Abandoned => {
-                // #2415: defensive probe. The streaming pipeline can hand
-                // off live relay to a delegated owner (watcher / standby)
-                // that updates the Discord message in place without
-                // mirroring `full_response` / `response_sent_offset` back
-                // into the persisted inflight state. The placeholder-only
-                // gate above therefore lets the row through even though
-                // the user already received the answer. Fetch the current
-                // Discord content and skip the destructive overwrite when
-                // the message body no longer looks like a placeholder.
-                let probe =
-                    probe_placeholder_state(http, state.channel_id, state.current_msg_id).await;
                 match probe {
                     PlaceholderProbe::AlreadyDelivered => {
                         // Response already on screen. Do NOT overwrite —
@@ -350,13 +444,19 @@ async fn run_placeholder_sweep_pass(
                         continue;
                     }
                     PlaceholderProbe::MessageGone => {
-                        // The Discord message is unreachable (deleted /
-                        // 403 / channel gone). An edit attempt would fail
-                        // anyway; just drop the inflight row.
+                        // The Discord message is permanently unreachable
+                        // (404 / 403 / 410). An edit attempt would fail
+                        // anyway; drop the inflight row.
                         if inflight_state_still_same_turn(provider, &state, age_secs) {
                             finalize_abandoned_mailbox(shared, provider, &state).await;
                             let _ = delete_inflight_state_file(provider, state.channel_id);
                         }
+                        continue;
+                    }
+                    PlaceholderProbe::ProbeFailed => {
+                        // Already handled above by the early `continue`.
+                        // This arm is unreachable but kept for exhaustive
+                        // matching clarity.
                         continue;
                     }
                     PlaceholderProbe::StillPlaceholder => {
@@ -597,6 +697,37 @@ pub(super) fn spawn_placeholder_sweeper(
             tokio::time::sleep(tokio::time::Duration::from_secs(SWEEP_INTERVAL_SECS)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod probe_classification_tests {
+    use super::is_permanent_message_gone_status;
+
+    #[test]
+    fn permanent_statuses_classified_as_gone() {
+        assert!(is_permanent_message_gone_status(404));
+        assert!(is_permanent_message_gone_status(403));
+        assert!(is_permanent_message_gone_status(410));
+    }
+
+    #[test]
+    fn transient_statuses_classified_as_retryable() {
+        // 5xx server errors → retry next sweep
+        assert!(!is_permanent_message_gone_status(500));
+        assert!(!is_permanent_message_gone_status(502));
+        assert!(!is_permanent_message_gone_status(503));
+        assert!(!is_permanent_message_gone_status(504));
+        // 429 rate limit → retry next sweep
+        assert!(!is_permanent_message_gone_status(429));
+        // 408 request timeout → retry next sweep
+        assert!(!is_permanent_message_gone_status(408));
+        // 401 unauthorized: transient credential rotation; do not evict
+        assert!(!is_permanent_message_gone_status(401));
+        // Hypothetical 2xx that somehow landed in the error path
+        assert!(!is_permanent_message_gone_status(200));
+        // Edge: 0 (no status code available)
+        assert!(!is_permanent_message_gone_status(0));
+    }
 }
 
 #[cfg(test)]
