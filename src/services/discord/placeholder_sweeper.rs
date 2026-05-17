@@ -230,16 +230,37 @@ async fn probe_placeholder_state(
 ///     glyphs followed by a space, e.g. `⠋ Processing...` or
 ///     `⠹ ⚙ Bash: cargo build`. Produced by
 ///     [`build_placeholder_status_block`] / [`build_processing_status_block`].
-///   - Monitor handoff card: starts with a known status header marker
-///     emitted by [`monitor_handoff_header`] — `🔄 **`, `📬 **`, `⏱ **`,
-///     `❌ **`, `✅ **`, `⚠ **`. These all begin with an emoji + bold-open,
-///     a shape user-authored responses essentially never use as a prefix.
+///   - Monitor handoff card: the **first line** of the message matches one
+///     of the canonical Korean header strings emitted by
+///     [`monitor_handoff_header`] exactly (modulo the optional `: {detail}`
+///     suffix that the Failed variants append). We deliberately do NOT use
+///     looser prefixes like `{emoji} **` — a real assistant response can
+///     legitimately begin with `✅ **Done**`, `⚠ **주의**`, or
+///     `❌ **Error**` and those must be protected from sweeper overwrite.
 ///
 /// Anything else (real prose, code blocks, embeds rendered as text) is
 /// treated as a delivered response and protected from sweeper overwrite.
 pub(super) fn is_message_still_placeholder(content: &str) -> bool {
     const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    const HANDOFF_HEADER_PREFIXES: &[&str] = &["🔄 **", "📬 **", "⏱ **", "❌ **", "✅ **", "⚠ **"];
+    // Exact canonical header strings produced by `monitor_handoff_header`
+    // in `src/services/discord/formatting.rs`. Keep in lockstep with that
+    // function; `handoff_card_headers_are_placeholder` and
+    // `delivered_response_with_status_style_prefix_is_not_placeholder`
+    // pin the in/out boundaries.
+    const HANDOFF_HEADERS_EXACT: &[&str] = &[
+        "📬 **메시지 대기 중**",
+        "🔄 **백그라운드 처리 중**",
+        "🔄 **응답 처리 중**",
+        "✅ **백그라운드 완료**",
+        "✅ **응답 완료**",
+        "⏱ **백그라운드 타임아웃**",
+        "⏱ **응답 타임아웃**",
+        "⚠ **백그라운드 중단** (모니터 연결 끊김)",
+        "⚠ **응답 중단**",
+    ];
+    // Failed states render as `❌ **{label}**[: {detail}]`. Accept the bare
+    // header plus the header-with-detail-prefix variant.
+    const HANDOFF_FAILED_HEADERS: &[&str] = &["❌ **백그라운드 실패**", "❌ **응답 실패**"];
 
     let trimmed = content.trim_start();
     if trimmed.is_empty() {
@@ -259,9 +280,16 @@ pub(super) fn is_message_still_placeholder(content: &str) -> bool {
         }
     }
 
-    HANDOFF_HEADER_PREFIXES
+    // First-line-bounded match: handoff cards put the header on its own
+    // first line. Comparing only the first line avoids accidental matches
+    // inside long prose continuations or embedded code blocks.
+    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim_end();
+    if HANDOFF_HEADERS_EXACT.iter().any(|h| first_line == *h) {
+        return true;
+    }
+    HANDOFF_FAILED_HEADERS
         .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
+        .any(|h| first_line == *h || first_line.starts_with(&format!("{h}: ")))
 }
 
 /// Run a single sweep pass for the given provider. Public for testability —
@@ -760,6 +788,39 @@ mod is_message_still_placeholder_tests {
         assert!(is_message_still_placeholder(
             "⚠ **응답 중단**\n브릿지 또는 세션이 종료되었습니다."
         ));
+    }
+
+    #[test]
+    fn delivered_response_with_status_style_prefix_is_not_placeholder() {
+        // Codex round 2 HIGH on PR #2417: assistant output legitimately
+        // starts with status-style emoji + bold prose. These must be
+        // protected from sweeper overwrite — they look like handoff
+        // headers but are NOT the canonical Korean header strings.
+        assert!(!is_message_still_placeholder("✅ **Done**"));
+        assert!(!is_message_still_placeholder("✅ **Done**\n결과 요약..."));
+        assert!(!is_message_still_placeholder(
+            "⚠ **주의**: 이 부분 확인 필요"
+        ));
+        assert!(!is_message_still_placeholder("⚠ **Warning**"));
+        assert!(!is_message_still_placeholder(
+            "❌ **Error**: file not found"
+        ));
+        assert!(!is_message_still_placeholder("❌ **Build failed**"));
+        assert!(!is_message_still_placeholder(
+            "🔄 **Retry attempted**\nsecond paragraph"
+        ));
+        assert!(!is_message_still_placeholder("📬 **Inbox**: 3 unread"));
+        assert!(!is_message_still_placeholder("⏱ **Elapsed**: 1.2s"));
+        // English equivalents of the Korean headers must not match either.
+        assert!(!is_message_still_placeholder("✅ **Response complete**"));
+        assert!(!is_message_still_placeholder("⚠ **Response aborted**"));
+        // Header text with extra trailing content beyond the `**` close on
+        // the same line — e.g. a response title that uses the same Korean
+        // bold + emoji pattern — must NOT match.
+        assert!(!is_message_still_placeholder(
+            "✅ **응답 완료** — 검토 결과 정상 동작"
+        ));
+        assert!(!is_message_still_placeholder("⚠ **응답 중단** 이거 농담"));
     }
 
     #[test]
