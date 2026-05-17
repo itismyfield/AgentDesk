@@ -36,8 +36,7 @@ pub(crate) fn signal_prompt_ready_for_test() {
 }
 
 fn should_signal_prompt_ready(provider: &str, kind: &HookEventKind) -> bool {
-    provider == CLAUDE_PROVIDER
-        && matches!(kind, HookEventKind::Stop | HookEventKind::SubagentStop)
+    provider == CLAUDE_PROVIDER && matches!(kind, HookEventKind::Stop | HookEventKind::SubagentStop)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -490,7 +490,10 @@ line 13";
     fn event_budget_is_shorter_than_full_timeout() {
         // The event-budget is meant to fail fast and yield to the polling
         // fallback long before the legacy timeout would fire.
-        for kind in [PromptReadinessKind::FreshTurn, PromptReadinessKind::Followup] {
+        for kind in [
+            PromptReadinessKind::FreshTurn,
+            PromptReadinessKind::Followup,
+        ] {
             assert!(
                 kind.event_budget() < kind.timeout(),
                 "event budget for {:?} must be smaller than legacy timeout",
