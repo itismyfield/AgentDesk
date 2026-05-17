@@ -1383,6 +1383,166 @@ mod tests {
     }
 
     #[test]
+    fn two_segments_with_long_pause_emits_full_response() {
+        // #2419 regression: codex CLI emits assistant text in
+        // burst-pause-burst patterns. With the old 750ms drain a >1s inter-
+        // segment silence caused the tailer to emit Done and shut down,
+        // truncating Discord relay. With drain=2s the second segment must
+        // still land in the same turn after a 1s pause.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"two-seg\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-two-seg.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        // First segment is present from the start so the tail picks it up
+        // and starts the drain countdown.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment1"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                Duration::from_secs(2),
+                Some(Duration::from_secs(10)),
+            )
+        });
+
+        // Pause longer than the old 750ms default but shorter than the new
+        // 2s drain used here. The tailer must NOT have finished yet.
+        std::thread::sleep(Duration::from_millis(1100));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment2"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        assert!(
+            messages.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content == "segment1")
+            ),
+            "segment1 must be emitted; got {:?}",
+            messages
+        );
+        assert!(
+            messages.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content == "segment2")
+            ),
+            "segment2 must be emitted after the inter-segment pause; got {:?}",
+            messages
+        );
+        // Done's `result` accumulates both segments separated by blank line.
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result.contains("segment1") && result.contains("segment2")
+        ));
+    }
+
+    #[test]
+    fn tool_call_pause_does_not_emit_premature_done() {
+        // #2419: while a tool_call is in flight the assistant naturally goes
+        // silent. The drain timer must be suppressed for that window so
+        // segment2 (post-tool) still lands in the same turn.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"tool-pause\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-tool-pause.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        // Pre-write: segment1 + function_call (no output yet). The drain
+        // timer would normally trip on the ensuing silence — pending_tool_call
+        // must suppress it.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment1"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"c1"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                // Short drain — without the tool-call gate, this would fire
+                // during the silence and emit Done before segment2 arrives.
+                Duration::from_millis(150),
+                Some(Duration::from_secs(10)),
+            )
+        });
+
+        // Sleep long enough that drain WOULD have fired without gating.
+        std::thread::sleep(Duration::from_millis(600));
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"segment2"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        assert!(
+            messages.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content == "segment2")
+            ),
+            "segment2 must be emitted after the tool call resolves; got {:?}",
+            messages
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result.contains("segment1") && result.contains("segment2")
+        ));
+    }
+
+    #[test]
     fn preserves_multibyte_text_split_across_read_buffer_boundary() {
         let prefix = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":""#;
         let suffix = r#""}]}}"#;
