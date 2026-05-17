@@ -299,13 +299,14 @@ impl StreamRelayHandle {
             ..
         } = self;
         shutdown.store(true, Ordering::Release);
-        // Wake the relay loop's `select!` so it observes the flag and exits
-        // BEFORE we even bother dropping our sender. This is the bit that
-        // makes the loop robust to surviving sender clones — `notify_waiters`
-        // (singular waiter inside the loop, but the API is symmetric and
-        // does not require a prior `notified()` to be armed thanks to the
-        // permit semantics described in `Notify::notify_one`).
-        shutdown_notify.notify_waiters();
+        // Wake the relay loop's `select!` so it observes the flag and exits.
+        // `notify_one` (not `notify_waiters`) stores a single permit so the
+        // wakeup survives the pre-waiter race: if shutdown lands while the
+        // loop is mid-`deliver_frame` (no `Notified` future armed), the
+        // permit is consumed by the next `notified().await`. The
+        // `shutdown.load()` guard at the top of each loop iteration is the
+        // fail-closed backstop against any residual missed-notify.
+        shutdown_notify.notify_one();
         drop(tx);
         if let Some(handle) = task {
             let _ = handle.await;
@@ -393,14 +394,27 @@ async fn run_relay_loop(
         "stream-relay entering"
     );
     loop {
+        // Fail-closed shutdown check BEFORE entering select!. Guards the
+        // pre-waiter race where shutdown lands between the previous
+        // iteration's `deliver_frame()` return and the new `notified()`
+        // future construction. AtomicBool is loaded unconditionally, so a
+        // shutdown set during prior frame delivery is observed here.
+        if shutdown.load(Ordering::Acquire) {
+            tracing::debug!(
+                session = %session_name,
+                "stream-relay observed shutdown flag pre-select; draining and exiting"
+            );
+            drain_pending(&mut rx, &sink, &metrics, &session_name).await;
+            break;
+        }
         tokio::select! {
-            // Receiver-side cancellation. `notify_waiters` wakes any task
-            // currently inside `notified().await`; selecting on it makes the
+            // Receiver-side cancellation. `notify_one` stores a single
+            // permit so the wakeup survives even when it lands before
+            // `notified()` is armed (closes the pre-waiter race that
+            // `notify_waiters` would have lost). Selecting on it makes the
             // loop exit even when external sender clones (E5 #2412 cached
             // `RelayProducer` clones in `tmux_watcher`) keep the channel
-            // open. Without this branch, `rx.recv()` would wedge until every
-            // sender clone was dropped — which the supervisor cannot
-            // guarantee on its own.
+            // open.
             _ = shutdown_notify.notified() => {
                 tracing::debug!(
                     session = %session_name,
