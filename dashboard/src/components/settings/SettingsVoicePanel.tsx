@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
 import type {
   VoiceAgentConfig,
@@ -16,7 +16,6 @@ import { CompactFieldCard } from "./SettingsPanels";
 import {
   VOICE_SENSITIVITY_OPTIONS,
   splitVoiceAliases,
-  voiceAgentBuiltInAliases,
   voiceAgentKeys,
   type VoiceAliasConflict,
 } from "./SettingsModel";
@@ -68,6 +67,27 @@ export function SettingsVoicePanel({
   voiceLoaded,
   voiceSaving,
 }: SettingsVoicePanelProps) {
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const visibleAgents = useMemo(
+    () =>
+      voiceDraft?.agents.filter((agent) =>
+        voiceAgentKeys(agent.id).some((key) => isRowVisible(key)),
+      ) ?? [],
+    [isRowVisible, voiceDraft],
+  );
+
+  useEffect(() => {
+    if (visibleAgents.length === 0) {
+      if (selectedAgentId !== null) {
+        setSelectedAgentId(null);
+      }
+      return;
+    }
+    if (!selectedAgentId || !visibleAgents.some((agent) => agent.id === selectedAgentId)) {
+      setSelectedAgentId(visibleAgents[0].id);
+    }
+  }, [selectedAgentId, visibleAgents]);
+
   if (!voiceLoaded) {
     return (
       <SettingsEmptyState className="text-sm">
@@ -97,10 +117,10 @@ export function SettingsVoicePanel({
     isRowVisible("voice.global.lobby_channel_id") ? (
       <CompactFieldCard
         key="lobby"
-        label={tr("Lobby 채널 ID", "Lobby channel ID")}
+        label={tr("음성 채널 ID", "Voice channel ID")}
         description={tr(
-          "단일 voice-lobby로 들어오는 음성을 agent alias 라우팅에 사용합니다.",
-          "Single voice-lobby channel used for agent alias routing.",
+          "음성 입력을 받을 Discord 채널입니다.",
+          "Discord channel that receives voice input.",
         )}
       >
         <input
@@ -115,10 +135,10 @@ export function SettingsVoicePanel({
     isRowVisible("voice.global.active_agent_ttl_seconds") ? (
       <CompactFieldCard
         key="ttl"
-        label={tr("Active agent TTL", "Active agent TTL")}
+        label={tr("대화 유지 시간", "Conversation handoff time")}
         description={tr(
-          "alias 없이 이어 말할 수 있는 최근 agent 유지 시간입니다.",
-          "How long follow-up speech can continue without repeating an alias.",
+          "이름을 다시 부르지 않아도 같은 에이전트에게 이어 말할 수 있는 시간입니다.",
+          "How long follow-up speech keeps talking to the same agent without repeating a name.",
         )}
       >
         <div className="flex items-center gap-3">
@@ -156,8 +176,8 @@ export function SettingsVoicePanel({
         key="sensitivity"
         label={tr("기본 민감도", "Default sensitivity")}
         description={tr(
-          "agent별 override가 없을 때 적용할 barge-in 민감도입니다.",
-          "Barge-in sensitivity used when an agent has no override.",
+          "말이 겹칠 때 새 발화로 얼마나 쉽게 인식할지 정합니다.",
+          "Controls how readily overlapping speech is treated as a new utterance.",
         )}
       >
         <select
@@ -176,41 +196,25 @@ export function SettingsVoicePanel({
         </select>
       </CompactFieldCard>
     ) : null,
-    isRowVisible("voice.global.version") ? (
-      <CompactFieldCard
-        key="version"
-        label={tr("설정 버전", "Config version")}
-        description={tr(
-          "저장 시 optimistic locking에 사용하는 버전 해시입니다.",
-          "Version hash used for optimistic locking on save.",
-        )}
-      >
-        <code
-          className="block truncate rounded-xl px-3 py-2 text-xs"
-          style={{
-            background: "color-mix(in srgb, var(--th-overlay-medium) 80%, transparent)",
-            color: "var(--th-text-muted)",
-            fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-          }}
-        >
-          {voiceDraft.version}
-        </code>
-      </CompactFieldCard>
-    ) : null,
   ].filter(Boolean);
 
-  const agentCards = voiceDraft.agents
-    .filter((agent) =>
-      voiceAgentKeys(agent.id).some((key) => isRowVisible(key)),
-    )
-    .map((agent) => {
+  const selectedAgent =
+    (selectedAgentId ? visibleAgents.find((agent) => agent.id === selectedAgentId) : null)
+    ?? visibleAgents[0]
+    ?? null;
+  const enabledAgentCount = voiceDraft.agents.filter((agent) => agent.voice_enabled).length;
+  const selectedAgentCard = selectedAgent
+    ? (() => {
+      const agent = selectedAgent;
       const displayName = isKo && agent.name_ko ? agent.name_ko : agent.name;
+      const secondaryName = isKo && agent.name !== displayName ? agent.name : agent.name_ko;
       const conflictInAgent =
         voiceAliasConflict &&
         (voiceAliasConflict.firstAgent.id === agent.id || voiceAliasConflict.secondAgent.id === agent.id);
       return (
         <SettingsCard
           key={agent.id}
+          data-testid="voice-agent-card"
           className="rounded-2xl p-4"
           style={{
             borderColor: conflictInAgent
@@ -224,13 +228,16 @@ export function SettingsVoicePanel({
               <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
                 {displayName}
               </div>
-              <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                {agent.id} · {agent.name}
-              </div>
+              {secondaryName ? (
+                <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                  {secondaryName}
+                </div>
+              ) : null}
             </div>
             <button
               type="button"
               role="switch"
+              aria-label={tr(`${displayName} 음성 사용`, `${displayName} voice enabled`)}
               aria-checked={agent.voice_enabled}
               onClick={() => updateVoiceAgent(agent.id, { voice_enabled: !agent.voice_enabled })}
               className="relative inline-flex h-7 w-12 items-center rounded-full transition-colors"
@@ -250,8 +257,8 @@ export function SettingsVoicePanel({
           <div className="mt-4 grid gap-3 md:grid-cols-2">
             {isRowVisible(`voice.agent.${agent.id}.wake_word`) ? (
               <CompactFieldCard
-                label={tr("Wake word", "Wake word")}
-                description={tr("비어 있으면 agent alias만으로 라우팅합니다.", "When empty, the agent routes by alias only.")}
+                label={tr("호출어", "Wake word")}
+                description={tr("비워 두면 호출 이름만으로 연결합니다.", "When empty, spoken names are enough.")}
               >
                 <input
                   value={agent.wake_word}
@@ -265,7 +272,7 @@ export function SettingsVoicePanel({
             {isRowVisible(`voice.agent.${agent.id}.sensitivity`) ? (
               <CompactFieldCard
                 label={tr("민감도", "Sensitivity")}
-                description={tr("agent별 barge-in 감지 민감도입니다.", "Per-agent barge-in detection sensitivity.")}
+                description={tr("이 에이전트만 다르게 인식하도록 조정합니다.", "Tune recognition for this agent only.")}
               >
                 <select
                   value={agent.sensitivity_mode}
@@ -285,11 +292,11 @@ export function SettingsVoicePanel({
             ) : null}
             {isRowVisible(`voice.agent.${agent.id}.aliases`) ? (
               <CompactFieldCard
-                label={tr("Aliases", "Aliases")}
+                label={tr("추가 호출 이름", "Additional spoken names")}
                 description={tr("쉼표 또는 줄바꿈으로 여러 호출명을 입력합니다.", "Enter multiple spoken aliases separated by commas or new lines.")}
                 footer={tr(
-                  `기본 alias: ${voiceAgentBuiltInAliases(agent).join(", ")}`,
-                  `Built-in aliases: ${voiceAgentBuiltInAliases(agent).join(", ")}`,
+                  "에이전트 이름은 기본 호출명으로 자동 포함됩니다.",
+                  "The agent's name is always included automatically.",
                 )}
               >
                 <textarea
@@ -303,7 +310,8 @@ export function SettingsVoicePanel({
           </div>
         </SettingsCard>
       );
-    });
+    })()
+    : null;
 
   return (
     <div className="space-y-5">
@@ -322,8 +330,8 @@ export function SettingsVoicePanel({
       >
         <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
           {tr(
-            "음성 설정은 agentdesk.yaml에 저장되며 runtime voice routing이 다음 발화부터 다시 읽습니다. alias는 NFC/lowercase/공백·특수문자 제거 기준으로 충돌을 막습니다.",
-            "Voice settings are stored in agentdesk.yaml and runtime voice routing reloads them on the next utterance. Aliases reject collisions after NFC/lowercase and removing spaces/special characters.",
+            "음성 채널, 대화 유지 시간, 에이전트별 호출 이름을 조정합니다. 저장하면 다음 음성 입력부터 반영됩니다.",
+            "Adjust the voice channel, conversation handoff time, and each agent's spoken names. Saved changes apply to the next voice input.",
           )}
         </p>
       </SettingsCallout>
@@ -336,32 +344,71 @@ export function SettingsVoicePanel({
         <SettingsCallout>
           <p className="text-sm leading-6" style={{ color: "rgba(252,165,165,0.95)" }}>
             {tr(
-              `alias 충돌: ${voiceAliasConflict.firstAgent.name} "${voiceAliasConflict.firstAlias}" ↔ ${voiceAliasConflict.secondAgent.name} "${voiceAliasConflict.secondAlias}" (${voiceAliasConflict.normalized})`,
-              `Alias collision: ${voiceAliasConflict.firstAgent.name} "${voiceAliasConflict.firstAlias}" ↔ ${voiceAliasConflict.secondAgent.name} "${voiceAliasConflict.secondAlias}" (${voiceAliasConflict.normalized})`,
+              `호출 이름이 겹칩니다: ${voiceAliasConflict.firstAgent.name} "${voiceAliasConflict.firstAlias}" ↔ ${voiceAliasConflict.secondAgent.name} "${voiceAliasConflict.secondAlias}"`,
+              `Spoken names overlap: ${voiceAliasConflict.firstAgent.name} "${voiceAliasConflict.firstAlias}" ↔ ${voiceAliasConflict.secondAgent.name} "${voiceAliasConflict.secondAlias}"`,
             )}
           </p>
         </SettingsCallout>
       ) : null}
 
       {renderSettingGroupCard({
-        titleKo: "Voice lobby",
-        titleEn: "Voice lobby",
-        descriptionKo: "lobby 채널, active-agent TTL, 기본 민감도와 버전입니다.",
-        descriptionEn: "Lobby channel, active-agent TTL, default sensitivity, and version.",
-        totalCount: 4,
+        titleKo: "전체 음성 설정",
+        titleEn: "Global voice settings",
+        descriptionKo: "모든 에이전트에 공통으로 적용되는 기본값입니다.",
+        descriptionEn: "Defaults shared by every agent.",
+        totalCount: 3,
         rows: visibleGlobalCards,
       })}
 
       <SettingsSubsection
-        title={tr("에이전트 음성 라우팅", "Agent voice routing")}
+        title={tr("에이전트별 설정", "Per-agent settings")}
         description={tr(
-          "각 agent의 음성 활성화, wake word, 호출 alias, 민감도 override를 편집합니다.",
-          "Edit each agent's voice enablement, wake word, spoken aliases, and sensitivity override.",
+          "필요한 에이전트를 선택해 음성 사용 여부와 호출 이름을 조정합니다.",
+          "Choose one agent at a time to adjust voice enablement and spoken names.",
         )}
       >
-        <div className="grid gap-3">
-          {agentCards.length > 0 ? (
-            agentCards
+        <div className="grid gap-3 lg:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.6fr)]">
+          <SettingsCard
+            className="rounded-2xl p-4"
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+              background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
+            }}
+          >
+            <label
+              className="block text-xs font-semibold"
+              style={{ color: "var(--th-text)" }}
+              htmlFor="voice-agent-selector"
+            >
+              {tr("설정할 에이전트", "Agent to configure")}
+            </label>
+            <select
+              id="voice-agent-selector"
+              data-testid="voice-agent-selector"
+              value={selectedAgent?.id ?? ""}
+              onChange={(event) => setSelectedAgentId(event.target.value || null)}
+              className="mt-3 w-full rounded-2xl px-3 py-2.5 text-sm"
+              style={inputStyle}
+              disabled={visibleAgents.length === 0}
+            >
+              {visibleAgents.map((agent) => {
+                const displayName = isKo && agent.name_ko ? agent.name_ko : agent.name;
+                return (
+                  <option key={agent.id} value={agent.id}>
+                    {displayName}
+                  </option>
+                );
+              })}
+            </select>
+            <p className="mt-3 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+              {tr(
+                `${enabledAgentCount}명 활성 / 전체 ${voiceDraft.agents.length}명`,
+                `${enabledAgentCount} enabled / ${voiceDraft.agents.length} total`,
+              )}
+            </p>
+          </SettingsCard>
+          {selectedAgentCard ? (
+            selectedAgentCard
           ) : (
             <SettingsEmptyState className="text-sm">
               {tr("검색 결과가 없습니다.", "No matching agents.")}
