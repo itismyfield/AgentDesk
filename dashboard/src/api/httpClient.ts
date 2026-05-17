@@ -73,6 +73,7 @@ export class ApiRequestError extends Error {
 export interface RequestOptions extends RequestInit {
   timeoutMs?: number;
   maxRetries?: number;
+  suppressErrorToast?: boolean;
 }
 
 function composeRequestSignal(
@@ -167,7 +168,13 @@ export async function request<T>(url: string, opts?: RequestOptions): Promise<T>
       const externalSignal = opts?.signal ?? undefined;
       const { signal, cleanup } = composeRequestSignal(controller.signal, externalSignal);
       try {
-        const { timeoutMs: _timeoutMs, signal: _signal, ...fetchOpts } = opts ?? {};
+        const {
+          timeoutMs: _timeoutMs,
+          signal: _signal,
+          maxRetries: _maxRetries,
+          suppressErrorToast: _suppressErrorToast,
+          ...fetchOpts
+        } = opts ?? {};
         const res = await fetch(`${BASE}${url}`, {
           credentials: "include",
           ...fetchOpts,
@@ -236,7 +243,7 @@ export async function request<T>(url: string, opts?: RequestOptions): Promise<T>
     .catch((error) => {
       const resolvedError =
         error instanceof Error ? error : new Error(String(error));
-      if (!isAbortError(resolvedError)) {
+      if (!opts?.suppressErrorToast && !isAbortError(resolvedError)) {
         apiErrorListener?.(url, resolvedError);
       }
       throw resolvedError;

@@ -1,4 +1,9 @@
-import { request, readCachedGet, type CachedGetEntry } from "./httpClient";
+import {
+  request,
+  readCachedGet,
+  type CachedGetEntry,
+  type RequestOptions,
+} from "./httpClient";
 
 // ── Skill Ranking ──
 
@@ -24,11 +29,18 @@ export interface SkillRankingResponse {
   byAgent: SkillRankingByAgentRow[];
 }
 
+const SKILL_ANALYTICS_TIMEOUT_MS = 60_000;
+
 export async function getSkillRanking(
   window: "7d" | "30d" | "90d" | "all" = "7d",
   limit = 20,
+  opts?: RequestOptions,
 ): Promise<SkillRankingResponse> {
-  return request(`/api/skills/ranking?window=${window}&limit=${limit}`);
+  return request(`/api/skills/ranking?window=${window}&limit=${limit}`, {
+    timeoutMs: SKILL_ANALYTICS_TIMEOUT_MS,
+    suppressErrorToast: true,
+    ...opts,
+  });
 }
 
 export function getCachedSkillRanking(

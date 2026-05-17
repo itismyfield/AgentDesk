@@ -1,5 +1,11 @@
 import type { DashboardStats, TokenAnalyticsResponse } from "../types";
-import { request, readCachedGet, TOKEN_ANALYTICS_TIMEOUT_MS, type CachedGetEntry } from "./httpClient";
+import {
+  request,
+  readCachedGet,
+  TOKEN_ANALYTICS_TIMEOUT_MS,
+  type CachedGetEntry,
+  type RequestOptions,
+} from "./httpClient";
 
 export async function getStats(officeId?: string): Promise<DashboardStats> {
   const q = officeId ? `?officeId=${officeId}` : "";
@@ -8,7 +14,9 @@ export async function getStats(officeId?: string): Promise<DashboardStats> {
 
 export async function getTokenAnalytics(
   period: "7d" | "30d" | "90d" = "30d",
-  opts?: { signal?: AbortSignal; forceRefresh?: boolean },
+  opts?: Pick<RequestOptions, "signal" | "suppressErrorToast"> & {
+    forceRefresh?: boolean;
+  },
 ): Promise<TokenAnalyticsResponse> {
   // The endpoint now ships with `Cache-Control: max-age=15, swr=300` so a
   // background re-entry to /stats can paint instantly. The Refresh button
@@ -24,6 +32,7 @@ export async function getTokenAnalytics(
     signal: opts?.signal,
     timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
     cache: opts?.forceRefresh ? "reload" : "default",
+    suppressErrorToast: opts?.suppressErrorToast,
   });
 }
 

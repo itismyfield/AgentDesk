@@ -1,9 +1,5 @@
 import {
-  getCachedSkillCatalog,
-  getCachedSkillRanking,
   getCachedTokenAnalytics,
-  getSkillCatalog,
-  getSkillRanking,
   getTokenAnalytics,
 } from "../api/client";
 
@@ -25,14 +21,11 @@ export function warmStatsEntryCache(): () => void {
 
   const run = () => {
     void import("../components/StatsPageView");
+    if (!getCachedTokenAnalytics("7d")) {
+      void getTokenAnalytics("7d", { suppressErrorToast: true }).catch(() => {});
+    }
     if (!getCachedTokenAnalytics("30d")) {
-      void getTokenAnalytics("30d").catch(() => {});
-    }
-    if (!getCachedSkillRanking("30d", 16)) {
-      void getSkillRanking("30d", 16).catch(() => {});
-    }
-    if (!getCachedSkillCatalog()) {
-      void getSkillCatalog().catch(() => {});
+      void getTokenAnalytics("30d", { suppressErrorToast: true }).catch(() => {});
     }
   };
 

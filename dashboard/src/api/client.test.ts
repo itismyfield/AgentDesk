@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assignKanbanIssue,
   getDispatchDeliveryEvents,
+  getSkillRanking,
+  onApiError,
   redispatchKanbanCard,
+  request,
   retryKanbanCard,
 } from "./client";
 
@@ -22,8 +25,52 @@ function mockJsonResponse(body: unknown): Response {
   } as unknown as Response;
 }
 
+function mockErrorResponse(status: number, body: unknown): Response {
+  return {
+    ok: false,
+    status,
+    json: vi.fn().mockResolvedValue(body),
+  } as unknown as Response;
+}
+
 afterEach(() => {
+  onApiError(null);
   vi.unstubAllGlobals();
+});
+
+describe("global API error reporting", () => {
+  it("reports unsuppressed API errors to the toast listener", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(mockErrorResponse(500, { error: "boom" })),
+    );
+    const listener = vi.fn();
+    onApiError(listener);
+
+    await expect(request("/api/failing", { maxRetries: 0 })).rejects.toThrow(
+      "boom",
+    );
+
+    expect(listener).toHaveBeenCalledWith(
+      "/api/failing",
+      expect.objectContaining({ message: "boom" }),
+    );
+  });
+
+  it("keeps auxiliary skill analytics errors out of global toasts", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(mockErrorResponse(503, { error: "slow" })),
+    );
+    const listener = vi.fn();
+    onApiError(listener);
+
+    await expect(
+      getSkillRanking("7d", 16, { maxRetries: 0 }),
+    ).rejects.toThrow("slow");
+
+    expect(listener).not.toHaveBeenCalled();
+  });
 });
 
 describe("kanban dispatch mutation responses", () => {

@@ -1778,6 +1778,12 @@ test.describe("Dashboard smoke tests", () => {
     await expect(officeScene).toBeVisible({ timeout: 15000 });
     await expect(page.locator("#office-scene-status-summary")).toContainText(/Ada Dashboard|아다 대시보드/);
     await expect(officeScene.locator("canvas")).toHaveAttribute("aria-hidden", "true");
+
+    const [mainBox, sceneBox] = await Promise.all([
+      page.getByTestId("app-main-scroll").boundingBox(),
+      officeScene.boundingBox(),
+    ]);
+    expect((sceneBox?.x ?? 0) - (mainBox?.x ?? 0)).toBeLessThan(80);
   });
 
   test("home: widget order persists from storage and reset restores defaults", async ({ page }, testInfo) => {

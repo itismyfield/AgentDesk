@@ -469,7 +469,7 @@ export default function OfficeView({
 
   return (
     <div
-      className="mx-auto h-full w-full max-w-6xl min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
+      className="h-full w-full min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <div className="flex flex-col gap-4">

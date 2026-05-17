@@ -154,7 +154,7 @@ export default function StatsPageView({
       setCatalogLoading(cachedCatalog === null);
       setCatalogError(null);
       try {
-        const next = await getSkillCatalog();
+        const next = await getSkillCatalog({ suppressErrorToast: true });
         if (!active) return;
         setCatalog(next);
       } catch {
@@ -209,8 +209,8 @@ export default function StatsPageView({
       // a default re-entry would otherwise be served by the browser cache).
       const forceRefresh = reloadKey > 0;
       const [analyticsResult, skillResult] = await Promise.allSettled([
-        getTokenAnalytics(period, { forceRefresh }),
-        getSkillRanking(period, 16),
+        getTokenAnalytics(period, { forceRefresh, suppressErrorToast: true }),
+        getSkillRanking(period, 16, { suppressErrorToast: true }),
       ]);
       if (!active) return;
 

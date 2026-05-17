@@ -4,6 +4,7 @@ import {
   readCachedSnapshot,
   SLOW_MUTATION_TIMEOUT_MS,
   type CachedApiSnapshot,
+  type RequestOptions,
 } from "./httpClient";
 import type { GitHubIssuesResponse } from "./analytics";
 
@@ -211,9 +212,18 @@ export async function startRoundTableMeeting(
 
 // ── Skill Catalog ──
 
-export async function getSkillCatalog(): Promise<SkillCatalogEntry[]> {
+const SKILL_CATALOG_TIMEOUT_MS = 60_000;
+
+export async function getSkillCatalog(
+  opts?: RequestOptions,
+): Promise<SkillCatalogEntry[]> {
   const data = await request<{ catalog: SkillCatalogEntry[] }>(
     "/api/skills/catalog",
+    {
+      timeoutMs: SKILL_CATALOG_TIMEOUT_MS,
+      suppressErrorToast: true,
+      ...opts,
+    },
   );
   return data.catalog;
 }
