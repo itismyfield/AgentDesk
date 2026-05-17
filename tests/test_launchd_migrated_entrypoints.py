@@ -76,6 +76,19 @@ class LaunchdMigratedEntrypointTests(unittest.TestCase):
         self.assertTrue((ENTRYPOINT_DIR / "token-daily-report.py").exists())
         self.assertIn("$SCRIPT_DIR/token-daily-report.py", token_shell)
 
+    def test_output_files_use_unique_tmp_paths(self) -> None:
+        helper = (ENTRYPOINT_DIR / "run-claude-message-job.sh").read_text(
+            encoding="utf-8"
+        )
+        token_shell = (ENTRYPOINT_DIR / "token-daily-report.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("mktemp", helper)
+        self.assertIn("mktemp", token_shell)
+        self.assertNotIn("/tmp/claude-job-output-${SOURCE//[:\\/]/-}.txt", helper)
+        self.assertNotIn("/tmp/token-daily-report-output.txt", token_shell)
+
 
 if __name__ == "__main__":
     unittest.main()

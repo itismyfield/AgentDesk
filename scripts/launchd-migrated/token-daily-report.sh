@@ -9,8 +9,7 @@ export LC_ALL=ko_KR.UTF-8
 
 NOW_KST="$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')"
 TOKEN_MANAGER_CHANNEL="1481478222439907560"
-OUTPUT_FILE="/tmp/token-daily-report-output.txt"
-rm -f "$OUTPUT_FILE"
+OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/token-daily-report-output.XXXXXX")"
 
 # Step 1: Python으로 원시 데이터 수집
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -61,9 +61,9 @@ if [[ "$DRY_RUN" -eq 0 && -z "$TARGET" ]]; then
   exit 2
 fi
 
-# Unique output file for this job run
-OUTPUT_FILE="/tmp/claude-job-output-${SOURCE//[:\/]/-}.txt"
-rm -f "$OUTPUT_FILE"
+# Unique output file for this job run. Keep it unpredictable so overlapping
+# routine retries cannot read or clobber each other's result.
+OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/claude-job-output-${SOURCE//[:\/]/-}.XXXXXX")"
 
 # Append file-based output instruction to the prompt
 AUGMENTED_PROMPT="$(mktemp)"
