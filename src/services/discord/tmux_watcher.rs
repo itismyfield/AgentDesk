@@ -2490,15 +2490,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     );
                 }
                 Some(state) => {
-                    crate::services::discord::turn_bridge::auto_retry_with_history(
-                        &http,
-                        &shared,
-                        &watcher_provider,
+                    crate::services::discord::tmux_overload_retry::schedule_discord_retry_with_history_completion_release(
+                        shared.clone(),
+                        http.clone(),
+                        watcher_provider.clone(),
                         channel_id,
                         serenity::MessageId::new(state.user_msg_id),
-                        &state.user_text,
-                    )
-                    .await;
+                        state.user_text,
+                    );
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
                         "  [{ts}] ↻ Watcher auto-retry queued for channel {}",

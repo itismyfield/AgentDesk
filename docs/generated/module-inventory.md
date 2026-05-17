@@ -483,12 +483,12 @@
 | `services::discord::tmux_kill_policy` | `src/services/discord/tmux_kill_policy.rs` | 418 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 1129 | giant-file |
 | `services::discord::tmux_output_stream` | `src/services/discord/tmux_output_stream.rs` | 590 |  |
-| `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
+| `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 478 |  |
 | `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 537 |  |
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 83 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 597 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
-| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4008 | giant-file |
+| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4007 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 710 |  |
 | `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 6595 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2458 | giant-file |
