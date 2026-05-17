@@ -15,7 +15,10 @@ use std::{
 
 use super::{
     AppState,
-    skill_usage_analytics::{SkillUsageRecord, collect_skill_usage_pg},
+    skill_usage_analytics::{
+        SkillUsageSummary, collect_direct_agent_skill_usage_summary_pg,
+        collect_direct_skill_usage_summary_pg,
+    },
 };
 
 fn skill_description_from_markdown(content: &str) -> String {
@@ -202,13 +205,6 @@ struct UsageAggregate {
     last_used_at: Option<i64>,
 }
 
-#[derive(Default)]
-struct ByAgentAggregate {
-    agent_name: String,
-    calls: i64,
-    last_used_at: Option<i64>,
-}
-
 fn ranking_days(window: &str) -> Option<i64> {
     match window {
         "30d" => Some(30),
@@ -332,24 +328,19 @@ async fn load_stale_skill_ids_pg(
         .collect())
 }
 
-fn apply_usage(aggregate: &mut UsageAggregate, used_at_ms: i64) {
-    aggregate.calls += 1;
-    aggregate.last_used_at = Some(
-        aggregate
-            .last_used_at
-            .map_or(used_at_ms, |last_used_at| last_used_at.max(used_at_ms)),
-    );
-}
-
-fn aggregate_overall_usage(records: &[SkillUsageRecord]) -> HashMap<String, UsageAggregate> {
-    let mut totals = HashMap::new();
-    for record in records {
-        apply_usage(
-            totals.entry(record.skill_id.clone()).or_default(),
-            record.used_at_ms,
-        );
-    }
-    totals
+fn aggregate_usage_summaries(records: Vec<SkillUsageSummary>) -> HashMap<String, UsageAggregate> {
+    records
+        .into_iter()
+        .map(|record| {
+            (
+                record.skill_id,
+                UsageAggregate {
+                    calls: record.calls,
+                    last_used_at: record.last_used_at,
+                },
+            )
+        })
+        .collect()
 }
 
 /// GET /api/skills/catalog
@@ -378,12 +369,12 @@ pub async fn catalog(
         }
     };
     let include_stale = params.include_stale.unwrap_or(false);
-    // Same pattern as the ranking endpoint: metadata + usage are independent
-    // PG queries, so awaiting them concurrently keeps the catalog endpoint
-    // bounded by the slower of the two instead of their sum.
+    // Dashboard catalog requests should stay cheap. Use the canonical
+    // skill_usage table instead of reparsing large transcript JSON on every
+    // page load.
     let (metadata_result, usage_result) = tokio::join!(
         load_skill_metadata_pg(pool),
-        collect_skill_usage_pg(pool, None),
+        collect_direct_skill_usage_summary_pg(pool, None),
     );
     let metadata = match metadata_result {
         Ok(data) => data,
@@ -403,7 +394,7 @@ pub async fn catalog(
             );
         }
     };
-    let totals = aggregate_overall_usage(&usage);
+    let totals = aggregate_usage_summaries(usage);
     let known_ids: HashSet<String> = metadata.keys().cloned().collect();
 
     let mut catalog = metadata
@@ -499,13 +490,14 @@ pub async fn ranking(
     let window = params.window.as_deref().unwrap_or("7d");
     let limit = params.limit.unwrap_or(20);
     let include_stale = params.include_stale.unwrap_or(false);
-    // metadata + usage queries don't depend on each other and are the bulk of
-    // the endpoint latency. Run them concurrently so the wall-clock time is
-    // max(metadata, usage) instead of metadata + usage. Disk sync stays
-    // sequential because metadata reads the skills table this writes to.
-    let (metadata_result, usage_result) = tokio::join!(
+    // Metadata + direct usage summaries don't depend on each other. Keep the
+    // dashboard path on SQL aggregates so 30d/90d views don't parse transcript
+    // blobs synchronously in the request handler.
+    let days = ranking_days(window);
+    let (metadata_result, usage_result, by_agent_usage_result) = tokio::join!(
         load_skill_metadata_pg(pool),
-        collect_skill_usage_pg(pool, ranking_days(window)),
+        collect_direct_skill_usage_summary_pg(pool, days),
+        collect_direct_agent_skill_usage_summary_pg(pool, days),
     );
     let metadata = match metadata_result {
         Ok(data) => data,
@@ -525,8 +517,17 @@ pub async fn ranking(
             );
         }
     };
+    let by_agent_usage = match by_agent_usage_result {
+        Ok(data) => data,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("agent usage query failed: {e}")})),
+            );
+        }
+    };
 
-    let mut overall = aggregate_overall_usage(&usage)
+    let mut overall = aggregate_usage_summaries(usage)
         .into_iter()
         .map(|(skill_id, aggregate)| {
             let metadata = metadata
@@ -568,53 +569,28 @@ pub async fn ranking(
     });
     overall.truncate(limit.max(0) as usize);
 
-    let mut by_agent_totals = HashMap::<(String, String), ByAgentAggregate>::new();
-    for record in &usage {
-        let Some(agent_role_id) = record.agent_id.clone() else {
-            continue;
-        };
-        let agent_name = record
-            .agent_name
-            .clone()
-            .unwrap_or_else(|| agent_role_id.clone());
-        let aggregate = by_agent_totals
-            .entry((agent_role_id, record.skill_id.clone()))
-            .or_insert_with(|| ByAgentAggregate {
-                agent_name: agent_name.clone(),
-                ..ByAgentAggregate::default()
-            });
-        if aggregate.agent_name.is_empty() {
-            aggregate.agent_name = agent_name;
-        }
-        aggregate.calls += 1;
-        aggregate.last_used_at = Some(
-            aggregate
-                .last_used_at
-                .map_or(record.used_at_ms, |last_used_at| {
-                    last_used_at.max(record.used_at_ms)
-                }),
-        );
-    }
-
-    let mut by_agent = by_agent_totals
+    let mut by_agent = by_agent_usage
         .into_iter()
-        .map(|((agent_role_id, skill_id), aggregate)| {
-            let metadata = metadata
-                .get(&skill_id)
-                .cloned()
-                .unwrap_or_else(|| SkillMetadata {
-                    name: skill_id.clone(),
-                    description: skill_id.clone(),
-                });
-            json!({
+        .filter_map(|summary| {
+            let agent_role_id = summary.agent_id?;
+            let agent_name = summary.agent_name.unwrap_or_else(|| agent_role_id.clone());
+            let metadata =
+                metadata
+                    .get(&summary.skill_id)
+                    .cloned()
+                    .unwrap_or_else(|| SkillMetadata {
+                        name: summary.skill_id.clone(),
+                        description: summary.skill_id.clone(),
+                    });
+            Some(json!({
                 "agent_role_id": agent_role_id,
-                "agent_name": aggregate.agent_name,
+                "agent_name": agent_name,
                 "skill_name": metadata.name,
                 "skill_desc_ko": metadata.description,
-                "calls": aggregate.calls,
-                "last_used_at": aggregate.last_used_at,
-                "disk_present": disk_skill_ids.contains(&skill_id),
-            })
+                "calls": summary.calls,
+                "last_used_at": summary.last_used_at,
+                "disk_present": disk_skill_ids.contains(&summary.skill_id),
+            }))
         })
         .collect::<Vec<_>>();
     if !include_stale {

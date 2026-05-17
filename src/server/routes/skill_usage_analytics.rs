@@ -20,6 +20,15 @@ pub(super) struct SkillUsageRecord {
     pub day: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SkillUsageSummary {
+    pub skill_id: String,
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub calls: i64,
+    pub last_used_at: Option<i64>,
+}
+
 fn skill_markdown_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -307,6 +316,94 @@ async fn load_direct_skill_usage_pg(
     }
 
     Ok(records)
+}
+
+pub(super) async fn collect_direct_skill_usage_summary_pg(
+    pool: &PgPool,
+    days: Option<i64>,
+) -> Result<Vec<SkillUsageSummary>, sqlx::Error> {
+    let sql_all = "SELECT su.skill_id,
+                          NULL::TEXT AS agent_id,
+                          NULL::TEXT AS agent_name,
+                          COUNT(*)::BIGINT AS calls,
+                          (EXTRACT(EPOCH FROM MAX(su.used_at))::BIGINT * 1000) AS last_used_at_ms
+                   FROM skill_usage su
+                   GROUP BY su.skill_id";
+    let sql_window = "SELECT su.skill_id,
+                             NULL::TEXT AS agent_id,
+                             NULL::TEXT AS agent_name,
+                             COUNT(*)::BIGINT AS calls,
+                             (EXTRACT(EPOCH FROM MAX(su.used_at))::BIGINT * 1000) AS last_used_at_ms
+                      FROM skill_usage su
+                      WHERE su.used_at >= NOW() - ($1::BIGINT * INTERVAL '1 day')
+                      GROUP BY su.skill_id";
+
+    load_skill_usage_summary_rows(pool, days, sql_all, sql_window).await
+}
+
+pub(super) async fn collect_direct_agent_skill_usage_summary_pg(
+    pool: &PgPool,
+    days: Option<i64>,
+) -> Result<Vec<SkillUsageSummary>, sqlx::Error> {
+    let sql_all = "SELECT su.skill_id,
+                          su.agent_id,
+                          COALESCE(a.name_ko, a.name, su.agent_id) AS agent_name,
+                          COUNT(*)::BIGINT AS calls,
+                          (EXTRACT(EPOCH FROM MAX(su.used_at))::BIGINT * 1000) AS last_used_at_ms
+                   FROM skill_usage su
+                   LEFT JOIN agents a ON a.id = su.agent_id
+                   WHERE su.agent_id IS NOT NULL
+                   GROUP BY su.skill_id, su.agent_id, COALESCE(a.name_ko, a.name, su.agent_id)";
+    let sql_window = "SELECT su.skill_id,
+                             su.agent_id,
+                             COALESCE(a.name_ko, a.name, su.agent_id) AS agent_name,
+                             COUNT(*)::BIGINT AS calls,
+                             (EXTRACT(EPOCH FROM MAX(su.used_at))::BIGINT * 1000) AS last_used_at_ms
+                      FROM skill_usage su
+                      LEFT JOIN agents a ON a.id = su.agent_id
+                      WHERE su.used_at >= NOW() - ($1::BIGINT * INTERVAL '1 day')
+                        AND su.agent_id IS NOT NULL
+                      GROUP BY su.skill_id, su.agent_id, COALESCE(a.name_ko, a.name, su.agent_id)";
+
+    load_skill_usage_summary_rows(pool, days, sql_all, sql_window).await
+}
+
+async fn load_skill_usage_summary_rows(
+    pool: &PgPool,
+    days: Option<i64>,
+    sql_all: &str,
+    sql_window: &str,
+) -> Result<Vec<SkillUsageSummary>, sqlx::Error> {
+    let rows = if let Some(days) = days {
+        sqlx::query(sql_window).bind(days).fetch_all(pool).await?
+    } else {
+        sqlx::query(sql_all).fetch_all(pool).await?
+    };
+
+    let mut summaries = Vec::new();
+    for row in rows {
+        let Some(skill_id) = row
+            .try_get::<String, _>("skill_id")
+            .ok()
+            .and_then(|skill_id| normalize_skill_id(&skill_id))
+        else {
+            continue;
+        };
+        summaries.push(SkillUsageSummary {
+            skill_id,
+            agent_id: row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
+            agent_name: row
+                .try_get::<Option<String>, _>("agent_name")
+                .ok()
+                .flatten(),
+            calls: row.try_get::<i64, _>("calls").unwrap_or_default(),
+            last_used_at: row
+                .try_get::<Option<i64>, _>("last_used_at_ms")
+                .ok()
+                .flatten(),
+        });
+    }
+    Ok(summaries)
 }
 
 pub(super) async fn collect_skill_usage_pg(
