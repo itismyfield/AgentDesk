@@ -104,6 +104,51 @@ pub fn request_discovery_tick() {
 pub async fn build_channel_directory_from_pg(
     pool: &PgPool,
 ) -> Result<ChannelDirectory, sqlx::Error> {
+    // load_graceful() does sync filesystem IO + yaml parse — push to a blocking
+    // thread so we don't stall the tokio runtime on every discovery tick.
+    let name_map = tokio::task::spawn_blocking(build_yaml_channel_name_map)
+        .await
+        .unwrap_or_default();
+    build_channel_directory_from_pg_with_config(pool, name_map).await
+}
+
+/// Lookup table: `(agent_id, provider, channel_id) → channel_name`. Built once
+/// from `agentdesk.yaml` so discovery can resolve the tmux session segment
+/// (`channels.<provider>.name`) that the dispatch path uses to construct live
+/// tmux session names.
+///
+/// Without this, the directory keys collapse to `(provider, channel_id)` and
+/// fail to match `AgentDesk-{provider}-{channel_name}` sessions, leaving the
+/// post-restart adoption path silently broken (issue #2465).
+pub type ChannelNameMap = std::collections::HashMap<(String, ProviderKind, String), String>;
+
+/// Build the channel-name map from the live yaml config. Returns an empty map
+/// on any failure so discovery degrades gracefully (legacy snowflake-keyed
+/// matching).
+pub fn build_yaml_channel_name_map() -> ChannelNameMap {
+    let mut map: ChannelNameMap = ChannelNameMap::new();
+    let config = crate::config::load_graceful();
+    for agent in &config.agents {
+        for (provider_str, channel_opt) in agent.channels.iter() {
+            let Some(channel) = channel_opt else { continue };
+            let Some(provider) = ProviderKind::from_str(provider_str) else {
+                continue;
+            };
+            let Some(channel_id) = channel.channel_id() else {
+                continue;
+            };
+            if let Some(channel_name) = channel.channel_name() {
+                map.insert((agent.id.clone(), provider, channel_id), channel_name);
+            }
+        }
+    }
+    map
+}
+
+async fn build_channel_directory_from_pg_with_config(
+    pool: &PgPool,
+    name_map: ChannelNameMap,
+) -> Result<ChannelDirectory, sqlx::Error> {
     let all = crate::db::agents::load_all_agent_channel_bindings_pg(pool).await?;
 
     let mut directory = ChannelDirectory::new();
@@ -113,10 +158,19 @@ pub async fn build_channel_directory_from_pg(
         // tmux session name*, so duplicate provider entries that map to the
         // same channel collapse naturally.
         for (provider, channel_id) in channel_pairs_for_agent(&bindings) {
+            // Look up the yaml-declared channel name for this exact
+            // (agent, provider, channel_id) tuple. When present, the live
+            // tmux session is `AgentDesk-{provider}-{channel_name}` so the
+            // directory must key by `channel_name`; falling back to
+            // `channel_id` preserves legacy bindings without a yaml entry.
+            let tmux_segment = name_map
+                .get(&(agent_id.clone(), provider.clone(), channel_id.clone()))
+                .cloned();
             let binding = ChannelBinding {
                 channel_id,
                 agent_id: agent_id.clone(),
                 provider,
+                tmux_segment,
             };
             if let Err(error) = directory.insert(binding) {
                 tracing::warn!(
@@ -373,6 +427,21 @@ mod tests {
             channel_id: channel.to_string(),
             agent_id: agent.to_string(),
             provider,
+            tmux_segment: None,
+        }
+    }
+
+    fn binding_named(
+        channel_id: &str,
+        channel_name: &str,
+        agent: &str,
+        provider: ProviderKind,
+    ) -> ChannelBinding {
+        ChannelBinding {
+            channel_id: channel_id.to_string(),
+            agent_id: agent.to_string(),
+            provider,
+            tmux_segment: Some(channel_name.to_string()),
         }
     }
 
@@ -555,6 +624,68 @@ mod tests {
         assert!(r.changes.is_empty());
         let entry = registry.lookup(&s_x).expect("peer entry survives");
         assert_eq!(entry.instance_id.as_deref(), Some(NODE_B));
+    }
+
+    /// Regression for #2465: tmux sessions whose names embed the yaml channel
+    /// **name** (e.g. `AgentDesk-claude-adk-cc`) must match a binding whose
+    /// `tmux_segment` carries that name, even though the binding's
+    /// `channel_id` is a Discord snowflake. Prior to the fix this combination
+    /// fell through as `NoChannelBinding` ("operator session?") and silently
+    /// stayed orphan across dcserver restarts.
+    #[test]
+    fn reconcile_matches_yaml_named_session_with_snowflake_id() {
+        let snowflake = "1479671298497183835";
+        let channel_name = "adk-cc";
+        let directory = ChannelDirectory::from_bindings(vec![binding_named(
+            snowflake,
+            channel_name,
+            "project-agentdesk",
+            ProviderKind::Claude,
+        )]);
+        let registry = SessionRegistry::new();
+        // Live tmux session string uses the *channel name*, not the snowflake.
+        let live_session = expected_session_name_for(None, &ProviderKind::Claude, channel_name);
+
+        let report = reconcile_from_enumeration(
+            Some(NODE_A),
+            vec![enumerated(&live_session, "claude")],
+            &directory,
+            &registry,
+        );
+
+        assert_eq!(report.matched, 1, "named session must match");
+        let entry = registry
+            .lookup(&live_session)
+            .expect("named session must be present in registry");
+        assert_eq!(
+            entry.matched.channel_id, snowflake,
+            "binding's channel_id (snowflake) must survive routing intact"
+        );
+        assert_eq!(entry.matched.agent_id, "project-agentdesk");
+    }
+
+    /// Snowflake-only binding (no yaml-supplied channel name) must still match
+    /// a session whose live name embeds the snowflake — preserves legacy
+    /// behavior for agents that aren't declared in `agentdesk.yaml`.
+    #[test]
+    fn reconcile_matches_snowflake_session_when_tmux_segment_absent() {
+        let snowflake = "1234567890";
+        let directory = ChannelDirectory::from_bindings(vec![binding(
+            snowflake,
+            "legacy-agent",
+            ProviderKind::Claude,
+        )]);
+        let registry = SessionRegistry::new();
+        let live_session = expected_session_name_for(None, &ProviderKind::Claude, snowflake);
+
+        let report = reconcile_from_enumeration(
+            Some(NODE_A),
+            vec![enumerated(&live_session, "claude")],
+            &directory,
+            &registry,
+        );
+
+        assert_eq!(report.matched, 1, "snowflake fallback must still match");
     }
 
     #[test]
