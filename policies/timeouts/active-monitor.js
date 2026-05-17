@@ -52,14 +52,13 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
       var iInProgress = agentdesk.pipeline.nextGatedTarget(iInitial, iCfg);
 
       // 먼저: heartbeat가 신선한 working 세션의 카운터를 리셋 (비연속 스톨 누적 방지)
-      var freshSessions = agentdesk.db.query(
-        "SELECT session_key FROM sessions WHERE status IN ('turn_active', 'working') " +
-        "AND last_heartbeat >= datetime('now', '-" + DEADLOCK_MINUTES + " minutes')"
+      agentdesk.db.execute(
+        "DELETE FROM kv_meta WHERE key IN (" +
+        "SELECT 'deadlock_check:' || session_key FROM sessions " +
+        "WHERE status IN ('turn_active', 'working') " +
+        "AND last_heartbeat >= datetime('now', '-" + DEADLOCK_MINUTES + " minutes')" +
+        ")"
       );
-      for (var fs = 0; fs < freshSessions.length; fs++) {
-        var freshKey = "deadlock_check:" + freshSessions[fs].session_key;
-        agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [freshKey]);
-      }
 
       // Fix stale working sessions: if status=working but no inflight file exists,
       // the turn has ended but DB wasn't updated. Fix to idle.

@@ -355,7 +355,7 @@ test("timeouts active monitor module treats synthetic reattach placeholders as a
     ],
     dbQuery: createSqlRouter([
       {
-        match: "AND last_heartbeat >= datetime('now', '-30 minutes')",
+        match: "DELETE FROM kv_meta WHERE key IN",
         result: []
       },
       {
@@ -391,9 +391,9 @@ test("timeouts active monitor module treats synthetic reattach placeholders as a
 
   assert.equal(state.deadlockAlerts.length, 0);
   assert.equal(state.httpPosts.length, 0);
-  assert.match(state.executions[0].sql, /SET status = 'idle'/);
-  assert.deepEqual(toPlain(state.executions[0].params), [sessionKey]);
-  assert.deepEqual(toPlain(state.executions[1].params), ["deadlock_check:" + sessionKey]);
+  assert.match(state.executions[1].sql, /SET status = 'idle'/);
+  assert.deepEqual(toPlain(state.executions[1].params), [sessionKey]);
+  assert.deepEqual(toPlain(state.executions[2].params), ["deadlock_check:" + sessionKey]);
 });
 
 test("timeouts orphan dispatch module emits orphan recovery signals", () => {
