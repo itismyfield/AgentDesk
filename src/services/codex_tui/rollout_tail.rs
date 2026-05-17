@@ -705,13 +705,24 @@ fn tail_rollout_file_until_assistant_response(
                         state.final_text.push_str(&text);
                         state.saw_assistant_text = true;
                     }
-                    emit_done(&sender, &state);
-                    return Ok((
-                        ReadOutputResult::Completed {
-                            offset: current_offset,
-                        },
-                        outcome(&state, current_offset),
-                    ));
+                    // schema-drift guard (codex review HIGH-2): if task_complete
+                    // fires but `last_agent_message` was absent (field renamed or
+                    // removed in a future codex CLI build), do not emit an empty
+                    // Done. Fall through to drain fallback so any subsequent
+                    // assistant text still gets a chance to arrive.
+                    if state.saw_assistant_text {
+                        emit_done(&sender, &state);
+                        return Ok((
+                            ReadOutputResult::Completed {
+                                offset: current_offset,
+                            },
+                            outcome(&state, current_offset),
+                        ));
+                    } else {
+                        tracing::warn!(
+                            "codex rollout task_complete missing last_agent_message; falling back to drain"
+                        );
+                    }
                 }
                 // #2419: only consider the turn drainable when no tool call
                 // is currently in flight. Otherwise the natural silence while
