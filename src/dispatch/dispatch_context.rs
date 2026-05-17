@@ -805,7 +805,23 @@ fn worktree_path_belongs_to_repo(worktree_path: &str, repo_dir: &str) -> bool {
         } else {
             std::path::PathBuf::from(dir).join(pb)
         };
-        Some(std::fs::canonicalize(&absolute).unwrap_or(absolute))
+        // Fail-closed on canonicalize errors: a partial-FS glitch (EACCES on
+        // a parent, NFS hiccup) that canonicalizes one side but not the
+        // other would otherwise compare raw vs. resolved paths and produce
+        // a silent false-negative. Returning None here forces the caller's
+        // fail-closed branch and surfaces the failure in logs.
+        match std::fs::canonicalize(&absolute) {
+            Ok(canon) => Some(canon),
+            Err(err) => {
+                tracing::warn!(
+                    target: "dispatch_context",
+                    path = %absolute.display(),
+                    error = %err,
+                    "worktree_path_belongs_to_repo: canonicalize failed; treating as foreign"
+                );
+                None
+            }
+        }
     };
     match (common_dir(worktree_path), common_dir(repo_dir)) {
         (Some(a), Some(b)) => a == b,
