@@ -2686,10 +2686,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         //     output is still flowing)
         // The placeholder sweeper / next watcher pass reconciles when the
         // pane finally reports idle, mirroring the bridge-side behaviour.
-        let lifecycle_stage_paused = matches!(
-            watcher_tui_gate_outcome,
-            TuiCompletionGateOutcome::TimedOut
-        );
+        let lifecycle_stage_paused =
+            matches!(watcher_tui_gate_outcome, TuiCompletionGateOutcome::TimedOut);
         if lifecycle_stage_paused {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
