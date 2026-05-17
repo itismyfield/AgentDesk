@@ -3276,3 +3276,61 @@ mod tests {
         assert_eq!(handle.take_timeout_override().await, None);
     }
 }
+
+#[cfg(test)]
+mod recovery_done_signal_tests {
+    use super::*;
+
+    /// #2443 — verify the latch-then-wait race-free contract.
+    #[tokio::test]
+    async fn recovery_done_latch_short_circuits_late_subscribers() {
+        let signal = RecoveryDoneSignal::new();
+        signal.mark_done();
+        // Subscriber registers AFTER mark_done — must still complete.
+        tokio::time::timeout(std::time::Duration::from_millis(100), signal.wait())
+            .await
+            .expect("late subscriber should observe latched done state");
+    }
+
+    /// #2443 — verify the reset clears the latch so the next recovery
+    /// cycle's watcher does not see a stale signal.
+    #[tokio::test]
+    async fn recovery_done_reset_unlatches_for_next_cycle() {
+        let signal = std::sync::Arc::new(RecoveryDoneSignal::new());
+        signal.mark_done();
+        signal.reset();
+        // After reset, wait should NOT short-circuit — must time out.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), signal.wait()).await;
+        assert!(
+            result.is_err(),
+            "reset() should clear the latch so subsequent waits block until next mark_done"
+        );
+        // Now fire mark_done in a background task and confirm a fresh
+        // waiter wakes up.
+        let signal_for_task = signal.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            signal_for_task.mark_done();
+        });
+        tokio::time::timeout(std::time::Duration::from_millis(500), signal.wait())
+            .await
+            .expect("wait after reset should resolve when mark_done fires again");
+    }
+
+    /// #2443 — global resolution path used by watchers/lifecycle.rs.
+    #[tokio::test]
+    async fn registry_recovery_done_is_globally_resolvable() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(99_443);
+        let signal = registry.recovery_done(channel_id);
+        let resolved =
+            ChannelMailboxRegistry::global_recovery_done(channel_id).expect("global signal");
+        // Identity check via mark_done propagation: marking one wakes
+        // the other if they point to the same underlying Arc.
+        signal.mark_done();
+        tokio::time::timeout(std::time::Duration::from_millis(50), resolved.wait())
+            .await
+            .expect("global_recovery_done should resolve to the same Arc");
+    }
+}

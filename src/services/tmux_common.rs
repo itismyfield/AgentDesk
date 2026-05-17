@@ -417,6 +417,61 @@ pub fn truncate_jsonl_head_safe(
     Ok(Some(new_size))
 }
 
+#[cfg(test)]
+mod sentinel_tests {
+    use super::*;
+
+    /// #2442 — round-trip the sentinel through the same code path the
+    /// wrappers use, then verify the consumer-side tail-peek picks it up.
+    #[test]
+    fn emit_wrapper_sentinel_writes_terminal_end_line() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("session.jsonl");
+        // Seed with normal output so the sentinel lands in the tail
+        // window after some legit content.
+        std::fs::write(&path, "{\"type\":\"assistant\",\"text\":\"hi\"}\n").unwrap();
+
+        emit_wrapper_sentinel(
+            path.to_str().unwrap(),
+            WrapperSentinel::TerminalEnd {
+                exit: "exit:0",
+            },
+        );
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains(&format!(
+                "\"type\":\"{}\"",
+                WRAPPER_TERMINAL_END_EVENT
+            )),
+            "terminal_end sentinel must be present in the jsonl, got:\n{content}",
+        );
+        assert!(content.contains("\"exit\":\"exit:0\""));
+    }
+
+    /// #2442 — ready_for_input variant emits the correct provider tag so
+    /// downstream consumers can attribute the readiness signal.
+    #[test]
+    fn emit_wrapper_sentinel_writes_ready_for_input_line() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("session.jsonl");
+
+        emit_wrapper_sentinel(
+            path.to_str().unwrap(),
+            WrapperSentinel::ReadyForInput {
+                provider: "codex",
+            },
+        );
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(&format!(
+            "\"type\":\"{}\"",
+            WRAPPER_READY_FOR_INPUT_EVENT
+        )));
+        assert!(content.contains("\"provider\":\"codex\""));
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::*;

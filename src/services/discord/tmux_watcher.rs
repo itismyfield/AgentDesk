@@ -1,5 +1,23 @@
 use super::*;
 
+/// #2441 (H1) — race a fixed sleep against a `notify`-backed wake-up
+/// from `JsonlWatcher`. Returns as soon as EITHER the sleep elapses or
+/// the watcher fires its `Notify`. This is the primitive used to replace
+/// the six fixed-interval `tokio::time::sleep(200ms / 250ms)` polling
+/// sites in the watcher loop: a real wrapper write wakes us immediately
+/// while the sleep continues to bound the wake-up latency (defense in
+/// depth for environments where the notify backend silently drops
+/// events).
+async fn sleep_or_jsonl_event(
+    sleep: std::time::Duration,
+    jsonl_notify: &std::sync::Arc<tokio::sync::Notify>,
+) {
+    tokio::select! {
+        _ = tokio::time::sleep(sleep) => {}
+        _ = jsonl_notify.notified() => {}
+    }
+}
+
 /// #2442 (H3) — fast-path check for the wrapper's `ready_for_input` JSONL
 /// sentinel in the tail of the session jsonl. Reads only the last ~4 KiB
 /// so it stays O(1) regardless of jsonl size. False negatives just fall
@@ -436,6 +454,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut rotation_tick: u32 = 0;
     const ROTATION_CHECK_EVERY: u32 = 120; // ~30s at 250ms base cadence
 
+    // #2441 (H1) — spawn a single `notify`-crate-backed JsonlWatcher
+    // keyed on the session output path. Its `Notify` is awaited alongside
+    // each polling `sleep()` in this function so a real wrapper write
+    // wakes us immediately while the sleep still bounds the maximum
+    // wake-up latency. The watcher is dropped automatically when this
+    // task exits (or the wrapper rotates the file away).
+    let jsonl_watcher = crate::services::discord::jsonl_watcher::JsonlWatcher::spawn(
+        std::path::PathBuf::from(&output_path),
+    );
+    let jsonl_notify = jsonl_watcher.notify();
+
     'watcher_loop: loop {
         last_heartbeat_ts_ms.store(
             crate::services::discord::tmux_watcher_now_ms(),
@@ -487,7 +516,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 probe_tmux_session_liveness(&tmux_session_name).await,
             ) {
                 TmuxLivenessDecision::Continue => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    // #2441 (H1) — graduate the fixed 200ms paused-loop
+                    // poll onto the notify-backed JsonlWatcher. A wrapper
+                    // write wakes us early; the sleep stays as the upper
+                    // bound.
+                    sleep_or_jsonl_event(
+                        tokio::time::Duration::from_millis(200),
+                        &jsonl_notify,
+                    )
+                    .await;
                     continue;
                 }
                 TmuxLivenessDecision::QuietStop => {
@@ -623,7 +660,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     probe_tmux_session_liveness(&tmux_session_name).await,
                 ) {
                     TmuxLivenessDecision::Continue => {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                        // #2441 (H1) — notify-backed wake-up for the
+                        // initial-read failure retry.
+                        sleep_or_jsonl_event(
+                            tokio::time::Duration::from_millis(250),
+                            &jsonl_notify,
+                        )
+                        .await;
                         continue;
                     }
                     TmuxLivenessDecision::QuietStop => {
@@ -667,7 +710,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         match poll_decision {
             WatcherOutputPollDecision::DrainOutput => {}
             WatcherOutputPollDecision::Continue => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                // #2441 (H1) — notify-backed wake-up for the
+                // poll-decision "wait more" branch.
+                sleep_or_jsonl_event(
+                    tokio::time::Duration::from_millis(250),
+                    &jsonl_notify,
+                )
+                .await;
                 continue;
             }
             WatcherOutputPollDecision::QuietStop => {
@@ -1012,7 +1061,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 }
                             }
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                        // #2441 (H1) — notify-backed wake-up for the
+                        // "no new bytes, waiting for more" tail of the
+                        // inner streaming loop. A wrapper write wakes us
+                        // immediately; the sleep stays as the upper
+                        // bound.
+                        sleep_or_jsonl_event(
+                            tokio::time::Duration::from_millis(200),
+                            &jsonl_notify,
+                        )
+                        .await;
                         let now = std::time::Instant::now();
                         // #2442 (H3) — wrapper emits a `ready_for_input`
                         // JSONL sentinel as soon as it transitions back to
@@ -1102,7 +1160,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         }
                     }
                     _ => {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                        // #2441 (H1) — notify-backed wake-up for the
+                        // inner-loop read-error retry path.
+                        sleep_or_jsonl_event(
+                            tokio::time::Duration::from_millis(200),
+                            &jsonl_notify,
+                        )
+                        .await;
                     }
                 }
 

@@ -13,6 +13,7 @@ pub(crate) mod idle_recap;
 mod idle_recap_interaction;
 mod inflight;
 pub(crate) mod internal_api;
+mod jsonl_watcher;
 mod mcp_credential_watcher;
 pub(crate) mod meeting_artifact_store;
 pub(crate) mod meeting_orchestrator;
