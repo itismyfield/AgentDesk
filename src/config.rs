@@ -563,6 +563,13 @@ impl AgentChannel {
         }
     }
 
+    pub fn isolate_override(&self) -> Option<bool> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => config.isolate_override,
+        }
+    }
+
     /// Returns the configured prompt-cache TTL in minutes, but only if it is a
     /// supported bucket (5 or 60). Anything else maps to `None` so the default
     /// 5-minute TTL is used.
@@ -631,6 +638,15 @@ pub struct AgentChannelConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub dispatch_profile: Option<String>,
+    /// Optional per-channel worktree isolation override. When unset, Discord
+    /// turns for a channel whose effective provider differs from the agent's
+    /// main provider are isolated in a worktree.
+    #[serde(
+        default,
+        alias = "isolateOverride",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub isolate_override: Option<bool>,
     /// Anthropic prompt-cache TTL bucket (#1088). Only `5` (default) or `60`
     /// minutes are valid. Any other value is treated as `None` (default 5m).
     /// When set to `60`, the Claude CLI is invoked with the extended 1h
@@ -2109,6 +2125,42 @@ pub(crate) fn current_test_runtime_root_override() -> Option<std::path::PathBuf>
     test_runtime_root_override()
 }
 
+#[cfg(test)]
+mod agent_channel_isolate_override_tests {
+    use super::{AgentChannel, AgentChannelConfig};
+
+    #[test]
+    fn isolate_override_round_trips_through_yaml_by_default() {
+        let config = AgentChannelConfig {
+            id: Some("123".to_string()),
+            isolate_override: Some(false),
+            ..AgentChannelConfig::default()
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(
+            yaml.contains("isolate_override: false"),
+            "expected isolate_override in: {yaml}"
+        );
+        let reloaded: AgentChannelConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(reloaded.isolate_override, Some(false));
+        assert_eq!(
+            AgentChannel::Detailed(reloaded).isolate_override(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn isolate_override_camel_case_alias_is_accepted_by_default() {
+        let yaml = "id: '123'\nisolateOverride: true\n";
+        let config: AgentChannelConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.isolate_override, Some(true));
+        assert_eq!(
+            AgentChannel::Detailed(config).isolate_override(),
+            Some(true)
+        );
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn set_test_runtime_root_override(path: Option<std::path::PathBuf>) {
     TEST_RUNTIME_ROOT_OVERRIDE.with(|slot| {
@@ -3031,6 +3083,37 @@ routines:
         assert_eq!(
             AgentChannel::Detailed(config).dispatch_profile().as_deref(),
             Some("lite")
+        );
+    }
+
+    #[test]
+    fn isolate_override_round_trips_through_yaml() {
+        let config = AgentChannelConfig {
+            id: Some("123".to_string()),
+            isolate_override: Some(false),
+            ..AgentChannelConfig::default()
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(
+            yaml.contains("isolate_override: false"),
+            "expected isolate_override in: {yaml}"
+        );
+        let reloaded: AgentChannelConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(reloaded.isolate_override, Some(false));
+        assert_eq!(
+            AgentChannel::Detailed(reloaded).isolate_override(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn isolate_override_camel_case_alias_is_accepted() {
+        let yaml = "id: '123'\nisolateOverride: true\n";
+        let config: AgentChannelConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.isolate_override, Some(true));
+        assert_eq!(
+            AgentChannel::Detailed(config).isolate_override(),
+            Some(true)
         );
     }
 
