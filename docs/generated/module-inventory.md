@@ -135,7 +135,7 @@
 | `engine` | `src/engine/mod.rs` | 2613 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
 | `engine::intent` | `src/engine/intent.rs` | 873 |  |
-| `engine::loader` | `src/engine/loader.rs` | 1720 | giant-file |
+| `engine::loader` | `src/engine/loader.rs` | 1819 | giant-file |
 | `engine::ops` | `src/engine/ops.rs` | 242 |  |
 | `engine::ops::agent_ops` | `src/engine/ops/agent_ops.rs` | 362 |  |
 | `engine::ops::auto_queue_ops` | `src/engine/ops/auto_queue_ops.rs` | 862 |  |
