@@ -552,6 +552,20 @@ async fn deliver_response(
             match outcome {
                 Ok(ReplaceLongMessageOutcome::EditedOriginal)
                 | Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }) => {
+                    match channel_id.unpin(http, msg_id).await {
+                        Ok(()) => shared
+                            .placeholder_controller
+                            .forget_placeholder_pin(provider, channel_id, msg_id),
+                        Err(error) => {
+                            tracing::warn!(
+                                provider = provider.as_str(),
+                                channel_id = channel_id.get(),
+                                message_id = msg_id.get(),
+                                error = %error,
+                                "[standby_relay] placeholder unpin failed after terminal delivery; tracked cleanup will retry"
+                            );
+                        }
+                    }
                     tracing::info!(
                         "  [{ts}] 👁 standby_relay ✓ delivered terminal response (edit) channel {} msg {} ({} chars)",
                         channel_id.get(),

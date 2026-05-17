@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, MessageId, UserId};
+use serenity::{ChannelId, MessageId, Permissions, UserId};
 
 use super::outbound::delivery::{deliver_outbound, first_raw_message_id};
 use super::outbound::message::{
@@ -38,6 +38,22 @@ pub(super) trait TurnGateway: Send + Sync {
         message_id: MessageId,
         content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>>;
+
+    fn pin_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+    ) -> GatewayFuture<'a, Result<bool, String>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn unpin_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+    ) -> GatewayFuture<'a, Result<bool, String>> {
+        Box::pin(async { Ok(false) })
+    }
 
     fn replace_message_with_outcome<'a>(
         &'a self,
@@ -149,6 +165,21 @@ impl DiscordGateway {
             shared,
             provider,
             live_turn,
+        }
+    }
+
+    #[allow(deprecated)]
+    fn cache_confirms_missing_manage_messages(&self, channel_id: ChannelId) -> bool {
+        let Some(live_turn) = self.live_turn.as_ref() else {
+            return false;
+        };
+        let Some(channel) = channel_id.to_channel_cached(&live_turn.ctx.cache) else {
+            return false;
+        };
+        let bot_user_id = live_turn.ctx.cache.current_user().id;
+        match channel.permissions_for_user(&live_turn.ctx.cache, bot_user_id) {
+            Ok(perms) => !perms.contains(Permissions::MANAGE_MESSAGES),
+            Err(_) => false,
         }
     }
 }
@@ -457,6 +488,50 @@ impl TurnGateway for DiscordGateway {
                 .with_operation(OutboundOperation::Edit { message_id });
             outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg).await)
                 .map(|_| ())
+        })
+    }
+
+    fn pin_message<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> GatewayFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            if self.cache_confirms_missing_manage_messages(channel_id) {
+                tracing::debug!(
+                    channel_id = channel_id.get(),
+                    message_id = message_id.get(),
+                    "[discord] skipping placeholder pin because bot lacks Manage Messages"
+                );
+                return Ok(false);
+            }
+            channel_id
+                .pin(&self.http, message_id)
+                .await
+                .map(|_| true)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn unpin_message<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> GatewayFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            if self.cache_confirms_missing_manage_messages(channel_id) {
+                tracing::debug!(
+                    channel_id = channel_id.get(),
+                    message_id = message_id.get(),
+                    "[discord] skipping placeholder unpin because bot lacks Manage Messages"
+                );
+                return Ok(false);
+            }
+            channel_id
+                .unpin(&self.http, message_id)
+                .await
+                .map(|_| true)
+                .map_err(|error| error.to_string())
         })
     }
 

@@ -45,7 +45,7 @@ direct_discord_sends = [
   "src/services/discord/meeting_orchestrator.rs#direct_discord_sends:5e0310b8b9e373ff",
   "src/services/discord/monitoring_status.rs#direct_discord_sends:6911fe26869c481d",
   "src/services/discord/monitoring_status.rs#direct_discord_sends:9ea6e87eaf2dcfcb",
-  "src/services/discord/placeholder_controller.rs#direct_discord_sends:94892504c53d1b42",
+  "src/services/discord/placeholder_controller.rs#direct_discord_sends:9afb1afb3d076c2c",
   "src/services/discord/router/intake_gate.rs#direct_discord_sends:0a2beaabe9619b4f",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:f377b5c8a89499a2",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:9016a6940938ce84",
@@ -59,6 +59,9 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1c3d5094762f23e4",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:26d4f3ea346a4c7b",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:f950efca7abd900a",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:5631d1c1ef14cc9d",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:f135bf0b58718cbb",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1c6f6dcd93167903",
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.

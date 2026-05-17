@@ -4509,7 +4509,11 @@ pub(in crate::services::discord) async fn handle_text_message(
             http.clone(),
             shared.clone(),
             provider_for_handoff,
-            None,
+            ctx_for_chained_dispatch.map(|live_ctx| LiveDiscordTurnContext {
+                ctx: live_ctx.clone(),
+                token: token.to_string(),
+                request_owner,
+            }),
         );
         let _ = shared
             .placeholder_controller
@@ -4587,7 +4591,6 @@ pub(in crate::services::discord) async fn handle_text_message(
             }
         }
     };
-
     shared
         .global_active
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

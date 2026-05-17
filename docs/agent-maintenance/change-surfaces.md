@@ -125,6 +125,9 @@
   - `src/services/discord/placeholder_sweeper.rs` (1022 lines; placeholder
     sweep loop and delivered-response idempotency surface — bugfix only
     outside a split plan).
+  - `src/services/discord/gateway.rs` (1006 lines; Discord gateway adapter
+    and `TurnGateway` bridge for turn send/edit/pin/unpin behavior — bugfix
+    only outside a split plan).
   - `src/services/discord/router/message_handler.rs` (7013 lines).
   - `src/services/discord/meeting_orchestrator.rs` (3779 lines).
   - `src/services/discord/turn_bridge/mod.rs` (4267 lines).
