@@ -781,6 +781,44 @@ pub(super) fn clear_inflight_state_if_matches_in_root(
     if expected_user_msg_id == 0 || state.user_msg_id != expected_user_msg_id {
         return GuardedClearOutcome::UserMsgMismatch;
     }
+    // Codex round-2 HIGH-2: TOCTOU between the read above and remove
+    // below. The inflight save path uses an atomic write+rename
+    // (`save_inflight_state_in_root`), so a successful save between our
+    // read and remove changes the file's (dev, inode). We re-stat right
+    // before removing and bail if the identity changed — that means a
+    // newer turn has already taken ownership of the slot and we must
+    // not delete it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(pre) = fs::metadata(&path) else {
+            return GuardedClearOutcome::Missing;
+        };
+        let Ok(post) = fs::metadata(&path) else {
+            return GuardedClearOutcome::Missing;
+        };
+        if pre.dev() != post.dev() || pre.ino() != post.ino() {
+            return GuardedClearOutcome::UserMsgMismatch;
+        }
+        // Final re-read + re-validate before unlink. This is still not
+        // strictly atomic against another rename racing between the
+        // re-read and `remove_file`, but combined with the (dev, ino)
+        // check above it narrows the window to the kernel-level rename
+        // syscall window, which is the same window every other reader
+        // of this file already lives with.
+        let Ok(reread) = fs::read_to_string(&path) else {
+            return GuardedClearOutcome::Missing;
+        };
+        let Ok(restate) = serde_json::from_str::<InflightTurnState>(&reread) else {
+            return GuardedClearOutcome::Missing;
+        };
+        if restate.user_msg_id != expected_user_msg_id
+            || restate.restart_mode.is_some()
+            || restate.rebind_origin
+        {
+            return GuardedClearOutcome::UserMsgMismatch;
+        }
+    }
     if fs::remove_file(&path).is_ok() {
         GuardedClearOutcome::Cleared
     } else {

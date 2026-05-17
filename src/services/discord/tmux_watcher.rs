@@ -73,13 +73,20 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal(
 }
 
 /// #2427 A wire — synchronous variant for the dead-pane post-mortem,
-/// which runs on a `spawn_blocking` thread. Behaviour matches the D
-/// wire except the user_msg_id guard is read directly from the inflight
-/// state (the pane is dead — there is no in-flight context to thread
-/// in) and the log reason is fixed.
+/// which runs on a `spawn_blocking` thread.
+///
+/// Codex round-2 HIGH-1: a naïve "load → re-feed user_msg_id" guard is
+/// self-authenticating (a new turn's inflight matches itself). To make
+/// the guard meaningful for the pane-death path, we also require the
+/// loaded inflight to point at the *same dead tmux session* the caller
+/// witnessed. If a fresh `start_claude` respawn already replaced the
+/// inflight with one tied to a new (live) tmux name, we leave it alone
+/// — the new turn's pane is alive, and its inflight does not belong to
+/// us to clear.
 pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal_pane_dead(
     provider: &ProviderKind,
     channel_id: ChannelId,
+    expected_tmux_session_name: &str,
 ) {
     let Some(state) = crate::services::discord::inflight::load_inflight_state(
         provider,
@@ -87,6 +94,17 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal_pane_d
     ) else {
         return;
     };
+    if state.tmux_session_name.as_deref() != Some(expected_tmux_session_name) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::debug!(
+            provider = %provider.as_str(),
+            channel = channel_id.get(),
+            on_disk = ?state.tmux_session_name,
+            expected = expected_tmux_session_name,
+            "[{ts}] skipping pane-dead explicit cleanup — inflight points at a different tmux session (#2427 A self-auth guard)"
+        );
+        return;
+    }
     let expected_user_msg_id = state.user_msg_id;
     emit_explicit_inflight_cleanup_signal(provider, channel_id, expected_user_msg_id, "pane_dead");
 }
@@ -143,43 +161,24 @@ async fn complete_watcher_status_panel_v2(
     started_at_unix: i64,
     last_status_panel_text: &mut String,
     background: bool,
-    expected_user_msg_id: u64,
 ) {
+    // #2427 D wire (Codex round 2 HIGH-1): explicit-signal inflight cleanup
+    // is intentionally NOT emitted from the watcher path. The watcher is
+    // not turn-scoped, so any user_msg_id read here would be the *current*
+    // on-disk value (possibly the next turn's). The committed-output path
+    // at L~2996 already performs the unconditional `clear_inflight_state`
+    // for the turn the watcher actually finished. Recovery-driven
+    // TurnCompleted still emits the guarded signal (see recovery_engine.rs)
+    // because its state snapshot is pinned at recovery entry.
     if !shared.status_panel_v2_enabled {
-        // Even when the panel is disabled we still want the explicit
-        // completion-signal safety net to fire (#2427 D wire).
-        emit_explicit_inflight_cleanup_signal(
-            provider,
-            channel_id,
-            expected_user_msg_id,
-            "turn_completed_watcher_no_panel",
-        );
         return;
     }
     let Some(status_msg_id) = status_panel_msg_id else {
-        emit_explicit_inflight_cleanup_signal(
-            provider,
-            channel_id,
-            expected_user_msg_id,
-            "turn_completed_watcher_no_status_msg",
-        );
         return;
     };
     shared
         .placeholder_live_events
         .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
-    // #2427 D wire: TurnCompleted is the explicit signal that the turn
-    // finished. The committed-output path at L~2868 already calls the
-    // unconditional `clear_inflight_state`, so this is a safety net for
-    // any early-return path that emitted TurnCompleted without clearing.
-    // The user_msg_id guard prevents Pitfall #1 (stale TurnCompleted
-    // arriving after the next turn has already written its inflight).
-    emit_explicit_inflight_cleanup_signal(
-        provider,
-        channel_id,
-        expected_user_msg_id,
-        "turn_completed_watcher",
-    );
     let panel_text =
         shared
             .placeholder_live_events
@@ -2682,15 +2681,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
 
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
-            // #2427 D wire: capture user_msg_id at completion time so the
-            // explicit-signal cleanup downstream of `push_status_event` can
-            // guard against Pitfall #1 (stale TurnCompleted vs next turn).
-            let completion_user_msg_id = crate::services::discord::inflight::load_inflight_state(
-                &watcher_provider,
-                channel_id.get(),
-            )
-            .map(|state| state.user_msg_id)
-            .unwrap_or(0);
+            // #2427 D wire (Codex round 2 HIGH-1): the watcher loop is not
+            // turn-scoped — by the time we reach here a new turn may have
+            // rewritten the inflight on disk. Reading user_msg_id from that
+            // same file and feeding it back into
+            // `clear_inflight_state_if_matches` becomes self-authentication
+            // and *enables* the very Pitfall #1 race the guard was meant
+            // to prevent. We therefore drop the explicit-signal hook on
+            // the watcher D wire and rely exclusively on the unconditional
+            // `clear_inflight_state` call at L~2996 (committed-output
+            // path). The recovery_engine D wire is preserved because its
+            // `state.user_msg_id` is captured from the inflight snapshot
+            // pinned at recovery entry, not re-read at completion time.
             complete_watcher_status_panel_v2(
                 &http,
                 &shared,
@@ -2703,7 +2705,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     task_notification_kind,
                     Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
                 ),
-                completion_user_msg_id,
             )
             .await;
         }
@@ -3402,6 +3403,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 emit_explicit_inflight_cleanup_signal_pane_dead(
                     &provider_for_inflight,
                     channel_id_inflight,
+                    &sess_for_inflight,
                 );
             })
             .await;
