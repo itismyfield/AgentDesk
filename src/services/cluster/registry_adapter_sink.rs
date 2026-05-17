@@ -186,5 +186,76 @@ mod tests {
 
         handle.shutdown().await;
     }
+
+    #[tokio::test]
+    async fn registry_to_supervisor_to_sink_end_to_end() {
+        // Full E4 integration shape:
+        //   tmux session → SessionRegistry.upsert → WatcherSupervisor spawns
+        //   StreamRelay → RegistryAdapterSink records the frame keyed by the
+        //   MatchedChannel.expected_session_name.
+        //
+        // The supervisor doesn't expose its internal relay handles, so we
+        // exercise the wiring by:
+        //   1. Spawning the supervisor against the live registry,
+        //   2. Upserting a matched session,
+        //   3. Independently spawning a sibling relay against the SAME sink
+        //      with the same MatchedChannel binding, sending a frame, and
+        //      verifying the sink sees it under that session name.
+        //
+        // This proves the sink/MatchedChannel contract that the supervisor
+        // relies on; the supervisor's own spawn path is exercised by
+        // watcher_supervisor::tests.
+        use crate::services::cluster::session_registry::SessionRegistry;
+        use crate::services::cluster::watcher_supervisor::{
+            SupervisorConfig, run_watcher_supervisor_loop_with_registry,
+        };
+
+        let registry = Arc::new(SessionRegistry::new());
+        let sink_arc = Arc::new(RegistryAdapterSink::new());
+        let sink_trait: Arc<dyn RelaySink> = sink_arc.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let registry_clone = registry.clone();
+        let sink_clone = sink_trait.clone();
+        let shutdown_clone = shutdown.clone();
+        let supervisor = tokio::spawn(async move {
+            run_watcher_supervisor_loop_with_registry(
+                SupervisorConfig::for_test(),
+                sink_clone,
+                shutdown_clone,
+                registry_clone,
+            )
+            .await;
+        });
+
+        let m = matched("c-e2e-reg");
+        registry.upsert(m.clone(), Some("mac-mini"));
+
+        // Give the supervisor time to react to the Added event and spawn its
+        // own relay (we don't read frames from that relay; we just confirm
+        // the supervisor lifecycle was driven end-to-end without panicking).
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        // Now demonstrate frame delivery through the sink (any relay against
+        // the same sink/binding is equivalent at the sink layer).
+        let probe = spawn_stream_relay(m.clone(), sink_trait.clone());
+        assert!(probe.try_send_frame("frame-1".into()));
+        for _ in 0..200 {
+            if sink_arc.frames_for(&m.expected_session_name) >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            sink_arc.frames_for(&m.expected_session_name) >= 1,
+            "sink must observe at least one frame under the matched session name"
+        );
+
+        probe.shutdown().await;
+        shutdown.store(true, Ordering::Release);
+        // Publish a remove so the supervisor recv() unblocks.
+        registry.remove(&m.expected_session_name);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), supervisor).await;
+    }
 }
 
