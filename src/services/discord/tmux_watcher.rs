@@ -53,6 +53,114 @@ fn jsonl_tail_contains_ready_for_input_sentinel(output_path: &str) -> bool {
     String::from_utf8_lossy(&buf).contains(&needle)
 }
 
+/// #2427 D/A wires — emit an explicit-signal inflight cleanup attempt.
+///
+/// Used by the TurnCompleted broadcast and the dead-pane post-mortem
+/// path. The on-disk inflight is guarded so that:
+///   * stale signals arriving after a new turn has written its own
+///     inflight do not delete the new turn's file (Pitfall #1);
+///   * planned-restart markers (`restart_mode = Some(_)`) survive across
+///     the dcserver restart they were saved for;
+///   * `rebind_origin` rows owned by the rebind API are not touched
+///     (Pitfall #5).
+///
+/// All outcomes are logged at trace/info level so the sweeper safety-net
+/// strikes are easy to spot when this hook misses.
+pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_msg_id: u64,
+    reason: &'static str,
+) {
+    let outcome = crate::services::discord::inflight::clear_inflight_state_if_matches(
+        provider,
+        channel_id.get(),
+        expected_user_msg_id,
+    );
+    match outcome {
+        crate::services::discord::inflight::GuardedClearOutcome::Cleared => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                user_msg_id = expected_user_msg_id,
+                reason = reason,
+                "[{ts}] 🧹 inflight cleared via explicit completion signal (#2427)"
+            );
+        }
+        crate::services::discord::inflight::GuardedClearOutcome::Missing => {
+            tracing::trace!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                reason = reason,
+                "inflight already absent — explicit signal redundant (#2427)"
+            );
+        }
+        crate::services::discord::inflight::GuardedClearOutcome::UserMsgMismatch => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                expected_user_msg_id = expected_user_msg_id,
+                reason = reason,
+                "[{ts}] ⚠ inflight user_msg_id mismatch — stale explicit signal ignored (#2427 Pitfall #1)"
+            );
+        }
+        crate::services::discord::inflight::GuardedClearOutcome::PlannedRestartSkipped => {
+            tracing::debug!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                reason = reason,
+                "skipping explicit inflight cleanup — planned-restart marker present (#2427)"
+            );
+        }
+        crate::services::discord::inflight::GuardedClearOutcome::RebindOriginSkipped => {
+            tracing::debug!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                reason = reason,
+                "skipping explicit inflight cleanup — rebind_origin row (#2427 Pitfall #5)"
+            );
+        }
+    }
+}
+
+/// #2427 A wire — synchronous variant for the dead-pane post-mortem,
+/// which runs on a `spawn_blocking` thread.
+///
+/// Codex round-2 HIGH-1: a naïve "load → re-feed user_msg_id" guard is
+/// self-authenticating (a new turn's inflight matches itself). To make
+/// the guard meaningful for the pane-death path, we also require the
+/// loaded inflight to point at the *same dead tmux session* the caller
+/// witnessed. If a fresh `start_claude` respawn already replaced the
+/// inflight with one tied to a new (live) tmux name, we leave it alone
+/// — the new turn's pane is alive, and its inflight does not belong to
+/// us to clear.
+pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal_pane_dead(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_tmux_session_name: &str,
+) {
+    let Some(state) =
+        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
+    else {
+        return;
+    };
+    if state.tmux_session_name.as_deref() != Some(expected_tmux_session_name) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::debug!(
+            provider = %provider.as_str(),
+            channel = channel_id.get(),
+            on_disk = ?state.tmux_session_name,
+            expected = expected_tmux_session_name,
+            "[{ts}] skipping pane-dead explicit cleanup — inflight points at a different tmux session (#2427 A self-auth guard)"
+        );
+        return;
+    }
+    let expected_user_msg_id = state.user_msg_id;
+    emit_explicit_inflight_cleanup_signal(provider, channel_id, expected_user_msg_id, "pane_dead");
+}
+
 /// E5 (#2412): forward a freshly-read tmux output chunk into the
 /// supervisor-owned [`StreamRelay`] (if one exists for the session). The
 /// supervisor's [`RelayProducerRegistry`] is the bridge — it hands the
@@ -159,6 +267,14 @@ async fn complete_watcher_status_panel_v2(
     last_status_panel_text: &mut String,
     background: bool,
 ) {
+    // #2427 D wire (Codex round 2 HIGH-1): explicit-signal inflight cleanup
+    // is intentionally NOT emitted from the watcher path. The watcher is
+    // not turn-scoped, so any user_msg_id read here would be the *current*
+    // on-disk value (possibly the next turn's). The committed-output path
+    // at L~2996 already performs the unconditional `clear_inflight_state`
+    // for the turn the watcher actually finished. Recovery-driven
+    // TurnCompleted still emits the guarded signal (see recovery_engine.rs)
+    // because its state snapshot is pinned at recovery entry.
     if !shared.status_panel_v2_enabled {
         return;
     }
@@ -520,11 +636,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     // poll onto the notify-backed JsonlWatcher. A wrapper
                     // write wakes us early; the sleep stays as the upper
                     // bound.
-                    sleep_or_jsonl_event(
-                        tokio::time::Duration::from_millis(200),
-                        &jsonl_notify,
-                    )
-                    .await;
+                    sleep_or_jsonl_event(tokio::time::Duration::from_millis(200), &jsonl_notify)
+                        .await;
                     continue;
                 }
                 TmuxLivenessDecision::QuietStop => {
@@ -712,11 +825,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             WatcherOutputPollDecision::Continue => {
                 // #2441 (H1) — notify-backed wake-up for the
                 // poll-decision "wait more" branch.
-                sleep_or_jsonl_event(
-                    tokio::time::Duration::from_millis(250),
-                    &jsonl_notify,
-                )
-                .await;
+                sleep_or_jsonl_event(tokio::time::Duration::from_millis(250), &jsonl_notify).await;
                 continue;
             }
             WatcherOutputPollDecision::QuietStop => {
@@ -1079,9 +1188,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         // and short-circuit the 2s probe cadence. The
                         // legacy `should_probe_ready` cadence stays as a
                         // fallback for the SIGKILL / sentinel-lost case.
-                        let sentinel_ready = jsonl_tail_contains_ready_for_input_sentinel(
-                            &output_path,
-                        );
+                        let sentinel_ready =
+                            jsonl_tail_contains_ready_for_input_sentinel(&output_path);
                         let should_probe_ready = sentinel_ready
                             || last_ready_probe_at
                                 .map(|last| {
@@ -2782,6 +2890,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
 
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
+            // #2427 D wire (Codex round 2 HIGH-1): the watcher loop is not
+            // turn-scoped — by the time we reach here a new turn may have
+            // rewritten the inflight on disk. Reading user_msg_id from that
+            // same file and feeding it back into
+            // `clear_inflight_state_if_matches` becomes self-authentication
+            // and *enables* the very Pitfall #1 race the guard was meant
+            // to prevent. We therefore drop the explicit-signal hook on
+            // the watcher D wire and rely exclusively on the unconditional
+            // `clear_inflight_state` call at L~2996 (committed-output
+            // path). The recovery_engine D wire is preserved because its
+            // `state.user_msg_id` is captured from the inflight snapshot
+            // pinned at recovery entry, not re-read at completion time.
             complete_watcher_status_panel_v2(
                 &http,
                 &shared,
@@ -3465,6 +3585,39 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     }
 
     if !cleanup_plan.preserve_tmux_session {
+        // #2427 A wire: pane-death explicit inflight cleanup. The
+        // tmux pane is gone (or about to be killed below), so any
+        // inflight row still pointing at this provider/channel will
+        // never receive a normal completion hook. Without this the
+        // sweeper has to time-guess (`STALL`/`ABANDON`) before evicting,
+        // reproducing the #2415 family of "completion-missing → time
+        // heuristic" bugs.
+        //
+        // We re-check `tmux_session_has_live_pane` on the blocking
+        // thread before clearing, matching the same revalidation the
+        // kill path uses (#1261 codex P2) so a concurrent
+        // `start_claude` respawn of a fresh same-named session does not
+        // get its inflight wiped.
+        {
+            let sess_for_inflight = tmux_session_name.clone();
+            let provider_for_inflight = provider.clone();
+            let channel_id_inflight = channel_id;
+            let _ = tokio::task::spawn_blocking(move || {
+                let pane_alive = tmux_session_has_live_pane(&sess_for_inflight);
+                if pane_alive {
+                    // Pane resurrected (e.g. start_claude respawn race) —
+                    // do not touch its inflight.
+                    return;
+                }
+                emit_explicit_inflight_cleanup_signal_pane_dead(
+                    &provider_for_inflight,
+                    channel_id_inflight,
+                    &sess_for_inflight,
+                );
+            })
+            .await;
+        }
+
         // Kill dead tmux session to prevent accumulation (especially for thread sessions
         // which are created per-dispatch and would otherwise linger for 24h).
         // #145: skip kill for unified-thread sessions with active auto-queue runs.

@@ -313,6 +313,16 @@ async fn complete_recovery_visible_turn(
     shared
         .placeholder_live_events
         .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
+    // #2427 D wire: explicit completion signal — most recovery paths
+    // already call `clear_inflight_state` unconditionally; this is a
+    // safety net for any branch that emits TurnCompleted without doing
+    // so. user_msg_id guard defeats Pitfall #1 (next turn race).
+    super::tmux::emit_explicit_inflight_cleanup_signal(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "turn_completed_recovery",
+    );
     let started_at_unix = super::inflight::parse_started_at_unix(&state.started_at)
         .unwrap_or_else(|| chrono::Utc::now().timestamp());
     let panel_text =

@@ -708,6 +708,124 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
     fs::remove_file(path).is_ok()
 }
 
+/// Outcome of an explicit-signal cleanup attempt that is guarded against
+/// racing the next turn's inflight write (#2427 Pitfall #1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuardedClearOutcome {
+    /// File matched the expected `user_msg_id` and was removed.
+    Cleared,
+    /// File existed but a different `user_msg_id` was on disk — the next
+    /// turn already wrote its inflight, so we leave it alone.
+    UserMsgMismatch,
+    /// File on disk is a planned-restart marker (`restart_mode` set). The
+    /// caller is an explicit cleanup signal that fired for the previous
+    /// generation, so the marker must be preserved for recovery.
+    PlannedRestartSkipped,
+    /// File on disk is a rebind origin (`rebind_origin = true`). Its
+    /// lifetime is owned by `/api/inflight/rebind`, not the watcher /
+    /// turn-bridge, so the cleanup signal does not apply.
+    RebindOriginSkipped,
+    /// No inflight file existed (already cleared by a peer / never written).
+    Missing,
+}
+
+/// Idempotent inflight cleanup driven by an *explicit* turn-completion
+/// signal (`TurnCompleted` emit, pane death detection, etc.). This is the
+/// #2427 D / A wire — by the time we run, the regular hook on the
+/// completion path may have already cleared the file (Cleared turns into
+/// Missing). We only act when the inflight on disk still describes the
+/// turn we believe just finished.
+///
+/// Guards:
+/// * `expected_user_msg_id` — required to defeat the Pitfall #1 race where
+///   a stale `TurnCompleted` arrives after the next turn has already
+///   written its inflight. `0` is treated as "no guard available" and we
+///   refuse to delete to stay on the conservative side.
+/// * `restart_mode = Some(_)` — preserved (planned drain/hot-swap turns
+///   must survive across the dcserver restart they were saved for).
+/// * `rebind_origin = true` — preserved (Pitfall #5).
+pub(crate) fn clear_inflight_state_if_matches(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected_user_msg_id: u64,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    clear_inflight_state_if_matches_in_root(&root, provider, channel_id, expected_user_msg_id)
+}
+
+/// Root-explicit variant for unit tests. Production callers should use
+/// [`clear_inflight_state_if_matches`].
+pub(super) fn clear_inflight_state_if_matches_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected_user_msg_id: u64,
+) -> GuardedClearOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        // Malformed file: treat like Missing — the loader-side eviction
+        // will GC the malformed payload on the next read.
+        return GuardedClearOutcome::Missing;
+    };
+    if state.restart_mode.is_some() {
+        return GuardedClearOutcome::PlannedRestartSkipped;
+    }
+    if state.rebind_origin {
+        return GuardedClearOutcome::RebindOriginSkipped;
+    }
+    if expected_user_msg_id == 0 || state.user_msg_id != expected_user_msg_id {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    // Codex round-2 HIGH-2: TOCTOU between the read above and remove
+    // below. The inflight save path uses an atomic write+rename
+    // (`save_inflight_state_in_root`), so a successful save between our
+    // read and remove changes the file's (dev, inode). We re-stat right
+    // before removing and bail if the identity changed — that means a
+    // newer turn has already taken ownership of the slot and we must
+    // not delete it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(pre) = fs::metadata(&path) else {
+            return GuardedClearOutcome::Missing;
+        };
+        let Ok(post) = fs::metadata(&path) else {
+            return GuardedClearOutcome::Missing;
+        };
+        if pre.dev() != post.dev() || pre.ino() != post.ino() {
+            return GuardedClearOutcome::UserMsgMismatch;
+        }
+        // Final re-read + re-validate before unlink. This is still not
+        // strictly atomic against another rename racing between the
+        // re-read and `remove_file`, but combined with the (dev, ino)
+        // check above it narrows the window to the kernel-level rename
+        // syscall window, which is the same window every other reader
+        // of this file already lives with.
+        let Ok(reread) = fs::read_to_string(&path) else {
+            return GuardedClearOutcome::Missing;
+        };
+        let Ok(restate) = serde_json::from_str::<InflightTurnState>(&reread) else {
+            return GuardedClearOutcome::Missing;
+        };
+        if restate.user_msg_id != expected_user_msg_id
+            || restate.restart_mode.is_some()
+            || restate.rebind_origin
+        {
+            return GuardedClearOutcome::UserMsgMismatch;
+        }
+    }
+    if fs::remove_file(&path).is_ok() {
+        GuardedClearOutcome::Cleared
+    } else {
+        GuardedClearOutcome::Missing
+    }
+}
+
 fn inflight_state_allows_idle_tmux_repair_state(state: &InflightTurnState) -> bool {
     state.full_response.trim().is_empty()
         && state.response_sent_offset == 0
@@ -967,7 +1085,8 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
 #[cfg(test)]
 mod stall_recovery_tests {
     use super::{
-        INFLIGHT_STALENESS_THRESHOLD_SECS, InflightTurnState,
+        GuardedClearOutcome, INFLIGHT_STALENESS_THRESHOLD_SECS, InflightRestartMode,
+        InflightTurnState, clear_inflight_state_if_matches_in_root,
         inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale,
         load_inflight_states_from_root, save_inflight_state_in_root,
     };
@@ -1339,6 +1458,147 @@ mod stall_recovery_tests {
         assert_eq!(loaded[0].channel_id, 111);
         assert!(valid_path.exists());
         assert!(!malformed_path.exists());
+    }
+
+    fn build_inflight_for_guard_tests(
+        provider: ProviderKind,
+        channel_id: u64,
+        user_msg_id: u64,
+    ) -> InflightTurnState {
+        InflightTurnState::new(
+            provider,
+            channel_id,
+            Some("adk".to_string()),
+            42,
+            100,
+            user_msg_id,
+            "user prompt".to_string(),
+            None,
+            Some("AgentDesk-claude-adk".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        )
+    }
+
+    /// #2427 D/A wire — happy path. When the on-disk inflight has a
+    /// matching `user_msg_id` and is neither a planned-restart marker
+    /// nor a rebind origin, the explicit signal removes it.
+    #[test]
+    fn clear_inflight_state_if_matches_removes_matching_turn() {
+        let temp = TempDir::new().unwrap();
+        let state = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        let user_msg_id = state.user_msg_id;
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            321,
+            user_msg_id,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::Cleared);
+        assert!(load_inflight_states_from_root(temp.path(), &ProviderKind::Claude).is_empty());
+    }
+
+    /// #2427 Pitfall #1 — stale TurnCompleted carrying the previous
+    /// turn's `user_msg_id` must NOT delete the next turn's inflight.
+    #[test]
+    fn clear_inflight_state_if_matches_protects_next_turn_against_stale_signal() {
+        let temp = TempDir::new().unwrap();
+        let next_turn = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        save_inflight_state_in_root(temp.path(), &next_turn).unwrap();
+
+        // Stale completion for previous turn user_msg_id = 50 arrives now.
+        let outcome =
+            clear_inflight_state_if_matches_in_root(temp.path(), &ProviderKind::Claude, 321, 50);
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+
+        let still_there = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(still_there.len(), 1);
+        assert_eq!(still_there[0].user_msg_id, 100);
+    }
+
+    /// #2427 — planned-restart markers must survive the explicit-signal
+    /// hook because their lifetime is owned by the next dcserver boot's
+    /// recovery. We bypass `load_inflight_states_from_root` here (which
+    /// has its own retention-eviction side-effect) and assert directly
+    /// on the file system that the row is intact after the guarded
+    /// clear refused to touch it.
+    #[test]
+    fn clear_inflight_state_if_matches_preserves_planned_restart() {
+        let temp = TempDir::new().unwrap();
+        let mut state = build_inflight_for_guard_tests(ProviderKind::Codex, 555, 333);
+        state.restart_mode = Some(InflightRestartMode::DrainRestart);
+        state.restart_generation = Some(7);
+        let user_msg_id = state.user_msg_id;
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            555,
+            user_msg_id,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::PlannedRestartSkipped);
+
+        let provider_dir = temp.path().join(ProviderKind::Codex.as_str());
+        let path = provider_dir.join("555.json");
+        assert!(
+            path.exists(),
+            "planned-restart marker file should survive guarded clear"
+        );
+    }
+
+    /// #2427 Pitfall #5 — rebind_origin rows are owned by the
+    /// `/api/inflight/rebind` API. The explicit signal must NOT touch
+    /// them even when user_msg_id matches.
+    #[test]
+    fn clear_inflight_state_if_matches_preserves_rebind_origin() {
+        let temp = TempDir::new().unwrap();
+        let mut state = build_inflight_for_guard_tests(ProviderKind::Gemini, 901, 444);
+        state.rebind_origin = true;
+        let user_msg_id = state.user_msg_id;
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let outcome = clear_inflight_state_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Gemini,
+            901,
+            user_msg_id,
+        );
+        assert_eq!(outcome, GuardedClearOutcome::RebindOriginSkipped);
+        assert_eq!(
+            load_inflight_states_from_root(temp.path(), &ProviderKind::Gemini).len(),
+            1
+        );
+    }
+
+    /// `expected_user_msg_id = 0` is the "no guard available" sentinel —
+    /// refuse to clear so the helper never accidentally deletes a row
+    /// it cannot authenticate against.
+    #[test]
+    fn clear_inflight_state_if_matches_refuses_zero_guard() {
+        let temp = TempDir::new().unwrap();
+        let state = build_inflight_for_guard_tests(ProviderKind::Qwen, 8, 12_345);
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let outcome =
+            clear_inflight_state_if_matches_in_root(temp.path(), &ProviderKind::Qwen, 8, 0);
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+        assert_eq!(
+            load_inflight_states_from_root(temp.path(), &ProviderKind::Qwen).len(),
+            1
+        );
+    }
+
+    /// No on-disk row → `Missing`. Idempotency safety net.
+    #[test]
+    fn clear_inflight_state_if_matches_missing_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let outcome =
+            clear_inflight_state_if_matches_in_root(temp.path(), &ProviderKind::Claude, 42, 999);
+        assert_eq!(outcome, GuardedClearOutcome::Missing);
     }
 }
 

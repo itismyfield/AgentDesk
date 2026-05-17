@@ -33,7 +33,16 @@ impl TmuxCleanupPolicy {
     }
 }
 
+/// Upper bound for how long we wait for the provider CLI to exit on its own
+/// after the C-c / SIGINT-fallback interrupt was delivered. #2426: this used
+/// to be an unconditional `tokio::sleep`; we now subscribe to the provider's
+/// PID exit (kqueue on macOS, pidfd on Linux) and only fall back to the
+/// upper-bound when the exit signal never fires. The constant is now a
+/// *safety net*, not the primary timing source.
 const PROVIDER_INTERRUPT_SETTLE: Duration = Duration::from_millis(750);
+/// Upper bound for the post-SIGINT grace period before we escalate to
+/// SIGKILL. Same #2426 rationale as `PROVIDER_INTERRUPT_SETTLE`: when the
+/// provider exits cleanly we observe its PID exit and proceed immediately.
 const PROVIDER_HARD_STOP_GRACE: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,7 +186,31 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
         };
     }
 
-    tokio::time::sleep(PROVIDER_INTERRUPT_SETTLE).await;
+    // #2426: instead of an unconditional `sleep(PROVIDER_INTERRUPT_SETTLE)`,
+    // observe the provider PID's actual exit. We look up the provider PID
+    // *before* waiting so we can subscribe to its exit signal (kqueue on
+    // macOS, pidfd_open+poll on Linux). When the provider exits cleanly the
+    // wait returns immediately; otherwise the 750ms upper bound matches the
+    // pre-#2426 behavior as a safety net.
+    let preinterrupt_session = tmux_session_name.to_string();
+    let preinterrupt_provider = provider.clone();
+    let early_provider_pid = tokio::task::spawn_blocking(move || {
+        provider_cli_pid_in_tmux(
+            &preinterrupt_session,
+            &preinterrupt_provider,
+            tracked_child_pid,
+        )
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(pid) = early_provider_pid {
+        wait_for_pid_exit(pid, PROVIDER_INTERRUPT_SETTLE).await;
+    } else {
+        // Fall back to the original wall-clock wait when we can't observe a
+        // PID directly (e.g. provider not yet visible in `ps` output).
+        tokio::time::sleep(PROVIDER_INTERRUPT_SETTLE).await;
+    }
 
     let session_for_probe = tmux_session_name.to_string();
     let provider_for_probe = provider.clone();
@@ -356,7 +389,27 @@ async fn hard_stop_unresponsive_provider_cli_turn(
         return;
     };
 
-    tokio::time::sleep(PROVIDER_HARD_STOP_GRACE).await;
+    // #2426: replace the unconditional `sleep(PROVIDER_HARD_STOP_GRACE)`
+    // with PID-exit observation on the SIGINT target. If the SIGINT actually
+    // worked the provider exits within milliseconds and we proceed to the
+    // re-probe immediately; the 1.5s upper bound is now a safety net for
+    // pathological providers that swallow SIGINT.
+    //
+    // Codex review HIGH: the wait_for_pid_exit return value must NOT be
+    // discarded. If it returns `true` the SIGINT target genuinely exited —
+    // continuing to pass that stale PID through `hard_stop_pid_for_unresponsive_provider`
+    // → `kill_pid_tree` risks killing an unrelated process if the OS has
+    // recycled the PID by then. Track the effective fallback locally so
+    // escalation can only target a currently-observed provider PID from
+    // the tmux pane probe when the original SIGINT target has exited.
+    let effective_fallback_sigint_pid =
+        if let Some(target_pid) = interrupt_outcome.fallback_sigint_pid {
+            let exited = wait_for_pid_exit(target_pid, PROVIDER_HARD_STOP_GRACE).await;
+            if exited { None } else { Some(target_pid) }
+        } else {
+            tokio::time::sleep(PROVIDER_HARD_STOP_GRACE).await;
+            None
+        };
 
     let tracked_child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
     let provider_for_probe = provider.clone();
@@ -396,7 +449,7 @@ async fn hard_stop_unresponsive_provider_cli_turn(
         session_alive,
         ready_for_input,
         current_provider_pid,
-        interrupt_outcome.fallback_sigint_pid,
+        effective_fallback_sigint_pid,
         pane_pid,
     ) else {
         return;
@@ -703,6 +756,168 @@ fn send_sigint(pid: u32) -> Result<(), String> {
 #[cfg(not(unix))]
 fn send_sigint(_pid: u32) -> Result<(), String> {
     Err("SIGINT fallback is only supported on Unix".to_string())
+}
+
+/// #2426: wait until the given PID exits, with an upper bound. Uses OS-level
+/// exit signals (kqueue `EVFILT_PROC|NOTE_EXIT` on macOS, `pidfd_open` +
+/// `poll` on Linux) so we never busy-poll. When the PID does not exist at
+/// call time, returns immediately. When the OS signal API is unavailable or
+/// fails (e.g. permission, pre-5.3 kernel), falls back to a single bounded
+/// `tokio::sleep` so callers still observe a deterministic upper bound.
+///
+/// Returns `true` if the process exited within the deadline, `false` if the
+/// upper bound elapsed first.
+#[cfg(unix)]
+pub(super) async fn wait_for_pid_exit(pid: u32, deadline: Duration) -> bool {
+    if pid == 0 {
+        // libc::kill(0, ...) targets the whole process group; treat as "no
+        // PID to observe" and just honour the deadline.
+        tokio::time::sleep(deadline).await;
+        return false;
+    }
+
+    // Fast-path: process already gone (or never existed). `kill(pid, 0)`
+    // delivers no signal but tells us whether the PID is reachable.
+    #[allow(unsafe_code)]
+    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    if !alive {
+        return true;
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    let join = tokio::task::spawn_blocking(move || {
+        let exited = wait_for_pid_exit_blocking(pid, deadline);
+        let _ = tx.send(exited);
+    });
+
+    match tokio::time::timeout(deadline, rx).await {
+        Ok(Ok(exited)) => {
+            // Allow the blocking task to settle. It already finished (rx
+            // resolved), so this is a cheap join.
+            let _ = join.await;
+            exited
+        }
+        _ => {
+            // Outer guard fired or the blocking task panicked / dropped tx.
+            // Either way the upper bound has elapsed.
+            false
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(super) async fn wait_for_pid_exit(_pid: u32, deadline: Duration) -> bool {
+    tokio::time::sleep(deadline).await;
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_pid_exit_blocking(pid: u32, deadline: Duration) -> bool {
+    // kqueue + EVFILT_PROC|NOTE_EXIT: kernel notifies us when the PID exits.
+    // We arm a single ONESHOT kevent and block in `kevent()` until either
+    // NOTE_EXIT fires or the supplied timespec deadline elapses.
+    #[allow(unsafe_code)]
+    unsafe {
+        let kq = libc::kqueue();
+        if kq < 0 {
+            return wait_for_pid_exit_kill_fallback(pid, deadline);
+        }
+        let change = libc::kevent {
+            ident: pid as libc::uintptr_t,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_ONESHOT,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // Register the watch. A zero timeout means "register only, don't
+        // block". If the PID already exited or doesn't exist, `kevent` sets
+        // EV_ERROR with ESRCH and we treat that as "exited".
+        let zero = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let reg = libc::kevent(
+            kq,
+            &change as *const _,
+            1,
+            std::ptr::null_mut(),
+            0,
+            &zero as *const _,
+        );
+        if reg < 0 {
+            libc::close(kq);
+            return wait_for_pid_exit_kill_fallback(pid, deadline);
+        }
+
+        let mut event: libc::kevent = std::mem::zeroed();
+        let ts = libc::timespec {
+            tv_sec: deadline.as_secs() as libc::time_t,
+            tv_nsec: deadline.subsec_nanos() as libc::c_long,
+        };
+        let n = libc::kevent(
+            kq,
+            std::ptr::null(),
+            0,
+            &mut event as *mut _,
+            1,
+            &ts as *const _,
+        );
+        libc::close(kq);
+        if n < 0 {
+            return wait_for_pid_exit_kill_fallback(pid, deadline);
+        }
+        if n == 0 {
+            // Timeout — deadline elapsed without NOTE_EXIT.
+            return false;
+        }
+        // One event delivered. NOTE_EXIT fired or EV_ERROR/ESRCH (already
+        // gone). Both mean "PID is no longer running".
+        true
+    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn wait_for_pid_exit_blocking(pid: u32, deadline: Duration) -> bool {
+    // pidfd_open(pid, 0) returns an fd that becomes readable when the
+    // process exits. We poll(POLLIN) it with the deadline. On kernels
+    // without pidfd_open (<5.3) the syscall returns ENOSYS and we fall
+    // back to a single-shot bounded wait.
+    #[allow(unsafe_code)]
+    unsafe {
+        let fd = libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0_u32) as libc::c_int;
+        if fd < 0 {
+            return wait_for_pid_exit_kill_fallback(pid, deadline);
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout_ms: libc::c_int = deadline.as_millis().try_into().unwrap_or(libc::c_int::MAX);
+        let n = libc::poll(&mut pfd as *mut _, 1, timeout_ms);
+        libc::close(fd);
+        if n < 0 {
+            return wait_for_pid_exit_kill_fallback(pid, deadline);
+        }
+        n > 0
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn wait_for_pid_exit_blocking(pid: u32, deadline: Duration) -> bool {
+    wait_for_pid_exit_kill_fallback(pid, deadline)
+}
+
+/// Last-resort fallback when the OS-native exit notifier is unavailable
+/// (kqueue creation failure, pre-5.3 Linux kernel without `pidfd_open`,
+/// other Unix). A single bounded sleep keeps the upper bound deterministic
+/// without introducing a polling loop.
+#[cfg(unix)]
+fn wait_for_pid_exit_kill_fallback(_pid: u32, deadline: Duration) -> bool {
+    std::thread::sleep(deadline);
+    false
 }
 
 #[cfg(unix)]
@@ -1207,5 +1422,115 @@ mod tests {
         assert!(super::command_is_agentdesk_provider_wrapper(
             "/tmp/agentdesk codex-tmux-wrapper --codex-bin /opt/bin/codex"
         ));
+    }
+}
+
+// #2426: tests for the PID-exit observation helper. These do not require the
+// `legacy-sqlite-tests` feature because they exercise only the
+// `wait_for_pid_exit` path and do not touch the SQLite test scaffolding.
+#[cfg(all(test, unix))]
+mod pid_exit_tests {
+    use super::wait_for_pid_exit;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// A PID we are extremely unlikely to ever be reachable: well above the
+    /// typical max PID and never spawned by this test process. The kernel
+    /// reports ESRCH from `kill(pid, 0)` and `wait_for_pid_exit` should
+    /// short-circuit to `true` without blocking for the deadline.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_pid_exit_returns_immediately_for_nonexistent_pid() {
+        let started = Instant::now();
+        let exited = wait_for_pid_exit(4_000_000, Duration::from_secs(5)).await;
+        let elapsed = started.elapsed();
+        assert!(
+            exited,
+            "nonexistent PID must be reported as already-exited (kill(pid,0) -> ESRCH)"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "nonexistent PID short-circuit must not honour the full deadline (took {elapsed:?})"
+        );
+    }
+
+    /// Spawn a real child, kill it, then call `wait_for_pid_exit`. The
+    /// kqueue/pidfd path must signal exit well before the 2s upper bound.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_pid_exit_observes_child_termination() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+
+        // Schedule a kill 50ms in the future so the helper actually has to
+        // wait for the exit signal rather than short-circuit via the
+        // `kill(pid,0)` fast path.
+        let killer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // SIGKILL = unconditional, no handler chance.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        });
+
+        let started = Instant::now();
+        let exited = wait_for_pid_exit(pid, Duration::from_secs(2)).await;
+        let elapsed = started.elapsed();
+
+        // Reap the zombie regardless of test outcome so we don't leak.
+        let _ = child.wait();
+        let _ = killer.await;
+
+        assert!(
+            exited,
+            "wait_for_pid_exit must report exit for killed child"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "OS-level exit notification must beat the upper bound by a comfortable margin (took {elapsed:?})"
+        );
+    }
+
+    /// A still-running child must drive `wait_for_pid_exit` to the upper
+    /// bound and report `false`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_pid_exit_times_out_when_child_keeps_running() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+
+        let started = Instant::now();
+        let exited = wait_for_pid_exit(pid, Duration::from_millis(200)).await;
+        let elapsed = started.elapsed();
+
+        // Tear down the still-running child.
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = child.wait();
+
+        assert!(
+            !exited,
+            "long-running child must not be reported as exited within the upper bound"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(180),
+            "the upper bound must actually be honoured (took only {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the upper bound must not be exceeded by more than scheduler jitter (took {elapsed:?})"
+        );
     }
 }

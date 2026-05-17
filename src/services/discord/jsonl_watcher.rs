@@ -170,10 +170,7 @@ fn run_watcher_thread(
             match watcher.watch(&parent, RecursiveMode::NonRecursive) {
                 Ok(()) => break,
                 Err(err) => {
-                    tracing::warn!(
-                        "jsonl_watcher: cannot watch {}: {err}",
-                        parent.display()
-                    );
+                    tracing::warn!("jsonl_watcher: cannot watch {}: {err}", parent.display());
                     // No retry policy will recover from a hard error
                     // (e.g. permission denied) — fall through to the
                     // park loop so the Notify never fires and the
@@ -204,8 +201,7 @@ fn park_forever(stop: Arc<std::sync::atomic::AtomicBool>) {
 
 impl Drop for JsonlWatcher {
     fn drop(&mut self) {
-        self._stop
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self._stop.store(true, std::sync::atomic::Ordering::Relaxed);
         // Last wake so any pinned futures awaiting the Notify can
         // observe the shutdown and bail out of their select arms.
         self.notify.notify_waiters();

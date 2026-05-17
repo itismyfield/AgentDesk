@@ -2259,8 +2259,8 @@ async fn finish_restored_watcher_active_turn(
 #[path = "tmux_watcher.rs"]
 mod tmux_watcher;
 pub(super) use self::tmux_watcher::{
-    TuiCompletionGateOutcome, run_tui_completion_gate, tmux_output_watcher,
-    tmux_output_watcher_with_restore,
+    TuiCompletionGateOutcome, emit_explicit_inflight_cleanup_signal, run_tui_completion_gate,
+    tmux_output_watcher, tmux_output_watcher_with_restore,
 };
 #[path = "tmux_output_stream.rs"]
 mod tmux_output_stream;

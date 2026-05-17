@@ -113,8 +113,9 @@
     lifecycle behavior).
   - `src/services/discord/tmux.rs` (6208 lines after #1435 lifecycle
     extraction; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (3214 lines after #1520 watcher
-    loop extraction; split loop helpers further before adding behavior).
+  - `src/services/discord/tmux_watcher.rs` (3524 lines after #1520 watcher
+    loop extraction + #2427 D/A explicit-cleanup wires; split loop helpers
+    further before adding behavior).
   - `src/services/discord/recovery_engine.rs` (4842 lines).
   - `src/services/discord/health.rs` (4880 lines after #1879 snapshot/mailbox
     extraction).
@@ -127,10 +128,11 @@
   - `src/services/discord/router/message_handler.rs` (7013 lines).
   - `src/services/discord/meeting_orchestrator.rs` (3779 lines).
   - `src/services/discord/turn_bridge/mod.rs` (4267 lines).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1016 lines; provider
-    stop-token/tmux binding runtime, split before adding non-bugfix behavior).
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1525 lines; provider
+    stop-token/tmux binding runtime + PID-exit observation helper (#2426),
+    split before adding non-bugfix behavior).
   - `src/services/discord/turn_bridge/completion_guard.rs` (2096 lines).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1016 lines).
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1525 lines).
   - `src/services/discord/formatting.rs` (3247 lines).
   - `src/services/discord/settings.rs` (2445 lines).
   - `src/services/discord/prompt_builder.rs` (2114 lines).

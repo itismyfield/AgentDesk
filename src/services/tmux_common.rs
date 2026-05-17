@@ -433,17 +433,12 @@ mod sentinel_tests {
 
         emit_wrapper_sentinel(
             path.to_str().unwrap(),
-            WrapperSentinel::TerminalEnd {
-                exit: "exit:0",
-            },
+            WrapperSentinel::TerminalEnd { exit: "exit:0" },
         );
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(
-            content.contains(&format!(
-                "\"type\":\"{}\"",
-                WRAPPER_TERMINAL_END_EVENT
-            )),
+            content.contains(&format!("\"type\":\"{}\"", WRAPPER_TERMINAL_END_EVENT)),
             "terminal_end sentinel must be present in the jsonl, got:\n{content}",
         );
         assert!(content.contains("\"exit\":\"exit:0\""));
@@ -458,16 +453,11 @@ mod sentinel_tests {
 
         emit_wrapper_sentinel(
             path.to_str().unwrap(),
-            WrapperSentinel::ReadyForInput {
-                provider: "codex",
-            },
+            WrapperSentinel::ReadyForInput { provider: "codex" },
         );
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains(&format!(
-            "\"type\":\"{}\"",
-            WRAPPER_READY_FOR_INPUT_EVENT
-        )));
+        assert!(content.contains(&format!("\"type\":\"{}\"", WRAPPER_READY_FOR_INPUT_EVENT)));
         assert!(content.contains("\"provider\":\"codex\""));
     }
 }
