@@ -2260,8 +2260,7 @@ impl VoiceBargeInRuntime {
             crate::voice::announce_meta::reserve_handoff_durable(&pool, &correlation_id, &meta)
                 .await
         {
-            crate::voice::announce_meta::global_store()
-                .cancel_pending_reservation(&correlation_id);
+            crate::voice::announce_meta::global_store().cancel_pending_reservation(&correlation_id);
             return Err(format!(
                 "voice background handoff durable reservation failed (#2392): {error}"
             ));
@@ -2283,12 +2282,8 @@ impl VoiceBargeInRuntime {
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.rollback_pending_handoff_reservation(
-                    &pool,
-                    &correlation_id,
-                    "publish_error",
-                )
-                .await;
+                self.rollback_pending_handoff_reservation(&pool, &correlation_id, "publish_error")
+                    .await;
                 return Err(error);
             }
         };
