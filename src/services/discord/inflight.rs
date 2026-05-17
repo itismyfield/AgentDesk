@@ -708,6 +708,67 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
     fs::remove_file(path).is_ok()
 }
 
+/// Outcome of an explicit-signal cleanup attempt that is guarded against
+/// racing the next turn's inflight write (#2427 Pitfall #1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuardedClearOutcome {
+    /// File matched the expected `user_msg_id` and was removed.
+    Cleared,
+    /// File existed but a different `user_msg_id` was on disk — the next
+    /// turn already wrote its inflight, so we leave it alone.
+    UserMsgMismatch,
+    /// File on disk is a planned-restart marker (`restart_mode` set). The
+    /// caller is an explicit cleanup signal that fired for the previous
+    /// generation, so the marker must be preserved for recovery.
+    PlannedRestartSkipped,
+    /// File on disk is a rebind origin (`rebind_origin = true`). Its
+    /// lifetime is owned by `/api/inflight/rebind`, not the watcher /
+    /// turn-bridge, so the cleanup signal does not apply.
+    RebindOriginSkipped,
+    /// No inflight file existed (already cleared by a peer / never written).
+    Missing,
+}
+
+/// Idempotent inflight cleanup driven by an *explicit* turn-completion
+/// signal (`TurnCompleted` emit, pane death detection, etc.). This is the
+/// #2427 D / A wire — by the time we run, the regular hook on the
+/// completion path may have already cleared the file (Cleared turns into
+/// Missing). We only act when the inflight on disk still describes the
+/// turn we believe just finished.
+///
+/// Guards:
+/// * `expected_user_msg_id` — required to defeat the Pitfall #1 race where
+///   a stale `TurnCompleted` arrives after the next turn has already
+///   written its inflight. `0` is treated as "no guard available" and we
+///   refuse to delete to stay on the conservative side.
+/// * `restart_mode = Some(_)` — preserved (planned drain/hot-swap turns
+///   must survive across the dcserver restart they were saved for).
+/// * `rebind_origin = true` — preserved (Pitfall #5).
+pub(crate) fn clear_inflight_state_if_matches(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected_user_msg_id: u64,
+) -> GuardedClearOutcome {
+    let Some(state) = load_inflight_state(provider, channel_id) else {
+        return GuardedClearOutcome::Missing;
+    };
+    if state.restart_mode.is_some() {
+        return GuardedClearOutcome::PlannedRestartSkipped;
+    }
+    if state.rebind_origin {
+        return GuardedClearOutcome::RebindOriginSkipped;
+    }
+    if expected_user_msg_id == 0 || state.user_msg_id != expected_user_msg_id {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    if clear_inflight_state(provider, channel_id) {
+        GuardedClearOutcome::Cleared
+    } else {
+        // File vanished between our read and remove (peer cleared it).
+        GuardedClearOutcome::Missing
+    }
+}
+
 fn inflight_state_allows_idle_tmux_repair_state(state: &InflightTurnState) -> bool {
     state.full_response.trim().is_empty()
         && state.response_sent_offset == 0
