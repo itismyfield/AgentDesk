@@ -431,13 +431,13 @@ pub(crate) async fn cancel_pending_handoff_durable(
 /// `ON CONFLICT … DO UPDATE` resets `consumed_at` to NULL so retries from
 /// a re-dispatched handoff path can reuse the same `message_id`.
 ///
-/// #2392: this is the legacy direct-insert variant. New dispatch sites
-/// MUST use the 3-phase `reserve_handoff_durable` → publish →
-/// `bind_handoff_message_id_durable` flow. This entry point is kept only
-/// for tests and the no-guild_id fallback path; the dispatcher refuses
-/// dispatch entirely when guild_id is missing (#2392 acceptance — no
-/// race-prone fallback survives).
-#[allow(dead_code)]
+/// #2392: this is the legacy direct-insert variant. New voice dispatch
+/// sites MUST use the 3-phase `reserve_handoff_durable` → publish →
+/// `bind_handoff_message_id_durable` flow; the voice dispatcher refuses
+/// dispatch entirely when guild_id or PG pool is missing (no race-prone
+/// fallback survives). This entry point remains in use by the turn
+/// bridge for inbound markers (#2236 reverse-binding tests) and by
+/// existing test scaffolding.
 pub(crate) async fn persist_handoff_durable(
     pool: &PgPool,
     message_id: MessageId,

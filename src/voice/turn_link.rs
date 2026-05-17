@@ -140,6 +140,16 @@ const RETURNING_COLUMNS: &str = "id, guild_id, voice_channel_id, background_chan
 /// index — callers that need a true retarget should use
 /// [`retarget_voice_turn_link_pg`].
 ///
+/// #2370 final-review pass: the insert path uses the same latest-row
+/// guard the retarget path uses, so an insert against a `(guild,
+/// channel, utterance)` that has already reached a terminal state is
+/// rejected symmetrically with retarget. The regression test
+/// `insert_after_mark_terminal_does_not_resurrect_pg` exercises this
+/// directly. The partial unique index `voice_turn_link_unique_active`
+/// is the schema-level backstop and is unaffected by terminal rows
+/// (which carry `status='terminal'` and are excluded from the index
+/// predicate).
+///
 /// Returns the inserted row on success, or `None` on idempotent dedup.
 pub async fn insert_voice_turn_link_pg(
     pool: &PgPool,
