@@ -7,6 +7,8 @@ import {
 } from "react";
 import {
   getCachedTokenAnalytics,
+  getCachedSkillCatalog,
+  getCachedSkillRanking,
   getSkillCatalog,
   getSkillRanking,
   getTokenAnalytics,
@@ -87,6 +89,7 @@ interface StatsPageViewProps {
 }
 
 const PERIOD_OPTIONS: Period[] = ["7d", "30d", "90d"];
+const DEFAULT_PERIOD: Period = "7d";
 
 const NUMERIC_STYLE: CSSProperties = {
   fontFamily: "var(--font-mono)",
@@ -110,18 +113,34 @@ export default function StatsPageView({
     [language],
   );
 
-  const [period, setPeriod] = useState<Period>("30d");
+  const [period, setPeriod] = useState<Period>(DEFAULT_PERIOD);
   const [reloadKey, setReloadKey] = useState(0);
   const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(
-    null,
+    () =>
+      getCachedTokenAnalytics(DEFAULT_PERIOD)?.data ??
+      readPersistedAnalytics(DEFAULT_PERIOD),
   );
   const [skillRanking, setSkillRanking] = useState<SkillRankingResponse | null>(
-    null,
+    () =>
+      getCachedSkillRanking(DEFAULT_PERIOD, 16)?.data ??
+      readPersistedSkillRanking(DEFAULT_PERIOD),
   );
-  const [catalog, setCatalog] = useState<SkillCatalogEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [skillLoading, setSkillLoading] = useState(true);
-  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalog, setCatalog] = useState<SkillCatalogEntry[]>(
+    () => getCachedSkillCatalog()?.data ?? [],
+  );
+  const [loading, setLoading] = useState(
+    () =>
+      getCachedTokenAnalytics(DEFAULT_PERIOD) === null &&
+      readPersistedAnalytics(DEFAULT_PERIOD) === null,
+  );
+  const [skillLoading, setSkillLoading] = useState(
+    () =>
+      getCachedSkillRanking(DEFAULT_PERIOD, 16) === null &&
+      readPersistedSkillRanking(DEFAULT_PERIOD) === null,
+  );
+  const [catalogLoading, setCatalogLoading] = useState(
+    () => getCachedSkillCatalog() === null,
+  );
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [skillError, setSkillError] = useState<string | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -130,7 +149,9 @@ export default function StatsPageView({
     let active = true;
 
     const load = async () => {
-      setCatalogLoading(true);
+      const cachedCatalog = getCachedSkillCatalog();
+      if (cachedCatalog) setCatalog(cachedCatalog.data);
+      setCatalogLoading(cachedCatalog === null);
       setCatalogError(null);
       try {
         const next = await getSkillCatalog();
@@ -161,24 +182,24 @@ export default function StatsPageView({
 
   useEffect(() => {
     let active = true;
-    const controller = new AbortController();
 
     const load = async () => {
       // SWR fast-path (#1250): hydrate from in-memory cache, then fall back to
       // sessionStorage so the *first* tab entry after a reload still paints
       // instantly instead of showing every "...불러오는 중" placeholder.
       const cachedAnalytics = getCachedTokenAnalytics(period);
+      const persistedAnalytics = cachedAnalytics ? null : readPersistedAnalytics(period);
       if (cachedAnalytics) {
         setAnalytics(cachedAnalytics.data);
       } else {
-        const persisted = readPersistedAnalytics(period);
-        if (persisted) setAnalytics(persisted);
+        setAnalytics(persistedAnalytics);
       }
-      const persistedRanking = readPersistedSkillRanking(period);
-      if (persistedRanking) setSkillRanking(persistedRanking);
+      const cachedRanking = getCachedSkillRanking(period, 16);
+      const persistedRanking = cachedRanking ? null : readPersistedSkillRanking(period);
+      setSkillRanking(cachedRanking?.data ?? persistedRanking);
 
-      setLoading(!cachedAnalytics && readPersistedAnalytics(period) === null);
-      setSkillLoading(persistedRanking === null);
+      setLoading(!cachedAnalytics && persistedAnalytics === null);
+      setSkillLoading(!cachedRanking && persistedRanking === null);
       setAnalyticsError(null);
       setSkillError(null);
 
@@ -188,7 +209,7 @@ export default function StatsPageView({
       // a default re-entry would otherwise be served by the browser cache).
       const forceRefresh = reloadKey > 0;
       const [analyticsResult, skillResult] = await Promise.allSettled([
-        getTokenAnalytics(period, { signal: controller.signal, forceRefresh }),
+        getTokenAnalytics(period, { forceRefresh }),
         getSkillRanking(period, 16),
       ]);
       if (!active) return;
@@ -232,7 +253,6 @@ export default function StatsPageView({
     void load();
     return () => {
       active = false;
-      controller.abort();
     };
   }, [period, reloadKey, t]);
 

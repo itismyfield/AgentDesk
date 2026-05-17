@@ -4,6 +4,7 @@ export const HOME_PRIMARY_WIDGET_IDS = [
   "m_progress",
   "m_rate_limit",
   "kanban",
+  "routines",
 ] as const;
 export const HOME_SUPPORT_WIDGET_IDS = ["quality", "missions"] as const;
 export const HOME_DEFAULT_WIDGETS = [

@@ -17,3 +17,4 @@ export * from "./agentActivity";
 export * from "./analytics";
 export * from "./communication";
 export * from "./autoQueue";
+export * from "./routines";

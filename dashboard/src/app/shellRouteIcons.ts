@@ -1,6 +1,7 @@
 import {
   Bell,
   Building2,
+  CalendarClock,
   FolderKanban,
   Home,
   LayoutDashboard,
@@ -22,6 +23,8 @@ export function iconForRoute(routeId: AppRouteId) {
       return Users;
     case "kanban":
       return FolderKanban;
+    case "routines":
+      return CalendarClock;
     case "stats":
       return LayoutDashboard;
     case "ops":

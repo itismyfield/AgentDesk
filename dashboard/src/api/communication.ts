@@ -1,5 +1,10 @@
 import type { RoundTableMeeting, RoundTableMeetingChannelOption, SkillCatalogEntry } from "../types";
-import { request, SLOW_MUTATION_TIMEOUT_MS } from "./httpClient";
+import {
+  request,
+  readCachedSnapshot,
+  SLOW_MUTATION_TIMEOUT_MS,
+  type CachedApiSnapshot,
+} from "./httpClient";
 import type { GitHubIssuesResponse } from "./analytics";
 
 export interface ChatMessage {
@@ -211,4 +216,13 @@ export async function getSkillCatalog(): Promise<SkillCatalogEntry[]> {
     "/api/skills/catalog",
   );
   return data.catalog;
+}
+
+export function getCachedSkillCatalog(): CachedApiSnapshot<SkillCatalogEntry[]> | null {
+  const cached = readCachedSnapshot<{ catalog: SkillCatalogEntry[] }>(
+    "/api/skills/catalog",
+  );
+  return cached
+    ? { data: cached.data.catalog, fetchedAt: cached.fetchedAt }
+    : null;
 }
