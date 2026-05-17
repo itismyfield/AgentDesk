@@ -63,6 +63,8 @@
   - `src/engine/transition.rs` (1309 lines, giant-file).
   - `src/engine/ops/kanban_ops.rs` (1116 lines, giant-file).
   - `src/engine/ops/db_ops.rs` (1652 lines, giant-file).
+  - `src/engine/loader.rs` (1670 lines, giant-file) — engine loader / QuickJS
+    validator surface; split before adding non-bugfix behavior.
   - `src/engine/intent.rs` (873 lines, retained migration-sensitive surface).
   - `src/pipeline.rs` (2125 lines, giant-file).
 - active_callsite_coverage: n/a (no canonical replacement yet).
