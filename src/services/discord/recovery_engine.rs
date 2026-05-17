@@ -38,7 +38,7 @@ fn tmux_session_has_live_pane(_name: &str) -> bool {
 ///   total grace window before declaring tmux/finalize recovery failed.
 /// - New: gap schedule = `[700, 1300, 2000]` ms + 0..=100ms jitter, callers
 ///   sleep on attempt 1 and 2 (`if attempt < 3`). Wait between attempts =
-///   `700 + 1300 = 2000ms ±200ms`. **Total budget preserved** while
+///   `700 + 1300 = 2000ms +0..=200ms` (jitter only adds). **Total budget preserved** while
 ///   distributing the gaps exponentially so a transient failure that resolves
 ///   in <1s wakes ~300ms earlier on average.
 /// - The third slot (`2000ms`) is reachable only if a future change bumps
