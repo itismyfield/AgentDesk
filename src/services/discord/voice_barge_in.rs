@@ -32,7 +32,7 @@ use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 use super::SharedData;
 use super::voice_background_driver::{
     VoiceBackgroundStartRequest, VoiceBackgroundTurnDriver, default_voice_announce_generation,
-    select_voice_background_driver,
+    select_voice_background_driver, voice_announce_delivery_id,
 };
 pub(in crate::services::discord) const INTERNAL_VOICE_MESSAGE_ID_START: u64 =
     9_000_000_000_000_000_000;
@@ -2139,42 +2139,120 @@ impl VoiceBargeInRuntime {
             summary,
             &announcement.language,
         );
-        let outcome = driver
+        // #2392: persist BEFORE publish.
+        //
+        // Previously this method called `driver.start()` first (which posts
+        // the announce-bot trigger message to Discord), then inserted the
+        // typed handoff marker keyed by the returned `message_id`. A fast
+        // downstream turn — or any other node receiving the Discord
+        // MESSAGE_CREATE webhook — could call
+        // `voice_background_completion_target(message_id)` BEFORE this
+        // method's post-publish `insert_handoff` ran. The marker store was
+        // empty, the spoken-summary routing silently dropped, and the
+        // Option C eventual-consistency fallback (#2351 v6) did not help
+        // because both stores were equally empty.
+        //
+        // The fix splits dispatch into three deterministic phases:
+        //   1. Pre-publish reservation under a deterministic correlation_id
+        //      (same id the announce driver hands to the outbound delivery
+        //      layer, so the token is already stable before publish).
+        //   2. `driver.start()` — Discord publish; returns the actual
+        //      `message_id`.
+        //   3. Post-publish `bind_handoff_message_id` — atomically promote
+        //      the pending reservation to a `message_id`-keyed marker that
+        //      `get_handoff` / `take_handoff` consult.
+        // Failure paths (driver Err, missing message_id) cancel the
+        // reservation so the pending map does not leak entries.
+        let generation = default_voice_announce_generation() + 1;
+        let reservation_correlation_id = guild_id.map(|gid| {
+            voice_announce_delivery_id(
+                gid,
+                source_channel_id,
+                &announcement.utterance_id,
+                generation,
+            )
+            .correlation_id
+        });
+        let agent_id = self
+            .active_voice_routes
+            .get(&source_channel_id.get())
+            .map(|entry| entry.agent_id.clone());
+        let handoff_meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+            voice_channel_id: source_channel_id.get(),
+            background_channel_id: target_channel_id.get(),
+            agent_id,
+        };
+        let store = crate::voice::announce_meta::global_store();
+        // Phase 1: reservation. Skipped only when guild_id is absent, in
+        // which case the driver itself cannot stamp a delivery id either
+        // and the legacy fallback path applies.
+        let reserved = match reservation_correlation_id.as_deref() {
+            Some(correlation_id) => store.reserve_handoff(correlation_id, handoff_meta.clone()),
+            None => false,
+        };
+        // Phase 2: publish.
+        let outcome = match driver
             .start(VoiceBackgroundStartRequest {
                 guild_id,
                 voice_channel_id: source_channel_id,
                 channel_id: target_channel_id,
                 shared,
                 utterance_id: &announcement.utterance_id,
-                generation: default_voice_announce_generation() + 1,
+                generation,
                 message_content: &prompt,
             })
-            .await?;
-        // #2236: stamp a typed marker keyed by the posted message id so the
-        // turn bridge can route the background turn's spoken summary back to
-        // the foreground voice channel WITHOUT inspecting the prompt body.
-        // The previous design matched a hardcoded Korean prefix on
-        // `user_text`, which any user could type to hijack routing.
-        if let Some(message_id) = outcome.message_id {
-            let agent_id = self
-                .active_voice_routes
-                .get(&source_channel_id.get())
-                .map(|entry| entry.agent_id.clone());
-            crate::voice::announce_meta::global_store().insert_handoff(
-                message_id,
-                crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
-                    voice_channel_id: source_channel_id.get(),
-                    background_channel_id: target_channel_id.get(),
-                    agent_id,
-                },
-            );
-        } else {
-            tracing::warn!(
-                source_channel_id = source_channel_id.get(),
-                target_channel_id = target_channel_id.get(),
-                utterance_id = %announcement.utterance_id,
-                "voice background handoff dispatch returned no message_id; spoken summary routing will fall back to legacy prefix detection"
-            );
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if reserved
+                    && let Some(correlation_id) = reservation_correlation_id.as_deref()
+                {
+                    store.cancel_handoff_reservation(correlation_id);
+                }
+                return Err(error);
+            }
+        };
+        // Phase 3: bind / fallback / cleanup.
+        match (reserved, reservation_correlation_id.as_deref(), outcome.message_id) {
+            (true, Some(correlation_id), Some(message_id)) => {
+                if !store.bind_handoff_message_id(correlation_id, message_id) {
+                    // Reservation evaporated (e.g. TTL); fall back to the
+                    // direct message_id insert so the marker still lands.
+                    tracing::warn!(
+                        source_channel_id = source_channel_id.get(),
+                        target_channel_id = target_channel_id.get(),
+                        utterance_id = %announcement.utterance_id,
+                        correlation_id = %correlation_id,
+                        "voice background handoff reservation missing at bind; falling back to direct message_id insert"
+                    );
+                    store.insert_handoff(message_id, handoff_meta.clone());
+                }
+            }
+            (true, Some(correlation_id), None) => {
+                store.cancel_handoff_reservation(correlation_id);
+                tracing::warn!(
+                    source_channel_id = source_channel_id.get(),
+                    target_channel_id = target_channel_id.get(),
+                    utterance_id = %announcement.utterance_id,
+                    "voice background handoff dispatch returned no message_id; cancelled pre-publish reservation, spoken summary routing will fall back to legacy prefix detection"
+                );
+            }
+            (_, _, Some(message_id)) => {
+                // No reservation could be made (no guild_id, or
+                // reservation write-lock poisoned). Fall back to the
+                // legacy post-publish insert path — preserves prior
+                // behaviour without regressing the no-guild case.
+                store.insert_handoff(message_id, handoff_meta.clone());
+            }
+            (_, _, None) => {
+                tracing::warn!(
+                    source_channel_id = source_channel_id.get(),
+                    target_channel_id = target_channel_id.get(),
+                    utterance_id = %announcement.utterance_id,
+                    "voice background handoff dispatch returned no message_id; spoken summary routing will fall back to legacy prefix detection"
+                );
+            }
         }
         Ok(VoiceBackgroundHandoffOutcome {
             turn_id: outcome.turn_id,
