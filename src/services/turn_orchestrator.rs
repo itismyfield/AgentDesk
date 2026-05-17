@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::services::provider::{CancelToken, ProviderKind};
 
@@ -1290,9 +1290,81 @@ pub(crate) enum WatchdogDeadlineExtensionError {
     NoActiveTurn,
 }
 
+/// #2443 — deterministic "recovery finished" signal per channel.
+///
+/// Pairs a `tokio::sync::Notify` with a one-shot `latched` flag so a
+/// `recovery_done` event raised before a watcher subscribes is still
+/// observable. Without the latch, `Notify::notify_waiters` would lose the
+/// signal whenever recovery completes BEFORE the watcher reaches its
+/// `notified()` await, re-introducing exactly the race the 60s timeout was
+/// papering over. The latch flips on the first `mark_done` call and
+/// `wait()` short-circuits on subsequent observers — recovery sessions are
+/// monotonic per channel within the lifetime of this signal.
+///
+/// Callers reset the latch when a *new* recovery begins (so the next watcher
+/// wave doesn't see a stale "already done"). `reset()` is idempotent.
+pub(crate) struct RecoveryDoneSignal {
+    notify: Notify,
+    latched: std::sync::atomic::AtomicBool,
+}
+
+impl RecoveryDoneSignal {
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+            latched: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Mark recovery as finished. Wakes all current waiters and latches the
+    /// signal so subsequent `wait()` calls return immediately until `reset()`.
+    pub(crate) fn mark_done(&self) {
+        self.latched.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    /// Reset the latch so the next recovery cycle starts clean. Should be
+    /// called at recovery kickoff so an old "done" flag does not satisfy a
+    /// watcher waiting for the new run.
+    pub(crate) fn reset(&self) {
+        self.latched.store(false, Ordering::Release);
+    }
+
+    /// Wait until `mark_done` is observed. Returns immediately if the latch
+    /// is already set (race-free for observers that subscribe after the
+    /// notification fires).
+    pub(crate) async fn wait(&self) {
+        if self.latched.load(Ordering::Acquire) {
+            return;
+        }
+        // Subscribe BEFORE the second check to close the
+        // observe-then-subscribe window. `Notify::notified()` returns a
+        // future that registers a waiter on first poll; recheck the flag
+        // afterwards in case `mark_done` ran between the load and the
+        // subscribe.
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        if self.latched.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+static GLOBAL_RECOVERY_DONE_SIGNALS: LazyLock<
+    dashmap::DashMap<ChannelId, Arc<RecoveryDoneSignal>>,
+> = LazyLock::new(dashmap::DashMap::new);
+
 #[derive(Clone, Default)]
 pub(crate) struct ChannelMailboxRegistry {
     handles: Arc<dashmap::DashMap<ChannelId, ChannelMailboxHandle>>,
+    /// #2443 — per-channel "recovery finished" signals consumed by
+    /// `watchers/lifecycle.rs` to graduate the 60s `recovery_started_at < 60s`
+    /// skip heuristic. Stored in a separate map (rather than fields on the
+    /// mailbox actor state) so both the recovery_engine producer and the
+    /// watchers/lifecycle consumer can take a clone without round-tripping
+    /// through the actor's message channel.
+    recovery_done: Arc<dashmap::DashMap<ChannelId, Arc<RecoveryDoneSignal>>>,
 }
 
 impl ChannelMailboxRegistry {
@@ -1315,6 +1387,37 @@ impl ChannelMailboxRegistry {
 
     pub(crate) fn global_handle(channel_id: ChannelId) -> Option<ChannelMailboxHandle> {
         GLOBAL_CHANNEL_MAILBOXES
+            .get(&channel_id)
+            .map(|entry| entry.value().clone())
+    }
+
+    /// #2443 — fetch or create the recovery-done signal for this channel.
+    /// Cloning the `Arc` is cheap; the signal lives for the lifetime of the
+    /// registry. The same `Arc` is mirrored into `GLOBAL_RECOVERY_DONE_SIGNALS`
+    /// so callers that only have a `ChannelId` (no registry handle, e.g.
+    /// helper free functions outside `SharedData`) can resolve via
+    /// `global_recovery_done`.
+    pub(crate) fn recovery_done(&self, channel_id: ChannelId) -> Arc<RecoveryDoneSignal> {
+        if let Some(existing) = self.recovery_done.get(&channel_id) {
+            return existing.clone();
+        }
+        let signal = Arc::new(RecoveryDoneSignal::new());
+        let resolved = match self.recovery_done.entry(channel_id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(signal.clone());
+                signal
+            }
+        };
+        GLOBAL_RECOVERY_DONE_SIGNALS.insert(channel_id, resolved.clone());
+        resolved
+    }
+
+    /// #2443 — globally resolvable variant. Returns `None` only when no
+    /// `recovery_done()` call has happened yet for this channel; callers
+    /// that need a signal regardless should use the per-instance accessor.
+    pub(crate) fn global_recovery_done(channel_id: ChannelId) -> Option<Arc<RecoveryDoneSignal>> {
+        GLOBAL_RECOVERY_DONE_SIGNALS
             .get(&channel_id)
             .map(|entry| entry.value().clone())
     }
@@ -3171,5 +3274,63 @@ mod tests {
         assert!(handle.extend_timeout(15).await.is_ok());
         handle.clear_timeout_override().await;
         assert_eq!(handle.take_timeout_override().await, None);
+    }
+}
+
+#[cfg(test)]
+mod recovery_done_signal_tests {
+    use super::*;
+
+    /// #2443 — verify the latch-then-wait race-free contract.
+    #[tokio::test]
+    async fn recovery_done_latch_short_circuits_late_subscribers() {
+        let signal = RecoveryDoneSignal::new();
+        signal.mark_done();
+        // Subscriber registers AFTER mark_done — must still complete.
+        tokio::time::timeout(std::time::Duration::from_millis(100), signal.wait())
+            .await
+            .expect("late subscriber should observe latched done state");
+    }
+
+    /// #2443 — verify the reset clears the latch so the next recovery
+    /// cycle's watcher does not see a stale signal.
+    #[tokio::test]
+    async fn recovery_done_reset_unlatches_for_next_cycle() {
+        let signal = std::sync::Arc::new(RecoveryDoneSignal::new());
+        signal.mark_done();
+        signal.reset();
+        // After reset, wait should NOT short-circuit — must time out.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), signal.wait()).await;
+        assert!(
+            result.is_err(),
+            "reset() should clear the latch so subsequent waits block until next mark_done"
+        );
+        // Now fire mark_done in a background task and confirm a fresh
+        // waiter wakes up.
+        let signal_for_task = signal.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            signal_for_task.mark_done();
+        });
+        tokio::time::timeout(std::time::Duration::from_millis(500), signal.wait())
+            .await
+            .expect("wait after reset should resolve when mark_done fires again");
+    }
+
+    /// #2443 — global resolution path used by watchers/lifecycle.rs.
+    #[tokio::test]
+    async fn registry_recovery_done_is_globally_resolvable() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(99_443);
+        let signal = registry.recovery_done(channel_id);
+        let resolved =
+            ChannelMailboxRegistry::global_recovery_done(channel_id).expect("global signal");
+        // Identity check via mark_done propagation: marking one wakes
+        // the other if they point to the same underlying Arc.
+        signal.mark_done();
+        tokio::time::timeout(std::time::Duration::from_millis(50), resolved.wait())
+            .await
+            .expect("global_recovery_done should resolve to the same Arc");
     }
 }

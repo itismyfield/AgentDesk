@@ -16,6 +16,18 @@ pub(in crate::services::discord) const MONITOR_AUTO_TURN_REASON_CODE: &str =
     "lifecycle.monitor_auto_turn";
 pub(in crate::services::discord) const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str =
     "lifecycle.monitor_auto_turn.deferred";
+/// #2441 (H4) — current cadence at which `tmux_output_watcher_with_restore`
+/// re-probes `probe_tmux_session_liveness` while waiting for new bytes.
+/// The issue body proposes graduating this with a `.dead` marker file
+/// emitted by a `tmux set-hook session-closed/pane-exited` hook + the new
+/// JsonlWatcher infrastructure. That hook-based approach crosses tmux's
+/// userland-hook surface and has different reliability semantics on
+/// macOS (FSEvents) vs Linux (inotify) sandboxes, so for the first cut
+/// we leave the 2s cadence in place and document the graduation path
+/// here. The inner-loop sleeps already wake on jsonl events (see
+/// `sleep_or_jsonl_event` in tmux_watcher.rs), which is the dominant
+/// CPU-usage win the issue was after; the standalone liveness probe runs
+/// at most once every 2s and is observability-grade, not a hot path.
 pub(in crate::services::discord) const TMUX_LIVENESS_PROBE_INTERVAL: tokio::time::Duration =
     tokio::time::Duration::from_secs(2);
 

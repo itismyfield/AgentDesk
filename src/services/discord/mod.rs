@@ -13,6 +13,7 @@ pub(crate) mod idle_recap;
 mod idle_recap_interaction;
 mod inflight;
 pub(crate) mod internal_api;
+mod jsonl_watcher;
 mod mcp_credential_watcher;
 pub(crate) mod meeting_artifact_store;
 pub(crate) mod meeting_orchestrator;
@@ -2396,6 +2397,12 @@ async fn mailbox_recovery_kickoff(
     request_owner: UserId,
     user_message_id: MessageId,
 ) -> RecoveryKickoffResult {
+    // #2443 — reset the per-channel `recovery_done` latch BEFORE the
+    // recovery actually starts. A stale "done" flag from a previous cycle
+    // would otherwise let `watchers/lifecycle.rs` (which selects on
+    // `recovery_done.wait()`) immediately graduate the skip and race the
+    // ongoing recovery. Reset is idempotent and cheap.
+    shared.mailboxes.recovery_done(channel_id).reset();
     let result = shared
         .mailbox(channel_id)
         .recovery_kickoff(cancel_token, request_owner, user_message_id)
@@ -2453,6 +2460,13 @@ fn ensure_cancel_token_bound_from_inflight(
 
 async fn mailbox_clear_recovery_marker(shared: &SharedData, channel_id: ChannelId) {
     shared.mailbox(channel_id).clear_recovery_marker().await;
+    // #2443 — graduate the 60s `recovery_started_at < 60s` skip via a
+    // deterministic wake-up. Every exit path of the recovery engine
+    // (success / failure / cancel / stale-cleanup) funnels through this
+    // helper, so a single `mark_done()` here covers all of them. Watchers
+    // selecting on `recovery_done.wait()` proceed immediately; the 60s
+    // timeout remains as a hook-miss safety net.
+    shared.mailboxes.recovery_done(channel_id).mark_done();
 }
 
 /// Outcome of `mailbox_enqueue_intervention` — exposes both the enqueue
@@ -2919,6 +2933,13 @@ async fn mailbox_finish_turn(
         .finish_turn(queue_persistence_context(shared, provider, channel_id))
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    // #2443 — finish_turn is the success-path exit for the recovery engine
+    // (recovery_engine.rs L648). Marking `recovery_done` here covers the
+    // "recovery completed normally" branch so the watcher waiting on
+    // `recovery_done.wait()` can proceed without waiting for the 60s timeout
+    // that the legacy heuristic depended on. The latch is idempotent — if
+    // `mailbox_clear_recovery_marker` already ran, this is a no-op.
+    shared.mailboxes.recovery_done(channel_id).mark_done();
     result
 }
 
@@ -2932,6 +2953,10 @@ async fn mailbox_clear_channel(
         .clear(queue_persistence_context(shared, provider, channel_id))
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    // #2443 — `Clear` is the cancel/teardown exit path. Mark recovery_done so
+    // a watcher that subscribed to the recovery latch is freed even when
+    // recovery is aborted rather than completed.
+    shared.mailboxes.recovery_done(channel_id).mark_done();
     result
 }
 
