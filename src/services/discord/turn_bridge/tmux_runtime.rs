@@ -402,19 +402,14 @@ async fn hard_stop_unresponsive_provider_cli_turn(
     // recycled the PID by then. Track the effective fallback locally so
     // escalation can only target a currently-observed provider PID from
     // the tmux pane probe when the original SIGINT target has exited.
-    let effective_fallback_sigint_pid = if let Some(target_pid) =
-        interrupt_outcome.fallback_sigint_pid
-    {
-        let exited = wait_for_pid_exit(target_pid, PROVIDER_HARD_STOP_GRACE).await;
-        if exited {
-            None
+    let effective_fallback_sigint_pid =
+        if let Some(target_pid) = interrupt_outcome.fallback_sigint_pid {
+            let exited = wait_for_pid_exit(target_pid, PROVIDER_HARD_STOP_GRACE).await;
+            if exited { None } else { Some(target_pid) }
         } else {
-            Some(target_pid)
-        }
-    } else {
-        tokio::time::sleep(PROVIDER_HARD_STOP_GRACE).await;
-        None
-    };
+            tokio::time::sleep(PROVIDER_HARD_STOP_GRACE).await;
+            None
+        };
 
     let tracked_child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
     let provider_for_probe = provider.clone();
@@ -900,10 +895,7 @@ fn wait_for_pid_exit_blocking(pid: u32, deadline: Duration) -> bool {
             events: libc::POLLIN,
             revents: 0,
         };
-        let timeout_ms: libc::c_int = deadline
-            .as_millis()
-            .try_into()
-            .unwrap_or(libc::c_int::MAX);
+        let timeout_ms: libc::c_int = deadline.as_millis().try_into().unwrap_or(libc::c_int::MAX);
         let n = libc::poll(&mut pfd as *mut _, 1, timeout_ms);
         libc::close(fd);
         if n < 0 {
@@ -1494,7 +1486,10 @@ mod pid_exit_tests {
         let _ = child.wait();
         let _ = killer.await;
 
-        assert!(exited, "wait_for_pid_exit must report exit for killed child");
+        assert!(
+            exited,
+            "wait_for_pid_exit must report exit for killed child"
+        );
         assert!(
             elapsed < Duration::from_millis(1500),
             "OS-level exit notification must beat the upper bound by a comfortable margin (took {elapsed:?})"
