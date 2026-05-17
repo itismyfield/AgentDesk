@@ -123,6 +123,13 @@ fn is_voice_background_handoff_prompt(user_msg_id: MessageId, _text: &str) -> bo
 /// `background_channel_id`, so routing does NOT round-trip through the
 /// (potentially-stale, multi-agent-ambiguous) reverse lookup any more.
 ///
+/// #2274: when the in-memory store misses (e.g. after a dcserver restart
+/// during a long background turn before rehydration finished, or when
+/// terminal delivery lands on a different cluster node than the dispatch
+/// node) the durable PG side store is consulted as a fallback. The atomic
+/// `UPDATE … SET consumed_at = NOW() RETURNING …` claim there guarantees
+/// exactly-once consumption across nodes.
+///
 /// - Returns `None` when no marker exists for this `user_msg_id` (this
 ///   turn was not a voice-background handoff).
 /// - Returns `None` when the marker exists but the recorded
@@ -134,14 +141,94 @@ fn is_voice_background_handoff_prompt(user_msg_id: MessageId, _text: &str) -> bo
 ///   a cross-check parameter — if reverse lookup also resolved a voice
 ///   channel and it disagrees with the marker, a warn is emitted but the
 ///   marker still wins (it is the authoritative origin record).
-fn voice_background_completion_target(
+async fn voice_background_completion_target(
     mapped_voice_channel_id: Option<ChannelId>,
     user_msg_id: MessageId,
     _user_text: &str,
     channel_id: ChannelId,
+    pool: Option<&sqlx::PgPool>,
 ) -> Option<ChannelId> {
     let store = crate::voice::announce_meta::global_store();
-    let meta = store.take_handoff(user_msg_id)?;
+    // #2274 Codex review finding #1: when a PG pool is available the
+    // durable `UPDATE ... SET consumed_at = NOW() RETURNING ...` claim is
+    // ALWAYS authoritative for one-shot consumption, even when an
+    // in-memory marker is present. Otherwise two cluster nodes (or a
+    // pre-restart in-memory holder paired with a post-restart rehydrate)
+    // could both observe a local marker and route duplicate spoken
+    // summaries. The local store is treated as a hot cache, never as the
+    // routing gate.
+    let meta = if let Some(pool) = pool {
+        match crate::voice::announce_meta::take_handoff_durable(pool, user_msg_id).await {
+            Ok(Some(meta)) => {
+                // Drop any local copy so a parallel caller cannot see it.
+                store.forget_handoff(user_msg_id);
+                meta
+            }
+            Ok(None) => {
+                // #2274 Codex round-2 finding: a dispatch whose durable
+                // PG write failed will have flipped `local_only_fallback`
+                // on the in-memory marker. In that case the local marker
+                // is the only record of the handoff — refusing to route
+                // would silently drop the spoken summary, regressing
+                // pre-#2274 behaviour under DB unavailability. We
+                // consume the local marker (one-shot, take_handoff) and
+                // emit a `voice_background_handoff_local_only_fallback`
+                // warn so operators see persistence is failing.
+                //
+                // If the marker is present without the flag, we still
+                // refuse — that case (PG row gone but local copy lives)
+                // matches the round-1 duplicate-routing prevention.
+                if let Some(local) = store.get_handoff(user_msg_id) {
+                    if local.local_only_fallback {
+                        if let Some(consumed) = store.take_handoff(user_msg_id) {
+                            tracing::warn!(
+                                event = "voice_background_handoff_local_only_fallback",
+                                user_msg_id = user_msg_id.get(),
+                                channel_id = channel_id.get(),
+                                marker_voice_channel_id = consumed.voice_channel_id,
+                                marker_background_channel_id = consumed.background_channel_id,
+                                "durable PG row absent but local marker is flagged local-only fallback (dispatch-time persist failure); routing spoken summary from in-memory marker"
+                            );
+                            // Re-bind the surviving meta so the downstream
+                            // channel-match / reverse-lookup checks below
+                            // can operate on it uniformly.
+                            consumed
+                        } else {
+                            // Lost the race against another take_handoff
+                            // caller on the same node — be safe and drop.
+                            return None;
+                        }
+                    } else {
+                        tracing::info!(
+                            event = "voice_background_handoff_durable_already_consumed",
+                            user_msg_id = user_msg_id.get(),
+                            channel_id = channel_id.get(),
+                            "in-memory marker present but durable PG row is absent or already consumed; refusing to route to avoid duplicate spoken summary"
+                        );
+                        store.forget_handoff(user_msg_id);
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    user_msg_id = user_msg_id.get(),
+                    "voice_background_handoff durable claim failed; refusing to route spoken summary"
+                );
+                return None;
+            }
+        }
+    } else {
+        // No durable backstop available (typically: dev / no-PG mode).
+        // Preserve legacy local-only behaviour for setups that never
+        // persisted the marker in the first place. Single-node, no-PG
+        // deployments cannot duplicate routing because there is only
+        // one consumer.
+        store.take_handoff(user_msg_id)?
+    };
     if meta.background_channel_id != channel_id.get() {
         tracing::warn!(
             event = "voice_background_handoff_channel_mismatch",
@@ -257,6 +344,7 @@ mod dispatch_kind_tests {
                 voice_channel_id: 300,
                 background_channel_id: 200,
                 agent_id: Some("project-agentdesk".to_string()),
+                local_only_fallback: false,
             },
         );
         assert!(is_voice_background_handoff_prompt(
@@ -269,8 +357,8 @@ mod dispatch_kind_tests {
 
     /// #2236: delivery is bound to the marker's recorded voice channel.
     /// Reverse-lookup result is accepted only as a cross-check.
-    #[test]
-    fn background_completion_target_returns_marker_recorded_voice_channel() {
+    #[tokio::test]
+    async fn background_completion_target_returns_marker_recorded_voice_channel() {
         let user_msg_id = MessageId::new(7_300_001);
         crate::voice::announce_meta::global_store().insert_handoff(
             user_msg_id,
@@ -278,6 +366,7 @@ mod dispatch_kind_tests {
                 voice_channel_id: 301,
                 background_channel_id: 201,
                 agent_id: None,
+                local_only_fallback: false,
             },
         );
         let mapped = Some(ChannelId::new(301));
@@ -288,7 +377,9 @@ mod dispatch_kind_tests {
                 user_msg_id,
                 "free-form user-controlled text",
                 channel,
-            ),
+                None,
+            )
+            .await,
             Some(ChannelId::new(301))
         );
         // Marker is consumed exactly once.
@@ -298,14 +389,16 @@ mod dispatch_kind_tests {
                 user_msg_id,
                 "free-form user-controlled text",
                 channel,
-            ),
+                None,
+            )
+            .await,
             None
         );
     }
 
     /// #2236: prefix-only spoofing attempt — no marker, prefix in body — must NOT route.
-    #[test]
-    fn background_completion_target_refuses_legacy_prefix_without_marker() {
+    #[tokio::test]
+    async fn background_completion_target_refuses_legacy_prefix_without_marker() {
         let user_msg_id = MessageId::new(7_400_001);
         let mapped = Some(ChannelId::new(300));
         let channel = ChannelId::new(200);
@@ -315,7 +408,9 @@ mod dispatch_kind_tests {
                 user_msg_id,
                 "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.",
                 channel,
-            ),
+                None,
+            )
+            .await,
             None,
             "user-controllable legacy prefix must no longer drive routing"
         );
@@ -323,8 +418,8 @@ mod dispatch_kind_tests {
 
     /// #2236: marker recorded against a different background channel than
     /// the turn fired in is treated as a routing mismatch and refused.
-    #[test]
-    fn background_completion_target_refuses_marker_with_wrong_background_channel() {
+    #[tokio::test]
+    async fn background_completion_target_refuses_marker_with_wrong_background_channel() {
         let user_msg_id = MessageId::new(7_500_001);
         crate::voice::announce_meta::global_store().insert_handoff(
             user_msg_id,
@@ -332,6 +427,7 @@ mod dispatch_kind_tests {
                 voice_channel_id: 301,
                 background_channel_id: 999, // not the channel below
                 agent_id: None,
+                local_only_fallback: false,
             },
         );
         assert_eq!(
@@ -340,15 +436,17 @@ mod dispatch_kind_tests {
                 user_msg_id,
                 "irrelevant body",
                 ChannelId::new(201), // mismatched
-            ),
+                None,
+            )
+            .await,
             None
         );
     }
 
     /// #2236: marker is authoritative — when the reverse-lookup voice channel
     /// disagrees with the marker, the marker still wins (with a warn).
-    #[test]
-    fn background_completion_target_marker_wins_over_reverse_lookup_disagreement() {
+    #[tokio::test]
+    async fn background_completion_target_marker_wins_over_reverse_lookup_disagreement() {
         let user_msg_id = MessageId::new(7_600_001);
         crate::voice::announce_meta::global_store().insert_handoff(
             user_msg_id,
@@ -356,6 +454,7 @@ mod dispatch_kind_tests {
                 voice_channel_id: 301,
                 background_channel_id: 201,
                 agent_id: None,
+                local_only_fallback: false,
             },
         );
         // Reverse lookup says 999, but marker says 301 — marker wins.
@@ -365,9 +464,304 @@ mod dispatch_kind_tests {
                 user_msg_id,
                 "irrelevant body",
                 ChannelId::new(201),
-            ),
+                None,
+            )
+            .await,
             Some(ChannelId::new(301))
         );
+    }
+
+    /// #2274: when the in-memory marker is absent but the durable PG row
+    /// exists (e.g. dcserver restarted between dispatch and terminal
+    /// delivery), the durable claim path must still resolve the voice
+    /// channel — that is the entire point of this fix.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_completion_target_falls_back_to_durable_pg_row() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let user_msg_id = MessageId::new(7_700_001);
+        let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+            voice_channel_id: 311,
+            background_channel_id: 211,
+            agent_id: Some("project-agentdesk".to_string()),
+            local_only_fallback: false,
+        };
+        crate::voice::announce_meta::persist_handoff_durable(&pool, user_msg_id, &meta)
+            .await
+            .expect("persist durable handoff");
+        // Intentionally do NOT insert into the in-memory store — that
+        // simulates the post-restart state before rehydration.
+
+        let resolved = voice_background_completion_target(
+            None,
+            user_msg_id,
+            "irrelevant body",
+            ChannelId::new(211),
+            Some(&pool),
+        )
+        .await;
+        assert_eq!(resolved, Some(ChannelId::new(311)));
+
+        // The durable claim is one-shot — a second call must return None.
+        let again = voice_background_completion_target(
+            None,
+            user_msg_id,
+            "irrelevant body",
+            ChannelId::new(211),
+            Some(&pool),
+        )
+        .await;
+        assert_eq!(again, None);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2274 Codex review finding #1: two concurrent terminal-delivery
+    /// callers both see the local marker (e.g. rehydrated on two nodes,
+    /// or pre-restart-in-memory plus post-restart-rehydrate on the same
+    /// node). Without PG-authoritative consumption, both would route a
+    /// spoken summary — exactly the duplicate-routing bug the durability
+    /// story is meant to prevent. With the fix, exactly one wins.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn background_completion_target_pg_authoritative_under_two_local_holders() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let user_msg_id = MessageId::new(7_800_001);
+        let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+            voice_channel_id: 321,
+            background_channel_id: 221,
+            agent_id: Some("project-agentdesk".to_string()),
+            local_only_fallback: false,
+        };
+
+        // Persist exactly one durable row.
+        crate::voice::announce_meta::persist_handoff_durable(&pool, user_msg_id, &meta)
+            .await
+            .expect("persist durable handoff");
+        // Simulate the local cache being populated on this node as well
+        // (e.g. via the foreground dispatch write-through, or via boot
+        // rehydration). On a cluster with two nodes this would happen
+        // independently on each.
+        crate::voice::announce_meta::global_store().insert_handoff(user_msg_id, meta.clone());
+
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let task_a = tokio::spawn(async move {
+            voice_background_completion_target(
+                None,
+                user_msg_id,
+                "irrelevant body",
+                ChannelId::new(221),
+                Some(&pool_a),
+            )
+            .await
+        });
+        let task_b = tokio::spawn(async move {
+            voice_background_completion_target(
+                None,
+                user_msg_id,
+                "irrelevant body",
+                ChannelId::new(221),
+                Some(&pool_b),
+            )
+            .await
+        });
+        let (a, b) = tokio::try_join!(task_a, task_b).expect("join concurrent consumers");
+        let winners = [&a, &b].iter().filter(|r| r.is_some()).count();
+        assert_eq!(
+            winners, 1,
+            "exactly one terminal-delivery caller must route the spoken summary"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2274 Codex review finding #3 regression guard: after rehydration,
+    /// a row that already lived 23h in PG must NOT survive another 24h in
+    /// memory. Verify the in-memory expiry roughly matches the remaining
+    /// durable TTL rather than getting reset.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rehydrate_preserves_remaining_ttl_for_aged_rows() {
+        use crate::voice::announce_meta::{
+            DURABLE_HANDOFF_META_TTL_SECS, VoiceBackgroundHandoffMeta, persist_handoff_durable,
+            rehydrate_handoffs_from_pg,
+        };
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let user_msg_id = MessageId::new(7_900_001);
+        let meta = VoiceBackgroundHandoffMeta {
+            voice_channel_id: 331,
+            background_channel_id: 231,
+            agent_id: None,
+            local_only_fallback: false,
+        };
+
+        persist_handoff_durable(&pool, user_msg_id, &meta)
+            .await
+            .expect("persist durable handoff");
+        // Backdate the row to "5 minutes before TTL expiry" so the
+        // remaining lifetime should clamp to ~5 minutes, not a fresh 24h.
+        let near_ttl_age = DURABLE_HANDOFF_META_TTL_SECS - 300;
+        sqlx::query(
+            "UPDATE voice_background_handoff_meta
+             SET created_at = NOW() - make_interval(secs => $1)
+             WHERE message_id = $2",
+        )
+        .bind(near_ttl_age as f64)
+        .bind(user_msg_id.get().to_string())
+        .execute(&pool)
+        .await
+        .expect("backdate row for rehydrate ttl test");
+
+        let count = rehydrate_handoffs_from_pg(&pool)
+            .await
+            .expect("rehydrate succeeds");
+        assert!(count >= 1, "rehydrate must surface the aged row");
+        // Local marker must still be present (remaining TTL > 0 here).
+        let store = crate::voice::announce_meta::global_store();
+        assert!(store.get_handoff(user_msg_id).is_some());
+        // Drain to keep test isolation tight.
+        let _ = store.take_handoff(user_msg_id);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #2274 Codex round-2 finding: a durable-write failure at dispatch
+    /// time used to drop the spoken summary, because the PG-authoritative
+    /// terminal-delivery path (added in the round-1 fix) returns
+    /// `Ok(None)` when no row exists. This regressed pre-#2274 local-only
+    /// behaviour for transient DB outages.
+    ///
+    /// The fix flips a `local_only_fallback` flag on the in-memory marker
+    /// at dispatch time when persist fails. Terminal delivery then
+    /// consumes the local marker (one-shot via `take_handoff`) and emits a
+    /// `voice_background_handoff_local_only_fallback` warn so operators
+    /// can see persistence is failing.
+    ///
+    /// This test exercises three properties together:
+    ///   1. With a flagged local marker and an empty PG table,
+    ///      `voice_background_completion_target` resolves the marker's
+    ///      voice channel (instead of silently dropping).
+    ///   2. The marker is one-shot — a second call returns `None`.
+    ///   3. The `voice_background_handoff_local_only_fallback` warn fires
+    ///      and carries the marker context.
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_completion_target_uses_local_only_fallback_when_pg_persist_failed() {
+        use std::{
+            io::{self, Write},
+            sync::{Arc, Mutex},
+        };
+        use tracing_subscriber::fmt::MakeWriter;
+
+        // Captures warn logs emitted on the current thread for the
+        // duration of the test. `with_default` scopes the subscriber to
+        // exactly this thread; a `current_thread` tokio runtime keeps all
+        // awaits on the same thread, so the subscriber sees them.
+        #[derive(Clone)]
+        struct CapturingWriter {
+            buffer: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Write for CapturingWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.buffer.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for CapturingWriter {
+            type Writer = CapturingWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        // Deliberately do NOT call persist_handoff_durable — this
+        // simulates the post-persist-failure state where the dispatch
+        // path inserted into the in-memory store and flagged
+        // `local_only_fallback`, but no PG row exists.
+        let user_msg_id = MessageId::new(7_950_001);
+        let store = crate::voice::announce_meta::global_store();
+        store.insert_handoff(
+            user_msg_id,
+            crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: 341,
+                background_channel_id: 241,
+                agent_id: Some("project-agentdesk".to_string()),
+                local_only_fallback: false,
+            },
+        );
+        assert!(
+            store.mark_handoff_local_only_fallback(user_msg_id),
+            "mark_handoff_local_only_fallback must update the freshly-inserted marker"
+        );
+
+        let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturingWriter {
+            buffer: buffer.clone(),
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(writer)
+            .finish();
+
+        // `set_default` returns a thread-local guard. With
+        // `flavor = "current_thread"` the tokio runtime keeps every
+        // await on this same thread, so warns emitted inside the async
+        // call are routed to our capturing subscriber.
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let resolved = voice_background_completion_target(
+            None,
+            user_msg_id,
+            "irrelevant body",
+            ChannelId::new(241),
+            Some(&pool),
+        )
+        .await;
+        assert_eq!(
+            resolved,
+            Some(ChannelId::new(341)),
+            "local-only fallback marker must resolve the marker's voice channel"
+        );
+
+        // Marker is one-shot — second call returns None (the in-memory
+        // store took it, and PG never had a row).
+        let again = voice_background_completion_target(
+            None,
+            user_msg_id,
+            "irrelevant body",
+            ChannelId::new(241),
+            Some(&pool),
+        )
+        .await;
+        assert_eq!(
+            again, None,
+            "local-only fallback must consume the marker exactly once"
+        );
+
+        // Drop guard to flush the subscriber before reading the buffer.
+        drop(_guard);
+
+        // Verify the operator-visible warn fired with the expected event
+        // name. The captured bytes contain the formatted tracing event
+        // including `event = "voice_background_handoff_local_only_fallback"`.
+        let captured = String::from_utf8_lossy(&buffer.lock().unwrap().clone()).into_owned();
+        assert!(
+            captured.contains("voice_background_handoff_local_only_fallback"),
+            "expected local-only fallback warn in captured logs, got: {captured}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
 
@@ -4599,9 +4993,29 @@ pub(super) fn spawn_turn_bridge(
                 // marker is consumed inside voice_background_completion_target
                 // below; passing the stored agent_id (cloned, not taken) here
                 // keeps both lookups consistent for this single dispatch.
-                let stored_handoff_agent_id = crate::voice::announce_meta::global_store()
-                    .get_handoff(user_msg_id)
-                    .and_then(|meta| meta.agent_id);
+                //
+                // #2274: if the in-memory marker is absent (dcserver
+                // restarted mid-turn, or rehydration has not yet completed)
+                // fall back to the durable PG row for the agent_id lookup.
+                let pg_pool_for_handoff = shared_owned.pg_pool.as_ref();
+                let in_memory_handoff_agent_id =
+                    crate::voice::announce_meta::global_store()
+                        .get_handoff(user_msg_id)
+                        .and_then(|meta| meta.agent_id);
+                let stored_handoff_agent_id = match in_memory_handoff_agent_id {
+                    Some(agent_id) => Some(agent_id),
+                    None => match pg_pool_for_handoff {
+                        Some(pool) => crate::voice::announce_meta::load_handoff_durable(
+                            pool,
+                            user_msg_id,
+                        )
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|meta| meta.agent_id),
+                        None => None,
+                    },
+                };
                 let mapped_voice_channel_id = shared_owned
                     .voice_barge_in
                     .voice_channel_for_background(channel_id, stored_handoff_agent_id.as_deref())
@@ -4611,7 +5025,10 @@ pub(super) fn spawn_turn_bridge(
                     user_msg_id,
                     &user_text_owned,
                     channel_id,
-                ) {
+                    pg_pool_for_handoff,
+                )
+                .await
+                {
                     if !inflight_state.silent_turn {
                         let voice_barge_in = shared_owned.voice_barge_in.clone();
                         let shared_for_voice = shared_owned.clone();

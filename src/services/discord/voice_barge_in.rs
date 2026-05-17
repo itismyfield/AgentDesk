@@ -2155,19 +2155,69 @@ impl VoiceBargeInRuntime {
         // the foreground voice channel WITHOUT inspecting the prompt body.
         // The previous design matched a hardcoded Korean prefix on
         // `user_text`, which any user could type to hijack routing.
+        //
+        // #2274: also write through to the durable PG side store so the
+        // marker survives a dcserver restart while the background turn is
+        // still running. The in-memory store remains the hot read path; PG
+        // is the durable source of truth and is consulted as a fallback by
+        // terminal-delivery callers when the in-memory store misses.
         if let Some(message_id) = outcome.message_id {
             let agent_id = self
                 .active_voice_routes
                 .get(&source_channel_id.get())
                 .map(|entry| entry.agent_id.clone());
-            crate::voice::announce_meta::global_store().insert_handoff(
-                message_id,
-                crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
-                    voice_channel_id: source_channel_id.get(),
-                    background_channel_id: target_channel_id.get(),
-                    agent_id,
-                },
-            );
+            let meta = crate::voice::announce_meta::VoiceBackgroundHandoffMeta {
+                voice_channel_id: source_channel_id.get(),
+                background_channel_id: target_channel_id.get(),
+                agent_id,
+                local_only_fallback: false,
+            };
+            crate::voice::announce_meta::global_store().insert_handoff(message_id, meta.clone());
+            // #2274 Codex round-2 finding: a durable-write failure here used
+            // to leave the local marker as-is, but the terminal-delivery path
+            // (PG-authoritative since the round-1 fix) would then observe
+            // `Ok(None)` from PG and silently refuse to route the spoken
+            // summary. That is a regression vs the pre-#2274 local-only
+            // behaviour. We restore the local-only fallback by flipping the
+            // explicit `local_only_fallback` flag on the in-memory marker
+            // and emitting an operator-visible warn so persistence failures
+            // are not invisible. The flag is scoped to exactly the
+            // persist-failed case: PG-loaded / rehydrated markers always
+            // carry `local_only_fallback = false`, and once the durable
+            // claim succeeds the local copy is `forget_handoff` ed, so the
+            // fallback path cannot double-route.
+            if let Some(pool) = shared.pg_pool.as_ref() {
+                if let Err(error) =
+                    crate::voice::announce_meta::persist_handoff_durable(pool, message_id, &meta)
+                        .await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        message_id = message_id.get(),
+                        source_channel_id = source_channel_id.get(),
+                        target_channel_id = target_channel_id.get(),
+                        utterance_id = %announcement.utterance_id,
+                        "voice background handoff durable persistence failed; falling back to local-only marker so the spoken summary is not dropped"
+                    );
+                    if crate::voice::announce_meta::global_store()
+                        .mark_handoff_local_only_fallback(message_id)
+                    {
+                        tracing::warn!(
+                            event = "voice_background_handoff_local_only_fallback",
+                            message_id = message_id.get(),
+                            source_channel_id = source_channel_id.get(),
+                            target_channel_id = target_channel_id.get(),
+                            utterance_id = %announcement.utterance_id,
+                            "voice background handoff marker flagged local-only fallback; terminal delivery may consume the local marker without a backing PG row"
+                        );
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    message_id = message_id.get(),
+                    "voice background handoff durable persistence skipped — postgres pool unavailable"
+                );
+            }
         } else {
             tracing::warn!(
                 source_channel_id = source_channel_id.get(),

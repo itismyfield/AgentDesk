@@ -13,6 +13,7 @@ export interface PipelineVisualEditorProps {
   agents: Agent[];
   selectedAgentId?: string | null;
   variant?: "advanced" | "fsm";
+  defaultCollapsed?: boolean;
 }
 
 export type EditLevel = "repo" | "agent";

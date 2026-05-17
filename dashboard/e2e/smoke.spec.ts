@@ -1316,6 +1316,53 @@ async function mockSettingsPipelineEditorApis(page: Page) {
   });
 }
 
+async function mockSettingsVoiceConfigApi(page: Page) {
+  await page.route(/\/api\/voice\/config$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: "voice-smoke-v1",
+        source_path: "/internal/not-shown.yaml",
+        global: {
+          lobby_channel_id: "1503294653313712169",
+          active_agent_ttl_seconds: 180,
+          default_sensitivity_mode: "normal",
+        },
+        agents: [
+          {
+            id: "codex",
+            name: "Codex",
+            name_ko: "코덱스",
+            voice_enabled: true,
+            wake_word: "",
+            aliases: ["코덱스야"],
+            sensitivity_mode: "normal",
+          },
+          {
+            id: "claude",
+            name: "Claude",
+            name_ko: "클로드",
+            voice_enabled: false,
+            wake_word: "",
+            aliases: ["클로드야"],
+            sensitivity_mode: "conservative",
+          },
+          {
+            id: "dashboard",
+            name: "Dashboard",
+            name_ko: "대시보드",
+            voice_enabled: true,
+            wake_word: "대시보드",
+            aliases: ["대시보드 에이전트"],
+            sensitivity_mode: "normal",
+          },
+        ],
+      }),
+    });
+  });
+}
+
 async function mockSettingsPipelineEditorApisWithRefreshDelay(page: Page, delayMs = 700) {
   await page.route(/\/api\/github-repos$/, async (route) => {
     await route.fulfill({
@@ -2225,19 +2272,38 @@ test.describe("Dashboard smoke tests", () => {
     expect(after).toBeGreaterThan(0);
   });
 
-  test("settings: mobile FSM editor exposes quick selection controls", async ({ page }, testInfo) => {
+  test("settings: voice agent settings show one selected agent at a time", async ({ page }) => {
+    await mockSettingsVoiceConfigApi(page);
+    await page.goto("/settings?settingsPanel=voice");
+
+    await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(/전체 음성 설정|Global voice settings/)).toBeVisible();
+    await expect(page.getByText(/에이전트별 설정|Per-agent settings/)).toBeVisible();
+    await expect(page.getByTestId("voice-agent-selector")).toBeVisible();
+    await expect(page.getByTestId("voice-agent-card")).toHaveCount(1);
+    await expect(page.getByTestId("voice-agent-card")).toContainText(/코덱스|Codex/);
+
+    await page.getByTestId("voice-agent-selector").selectOption("claude");
+    await expect(page.getByTestId("voice-agent-card")).toHaveCount(1);
+    await expect(page.getByTestId("voice-agent-card")).toContainText(/클로드|Claude/);
+    await expect(page.getByTestId("voice-agent-card")).not.toContainText(/코덱스/);
+
+    await expect(page.getByText(/설정 버전|Config version|voice-lobby|Active agent TTL|agentdesk.yaml/)).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("settings: mobile pipeline editor uses the detailed editor only", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await mockSettingsPipelineEditorApis(page);
     await page.goto("/settings?settingsPanel=pipeline");
 
     await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
-    await expect(page.getByTestId("fsm-mobile-selector")).toBeVisible();
-
-    await page.getByTestId("fsm-mobile-transition-button-3").click();
-    await expect(page.getByTestId("pipeline-selection-title")).toContainText("review → done");
-
-    await page.getByTestId("fsm-mobile-state-button-review").click();
-    await expect(page.getByTestId("pipeline-selection-title")).toContainText(/상태 · review|State · review/);
+    await expect(page.getByText(/세부 흐름 편집기|Detailed workflow editor/).first()).toBeVisible();
+    await expect(page.getByText(/FSM 비주얼 에디터|FSM visual editor/)).toHaveCount(0);
+    await expect(page.getByTestId("fsm-mobile-selector")).toHaveCount(0);
+    await expect(page.getByTestId("pipeline-flow-canvas")).toBeVisible();
+    await expect(page.getByTestId("pipeline-selection-title")).toContainText(/상태 · backlog|State · backlog/);
+    await expect(page.locator(".react-flow__controls")).toHaveCount(0);
   });
 
   test("settings: pipeline editor keeps cached content visible while refreshing", async ({ page }) => {
@@ -2278,7 +2344,24 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
     await expect(page.getByTestId("pipeline-selection-title")).toBeVisible({ timeout: 1500 });
     await expect(page.getByTestId("pipeline-refresh-indicator")).toBeVisible();
-    await expect(page.getByTestId("pipeline-selection-title")).toContainText("backlog → ready");
+    await expect(page.getByTestId("pipeline-selection-title")).toContainText(/상태 · backlog|State · backlog/);
+    await expect(page.locator(".react-flow__controls")).toHaveCount(0);
+
+    const canvas = page.getByTestId("pipeline-flow-canvas");
+    const viewport = page.locator(".react-flow__viewport").first();
+    const beforeWheelTransform = await viewport.evaluate((node) =>
+      node.getAttribute("transform") ?? window.getComputedStyle(node).transform,
+    );
+    const canvasBox = await canvas.boundingBox();
+    expect(canvasBox).not.toBeNull();
+    await page.mouse.move(canvasBox!.x + canvasBox!.width / 2, canvasBox!.y + canvasBox!.height / 2);
+    await page.mouse.wheel(0, 500);
+    await page.waitForTimeout(120);
+    const afterWheelTransform = await viewport.evaluate((node) =>
+      node.getAttribute("transform") ?? window.getComputedStyle(node).transform,
+    );
+    expect(afterWheelTransform).toBe(beforeWheelTransform);
+
     await expect(page.getByTestId("settings-audit-notes")).toHaveCount(0);
     await expect(page.getByText(/audit 노트|Audit notes/)).toHaveCount(0);
     await expect(page.getByText("kv_meta")).toHaveCount(0);

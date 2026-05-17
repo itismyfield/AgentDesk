@@ -5,15 +5,31 @@ use std::{
 };
 
 use poise::serenity_prelude::MessageId;
+use sqlx::PgPool;
 
 use super::prompt::VoiceTranscriptAnnouncement;
 
 const ANNOUNCEMENT_META_TTL: Duration = Duration::from_secs(30);
 /// Voice-background handoff markers can outlive the short announce TTL because
-/// the background turn they trigger may run for minutes before the terminal
-/// delivery callback consults the marker. Keep generously long so legitimate
-/// long-running background turns still find the marker.
-const HANDOFF_META_TTL: Duration = Duration::from_secs(60 * 60);
+/// the background turn they trigger may run for minutes — or, with watchdog
+/// extensions, hours — before the terminal-delivery callback consults the
+/// marker.
+///
+/// 24h is generous: `turn_orchestrator::extend_active_watchdog_deadline` does
+/// not impose a practical cap on the number of extensions
+/// (`count_limit = u32::MAX`, `total_secs_limit = u64::MAX`), so a productive
+/// long turn can legitimately exceed the 1-hour default watchdog. Keeping
+/// markers alive for a full day prevents the spoken-summary path from
+/// silently dropping completions on extended turns (Codex #2274 review
+/// finding #2). Anything older than 24h almost certainly represents a
+/// turn that crashed or never reached terminal delivery.
+const HANDOFF_META_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Durable handoff rows older than this are treated as expired and ignored
+/// by the durable load/take helpers. The leader-only GC sweep
+/// (`gc_expired_voice_background_handoff_meta_pg`) deletes them. Mirrors
+/// the in-memory `HANDOFF_META_TTL` — see that constant for the rationale.
+pub(crate) const DURABLE_HANDOFF_META_TTL_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone)]
 struct StoredVoiceTranscriptAnnouncement {
@@ -39,6 +55,21 @@ pub(crate) struct VoiceBackgroundHandoffMeta {
     /// `voice_channel_for_background` to disambiguate when multiple agents
     /// map onto the same background channel.
     pub agent_id: Option<String>,
+    /// Set at dispatch time when the durable PG write failed (or no pool
+    /// was available). When `true`, terminal delivery on this node may
+    /// fall back to consuming the in-memory marker even though no PG row
+    /// exists — restoring the pre-#2274 local-only behaviour under DB
+    /// unavailability. Always `false` for markers loaded from PG, since
+    /// those rows are themselves the durable source of truth.
+    ///
+    /// Codex #2274 round-2 finding: without this flag, a transient PG
+    /// outage at dispatch would silently drop the spoken summary because
+    /// the PG-authoritative claim path would return `Ok(None)` and refuse
+    /// to route. The flag scopes the fallback to exactly the case it is
+    /// meant to handle (persist failed AT DISPATCH) and never to the case
+    /// PG actually consumed a real row (since `forget_handoff` clears the
+    /// local copy in that branch).
+    pub local_only_fallback: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +119,22 @@ impl VoiceAnnouncementMetaStore {
     }
 
     pub(crate) fn insert_handoff(&self, message_id: MessageId, meta: VoiceBackgroundHandoffMeta) {
+        self.insert_handoff_with_remaining_ttl(message_id, meta, HANDOFF_META_TTL);
+    }
+
+    /// Insert with an explicit remaining-lifetime override. Used by
+    /// `rehydrate_handoffs_from_pg` (#2274 Codex review finding #3) so a
+    /// row that already survived 59 minutes in PG only gets the matching
+    /// remaining-TTL in memory — not a fresh 24-hour lease. Without this,
+    /// a stale local marker could outlive its durable row and route a
+    /// completion summary after PG GC has already deleted the source of
+    /// truth.
+    pub(crate) fn insert_handoff_with_remaining_ttl(
+        &self,
+        message_id: MessageId,
+        meta: VoiceBackgroundHandoffMeta,
+        remaining: Duration,
+    ) {
         if let Ok(mut entries) = self.handoff_entries.write() {
             let now = Instant::now();
             prune_handoff_expired_locked(&mut entries, now);
@@ -95,9 +142,41 @@ impl VoiceAnnouncementMetaStore {
                 message_id.get(),
                 StoredVoiceBackgroundHandoffMeta {
                     meta,
-                    expires_at: now + HANDOFF_META_TTL,
+                    expires_at: now + remaining,
                 },
             );
+        }
+    }
+
+    /// Drop a specific marker from the in-memory store without consuming
+    /// it. Used to clear stale local state when the durable PG claim is
+    /// the authoritative source and reports the row is gone (#2274 Codex
+    /// review finding #1).
+    pub(crate) fn forget_handoff(&self, message_id: MessageId) {
+        if let Ok(mut entries) = self.handoff_entries.write() {
+            entries.remove(&message_id.get());
+        }
+    }
+
+    /// Flip the `local_only_fallback` flag on an in-memory marker. Called
+    /// at dispatch time when the durable PG write failed (or no pool was
+    /// available), so the terminal-delivery path knows it is safe to fall
+    /// back to consuming the local marker without a backing PG row.
+    /// Returns true iff a marker existed and was updated.
+    ///
+    /// Codex #2274 round-2 finding: see the `local_only_fallback` doc
+    /// comment on `VoiceBackgroundHandoffMeta`.
+    pub(crate) fn mark_handoff_local_only_fallback(&self, message_id: MessageId) -> bool {
+        let Ok(mut entries) = self.handoff_entries.write() else {
+            return false;
+        };
+        let now = Instant::now();
+        prune_handoff_expired_locked(&mut entries, now);
+        if let Some(stored) = entries.get_mut(&message_id.get()) {
+            stored.meta.local_only_fallback = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -153,6 +232,225 @@ pub(crate) fn global_store() -> &'static VoiceAnnouncementMetaStore {
     STORE.get_or_init(VoiceAnnouncementMetaStore::default)
 }
 
+/// Persist a voice-background handoff marker to the durable side store
+/// (#2274). The process-local in-memory store remains the hot read path;
+/// this PG row is the durable source of truth that survives a dcserver
+/// restart partway through a long background turn.
+///
+/// `ON CONFLICT … DO UPDATE` resets `consumed_at` to NULL so retries from
+/// a re-dispatched handoff path can reuse the same `message_id`.
+pub(crate) async fn persist_handoff_durable(
+    pool: &PgPool,
+    message_id: MessageId,
+    meta: &VoiceBackgroundHandoffMeta,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO voice_background_handoff_meta (
+             message_id, voice_channel_id, background_channel_id, agent_id
+         ) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (message_id) DO UPDATE
+         SET voice_channel_id = EXCLUDED.voice_channel_id,
+             background_channel_id = EXCLUDED.background_channel_id,
+             agent_id = EXCLUDED.agent_id,
+             consumed_at = NULL",
+    )
+    .bind(message_id.get().to_string())
+    .bind(meta.voice_channel_id.to_string())
+    .bind(meta.background_channel_id.to_string())
+    .bind(meta.agent_id.as_ref())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Non-destructive read used to check whether a marker exists for a given
+/// `message_id`. Mirrors `peek_durable` in the announce path.
+pub(crate) async fn load_handoff_durable(
+    pool: &PgPool,
+    message_id: MessageId,
+) -> Result<Option<VoiceBackgroundHandoffMeta>, sqlx::Error> {
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT voice_channel_id, background_channel_id, agent_id
+         FROM voice_background_handoff_meta
+         WHERE message_id = $1
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $2)",
+    )
+    .bind(message_id.get().to_string())
+    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|(voice_channel_id, background_channel_id, agent_id)| {
+        Ok::<_, sqlx::Error>(VoiceBackgroundHandoffMeta {
+            voice_channel_id: voice_channel_id.parse().map_err(|error| {
+                sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("voice_channel_id not u64: {error}"),
+                )))
+            })?,
+            background_channel_id: background_channel_id.parse().map_err(|error| {
+                sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("background_channel_id not u64: {error}"),
+                )))
+            })?,
+            agent_id,
+            // A row that came from PG is durable by definition.
+            local_only_fallback: false,
+        })
+    })
+    .transpose()
+}
+
+/// Atomic claim — `UPDATE … SET consumed_at = NOW() RETURNING …` so that
+/// two callers racing on the same row cannot both succeed. Concurrent
+/// callers (e.g. two terminal-delivery hooks in a clustered deployment)
+/// receive `Ok(None)` and MUST abort routing.
+///
+/// Crash semantics mirror the announce path: the row is marked consumed,
+/// not deleted; the GC sweep removes the row after TTL. If a worker
+/// crashes after `take_handoff_durable` but before routing, the spoken
+/// summary is dropped — that is the conservative choice, matching the
+/// fail-safe-drop posture #2236 established.
+pub(crate) async fn take_handoff_durable(
+    pool: &PgPool,
+    message_id: MessageId,
+) -> Result<Option<VoiceBackgroundHandoffMeta>, sqlx::Error> {
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "UPDATE voice_background_handoff_meta
+         SET consumed_at = NOW()
+         WHERE message_id = $1
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $2)
+         RETURNING voice_channel_id, background_channel_id, agent_id",
+    )
+    .bind(message_id.get().to_string())
+    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|(voice_channel_id, background_channel_id, agent_id)| {
+        Ok::<_, sqlx::Error>(VoiceBackgroundHandoffMeta {
+            voice_channel_id: voice_channel_id.parse().map_err(|error| {
+                sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("voice_channel_id not u64: {error}"),
+                )))
+            })?,
+            background_channel_id: background_channel_id.parse().map_err(|error| {
+                sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("background_channel_id not u64: {error}"),
+                )))
+            })?,
+            agent_id,
+            // A row that came from PG is durable by definition.
+            local_only_fallback: false,
+        })
+    })
+    .transpose()
+}
+
+/// Boot-time rehydration — copy every live, unconsumed, within-TTL row
+/// from the PG side store into the in-memory store so callers on the hot
+/// path (synchronous `get_handoff` / `take_handoff`) keep working after a
+/// dcserver restart without an async fallback ripple.
+///
+/// #2274 Codex review finding #3: each rehydrated row carries its
+/// PG-recorded age, and the in-memory expiry is set to the REMAINING
+/// portion of the durable TTL — never a fresh 24-hour lease. Without
+/// this, a row that already lived 23 hours in PG could survive another
+/// 24 hours in memory while PG GC deletes the durable source of truth.
+///
+/// Best-effort: a PG error here is logged and ignored. Subsequent
+/// dispatches will still write through and terminal-delivery callers fall
+/// back to `take_handoff_durable` directly when the in-memory store
+/// misses (see `voice_background_completion_target`).
+///
+/// Returns the count of rows rehydrated for observability.
+pub(crate) async fn rehydrate_handoffs_from_pg(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    // `age_secs` is computed in SQL so the truth horizon is PG's clock,
+    // not the local process clock — same source of truth used by the
+    // load/take/GC paths.
+    let rows: Vec<(String, String, String, Option<String>, f64)> = sqlx::query_as(
+        "SELECT message_id,
+                voice_channel_id,
+                background_channel_id,
+                agent_id,
+                EXTRACT(EPOCH FROM (NOW() - created_at))::float8 AS age_secs
+         FROM voice_background_handoff_meta
+         WHERE consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $1)",
+    )
+    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
+    .fetch_all(pool)
+    .await?;
+    let store = global_store();
+    let mut count: u64 = 0;
+    for (message_id, voice_channel_id, background_channel_id, agent_id, age_secs) in rows {
+        let Ok(message_id_u64) = message_id.parse::<u64>() else {
+            tracing::warn!(
+                message_id,
+                "voice_background_handoff_meta rehydrate skipped row with non-u64 message_id"
+            );
+            continue;
+        };
+        let Ok(voice_channel_id_u64) = voice_channel_id.parse::<u64>() else {
+            tracing::warn!(
+                message_id_u64,
+                voice_channel_id,
+                "voice_background_handoff_meta rehydrate skipped row with non-u64 voice_channel_id"
+            );
+            continue;
+        };
+        let Ok(background_channel_id_u64) = background_channel_id.parse::<u64>() else {
+            tracing::warn!(
+                message_id_u64,
+                background_channel_id,
+                "voice_background_handoff_meta rehydrate skipped row with non-u64 background_channel_id"
+            );
+            continue;
+        };
+        // Compute remaining TTL from PG-reported age. Clamp the lower
+        // bound to a single second so the entry exists at all — the
+        // durable claim path remains the source of truth and will
+        // refuse stale rows even if a barely-alive local entry briefly
+        // survives.
+        let total_ttl_secs = DURABLE_HANDOFF_META_TTL_SECS as f64;
+        let remaining_secs = (total_ttl_secs - age_secs.max(0.0)).max(1.0);
+        let remaining = Duration::from_secs_f64(remaining_secs);
+        store.insert_handoff_with_remaining_ttl(
+            MessageId::new(message_id_u64),
+            VoiceBackgroundHandoffMeta {
+                voice_channel_id: voice_channel_id_u64,
+                background_channel_id: background_channel_id_u64,
+                agent_id,
+                // Rehydrated entries are backed by a durable PG row.
+                local_only_fallback: false,
+            },
+            remaining,
+        );
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Delete durable rows older than `ttl`. Wired into the leader-only
+/// maintenance scheduler so cleanup runs without a new background worker.
+pub(crate) async fn gc_expired_voice_background_handoff_meta_pg(
+    pool: &PgPool,
+    ttl: Duration,
+) -> Result<u64, sqlx::Error> {
+    let ttl_secs = ttl.as_secs_f64();
+    let result = sqlx::query(
+        "DELETE FROM voice_background_handoff_meta
+         WHERE created_at < NOW() - make_interval(secs => $1)",
+    )
+    .bind(ttl_secs)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +496,7 @@ mod tests {
             voice_channel_id: 300,
             background_channel_id: 200,
             agent_id: Some("project-agentdesk".to_string()),
+            local_only_fallback: false,
         };
 
         store.insert_handoff(message_id, meta.clone());
@@ -213,5 +512,164 @@ mod tests {
         let store = VoiceAnnouncementMetaStore::default();
         assert!(store.get_handoff(MessageId::new(999)).is_none());
         assert!(store.take_handoff(MessageId::new(999)).is_none());
+    }
+
+    fn handoff_meta(
+        voice: u64,
+        background: u64,
+        agent: Option<&str>,
+    ) -> VoiceBackgroundHandoffMeta {
+        VoiceBackgroundHandoffMeta {
+            voice_channel_id: voice,
+            background_channel_id: background,
+            agent_id: agent.map(str::to_string),
+            local_only_fallback: false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_handoff_round_trips_and_consumes_exactly_once() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(81_001);
+        let expected = handoff_meta(700, 600, Some("project-agentdesk"));
+
+        persist_handoff_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable handoff");
+
+        let loaded = load_handoff_durable(&pool, message_id)
+            .await
+            .expect("load durable handoff")
+            .expect("row visible before consumption");
+        assert_eq!(loaded, expected);
+
+        let taken = take_handoff_durable(&pool, message_id)
+            .await
+            .expect("take durable handoff")
+            .expect("first take consumes the row");
+        assert_eq!(taken, expected);
+
+        assert!(
+            load_handoff_durable(&pool, message_id)
+                .await
+                .expect("load after consume")
+                .is_none(),
+            "consumed row must not be visible to load"
+        );
+        assert!(
+            take_handoff_durable(&pool, message_id)
+                .await
+                .expect("second take")
+                .is_none(),
+            "second take must report None — claim is one-shot"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Two concurrent terminal-delivery callers race to consume the same
+    /// durable handoff. Exactly one must win.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn durable_handoff_concurrent_consumers_yield_exactly_one_claim() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(81_101);
+        let expected = handoff_meta(701, 601, Some("project-agentdesk"));
+
+        persist_handoff_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable handoff");
+
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let task_a =
+            tokio::spawn(async move { take_handoff_durable(&pool_a, message_id).await.unwrap() });
+        let task_b =
+            tokio::spawn(async move { take_handoff_durable(&pool_b, message_id).await.unwrap() });
+        let (result_a, result_b) =
+            tokio::try_join!(task_a, task_b).expect("join concurrent consumers");
+        let winners = [&result_a, &result_b]
+            .iter()
+            .filter(|r| r.is_some())
+            .count();
+        assert_eq!(winners, 1, "exactly one consumer must win the atomic claim");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rehydrate_copies_live_rows_into_in_memory_store() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(81_201);
+        let expected = handoff_meta(702, 602, Some("project-agentdesk"));
+
+        persist_handoff_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable handoff");
+
+        let count = rehydrate_handoffs_from_pg(&pool)
+            .await
+            .expect("rehydrate succeeds");
+        assert!(
+            count >= 1,
+            "rehydrate must include the persisted row (got {count})"
+        );
+        assert_eq!(global_store().get_handoff(message_id), Some(expected));
+
+        // Drain the in-memory store entry to keep test isolation tight.
+        let _ = global_store().take_handoff(message_id);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gc_removes_rows_older_than_ttl() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(81_301);
+        let expected = handoff_meta(703, 603, None);
+
+        persist_handoff_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable handoff");
+
+        // Backdate created_at past the GC TTL so the GC sweep deletes it.
+        sqlx::query(
+            "UPDATE voice_background_handoff_meta
+             SET created_at = NOW() - make_interval(secs => $1)
+             WHERE message_id = $2",
+        )
+        .bind((DURABLE_HANDOFF_META_TTL_SECS + 60) as f64)
+        .bind(message_id.get().to_string())
+        .execute(&pool)
+        .await
+        .expect("backdate row for gc test");
+
+        let deleted = gc_expired_voice_background_handoff_meta_pg(
+            &pool,
+            Duration::from_secs(DURABLE_HANDOFF_META_TTL_SECS as u64),
+        )
+        .await
+        .expect("gc sweep");
+        assert!(
+            deleted >= 1,
+            "gc must delete the backdated row (got {deleted})"
+        );
+
+        assert!(
+            load_handoff_durable(&pool, message_id)
+                .await
+                .expect("load after gc")
+                .is_none(),
+            "post-gc load must observe no row"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
