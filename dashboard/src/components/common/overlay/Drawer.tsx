@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import type { ReactNode } from "react";
+import { getOverlayAccessibleTitle } from "./accessibility";
 import { BottomSheet } from "./BottomSheet";
 import { useIsMobile } from "./useBreakpoint";
 import { useReturnFocus } from "./useReturnFocus";
@@ -8,7 +9,11 @@ import { useReturnFocus } from "./useReturnFocus";
 export interface DrawerProps {
   open: boolean;
   onClose: () => void;
-  title?: string;
+  /**
+   * Visible heading. Prefer plain text; pass ariaLabel for complex titles
+   * that cannot be reduced to readable text.
+   */
+  title?: ReactNode;
   children: ReactNode;
   side?: "right" | "left";
   width?: string;
@@ -29,7 +34,7 @@ export function Drawer({
   ariaLabel,
 }: DrawerProps) {
   const isMobile = useIsMobile();
-  const accessibleTitle = title ?? ariaLabel ?? "Drawer";
+  const accessibleTitle = getOverlayAccessibleTitle(title, ariaLabel, "Drawer");
   const returnFocus = useReturnFocus(open);
 
   if (isMobile) {
@@ -58,8 +63,7 @@ export function Drawer({
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-[70] bg-black/45 backdrop-blur-sm" />
         <Dialog.Content
-          aria-label={ariaLabel}
-          aria-describedby={undefined}
+          aria-label={accessibleTitle}
           onEscapeKeyDown={(event) => {
             if (!closeOnEsc) event.preventDefault();
           }}
@@ -95,6 +99,9 @@ export function Drawer({
           ) : (
             <Dialog.Title className="sr-only">{accessibleTitle}</Dialog.Title>
           )}
+          <Dialog.Description className="sr-only">
+            Drawer content
+          </Dialog.Description>
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
         </Dialog.Content>
       </Dialog.Portal>

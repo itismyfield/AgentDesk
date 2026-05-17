@@ -100,6 +100,8 @@ vi.mock("vaul", async () => {
       },
       Title: (props: CapturedProps & { children?: ReactNode }) =>
         renderElement("h2", props),
+      Description: (props: CapturedProps & { children?: ReactNode }) =>
+        renderElement("p", props),
       Close: ({ children }: { children: ReactNode }) =>
         React.createElement(React.Fragment, null, children),
       Handle: (props: CapturedProps & { children?: ReactNode }) =>
@@ -141,7 +143,7 @@ describe("overlay primitives", () => {
     vi.restoreAllMocks();
   });
 
-  it("associates modal descriptions with the dialog content", async () => {
+  it("lets Radix own modal description wiring", async () => {
     await render(
       <Modal
         open
@@ -156,8 +158,9 @@ describe("overlay primitives", () => {
     const dialog = document.querySelector("[role='dialog']");
     const description = document.querySelector("p");
 
-    expect(dialog?.getAttribute("aria-describedby")).toBeTruthy();
-    expect(dialog?.getAttribute("aria-describedby")).toBe(description?.id);
+    expect(description?.textContent).toBe("Longer context");
+    expect(dialog?.getAttribute("aria-describedby")).toBeNull();
+    expect(captured.dialogContentProps[0]["aria-describedby"]).toBeUndefined();
   });
 
   it("keeps modal escape and backdrop guards wired", async () => {
@@ -235,5 +238,49 @@ describe("overlay primitives", () => {
     expect(captured.vaulRootProps[0].dismissible).toBe(true);
     expect(escapeEvent.preventDefault).toHaveBeenCalledTimes(1);
     expect(outsideEvent.preventDefault).toHaveBeenCalledTimes(1);
+  });
+
+  it("derives drawer aria labels from complex visible titles", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+
+    await render(
+      <Drawer
+        open
+        onClose={() => {}}
+        title={
+          <>
+            <span aria-hidden="true">#</span>
+            <span>Agent details</span>
+          </>
+        }
+      >
+        Body
+      </Drawer>,
+    );
+
+    expect(captured.dialogContentProps[0]["aria-label"]).toBe("Agent details");
+  });
+
+  it("derives bottom sheet aria labels from complex visible titles", async () => {
+    await render(
+      <BottomSheet
+        open
+        onClose={() => {}}
+        title={
+          <>
+            <span aria-hidden="true">#</span>
+            <span>Agent details</span>
+          </>
+        }
+      >
+        Body
+      </BottomSheet>,
+    );
+
+    expect(captured.vaulContentProps[0]["aria-label"]).toBe("Agent details");
   });
 });

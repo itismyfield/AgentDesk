@@ -1,12 +1,17 @@
 import { Drawer as VaulDrawer } from "vaul";
 import { X } from "lucide-react";
 import type { ReactNode } from "react";
+import { getOverlayAccessibleTitle } from "./accessibility";
 import { useReturnFocus } from "./useReturnFocus";
 
 export interface BottomSheetProps {
   open: boolean;
   onClose: () => void;
-  title?: string;
+  /**
+   * Visible heading. Prefer plain text; pass ariaLabel for complex titles
+   * that cannot be reduced to readable text.
+   */
+  title?: ReactNode;
   children: ReactNode;
   closeOnBackdrop?: boolean;
   closeOnEsc?: boolean;
@@ -22,7 +27,11 @@ export function BottomSheet({
   closeOnEsc = true,
   ariaLabel,
 }: BottomSheetProps) {
-  const accessibleTitle = title ?? ariaLabel ?? "Bottom sheet";
+  const accessibleTitle = getOverlayAccessibleTitle(
+    title,
+    ariaLabel,
+    "Bottom sheet",
+  );
   const returnFocus = useReturnFocus(open);
 
   return (
@@ -45,8 +54,7 @@ export function BottomSheet({
       <VaulDrawer.Portal>
         <VaulDrawer.Overlay className="fixed inset-0 z-[70] bg-black/45 backdrop-blur-sm" />
         <VaulDrawer.Content
-          aria-label={ariaLabel}
-          aria-describedby={undefined}
+          aria-label={accessibleTitle}
           onEscapeKeyDown={(event) => {
             if (!closeOnEsc) event.preventDefault();
           }}
@@ -90,6 +98,9 @@ export function BottomSheet({
               {accessibleTitle}
             </VaulDrawer.Title>
           )}
+          <VaulDrawer.Description className="sr-only">
+            Bottom sheet content
+          </VaulDrawer.Description>
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
         </VaulDrawer.Content>
       </VaulDrawer.Portal>
