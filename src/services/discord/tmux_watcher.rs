@@ -1,5 +1,77 @@
 use super::*;
 
+/// #2427 D/A wires — emit an explicit-signal inflight cleanup attempt.
+///
+/// Used by the TurnCompleted broadcast and the dead-pane post-mortem
+/// path. The on-disk inflight is guarded so that:
+///   * stale signals arriving after a new turn has written its own
+///     inflight do not delete the new turn's file (Pitfall #1);
+///   * planned-restart markers (`restart_mode = Some(_)`) survive across
+///     the dcserver restart they were saved for;
+///   * `rebind_origin` rows owned by the rebind API are not touched
+///     (Pitfall #5).
+///
+/// All outcomes are logged at trace/info level so the sweeper safety-net
+/// strikes are easy to spot when this hook misses.
+pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_msg_id: u64,
+    reason: &'static str,
+) {
+    let outcome = crate::services::discord::inflight::clear_inflight_state_if_matches(
+        provider,
+        channel_id.get(),
+        expected_user_msg_id,
+    );
+    match outcome {
+        crate::services::discord::inflight::GuardedClearOutcome::Cleared => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                user_msg_id = expected_user_msg_id,
+                reason = reason,
+                "[{ts}] 🧹 inflight cleared via explicit completion signal (#2427)"
+            );
+        }
+        crate::services::discord::inflight::GuardedClearOutcome::Missing => {
+            tracing::trace!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                reason = reason,
+                "inflight already absent — explicit signal redundant (#2427)"
+            );
+        }
+        crate::services::discord::inflight::GuardedClearOutcome::UserMsgMismatch => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                expected_user_msg_id = expected_user_msg_id,
+                reason = reason,
+                "[{ts}] ⚠ inflight user_msg_id mismatch — stale explicit signal ignored (#2427 Pitfall #1)"
+            );
+        }
+        crate::services::discord::inflight::GuardedClearOutcome::PlannedRestartSkipped => {
+            tracing::debug!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                reason = reason,
+                "skipping explicit inflight cleanup — planned-restart marker present (#2427)"
+            );
+        }
+        crate::services::discord::inflight::GuardedClearOutcome::RebindOriginSkipped => {
+            tracing::debug!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                reason = reason,
+                "skipping explicit inflight cleanup — rebind_origin row (#2427 Pitfall #5)"
+            );
+        }
+    }
+}
+
 async fn persist_watcher_provider_session_id(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -52,16 +124,43 @@ async fn complete_watcher_status_panel_v2(
     started_at_unix: i64,
     last_status_panel_text: &mut String,
     background: bool,
+    expected_user_msg_id: u64,
 ) {
     if !shared.status_panel_v2_enabled {
+        // Even when the panel is disabled we still want the explicit
+        // completion-signal safety net to fire (#2427 D wire).
+        emit_explicit_inflight_cleanup_signal(
+            provider,
+            channel_id,
+            expected_user_msg_id,
+            "turn_completed_watcher_no_panel",
+        );
         return;
     }
     let Some(status_msg_id) = status_panel_msg_id else {
+        emit_explicit_inflight_cleanup_signal(
+            provider,
+            channel_id,
+            expected_user_msg_id,
+            "turn_completed_watcher_no_status_msg",
+        );
         return;
     };
     shared
         .placeholder_live_events
         .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
+    // #2427 D wire: TurnCompleted is the explicit signal that the turn
+    // finished. The committed-output path at L~2868 already calls the
+    // unconditional `clear_inflight_state`, so this is a safety net for
+    // any early-return path that emitted TurnCompleted without clearing.
+    // The user_msg_id guard prevents Pitfall #1 (stale TurnCompleted
+    // arriving after the next turn has already written its inflight).
+    emit_explicit_inflight_cleanup_signal(
+        provider,
+        channel_id,
+        expected_user_msg_id,
+        "turn_completed_watcher",
+    );
     let panel_text =
         shared
             .placeholder_live_events
@@ -2564,6 +2663,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
 
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
+            // #2427 D wire: capture user_msg_id at completion time so the
+            // explicit-signal cleanup downstream of `push_status_event` can
+            // guard against Pitfall #1 (stale TurnCompleted vs next turn).
+            let completion_user_msg_id = crate::services::discord::inflight::load_inflight_state(
+                &watcher_provider,
+                channel_id.get(),
+            )
+            .map(|state| state.user_msg_id)
+            .unwrap_or(0);
             complete_watcher_status_panel_v2(
                 &http,
                 &shared,
@@ -2576,6 +2684,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     task_notification_kind,
                     Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
                 ),
+                completion_user_msg_id,
             )
             .await;
         }
