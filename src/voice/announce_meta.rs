@@ -47,10 +47,37 @@ struct StoredVoiceBackgroundHandoffMeta {
     expires_at: Instant,
 }
 
+/// Pre-publish reservation entry keyed by `correlation_id`.
+///
+/// #2392: `dispatch_voice_background_handoff` used to call `driver.start()`
+/// (which posts the announce-bot message to Discord) BEFORE inserting the
+/// in-memory handoff marker keyed by the returned `message_id`. A fast
+/// downstream turn that completed in the pre-persist window could reach
+/// `voice_background_completion_target` with the marker store still empty,
+/// silently dropping the spoken-summary routing.
+///
+/// The fix splits dispatch into three phases:
+///
+/// 1. `reserve_handoff(correlation_id, meta)` — synchronously stamp the
+///    typed metadata under a deterministic pre-publish correlation token.
+/// 2. `driver.start()` — publish the announce-bot message and learn the
+///    actual `message_id`.
+/// 3. `bind_handoff_message_id(correlation_id, message_id)` — atomically
+///    promote the pending reservation to a `message_id`-keyed marker.
+///
+/// Failure paths call `cancel_handoff_reservation(correlation_id)` to keep
+/// the pending map from leaking entries when publish fails.
+#[derive(Debug, Clone)]
+struct PendingVoiceBackgroundHandoffMeta {
+    meta: VoiceBackgroundHandoffMeta,
+    expires_at: Instant,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct VoiceAnnouncementMetaStore {
     entries: RwLock<HashMap<u64, StoredVoiceTranscriptAnnouncement>>,
     handoff_entries: RwLock<HashMap<u64, StoredVoiceBackgroundHandoffMeta>>,
+    pending_handoff_entries: RwLock<HashMap<String, PendingVoiceBackgroundHandoffMeta>>,
 }
 
 impl VoiceAnnouncementMetaStore {
@@ -117,6 +144,96 @@ impl VoiceAnnouncementMetaStore {
         entries.remove(&message_id.get()).map(|stored| stored.meta)
     }
 
+    /// #2392 phase 1: stamp the typed handoff metadata under a deterministic
+    /// pre-publish `correlation_id`. Must be called BEFORE the announce-bot
+    /// message is published so the lookup-side never sees the published
+    /// `message_id` without a backing marker.
+    ///
+    /// Returns `true` when the reservation was recorded; `false` only when
+    /// the internal lock was poisoned (lookup-side calls degrade gracefully
+    /// without a reservation so callers can still proceed).
+    pub(crate) fn reserve_handoff(
+        &self,
+        correlation_id: &str,
+        meta: VoiceBackgroundHandoffMeta,
+    ) -> bool {
+        let Ok(mut pending) = self.pending_handoff_entries.write() else {
+            return false;
+        };
+        let now = Instant::now();
+        prune_pending_handoff_expired_locked(&mut pending, now);
+        pending.insert(
+            correlation_id.to_string(),
+            PendingVoiceBackgroundHandoffMeta {
+                meta,
+                expires_at: now + HANDOFF_META_TTL,
+            },
+        );
+        true
+    }
+
+    /// #2392 phase 3: promote a pending reservation to a `message_id`-keyed
+    /// committed marker. Called AFTER `driver.start()` returns the actual
+    /// `message_id` from Discord.
+    ///
+    /// Atomic with respect to lookup: the `message_id`-keyed entry is
+    /// inserted under the same `handoff_entries` write lock that
+    /// `get_handoff` / `take_handoff` consult. Returns `true` when a
+    /// pending entry was found and promoted, `false` otherwise (e.g.
+    /// reservation expired or was cancelled).
+    pub(crate) fn bind_handoff_message_id(
+        &self,
+        correlation_id: &str,
+        message_id: MessageId,
+    ) -> bool {
+        let mut pending = match self.pending_handoff_entries.write() {
+            Ok(pending) => pending,
+            Err(_) => return false,
+        };
+        let now = Instant::now();
+        prune_pending_handoff_expired_locked(&mut pending, now);
+        let Some(stored) = pending.remove(correlation_id) else {
+            return false;
+        };
+        drop(pending);
+        let Ok(mut committed) = self.handoff_entries.write() else {
+            return false;
+        };
+        prune_handoff_expired_locked(&mut committed, now);
+        committed.insert(
+            message_id.get(),
+            StoredVoiceBackgroundHandoffMeta {
+                meta: stored.meta,
+                // Refresh the expiry on bind so a slow publish does not
+                // shorten the long-running-turn lookup window.
+                expires_at: now + HANDOFF_META_TTL,
+            },
+        );
+        true
+    }
+
+    /// #2392 cleanup: drop a pending reservation when publish fails or the
+    /// driver returns no `message_id`. Returns `true` when an entry was
+    /// removed.
+    pub(crate) fn cancel_handoff_reservation(&self, correlation_id: &str) -> bool {
+        let Ok(mut pending) = self.pending_handoff_entries.write() else {
+            return false;
+        };
+        let now = Instant::now();
+        prune_pending_handoff_expired_locked(&mut pending, now);
+        pending.remove(correlation_id).is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_reservation(&self, correlation_id: &str) -> bool {
+        let Ok(mut pending) = self.pending_handoff_entries.write() else {
+            return false;
+        };
+        let now = Instant::now();
+        prune_pending_handoff_expired_locked(&mut pending, now);
+        pending.contains_key(correlation_id)
+    }
+
     /// #2266: non-consuming clone of the stored announcement so the intake-gate
     /// busy-channel paths can embed the payload in the queued `Intervention`
     /// WITHOUT draining the store. The active dispatch path still calls
@@ -136,6 +253,13 @@ impl VoiceAnnouncementMetaStore {
 
 fn prune_handoff_expired_locked(
     entries: &mut HashMap<u64, StoredVoiceBackgroundHandoffMeta>,
+    now: Instant,
+) {
+    entries.retain(|_, stored| stored.expires_at > now);
+}
+
+fn prune_pending_handoff_expired_locked(
+    entries: &mut HashMap<String, PendingVoiceBackgroundHandoffMeta>,
     now: Instant,
 ) {
     entries.retain(|_, stored| stored.expires_at > now);
@@ -213,5 +337,94 @@ mod tests {
         let store = VoiceAnnouncementMetaStore::default();
         assert!(store.get_handoff(MessageId::new(999)).is_none());
         assert!(store.take_handoff(MessageId::new(999)).is_none());
+    }
+
+    fn handoff_meta_fixture() -> VoiceBackgroundHandoffMeta {
+        VoiceBackgroundHandoffMeta {
+            voice_channel_id: 300,
+            background_channel_id: 200,
+            agent_id: Some("project-agentdesk".to_string()),
+        }
+    }
+
+    /// #2392 phase 1+3: reservation made before publish must be visible by
+    /// message_id-keyed lookup immediately after `bind_handoff_message_id`
+    /// — exactly the persist-before-publish invariant the issue requires.
+    #[test]
+    fn reserve_then_bind_makes_marker_visible_by_message_id() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let correlation_id = "voice:111:222:utt-2392";
+        let message_id = MessageId::new(7_392_001);
+        let meta = handoff_meta_fixture();
+
+        // Phase 1 (pre-publish): reservation recorded under correlation_id.
+        assert!(store.reserve_handoff(correlation_id, meta.clone()));
+        assert!(store.has_pending_reservation(correlation_id));
+        // Pre-bind: lookup by message_id MUST still miss because the
+        // publish has not happened yet.
+        assert!(store.get_handoff(message_id).is_none());
+
+        // Phase 3 (post-publish): bind promotes pending → committed.
+        assert!(store.bind_handoff_message_id(correlation_id, message_id));
+        assert!(!store.has_pending_reservation(correlation_id));
+        // Now the message_id-keyed lookup MUST succeed even on the very
+        // first call — no pre-persist window.
+        assert_eq!(store.get_handoff(message_id), Some(meta.clone()));
+        assert_eq!(store.take_handoff(message_id), Some(meta));
+    }
+
+    /// #2392: when the announce-bot publish fails (or the driver returns
+    /// no message_id), the dispatch site cancels the reservation. The
+    /// pending map MUST NOT leak the entry.
+    #[test]
+    fn cancel_reservation_drops_pending_entry() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let correlation_id = "voice:111:222:utt-cancel";
+
+        assert!(store.reserve_handoff(correlation_id, handoff_meta_fixture()));
+        assert!(store.has_pending_reservation(correlation_id));
+
+        assert!(store.cancel_handoff_reservation(correlation_id));
+        assert!(!store.has_pending_reservation(correlation_id));
+        // A second cancel is a no-op.
+        assert!(!store.cancel_handoff_reservation(correlation_id));
+    }
+
+    /// #2392: bind without a prior reservation MUST NOT spuriously create
+    /// a committed marker (defensive against double-bind / late-bind).
+    #[test]
+    fn bind_without_reservation_is_noop() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let message_id = MessageId::new(7_392_404);
+
+        assert!(
+            !store.bind_handoff_message_id("voice:nonexistent", message_id),
+            "bind without a matching reservation must report false"
+        );
+        assert!(store.get_handoff(message_id).is_none());
+    }
+
+    /// #2392: ordering invariant — once `bind` returns, any subsequent
+    /// `get_handoff(message_id)` call MUST observe the marker. This is
+    /// the property that closes the announce-publish-before-persist race.
+    /// We exercise the lookup side N times to spot any non-determinism in
+    /// the lock-acquisition ordering between `pending_handoff_entries`
+    /// and `handoff_entries`.
+    #[test]
+    fn ordering_invariant_bind_then_lookup_never_misses() {
+        let store = VoiceAnnouncementMetaStore::default();
+        for i in 0..32u64 {
+            let correlation_id = format!("voice:111:222:utt-{i}");
+            let message_id = MessageId::new(7_500_000 + i);
+            assert!(store.reserve_handoff(&correlation_id, handoff_meta_fixture()));
+            assert!(store.bind_handoff_message_id(&correlation_id, message_id));
+            // Lookup must NEVER miss on the first call after bind.
+            assert!(
+                store.get_handoff(message_id).is_some(),
+                "lookup missed for message_id={} after bind — pre-persist window leak",
+                message_id.get()
+            );
+            store.take_handoff(message_id);
+        }
     }
 }
