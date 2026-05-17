@@ -17,6 +17,32 @@ use crate::utils::api::clamp_api_limit;
 
 pub const ROUTINE_RUN_LEASE_SECS: u64 = 30 * 60;
 const RUN_LEASE_SECS: i64 = ROUTINE_RUN_LEASE_SECS as i64;
+const RESUME_NEXT_DUE_REQUIRED_MESSAGE: &str =
+    "next_due_at required to resume schedule-less routine";
+
+#[derive(Debug)]
+pub struct ResumeRoutineRequiresNextDueAt;
+
+impl std::fmt::Display for ResumeRoutineRequiresNextDueAt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(RESUME_NEXT_DUE_REQUIRED_MESSAGE)
+    }
+}
+
+impl std::error::Error for ResumeRoutineRequiresNextDueAt {}
+
+pub fn is_resume_routine_requires_next_due_at(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ResumeRoutineRequiresNextDueAt>()
+        .is_some()
+}
+
+fn resume_without_next_due_is_invalid(
+    schedule: Option<&str>,
+    next_due_at: Option<DateTime<Utc>>,
+) -> bool {
+    schedule.is_none() && next_due_at.is_none()
+}
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
@@ -1879,19 +1905,58 @@ impl RoutineStore {
         next_due_at: Option<Option<DateTime<Utc>>>,
     ) -> Result<bool> {
         let result = match next_due_at {
-            None => sqlx::query(
-                r#"
-                UPDATE routines
-                SET status = 'enabled',
-                    updated_at = NOW()
-                WHERE id = $1
-                  AND status = 'paused'
-                "#,
-            )
-            .bind(routine_id)
-            .execute(&*self.pool)
-            .await
-            .map_err(|e| anyhow!("resume routine {routine_id}: {e}"))?,
+            None => {
+                let mut tx = self
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(|e| anyhow!("resume routine {routine_id}: {e}"))?;
+                let row = sqlx::query(
+                    r#"
+                    SELECT schedule, next_due_at
+                    FROM routines
+                    WHERE id = $1
+                      AND status = 'paused'
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(routine_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| anyhow!("resume routine {routine_id}: {e}"))?;
+
+                let Some(row) = row else {
+                    return Ok(false);
+                };
+
+                let schedule: Option<String> = row
+                    .try_get("schedule")
+                    .map_err(|e| anyhow!("resume routine {routine_id}: {e}"))?;
+                let existing_next_due_at: Option<DateTime<Utc>> = row
+                    .try_get("next_due_at")
+                    .map_err(|e| anyhow!("resume routine {routine_id}: {e}"))?;
+                if resume_without_next_due_is_invalid(schedule.as_deref(), existing_next_due_at) {
+                    return Err(ResumeRoutineRequiresNextDueAt.into());
+                }
+
+                let result = sqlx::query(
+                    r#"
+                    UPDATE routines
+                    SET status = 'enabled',
+                        updated_at = NOW()
+                    WHERE id = $1
+                      AND status = 'paused'
+                    "#,
+                )
+                .bind(routine_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| anyhow!("resume routine {routine_id}: {e}"))?;
+                tx.commit()
+                    .await
+                    .map_err(|e| anyhow!("resume routine {routine_id}: {e}"))?;
+                result
+            }
             Some(value) => sqlx::query(
                 r#"
                 UPDATE routines
@@ -2722,8 +2787,8 @@ struct CloseRun<'a> {
 mod tests {
     use super::{
         include_automation_candidate_card_observations, next_due_after, next_due_after_anchor,
-        parse_schedule_interval, precomputed_observation_from_kv, truncate_chars,
-        validate_routine_schedule,
+        parse_schedule_interval, precomputed_observation_from_kv,
+        resume_without_next_due_is_invalid, truncate_chars, validate_routine_schedule,
     };
     use chrono::{TimeZone, Timelike, Utc};
     use serde_json::Value;
@@ -2733,6 +2798,16 @@ mod tests {
     // The store SQL is compiled by `cargo check`; concurrent claim/recovery
     // behavior should be covered by PG integration tests once the runtime
     // harness starts executing routines.
+
+    #[test]
+    fn resume_omitted_next_due_rejects_legacy_schedule_less_rows() {
+        assert!(resume_without_next_due_is_invalid(None, None));
+        assert!(!resume_without_next_due_is_invalid(Some("@every 1h"), None));
+        assert!(!resume_without_next_due_is_invalid(
+            None,
+            Some(Utc.with_ymd_and_hms(2026, 5, 17, 12, 0, 0).unwrap())
+        ));
+    }
 
     #[test]
     fn automation_candidate_card_observations_are_executor_only() {

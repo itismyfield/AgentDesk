@@ -268,7 +268,7 @@
 | `server::routes::reviews` | `src/server/routes/reviews.rs` | 1173 | giant-file |
 | `server::routes::routes_tests` | `src/server/routes/routes_tests/mod.rs` | 26 |  |
 | `server::routes::routes_tests::common` | `src/server/routes/routes_tests/common.rs` | 1418 | giant-file |
-| `server::routes::routines` | `src/server/routes/routines.rs` | 823 |  |
+| `server::routes::routines` | `src/server/routes/routines.rs` | 839 |  |
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 405 |  |
 | `server::routes::settings` | `src/server/routes/settings.rs` | 91 |  |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 425 |  |
@@ -597,7 +597,7 @@
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1230 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
 | `services::retrospectives` | `src/services/retrospectives.rs` | 882 |  |
-| `services::routines` | `src/services/routines/mod.rs` | 27 |  |
+| `services::routines` | `src/services/routines/mod.rs` | 30 |  |
 | `services::routines::action` | `src/services/routines/action.rs` | 284 |  |
 | `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 727 |  |
 | `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 1653 | giant-file |
@@ -605,7 +605,7 @@
 | `services::routines::runtime` | `src/services/routines/runtime.rs` | 786 |  |
 | `services::routines::runtime_config` | `src/services/routines/runtime_config.rs` | 108 |  |
 | `services::routines::session_control` | `src/services/routines/session_control.rs` | 419 |  |
-| `services::routines::store` | `src/services/routines/store.rs` | 3126 | giant-file |
+| `services::routines::store` | `src/services/routines/store.rs` | 3201 | giant-file |
 | `services::service_error` | `src/services/service_error.rs` | 1 |  |
 | `services::session_backend` | `src/services/session_backend.rs` | 1274 | giant-file |
 | `services::session_forwarding` | `src/services/session_forwarding.rs` | 471 |  |

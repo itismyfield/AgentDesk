@@ -24,4 +24,7 @@ pub use loader::RoutineScriptLoader;
 pub use runtime::{execute_claimed_script_run, poll_agent_turns, run_due_tick};
 pub use runtime_config::validate_routine_runtime_config;
 pub use session_control::{RoutineSessionCommand, RoutineSessionController};
-pub use store::{NewRoutine, RoutinePatch, RoutineStore, validate_routine_schedule};
+pub use store::{
+    NewRoutine, RoutinePatch, RoutineStore, is_resume_routine_requires_next_due_at,
+    validate_routine_schedule,
+};

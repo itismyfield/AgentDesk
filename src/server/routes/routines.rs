@@ -12,7 +12,8 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::routines::{
     NewRoutine, RoutineAgentExecutor, RoutineDiscordLogger, RoutineLifecycleEvent, RoutinePatch,
     RoutineScriptLoader, RoutineSessionCommand, RoutineSessionController, RoutineStore,
-    execute_claimed_script_run, validate_routine_runtime_config, validate_routine_schedule,
+    execute_claimed_script_run, is_resume_routine_requires_next_due_at,
+    validate_routine_runtime_config, validate_routine_schedule,
 };
 use crate::utils::api::clamp_api_limit;
 
@@ -658,6 +659,9 @@ fn routine_health_target(config: &Config) -> Option<String> {
 }
 
 fn store_error(error: anyhow::Error) -> AppError {
+    if is_resume_routine_requires_next_due_at(&error) {
+        return AppError::conflict(error.to_string());
+    }
     AppError::internal(error.to_string()).with_code(ErrorCode::Database)
 }
 
@@ -683,6 +687,7 @@ mod tests {
 
     use super::{
         PatchRoutineBody, ResumeRoutineBody, ensure_routine_runtime_runnable, normalize_script_ref,
+        store_error,
     };
     use crate::config::RoutinesConfig;
     use crate::error::ErrorCode;
@@ -807,6 +812,17 @@ mod tests {
         let update = body.next_due_at_update().expect("field must be present");
         let ts = update.expect("timestamp must be Some");
         assert_eq!(ts.to_rfc3339(), "2026-04-29T00:00:00+00:00");
+    }
+
+    #[test]
+    fn resume_missing_next_due_store_error_maps_to_conflict() {
+        let err =
+            store_error(crate::services::routines::store::ResumeRoutineRequiresNextDueAt.into());
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            err.message(),
+            "next_due_at required to resume schedule-less routine"
+        );
     }
 
     #[test]
