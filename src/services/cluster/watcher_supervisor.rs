@@ -675,11 +675,13 @@ mod tests {
             .get(&new_binding.expected_session_name)
             .expect("respawned handle present");
         assert_eq!(
-            respawned.matched().channel_id, new_binding.channel_id,
+            respawned.matched().channel_id,
+            new_binding.channel_id,
             "respawned handle carries the NEW binding"
         );
         assert_eq!(
-            respawned.matched().agent_id, new_binding.agent_id,
+            respawned.matched().agent_id,
+            new_binding.agent_id,
             "respawned handle carries the NEW agent id"
         );
 
