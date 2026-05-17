@@ -165,7 +165,10 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
     }
 }
 
-fn wait_for_prompt_ready(session_name: &str, readiness: PromptReadinessKind) -> Result<(), String> {
+pub fn wait_for_prompt_ready(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+) -> Result<(), String> {
     let timeout = readiness.timeout();
     let start = Instant::now();
     let mut wait_interval = Duration::from_millis(100);
