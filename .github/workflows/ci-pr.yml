@@ -365,35 +365,41 @@ jobs:
 
   fast_check_required_context:
     name: Fast check (ubuntu-latest)
-    needs: check_fast
+    needs:
+      - changes
+      - check_fast
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Mirror fast check result for branch protection
-        run: |
-          result="${{ needs.check_fast.result }}"
-          if [ "$result" = "success" ] || [ "$result" = "skipped" ]; then
-            echo "check_fast result: $result (treated as pass)"
-            exit 0
-          fi
-          echo "check_fast result: $result"
-          exit 1
+        env:
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: rust_or_policy
+          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy }}
+          UPSTREAM_JOB_NAME: check_fast
+          UPSTREAM_RESULT: ${{ needs.check_fast.result }}
+        run: ./scripts/required-check-mirror.sh
 
   fast_targeted_tests_required_context:
     name: Fast targeted tests (ubuntu-latest)
-    needs: test_fast
+    needs:
+      - changes
+      - test_fast
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Mirror targeted test result for branch protection
-        run: |
-          result="${{ needs.test_fast.result }}"
-          if [ "$result" = "success" ] || [ "$result" = "skipped" ]; then
-            echo "test_fast result: $result (treated as pass)"
-            exit 0
-          fi
-          echo "test_fast result: $result"
-          exit 1
+        env:
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: pg_db
+          FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}
+          UPSTREAM_JOB_NAME: test_fast
+          UPSTREAM_RESULT: ${{ needs.test_fast.result }}
+        run: ./scripts/required-check-mirror.sh
 
   test_fast:
     name: PostgreSQL tests (ubuntu-postgres)
