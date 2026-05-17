@@ -54,8 +54,10 @@ export default function PipelineVisualEditor({
   agents,
   selectedAgentId,
   variant = "advanced",
+  defaultCollapsed,
 }: PipelineVisualEditorProps) {
   const isFsmVariant = variant === "fsm";
+  const collapsedDefault = defaultCollapsed ?? !isFsmVariant;
   const [level, setLevel] = useState<EditLevel>("repo");
   const [pipelineDraft, setPipelineDraft] = useState<PipelineConfigFull | null>(null);
   const [savedPipeline, setSavedPipeline] = useState<PipelineConfigFull | null>(null);
@@ -72,7 +74,7 @@ export default function PipelineVisualEditor({
   const [success, setSuccess] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [compactGraph, setCompactGraph] = useState(false);
-  const [collapsed, setCollapsed] = useState(!isFsmVariant);
+  const [collapsed, setCollapsed] = useState(collapsedDefault);
   const [rawPersistedFsmDraftStore, setPersistedFsmDraftStore] =
     useLocalStorage<PersistedFsmDraftStore>(
       STORAGE_KEYS.fsmDraft,
@@ -132,8 +134,8 @@ export default function PipelineVisualEditor({
   }, [success]);
 
   useEffect(() => {
-    setCollapsed(!isFsmVariant);
-  }, [isFsmVariant, repo, selectedAgentId]);
+    setCollapsed(collapsedDefault);
+  }, [collapsedDefault, repo, selectedAgentId]);
 
   async function fetchSnapshot(nextLevel: EditLevel): Promise<EditorSnapshot> {
     if (!repo) {
@@ -375,8 +377,8 @@ export default function PipelineVisualEditor({
         "Select a line and tune its transition name and execution rule in the side panel.",
       )
     : tr(
-        "노드는 상태, 화살표는 전환입니다. 노드/전환을 눌러 우측 속성을 수정하고, 하단에서 스테이지를 함께 편집합니다.",
-        "Nodes are states, arrows are transitions. Click a node or edge to edit it, then adjust stages below in the same editor.",
+        "노드는 상태, 화살표는 전환입니다. 캔버스는 드래그로 이동하고, 노드/전환을 눌러 우측 속성을 수정합니다.",
+        "Nodes are states, arrows are transitions. Drag the canvas to move, then click a node or edge to edit its properties.",
       );
   const graphGridClass = isFsmVariant
     ? "grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_280px]"
@@ -391,8 +393,8 @@ export default function PipelineVisualEditor({
           : "The FSM canvas uses a fixed 1100×420 viewBox, and the side panel drops below on narrow screens.",
       )
     : tr(
-        "그래프는 화면 폭에 맞춰 자동 압축됩니다. 모바일은 가로 스크롤 없이 1열 레이아웃을 사용합니다.",
-        "The graph automatically collapses to fit the screen width. Mobile uses a single-column layout without horizontal scrolling.",
+        "캔버스는 보기 좋은 크기로 맞춰 열리고, 이동은 드래그만 사용합니다.",
+        "The canvas opens at a readable scale and moves by drag only.",
       );
 
   useEffect(() => {

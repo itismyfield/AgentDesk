@@ -1,7 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   Background,
-  Controls,
   Handle,
   MarkerType,
   MiniMap,
@@ -305,7 +304,7 @@ export default function PipelineFlowCanvas({
     [isFsmVariant, onConnectTransition],
   );
 
-  const minimapAllowed = !useScrollableMobileFsmCanvas;
+  const minimapAllowed = !compactGraph && !useScrollableMobileFsmCanvas;
   const [miniMapVisible, setMiniMapVisible] = useState(minimapAllowed);
   const miniMapHideTimerRef = useRef<number | null>(null);
 
@@ -347,7 +346,7 @@ export default function PipelineFlowCanvas({
       <div
         className="overflow-hidden rounded-[24px] border p-2 sm:p-3"
         style={isFsmVariant ? FSM_FLOW_SHELL_STYLE : FLOW_SHELL_STYLE}
-        data-testid={useScrollableMobileFsmCanvas ? "fsm-canvas-scroll" : undefined}
+        data-testid={useScrollableMobileFsmCanvas ? "fsm-canvas-scroll" : "pipeline-flow-canvas"}
         onFocusCapture={revealMiniMap}
         onPointerMove={revealMiniMap}
       >
@@ -370,9 +369,10 @@ export default function PipelineFlowCanvas({
             nodesConnectable={!isFsmVariant}
             elementsSelectable
             panOnDrag
-            panOnScroll
-            zoomOnPinch
+            panOnScroll={false}
+            zoomOnPinch={false}
             zoomOnScroll={false}
+            zoomOnDoubleClick={false}
             preventScrolling={false}
             onNodeClick={handleNodeClick}
             onEdgeClick={handleEdgeClick}
@@ -385,11 +385,10 @@ export default function PipelineFlowCanvas({
               size={isFsmVariant ? 1 : 1.2}
               color={isFsmVariant ? "rgba(148, 163, 184, 0.22)" : "rgba(148, 163, 184, 0.18)"}
             />
-            <Controls showInteractive={false} position="bottom-left" />
             {minimapAllowed && (
               <MiniMap
                 pannable
-                zoomable
+                zoomable={false}
                 position="bottom-right"
                 maskColor="rgba(2, 6, 23, 0.52)"
                 nodeBorderRadius={8}
