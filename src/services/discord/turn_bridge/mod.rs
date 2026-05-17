@@ -2582,6 +2582,7 @@ pub(super) fn spawn_turn_bridge(
         }
 
         let mut pending_placeholder_pin_transition_after_state_save = None;
+        let mut pending_long_running_open_after_state_save = None;
         let mut pending_long_running_retarget_after_state_save = None;
 
         'outer: while !done
@@ -2995,6 +2996,7 @@ pub(super) fn spawn_turn_bridge(
                                 shared_owned.status_panel_v2_enabled,
                             )
                                 && long_running_placeholder_active.is_none()
+                                && pending_long_running_open_after_state_save.is_none()
                                 && pending_placeholder_pin_transition_after_state_save.is_none()
                                 && pending_long_running_retarget_after_state_save.is_none()
                             {
@@ -3023,32 +3025,10 @@ pub(super) fn spawn_turn_bridge(
                                             )
                                             .await,
                                         };
-                                    let outcome = ensure_active_placeholder_card(
-                                        shared_owned.as_ref(),
-                                        gateway.as_ref(),
-                                        key.clone(),
-                                        input_payload.clone(),
-                                    )
-                                    .await;
-                                    // codex round-2 P2: only commit the active
-                                    // pointer when the controller actually
-                                    // committed (or coalesced an existing
-                                    // edit); otherwise the regular streaming
-                                    // path stays in charge so the turn isn't
-                                    // visually frozen on a transient edit
-                                    // failure.
-                                    use super::placeholder_controller::PlaceholderControllerOutcome::*;
-                                    if matches!(outcome, Edited | Coalesced) {
-                                        long_running_placeholder_active = Some((
-                                            key,
-                                            input_payload,
-                                            close_trigger,
-                                            false, // ack not yet consumed
-                                        ));
-                                        inflight_state
-                                            .long_running_placeholder_active = true;
-                                        state_dirty = true;
-                                    }
+                                    pending_long_running_open_after_state_save =
+                                        Some((key, input_payload, close_trigger, false));
+                                    inflight_state.long_running_placeholder_active = true;
+                                    state_dirty = true;
                                 }
                             }
                             push_transcript_event(
@@ -3180,6 +3160,7 @@ pub(super) fn spawn_turn_bridge(
                                         )
                                         .await;
                                     }
+                                    pending_long_running_retarget_after_state_save = None;
                                     let target = if is_error {
                                         super::placeholder_controller::PlaceholderLifecycle::Aborted
                                     } else {
@@ -3195,6 +3176,7 @@ pub(super) fn spawn_turn_bridge(
                                     if matches!(outcome, Edited | Coalesced | AlreadyTerminal) {
                                         inflight_state
                                             .long_running_placeholder_active = false;
+                                        pending_long_running_retarget_after_state_save = None;
                                         state_dirty = true;
                                     } else {
                                         // EditFailed — keep the placeholder
@@ -3209,12 +3191,39 @@ pub(super) fn spawn_turn_bridge(
                                     // `Done`/cancel can close the card. Mark
                                     // the ack consumed so future is_error
                                     // results from other tools don't abort us.
+                                    let active_key_for_pending_update = key.clone();
                                     long_running_placeholder_active = Some((
                                         key,
                                         snapshot,
                                         close_trigger,
                                         true,
                                     ));
+                                    if let Some((
+                                        pending_key,
+                                        _,
+                                        _,
+                                        pending_ack_consumed,
+                                        _,
+                                    )) = pending_long_running_retarget_after_state_save.as_mut()
+                                        && *pending_key == active_key_for_pending_update
+                                    {
+                                        *pending_ack_consumed = true;
+                                    }
+                                }
+                            } else if let Some((_, _, close_trigger, ack_consumed)) =
+                                pending_long_running_open_after_state_save.as_mut()
+                            {
+                                let monitor_like = matches!(
+                                    *close_trigger,
+                                    super::formatting::LongRunningCloseTrigger::MonitorLike
+                                );
+                                let is_dispatch_ack = !monitor_like && !*ack_consumed;
+                                if monitor_like || (is_dispatch_ack && is_error) {
+                                    pending_long_running_open_after_state_save = None;
+                                    inflight_state.long_running_placeholder_active = false;
+                                    state_dirty = true;
+                                } else {
+                                    *ack_consumed = true;
                                 }
                             }
                             // Reset the assistant-line summary so the next
@@ -3341,6 +3350,10 @@ pub(super) fn spawn_turn_bridge(
                                 // resumed session dies before completion.
                                 recovery_retry = true;
                             }
+                            if pending_long_running_open_after_state_save.take().is_some() {
+                                inflight_state.long_running_placeholder_active = false;
+                                let _ = save_inflight_state(&inflight_state);
+                            }
                             // #1255: turn finished while a long-running
                             // placeholder is still flagged as Active — close
                             // it now so the user does not stare at a stale
@@ -3349,6 +3362,7 @@ pub(super) fn spawn_turn_bridge(
                             if let Some((key, snapshot, close_trigger, ack_consumed)) =
                                 long_running_placeholder_active.take()
                             {
+                                pending_long_running_retarget_after_state_save = None;
                                 let target = if session_died_retry {
                                     super::placeholder_controller::PlaceholderLifecycle::Aborted
                                 } else {
@@ -4175,7 +4189,7 @@ pub(super) fn spawn_turn_bridge(
                                 // its `Active` controller entry doesn't linger as
                                 // a non-evictable row in the cap-bounded map.
                                 if let Some((old_key, snapshot, close_trigger, ack_consumed)) =
-                                    long_running_placeholder_active.take()
+                                    long_running_placeholder_active.as_ref()
                                 {
                                     let new_key = super::placeholder_controller::PlaceholderKey {
                                         provider: provider.clone(),
@@ -4183,7 +4197,13 @@ pub(super) fn spawn_turn_bridge(
                                         message_id: current_msg_id,
                                     };
                                     pending_long_running_retarget_after_state_save =
-                                        Some((old_key, snapshot, close_trigger, ack_consumed, new_key));
+                                        Some((
+                                            old_key.clone(),
+                                            snapshot.clone(),
+                                            *close_trigger,
+                                            *ack_consumed,
+                                            new_key,
+                                        ));
                                     state_dirty = true;
                                 }
                             }
@@ -4235,6 +4255,7 @@ pub(super) fn spawn_turn_bridge(
                     && !done
                     && last_status_edit.elapsed() >= status_interval
                     && long_running_placeholder_active.is_none()
+                    && pending_long_running_open_after_state_save.is_none()
                     && pending_long_running_retarget_after_state_save.is_none()
                 {
                     let _ = gateway
@@ -4274,6 +4295,7 @@ pub(super) fn spawn_turn_bridge(
 
             if state_dirty
                 || pending_placeholder_pin_transition_after_state_save.is_some()
+                || pending_long_running_open_after_state_save.is_some()
                 || pending_long_running_retarget_after_state_save.is_some()
                 || inflight_state.current_tool_line != current_tool_line
                 || inflight_state.last_tool_name != last_tool_name
@@ -4302,6 +4324,44 @@ pub(super) fn spawn_turn_bridge(
                                 )
                                 .await;
                         }
+                        if let Some((key, snapshot, close_trigger, ack_consumed)) =
+                            pending_long_running_open_after_state_save.take()
+                        {
+                            if key.message_id == current_msg_id
+                                && long_running_placeholder_active.is_none()
+                            {
+                                let outcome = ensure_active_placeholder_card(
+                                    shared_owned.as_ref(),
+                                    gateway.as_ref(),
+                                    key.clone(),
+                                    snapshot.clone(),
+                                )
+                                .await;
+                                use super::placeholder_controller::PlaceholderControllerOutcome::*;
+                                if matches!(outcome, Edited | Coalesced) {
+                                    long_running_placeholder_active =
+                                        Some((key, snapshot, close_trigger, ack_consumed));
+                                } else {
+                                    inflight_state.long_running_placeholder_active = false;
+                                    if let Err(error) = save_inflight_state(&inflight_state) {
+                                        tracing::warn!(
+                                            "[turn_bridge] failed to persist long-running placeholder open failure in channel {}: {}",
+                                            channel_id,
+                                            error
+                                        );
+                                    }
+                                }
+                            } else {
+                                inflight_state.long_running_placeholder_active = false;
+                                if let Err(error) = save_inflight_state(&inflight_state) {
+                                    tracing::warn!(
+                                        "[turn_bridge] failed to persist stale long-running placeholder open drop in channel {}: {}",
+                                        channel_id,
+                                        error
+                                    );
+                                }
+                            }
+                        }
                         if let Some((
                             old_key,
                             snapshot,
@@ -4310,29 +4370,35 @@ pub(super) fn spawn_turn_bridge(
                             new_key,
                         )) = pending_long_running_retarget_after_state_save.take()
                         {
-                            shared_owned.placeholder_controller.detach(&old_key);
-                            let outcome = ensure_active_placeholder_card(
-                                shared_owned.as_ref(),
-                                gateway.as_ref(),
-                                new_key.clone(),
-                                snapshot.clone(),
-                            )
-                            .await;
-                            use super::placeholder_controller::PlaceholderControllerOutcome::*;
-                            if matches!(outcome, Edited | Coalesced) {
-                                long_running_placeholder_active =
-                                    Some((new_key, snapshot, close_trigger, ack_consumed));
-                            } else {
-                                // Retarget edit failed — drop the flag so the
-                                // regular streaming loop and sweeper resume
-                                // normal handling.
-                                inflight_state.long_running_placeholder_active = false;
-                                if let Err(error) = save_inflight_state(&inflight_state) {
-                                    tracing::warn!(
-                                        "[turn_bridge] failed to persist long-running placeholder retarget failure in channel {}: {}",
-                                        channel_id,
-                                        error
-                                    );
+                            let active_still_matches_old_key = long_running_placeholder_active
+                                .as_ref()
+                                .is_some_and(|(active_key, _, _, _)| *active_key == old_key);
+                            if active_still_matches_old_key {
+                                shared_owned.placeholder_controller.detach(&old_key);
+                                let outcome = ensure_active_placeholder_card(
+                                    shared_owned.as_ref(),
+                                    gateway.as_ref(),
+                                    new_key.clone(),
+                                    snapshot.clone(),
+                                )
+                                .await;
+                                use super::placeholder_controller::PlaceholderControllerOutcome::*;
+                                if matches!(outcome, Edited | Coalesced) {
+                                    long_running_placeholder_active =
+                                        Some((new_key, snapshot, close_trigger, ack_consumed));
+                                } else {
+                                    // Retarget edit failed — drop the flag so the
+                                    // regular streaming loop and sweeper resume
+                                    // normal handling.
+                                    long_running_placeholder_active = None;
+                                    inflight_state.long_running_placeholder_active = false;
+                                    if let Err(error) = save_inflight_state(&inflight_state) {
+                                        tracing::warn!(
+                                            "[turn_bridge] failed to persist long-running placeholder retarget failure in channel {}: {}",
+                                            channel_id,
+                                            error
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -4398,7 +4464,12 @@ pub(super) fn spawn_turn_bridge(
         let relay_owns_output_at_stream_end = standby_relay_owns_output
             || (rx_disconnected && tmux_handed_off && full_response.is_empty());
         if !cancelled && !relay_owns_output_at_stream_end {
+            if pending_long_running_open_after_state_save.take().is_some() {
+                inflight_state.long_running_placeholder_active = false;
+                let _ = save_inflight_state(&inflight_state);
+            }
             if let Some((key, _, _, _)) = long_running_placeholder_active.take() {
+                let _ = pending_long_running_retarget_after_state_save.take();
                 let target = if transport_error || rx_disconnected {
                     super::placeholder_controller::PlaceholderLifecycle::Aborted
                 } else {
@@ -4866,6 +4937,10 @@ pub(super) fn spawn_turn_bridge(
                 "cancel cleanup",
             )
             .await;
+            if pending_long_running_open_after_state_save.take().is_some() {
+                inflight_state.long_running_placeholder_active = false;
+                let _ = save_inflight_state(&inflight_state);
+            }
             // #1255: cancelled turn → drive any active long-running placeholder
             // into Aborted before the rest of the cleanup machinery runs. The
             // controller's idempotent terminal transition guarantees this is
@@ -4881,6 +4956,7 @@ pub(super) fn spawn_turn_bridge(
             if let Some((key, snapshot, close_trigger, ack_consumed)) =
                 long_running_placeholder_active.take()
             {
+                let _ = pending_long_running_retarget_after_state_save.take();
                 let outcome = shared_owned
                     .placeholder_controller
                     .transition(
