@@ -1620,6 +1620,7 @@ fn execute_streaming_local_tui_tmux(
             match crate::services::claude_tui::input::wait_for_prompt_ready(
                 tmux_session_name,
                 crate::services::claude_tui::input::PromptReadinessKind::Followup,
+                cancel_token.as_deref(),
             ) {
                 Ok(()) => {
                     busy_waited = true;
@@ -1629,6 +1630,23 @@ fn execute_streaming_local_tui_tmux(
                     ));
                 }
                 Err(err) => {
+                    if crate::services::claude_tui::input::is_prompt_ready_cancelled_error(&err) {
+                        debug_log(&format!(
+                            "Claude TUI follow-up: cancellation observed during busy wait, aborting injection (session={})",
+                            tmux_session_name
+                        ));
+                        log_producer_exit(
+                            "tui_warm_followup_cancelled_during_busy_wait",
+                            Some(&resolved_session_id),
+                            report_channel_id,
+                            0,
+                            serde_json::json!({
+                                "tmux_session_name": tmux_session_name,
+                                "transcript_path": transcript_path_string,
+                            }),
+                        );
+                        return Ok(());
+                    }
                     let timed_out =
                         crate::services::claude_tui::input::is_prompt_ready_timeout_error(&err);
                     debug_log(&format!(
@@ -1694,7 +1712,30 @@ fn execute_streaming_local_tui_tmux(
             );
             return Ok(());
         }
-        crate::services::claude_tui::input::send_followup_prompt(tmux_session_name, prompt)?;
+        if let Err(error) = crate::services::claude_tui::input::send_followup_prompt(
+            tmux_session_name,
+            prompt,
+            cancel_token.as_deref(),
+        ) {
+            if crate::services::claude_tui::input::is_prompt_ready_cancelled_error(&error) {
+                debug_log(&format!(
+                    "Claude TUI follow-up: cancellation observed during prompt submission, aborting injection (session={})",
+                    tmux_session_name
+                ));
+                log_producer_exit(
+                    "tui_warm_followup_cancelled_during_prompt_submit",
+                    Some(&resolved_session_id),
+                    report_channel_id,
+                    0,
+                    serde_json::json!({
+                        "tmux_session_name": tmux_session_name,
+                        "transcript_path": transcript_path_string,
+                    }),
+                );
+                return Ok(());
+            }
+            return Err(error);
+        }
         let hook_events_after = chrono::Utc::now();
         let read_result = read_claude_tui_transcript_until_done(
             &transcript_path_string,
@@ -1954,7 +1995,11 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
 ) -> Result<ReadOutputResult, String> {
     for attempt in 1..=CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS {
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
-        match crate::services::claude_tui::input::send_fresh_prompt(tmux_session_name, prompt) {
+        match crate::services::claude_tui::input::send_fresh_prompt(
+            tmux_session_name,
+            prompt,
+            cancel_token.as_deref(),
+        ) {
             Ok(()) => {
                 let hook_events_after = chrono::Utc::now();
                 return read_claude_tui_transcript_until_done(
