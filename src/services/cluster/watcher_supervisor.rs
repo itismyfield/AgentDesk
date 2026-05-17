@@ -32,10 +32,14 @@
 //!
 //! ## Flag gate
 //!
-//! `cluster.session_bound_relay_enabled` (default `false`). When `false`, the
-//! supervisor is not started by the worker registry. The legacy turn-bound
-//! relay path remains the only delivery channel. E4 (#2346) flips the flag
-//! and migrates call-sites.
+//! `cluster.session_bound_relay_enabled` (default `true` since E4 / #2346).
+//! When `false`, the supervisor is not started by the worker registry and
+//! the legacy turn-bound relay path remains the only delivery channel —
+//! that escape hatch lets operators disable the new path if a regression
+//! surfaces. Under the default-on configuration the supervisor runs against
+//! the production observation sink
+//! ([`super::registry_adapter_sink::RegistryAdapterSink`]); the legacy
+//! turn-bound watcher still owns Discord delivery during the E4 release.
 
 use std::collections::HashMap;
 use std::sync::Arc;
