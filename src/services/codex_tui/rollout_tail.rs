@@ -784,9 +784,7 @@ fn tail_rollout_file_until_assistant_response(
                 // configured legacy drain is strictly longer than the
                 // base drain — `terminal_drain.is_zero()` (replay) and
                 // shorter overrides stay verbatim.
-                let effective_drain = if state.seen_any_event_msg
-                    || terminal_drain.is_zero()
-                {
+                let effective_drain = if state.seen_any_event_msg || terminal_drain.is_zero() {
                     terminal_drain
                 } else {
                     match legacy_terminal_drain {

@@ -1021,11 +1021,8 @@ finalising response";
         );
         let budget = PromptReadinessKind::PostTurnHandoff.timeout();
         let started = Instant::now();
-        let result = wait_until_codex_tui_input_ready(
-            &session,
-            PromptReadinessKind::PostTurnHandoff,
-            None,
-        );
+        let result =
+            wait_until_codex_tui_input_ready(&session, PromptReadinessKind::PostTurnHandoff, None);
         let elapsed = started.elapsed();
         assert!(result.is_err(), "expected Err for dead tmux session");
         // Generous ceiling: 1× budget + one extra capture round (~500ms
@@ -1061,11 +1058,8 @@ finalising response";
         );
         let budget = PromptReadinessKind::PostTurnHandoff.timeout();
         let started = Instant::now();
-        let _ = wait_until_codex_tui_input_ready(
-            &session,
-            PromptReadinessKind::PostTurnHandoff,
-            None,
-        );
+        let _ =
+            wait_until_codex_tui_input_ready(&session, PromptReadinessKind::PostTurnHandoff, None);
         let elapsed = started.elapsed();
         // Hard ceiling: legacy could hit ~budget + 1000ms (max
         // wait_interval). #2399 HIGH 1 keeps us under budget + 500ms.
