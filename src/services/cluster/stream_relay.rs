@@ -147,8 +147,91 @@ pub struct StreamRelayHandle {
     tx: mpsc::Sender<StreamFrame>,
     shutdown: Arc<AtomicBool>,
     metrics: Arc<RelayMetrics>,
-    sequence: AtomicU64,
+    sequence: Arc<AtomicU64>,
     task: Option<JoinHandle<()>>,
+}
+
+/// Clonable producer-side handle for a [`StreamRelay`]. Owned by the
+/// [`super::relay_producer_registry::RelayProducerRegistry`] so the
+/// production tmux frame producer (`tmux_watcher`) can `try_send_frame`
+/// without holding the supervisor-owned [`StreamRelayHandle`] (which owns the
+/// [`JoinHandle`] and cannot be cloned). The producer shares the same
+/// underlying `tx`, `shutdown`, `metrics`, and `sequence` atomics — so a
+/// shutdown initiated by the supervisor is immediately visible to every
+/// producer attempt (E5 #2412).
+#[derive(Clone)]
+pub struct RelayProducer {
+    session_name: String,
+    tx: mpsc::Sender<StreamFrame>,
+    shutdown: Arc<AtomicBool>,
+    metrics: Arc<RelayMetrics>,
+    sequence: Arc<AtomicU64>,
+}
+
+impl RelayProducer {
+    pub fn session_name(&self) -> &str {
+        &self.session_name
+    }
+
+    pub fn metrics(&self) -> &Arc<RelayMetrics> {
+        &self.metrics
+    }
+
+    /// Non-blocking enqueue. See [`StreamRelayHandle::try_send_frame`] for
+    /// the contract (drop-on-full, returns `false` only when the relay task
+    /// has exited). Callers in production must always go through this entry
+    /// point — the producer registry hands out clones of this struct.
+    pub fn try_send_frame(&self, payload: String) -> bool {
+        try_send_frame_inner(
+            &self.session_name,
+            &self.tx,
+            &self.shutdown,
+            &self.metrics,
+            &self.sequence,
+            payload,
+        )
+    }
+}
+
+impl std::fmt::Debug for RelayProducer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayProducer")
+            .field("session", &self.session_name)
+            .field("metrics", &self.metrics.snapshot())
+            .finish()
+    }
+}
+
+fn try_send_frame_inner(
+    session_name: &str,
+    tx: &mpsc::Sender<StreamFrame>,
+    shutdown: &Arc<AtomicBool>,
+    metrics: &Arc<RelayMetrics>,
+    sequence: &Arc<AtomicU64>,
+    payload: String,
+) -> bool {
+    if shutdown.load(Ordering::Acquire) {
+        return false;
+    }
+    let seq = sequence.fetch_add(1, Ordering::AcqRel);
+    let frame = StreamFrame {
+        session_name: session_name.to_string(),
+        payload,
+        sequence: seq,
+    };
+    metrics.frames_received.fetch_add(1, Ordering::AcqRel);
+    match tx.try_send(frame) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(frame)) => {
+            // Drop-oldest semantics: tokio mpsc has no sender-side pop, so we
+            // discard the NEW frame and bump the counter. Production
+            // operators see the loss via /api/cluster/sessions.
+            metrics.dropped_frames.fetch_add(1, Ordering::AcqRel);
+            drop(frame);
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
 }
 
 impl StreamRelayHandle {
@@ -160,39 +243,33 @@ impl StreamRelayHandle {
         &self.metrics
     }
 
+    /// Return a clonable [`RelayProducer`] sharing the relay's underlying
+    /// channel and atomics. Used by E5 (#2412) to expose `try_send_frame` to
+    /// the production tmux frame producer via
+    /// [`super::relay_producer_registry::RelayProducerRegistry`].
+    pub fn producer(&self) -> RelayProducer {
+        RelayProducer {
+            session_name: self.matched.expected_session_name.clone(),
+            tx: self.tx.clone(),
+            shutdown: self.shutdown.clone(),
+            metrics: self.metrics.clone(),
+            sequence: self.sequence.clone(),
+        }
+    }
+
     /// Non-blocking enqueue. If the channel is full, the oldest queued frame
     /// is dropped (we drain one then enqueue) and the dropped counter
     /// increments. Returns `false` only if the relay task has already exited
     /// — the upstream caller should then treat the relay as dead.
     pub fn try_send_frame(&self, payload: String) -> bool {
-        if self.shutdown.load(Ordering::Acquire) {
-            return false;
-        }
-        let sequence = self.sequence.fetch_add(1, Ordering::AcqRel);
-        let frame = StreamFrame {
-            session_name: self.matched.expected_session_name.clone(),
+        try_send_frame_inner(
+            &self.matched.expected_session_name,
+            &self.tx,
+            &self.shutdown,
+            &self.metrics,
+            &self.sequence,
             payload,
-            sequence,
-        };
-        self.metrics.frames_received.fetch_add(1, Ordering::AcqRel);
-        match self.tx.try_send(frame) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(frame)) => {
-                // Drop-oldest: try receiving via try_reserve loop is not
-                // available on tokio mpsc, so we approximate by overwriting:
-                // increment dropped counter and discard the new frame (we
-                // can't pop the head of a tokio mpsc Receiver from the
-                // sender side). The watcher continues without blocking — the
-                // dropped counter surfaces the loss to operators.
-                self.metrics.dropped_frames.fetch_add(1, Ordering::AcqRel);
-                drop(frame);
-                true
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                // Receiver gone — relay task exited.
-                false
-            }
-        }
+        )
     }
 
     /// Initiate graceful shutdown. Closes the producer side so the relay
@@ -270,7 +347,7 @@ pub fn spawn_stream_relay_with_buffer(
         tx,
         shutdown,
         metrics,
-        sequence: AtomicU64::new(0),
+        sequence: Arc::new(AtomicU64::new(0)),
         task: Some(task),
     }
 }
