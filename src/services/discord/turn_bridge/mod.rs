@@ -91,8 +91,7 @@ fn spawn_retry_with_history_with_release(
         // (panic, wedged future), the recv resolves with Err and we still
         // release. If 120s elapses with neither send nor drop, force
         // release so the lockout cannot leak forever.
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_secs(120), completion_rx).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(120), completion_rx).await;
         release_retry_pending(channel_id);
     });
 }

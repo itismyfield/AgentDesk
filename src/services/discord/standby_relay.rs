@@ -121,8 +121,28 @@ pub(super) async fn run_standby_relay(
                 Ok(_) => continue, // other channels — ignore
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Lagged(_)) => {
-                    // Force-poll on next tick; re-fetch state happens via
-                    // the inflight heartbeat path below.
+                    // Codex review HIGH: a bursty publisher can saturate the
+                    // 256-slot broadcast and Lag us before we observe our
+                    // own `Completed`. The previous `break` here meant we
+                    // silently fell through to the 1800s backstop — the
+                    // exact regression #2448 was meant to close. Recheck
+                    // the on-disk inflight authoritatively: if terminal
+                    // (file gone or pointing at a different output), the
+                    // turn already completed and we should exit now.
+                    if super::inflight::load_inflight_state(&provider, channel_id.get())
+                        .map(|state| {
+                            !standby_inflight_matches(&state, &output_path, placeholder_msg_id)
+                        })
+                        .unwrap_or(true)
+                    {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 👁 standby_relay exit on broadcast Lag + terminal inflight for channel {} (offset={})",
+                            channel_id.get(),
+                            current_offset
+                        );
+                        return;
+                    }
                     break;
                 }
                 Err(TryRecvError::Closed) => break, // sender dropped — keep polling
@@ -428,9 +448,7 @@ mod tests {
         };
 
         assert!(matches(&InflightSignal::Completed { channel_id: own }));
-        assert!(!matches(&InflightSignal::Completed {
-            channel_id: other
-        }));
+        assert!(!matches(&InflightSignal::Completed { channel_id: other }));
     }
 
     /// #2448 acceptance — `tokio::sync::broadcast` capacity 256 must
