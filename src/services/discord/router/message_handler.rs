@@ -206,6 +206,17 @@ fn claude_tui_busy_followup_diagnostic(
     )
 }
 
+#[cfg(unix)]
+fn recapture_inflight_offset_after_successful_busy_wait(
+    output_path: Option<&str>,
+    previous_offset: u64,
+) -> u64 {
+    output_path
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .unwrap_or(previous_offset)
+}
+
 fn metadata_parent_channel_id(metadata: Option<&serde_json::Value>) -> Option<serenity::ChannelId> {
     metadata
         .and_then(|value| value.get("parent_channel_id"))
@@ -5072,7 +5083,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     )
     .await;
 
-    let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, inflight_offset) = {
+    let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, mut inflight_offset) = {
         #[cfg(unix)]
         {
             if remote_profile.is_none()
@@ -5106,6 +5117,8 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
     let watcher_tmux_name = inflight_tmux_name.clone();
     let watcher_output_path = inflight_output_path.clone();
+    #[cfg(unix)]
+    let mut recapture_offset_after_busy_wait = false;
     // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.
     // If the first snapshot says busy, run wait_for_prompt_ready (Followup kind,
     // ~45s default) via spawn_blocking. If the wait succeeds AND a fresh
@@ -5123,10 +5136,12 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
         if let Some(initial_diagnostic) = initial {
             let wait_session_name = initial_diagnostic.tmux_session_name.clone();
+            let wait_cancel_token = cancel_token.clone();
             let wait_result = tokio::task::spawn_blocking(move || {
                 crate::services::claude_tui::input::wait_for_prompt_ready(
                     &wait_session_name,
                     crate::services::claude_tui::input::PromptReadinessKind::Followup,
+                    Some(wait_cancel_token.as_ref()),
                 )
             })
             .await
@@ -5163,6 +5178,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     Some(initial_diagnostic)
                 }
                 (Ok(()), None, _) => {
+                    recapture_offset_after_busy_wait = true;
                     tracing::info!(
                         channel_id = channel_id.get(),
                         user_msg_id = user_msg_id.get(),
@@ -5259,6 +5275,23 @@ pub(in crate::services::discord) async fn handle_text_message(
             .store(true, std::sync::atomic::Ordering::Relaxed);
         super::super::clear_watchdog_deadline_override(channel_id.get()).await;
         return Ok(());
+    }
+    #[cfg(unix)]
+    if recapture_offset_after_busy_wait {
+        let corrected_offset = recapture_inflight_offset_after_successful_busy_wait(
+            inflight_output_path.as_deref(),
+            inflight_offset,
+        );
+        if corrected_offset != inflight_offset {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                user_msg_id = user_msg_id.get(),
+                previous_offset = inflight_offset,
+                corrected_offset,
+                "claude_tui follow-up recaptured inflight offset after successful busy wait"
+            );
+        }
+        inflight_offset = corrected_offset;
     }
 
     let (logical_channel_id, thread_id, thread_title) =
@@ -7246,6 +7279,40 @@ mod session_strategy_lifecycle_tests {
                 "AgentDesk-claude-dead",
             )
             .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_busy_wait_recaptures_offset_past_previous_turn_bytes() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let output_path = dir.path().join("claude-tui-transcript.jsonl");
+        std::fs::write(&output_path, b"already delivered\n").expect("write initial transcript");
+        let stale_offset = std::fs::metadata(&output_path).unwrap().len();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&output_path)
+            .unwrap()
+            .write_all(b"previous turn bytes appended during busy wait\n")
+            .expect("append previous-turn bytes");
+
+        let corrected_offset = recapture_inflight_offset_after_successful_busy_wait(
+            output_path.to_str(),
+            stale_offset,
+        );
+        let transcript = std::fs::read(&output_path).expect("read transcript");
+        let stale_window = &transcript[stale_offset as usize..];
+        let corrected_window = &transcript[corrected_offset as usize..];
+
+        assert!(
+            String::from_utf8_lossy(stale_window).contains("previous turn bytes"),
+            "test setup must prove the stale offset would recover previous-turn bytes"
+        );
+        assert_eq!(
+            corrected_window, b"",
+            "corrected new-turn offset must skip bytes appended while waiting"
         );
     }
 

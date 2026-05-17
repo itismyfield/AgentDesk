@@ -351,6 +351,10 @@ The remaining giant-file modules under `src/services/` not covered above:
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
   non-bugfix behavior beyond the readiness/cancel contract.
+- `src/services/claude_tui/input.rs` (~1049) — Claude TUI input readiness
+  detector, prompt delivery, and cancellation/offset handoff surface. Treat as
+  giant-file territory; split before adding non-bugfix behavior beyond the
+  readiness/cancel contract.
 - `src/services/claude_tui/hook_bundle.rs` (~1152) — Claude/Codex hook
   bundle renderer + trust-hash canonicalization. Includes the #2210/#2259
   startup self-check and the gated Codex-CLI integration test. Treat as

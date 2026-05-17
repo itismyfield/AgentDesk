@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
 
+use crate::services::provider::{CancelToken, cancel_requested};
+
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 const PROMPT_READY_CAPTURE_SCROLLBACK: i32 = -80;
 const PROMPT_READY_DEBUG_TAIL_LINES: usize = 24;
@@ -20,6 +22,7 @@ const FOLLOWUP_PROMPT_READY_EVENT_BUDGET: Duration = Duration::from_secs(5);
 /// so the TUI has time to redraw the prompt marker after Stop.
 const PROMPT_READY_POST_EVENT_SETTLE: Duration = Duration::from_millis(50);
 const PROMPT_READY_TIMEOUT_ERROR_PREFIX: &str = "timeout waiting for claude tui";
+pub const PROMPT_READY_CANCELLED_ERROR: &str = "claude tui prompt readiness wait cancelled";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptReadinessKind {
@@ -114,20 +117,46 @@ pub fn plan_cancel() -> Vec<TuiInputAction> {
     vec![TuiInputAction::Escape]
 }
 
-pub fn send_fresh_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
-    send_prompt_with_readiness(session_name, prompt, PromptReadinessKind::FreshTurn)
+pub fn send_fresh_prompt(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    send_prompt_with_readiness(
+        session_name,
+        prompt,
+        PromptReadinessKind::FreshTurn,
+        cancel_token,
+    )
 }
 
-pub fn send_followup_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
-    send_prompt_with_readiness(session_name, prompt, PromptReadinessKind::Followup)
+pub fn send_followup_prompt(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    send_prompt_with_readiness(
+        session_name,
+        prompt,
+        PromptReadinessKind::Followup,
+        cancel_token,
+    )
 }
 
-pub fn send_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
-    send_followup_prompt(session_name, prompt)
+pub fn send_prompt(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    send_followup_prompt(session_name, prompt, cancel_token)
 }
 
 pub fn is_prompt_ready_timeout_error(error: &str) -> bool {
     error.starts_with(PROMPT_READY_TIMEOUT_ERROR_PREFIX)
+}
+
+pub fn is_prompt_ready_cancelled_error(error: &str) -> bool {
+    error == PROMPT_READY_CANCELLED_ERROR
 }
 
 pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot {
@@ -154,15 +183,16 @@ fn send_prompt_with_readiness(
     session_name: &str,
     prompt: &str,
     readiness: PromptReadinessKind,
+    cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let actions = plan_prompt_submit(prompt)?;
-    wait_for_prompt_ready(session_name, readiness)?;
+    wait_for_prompt_ready(session_name, readiness, cancel_token)?;
     crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
         "claude",
         session_name,
         prompt,
     );
-    match run_actions(session_name, &actions) {
+    match run_actions(session_name, &actions, cancel_token) {
         Ok(()) => Ok(()),
         Err(error) => {
             crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
@@ -176,11 +206,16 @@ fn send_prompt_with_readiness(
 }
 
 pub fn send_cancel(session_name: &str) -> Result<(), String> {
-    run_actions(session_name, &plan_cancel())
+    run_actions(session_name, &plan_cancel(), None)
 }
 
-fn run_actions(session_name: &str, actions: &[TuiInputAction]) -> Result<(), String> {
+fn run_actions(
+    session_name: &str,
+    actions: &[TuiInputAction],
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
     for action in actions {
+        check_prompt_cancel(cancel_token)?;
         let output = match action {
             TuiInputAction::Literal(text) => {
                 crate::services::platform::tmux::send_literal(session_name, text)?
@@ -189,6 +224,7 @@ fn run_actions(session_name: &str, actions: &[TuiInputAction]) -> Result<(), Str
                 let buffer_name = format!("agentdesk-tui-input-{}", uuid::Uuid::new_v4());
                 let load_output = crate::services::platform::tmux::load_buffer(&buffer_name, text)?;
                 ensure_tmux_success(load_output, action)?;
+                check_prompt_cancel(cancel_token)?;
                 crate::services::platform::tmux::paste_buffer(session_name, &buffer_name, true)?
             }
             TuiInputAction::Enter => {
@@ -201,6 +237,14 @@ fn run_actions(session_name: &str, actions: &[TuiInputAction]) -> Result<(), Str
         ensure_tmux_success(output, action)?;
     }
     Ok(())
+}
+
+fn check_prompt_cancel(cancel_token: Option<&CancelToken>) -> Result<(), String> {
+    if cancel_requested(cancel_token) {
+        Err(PROMPT_READY_CANCELLED_ERROR.to_string())
+    } else {
+        Ok(())
+    }
 }
 
 fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), String> {
@@ -224,9 +268,21 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
 pub fn wait_for_prompt_ready(
     session_name: &str,
     readiness: PromptReadinessKind,
+    cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
+    check_prompt_cancel(cancel_token)?;
     let timeout = readiness.timeout();
     let start = Instant::now();
+
+    if cancel_token.is_some() {
+        return wait_for_prompt_ready_polling(
+            session_name,
+            readiness,
+            timeout,
+            start,
+            cancel_token,
+        );
+    }
 
     // Event-driven fast path with subscribe-before-snapshot ordering.
     //
@@ -246,6 +302,7 @@ pub fn wait_for_prompt_ready(
 
     match fast_path {
         HookFastPathOutcome::PreSnapshotReady => {
+            check_prompt_cancel(cancel_token)?;
             tracing::debug!(
                 tmux_session_name = session_name,
                 readiness = readiness.label(),
@@ -255,13 +312,16 @@ pub fn wait_for_prompt_ready(
             return Ok(());
         }
         HookFastPathOutcome::PreSnapshotSessionDead => {
+            check_prompt_cancel(cancel_token)?;
             return Err("claude tui session died before prompt input was ready".to_string());
         }
         HookFastPathOutcome::Ready | HookFastPathOutcome::Pending => {}
     }
 
+    check_prompt_cancel(cancel_token)?;
     if let Some(snapshot) = post_event_snapshot {
         if snapshot.prompt_marker_detected {
+            check_prompt_cancel(cancel_token)?;
             tracing::debug!(
                 tmux_session_name = session_name,
                 readiness = readiness.label(),
@@ -272,10 +332,12 @@ pub fn wait_for_prompt_ready(
             return Ok(());
         }
         if !snapshot.tmux_pane_alive {
+            check_prompt_cancel(cancel_token)?;
             return Err("claude tui session died before prompt input was ready".to_string());
         }
     }
 
+    check_prompt_cancel(cancel_token)?;
     if !matches!(fast_path, HookFastPathOutcome::Ready) {
         // Fast path did not fire within its budget — keep the original warn
         // visibility so missing Stop hooks remain debuggable.
@@ -287,7 +349,7 @@ pub fn wait_for_prompt_ready(
         );
     }
 
-    wait_for_prompt_ready_polling(session_name, readiness, timeout, start)
+    wait_for_prompt_ready_polling(session_name, readiness, timeout, start, cancel_token)
 }
 
 /// Sync wrapper that awaits the global prompt-ready notify with a bounded
@@ -451,17 +513,22 @@ fn wait_for_prompt_ready_polling(
     readiness: PromptReadinessKind,
     timeout: Duration,
     start: Instant,
+    cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let mut wait_interval = Duration::from_millis(100);
     loop {
+        check_prompt_cancel(cancel_token)?;
         let snapshot = prompt_readiness_snapshot(session_name);
+        check_prompt_cancel(cancel_token)?;
         if snapshot.prompt_marker_detected {
             return Ok(());
         }
         if !snapshot.tmux_pane_alive {
+            check_prompt_cancel(cancel_token)?;
             return Err("claude tui session died before prompt input was ready".to_string());
         }
         if start.elapsed() >= timeout {
+            check_prompt_cancel(cancel_token)?;
             log_prompt_ready_timeout(session_name, readiness, timeout, &snapshot);
             return Err(format!(
                 "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; capture_available={}",
@@ -471,6 +538,7 @@ fn wait_for_prompt_ready_polling(
             ));
         }
         std::thread::sleep(wait_interval);
+        check_prompt_cancel(cancel_token)?;
         wait_interval = std::cmp::min(wait_interval * 2, Duration::from_millis(1000));
     }
 }
@@ -874,6 +942,32 @@ line 13";
         ));
     }
 
+    #[test]
+    fn cancelled_error_is_classified_and_distinct_from_timeout() {
+        assert!(is_prompt_ready_cancelled_error(
+            PROMPT_READY_CANCELLED_ERROR
+        ));
+        assert!(!is_prompt_ready_cancelled_error(
+            "timeout waiting for claude tui fresh prompt input readiness after 120s"
+        ));
+        assert!(!is_prompt_ready_timeout_error(PROMPT_READY_CANCELLED_ERROR));
+    }
+
+    #[test]
+    fn wait_for_prompt_ready_returns_cancelled_for_pre_cancelled_token() {
+        let token = CancelToken::new();
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let session_name = format!("agentdesk-test-missing-cancelled-{}", std::process::id());
+
+        let error =
+            wait_for_prompt_ready(&session_name, PromptReadinessKind::Followup, Some(&token))
+                .expect_err("pre-cancelled token must short-circuit readiness wait");
+
+        assert!(is_prompt_ready_cancelled_error(&error), "got: {error}");
+    }
+
     // #2416: when the busy-followup wait path bails because the tmux session
     // never came alive, the dead-session error must NOT be classified as a
     // timeout. The caller relies on this split to decide between "wait again"
@@ -905,7 +999,7 @@ line 13";
     #[test]
     fn wait_for_prompt_ready_is_public_and_returns_err_for_missing_session() {
         let session_name = format!("agentdesk-test-missing-{}", std::process::id());
-        let result = wait_for_prompt_ready(&session_name, PromptReadinessKind::Followup);
+        let result = wait_for_prompt_ready(&session_name, PromptReadinessKind::Followup, None);
         assert!(
             result.is_err(),
             "wait_for_prompt_ready on a missing session must return Err; got {result:?}"

@@ -5,7 +5,7 @@
 
 - Production Rust modules: `606`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `115`
+- Giant files: `116`
 
 ## Namespace Summary
 
@@ -336,12 +336,12 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 |  |
-| `services::claude` | `src/services/claude.rs` | 3844 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 3889 | giant-file |
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 6 |  |
 | `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1164 | giant-file |
 | `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 427 |  |
 | `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 528 |  |
-| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 970 |  |
+| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 1064 | giant-file |
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 275 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 295 |  |
 | `services::cluster` | `src/services/cluster/mod.rs` | 20 |  |
@@ -460,7 +460,7 @@
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 231 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2658 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 9496 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 9563 | giant-file |
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 354 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 130 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 410 |  |
