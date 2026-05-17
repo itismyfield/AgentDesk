@@ -43,10 +43,37 @@ fn escape_for_json(value: &str) -> String {
     out
 }
 
+/// Default ureq request timeout for synchronous localhost POSTs. Clamped to
+/// the bridge-op deadline when one is armed (#2378).
+const HTTP_POST_DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Choose the ureq timeout: the smaller of the default and the remaining
+/// bridge-op budget. Returns `Err(message)` if the deadline has already
+/// passed so the policy can short-circuit instead of issuing a doomed
+/// request that would block the runtime lock past the deadline.
+fn resolve_http_post_timeout() -> Result<std::time::Duration, String> {
+    match crate::engine::loader::bridge_op_deadline_remaining() {
+        None => Ok(HTTP_POST_DEFAULT_TIMEOUT),
+        Some(remaining) if remaining.is_zero() => {
+            Err("bridge deadline passed before http.post started".to_string())
+        }
+        Some(remaining) => Ok(remaining.min(HTTP_POST_DEFAULT_TIMEOUT)),
+    }
+}
+
 fn invoke_localhost_post(url: &str, body_json: &str) -> String {
     if !crate::utils::loopback_url::is_loopback_url(url, None) {
         return r#"{"error":"only localhost allowed"}"#.to_string();
     }
+    // #2378: bound the ureq timeout by the current eval deadline so a
+    // hot-reloaded policy can never hold the runtime lock longer than the
+    // deadline budget while waiting for a localhost POST to return.
+    let timeout = match resolve_http_post_timeout() {
+        Ok(d) => d,
+        Err(message) => {
+            return format!(r#"{{"error":"{}"}}"#, escape_for_json(&message));
+        }
+    };
     let url_owned = url.to_string();
     let body_owned = body_json.to_string();
     // Run on a dedicated thread to avoid blocking the tokio I/O driver.
@@ -64,7 +91,7 @@ fn invoke_localhost_post(url: &str, body_json: &str) -> String {
         // the policy can decide whether to retry.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let request = ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(5))
+                .timeout(timeout)
                 .build()
                 .post(&url_owned)
                 .set("Content-Type", "application/json");
@@ -140,6 +167,44 @@ mod tests {
         struct Opaque;
         let opaque_panic = std::panic::catch_unwind(|| std::panic::panic_any(Opaque)).unwrap_err();
         assert_eq!(describe_panic_payload(opaque_panic), "unknown panic");
+    }
+
+    /// #2378: with no deadline armed, the timeout resolver must return the
+    /// default so live-engine `agentdesk.http.post` calls (which run
+    /// outside any bounded eval) retain their full 5s budget.
+    #[test]
+    fn resolve_http_post_timeout_is_default_without_armed_deadline() {
+        assert_eq!(resolve_http_post_timeout(), Ok(HTTP_POST_DEFAULT_TIMEOUT));
+    }
+
+    /// #2378: when a tight deadline is armed, the resolver must clamp the
+    /// ureq timeout down to (at most) the remaining budget so a localhost
+    /// POST cannot block the runtime lock longer than the JS eval's
+    /// deadline.
+    #[test]
+    fn resolve_http_post_timeout_clamps_under_tight_deadline() {
+        let _scope =
+            crate::engine::loader::ScopedBridgeDeadline::new(std::time::Duration::from_millis(150));
+        let resolved = resolve_http_post_timeout().expect("deadline still in the future");
+        assert!(
+            resolved <= std::time::Duration::from_millis(150),
+            "ureq timeout must shrink to remaining budget, got {resolved:?}"
+        );
+    }
+
+    /// #2378: after the armed deadline elapses, the resolver must
+    /// short-circuit so we don't issue a doomed request that would block
+    /// the runtime past the deadline.
+    #[test]
+    fn resolve_http_post_timeout_errors_after_deadline_elapses() {
+        let _scope =
+            crate::engine::loader::ScopedBridgeDeadline::new(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let resolved = resolve_http_post_timeout();
+        assert!(
+            matches!(&resolved, Err(msg) if msg.contains("deadline passed")),
+            "expected deadline-passed error, got {resolved:?}"
+        );
     }
 
     #[test]
