@@ -29,6 +29,79 @@ fn tmux_session_has_live_pane(_name: &str) -> bool {
     false
 }
 
+/// #2428 H5: exponential backoff (+ jitter) for the 3-attempt recovery retry
+/// loops in this module. Replaces the previous fixed `1s` gap so transient
+/// failures are retried sooner while still capping the worst-case wait at
+/// roughly the previous total (≈2s + jitter).
+///
+/// `attempt` is 1-indexed and matches the loop variable: it is the attempt
+/// that *just failed*, and the returned duration is how long to wait before
+/// the next attempt. Callers should only invoke this when another attempt
+/// will actually be tried (typically `if attempt < 3`).
+pub(super) fn recovery_retry_backoff(attempt: u32) -> std::time::Duration {
+    // Base schedule between attempts 1→2, 2→3, …: 200ms, 500ms, 2000ms.
+    // Clamped to MAX_BASE_MS so unusually high attempt counts (which today
+    // do not happen, but might if a follow-up bumps the cap) do not stall
+    // recovery indefinitely.
+    const SCHEDULE_MS: [u64; 3] = [200, 500, 2000];
+    const MAX_BASE_MS: u64 = 2000;
+    let idx = attempt.saturating_sub(1) as usize;
+    let base_ms = SCHEDULE_MS
+        .get(idx)
+        .copied()
+        .unwrap_or(MAX_BASE_MS)
+        .min(MAX_BASE_MS);
+    // Add 0..=100ms uniform jitter so simultaneous retries (e.g. two
+    // channels recovering at once) do not lock-step into the same wakeup.
+    use rand::Rng;
+    let jitter_ms = rand::thread_rng().gen_range(0..=100);
+    std::time::Duration::from_millis(base_ms + jitter_ms)
+}
+
+#[cfg(test)]
+mod recovery_retry_backoff_tests {
+    use super::recovery_retry_backoff;
+    use std::time::Duration;
+
+    #[test]
+    fn backoff_attempt_1_is_in_200_to_300_ms() {
+        let d = recovery_retry_backoff(1);
+        assert!(d >= Duration::from_millis(200), "got {d:?}");
+        assert!(d <= Duration::from_millis(300), "got {d:?}");
+    }
+
+    #[test]
+    fn backoff_attempt_2_is_in_500_to_600_ms() {
+        let d = recovery_retry_backoff(2);
+        assert!(d >= Duration::from_millis(500), "got {d:?}");
+        assert!(d <= Duration::from_millis(600), "got {d:?}");
+    }
+
+    #[test]
+    fn backoff_attempt_3_is_in_2000_to_2100_ms() {
+        let d = recovery_retry_backoff(3);
+        assert!(d >= Duration::from_millis(2000), "got {d:?}");
+        assert!(d <= Duration::from_millis(2100), "got {d:?}");
+    }
+
+    #[test]
+    fn backoff_clamps_attempts_beyond_schedule() {
+        // Even if we ever extend the loop past 3, the wait must not exceed
+        // the documented cap.
+        let d = recovery_retry_backoff(7);
+        assert!(d <= Duration::from_millis(2100), "got {d:?}");
+    }
+
+    #[test]
+    fn backoff_attempt_zero_is_treated_as_first() {
+        // Defensive: a caller passing 0 should not get a divide-by-zero or
+        // a tiny instant-retry; behave like attempt 1.
+        let d = recovery_retry_backoff(0);
+        assert!(d >= Duration::from_millis(200), "got {d:?}");
+        assert!(d <= Duration::from_millis(300), "got {d:?}");
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryPhase {
     Pending,
@@ -251,9 +324,10 @@ fn tmux_session_alive_with_retry(name: &str) -> bool {
     if tmux_session_has_live_pane(name) {
         return true;
     }
-    // Retry up to 2 more times with 1-second gaps
-    for attempt in 1..=2 {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+    // #2428 H5: retry up to 2 more times with exponential backoff + jitter
+    // (was a fixed 1s gap; see `recovery_retry_backoff`).
+    for attempt in 1..=2u32 {
+        std::thread::sleep(recovery_retry_backoff(attempt));
         if tmux_session_has_live_pane(name) {
             tracing::info!(
                 "  [recovery] tmux pane alive on retry {} for {}",
@@ -271,8 +345,9 @@ fn tmux_has_session_with_retry(name: &str) -> bool {
     if crate::services::platform::tmux::has_session(name) {
         return true;
     }
-    for attempt in 1..=2 {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+    // #2428 H5: see `recovery_retry_backoff`.
+    for attempt in 1..=2u32 {
+        std::thread::sleep(recovery_retry_backoff(attempt));
         if crate::services::platform::tmux::has_session(name) {
             tracing::info!(
                 "  [recovery] tmux session found on retry {} for {}",
@@ -1426,7 +1501,8 @@ pub(super) async fn restore_inflight_turns(
                                         "  [{ts}] ⚠ recovery: finalize_dispatch failed for {did} (attempt {attempt}/3): {e}"
                                     );
                                     if attempt < 3 {
-                                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                        // #2428 H5: exponential backoff + jitter.
+                                        tokio::time::sleep(recovery_retry_backoff(u32::from(attempt))).await;
                                     }
                                 }
                             }
@@ -1503,7 +1579,8 @@ pub(super) async fn restore_inflight_turns(
                                 }
                             }
                             if attempt < 3 {
-                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                // #2428 H5: exponential backoff + jitter.
+                                tokio::time::sleep(recovery_retry_backoff(u32::from(attempt))).await;
                             }
                         }
                         // API retries exhausted — runtime-root DB fallback.
@@ -2023,7 +2100,8 @@ pub(super) async fn restore_inflight_turns(
                                             "  [{ts}] ⚠ recovery: finalize_dispatch failed for {did} (attempt {attempt}/3): {e}"
                                         );
                                         if attempt < 3 {
-                                            tokio::time::sleep(std::time::Duration::from_secs(1))
+                                            // #2428 H5: exponential backoff + jitter.
+                                            tokio::time::sleep(recovery_retry_backoff(u32::from(attempt)))
                                                 .await;
                                         }
                                     }
@@ -2265,7 +2343,8 @@ pub(super) async fn restore_inflight_turns(
                                             "  [{ts}] ⚠ recovery: finalize_dispatch failed for {did} (attempt {attempt}/3): {e}"
                                         );
                                         if attempt < 3 {
-                                            tokio::time::sleep(std::time::Duration::from_secs(1))
+                                            // #2428 H5: exponential backoff + jitter.
+                                            tokio::time::sleep(recovery_retry_backoff(u32::from(attempt)))
                                                 .await;
                                         }
                                     }
