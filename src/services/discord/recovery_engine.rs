@@ -262,6 +262,37 @@ async fn relay_recovery_terminal_notice(
     .is_ok()
 }
 
+/// Outcome of `complete_recovery_visible_turn` exposed to callers so they can
+/// short-circuit dispatch / mailbox / analytics work on a still-busy pane.
+///
+/// #2293 H3 — pre-existing callers ignored the gate outcome entirely because
+/// the helper returned `()`. They then proceeded with `persist_turn_analytics`
+/// + dispatch completion + mailbox finalize regardless of whether the
+/// `응답 완료` panel actually emitted. The new outcome lets each call site
+/// observe `LifecyclePaused` and skip the side effects, mirroring the
+/// bridge/watcher behaviour landed in the same PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RecoveryCompletionOutcome {
+    /// Visible completion emitted (or status-panel-v2 was disabled / no
+    /// status message id was wired). Callers may proceed with downstream
+    /// dispatch / analytics / mailbox finalization as before.
+    Emitted,
+    /// Recovery short-circuited because the TUI quiescence gate reported
+    /// `TimedOut`. Callers MUST skip dispatch completion, mailbox finish,
+    /// and analytics persistence — the next watcher pass / placeholder
+    /// sweeper reconciles when the pane finally reports idle.
+    LifecyclePaused,
+}
+
+impl RecoveryCompletionOutcome {
+    /// `true` when callers should proceed with downstream side effects. False
+    /// only on `LifecyclePaused`, where the gate explicitly suppressed
+    /// completion to avoid the #2161 / #2293 premature-completion cascade.
+    pub(super) fn should_proceed(self) -> bool {
+        matches!(self, RecoveryCompletionOutcome::Emitted)
+    }
+}
+
 async fn complete_recovery_visible_turn(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -269,18 +300,9 @@ async fn complete_recovery_visible_turn(
     state: &super::inflight::InflightTurnState,
     background: bool,
     source: &'static str,
-) {
+) -> RecoveryCompletionOutcome {
     let channel_id = ChannelId::new(state.channel_id);
     let user_msg_id = MessageId::new(state.user_msg_id);
-    super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
-    super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
-
-    if !shared.status_panel_v2_enabled {
-        return;
-    }
-    let Some(status_msg_id) = state.status_message_id.map(MessageId::new) else {
-        return;
-    };
 
     // #2161 (Codex round-2 M1): recovery completes a turn based on JSONL
     // `result` + output-file drain, not tmux pane readiness. For ClaudeTui
@@ -289,6 +311,12 @@ async fn complete_recovery_visible_turn(
     // the emit so the next watcher pass / placeholder sweeper reconciles.
     // The gate lives in the `tmux` module (`#[cfg(unix)]`); on non-unix
     // targets we skip it and emit completion as normal.
+    //
+    // #2293 H3 — the gate is hoisted ABOVE the ⏳ → ✅ reaction so a
+    // TimedOut outcome ALSO suppresses the reaction (was: reaction ran
+    // before the gate, lying about completion to the user). Recovery's
+    // visible side effects now follow the same ordering as the bridge and
+    // watcher paths.
     #[cfg(unix)]
     if let Some(tmux_session_name) = state.tmux_session_name.as_deref() {
         let outcome = super::tmux::run_tui_completion_gate(
@@ -304,11 +332,21 @@ async fn complete_recovery_visible_turn(
                 provider = %provider.as_str(),
                 channel = channel_id.get(),
                 source = source,
-                "[{ts}] ⚠ recovery turn-complete suppressed by TUI quiescence gate (#2161)"
+                "[{ts}] ⚠ #2293 recovery lifecycle-stage paused — TUI quiescence gate timed out; suppressing ⏳→✅ reaction AND downstream dispatch / analytics / mailbox finalize until the next pass observes idle"
             );
-            return;
+            return RecoveryCompletionOutcome::LifecyclePaused;
         }
     }
+
+    super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
+    super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
+
+    if !shared.status_panel_v2_enabled {
+        return RecoveryCompletionOutcome::Emitted;
+    }
+    let Some(status_msg_id) = state.status_message_id.map(MessageId::new) else {
+        return RecoveryCompletionOutcome::Emitted;
+    };
 
     shared
         .placeholder_live_events
@@ -332,6 +370,7 @@ async fn complete_recovery_visible_turn(
             error
         );
     }
+    RecoveryCompletionOutcome::Emitted
 }
 
 #[cfg(test)]
@@ -1409,7 +1448,7 @@ pub(super) async fn restore_inflight_turns(
                 // delivery commits; otherwise the channel shows completion
                 // without the final assistant message.
                 let user_msg_id = MessageId::new(state.user_msg_id);
-                complete_recovery_visible_turn(
+                let visible_outcome = complete_recovery_visible_turn(
                     http,
                     shared,
                     provider,
@@ -1418,6 +1457,19 @@ pub(super) async fn restore_inflight_turns(
                     "completed_during_downtime",
                 )
                 .await;
+                if !visible_outcome.should_proceed() {
+                    // #2293 H3 — TUI quiescence gate paused recovery. Skip
+                    // dispatch finalize + analytics persist; preserve the
+                    // inflight so the next pass can retry once the pane
+                    // reports idle.
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        provider = %provider.as_str(),
+                        channel = channel_id.get(),
+                        "[{ts}] ⚠ #2293: recovery (completed_during_downtime) deferred — TUI gate paused; will retry on next watcher pass"
+                    );
+                    continue;
+                }
                 // Complete the dispatch if this was a work dispatch turn — the
                 // normal completion path was lost when dcserver restarted.
                 // #142: implementation/rework need explicit completion. Review
@@ -2015,7 +2067,7 @@ pub(super) async fn restore_inflight_turns(
                 );
                 continue;
             }
-            complete_recovery_visible_turn(
+            let visible_outcome = complete_recovery_visible_turn(
                 http,
                 shared,
                 provider,
@@ -2024,6 +2076,18 @@ pub(super) async fn restore_inflight_turns(
                 "captured_full_response",
             )
             .await;
+            if !visible_outcome.should_proceed() {
+                // #2293 H3 — TUI quiescence gate paused recovery. Skip
+                // dispatch finalize + analytics persist; preserve the
+                // inflight so the next pass retries once the pane is idle.
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel = channel_id.get(),
+                    "[{ts}] ⚠ #2293: recovery (captured_full_response) deferred — TUI gate paused"
+                );
+                continue;
+            }
 
             let recovered_dispatch_id = parse_dispatch_id(&state.user_text)
                 .or(lookup_pending_dispatch_for_thread(shared.api_port, state.channel_id).await);
@@ -2256,7 +2320,7 @@ pub(super) async fn restore_inflight_turns(
                 continue;
             }
             // Mark user message as completed only after Discord terminal delivery commits.
-            complete_recovery_visible_turn(
+            let visible_outcome = complete_recovery_visible_turn(
                 http,
                 shared,
                 provider,
@@ -2265,6 +2329,17 @@ pub(super) async fn restore_inflight_turns(
                 "output_completed",
             )
             .await;
+            if !visible_outcome.should_proceed() {
+                // #2293 H3 — TUI quiescence gate paused recovery. Skip
+                // downstream dispatch / analytics work; the next pass retries.
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel = channel_id.get(),
+                    "[{ts}] ⚠ #2293: recovery (output_completed) deferred — TUI gate paused"
+                );
+                continue;
+            }
 
             // Complete the dispatch if this was an implementation/rework turn.
             // Review dispatches require the verdict flow (review_verdict.rs)

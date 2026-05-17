@@ -2666,6 +2666,39 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         } else {
             TuiCompletionGateOutcome::NotGated
         };
+        // #2293 H2 — single boolean threaded through every terminal side
+        // effect below. On `TimedOut` the pane is still busy past the bounded
+        // wait, so we must SKIP:
+        //   * ✅ reaction on the user message
+        //   * session transcript / turn-analytics persist (writes a row that
+        //     claims completion at this exact JSONL offset, which is wrong
+        //     while output is still being produced)
+        //   * history append into the in-memory session
+        //   * confirmed-end watermark advance (turn isn't actually done)
+        //   * `clear_inflight_state` (intake gate uses inflight presence to
+        //     decide whether to admit a new turn — wiping it lets the next
+        //     turn race the still-busy pane)
+        //   * `finish_restored_watcher_active_turn` (mailbox cancel_token
+        //     release for the same reason)
+        //   * deferred idle queue kickoff (would push backlog into the busy
+        //     pane)
+        //   * terminal-finalize stop decision (would stop the watcher while
+        //     output is still flowing)
+        // The placeholder sweeper / next watcher pass reconciles when the
+        // pane finally reports idle, mirroring the bridge-side behaviour.
+        let lifecycle_stage_paused = matches!(
+            watcher_tui_gate_outcome,
+            TuiCompletionGateOutcome::TimedOut
+        );
+        if lifecycle_stage_paused {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %watcher_provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                "[{ts}] ⚠ #2293: watcher lifecycle-stage paused — TUI quiescence gate timed out; skipping reaction / transcript / inflight-clear / mailbox-finish side effects until the next pass observes idle"
+            );
+        }
 
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
             complete_watcher_status_panel_v2(
@@ -2687,7 +2720,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // Advance the shared confirmed-delivery watermark on any committed
         // direct emission or empty-turn cleanup. CAS loop ensures we only ever move the
         // watermark FORWARD, even if some other instance has raced ahead.
-        if terminal_output_committed {
+        // #2293 H2 — pinning the watermark while the gate is TimedOut is what
+        // keeps the next pass's gate evaluation pointed at the same JSONL
+        // slice; advancing here would let `tmux_tail_offset` equal
+        // `confirmed_end` on the retry, falsely claiming there's nothing
+        // new to relay.
+        if terminal_output_committed && !lifecycle_stage_paused {
             advance_watcher_confirmed_end(
                 &shared,
                 &watcher_provider,
@@ -2748,7 +2786,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // turn_analytics. The notify-bot outbox enqueue above already
         // delivered the recovered response to the user; nothing else on the
         // success path is legitimate here.
+        //
+        // #2293 H2 — also skip on `lifecycle_stage_paused`. The ✅ reaction +
+        // transcript row + analytics row all claim completion at this exact
+        // JSONL offset; while the pane is still busy past the gate timeout
+        // they would either lie about completion (✅) or write a row that
+        // gets contradicted by the next pass (transcript / analytics).
         if terminal_output_committed
+            && !lifecycle_stage_paused
             && let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin)
         {
             let user_msg_id = serenity::MessageId::new(state.user_msg_id);
@@ -2916,7 +2961,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // was either delivered to Discord or intentionally suppressed as an
         // internal task notification. Only genuine delivery failure preserves
         // retry/handoff state for next startup.
-        if terminal_output_committed {
+        //
+        // #2293 H2 — skip the entire block on `lifecycle_stage_paused`. Wiping
+        // inflight + releasing the mailbox cancel_token while the pane is
+        // still busy is exactly the cascade the issue is filed against: the
+        // intake gate would see an empty inflight and a free mailbox and
+        // admit a new turn into a non-quiescent pane. The next watcher pass
+        // re-evaluates the gate and finishes the cleanup once the pane
+        // actually reports idle.
+        if terminal_output_committed && !lifecycle_stage_paused {
             if has_assistant_response
                 && let Some(state) = inflight_state.as_ref().filter(|state| !state.rebind_origin)
             {
