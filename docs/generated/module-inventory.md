@@ -396,7 +396,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 3249 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 931 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 5637 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 5630 | giant-file |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 22 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 242 |  |
 | `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 1494 | giant-file |
@@ -460,10 +460,10 @@
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 231 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2658 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 9097 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 9494 | giant-file |
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 354 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 130 |  |
-| `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 394 |  |
+| `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 410 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 3234 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 373 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 185 |  |
@@ -598,7 +598,7 @@
 | `services::retrospectives` | `src/services/retrospectives.rs` | 882 |  |
 | `services::routines` | `src/services/routines/mod.rs` | 27 |  |
 | `services::routines::action` | `src/services/routines/action.rs` | 284 |  |
-| `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 680 |  |
+| `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 727 |  |
 | `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 1653 | giant-file |
 | `services::routines::loader` | `src/services/routines/loader.rs` | 2133 | giant-file |
 | `services::routines::runtime` | `src/services/routines/runtime.rs` | 786 |  |

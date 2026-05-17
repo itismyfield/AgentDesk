@@ -25,6 +25,7 @@ use super::turn_start::session_strategy_lifecycle_event;
 use super::turn_start::{HEADLESS_TURN_MESSAGE_ID_BASE, headless_turn_message_id_seed};
 pub(crate) use super::turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
+    HeadlessTurnStartStatus,
 };
 use super::turn_start::{
     SessionResetReason, cli_just_spawned_for_emit, dispatch_reset_lifecycle_code,
@@ -833,6 +834,71 @@ async fn mailbox_try_start_turn_with_terminal_marker_cleanup(
     started
 }
 
+async fn cleanup_terminal_delivery_marker_after_turn_start(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    session_key: Option<&str>,
+) {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return;
+    };
+    let Some(session_key) = session_key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let thread_channel_id = channel_id.get().to_string();
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(
+                "[outbox] failed to begin terminal delivery marker cleanup after turn start for channel {}: {}",
+                channel_id,
+                error
+            );
+            return;
+        }
+    };
+
+    if let Err(error) = sqlx::query("SELECT pg_advisory_xact_lock(1752, hashtext($1))")
+        .bind(&thread_channel_id)
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::warn!(
+            "[outbox] failed to lock terminal delivery marker after turn start for channel {}: {}",
+            channel_id,
+            error
+        );
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    if let Err(error) = sqlx::query(
+        "UPDATE sessions
+            SET active_turn_delivery_outbox_id = NULL
+          WHERE session_key = $1
+            AND thread_channel_id = $2
+            AND active_turn_delivery_outbox_id IS NOT NULL",
+    )
+    .bind(session_key)
+    .bind(&thread_channel_id)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::warn!(
+            "[outbox] failed to clear terminal delivery marker after turn start for channel {}: {}",
+            channel_id,
+            error
+        );
+    }
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(
+            "[outbox] failed to commit terminal delivery marker cleanup after turn start for channel {}: {}",
+            channel_id,
+            error
+        );
+    }
+}
+
 fn native_fast_mode_override_for_turn(
     provider: &ProviderKind,
     channel_fast_mode_setting: Option<bool>,
@@ -855,15 +921,36 @@ fn codex_goals_override_for_turn(
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GoalCommandKind {
     NotGoal,
     ChainedStart,
     FreshStart,
-    Lifecycle,
+    Lifecycle(GoalLifecycleCommand),
 }
 
-const GOAL_LIFECYCLE_SUBCOMMANDS: &[&str] = &["pause", "resume", "clear"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoalLifecycleCommand {
+    Pause,
+    Resume,
+    Clear,
+}
+
+impl GoalLifecycleCommand {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Clear => "clear",
+        }
+    }
+}
+
+const GOAL_LIFECYCLE_SUBCOMMANDS: &[(&str, GoalLifecycleCommand)] = &[
+    ("pause", GoalLifecycleCommand::Pause),
+    ("resume", GoalLifecycleCommand::Resume),
+    ("clear", GoalLifecycleCommand::Clear),
+];
 
 fn classify_codex_goal_command(text: &str) -> GoalCommandKind {
     let Some(first_line) = text.trim_start().lines().next() else {
@@ -880,12 +967,12 @@ fn classify_codex_goal_command(text: &str) -> GoalCommandKind {
     if args.is_empty() {
         return GoalCommandKind::ChainedStart;
     }
-    for sub in GOAL_LIFECYCLE_SUBCOMMANDS {
+    for (sub, command) in GOAL_LIFECYCLE_SUBCOMMANDS {
         let Some(after) = args.strip_prefix(sub) else {
             continue;
         };
         if after.is_empty() || after.chars().next().is_some_and(char::is_whitespace) {
-            return GoalCommandKind::Lifecycle;
+            return GoalCommandKind::Lifecycle(*command);
         }
     }
     if let Some(after_fresh) = args.strip_prefix("--fresh") {
@@ -929,6 +1016,132 @@ fn rewrite_fresh_goal_prompt(text: &str) -> String {
 
 fn is_codex_goal_start_request(text: &str) -> bool {
     !matches!(classify_codex_goal_command(text), GoalCommandKind::NotGoal)
+}
+
+fn codex_goal_lifecycle_notice(command: GoalLifecycleCommand, active_turn: bool) -> &'static str {
+    match command {
+        GoalLifecycleCommand::Clear if active_turn => {
+            "`/goal clear`는 현재 Codex 턴이 끝난 뒤 적용할 수 있습니다. 현재 턴을 중단하려면 `/stop`을 먼저 사용해 주세요."
+        }
+        GoalLifecycleCommand::Clear => {
+            "`/goal clear` 적용 완료: Codex goal 세션을 비웠습니다. 다음 Codex 턴은 fresh session으로 시작합니다."
+        }
+        GoalLifecycleCommand::Pause => {
+            "`/goal pause`는 아직 routine lifecycle과 연결되어 있지 않아 Codex TUI로 전달하지 않았습니다."
+        }
+        GoalLifecycleCommand::Resume => {
+            "`/goal resume`은 아직 routine lifecycle과 연결되어 있지 않아 Codex TUI로 전달하지 않았습니다."
+        }
+    }
+}
+
+fn codex_goal_lifecycle_reason_code(
+    command: GoalLifecycleCommand,
+    active_turn: bool,
+) -> &'static str {
+    match command {
+        GoalLifecycleCommand::Clear if active_turn => "codex_goal_clear_active_turn",
+        GoalLifecycleCommand::Clear => "codex_goal_clear",
+        GoalLifecycleCommand::Pause => "codex_goal_pause_ignored",
+        GoalLifecycleCommand::Resume => "codex_goal_resume_ignored",
+    }
+}
+
+async fn send_codex_goal_lifecycle_notice(
+    http: &Arc<serenity::http::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    command: GoalLifecycleCommand,
+    active_turn: bool,
+) {
+    let notice = codex_goal_lifecycle_notice(command, active_turn);
+    rate_limit_wait(shared, channel_id).await;
+    if let Err(error) = channel_id.say(http, notice).await {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            command = command.as_str(),
+            "failed to send Codex goal lifecycle notice: {error}"
+        );
+        let target = format!("channel:{}", channel_id.get());
+        let session_key = build_adk_session_key(shared, channel_id, &ProviderKind::Codex).await;
+        crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
+            None::<&crate::db::Db>,
+            shared.pg_pool.as_ref(),
+            &target,
+            session_key.as_deref(),
+            codex_goal_lifecycle_reason_code(command, active_turn),
+            notice,
+        );
+    }
+}
+
+async fn consume_codex_goal_lifecycle_command(
+    http: &Arc<serenity::http::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    command: GoalLifecycleCommand,
+    stale_session_id: Option<String>,
+) {
+    let active_turn = super::super::mailbox_has_active_turn(shared, channel_id).await;
+    if matches!(command, GoalLifecycleCommand::Clear) && !active_turn {
+        super::super::commands::reset_channel_provider_state(
+            http,
+            shared,
+            provider,
+            channel_id,
+            "/goal clear",
+            true,
+            false,
+            false,
+        )
+        .await;
+        if let Some(session_id) = stale_session_id.as_deref() {
+            let _ = super::super::internal_api::clear_stale_session_id(session_id).await;
+        }
+    }
+
+    send_codex_goal_lifecycle_notice(http, shared, channel_id, command, active_turn).await;
+}
+
+#[cfg(test)]
+mod codex_goal_lifecycle_unit_tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_subcommands_are_classified_precisely() {
+        assert_eq!(
+            classify_codex_goal_command("/goal clear"),
+            GoalCommandKind::Lifecycle(GoalLifecycleCommand::Clear)
+        );
+        assert_eq!(
+            classify_codex_goal_command("/goal pause"),
+            GoalCommandKind::Lifecycle(GoalLifecycleCommand::Pause)
+        );
+        assert_eq!(
+            classify_codex_goal_command("/goal resume"),
+            GoalCommandKind::Lifecycle(GoalLifecycleCommand::Resume)
+        );
+    }
+
+    #[test]
+    fn lifecycle_subcommands_have_consumed_notices() {
+        assert!(
+            codex_goal_lifecycle_notice(GoalLifecycleCommand::Clear, false).contains("적용 완료")
+        );
+        assert!(
+            codex_goal_lifecycle_notice(GoalLifecycleCommand::Clear, true)
+                .contains("현재 Codex 턴")
+        );
+        assert!(
+            codex_goal_lifecycle_notice(GoalLifecycleCommand::Pause, false)
+                .contains("Codex TUI로 전달하지 않았습니다")
+        );
+        assert!(
+            codex_goal_lifecycle_notice(GoalLifecycleCommand::Resume, false)
+                .contains("Codex TUI로 전달하지 않았습니다")
+        );
+    }
 }
 
 async fn clear_codex_goal_start_provider_session(
@@ -1234,6 +1447,80 @@ async fn start_reserved_headless_turn_with_owner(
     );
     let user_msg_id = reservation.user_msg_id;
     let placeholder_msg_id = reservation.placeholder_msg_id;
+    let (settings_provider, allowed_tools) = {
+        let settings = shared.settings.read().await;
+        (settings.provider.clone(), settings.allowed_tools.clone())
+    };
+    let (early_stale_session_id, early_channel_name) = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .map(|session| (session.session_id.clone(), session.channel_name.clone()))
+            .unwrap_or_default()
+    };
+    let early_thread_parent = super::super::resolve_thread_parent(&ctx.http, channel_id).await;
+    let early_resolved_channel_name = if early_channel_name.is_none() && channel_name_hint.is_none()
+    {
+        let (channel_name, _) = resolve_channel_category(&ctx.http, None, channel_id).await;
+        channel_name
+    } else {
+        None
+    };
+    let early_role_binding = resolve_role_binding(
+        channel_id,
+        early_channel_name
+            .as_deref()
+            .or(channel_name_hint.as_deref())
+            .or(early_resolved_channel_name.as_deref()),
+    )
+    .or_else(|| {
+        early_thread_parent
+            .as_ref()
+            .and_then(|(parent_id, parent_name)| {
+                resolve_role_binding(*parent_id, parent_name.as_deref())
+            })
+    });
+    let early_provider = early_role_binding
+        .as_ref()
+        .and_then(|binding| binding.provider.clone())
+        .unwrap_or_else(|| settings_provider.clone());
+    let early_fast_mode_channel_id =
+        effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
+    if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
+        &early_provider,
+        prompt,
+        super::super::commands::channel_codex_goals_setting(shared, early_fast_mode_channel_id)
+            .await,
+    ) {
+        consume_codex_goal_lifecycle_command(
+            &ctx.http,
+            shared,
+            &early_provider,
+            channel_id,
+            command,
+            early_stale_session_id,
+        )
+        .await;
+        return Ok(HeadlessTurnStartOutcome {
+            turn_id: reservation.turn_id(channel_id),
+            status: HeadlessTurnStartStatus::Consumed,
+        });
+    }
+    let cancel_token = Arc::new(CancelToken::new());
+    let started = super::super::mailbox_try_start_turn(
+        shared,
+        channel_id,
+        cancel_token.clone(),
+        request_owner,
+        user_msg_id,
+    )
+    .await;
+    if !started {
+        return Err(HeadlessTurnStartError::Conflict(format!(
+            "agent mailbox is busy for channel {}",
+            channel_id.get()
+        )));
+    }
     let mut session_reset_reason = None;
     let mut reset_session_id_to_clear = None;
 
@@ -1281,9 +1568,27 @@ async fn start_reserved_headless_turn_with_owner(
                     "no workspace resolved for headless turn channel {}",
                     channel_id.get()
                 ))
-            })?;
+            });
+            let workspace = match workspace {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    let _ = release_mailbox_after_placeholder_post_failure(
+                        shared,
+                        &early_provider,
+                        channel_id,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
             let workspace_path = std::path::Path::new(&workspace);
             if !workspace_path.is_dir() {
+                let _ = release_mailbox_after_placeholder_post_failure(
+                    shared,
+                    &early_provider,
+                    channel_id,
+                )
+                .await;
                 return Err(HeadlessTurnStartError::Internal(format!(
                     "resolved workspace does not exist for headless turn: {workspace}"
                 )));
@@ -1341,11 +1646,6 @@ async fn start_reserved_headless_turn_with_owner(
                 (std::mem::take(&mut session.pending_uploads), was_cleared)
             })
             .unwrap_or_default()
-    };
-
-    let (settings_provider, allowed_tools) = {
-        let settings = shared.settings.read().await;
-        (settings.provider.clone(), settings.allowed_tools.clone())
     };
 
     let turn_id = reservation.turn_id(channel_id);
@@ -1461,6 +1761,22 @@ async fn start_reserved_headless_turn_with_owner(
         prompt,
         super::super::commands::channel_codex_goals_setting(shared, fast_mode_channel_id).await,
     );
+    if let GoalCommandKind::Lifecycle(command) = headless_goal_kind {
+        consume_codex_goal_lifecycle_command(
+            &ctx.http,
+            shared,
+            &provider,
+            channel_id,
+            command,
+            session_id.clone(),
+        )
+        .await;
+        let _ = release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
+        return Ok(HeadlessTurnStartOutcome {
+            turn_id: reservation.turn_id(channel_id),
+            status: HeadlessTurnStartStatus::Consumed,
+        });
+    }
     let force_fresh_provider_session = matches!(headless_goal_kind, GoalCommandKind::FreshStart);
     let fresh_codex_goal_session_requested = force_fresh_provider_session;
     if force_fresh_provider_session {
@@ -1533,22 +1849,12 @@ async fn start_reserved_headless_turn_with_owner(
         }
     }
 
-    let cancel_token = Arc::new(CancelToken::new());
-    let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
+    cleanup_terminal_delivery_marker_after_turn_start(
         shared,
         channel_id,
-        cancel_token.clone(),
-        request_owner,
-        user_msg_id,
         adk_session_key.as_deref(),
     )
     .await;
-    if !started {
-        return Err(HeadlessTurnStartError::Conflict(format!(
-            "agent mailbox is busy for channel {}",
-            channel_id.get()
-        )));
-    }
     shared
         .global_active
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2283,6 +2589,7 @@ async fn start_reserved_headless_turn_with_owner(
 
     Ok(HeadlessTurnStartOutcome {
         turn_id: reservation.turn_id(channel_id),
+        status: HeadlessTurnStartStatus::Started,
     })
 }
 
@@ -2565,10 +2872,80 @@ pub(in crate::services::discord) async fn handle_text_message(
     {
         return Ok(());
     }
+    let is_dm_channel = matches!(
+        channel_id.to_channel(http).await.ok(),
+        Some(serenity::Channel::Private(_))
+    );
+    let is_dm_channel = super::super::resolve_is_dm_channel(dm_hint, is_dm_channel);
+    shared.record_channel_speaker(channel_id, request_owner, request_owner_name, is_dm_channel);
+    let (settings_provider, allowed_tools) = {
+        let settings = shared.settings.read().await;
+        (settings.provider.clone(), settings.allowed_tools.clone())
+    };
+    let dm_default_agent = if is_dm_channel {
+        super::super::agentdesk_config::resolve_dm_default_agent(&settings_provider)
+    } else {
+        None
+    };
+    let (early_stale_session_id, early_channel_name) = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .map(|session| (session.session_id.clone(), session.channel_name.clone()))
+            .unwrap_or_default()
+    };
+    let early_thread_parent = super::super::resolve_thread_parent(http, channel_id).await;
+    let early_resolved_channel_name = if early_channel_name.is_none() {
+        let (channel_name, _) = resolve_channel_category(http, cache, channel_id).await;
+        channel_name
+    } else {
+        None
+    };
+    let early_role_binding = resolve_role_binding(
+        channel_id,
+        early_channel_name
+            .as_deref()
+            .or(early_resolved_channel_name.as_deref()),
+    )
+    .or_else(|| {
+        early_thread_parent
+            .as_ref()
+            .and_then(|(parent_id, parent_name)| {
+                resolve_role_binding(*parent_id, parent_name.as_deref())
+            })
+    })
+    .or_else(|| {
+        dm_default_agent
+            .as_ref()
+            .map(|resolved| resolved.role_binding.clone())
+    });
+    let early_provider = early_role_binding
+        .as_ref()
+        .and_then(|binding| binding.provider.clone())
+        .unwrap_or_else(|| settings_provider.clone());
+    let early_fast_mode_channel_id =
+        effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
+    if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
+        &early_provider,
+        user_text,
+        super::super::commands::channel_codex_goals_setting(shared, early_fast_mode_channel_id)
+            .await,
+    ) {
+        consume_codex_goal_lifecycle_command(
+            http,
+            shared,
+            &early_provider,
+            channel_id,
+            command,
+            early_stale_session_id,
+        )
+        .await;
+        return Ok(());
+    }
     let mut session_reset_reason = None;
     let mut reset_session_id_to_clear = None;
     // Get session info, allowed tools, and pending uploads
-    let (session_info, provider, allowed_tools, pending_uploads, session_was_cleared) = {
+    let (session_info, pending_uploads, session_was_cleared) = {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id)
             && let Some(reason) =
@@ -2600,26 +2977,9 @@ pub(in crate::services::discord) async fn handle_text_message(
             })
             .unwrap_or_default();
         drop(data);
-        let settings = shared.settings.read().await;
-        (
-            info,
-            settings.provider.clone(),
-            settings.allowed_tools.clone(),
-            uploads,
-            was_cleared,
-        )
+        (info, uploads, was_cleared)
     };
-    let is_dm_channel = matches!(
-        channel_id.to_channel(http).await.ok(),
-        Some(serenity::Channel::Private(_))
-    );
-    let is_dm_channel = super::super::resolve_is_dm_channel(dm_hint, is_dm_channel);
-    shared.record_channel_speaker(channel_id, request_owner, request_owner_name, is_dm_channel);
-    let dm_default_agent = if is_dm_channel {
-        super::super::agentdesk_config::resolve_dm_default_agent(&provider)
-    } else {
-        None
-    };
+    let provider = settings_provider;
     let dispatch_id_for_thread = super::super::adk_session::parse_dispatch_id(user_text);
     let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
         super::lookup_dispatch_info(shared.api_port, did).await
@@ -3417,6 +3777,24 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         GoalCommandKind::NotGoal
     };
+    if let GoalCommandKind::Lifecycle(command) = turn_goal_kind {
+        if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
+            && !super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
+        {
+            super::super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳')
+                .await;
+        }
+        consume_codex_goal_lifecycle_command(
+            http,
+            shared,
+            &provider,
+            channel_id,
+            command,
+            session_id.clone(),
+        )
+        .await;
+        return Ok(());
+    }
     let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);
     let fresh_codex_goal_session_requested = force_fresh_provider_session;
     if force_fresh_provider_session {
@@ -7477,15 +7855,15 @@ mod tests {
         // Lifecycle
         assert_eq!(
             classify_codex_goal_command("/goal pause"),
-            GoalCommandKind::Lifecycle
+            GoalCommandKind::Lifecycle(GoalLifecycleCommand::Pause)
         );
         assert_eq!(
             classify_codex_goal_command("/goal resume"),
-            GoalCommandKind::Lifecycle
+            GoalCommandKind::Lifecycle(GoalLifecycleCommand::Resume)
         );
         assert_eq!(
             classify_codex_goal_command("/goal clear"),
-            GoalCommandKind::Lifecycle
+            GoalCommandKind::Lifecycle(GoalLifecycleCommand::Clear)
         );
 
         // NotGoal
@@ -7543,7 +7921,26 @@ mod tests {
                 "/goal pause",
                 Some(true)
             ),
-            GoalCommandKind::Lifecycle
+            GoalCommandKind::Lifecycle(GoalLifecycleCommand::Pause)
+        );
+    }
+
+    #[test]
+    fn codex_goal_lifecycle_notices_are_explicitly_consumed() {
+        assert!(
+            codex_goal_lifecycle_notice(GoalLifecycleCommand::Clear, false).contains("적용 완료")
+        );
+        assert!(
+            codex_goal_lifecycle_notice(GoalLifecycleCommand::Clear, true)
+                .contains("현재 Codex 턴")
+        );
+        assert!(
+            codex_goal_lifecycle_notice(GoalLifecycleCommand::Pause, false)
+                .contains("Codex TUI로 전달하지 않았습니다")
+        );
+        assert!(
+            codex_goal_lifecycle_notice(GoalLifecycleCommand::Resume, false)
+                .contains("Codex TUI로 전달하지 않았습니다")
         );
     }
 

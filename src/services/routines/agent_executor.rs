@@ -54,7 +54,7 @@ impl RoutineAgentExecutor {
             .start_turn(store, &claimed, &prompt, &checkpoint, next_due_at)
             .await;
         match result {
-            Ok(started) => Ok(RoutineRunOutcome {
+            Ok(started) if started.started => Ok(RoutineRunOutcome {
                 run_id: claimed.run_id,
                 routine_id: claimed.routine_id,
                 script_ref: claimed.script_ref,
@@ -64,6 +64,37 @@ impl RoutineAgentExecutor {
                 error: None,
                 fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
             }),
+            Ok(started) => {
+                let last_result = "headless command consumed without starting an agent turn";
+                let closed = store
+                    .complete_agent_run(
+                        &claimed.run_id,
+                        Some(started.result_json.clone()),
+                        checkpoint,
+                        Some(last_result),
+                        match next_due_at {
+                            Some(value) => NextDueAtUpdate::Set(value),
+                            None => NextDueAtUpdate::Preserve,
+                        },
+                    )
+                    .await?;
+                if !closed {
+                    return Err(anyhow!(
+                        "routine agent run {} was already closed before consumed outcome",
+                        claimed.run_id
+                    ));
+                }
+                Ok(RoutineRunOutcome {
+                    run_id: claimed.run_id,
+                    routine_id: claimed.routine_id,
+                    script_ref: claimed.script_ref,
+                    action,
+                    status: "succeeded".to_string(),
+                    result_json: Some(started.result_json),
+                    error: None,
+                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                })
+            }
             Err(error) => {
                 let message = error.to_string();
                 let result_json = Some(json!({
@@ -239,7 +270,7 @@ impl RoutineAgentExecutor {
         let reservation = reserve_headless_agent_turn(turn_channel_id);
         let turn_id = reservation.turn_id().to_string();
 
-        let result_json = json!({
+        let mut result_json = json!({
             "status": "started",
             "turn_id": turn_id.clone(),
             "agent_id": agent_id,
@@ -302,8 +333,23 @@ impl RoutineAgentExecutor {
                 outcome.turn_id
             ));
         }
+        if outcome.status.as_str() != "started"
+            && let Some(object) = result_json.as_object_mut()
+        {
+            object.insert(
+                "status".to_string(),
+                Value::String(outcome.status.as_str().to_string()),
+            );
+            object.insert(
+                "completion_evidence".to_string(),
+                Value::String("headless_start_outcome".to_string()),
+            );
+        }
 
-        Ok(StartedAgentTurn { result_json })
+        Ok(StartedAgentTurn {
+            result_json,
+            started: outcome.status.as_str() == "started",
+        })
     }
 
     async fn find_turn_completion(
@@ -428,6 +474,7 @@ impl RoutineAgentExecutor {
 
 struct StartedAgentTurn {
     result_json: Value,
+    started: bool,
 }
 
 struct RoutineThreadTarget {

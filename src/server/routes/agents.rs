@@ -697,7 +697,7 @@ pub async fn start_agent_turn(
             Json(json!({
                 "ok": true,
                 "turn_id": outcome.turn_id,
-                "status": "started",
+                "status": outcome.status.as_str(),
             })),
         ),
         Err(crate::services::discord::HeadlessTurnStartError::Conflict(error)) => (

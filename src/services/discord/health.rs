@@ -1110,13 +1110,6 @@ async fn start_reserved_headless_agent_turn_with_shared(
         )));
     }
 
-    if shared.mailbox(channel_id).has_active_turn().await {
-        return Err(super::router::HeadlessTurnStartError::Conflict(format!(
-            "agent mailbox is busy for channel {}",
-            channel_id.get()
-        )));
-    }
-
     let ctx = shared.cached_serenity_ctx.get().cloned().ok_or_else(|| {
         super::router::HeadlessTurnStartError::Internal(format!(
             "provider runtime is not ready for channel {}",

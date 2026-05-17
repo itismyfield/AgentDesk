@@ -12,6 +12,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeadlessTurnStartOutcome {
     pub turn_id: String,
+    pub status: HeadlessTurnStartStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeadlessTurnStartStatus {
+    Started,
+    Consumed,
+}
+
+impl HeadlessTurnStartStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Consumed => "consumed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
