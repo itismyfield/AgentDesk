@@ -25,6 +25,14 @@ const DEFAULT_TERMINAL_DRAIN_MS: u64 = 5000;
 /// loop, network hang, etc.) keeps the tailer thread alive indefinitely and the
 /// caller never sees a terminal `StreamMessage::Done`.
 const DEFAULT_ASSISTANT_RESPONSE_DEADLINE_SECS: u64 = 30 * 60;
+/// #2419 follow-up: bounded recovery for a pending tool call whose matching
+/// `function_call_output` never arrives (hung tool, malformed line, call_id
+/// mismatch, Codex schema skew). Without this, `has_pending_tool_call()`
+/// would hold the drain gate shut forever while the tmux pane stays alive,
+/// stranding the Discord turn. 5 minutes of inactivity after the last
+/// lifecycle event is well past any realistic tool runtime — at that point
+/// we surface a terminal Done so the bridge can advance.
+const DEFAULT_PENDING_TOOL_CALL_DEADLINE_SECS: u64 = 5 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolloutTailOutcome {
@@ -49,6 +57,12 @@ pub struct RolloutTailOptions {
     /// Maximum time the tailer waits at EOF for the assistant text to begin
     /// streaming. `None` disables the deadline (used by `replay_rollout_file`).
     pub assistant_response_deadline: Option<Duration>,
+    /// #2419 follow-up: bounded recovery deadline for a pending tool call
+    /// that never resolves (hung tool / malformed line / call_id skew).
+    /// Measured as inactivity since the last lifecycle event. `None`
+    /// disables the deadline; used by `replay_rollout_file` and by tests
+    /// that want the legacy unbounded behaviour.
+    pub pending_tool_call_deadline: Option<Duration>,
 }
 
 impl Default for RolloutTailOptions {
@@ -58,6 +72,9 @@ impl Default for RolloutTailOptions {
             terminal_drain: Duration::from_millis(DEFAULT_TERMINAL_DRAIN_MS),
             assistant_response_deadline: Some(Duration::from_secs(
                 DEFAULT_ASSISTANT_RESPONSE_DEADLINE_SECS,
+            )),
+            pending_tool_call_deadline: Some(Duration::from_secs(
+                DEFAULT_PENDING_TOOL_CALL_DEADLINE_SECS,
             )),
         }
     }
@@ -189,6 +206,7 @@ fn tail_latest_rollout_for_cwd_with_handoff_options(
         is_alive,
         options.terminal_drain,
         options.assistant_response_deadline,
+        options.pending_tool_call_deadline,
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
@@ -211,6 +229,7 @@ pub fn replay_rollout_file(
         None,
         || false,
         Duration::ZERO,
+        None,
         None,
     )?;
     match result {
@@ -237,6 +256,7 @@ pub fn tail_rollout_file_from_offset(
         is_alive,
         defaults.terminal_drain,
         defaults.assistant_response_deadline,
+        defaults.pending_tool_call_deadline,
     )
     .map(|result| result.0)
 }
@@ -360,6 +380,7 @@ fn tail_resumed_rollout_for_session_with_handoff_options(
         is_alive,
         options.terminal_drain,
         options.assistant_response_deadline,
+        options.pending_tool_call_deadline,
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
@@ -583,6 +604,7 @@ fn tail_rollout_file_until_assistant_response(
     mut is_alive: impl FnMut() -> bool,
     terminal_drain: Duration,
     assistant_response_deadline: Option<Duration>,
+    pending_tool_call_deadline: Option<Duration>,
 ) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     let mut file = std::fs::File::open(rollout_path)
         .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?;
@@ -642,6 +664,45 @@ fn tail_rollout_file_until_assistant_response(
                             outcome(&state, current_offset),
                         ));
                     }
+                }
+                // #2419 follow-up (Codex review HIGH): bounded recovery for
+                // a pending tool call whose `*_output` never arrives (hung
+                // tool, malformed line, call_id skew). Without this, the
+                // drain gate stays shut forever while the pane is alive and
+                // the Discord turn hangs. After `pending_tool_call_deadline`
+                // of inactivity past the last lifecycle event we surface a
+                // terminal Done with a warning so the upstream advances.
+                if state.saw_assistant_text
+                    && state.has_pending_tool_call()
+                    && let Some(deadline) = pending_tool_call_deadline
+                    && last_output_at.is_some_and(|at| at.elapsed() >= deadline)
+                {
+                    let elapsed_secs = last_output_at
+                        .map(|at| at.elapsed().as_secs())
+                        .unwrap_or_default();
+                    tracing::warn!(
+                        rollout_path = %rollout_path.display(),
+                        elapsed_secs,
+                        pending_keyed = state.pending_tool_calls.len(),
+                        pending_unkeyed = state.pending_tool_calls_unkeyed,
+                        "Codex rollout tail tool-call deadline expired; emitting Done to unblock turn"
+                    );
+                    let mut result_text = state.final_text.clone();
+                    let warning = format!(
+                        "\n\n⚠ Codex tool call did not resolve within {}s — emitting partial response.",
+                        elapsed_secs
+                    );
+                    result_text.push_str(&warning);
+                    sender.send(StreamMessage::Done {
+                        result: result_text,
+                        session_id: state.session_id.clone(),
+                    });
+                    return Ok((
+                        ReadOutputResult::Completed {
+                            offset: current_offset,
+                        },
+                        outcome(&state, current_offset),
+                    ));
                 }
                 if !is_alive() {
                     let result = if state.saw_assistant_text {
@@ -1193,6 +1254,7 @@ mod tests {
                 wait_for_rollout: Duration::from_millis(10),
                 terminal_drain: Duration::ZERO,
                 assistant_response_deadline: None,
+                pending_tool_call_deadline: None,
             },
         )
         .unwrap();
@@ -1248,6 +1310,7 @@ mod tests {
                 wait_for_rollout: Duration::from_millis(10),
                 terminal_drain: Duration::ZERO,
                 assistant_response_deadline: None,
+                pending_tool_call_deadline: None,
             },
         )
         .unwrap();
@@ -1331,6 +1394,7 @@ mod tests {
             || true, // pane stays alive — only the deadline rescues us
             Duration::ZERO,
             Some(Duration::from_millis(150)),
+            None,
         )
         .unwrap();
         drop(tx);
@@ -1382,6 +1446,7 @@ mod tests {
                 || true,
                 Duration::ZERO,
                 Some(Duration::from_secs(5)),
+                None,
             )
         });
 
@@ -1474,6 +1539,7 @@ mod tests {
                 || true,
                 Duration::from_secs(2),
                 Some(Duration::from_secs(10)),
+                None,
             )
         });
 
@@ -1559,6 +1625,7 @@ mod tests {
                 // during the silence and emit Done before segment2 arrives.
                 Duration::from_millis(150),
                 Some(Duration::from_secs(10)),
+                None,
             )
         });
 
@@ -1634,6 +1701,7 @@ mod tests {
                 || true,
                 Duration::from_millis(150),
                 Some(Duration::from_secs(10)),
+                None,
             )
         });
 
@@ -1714,6 +1782,7 @@ mod tests {
                 || true,
                 Duration::from_millis(250),
                 Some(Duration::from_secs(10)),
+                None,
             )
         });
 
@@ -1765,6 +1834,73 @@ mod tests {
             Some(StreamMessage::Done { result, .. })
                 if result.contains("segment1") && result.contains("segment2")
         ));
+    }
+
+    #[test]
+    fn stuck_tool_call_deadline_emits_recovery_done() {
+        // #2419 follow-up (Codex review HIGH round 2): assistant text was
+        // already streamed, then a tool call was emitted but its output
+        // never arrives (hung tool / mismatched call_id / schema skew).
+        // The pane stays alive, so without a bounded recovery deadline the
+        // tail would sleep forever and the Discord turn would hang. With
+        // `pending_tool_call_deadline` the tail must surface a terminal
+        // Done with a warning so the bridge advances.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"stuck-tool\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-stuck.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"never_returns","arguments":"{}","call_id":"c-stuck"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let (result, _outcome) = tail_rollout_file_until_assistant_response(
+            &rollout,
+            0,
+            None,
+            &tx,
+            None,
+            || true, // pane stays alive forever
+            Duration::from_secs(60),
+            Some(Duration::from_secs(60)),
+            // Short bounded recovery deadline — without this the tail
+            // would block forever.
+            Some(Duration::from_millis(200)),
+        )
+        .unwrap();
+        drop(tx);
+
+        assert!(
+            matches!(result, ReadOutputResult::Completed { .. }),
+            "tail must surface Completed once the pending-tool deadline expires; got {:?}",
+            result
+        );
+        let messages: Vec<_> = rx.iter().collect();
+        let done = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m, StreamMessage::Done { .. }));
+        assert!(
+            matches!(
+                done,
+                Some(StreamMessage::Done { result, .. })
+                    if result.contains("hello") && result.contains("did not resolve")
+            ),
+            "Done must contain prior assistant text and the recovery warning; got {:?}",
+            messages
+        );
     }
 
     #[test]
