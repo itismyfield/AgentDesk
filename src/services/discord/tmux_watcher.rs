@@ -72,6 +72,25 @@ pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal(
     }
 }
 
+/// #2427 A wire — synchronous variant for the dead-pane post-mortem,
+/// which runs on a `spawn_blocking` thread. Behaviour matches the D
+/// wire except the user_msg_id guard is read directly from the inflight
+/// state (the pane is dead — there is no in-flight context to thread
+/// in) and the log reason is fixed.
+pub(in crate::services::discord) fn emit_explicit_inflight_cleanup_signal_pane_dead(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) {
+    let Some(state) = crate::services::discord::inflight::load_inflight_state(
+        provider,
+        channel_id.get(),
+    ) else {
+        return;
+    };
+    let expected_user_msg_id = state.user_msg_id;
+    emit_explicit_inflight_cleanup_signal(provider, channel_id, expected_user_msg_id, "pane_dead");
+}
+
 async fn persist_watcher_provider_session_id(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -3356,6 +3375,38 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     }
 
     if !cleanup_plan.preserve_tmux_session {
+        // #2427 A wire: pane-death explicit inflight cleanup. The
+        // tmux pane is gone (or about to be killed below), so any
+        // inflight row still pointing at this provider/channel will
+        // never receive a normal completion hook. Without this the
+        // sweeper has to time-guess (`STALL`/`ABANDON`) before evicting,
+        // reproducing the #2415 family of "completion-missing → time
+        // heuristic" bugs.
+        //
+        // We re-check `tmux_session_has_live_pane` on the blocking
+        // thread before clearing, matching the same revalidation the
+        // kill path uses (#1261 codex P2) so a concurrent
+        // `start_claude` respawn of a fresh same-named session does not
+        // get its inflight wiped.
+        {
+            let sess_for_inflight = tmux_session_name.clone();
+            let provider_for_inflight = provider.clone();
+            let channel_id_inflight = channel_id;
+            let _ = tokio::task::spawn_blocking(move || {
+                let pane_alive = tmux_session_has_live_pane(&sess_for_inflight);
+                if pane_alive {
+                    // Pane resurrected (e.g. start_claude respawn race) —
+                    // do not touch its inflight.
+                    return;
+                }
+                emit_explicit_inflight_cleanup_signal_pane_dead(
+                    &provider_for_inflight,
+                    channel_id_inflight,
+                );
+            })
+            .await;
+        }
+
         // Kill dead tmux session to prevent accumulation (especially for thread sessions
         // which are created per-dispatch and would otherwise linger for 24h).
         // #145: skip kill for unified-thread sessions with active auto-queue runs.
