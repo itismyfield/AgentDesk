@@ -273,9 +273,13 @@ pub(crate) fn load_single_policy_with_deadline(
                 value
                     .as_string()
                     .and_then(|s| s.to_string().ok())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("policy {}: name must be a string", path.display())
-                    })?
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            policy = %path.display(),
+                            "policy name metadata is not a string; using file stem"
+                        );
+                        file_name.clone()
+                    })
             }
         } else {
             file_name.clone()
@@ -294,9 +298,13 @@ pub(crate) fn load_single_policy_with_deadline(
             if value.is_undefined() || value.is_null() {
                 100
             } else {
-                value.as_int().ok_or_else(|| {
-                    anyhow::anyhow!("policy {}: priority must be an integer", path.display())
-                })?
+                value.as_int().unwrap_or_else(|| {
+                    tracing::warn!(
+                        policy = %path.display(),
+                        "policy priority metadata is not an integer; using default priority"
+                    );
+                    100
+                })
             }
         } else {
             100
@@ -1165,6 +1173,16 @@ mod tests {
     use super::*;
     use rquickjs::Runtime;
 
+    fn policy_test_context() -> (Runtime, Context) {
+        let runtime = Runtime::new().expect("create QuickJS runtime");
+        let ctx = Context::full(&runtime).expect("create QuickJS context");
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>("globalThis.agentdesk = globalThis.agentdesk || {};")
+                .expect("bootstrap agentdesk surface");
+        });
+        (runtime, ctx)
+    }
+
     /// #2200 sub-fix 2: dropping `HotReloadGuard` must join the worker
     /// thread, which releases the worker's `Context` clone *before* the
     /// engine drops the QuickJS `Runtime`. We model the runtime here, hand
@@ -1640,6 +1658,38 @@ mod tests {
         );
 
         drop(guard);
+        drop(runtime);
+    }
+
+    #[test]
+    fn load_single_policy_tolerates_wrong_type_optional_metadata() {
+        let (runtime, ctx) = policy_test_context();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let policy_file = tmp.path().join("wrong_types.js");
+        std::fs::write(
+            &policy_file,
+            r#"
+                agentdesk.registerPolicy({
+                    name: 42,
+                    priority: "high",
+                    after: "base-policy",
+                    before: { value: "next-policy" },
+                    onTick: function() {}
+                });
+            "#,
+        )
+        .expect("write wrong-type policy");
+
+        let policy = load_single_policy(&ctx, &policy_file).expect("load tolerant policy");
+
+        assert_eq!(policy.name, "wrong_types");
+        assert_eq!(policy.priority, 100);
+        assert!(policy.after.is_empty());
+        assert!(policy.before.is_empty());
+        assert!(policy.hooks.contains_key(&Hook::OnTick));
+
+        drop(policy);
+        drop(ctx);
         drop(runtime);
     }
 
