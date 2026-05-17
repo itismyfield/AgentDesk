@@ -393,7 +393,7 @@ fn default_launchd_root_dir(home: &Path, flavor: LaunchdPlistFlavorArg) -> PathB
 }
 
 #[cfg(target_os = "macos")]
-const LAUNCHD_NOFILE_SOFT_LIMIT_TARGET: u64 = 2_048;
+const LAUNCHD_NOFILE_SOFT_LIMIT_TARGET: u64 = 16_384;
 
 #[cfg(target_os = "macos")]
 fn clamp_launchd_nofile_soft_limit(hard_limit: u64) -> Option<u64> {

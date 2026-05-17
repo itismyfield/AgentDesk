@@ -55,7 +55,7 @@
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 |  |
 | `cli::doctor::health` | `src/cli/doctor/health.rs` | 164 |  |
 | `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 256 |  |
-| `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 5036 | giant-file |
+| `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 5040 | giant-file |
 | `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 375 |  |
 | `cli::init` | `src/cli/init.rs` | 1671 | giant-file |
 | `cli::migrate` | `src/cli/migrate.rs` | 348 |  |
@@ -573,7 +573,7 @@
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1368 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 129 |  |
-| `services::platform::tmux` | `src/services/platform/tmux.rs` | 674 |  |
+| `services::platform::tmux` | `src/services/platform/tmux.rs` | 749 |  |
 | `services::process` | `src/services/process.rs` | 1442 | giant-file |
 | `services::provider` | `src/services/provider.rs` | 2621 | giant-file |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 |  |

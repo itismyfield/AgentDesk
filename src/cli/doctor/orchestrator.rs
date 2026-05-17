@@ -3128,26 +3128,26 @@ fn launchagent_plist_nofile_limit(label: &str) -> Option<u64> {
 }
 
 #[cfg(target_os = "macos")]
-fn pids_from_command_output(output: &[u8]) -> Vec<u32> {
+fn tmux_server_pids() -> Vec<u32> {
+    let owner_marker = crate::services::tmux_common::current_tmux_owner_marker();
+    let sessions = match crate::services::platform::tmux::list_sessions_with_server_pid() {
+        Ok(sessions) => sessions,
+        Err(_) => return Vec::new(),
+    };
     let mut pids = BTreeSet::new();
-    for line in String::from_utf8_lossy(output).lines() {
-        if let Ok(pid) = line.trim().parse::<u32>() {
-            pids.insert(pid);
+    for session in sessions {
+        if session.server_pid == 0 || !session.session_name.starts_with("AgentDesk-") {
+            continue;
+        }
+        let owner_path = crate::services::tmux_common::tmux_owner_path(&session.session_name);
+        let belongs_to_current_runtime = std::fs::read_to_string(owner_path)
+            .map(|value| value.trim() == owner_marker)
+            .unwrap_or(false);
+        if belongs_to_current_runtime {
+            pids.insert(session.server_pid);
         }
     }
     pids.into_iter().collect()
-}
-
-#[cfg(target_os = "macos")]
-fn tmux_server_pids() -> Vec<u32> {
-    let output = match std::process::Command::new("pgrep")
-        .args(["-x", "tmux"])
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        _ => return Vec::new(),
-    };
-    pids_from_command_output(&output.stdout)
 }
 
 #[cfg(target_os = "macos")]
@@ -3299,6 +3299,14 @@ fn check_file_descriptor_headroom() -> Check {
     } else {
         launchd_soft_limit
     };
+    // dcserver itself is the launchd job and inherits the per-job plist limit.
+    // tmux server PIDs are scoped to current-runtime AgentDesk sessions, not
+    // all user tmux daemons, so they can use the same resolved limit/source.
+    let resolved_limit_source = if launchd_job_loaded && plist_nofile_limit.is_some() {
+        "launchd_plist"
+    } else {
+        "launchctl_maxfiles"
+    };
 
     let mut samples = Vec::new();
     for pid in dcserver::dcserver_instance_pids() {
@@ -3308,11 +3316,7 @@ fn check_file_descriptor_headroom() -> Check {
                 pid,
                 open_files,
                 soft_limit: dcserver_soft_limit,
-                limit_source: if launchd_job_loaded && plist_nofile_limit.is_some() {
-                    "launchd_plist"
-                } else {
-                    "launchctl_maxfiles"
-                },
+                limit_source: resolved_limit_source,
             });
         }
     }
@@ -3322,8 +3326,8 @@ fn check_file_descriptor_headroom() -> Check {
                 process: "tmux",
                 pid,
                 open_files,
-                soft_limit: launchd_soft_limit,
-                limit_source: "launchctl_maxfiles",
+                soft_limit: dcserver_soft_limit,
+                limit_source: resolved_limit_source,
             });
         }
     }

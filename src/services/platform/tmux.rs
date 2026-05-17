@@ -379,6 +379,15 @@ pub struct EnumeratedSession {
     pub pane_pid: u32,
 }
 
+/// A tmux session and the PID of the tmux server that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionServer {
+    pub session_name: String,
+    /// `#{pid}` is the tmux server PID. It is shared by every session on the
+    /// same socket and may be 0 if tmux cannot resolve it.
+    pub server_pid: u32,
+}
+
 /// List every tmux session along with its active pane's `pane_current_command`.
 /// Used by `SessionDiscovery` (Epic #2285 / E2) to feed the `SessionMatcher`
 /// with both the session name *and* the live provider fingerprint in a single
@@ -426,6 +435,47 @@ pub fn list_sessions_with_pane_command() -> Result<Vec<EnumeratedSession>, Strin
         });
     }
     Ok(sessions)
+}
+
+/// List every tmux session along with its owning tmux server PID.
+pub fn list_sessions_with_server_pid() -> Result<Vec<SessionServer>, String> {
+    let mut command = tmux_command();
+    command.env_remove("TMUX");
+    let out = command
+        .args(["list-sessions", "-F", "#{session_name}|#{pid}"])
+        .output()
+        .map_err(|e| format!("tmux list-sessions failed: {e}"))?;
+    if !out.status.success() {
+        return Err("tmux list-sessions returned non-zero".to_string());
+    }
+    Ok(parse_sessions_with_server_pid(&String::from_utf8_lossy(
+        &out.stdout,
+    )))
+}
+
+fn parse_sessions_with_server_pid(text: &str) -> Vec<SessionServer> {
+    let mut sessions = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(2, '|');
+        let session_name = parts.next().unwrap_or("").trim().to_string();
+        if session_name.is_empty() {
+            continue;
+        }
+        let server_pid = parts
+            .next()
+            .unwrap_or("")
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(0);
+        sessions.push(SessionServer {
+            session_name,
+            server_pid,
+        });
+    }
+    sessions
 }
 
 /// Read the command line of a live process by PID, used as a fallback
@@ -562,6 +612,31 @@ mod paste_tests {
                 "agentdesk-buffer",
                 "-t",
                 "=AgentDesk-claude-adk-cc:"
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_server_tests {
+    use super::*;
+
+    #[test]
+    fn parse_sessions_with_server_pid_skips_empty_names_and_defaults_bad_pids() {
+        let sessions =
+            parse_sessions_with_server_pid("AgentDesk-a|123\n|456\noperator|not-a-pid\n");
+
+        assert_eq!(
+            sessions,
+            vec![
+                SessionServer {
+                    session_name: "AgentDesk-a".to_string(),
+                    server_pid: 123,
+                },
+                SessionServer {
+                    session_name: "operator".to_string(),
+                    server_pid: 0,
+                },
             ]
         );
     }
