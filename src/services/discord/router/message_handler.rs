@@ -968,6 +968,158 @@ fn effective_fast_mode_channel_id(
         .unwrap_or(channel_id)
 }
 
+fn dispatch_type_bypasses_provider_worktree_isolation(dispatch_type: Option<&str>) -> bool {
+    dispatch_type
+        .map(str::trim)
+        .map(|value| value.to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "review" | "e2e-test" | "consultation"))
+}
+
+fn should_force_provider_worktree_isolation(
+    non_main_provider_channel: bool,
+    isolate_override: Option<bool>,
+    dispatch_type: Option<&str>,
+) -> bool {
+    if dispatch_type_bypasses_provider_worktree_isolation(dispatch_type) {
+        return false;
+    }
+    isolate_override.unwrap_or(non_main_provider_channel)
+}
+
+#[derive(Debug, Default)]
+struct ProviderWorktreeIsolationOutcome {
+    applied: bool,
+    stale_session_id: Option<String>,
+}
+
+async fn ensure_provider_worktree_isolation(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    current_path: &mut String,
+    provider: &ProviderKind,
+    channel_name: Option<&str>,
+    dispatch_type: Option<&str>,
+) -> ProviderWorktreeIsolationOutcome {
+    let Some(policy) =
+        super::super::agentdesk_config::resolve_worktree_isolation_policy(channel_id, channel_name)
+    else {
+        return ProviderWorktreeIsolationOutcome::default();
+    };
+    if !should_force_provider_worktree_isolation(
+        policy.non_main_provider_channel,
+        policy.isolate_override,
+        dispatch_type,
+    ) {
+        return ProviderWorktreeIsolationOutcome::default();
+    }
+
+    let path = std::path::Path::new(current_path);
+    if !path.is_dir() {
+        return ProviderWorktreeIsolationOutcome::default();
+    }
+    let canonical = path
+        .canonicalize()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| current_path.clone());
+
+    let (already_isolated, session_channel_name, conflict) = {
+        let data = shared.core.lock().await;
+        let already_isolated = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|session| session.worktree.as_ref())
+            .is_some();
+        let session_channel_name = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone());
+        let conflict = detect_worktree_conflict(&data.sessions, &canonical, channel_id);
+        (already_isolated, session_channel_name, conflict)
+    };
+    if already_isolated {
+        return ProviderWorktreeIsolationOutcome::default();
+    }
+
+    let worktree_channel_name = session_channel_name
+        .as_deref()
+        .or(channel_name)
+        .unwrap_or("unknown");
+    let Ok((worktree_path, branch_name)) =
+        create_git_worktree(&canonical, worktree_channel_name, provider.as_str())
+    else {
+        return ProviderWorktreeIsolationOutcome::default();
+    };
+
+    let base_commit = crate::services::platform::git_head_commit(&canonical);
+    let mut stale_session_id = None;
+    {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            stale_session_id = session.session_id.clone();
+            session.clear_provider_session();
+            session.current_path = Some(worktree_path.clone());
+            session.worktree = Some(WorktreeInfo {
+                original_path: canonical.clone(),
+                worktree_path: worktree_path.clone(),
+                branch_name: branch_name.clone(),
+            });
+        }
+    }
+    if let Some(mut inflight) =
+        super::super::inflight::load_inflight_state(provider, channel_id.get())
+    {
+        inflight.set_worktree_context(
+            Some(worktree_path.clone()),
+            Some(branch_name.clone()),
+            base_commit,
+        );
+        let _ = super::super::inflight::save_inflight_state(&inflight);
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    if let Some(conflict) = conflict {
+        tracing::info!(
+            "  [{ts}] 🌿 Provider-channel worktree isolation (also conflicted with {conflict}): {} → {}",
+            canonical,
+            worktree_path
+        );
+    } else {
+        tracing::info!(
+            "  [{ts}] 🌿 Provider-channel worktree isolation: {} → {}",
+            canonical,
+            worktree_path
+        );
+    }
+    *current_path = worktree_path;
+    ProviderWorktreeIsolationOutcome {
+        applied: true,
+        stale_session_id,
+    }
+}
+
+async fn reset_provider_session_after_worktree_isolation(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    outcome: ProviderWorktreeIsolationOutcome,
+    session_id: &mut Option<String>,
+    memento_context_loaded: &mut bool,
+    session_strategy_reason: &mut &'static str,
+) {
+    if !outcome.applied {
+        return;
+    }
+    if let Some(key) = build_adk_session_key(shared, channel_id, provider).await {
+        super::super::adk_session::clear_provider_session_id(&key, shared.api_port).await;
+    }
+    if let Some(stale_session_id) = outcome.stale_session_id.as_deref() {
+        let _ = super::super::internal_api::clear_stale_session_id(stale_session_id).await;
+    }
+    *session_id = None;
+    *memento_context_loaded = false;
+    *session_strategy_reason = "provider_channel_worktree_isolated";
+}
+
 pub(in crate::services::discord) async fn start_headless_turn(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -1108,7 +1260,7 @@ async fn start_reserved_headless_turn_with_owner(
         }
     }
 
-    let (mut session_id, mut memento_context_loaded, current_path) = {
+    let (mut session_id, mut memento_context_loaded, mut current_path) = {
         let mut data = shared.core.lock().await;
         if let Some(info) = load_session_runtime_state(&mut data.sessions, channel_id) {
             if let Some(channel_name_hint) = channel_name_hint.as_ref()
@@ -1213,6 +1365,34 @@ async fn start_reserved_headless_turn_with_owner(
         .as_ref()
         .and_then(|binding| binding.provider.clone())
         .unwrap_or(settings_provider);
+    {
+        let channel_name_for_isolation = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .and_then(|session| session.channel_name.clone())
+                .or_else(|| channel_name_hint.clone())
+        };
+        let isolation_outcome = ensure_provider_worktree_isolation(
+            shared,
+            channel_id,
+            &mut current_path,
+            &provider,
+            channel_name_for_isolation.as_deref(),
+            None,
+        )
+        .await;
+        reset_provider_session_after_worktree_isolation(
+            shared,
+            channel_id,
+            &provider,
+            isolation_outcome,
+            &mut session_id,
+            &mut memento_context_loaded,
+            &mut session_strategy_reason,
+        )
+        .await;
+    }
     let dispatch_profile = {
         let data = shared.core.lock().await;
         let channel_name = data
@@ -2440,157 +2620,218 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         None
     };
+    let dispatch_id_for_thread = super::super::adk_session::parse_dispatch_id(user_text);
+    let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
+        super::lookup_dispatch_info(shared.api_port, did).await
+    } else {
+        None
+    };
+    let pre_session_dispatch_type = dispatch_info_cached
+        .as_ref()
+        .and_then(|info| info.dispatch_type.as_deref());
 
-    let (session_id, memento_context_loaded, current_path) = match session_info {
-        Some(info) => info,
-        None => {
-            // Try auto-start from role_map workspace
-            let ch_name = {
-                let data = shared.core.lock().await;
-                data.sessions
-                    .get(&channel_id)
-                    .and_then(|s| s.channel_name.clone())
-            };
-            let mut workspace = settings::resolve_workspace(channel_id, ch_name.as_deref());
-            // Fallback: if this is a thread, try resolving workspace from parent channel
-            if workspace.is_none() {
-                if let Some((parent_id, parent_name)) =
-                    super::super::resolve_thread_parent(http, channel_id).await
-                {
-                    // Use parent name from Discord API first, fall back to session map
-                    let parent_ch_name = parent_name.or_else(|| {
-                        let data = shared.core.try_lock().ok()?;
-                        data.sessions
-                            .get(&parent_id)
-                            .and_then(|s| s.channel_name.clone())
-                    });
-                    workspace = settings::resolve_workspace(parent_id, parent_ch_name.as_deref());
-                    if workspace.is_some() {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] 🧵 Thread auto-start: resolved workspace from parent channel {}",
-                            parent_id
-                        );
+    let (session_id, memento_context_loaded, current_path, auto_start_provider_isolated) =
+        match session_info {
+            Some(info) => (info.0, info.1, info.2, false),
+            None => {
+                // Try auto-start from role_map workspace
+                let ch_name = {
+                    let data = shared.core.lock().await;
+                    data.sessions
+                        .get(&channel_id)
+                        .and_then(|s| s.channel_name.clone())
+                };
+                let mut workspace = settings::resolve_workspace(channel_id, ch_name.as_deref());
+                // Fallback: if this is a thread, try resolving workspace from parent channel
+                if workspace.is_none() {
+                    if let Some((parent_id, parent_name)) =
+                        super::super::resolve_thread_parent(http, channel_id).await
+                    {
+                        // Use parent name from Discord API first, fall back to session map
+                        let parent_ch_name = parent_name.or_else(|| {
+                            let data = shared.core.try_lock().ok()?;
+                            data.sessions
+                                .get(&parent_id)
+                                .and_then(|s| s.channel_name.clone())
+                        });
+                        workspace =
+                            settings::resolve_workspace(parent_id, parent_ch_name.as_deref());
+                        if workspace.is_some() {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] 🧵 Thread auto-start: resolved workspace from parent channel {}",
+                                parent_id
+                            );
+                        }
                     }
                 }
-            }
-            if workspace.is_none()
-                && let Some(default_agent) = dm_default_agent.as_ref()
-            {
-                workspace = Some(default_agent.workspace.clone());
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 💬 DM auto-start: using default agent '{}' workspace",
-                    default_agent.role_binding.role_id
-                );
-            }
-            if let Some(ws_path) = workspace {
-                let ws = std::path::Path::new(&ws_path);
-                if ws.is_dir() {
-                    let canonical = ws
-                        .canonicalize()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| ws_path.clone());
-                    // Resolve channel name from Discord API before worktree
-                    // creation so the path uses the real name, not "unknown".
-                    let (ch_name_api, cat_name) =
-                        resolve_channel_category(http, cache, channel_id).await;
-                    let ch_name = match super::super::resolve_thread_parent(http, channel_id).await
-                    {
-                        Some((_parent_id, parent_name)) => {
-                            let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
-                            Some(super::super::synthetic_thread_channel_name(
-                                &parent, channel_id,
-                            ))
-                        }
-                        None => ch_name_api,
-                    };
-
-                    // Check worktree: always use worktree for thread sessions,
-                    // or when conflict detected with another session on same path.
-                    // Use both dispatch_thread_parents (for reused threads) AND Discord API
-                    // thread detection (for first-turn in newly created threads where
-                    // dispatch_thread_parents hasn't been populated yet).
-                    let wt_info = {
-                        let is_thread = shared.dispatch_thread_parents.contains_key(&channel_id)
-                            || super::super::resolve_thread_parent(http, channel_id)
-                                .await
-                                .is_some();
-                        let data = shared.core.lock().await;
-                        let conflict =
-                            detect_worktree_conflict(&data.sessions, &canonical, channel_id);
-                        drop(data);
-                        let needs_worktree = is_thread || conflict.is_some();
-                        if needs_worktree {
-                            let reason = if is_thread {
-                                "thread session"
-                            } else {
-                                "conflict"
-                            };
-                            let ch = ch_name.as_deref().unwrap_or("unknown");
-                            match create_git_worktree(&canonical, ch, provider.as_str()) {
-                                Ok((wt_path, branch)) => {
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    tracing::info!(
-                                        "  [{ts}] 🌿 Auto-start worktree ({reason}): {ch} → {}",
-                                        wt_path
-                                    );
-                                    Some(WorktreeInfo {
-                                        original_path: canonical.clone(),
-                                        worktree_path: wt_path,
-                                        branch_name: branch,
-                                    })
-                                }
-                                Err(_) => None,
-                            }
-                        } else {
-                            None
-                        }
-                    };
-                    let eff_path = wt_info
-                        .as_ref()
-                        .map(|wt| wt.worktree_path.clone())
-                        .unwrap_or_else(|| canonical.clone());
-                    {
-                        let mut data = shared.core.lock().await;
-                        let session =
-                            data.sessions
-                                .entry(channel_id)
-                                .or_insert_with(|| DiscordSession {
-                                    session_id: None,
-                                    memento_context_loaded: false,
-                                    memento_reflected: false,
-                                    current_path: None,
-                                    history: Vec::new(),
-                                    pending_uploads: Vec::new(),
-                                    cleared: false,
-                                    channel_name: None,
-                                    category_name: None,
-                                    remote_profile_name: None,
-                                    channel_id: Some(channel_id.get()),
-                                    last_active: tokio::time::Instant::now(),
-                                    worktree: None,
-
-                                    born_generation: super::super::runtime_store::load_generation(),
-                                    assistant_turns: 0,
-                                });
-                        session.current_path = Some(eff_path.clone());
-                        session.channel_name = ch_name;
-                        session.category_name = cat_name;
-                        session.channel_id = Some(channel_id.get());
-                        session.last_active = tokio::time::Instant::now();
-                        session.worktree = wt_info;
-                    }
+                if workspace.is_none()
+                    && let Some(default_agent) = dm_default_agent.as_ref()
+                {
+                    workspace = Some(default_agent.workspace.clone());
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!("  [{ts}] ▶ Auto-started session from workspace: {eff_path}");
-                    let session_state = {
-                        let data = shared.core.lock().await;
-                        data.sessions
-                            .get(&channel_id)
-                            .map(|s| (s.session_id.clone(), s.memento_context_loaded))
-                            .unwrap_or((None, false))
-                    };
-                    (session_state.0, session_state.1, eff_path)
+                    tracing::info!(
+                        "  [{ts}] 💬 DM auto-start: using default agent '{}' workspace",
+                        default_agent.role_binding.role_id
+                    );
+                }
+                if let Some(ws_path) = workspace {
+                    let ws = std::path::Path::new(&ws_path);
+                    if ws.is_dir() {
+                        let canonical = ws
+                            .canonicalize()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| ws_path.clone());
+                        // Resolve channel name from Discord API before worktree
+                        // creation so the path uses the real name, not "unknown".
+                        let (ch_name_api, cat_name) =
+                            resolve_channel_category(http, cache, channel_id).await;
+                        let ch_name =
+                            match super::super::resolve_thread_parent(http, channel_id).await {
+                                Some((_parent_id, parent_name)) => {
+                                    let parent =
+                                        parent_name.unwrap_or_else(|| format!("{}", _parent_id));
+                                    Some(super::super::synthetic_thread_channel_name(
+                                        &parent, channel_id,
+                                    ))
+                                }
+                                None => ch_name_api,
+                            };
+
+                        // Check worktree: always use worktree for thread sessions,
+                        // or when conflict detected with another session on same path.
+                        // Use both dispatch_thread_parents (for reused threads) AND Discord API
+                        // thread detection (for first-turn in newly created threads where
+                        // dispatch_thread_parents hasn't been populated yet).
+                        let (wt_info, provider_isolation_applied) = {
+                            let is_thread =
+                                shared.dispatch_thread_parents.contains_key(&channel_id)
+                                    || super::super::resolve_thread_parent(http, channel_id)
+                                        .await
+                                        .is_some();
+                            let data = shared.core.lock().await;
+                            let conflict =
+                                detect_worktree_conflict(&data.sessions, &canonical, channel_id);
+                            drop(data);
+                            let provider_isolation_policy =
+                                super::super::agentdesk_config::resolve_worktree_isolation_policy(
+                                    channel_id,
+                                    ch_name.as_deref(),
+                                );
+                            let provider_isolation_required =
+                                provider_isolation_policy.as_ref().is_some_and(|policy| {
+                                    should_force_provider_worktree_isolation(
+                                        policy.non_main_provider_channel,
+                                        policy.isolate_override,
+                                        pre_session_dispatch_type,
+                                    )
+                                });
+                            let needs_worktree =
+                                is_thread || conflict.is_some() || provider_isolation_required;
+                            let wt_info = if needs_worktree {
+                                let reason = if is_thread {
+                                    "thread session"
+                                } else if provider_isolation_required {
+                                    "provider isolation"
+                                } else {
+                                    "conflict"
+                                };
+                                let ch = ch_name.as_deref().unwrap_or("unknown");
+                                match create_git_worktree(&canonical, ch, provider.as_str()) {
+                                    Ok((wt_path, branch)) => {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        tracing::info!(
+                                            "  [{ts}] 🌿 Auto-start worktree ({reason}): {ch} → {}",
+                                            wt_path
+                                        );
+                                        Some(WorktreeInfo {
+                                            original_path: canonical.clone(),
+                                            worktree_path: wt_path,
+                                            branch_name: branch,
+                                        })
+                                    }
+                                    Err(_) => None,
+                                }
+                            } else {
+                                None
+                            };
+                            let provider_isolation_applied =
+                                provider_isolation_required && wt_info.is_some();
+                            (wt_info, provider_isolation_applied)
+                        };
+                        let eff_path = wt_info
+                            .as_ref()
+                            .map(|wt| wt.worktree_path.clone())
+                            .unwrap_or_else(|| canonical.clone());
+                        {
+                            let mut data = shared.core.lock().await;
+                            let session =
+                                data.sessions
+                                    .entry(channel_id)
+                                    .or_insert_with(|| DiscordSession {
+                                        session_id: None,
+                                        memento_context_loaded: false,
+                                        memento_reflected: false,
+                                        current_path: None,
+                                        history: Vec::new(),
+                                        pending_uploads: Vec::new(),
+                                        cleared: false,
+                                        channel_name: None,
+                                        category_name: None,
+                                        remote_profile_name: None,
+                                        channel_id: Some(channel_id.get()),
+                                        last_active: tokio::time::Instant::now(),
+                                        worktree: None,
+
+                                        born_generation:
+                                            super::super::runtime_store::load_generation(),
+                                        assistant_turns: 0,
+                                    });
+                            session.current_path = Some(eff_path.clone());
+                            session.channel_name = ch_name;
+                            session.category_name = cat_name;
+                            session.channel_id = Some(channel_id.get());
+                            session.last_active = tokio::time::Instant::now();
+                            session.worktree = wt_info;
+                            if provider_isolation_applied {
+                                session.clear_provider_session();
+                                session.memento_context_loaded = false;
+                            }
+                        }
+                        if provider_isolation_applied
+                            && let Some(key) =
+                                build_adk_session_key(shared, channel_id, &provider).await
+                        {
+                            super::super::adk_session::clear_provider_session_id(
+                                &key,
+                                shared.api_port,
+                            )
+                            .await;
+                        }
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ▶ Auto-started session from workspace: {eff_path}"
+                        );
+                        let session_state = {
+                            let data = shared.core.lock().await;
+                            data.sessions
+                                .get(&channel_id)
+                                .map(|s| (s.session_id.clone(), s.memento_context_loaded))
+                                .unwrap_or((None, false))
+                        };
+                        (
+                            session_state.0,
+                            session_state.1,
+                            eff_path,
+                            provider_isolation_applied,
+                        )
+                    } else {
+                        rate_limit_wait(shared, channel_id).await;
+                        let _ = channel_id
+                            .say(http, "No active session. Use `/start <path>` first.")
+                            .await;
+                        return Ok(());
+                    }
                 } else {
                     rate_limit_wait(shared, channel_id).await;
                     let _ = channel_id
@@ -2598,17 +2839,8 @@ pub(in crate::services::discord) async fn handle_text_message(
                         .await;
                     return Ok(());
                 }
-            } else {
-                rate_limit_wait(shared, channel_id).await;
-                let _ = channel_id
-                    .say(http, "No active session. Use `/start <path>` first.")
-                    .await;
-                return Ok(());
             }
-        }
-    };
-
-    let dispatch_id_for_thread = super::super::adk_session::parse_dispatch_id(user_text);
+        };
     if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
         && !super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
     {
@@ -2630,11 +2862,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         .is_some();
     // #259: Fetch dispatch metadata once before thread creation so we can extract
     // worktree_path for both thread bootstrap and the subsequent session CWD override.
-    let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
-        super::lookup_dispatch_info(shared.api_port, did).await
-    } else {
-        None
-    };
     // #259: Prefer card-bound worktree over parent channel CWD for dispatch sessions.
     // All dispatch types now inject worktree_path into context via resolve_card_worktree().
     let mut dispatch_type_str = dispatch_info_cached
@@ -2925,6 +3152,8 @@ pub(in crate::services::discord) async fn handle_text_message(
         "runtime_cached_provider_session"
     } else if bootstrapped_fresh_thread_session {
         "thread_session_bootstrapped"
+    } else if auto_start_provider_isolated {
+        "provider_channel_worktree_isolated"
     } else {
         "no_runtime_provider_session"
     };
@@ -3034,6 +3263,34 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         provider
     };
+
+    {
+        let channel_name_for_isolation = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .and_then(|session| session.channel_name.clone())
+        };
+        let isolation_outcome = ensure_provider_worktree_isolation(
+            shared,
+            channel_id,
+            &mut current_path,
+            &provider,
+            channel_name_for_isolation.as_deref(),
+            dispatch_type_str.as_deref(),
+        )
+        .await;
+        reset_provider_session_after_worktree_isolation(
+            shared,
+            channel_id,
+            &provider,
+            isolation_outcome,
+            &mut session_id,
+            &mut memento_context_loaded,
+            &mut session_strategy_reason,
+        )
+        .await;
+    }
 
     if matches!(provider, ProviderKind::Codex)
         && !dispatch_reset_provider_state
@@ -6627,6 +6884,35 @@ mod session_strategy_lifecycle_tests {
             Some("thread-1585")
         );
         assert!(!hints.reset_provider_state);
+    }
+
+    #[test]
+    fn provider_worktree_isolation_policy_keeps_main_provider_on_main_workspace() {
+        assert!(!should_force_provider_worktree_isolation(false, None, None,));
+    }
+
+    #[test]
+    fn provider_worktree_isolation_policy_forces_non_main_provider_channel() {
+        assert!(should_force_provider_worktree_isolation(true, None, None));
+    }
+
+    #[test]
+    fn provider_worktree_isolation_policy_honors_override_false() {
+        assert!(!should_force_provider_worktree_isolation(
+            true,
+            Some(false),
+            None,
+        ));
+    }
+
+    #[test]
+    fn provider_worktree_isolation_policy_bypasses_review_e2e_and_consultation_dispatches() {
+        for dispatch_type in ["review", "e2e-test", "consultation"] {
+            assert!(
+                !should_force_provider_worktree_isolation(true, None, Some(dispatch_type)),
+                "{dispatch_type} dispatches should bypass provider-channel isolation"
+            );
+        }
     }
 }
 

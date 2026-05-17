@@ -4669,6 +4669,7 @@ mod tests {
                         peer_agents: None,
                         quality_feedback_injection: None,
                         dispatch_profile: None,
+                        isolate_override: None,
                         cache_ttl_minutes: None,
                     },
                 )),

@@ -156,6 +156,7 @@ fn agent_channel_for_setup(input: &AgentSetupConfigInput) -> Option<AgentChannel
         peer_agents: None,
         quality_feedback_injection: None,
         dispatch_profile: None,
+        isolate_override: None,
         cache_ttl_minutes: None,
     }))
 }
@@ -326,6 +327,21 @@ fn binding_provider(
         .or_else(|| Some(agent.provider.clone()))
         .or_else(|| Some(provider_key.to_string()))
         .and_then(|raw| ProviderKind::from_str(&raw))
+}
+
+fn effective_channel_provider(provider_key: &str, channel: &AgentChannel) -> Option<ProviderKind> {
+    let raw = channel
+        .provider()
+        .unwrap_or_else(|| provider_key.to_string());
+    ProviderKind::from_str(&raw)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ChannelWorktreeIsolationPolicy {
+    pub(super) non_main_provider_channel: bool,
+    pub(super) isolate_override: Option<bool>,
+    pub(super) agent_provider: Option<ProviderKind>,
+    pub(super) channel_provider: Option<ProviderKind>,
 }
 
 fn role_binding_from_channel(
@@ -521,6 +537,24 @@ pub(super) fn resolve_role_binding(
     let config = load_agentdesk_config()?;
     let (agent, provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
     Some(role_binding_from_channel(agent, provider_key, channel))
+}
+
+pub(super) fn resolve_worktree_isolation_policy(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<ChannelWorktreeIsolationPolicy> {
+    let config = load_agentdesk_config()?;
+    let (agent, provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
+    let agent_provider = ProviderKind::from_str(&agent.provider);
+    let channel_provider = effective_channel_provider(provider_key, channel);
+    Some(ChannelWorktreeIsolationPolicy {
+        non_main_provider_channel: agent_provider.is_some()
+            && channel_provider.is_some()
+            && agent_provider != channel_provider,
+        isolate_override: channel.isolate_override(),
+        agent_provider,
+        channel_provider,
+    })
 }
 
 /// Resolve the prompt-cache TTL bucket (#1088) for a Discord channel based on
@@ -872,6 +906,105 @@ pub(crate) fn configured_workspaces() -> Vec<String> {
     workspaces
 }
 
+#[cfg(test)]
+mod worktree_isolation_policy_tests {
+    use std::fs;
+    use std::sync::Mutex;
+
+    use poise::serenity_prelude::ChannelId;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_temp_root<F>(f: F)
+    where
+        F: FnOnce(&TempDir),
+    {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let temp = TempDir::new().expect("temp home");
+        let root = temp.path().join(".adk");
+        fs::create_dir_all(&root).unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
+        f(&temp);
+        match previous {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+    }
+
+    fn write_agentdesk_yaml(dir: &std::path::Path, content: &str) {
+        let settings_dir = dir.join(".adk").join("config");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::write(settings_dir.join("agentdesk.yaml"), content).unwrap();
+    }
+
+    #[test]
+    fn resolve_policy_compares_agent_provider_to_effective_channel_provider_by_default() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      codex:
+        id: "1479671301387059200"
+        name: "adk-cdx"
+"#,
+            );
+
+            let policy = resolve_worktree_isolation_policy(
+                ChannelId::new(1479671301387059200),
+                Some("adk-cdx"),
+            )
+            .expect("policy");
+
+            assert!(policy.non_main_provider_channel);
+            assert_eq!(policy.agent_provider, Some(ProviderKind::Claude));
+            assert_eq!(policy.channel_provider, Some(ProviderKind::Codex));
+            assert_eq!(policy.isolate_override, None);
+        });
+    }
+
+    #[test]
+    fn resolve_policy_reads_channel_override_by_default() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      codex:
+        id: "1479671301387059200"
+        name: "adk-cdx"
+        isolate_override: false
+"#,
+            );
+
+            let policy = resolve_worktree_isolation_policy(
+                ChannelId::new(1479671301387059200),
+                Some("adk-cdx"),
+            )
+            .expect("policy");
+
+            assert!(policy.non_main_provider_channel);
+            assert_eq!(policy.isolate_override, Some(false));
+        });
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use std::fs;
@@ -964,6 +1097,69 @@ agents:
                 resolve_dispatch_profile(ChannelId::new(1479671301387059200), Some("adk-cdx")),
                 Some(DispatchProfile::Lite)
             );
+        });
+    }
+
+    #[test]
+    fn resolve_worktree_isolation_policy_compares_agent_provider_to_effective_channel_provider() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      codex:
+        id: "1479671301387059200"
+        name: "adk-cdx"
+"#,
+            );
+
+            let policy = resolve_worktree_isolation_policy(
+                ChannelId::new(1479671301387059200),
+                Some("adk-cdx"),
+            )
+            .expect("policy");
+
+            assert!(policy.non_main_provider_channel);
+            assert_eq!(policy.agent_provider, Some(ProviderKind::Claude));
+            assert_eq!(policy.channel_provider, Some(ProviderKind::Codex));
+            assert_eq!(policy.isolate_override, None);
+        });
+    }
+
+    #[test]
+    fn resolve_worktree_isolation_policy_reads_channel_override() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      codex:
+        id: "1479671301387059200"
+        name: "adk-cdx"
+        isolate_override: false
+"#,
+            );
+
+            let policy = resolve_worktree_isolation_policy(
+                ChannelId::new(1479671301387059200),
+                Some("adk-cdx"),
+            )
+            .expect("policy");
+
+            assert!(policy.non_main_provider_channel);
+            assert_eq!(policy.isolate_override, Some(false));
         });
     }
 
