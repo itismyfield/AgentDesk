@@ -174,7 +174,13 @@ pub fn run(
         Err(err) => {
             emit_result_error(&mut output, &err);
             let exit_reason_path = format!("{}.exit_reason", output_file);
-            let _ = std::fs::write(&exit_reason_path, format!("error:{err}"));
+            let exit_str = format!("error:{err}");
+            let _ = std::fs::write(&exit_reason_path, &exit_str);
+            // #2442 (H2) — settings_override fail-fast still emits sentinel.
+            crate::services::tmux_common::emit_wrapper_sentinel(
+                output_file,
+                crate::services::tmux_common::WrapperSentinel::TerminalEnd { exit: &exit_str },
+            );
             eprintln!("\x1b[33m[preserving output files for post-mortem: {output_file}]\x1b[0m");
             std::process::exit(1);
         }
@@ -196,10 +202,23 @@ pub fn run(
     if let Err(err) = first_turn {
         emit_result_error(&mut output, &err);
         let exit_reason_path = format!("{}.exit_reason", output_file);
-        let _ = std::fs::write(&exit_reason_path, format!("error:{err}"));
+        let exit_str = format!("error:{err}");
+        let _ = std::fs::write(&exit_reason_path, &exit_str);
+        // #2442 (H2) — initial-turn fail-fast emits terminal_end to wake
+        // recovery_engine drain without the 2s quiet-period.
+        crate::services::tmux_common::emit_wrapper_sentinel(
+            output_file,
+            crate::services::tmux_common::WrapperSentinel::TerminalEnd { exit: &exit_str },
+        );
         eprintln!("\x1b[33m[preserving output files for post-mortem: {output_file}]\x1b[0m");
         std::process::exit(1);
     }
+
+    // #2442 (H3) — initial turn succeeded; emit ready_for_input.
+    crate::services::tmux_common::emit_wrapper_sentinel(
+        output_file,
+        crate::services::tmux_common::WrapperSentinel::ReadyForInput { provider: "qwen" },
+    );
 
     let mut followup_error: Option<String> = None;
     while let Ok(next_prompt) = prompt_rx.recv() {
@@ -216,6 +235,11 @@ pub fn run(
             followup_error = Some(err);
             break;
         }
+        // #2442 (H3) — follow-up turn success → ready_for_input.
+        crate::services::tmux_common::emit_wrapper_sentinel(
+            output_file,
+            crate::services::tmux_common::WrapperSentinel::ReadyForInput { provider: "qwen" },
+        );
     }
 
     let exit_reason_path = format!("{}.exit_reason", output_file);
@@ -227,9 +251,21 @@ pub fn run(
     } else {
         let reason = "exit:0".to_string();
         let _ = std::fs::write(&exit_reason_path, &reason);
+        // #2442 (H2) — emit terminal_end BEFORE cleanup() removes the JSONL.
+        crate::services::tmux_common::emit_wrapper_sentinel(
+            output_file,
+            crate::services::tmux_common::WrapperSentinel::TerminalEnd { exit: &reason },
+        );
         cleanup(output_file, input_fifo);
         reason
     };
+    if followup_error.is_some() {
+        // Error branch keeps the JSONL — emit terminal_end now.
+        crate::services::tmux_common::emit_wrapper_sentinel(
+            output_file,
+            crate::services::tmux_common::WrapperSentinel::TerminalEnd { exit: &exit_reason },
+        );
+    }
     eprintln!();
     eprintln!("\x1b[90m--- Session ended ({exit_reason}) ---\x1b[0m");
 }

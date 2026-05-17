@@ -259,6 +259,69 @@ fn open_jsonl_append_file(path: &Path) -> std::io::Result<File> {
     OpenOptions::new().create(true).append(true).open(path)
 }
 
+/// #2442 — JSONL sentinel emitted by wrappers so the watcher /
+/// recovery_engine can graduate the 2s drain quiet-period and 2s
+/// ready-probe interval.
+///
+/// The wrapper writes one line per event directly to the session JSONL
+/// using the same append-then-flush path as normal stream-json output.
+/// Two flavors:
+///  - `terminal_end` — emitted by `scopeguard` at wrapper exit (any exit
+///    path the runtime can observe — clean exit, panic unwind). The
+///    consumer treats this as a deterministic drain marker so the 2s
+///    quiet-period in `recovery_engine.rs` can short-circuit. We still
+///    keep the 2s fallback for SIGKILL paths that bypass scopeguard.
+///  - `ready_for_input` — emitted by each wrapper immediately before/after
+///    handing stdin off to the provider when the provider has signalled
+///    readiness. The 2s probe-interval in `tmux.rs` short-circuits on
+///    arrival; if the wrapper never writes (e.g. SIGKILL mid-turn) the
+///    probe falls back to its existing cadence.
+///
+/// Both helpers are best-effort: a failure to write the sentinel never
+/// affects the wrapper's primary work. Errors are silently dropped — the
+/// 2s fallbacks on the consumer side keep behavior correct.
+#[derive(Clone, Copy, Debug)]
+pub enum WrapperSentinel<'a> {
+    /// Wrapper is exiting. `exit` carries the runtime-derived reason
+    /// string (`exit:N` / `signal:N` / `still_running`) for diagnostics.
+    TerminalEnd { exit: &'a str },
+    /// Provider has signalled readiness — wrapper is about to (or just
+    /// did) accept further stdin. `provider` identifies the wrapper kind.
+    ReadyForInput { provider: &'a str },
+}
+
+/// Public name of the JSONL `type` field for the terminal-end sentinel.
+/// Exposed as a constant so consumers (recovery_engine.rs) and producers
+/// (wrappers) can agree on the wire-level event name without string
+/// duplication.
+pub const WRAPPER_TERMINAL_END_EVENT: &str = "terminal_end";
+/// Public name of the JSONL `type` field for the ready-for-input sentinel.
+pub const WRAPPER_READY_FOR_INPUT_EVENT: &str = "ready_for_input";
+
+/// Emit a sentinel line into the session JSONL. Best-effort; errors are
+/// swallowed because the consumer-side fallbacks (2s drain quiet-period,
+/// 2s ready-probe interval) keep behavior correct even when the sentinel
+/// never lands.
+pub fn emit_wrapper_sentinel(output_file: &str, sentinel: WrapperSentinel<'_>) {
+    let line = match sentinel {
+        WrapperSentinel::TerminalEnd { exit } => serde_json::json!({
+            "type": WRAPPER_TERMINAL_END_EVENT,
+            "exit": exit,
+            "ts": chrono::Utc::now().to_rfc3339(),
+        }),
+        WrapperSentinel::ReadyForInput { provider } => serde_json::json!({
+            "type": WRAPPER_READY_FOR_INPUT_EVENT,
+            "provider": provider,
+            "ts": chrono::Utc::now().to_rfc3339(),
+        }),
+    };
+    let Ok(mut writer) = RotatingJsonlWriter::open(output_file) else {
+        return;
+    };
+    let _ = writer.write_line(&line.to_string());
+    let _ = writer.sync_all();
+}
+
 #[cfg(unix)]
 fn path_points_to_different_file(file: &File, path: &Path) -> std::io::Result<bool> {
     use std::os::unix::fs::MetadataExt;

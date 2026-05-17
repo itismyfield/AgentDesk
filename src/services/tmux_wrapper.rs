@@ -185,7 +185,22 @@ pub fn run(
             // Check if this is a "result" event (turn complete)
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
                 if json.get("type").and_then(|v| v.as_str()) == Some("result") {
-                    ready_t1.store(true, Ordering::Relaxed);
+                    let was_ready = ready_t1.swap(true, Ordering::Relaxed);
+                    if !was_ready {
+                        // #2442 (H3) — first transition to ready: emit the
+                        // ready_for_input sentinel so the tmux.rs probe-loop
+                        // (READY_FOR_INPUT_IDLE_PROBE_INTERVAL = 2s) can
+                        // short-circuit instead of waiting for the next 2s
+                        // tick. The probe still runs as a fallback in case
+                        // the sentinel never lands (e.g. wrapper SIGKILL
+                        // immediately after the result event).
+                        crate::services::tmux_common::emit_wrapper_sentinel(
+                            &output_file_path,
+                            crate::services::tmux_common::WrapperSentinel::ReadyForInput {
+                                provider: "claude",
+                            },
+                        );
+                    }
                     // Detect fatal startup errors (e.g. auth failure).
                     // If Claude reports is_error with zero cost, it failed before
                     // making any API call — no point keeping the session alive.
@@ -399,6 +414,19 @@ pub fn run(
     // spawned by Claude (e.g. cmd.exe on Windows, bash on Unix) are also terminated.
     // Without this, those descendants survive as orphan processes.
     crate::services::process::kill_child_tree(&mut child);
+
+    // #2442 (H2) — emit terminal_end sentinel BEFORE the JSONL is removed
+    // on the clean-exit branch. The recovery_engine drain quiet-period
+    // short-circuits when the sentinel line is present (the line is
+    // append-only and shows up at the tail of the JSONL the watcher sees),
+    // letting the 2s sleep in `terminal_success_output_drained_for_recovery`
+    // bail out immediately. SIGKILL paths bypass this emit; the 2s
+    // fallback in recovery_engine.rs handles that case as
+    // defense-in-depth.
+    crate::services::tmux_common::emit_wrapper_sentinel(
+        output_file,
+        crate::services::tmux_common::WrapperSentinel::TerminalEnd { exit: &exit_reason },
+    );
 
     // Write exit reason file for recovery diagnostics
     let exit_reason_path = format!("{}.exit_reason", output_file);

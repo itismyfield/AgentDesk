@@ -1,5 +1,40 @@
 use super::*;
 
+/// #2442 (H3) — fast-path check for the wrapper's `ready_for_input` JSONL
+/// sentinel in the tail of the session jsonl. Reads only the last ~4 KiB
+/// so it stays O(1) regardless of jsonl size. False negatives just fall
+/// back to the existing 2s `READY_FOR_INPUT_IDLE_PROBE_INTERVAL` cadence,
+/// so partial-line / rotation edge cases are harmless.
+fn jsonl_tail_contains_ready_for_input_sentinel(output_path: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const TAIL_WINDOW_BYTES: u64 = 4 * 1024;
+
+    let Ok(mut file) = std::fs::File::open(output_path) else {
+        return false;
+    };
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    let len = meta.len();
+    if len == 0 {
+        return false;
+    }
+    let start = len.saturating_sub(TAIL_WINDOW_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let mut buf = Vec::with_capacity(TAIL_WINDOW_BYTES as usize);
+    if file.read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    let needle = format!(
+        "\"type\":\"{}\"",
+        crate::services::tmux_common::WRAPPER_READY_FOR_INPUT_EVENT
+    );
+    String::from_utf8_lossy(&buf).contains(&needle)
+}
+
 /// E5 (#2412): forward a freshly-read tmux output chunk into the
 /// supervisor-owned [`StreamRelay`] (if one exists for the session). The
 /// supervisor's [`RelayProducerRegistry`] is the bridge — it hands the
@@ -979,27 +1014,42 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         }
                         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                         let now = std::time::Instant::now();
-                        let should_probe_ready = last_ready_probe_at
-                            .map(|last| {
-                                now.duration_since(last) >= READY_FOR_INPUT_IDLE_PROBE_INTERVAL
-                            })
-                            .unwrap_or(true);
+                        // #2442 (H3) — wrapper emits a `ready_for_input`
+                        // JSONL sentinel as soon as it transitions back to
+                        // accepting stdin. If we see the sentinel in the
+                        // tail bytes, treat it as a free readiness signal
+                        // and short-circuit the 2s probe cadence. The
+                        // legacy `should_probe_ready` cadence stays as a
+                        // fallback for the SIGKILL / sentinel-lost case.
+                        let sentinel_ready = jsonl_tail_contains_ready_for_input_sentinel(
+                            &output_path,
+                        );
+                        let should_probe_ready = sentinel_ready
+                            || last_ready_probe_at
+                                .map(|last| {
+                                    now.duration_since(last) >= READY_FOR_INPUT_IDLE_PROBE_INTERVAL
+                                })
+                                .unwrap_or(true);
                         if should_probe_ready {
                             last_ready_probe_at = Some(now);
-                            let ready_for_input = tokio::time::timeout(
-                                std::time::Duration::from_secs(5),
-                                tokio::task::spawn_blocking({
-                                    let name = tmux_session_name.clone();
-                                    move || {
-                                        crate::services::provider::tmux_session_ready_for_input(
-                                            &name,
-                                        )
-                                    }
-                                }),
-                            )
-                            .await
-                            .unwrap_or(Ok(false))
-                            .unwrap_or(false);
+                            let ready_for_input = if sentinel_ready {
+                                true
+                            } else {
+                                tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    tokio::task::spawn_blocking({
+                                        let name = tmux_session_name.clone();
+                                        move || {
+                                            crate::services::provider::tmux_session_ready_for_input(
+                                                &name,
+                                            )
+                                        }
+                                    }),
+                                )
+                                .await
+                                .unwrap_or(Ok(false))
+                                .unwrap_or(false)
+                            };
                             let post_work_observed = watcher_has_post_work_ready_evidence(
                                 &full_response,
                                 &tool_state,
