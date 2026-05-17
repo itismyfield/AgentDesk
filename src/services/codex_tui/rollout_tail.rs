@@ -2016,4 +2016,290 @@ mod tests {
             )
         );
     }
+
+    /// Helper that exercises the real read loop (not `replay_rollout_file`),
+    /// so we can observe the EOF drain vs `task_complete` fast-path
+    /// interaction. The `is_alive` closure flips to `false` once the rollout
+    /// has been fully written, mirroring the production `pane_alive` signal.
+    #[allow(clippy::too_many_arguments)]
+    fn run_tail_with_options(
+        body: &str,
+        drain: Duration,
+        deadline: Option<Duration>,
+        enable_task_complete_fast_path: bool,
+    ) -> (Vec<StreamMessage>, Duration) {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"task-complete-test\",\"cwd\":\"/tmp/repo\"}}}}\n{}",
+                body
+            ),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let started = Instant::now();
+        let alive = std::sync::atomic::AtomicBool::new(true);
+        // pane stays alive for the entire read — only the fast-path / drain
+        // should be able to terminate the tail. Once the read returns we
+        // capture the elapsed wall time so the assertion can verify the
+        // fast-path beat the drain.
+        let (result, _outcome) = tail_rollout_file_until_assistant_response(
+            file.path(),
+            0,
+            None,
+            &tx,
+            None,
+            || alive.load(std::sync::atomic::Ordering::Relaxed),
+            drain,
+            deadline,
+            enable_task_complete_fast_path,
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        drop(tx);
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        (rx.iter().collect(), elapsed)
+    }
+
+    #[test]
+    fn task_complete_emits_done_immediately_without_waiting_for_drain() {
+        // #2423: when codex CLI emits `event_msg/task_complete`, the tail
+        // must Done immediately. A 30s drain would normally pin the read
+        // loop at EOF for ~30s before flushing Done; if the fast-path is
+        // working we should finish within a fraction of that.
+        let body = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"hello"}}"#,
+            "\n",
+        );
+        let (messages, elapsed) = run_tail_with_options(
+            body,
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+            true,
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "task_complete fast-path must short-circuit the 30s drain (took {:?})",
+            elapsed
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. }) if result == "hello"
+        ));
+    }
+
+    #[test]
+    fn task_complete_waits_for_pending_tool_call_output() {
+        // #2423: codex may emit `task_complete` while the matching
+        // `function_call_output` line is still buffered. The
+        // `pending_tool_call_depth` guard must hold the fast-path until
+        // the output is observed so the relay does not drop the final
+        // tool result.
+        let body = concat!(
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"date\"}","call_id":"call-1"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"after tool"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"final tool output"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"after tool"}]}}"#,
+            "\n",
+        );
+        // Use a long drain so the fast-path is the only thing that can
+        // terminate the tail in a reasonable amount of time.
+        let (messages, elapsed) = run_tail_with_options(
+            body,
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+            true,
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "fast-path should fire once tool depth drains (took {:?})",
+            elapsed
+        );
+
+        // Final tool output MUST have been relayed before Done.
+        let tool_result_idx = messages
+            .iter()
+            .position(|m| matches!(m, StreamMessage::ToolResult { content, .. } if content.contains("final tool output")));
+        let done_idx = messages
+            .iter()
+            .position(|m| matches!(m, StreamMessage::Done { .. }));
+        assert!(
+            tool_result_idx.is_some(),
+            "final ToolResult must be in the stream: {:?}",
+            messages
+        );
+        assert!(done_idx.is_some(), "Done must be emitted: {:?}", messages);
+        assert!(
+            tool_result_idx.unwrap() < done_idx.unwrap(),
+            "ToolResult MUST precede Done (got {:?})",
+            messages
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. }) if result == "after tool"
+        ));
+    }
+
+    #[test]
+    fn task_complete_without_assistant_text_uses_last_agent_message() {
+        // #2423: tool-only turns (or rollouts that carry the final answer
+        // only on the `task_complete.last_agent_message` field) should
+        // produce a `Done.result` populated from the fallback string —
+        // empty Done would lose the response.
+        let body = concat!(
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"answer via last_agent_message"}}"#,
+            "\n",
+        );
+        let (messages, _elapsed) = run_tail_with_options(
+            body,
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+            true,
+        );
+        assert!(
+            matches!(
+                messages.last(),
+                Some(StreamMessage::Done { result, .. })
+                    if result == "answer via last_agent_message"
+            ),
+            "expected Done with last_agent_message fallback, got {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn missing_task_complete_falls_back_to_drain() {
+        // #2423: legacy Codex CLI versions / rollouts without
+        // `event_msg/task_complete` MUST still terminate via the
+        // `terminal_drain` safety net so the tail does not hang
+        // indefinitely. This is the same path #2422 ships on; we only
+        // want to ensure the fast-path additions did not regress it.
+        let body = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"legacy"}]}}"#,
+            "\n",
+        );
+        let (messages, elapsed) = run_tail_with_options(
+            body,
+            Duration::from_millis(150),
+            Some(Duration::from_secs(60)),
+            true,
+        );
+        // Drain must fire approximately within `drain` (with read-poll
+        // jitter). A loose upper bound of 2s keeps the test stable on CI.
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "drain must wait for the terminal window (took {:?})",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "drain should fire close to its configured value (took {:?})",
+            elapsed
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. }) if result == "legacy"
+        ));
+    }
+
+    #[test]
+    fn disabling_fast_path_keeps_legacy_drain_behaviour() {
+        // #2423: the `enable_task_complete_fast_path` escape hatch must
+        // restore the pre-#2423 behaviour — `task_complete` becomes a
+        // no-op and termination is decided solely by the drain. This
+        // protects an operations rollback path if a future Codex CLI
+        // ships a malformed `task_complete` event.
+        let body = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"with disabled fast path"}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"with disabled fast path"}}"#,
+            "\n",
+        );
+        let (messages, elapsed) = run_tail_with_options(
+            body,
+            Duration::from_millis(200),
+            Some(Duration::from_secs(60)),
+            false,
+        );
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "with fast-path disabled the drain must be the gating timer (took {:?})",
+            elapsed
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. }) if result == "with disabled fast path"
+        ));
+    }
+
+    #[test]
+    fn task_complete_recorded_but_pending_tool_call_blocks_fast_path() {
+        // #2423: explicit white-box check of the depth guard.
+        // task_complete arrives while a function_call is still
+        // outstanding → fast-path must wait. We verify by giving a
+        // very long drain and asserting that, until the
+        // function_call_output line appears, the tail does NOT
+        // terminate. Since reaching the drain itself would take 30s+,
+        // we instead append the output after a delay.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout-pending.jsonl");
+        let initial = concat!(
+            r#"{"type":"session_meta","payload":{"id":"pending-test","cwd":"/tmp/repo"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"date\"}","call_id":"call-1"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"after tool"}}"#,
+            "\n",
+        );
+        std::fs::write(&rollout, initial).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                Duration::from_secs(30),
+                Some(Duration::from_secs(60)),
+                true,
+            )
+        });
+        // Give the tail enough time to ingest the pre-output entries and
+        // reach EOF. The fast-path MUST NOT fire here.
+        std::thread::sleep(Duration::from_millis(300));
+        // Append the matching function_call_output + assistant text.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            concat!(
+                r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"ok"}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"after tool"}]}}"#,
+                "\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. }) if result == "after tool"
+        ));
+    }
 }
