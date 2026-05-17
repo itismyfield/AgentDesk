@@ -1215,6 +1215,10 @@ fn ensure_monitor_auto_turn_inflight(
     );
     synthetic.turn_start_offset = Some(turn_start_offset);
     synthetic.rebind_origin = true;
+    // #2285 audit trail: monitor pattern fired this turn without an
+    // originating Discord message. The session-bound relay does NOT branch
+    // on this — recorded for diagnostics only.
+    synthetic.turn_source = super::inflight::TurnSource::MonitorTriggered;
 
     match super::inflight::save_inflight_state_create_new(&synthetic) {
         Ok(()) => {
@@ -1716,6 +1720,58 @@ mod tui_completion_gate_outcome_tests {
         // Codex H2: timeout MUST suppress the TurnCompleted emit;
         // placeholder sweeper / next-turn intake reconciles later.
         assert!(!TuiCompletionGateOutcome::TimedOut.should_emit_completion());
+    }
+}
+
+/// #2293 regression coverage — the `lifecycle_stage_paused` boolean derived
+/// from `TuiCompletionGateOutcome` is what gates every TimedOut side-effect
+/// in `tmux_watcher.rs` (✅ reaction, transcript persist, history append,
+/// confirmed-end watermark, clear_inflight, finish_restored_watcher_active_turn,
+/// queue kickoff, terminal-finalize stop). Same pattern in `turn_bridge` and
+/// `recovery_engine`. The pure derivation lives in this module's
+/// `should_emit_completion` contract, but the consumers compute their flag
+/// inline via `matches!(outcome, TuiCompletionGateOutcome::TimedOut)` — these
+/// tests pin the matrix so a future refactor that adds a fourth variant
+/// cannot silently widen the "proceed" set without also updating the side-
+/// effect gates.
+#[cfg(test)]
+mod lifecycle_stage_pause_matrix_tests {
+    use super::TuiCompletionGateOutcome;
+
+    /// Mirrors the `matches!` predicate inlined at the watcher / bridge /
+    /// recovery side-effect gates. Keeping it as a tiny helper here makes
+    /// the gate matrix testable without re-implementing the consumers.
+    fn lifecycle_stage_paused(outcome: TuiCompletionGateOutcome) -> bool {
+        matches!(outcome, TuiCompletionGateOutcome::TimedOut)
+    }
+
+    #[test]
+    fn paused_only_on_timed_out() {
+        assert!(!lifecycle_stage_paused(TuiCompletionGateOutcome::NotGated));
+        assert!(!lifecycle_stage_paused(
+            TuiCompletionGateOutcome::ConfirmedIdle
+        ));
+        assert!(lifecycle_stage_paused(TuiCompletionGateOutcome::TimedOut));
+    }
+
+    #[test]
+    fn pause_matrix_is_complement_of_emit_matrix() {
+        // Every outcome where the gate DOES emit completion is also a
+        // outcome where lifecycle MUST proceed — and vice versa. If these
+        // two ever drift apart we'd either suppress the user-visible
+        // `응답 완료` while still releasing the mailbox (the original
+        // #2293 cascade) or emit completion while pausing the cleanup.
+        for outcome in [
+            TuiCompletionGateOutcome::NotGated,
+            TuiCompletionGateOutcome::ConfirmedIdle,
+            TuiCompletionGateOutcome::TimedOut,
+        ] {
+            assert_eq!(
+                outcome.should_emit_completion(),
+                !lifecycle_stage_paused(outcome),
+                "emit/pause complementarity violated for {outcome:?}",
+            );
+        }
     }
 }
 

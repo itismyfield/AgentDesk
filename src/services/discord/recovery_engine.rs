@@ -382,6 +382,28 @@ mod recovery_dispatch_gate_tests {
     }
 }
 
+#[cfg(test)]
+mod recovery_completion_outcome_tests {
+    use super::RecoveryCompletionOutcome;
+
+    #[test]
+    fn emitted_lets_callers_proceed_with_dispatch_finalize() {
+        assert!(RecoveryCompletionOutcome::Emitted.should_proceed());
+    }
+
+    #[test]
+    fn lifecycle_paused_blocks_dispatch_finalize() {
+        // #2293 H3: the three recovery callers
+        // (`completed_during_downtime`, `captured_full_response`,
+        // `output_completed`) MUST observe `false` here and `continue` the
+        // recovery loop. If this assertion ever flips to `true`, the gate
+        // would let dispatch finalize + analytics persist + mailbox finish
+        // run while the pane is still busy — the exact cascade #2293
+        // exists to prevent.
+        assert!(!RecoveryCompletionOutcome::LifecyclePaused.should_proceed());
+    }
+}
+
 /// Retry-aware tmux session check for recovery after dcserver restart.
 /// The first check can false-negative if tmux CLI hasn't fully initialized yet.
 fn tmux_session_alive_with_retry(name: &str) -> bool {
@@ -3545,6 +3567,15 @@ pub(crate) async fn rebind_inflight_for_channel(
             initial_offset,
         );
         state.rebind_origin = true;
+        // #2161 Part 2 / #2285 adoption: this synthetic inflight is born when
+        // `POST /api/inflight/rebind` adopts a tmux session the operator
+        // launched outside AgentDesk (e.g. `tmux new -s <expected>` + run
+        // provider manually). Tag as `ExternalAdopted` so audit logs and
+        // monitoring surfaces can distinguish "AgentDesk-launched" from
+        // "AgentDesk-discovered" sessions. The session-bound relay (epic
+        // #2285 E1–E5) routes both identically — this is pure audit
+        // metadata.
+        state.turn_source = super::inflight::TurnSource::ExternalAdopted;
 
         // Atomic create-or-fail: if a legitimate turn created its inflight file
         // between the preflight check above and this point, the write fails

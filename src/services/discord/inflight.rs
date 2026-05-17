@@ -246,6 +246,53 @@ impl TurnSource {
     }
 }
 
+#[cfg(test)]
+mod turn_source_tests {
+    use super::TurnSource;
+
+    #[test]
+    fn default_is_managed_for_legacy_rows() {
+        // #2285 audit field is backward compatible — legacy v8 inflight rows
+        // that pre-date the field must round-trip through serde with
+        // `TurnSource::Managed` filled in via `#[serde(default)]`.
+        assert_eq!(TurnSource::default(), TurnSource::Managed);
+    }
+
+    #[test]
+    fn wire_strings_are_stable_audit_labels() {
+        // The four labels are committed to observability dashboards / metrics
+        // — renaming them silently is a downstream-breaking change.
+        assert_eq!(TurnSource::Managed.as_str(), "managed");
+        assert_eq!(TurnSource::MonitorTriggered.as_str(), "monitor_triggered");
+        assert_eq!(TurnSource::ExternalInput.as_str(), "external_input");
+        assert_eq!(TurnSource::ExternalAdopted.as_str(), "external_adopted");
+    }
+
+    #[test]
+    fn serde_round_trip_uses_snake_case() {
+        // Confirms the `rename_all = "snake_case"` attribute survives any
+        // future refactor that re-imports the enum elsewhere.
+        let json = serde_json::to_string(&TurnSource::ExternalAdopted).unwrap();
+        assert_eq!(json, "\"external_adopted\"");
+        let parsed: TurnSource = serde_json::from_str("\"monitor_triggered\"").unwrap();
+        assert_eq!(parsed, TurnSource::MonitorTriggered);
+    }
+
+    #[test]
+    fn missing_field_defaults_to_managed_when_deserialised() {
+        // The full state struct is gated behind `legacy-sqlite-tests`, so we
+        // exercise the `#[serde(default)]` contract with a small wrapper
+        // that captures the exact attribute combination used on the field.
+        #[derive(serde::Deserialize, Debug)]
+        struct Probe {
+            #[serde(default)]
+            turn_source: TurnSource,
+        }
+        let parsed: Probe = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.turn_source, TurnSource::Managed);
+    }
+}
+
 impl InflightTurnState {
     pub fn new(
         provider: ProviderKind,
