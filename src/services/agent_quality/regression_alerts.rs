@@ -191,10 +191,18 @@ pub async fn compute_regressions(pool: &PgPool) -> Result<Vec<Regression>> {
             .try_get("agent_id")
             .map_err(|error| anyhow!("decode agent_id: {error}"))?;
 
-        let turn_7d: Option<f64> = row.try_get("turn_success_rate_7d").unwrap_or(None);
-        let turn_30d: Option<f64> = row.try_get("turn_success_rate_30d").unwrap_or(None);
-        let turn_s7: i64 = row.try_get("turn_sample_size_7d").unwrap_or(0);
-        let turn_s30: i64 = row.try_get("turn_sample_size_30d").unwrap_or(0);
+        let turn_7d: Option<f64> = row
+            .try_get("turn_success_rate_7d")
+            .map_err(|error| anyhow!("decode turn_success_rate_7d: {error}"))?;
+        let turn_30d: Option<f64> = row
+            .try_get("turn_success_rate_30d")
+            .map_err(|error| anyhow!("decode turn_success_rate_30d: {error}"))?;
+        let turn_s7: i64 = row
+            .try_get("turn_sample_size_7d")
+            .map_err(|error| anyhow!("decode turn_sample_size_7d: {error}"))?;
+        let turn_s30: i64 = row
+            .try_get("turn_sample_size_30d")
+            .map_err(|error| anyhow!("decode turn_sample_size_30d: {error}"))?;
         if let Some(reg) = build_regression(
             &agent_id,
             QualityMetric::TurnSuccessRate,
@@ -206,10 +214,18 @@ pub async fn compute_regressions(pool: &PgPool) -> Result<Vec<Regression>> {
             out.push(reg);
         }
 
-        let review_7d: Option<f64> = row.try_get("review_pass_rate_7d").unwrap_or(None);
-        let review_30d: Option<f64> = row.try_get("review_pass_rate_30d").unwrap_or(None);
-        let review_s7: i64 = row.try_get("review_sample_size_7d").unwrap_or(0);
-        let review_s30: i64 = row.try_get("review_sample_size_30d").unwrap_or(0);
+        let review_7d: Option<f64> = row
+            .try_get("review_pass_rate_7d")
+            .map_err(|error| anyhow!("decode review_pass_rate_7d: {error}"))?;
+        let review_30d: Option<f64> = row
+            .try_get("review_pass_rate_30d")
+            .map_err(|error| anyhow!("decode review_pass_rate_30d: {error}"))?;
+        let review_s7: i64 = row
+            .try_get("review_sample_size_7d")
+            .map_err(|error| anyhow!("decode review_sample_size_7d: {error}"))?;
+        let review_s30: i64 = row
+            .try_get("review_sample_size_30d")
+            .map_err(|error| anyhow!("decode review_sample_size_30d: {error}"))?;
         if let Some(reg) = build_regression(
             &agent_id,
             QualityMetric::ReviewPassRate,
@@ -612,5 +628,18 @@ mod tests {
                 None => std::env::remove_var(ALERT_CHANNEL_ENV),
             }
         }
+    }
+
+    #[test]
+    fn compute_regressions_requires_strict_types() {
+        let result: Result<Option<f64>> = Err(anyhow::anyhow!("db error"));
+        let mapped = result.map_err(|e| anyhow::anyhow!("decode error: {e}"));
+        assert!(mapped.is_err());
+        assert!(
+            mapped
+                .unwrap_err()
+                .to_string()
+                .contains("decode error: db error")
+        );
     }
 }
