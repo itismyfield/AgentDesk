@@ -1416,3 +1416,110 @@ mod tests {
         ));
     }
 }
+
+// #2426: tests for the PID-exit observation helper. These do not require the
+// `legacy-sqlite-tests` feature because they exercise only the
+// `wait_for_pid_exit` path and do not touch the SQLite test scaffolding.
+#[cfg(all(test, unix))]
+mod pid_exit_tests {
+    use super::wait_for_pid_exit;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// A PID we are extremely unlikely to ever be reachable: well above the
+    /// typical max PID and never spawned by this test process. The kernel
+    /// reports ESRCH from `kill(pid, 0)` and `wait_for_pid_exit` should
+    /// short-circuit to `true` without blocking for the deadline.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_pid_exit_returns_immediately_for_nonexistent_pid() {
+        let started = Instant::now();
+        let exited = wait_for_pid_exit(4_000_000, Duration::from_secs(5)).await;
+        let elapsed = started.elapsed();
+        assert!(
+            exited,
+            "nonexistent PID must be reported as already-exited (kill(pid,0) -> ESRCH)"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "nonexistent PID short-circuit must not honour the full deadline (took {elapsed:?})"
+        );
+    }
+
+    /// Spawn a real child, kill it, then call `wait_for_pid_exit`. The
+    /// kqueue/pidfd path must signal exit well before the 2s upper bound.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_pid_exit_observes_child_termination() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+
+        // Schedule a kill 50ms in the future so the helper actually has to
+        // wait for the exit signal rather than short-circuit via the
+        // `kill(pid,0)` fast path.
+        let killer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // SIGKILL = unconditional, no handler chance.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        });
+
+        let started = Instant::now();
+        let exited = wait_for_pid_exit(pid, Duration::from_secs(2)).await;
+        let elapsed = started.elapsed();
+
+        // Reap the zombie regardless of test outcome so we don't leak.
+        let _ = child.wait();
+        let _ = killer.await;
+
+        assert!(exited, "wait_for_pid_exit must report exit for killed child");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "OS-level exit notification must beat the upper bound by a comfortable margin (took {elapsed:?})"
+        );
+    }
+
+    /// A still-running child must drive `wait_for_pid_exit` to the upper
+    /// bound and report `false`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_pid_exit_times_out_when_child_keeps_running() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+
+        let started = Instant::now();
+        let exited = wait_for_pid_exit(pid, Duration::from_millis(200)).await;
+        let elapsed = started.elapsed();
+
+        // Tear down the still-running child.
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = child.wait();
+
+        assert!(
+            !exited,
+            "long-running child must not be reported as exited within the upper bound"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(180),
+            "the upper bound must actually be honoured (took only {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the upper bound must not be exceeded by more than scheduler jitter (took {elapsed:?})"
+        );
+    }
+}
