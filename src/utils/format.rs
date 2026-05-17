@@ -214,13 +214,9 @@ pub fn tail_with_ellipsis_bytes(text: &str, max_bytes: usize) -> String {
 /// `~` 또는 `~/...` 경로를 홈 디렉토리로 확장한다.
 /// `~user/...` 형태는 확장하지 않고 그대로 반환한다.
 pub fn expand_tilde_path(path: &str) -> std::path::PathBuf {
-    if path == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home;
-        }
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
+    if path == "~" || path.starts_with("~/") {
+        if let Some(expanded) = crate::runtime_layout::expand_user_path(path) {
+            return expanded;
         }
     }
     std::path::PathBuf::from(path)

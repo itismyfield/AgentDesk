@@ -357,7 +357,7 @@
 | `services::cluster::watcher_supervisor` | `src/services/cluster/watcher_supervisor.rs` | 743 |  |
 | `services::codex` | `src/services/codex.rs` | 3276 | giant-file |
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 |  |
-| `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 754 |  |
+| `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 744 |  |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 3 |  |
 | `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 1088 | giant-file |
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 2968 | giant-file |
@@ -529,7 +529,7 @@
 | `services::git::branch_resolver` | `src/services/git/branch_resolver.rs` | 197 |  |
 | `services::git::commit_resolver` | `src/services/git/commit_resolver.rs` | 575 |  |
 | `services::git::remote` | `src/services/git/remote.rs` | 49 |  |
-| `services::git::repo_resolver` | `src/services/git/repo_resolver.rs` | 257 |  |
+| `services::git::repo_resolver` | `src/services/git/repo_resolver.rs` | 254 |  |
 | `services::git::runner` | `src/services/git/runner.rs` | 420 |  |
 | `services::git::worktree_resolver` | `src/services/git/worktree_resolver.rs` | 640 |  |
 | `services::issue_announcements` | `src/services/issue_announcements.rs` | 483 |  |
@@ -594,7 +594,7 @@
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
 | `services::queue` | `src/services/queue.rs` | 782 |  |
 | `services::qwen` | `src/services/qwen.rs` | 2461 | giant-file |
-| `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1230 | giant-file |
+| `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1220 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
 | `services::retrospectives` | `src/services/retrospectives.rs` | 882 |  |
 | `services::routines` | `src/services/routines/mod.rs` | 30 |  |
@@ -615,7 +615,7 @@
 | `services::termination_audit` | `src/services/termination_audit.rs` | 411 |  |
 | `services::tmux_common` | `src/services/tmux_common.rs` | 869 |  |
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 398 |  |
-| `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 737 |  |
+| `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 727 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
 | `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 729 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 409 |  |
@@ -628,7 +628,7 @@
 | `utils::api` | `src/utils/api.rs` | 53 |  |
 | `utils::async_bridge` | `src/utils/async_bridge.rs` | 137 |  |
 | `utils::discord` | `src/utils/discord.rs` | 24 |  |
-| `utils::format` | `src/utils/format.rs` | 324 |  |
+| `utils::format` | `src/utils/format.rs` | 320 |  |
 | `utils::github_links` | `src/utils/github_links.rs` | 154 |  |
 | `utils::loopback_url` | `src/utils/loopback_url.rs` | 58 |  |
 | `utils::wip_detect` | `src/utils/wip_detect.rs` | 244 |  |
