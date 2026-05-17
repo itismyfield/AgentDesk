@@ -298,6 +298,17 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                     .split_once(':')
                     .map(|(_, name)| name)
                     .unwrap_or(&session_key);
+                // #2378: short-circuit if the current JS eval's bridge-op
+                // deadline has already passed. A blocking tmux `.output()`
+                // call against a hung tmux server would otherwise hold the
+                // runtime lock indefinitely.
+                if matches!(
+                    crate::engine::loader::bridge_op_deadline_remaining(),
+                    Some(d) if d.is_zero()
+                ) {
+                    return r#"{"ok":false,"error":"bridge deadline passed before session.sendCommand started"}"#
+                        .to_string();
+                }
                 match crate::services::platform::tmux::send_keys(tmux_name, &[&command, "Enter"]) {
                     Ok(out) if out.status.success() => {
                         format!(
@@ -327,6 +338,17 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                 .split_once(':')
                 .map(|(_, name)| name)
                 .unwrap_or(&session_key);
+            // #2378: short-circuit if the current JS eval's bridge-op
+            // deadline has already passed. The audit record is intentionally
+            // skipped in this case — it would be misleading to log an
+            // attempted termination we did not actually issue.
+            if matches!(
+                crate::engine::loader::bridge_op_deadline_remaining(),
+                Some(d) if d.is_zero()
+            ) {
+                return r#"{"ok":false,"error":"bridge deadline passed before session.kill started"}"#
+                    .to_string();
+            }
             crate::services::termination_audit::record_termination_for_tmux(
                 tmux_name,
                 None,
