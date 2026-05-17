@@ -141,6 +141,9 @@
   - `src/services/discord/voice_barge_in.rs` (1783 lines; voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
     split before adding non-bugfix behavior).
+  - `src/voice/announce_meta.rs` (1018 lines after #2392 handoff reservation
+    durability; voice announce/handoff metadata side-store surface, split before
+    adding non-bugfix behavior).
   - `src/voice/receiver.rs` (1104 lines; voice receive pipeline, utterance
     segmentation, artifact cleanup, and retention policy surface; split before
     adding non-bugfix behavior).
