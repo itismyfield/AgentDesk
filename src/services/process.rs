@@ -157,6 +157,8 @@ pub struct ProcessInfo {
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessIdentity {
     starttime: Option<u128>,
+    #[cfg(target_os = "macos")]
+    macos_lstart_hash: Option<u128>,
 }
 
 impl ProcessIdentity {
@@ -165,6 +167,8 @@ impl ProcessIdentity {
     pub fn capture(pid: u32) -> Self {
         Self {
             starttime: read_process_starttime(pid),
+            #[cfg(target_os = "macos")]
+            macos_lstart_hash: read_lstart_hash_macos(pid),
         }
     }
 
@@ -182,14 +186,28 @@ impl ProcessIdentity {
     ///    target either already exited (SIGKILL is now a no-op or worse, a
     ///    PID-reuse hit) or its identity has changed.
     pub fn matches(&self, pid: u32) -> bool {
-        let Some(saved) = self.starttime else {
-            // Case 1: no baseline — defer to legacy behaviour.
-            return true;
-        };
-        match read_process_starttime(pid) {
-            Some(current) => current == saved, // case 2/3a
-            None => false,                     // case 3b: fail closed
+        if let Some(saved) = self.starttime {
+            match read_process_starttime(pid) {
+                Some(current) => return current == saved, // case 2/3a
+                None => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        if let Some(saved_lstart) = self.macos_lstart_hash {
+                            return read_lstart_hash_macos(pid) == Some(saved_lstart);
+                        }
+                    }
+                    return false; // case 3b: fail closed
+                }
+            }
         }
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(saved_lstart) = self.macos_lstart_hash {
+                return read_lstart_hash_macos(pid) == Some(saved_lstart);
+            }
+        }
+        // Case 1: no baseline — defer to legacy behaviour.
+        true
     }
 
     /// Test-only inspector for the captured snapshot. Used to verify that
@@ -199,13 +217,24 @@ impl ProcessIdentity {
     /// guard silently disabled".
     #[cfg(test)]
     pub(crate) fn raw_starttime(&self) -> Option<u128> {
-        self.starttime
+        #[cfg(target_os = "macos")]
+        {
+            self.starttime.or(self.macos_lstart_hash)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.starttime
+        }
     }
 
     /// Test-only synthetic constructor used to pin the mismatch-skip path.
     #[cfg(test)]
     pub(crate) fn from_raw_for_test(starttime: Option<u128>) -> Self {
-        Self { starttime }
+        Self {
+            starttime,
+            #[cfg(target_os = "macos")]
+            macos_lstart_hash: None,
+        }
     }
 }
 
@@ -253,6 +282,66 @@ fn read_starttime_macos(pid: u32) -> Option<u128> {
     Some((info.pbi_start_tvsec as u128) * 1_000_000 + info.pbi_start_tvusec as u128)
 }
 
+#[cfg(target_os = "macos")]
+fn read_lstart_hash_macos(pid: u32) -> Option<u128> {
+    use std::hash::{Hash, Hasher};
+
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let lstart = String::from_utf8_lossy(&output.stdout);
+    let lstart = lstart.trim();
+    if lstart.is_empty() {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    lstart.hash(&mut hasher);
+    Some(hasher.finish() as u128)
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn pid_exists(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn process_group_exists(pgid: u32) -> bool {
+    unsafe { libc::kill(-(pgid as libc::pid_t), 0) == 0 }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn parse_linux_proc_stat_after_comm(stat: &str) -> Option<&str> {
+    stat.rsplit_once(") ").map(|(_, rest)| rest)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn parse_linux_proc_stat_starttime(stat: &str) -> Option<u64> {
+    let after_comm = parse_linux_proc_stat_after_comm(stat)?;
+    after_comm
+        .split_whitespace()
+        .nth(19)
+        .and_then(|field| field.parse().ok())
+}
+
+#[cfg(unix)]
+fn should_escalate_process_group_after_grace(
+    leader_exists: bool,
+    leader_identity_matches: bool,
+    group_exists_after_leader_exit: bool,
+) -> bool {
+    if leader_exists {
+        leader_identity_matches
+    } else {
+        group_exists_after_leader_exit
+    }
+}
+
 /// Kill a process tree by PID.
 ///
 /// On Unix, sends SIGTERM to the process group (or PID), waits ~200ms, then
@@ -280,11 +369,18 @@ pub fn kill_pid_tree(pid: u32) {
             }
         } else {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            // Only fire SIGKILL at the process group if the PID that defines
-            // that group (the original child) is still alive and unchanged.
-            // If the leader was recycled, the new PID may belong to a
-            // different group leader entirely — skip to avoid stray kills.
-            if identity.matches(pid) {
+            // If the leader PID still exists, only fire SIGKILL when it still
+            // matches the captured identity. A reused zombie PID is still a
+            // PID-reuse hazard, not proof that the original leader exited. If
+            // the leader PID fully disappeared during the grace window but the
+            // group remains, the group still belongs to the original
+            // cancellation target and needs SIGKILL cleanup.
+            let leader_exists = pid_exists(pid);
+            if should_escalate_process_group_after_grace(
+                leader_exists,
+                leader_exists && identity.matches(pid),
+                !leader_exists && process_group_exists(pid),
+            ) {
                 libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
             }
         }
@@ -528,18 +624,7 @@ fn parse_tasklist_memory_kb(value: &str) -> u64 {
 fn get_process_starttime(pid: i32) -> Option<u64> {
     let stat_path = format!("/proc/{}/stat", pid);
     let content = std::fs::read_to_string(stat_path).ok()?;
-
-    // Field 22 (0-indexed: 21) is starttime
-    // Format: pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt
-    //         utime stime cutime cstime priority nice num_threads itrealvalue starttime ...
-
-    // Find the closing parenthesis of comm field (which may contain spaces)
-    let comm_end = content.find(')')?;
-    let after_comm = &content[comm_end + 2..]; // Skip ") "
-    let fields: Vec<&str> = after_comm.split_whitespace().collect();
-
-    // starttime is field 20 after comm (0-indexed: 19)
-    fields.get(19).and_then(|s| s.parse().ok())
+    parse_linux_proc_stat_starttime(&content)
 }
 
 /// Verify process identity before kill to mitigate PID reuse race condition
@@ -905,12 +990,50 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod simple_cancel_watcher_tests {
-    use super::{configure_child_process_group, spawn_simple_cancel_watcher};
+    use super::{
+        configure_child_process_group, should_escalate_process_group_after_grace,
+        spawn_simple_cancel_watcher,
+    };
     use crate::services::provider::CancelToken;
     use std::process::Command;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn group_escalation_requires_identity_match_while_leader_pid_exists() {
+        assert!(
+            !should_escalate_process_group_after_grace(
+                true,  /* leader_exists */
+                false, /* leader_identity_matches */
+                true,  /* group_exists_after_leader_exit */
+            ),
+            "an existing leader PID with mismatched identity must not use the leader-exit path"
+        );
+        assert!(should_escalate_process_group_after_grace(
+            true,  /* leader_exists */
+            true,  /* leader_identity_matches */
+            false, /* group_exists_after_leader_exit */
+        ));
+        assert!(should_escalate_process_group_after_grace(
+            false, /* leader_exists */
+            false, /* leader_identity_matches */
+            true,  /* group_exists_after_leader_exit */
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_stat_parser_handles_comm_with_spaces_and_parens() {
+        let stat =
+            "123 (worker ) with spaces) Z 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 424242 20";
+
+        assert_eq!(
+            super::parse_linux_proc_stat_after_comm(stat),
+            Some("Z 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 424242 20")
+        );
+        assert_eq!(super::parse_linux_proc_stat_starttime(stat), Some(424242));
+    }
 
     /// #2250: a CancelToken-driven watcher must kill the child process tree
     /// within ~1s of the token flipping to cancelled. This guards against
@@ -1019,6 +1142,62 @@ mod simple_cancel_watcher_tests {
             status
         );
         watcher.disarm();
+    }
+
+    #[test]
+    fn kill_pid_tree_kills_group_when_leader_exits_but_descendant_ignores_sigterm() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let descendant_pid_path = temp.path().join("descendant.pid");
+
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(
+                r#"
+                trap 'exit 0' TERM
+                sh -c 'trap "" TERM; printf "%s\n" "$$" > "$DESCENDANT_PID_FILE"; exec sleep 60' &
+                while :; do sleep 1; done
+                "#,
+            )
+            .env("DESCENDANT_PID_FILE", &descendant_pid_path);
+        configure_child_process_group(&mut command);
+        let mut child = command.spawn().expect("leader shell should spawn");
+        let leader_pid = child.id();
+
+        let descendant_pid = {
+            let started_at = Instant::now();
+            loop {
+                if let Ok(raw) = std::fs::read_to_string(&descendant_pid_path) {
+                    let trimmed = raw.trim();
+                    if !trimmed.is_empty() {
+                        break trimmed.parse::<u32>().expect("descendant pid");
+                    }
+                }
+                if started_at.elapsed() > Duration::from_secs(2) {
+                    let _ = child.kill();
+                    panic!("descendant did not write pid file within 2s");
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        };
+
+        assert!(
+            process_is_running(descendant_pid),
+            "descendant should be alive before kill"
+        );
+        super::kill_pid_tree(leader_pid);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while process_is_running(descendant_pid) {
+            if Instant::now() >= deadline {
+                force_kill_process_for_test(descendant_pid);
+                let _ = child.kill();
+                panic!("descendant pid {descendant_pid} survived leader-exit group SIGKILL path");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let _ = child.wait();
     }
 
     /// #2250 (Codex review follow-up): when the spawned child has its own
@@ -1154,5 +1333,25 @@ mod simple_cancel_watcher_tests {
 
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[allow(unsafe_code)]
+    fn process_is_running(pid: u32) -> bool {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return false;
+        }
+        let Ok(output) = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "stat="])
+            .output()
+        else {
+            return true;
+        };
+        let stat = String::from_utf8_lossy(&output.stdout);
+        !stat.trim_start().starts_with('Z')
+    }
+
+    #[allow(unsafe_code)]
+    fn force_kill_process_for_test(pid: u32) {
+        let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
     }
 }

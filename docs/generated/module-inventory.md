@@ -574,7 +574,7 @@
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 129 |  |
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 674 |  |
-| `services::process` | `src/services/process.rs` | 1158 | giant-file |
+| `services::process` | `src/services/process.rs` | 1357 | giant-file |
 | `services::provider` | `src/services/provider.rs` | 2621 | giant-file |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 240 |  |
