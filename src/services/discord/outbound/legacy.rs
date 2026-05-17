@@ -21,9 +21,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 use sha2::{Digest, Sha256};
+use tokio::sync::Notify;
 
 use crate::server::routes::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
@@ -436,7 +438,7 @@ pub(crate) trait DiscordOutboundClient: Send + Sync {
 /// (`discord_outbound_dedup`) without touching callers.
 #[derive(Clone, Default)]
 pub(crate) struct OutboundDeduper {
-    inner: Arc<Mutex<HashMap<String, String>>>,
+    inner: Arc<Mutex<HashMap<String, OutboundDedupState>>>,
 }
 
 impl OutboundDeduper {
@@ -447,12 +449,170 @@ impl OutboundDeduper {
     /// Returns the previously-delivered message id, if any.
     pub(crate) fn lookup(&self, key: &str) -> Option<String> {
         let guard = self.inner.lock().ok()?;
-        guard.get(key).cloned()
+        match guard.get(key) {
+            Some(OutboundDedupState::Delivered(message_id)) => Some(message_id.clone()),
+            Some(OutboundDedupState::InFlight { .. }) | None => None,
+        }
     }
 
     pub(crate) fn record(&self, key: &str, message_id: &str) {
+        let notify = if let Ok(mut guard) = self.inner.lock() {
+            let notify = match guard.get(key) {
+                Some(OutboundDedupState::InFlight { notify }) => Some(notify.clone()),
+                _ => None,
+            };
+            guard.insert(
+                key.to_string(),
+                OutboundDedupState::Delivered(message_id.to_string()),
+            );
+            notify
+        } else {
+            None
+        };
+        if let Some(notify) = notify {
+            notify.notify_waiters();
+        }
+    }
+
+    /// Atomically claims `key` for a send attempt.
+    ///
+    /// The reservation covers the lookup -> send -> record window: exactly one
+    /// caller receives [`OutboundDedupClaim::Reserved`] for a vacant key, while
+    /// concurrent callers observe either the delivered value or an in-flight
+    /// attempt and must not send.
+    pub(crate) fn reserve(&self, key: &str) -> OutboundDedupClaim {
         if let Ok(mut guard) = self.inner.lock() {
-            guard.insert(key.to_string(), message_id.to_string());
+            match guard.get(key) {
+                Some(OutboundDedupState::Delivered(message_id)) => {
+                    return OutboundDedupClaim::Duplicate(message_id.clone());
+                }
+                Some(OutboundDedupState::InFlight { notify }) => {
+                    return OutboundDedupClaim::InFlight(OutboundDedupInFlight {
+                        key: key.to_string(),
+                        dedup: self.clone(),
+                        notify: notify.clone(),
+                    });
+                }
+                None => {
+                    let notify = Arc::new(Notify::new());
+                    guard.insert(key.to_string(), OutboundDedupState::InFlight { notify });
+                    return OutboundDedupClaim::Reserved(OutboundDedupReservation {
+                        key: key.to_string(),
+                        dedup: self.clone(),
+                        completed: false,
+                    });
+                }
+            }
+        }
+        OutboundDedupClaim::InFlight(OutboundDedupInFlight {
+            key: key.to_string(),
+            dedup: self.clone(),
+            notify: Arc::new(Notify::new()),
+        })
+    }
+
+    fn release_inflight(&self, key: &str) {
+        let notify = if let Ok(mut guard) = self.inner.lock() {
+            match guard.get(key) {
+                Some(OutboundDedupState::InFlight { notify }) => {
+                    let notify = notify.clone();
+                    guard.remove(key);
+                    Some(notify)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(notify) = notify {
+            notify.notify_waiters();
+        }
+    }
+
+    fn inflight_matches(&self, key: &str, expected: &Arc<Notify>) -> Option<bool> {
+        let guard = self.inner.lock().ok()?;
+        Some(matches!(
+            guard.get(key),
+            Some(OutboundDedupState::InFlight { notify }) if Arc::ptr_eq(notify, expected)
+        ))
+    }
+}
+
+#[derive(Clone)]
+enum OutboundDedupState {
+    InFlight { notify: Arc<Notify> },
+    Delivered(String),
+}
+
+pub(crate) enum OutboundDedupClaim {
+    Reserved(OutboundDedupReservation),
+    Duplicate(String),
+    InFlight(OutboundDedupInFlight),
+}
+
+pub(crate) enum OutboundDedupWait {
+    Delivered(String),
+    Released,
+    TimedOut,
+}
+
+pub(crate) struct OutboundDedupReservation {
+    key: String,
+    dedup: OutboundDeduper,
+    completed: bool,
+}
+
+impl OutboundDedupReservation {
+    pub(crate) fn record(&mut self, message_id: &str) {
+        self.dedup.record(&self.key, message_id);
+        self.completed = true;
+    }
+}
+
+impl Drop for OutboundDedupReservation {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.dedup.release_inflight(&self.key);
+        }
+    }
+}
+
+pub(crate) struct OutboundDedupInFlight {
+    key: String,
+    dedup: OutboundDeduper,
+    notify: Arc<Notify>,
+}
+
+impl OutboundDedupInFlight {
+    pub(crate) async fn wait_for_delivery(self, timeout: Duration) -> OutboundDedupWait {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(message_id) = self.dedup.lookup(&self.key) {
+                return OutboundDedupWait::Delivered(message_id);
+            }
+            match self.dedup.inflight_matches(&self.key, &self.notify) {
+                Some(true) => {}
+                Some(false) => return OutboundDedupWait::Released,
+                None => return OutboundDedupWait::TimedOut,
+            }
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                return self
+                    .dedup
+                    .lookup(&self.key)
+                    .map(OutboundDedupWait::Delivered)
+                    .unwrap_or(OutboundDedupWait::TimedOut);
+            };
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                return self
+                    .dedup
+                    .lookup(&self.key)
+                    .map(OutboundDedupWait::Delivered)
+                    .unwrap_or(OutboundDedupWait::TimedOut);
+            }
         }
     }
 }

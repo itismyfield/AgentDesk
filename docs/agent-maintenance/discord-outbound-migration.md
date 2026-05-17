@@ -1,10 +1,11 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
-> Implementation refresh for #1457: v3 delivery now covers dispatch outbox,
-> review followups, short manual/DM notifications, gateway placeholder sends,
-> and dispatch completion summaries directly.
+> Implementation refresh for #1457 / #2368: v3 delivery now covers dispatch
+> outbox, review followups, short manual/DM notifications, gateway placeholder
+> sends, and dispatch completion summaries directly. `OutboundDeduper` now has
+> an in-flight reservation primitive for atomic lookup/send/record behavior.
 >
-> Last refreshed: 2026-04-30 (against #1457 v3 outbound migration refresh).
+> Last refreshed: 2026-05-17 (against #2368 outbound dedupe reservation refresh).
 >
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
@@ -44,7 +45,7 @@ HTTP path.
 | **v3 delivery** `deliver_outbound<C>(...)` | `outbound/delivery.rs:42` | active | Executes the v3 message/policy/decision/result contract; currently reuses the legacy transport trait and deduper during migration. Split delivery records ordered chunk metadata and duplicate replay preserves it. |
 | **Legacy bridge** `DiscordOutboundMessage` (v2) | `outbound/legacy.rs:159` | compatibility facade | Two-arg constructor `(channel_id, content)` + builder fluent. Older producers still route through this while their callsites migrate. |
 | **Legacy bridge** `deliver_outbound<C>(...)` | `outbound/legacy.rs:455` | compatibility adapter over v3 | Converts v2 message/policy inputs into v3 envelopes, delegates to `outbound::delivery`, then maps v3 results back to legacy result variants. |
-| `OutboundDeduper` | `outbound/legacy.rs:425` | active | In-memory dedup store. v3 stores serialized `Vec<DeliveredMessage>`; the legacy facade still maps old single-message ids for compatibility. |
+| `OutboundDeduper` | `outbound/legacy.rs:440` | active | In-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record window. v3 stores serialized `Vec<DeliveredMessage>`; the legacy facade still maps old single-message ids for compatibility. |
 
 Legacy re-exports remain in `outbound/mod.rs`; direct v3 callsites import from
 their submodule paths (`outbound::message`, `outbound::policy`,
@@ -266,6 +267,12 @@ button hits the manual outbound API, which is covered under §3.A
   `v3_split_duplicate_preserves_ordered_chunk_metadata` verifies static v3
   split delivery preserves chunk order and duplicate replay metadata.
 - `src/services/discord/outbound/delivery.rs`:
+  `v3_dedup_reservation_suppresses_concurrent_retry_send` and
+  `v3_dedup_reservation_retries_after_inflight_owner_failure` verify the
+  in-flight reservation primitive suppresses concurrent duplicate sends while
+  allowing a waiting retry to claim the key if the first owner fails before
+  recording a delivery.
+- `src/services/discord/outbound/delivery.rs`:
   `v3_dm_user_target_resolves_before_posting` verifies `OutboundTarget::DmUser`
   resolves before first post and duplicate replay does not resolve the DM
   channel again.
@@ -277,6 +284,10 @@ button hits the manual outbound API, which is covered under §3.A
   `manual_dm_notification_uses_v3_dm_target_and_dedupes_before_resolve`
   verifies `/api/discord/send-dm` short text uses v3 DM target semantics and preserves
   the manual duplicate response contract.
+- `src/services/discord/health.rs`:
+  `api_send_rejects_user_supplied_voice_delivery_id_namespace` verifies manual
+  `/api/discord/send` callers cannot forge the reserved `voice:` correlation
+  namespace used by voice announce delivery ids.
 
 ## 6. Guardrail proposal (DoD #4)
 

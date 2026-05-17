@@ -396,7 +396,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 3838 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 1006 | giant-file |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 5632 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 5734 | giant-file |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 22 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 242 |  |
 | `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 1494 | giant-file |
@@ -423,8 +423,8 @@
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
 | `services::discord::outbound` | `src/services/discord/outbound/mod.rs` | 39 |  |
 | `services::discord::outbound::decision` | `src/services/discord/outbound/decision.rs` | 488 |  |
-| `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 726 |  |
-| `services::discord::outbound::legacy` | `src/services/discord/outbound/legacy.rs` | 1050 | giant-file |
+| `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 863 |  |
+| `services::discord::outbound::legacy` | `src/services/discord/outbound/legacy.rs` | 1210 | giant-file |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 629 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 191 |  |
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 309 |  |

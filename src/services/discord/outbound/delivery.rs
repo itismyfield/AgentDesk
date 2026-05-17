@@ -19,7 +19,10 @@ use super::decision::{
     LengthPolicyDecision, OutboundPolicyLimits, PrimaryDeliveryTarget, ThreadFallbackDecision,
     decide_policy_with_limits,
 };
-use super::legacy::{DiscordOutboundClient, OutboundDeduper};
+use super::legacy::{
+    DiscordOutboundClient, OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait,
+    OutboundDeduper,
+};
 use super::message::{
     DiscordOutboundMessage, OutboundDedupKey, OutboundOperation, OutboundReferenceContext,
 };
@@ -70,10 +73,34 @@ where
     let dedup_key = decision.dedup_key.clone();
     let store_key = dedup_store_key(&dedup_key);
 
-    let stored_duplicate = if message.policy.idempotency_window > Duration::ZERO {
-        dedup.lookup(&store_key)
+    let (stored_duplicate, reservation) = if message.policy.idempotency_window > Duration::ZERO {
+        loop {
+            match dedup.reserve(&store_key) {
+                OutboundDedupClaim::Duplicate(stored) => break (Some(stored), None),
+                OutboundDedupClaim::Reserved(reservation) => break (None, Some(reservation)),
+                OutboundDedupClaim::InFlight(in_flight) => {
+                    match in_flight.wait_for_delivery(Duration::from_secs(5)).await {
+                        OutboundDedupWait::Delivered(stored) => {
+                            if let Some(messages) = decode_stored_delivered_messages(&stored) {
+                                return DeliveryResult::Duplicate {
+                                    dedup_key,
+                                    existing_messages: messages,
+                                };
+                            }
+                            break (Some(stored), None);
+                        }
+                        OutboundDedupWait::Released => continue,
+                        OutboundDedupWait::TimedOut => {
+                            return DeliveryResult::Skip {
+                                reason: "outbound delivery already in flight".into(),
+                            };
+                        }
+                    }
+                }
+            }
+        }
     } else {
-        None
+        (None, None)
     };
     if let Some(stored) = stored_duplicate.as_deref() {
         if let Some(messages) = decode_stored_delivered_messages(stored) {
@@ -111,6 +138,7 @@ where
                 None,
                 decision.thread_fallback,
                 limits,
+                reservation,
             )
             .await
         }
@@ -129,6 +157,7 @@ where
                 truncated.then_some(FallbackUsed::LengthCompacted),
                 decision.thread_fallback,
                 limits,
+                reservation,
             )
             .await
         }
@@ -144,6 +173,7 @@ where
                 &target_channel,
                 delivered_channel_id,
                 chunk_char_limit,
+                reservation,
             )
             .await
         }
@@ -174,17 +204,19 @@ async fn deliver_single<C>(
     fallback_used: Option<FallbackUsed>,
     thread_fallback: ThreadFallbackDecision,
     limits: OutboundPolicyLimits,
+    reservation: Option<OutboundDedupReservation>,
 ) -> DeliveryResult
 where
     C: DiscordOutboundClient,
 {
+    let mut reservation = reservation;
     match send_content(client, message, overrides, target_channel, content).await {
         Ok(raw_message_id) => {
             let messages = vec![DeliveredMessage::single_raw(
                 delivered_channel_id,
                 raw_message_id,
             )];
-            record_success(dedup, dedup_key, message, &messages);
+            record_success(dedup, reservation.as_mut(), dedup_key, message, &messages);
             delivery_success(dedup_key.clone(), messages, fallback_used)
         }
         Err(error) => {
@@ -198,6 +230,7 @@ where
                     target_channel,
                     delivered_channel_id,
                     limits,
+                    reservation.as_mut(),
                 )
                 .await
                 {
@@ -210,7 +243,7 @@ where
                 match send_content(client, message, overrides, &parent_target, content).await {
                     Ok(raw_message_id) => {
                         let messages = vec![DeliveredMessage::single_raw(parent, raw_message_id)];
-                        record_success(dedup, dedup_key, message, &messages);
+                        record_success(dedup, reservation.as_mut(), dedup_key, message, &messages);
                         return DeliveryResult::Fallback {
                             dedup_key: dedup_key.clone(),
                             messages,
@@ -243,10 +276,12 @@ async fn retry_minimal_fallback<C>(
     target_channel: &str,
     delivered_channel_id: ChannelId,
     limits: OutboundPolicyLimits,
+    reservation: Option<&mut OutboundDedupReservation>,
 ) -> Option<DeliveryResult>
 where
     C: DiscordOutboundClient,
 {
+    let mut reservation = reservation;
     let summary = message.summary.as_ref()?.content.trim();
     if summary.is_empty() {
         return None;
@@ -259,7 +294,13 @@ where
                     delivered_channel_id,
                     raw_message_id,
                 )];
-                record_success(dedup, dedup_key, message, &messages);
+                record_success(
+                    dedup,
+                    reservation.as_mut().map(|reservation| &mut **reservation),
+                    dedup_key,
+                    message,
+                    &messages,
+                );
                 DeliveryResult::Fallback {
                     dedup_key: dedup_key.clone(),
                     messages,
@@ -285,10 +326,12 @@ async fn deliver_split<C>(
     target_channel: &str,
     delivered_channel_id: ChannelId,
     chunk_char_limit: usize,
+    reservation: Option<OutboundDedupReservation>,
 ) -> DeliveryResult
 where
     C: DiscordOutboundClient,
 {
+    let mut reservation = reservation;
     if matches!(message.operation, OutboundOperation::Edit { .. }) {
         return DeliveryResult::PermanentFailure {
             reason: "split length strategy cannot edit one message into multiple chunks".into(),
@@ -316,7 +359,7 @@ where
         ));
     }
 
-    record_success(dedup, dedup_key, message, &messages);
+    record_success(dedup, reservation.as_mut(), dedup_key, message, &messages);
     DeliveryResult::Fallback {
         dedup_key: dedup_key.clone(),
         messages,
@@ -427,6 +470,7 @@ fn delivery_success(
 
 fn record_success(
     dedup: &OutboundDeduper,
+    reservation: Option<&mut OutboundDedupReservation>,
     dedup_key: &OutboundDedupKey,
     message: &DiscordOutboundMessage,
     messages: &[DeliveredMessage],
@@ -434,10 +478,12 @@ fn record_success(
     if message.policy.idempotency_window <= Duration::ZERO {
         return;
     }
-    dedup.record(
-        &dedup_store_key(dedup_key),
-        &encode_delivered_messages(messages),
-    );
+    let encoded = encode_delivered_messages(messages);
+    if let Some(reservation) = reservation {
+        reservation.record(&encoded);
+    } else {
+        dedup.record(&dedup_store_key(dedup_key), &encoded);
+    }
 }
 
 fn dedup_store_key(dedup_key: &OutboundDedupKey) -> String {
@@ -512,6 +558,7 @@ mod tests {
     use super::*;
     use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
     use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -519,11 +566,21 @@ mod tests {
         posts: Arc<Mutex<Vec<(String, String)>>>,
         dm_resolutions: Arc<Mutex<Vec<String>>>,
         length_failures_remaining: Arc<Mutex<usize>>,
+        send_failures_remaining: Arc<Mutex<usize>>,
+        post_delay_ms: Arc<AtomicU64>,
     }
 
     impl MockClient {
+        fn set_post_delay_ms(&self, delay_ms: u64) {
+            self.post_delay_ms.store(delay_ms, Ordering::SeqCst);
+        }
+
         fn fail_next_with_length(&self) {
             *self.length_failures_remaining.lock().unwrap() += 1;
+        }
+
+        fn fail_next_send(&self) {
+            *self.send_failures_remaining.lock().unwrap() += 1;
         }
 
         fn posts(&self) -> Vec<(String, String)> {
@@ -545,12 +602,25 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((target_channel.to_string(), content.to_string()));
+            let post_delay_ms = self.post_delay_ms.load(Ordering::SeqCst);
+            if post_delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(post_delay_ms)).await;
+            }
             let mut failures = self.length_failures_remaining.lock().unwrap();
             if *failures > 0 {
                 *failures -= 1;
                 return Err(DispatchMessagePostError::new(
                     DispatchMessagePostErrorKind::MessageTooLong,
                     "mock length failure".into(),
+                ));
+            }
+            drop(failures);
+            let mut send_failures = self.send_failures_remaining.lock().unwrap();
+            if *send_failures > 0 {
+                *send_failures -= 1;
+                return Err(DispatchMessagePostError::new(
+                    DispatchMessagePostErrorKind::Other,
+                    "mock transient send failure".into(),
                 ));
             }
             Ok(format!("msg-{target_channel}-{}", content.chars().count()))
@@ -722,5 +792,72 @@ mod tests {
             client.posts(),
             vec![("97".to_string(), "hello".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn v3_dedup_reservation_suppresses_concurrent_retry_send() {
+        let client = MockClient::default();
+        client.set_post_delay_ms(50);
+        let dedup = OutboundDeduper::new();
+        let make = || {
+            DiscordOutboundMessage::new(
+                "dispatch:2368",
+                "dispatch:2368:notify",
+                "hello",
+                OutboundTarget::Channel(ChannelId::new(123)),
+                DiscordOutboundPolicy::dispatch_outbox(),
+            )
+        };
+
+        let (first, second) = tokio::join!(
+            deliver_outbound(&client, &dedup, make()),
+            deliver_outbound(&client, &dedup, make())
+        );
+
+        let sent_count = [&first, &second]
+            .iter()
+            .filter(|result| matches!(result, DeliveryResult::Sent { .. }))
+            .count();
+        let duplicate_count = [&first, &second]
+            .iter()
+            .filter(|result| matches!(result, DeliveryResult::Duplicate { .. }))
+            .count();
+        assert_eq!(sent_count, 1);
+        assert_eq!(duplicate_count, 1);
+        assert_eq!(client.posts().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn v3_dedup_reservation_retries_after_inflight_owner_failure() {
+        let client = MockClient::default();
+        client.set_post_delay_ms(50);
+        client.fail_next_send();
+        let dedup = OutboundDeduper::new();
+        let make = || {
+            DiscordOutboundMessage::new(
+                "dispatch:2368:owner-fail",
+                "dispatch:2368:notify",
+                "hello",
+                OutboundTarget::Channel(ChannelId::new(123)),
+                DiscordOutboundPolicy::dispatch_outbox(),
+            )
+        };
+
+        let (first, second) = tokio::join!(
+            deliver_outbound(&client, &dedup, make()),
+            deliver_outbound(&client, &dedup, make())
+        );
+
+        let sent_count = [&first, &second]
+            .iter()
+            .filter(|result| matches!(result, DeliveryResult::Sent { .. }))
+            .count();
+        let failure_count = [&first, &second]
+            .iter()
+            .filter(|result| matches!(result, DeliveryResult::PermanentFailure { .. }))
+            .count();
+        assert_eq!(sent_count, 1);
+        assert_eq!(failure_count, 1);
+        assert_eq!(client.posts().len(), 2);
     }
 }

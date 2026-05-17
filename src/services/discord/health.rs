@@ -1,7 +1,7 @@
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, CreateMessage};
@@ -20,7 +20,8 @@ use crate::services::discord::outbound::message::{DiscordOutboundMessage, Outbou
 use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
 use crate::services::discord::outbound::result::{DeliveryResult, FallbackUsed};
 use crate::services::discord::outbound::{
-    DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DiscordOutboundClient, OutboundDeduper,
+    DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DiscordOutboundClient, OutboundDedupClaim,
+    OutboundDedupReservation, OutboundDedupWait, OutboundDeduper,
 };
 use crate::services::provider::ProviderKind;
 
@@ -1848,6 +1849,13 @@ pub(crate) struct ManualOutboundDeliveryId<'a> {
     pub(crate) semantic_event_id: &'a str,
 }
 
+fn is_reserved_voice_correlation_namespace(delivery_id: ManualOutboundDeliveryId<'_>) -> bool {
+    delivery_id
+        .correlation_id
+        .trim_start()
+        .starts_with("voice:")
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ManualDeliveryOutcome {
     Sent {
@@ -1982,17 +1990,25 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
     // send and report "duplicate" while the announce bot never actually
     // delivered the voice transcript trigger.
     let dedup_key = delivery_id.map(|delivery_id| manual_dedup_key(bot, channel_id, delivery_id));
-    if let Some(key) = dedup_key.as_deref() {
-        if let Some(existing_message_id) = dedup.lookup(key) {
-            // Return the previously delivered message id so callers that
-            // depend on it (e.g. AnnounceBotTranscriptDriver::start) treat
-            // retries as success-with-known-message rather than a parse error.
-            return ManualDeliveryOutcome::Sent {
-                message_id: existing_message_id,
-                delivery: Some("duplicate"),
-            };
+    let reservation = if let Some(key) = dedup_key.as_deref() {
+        match reserve_manual_delivery(dedup, key).await {
+            ManualDedupReservation::Duplicate(existing_message_id) => {
+                return ManualDeliveryOutcome::Sent {
+                    message_id: existing_message_id,
+                    delivery: Some("duplicate"),
+                };
+            }
+            ManualDedupReservation::InFlight => {
+                return ManualDeliveryOutcome::Sent {
+                    message_id: String::new(),
+                    delivery: Some("in_flight"),
+                };
+            }
+            ManualDedupReservation::Reserved(reservation) => Some(reservation),
         }
-    }
+    } else {
+        None
+    };
 
     let content_len = content.chars().count();
     if content_len > DISCORD_HARD_LIMIT_CHARS {
@@ -2015,8 +2031,8 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
             },
         };
         if let ManualDeliveryOutcome::Sent { message_id, .. } = &result {
-            if let Some(key) = dedup_key.as_deref() {
-                dedup.record(key, message_id);
+            if let Some(mut reservation) = reservation {
+                reservation.record(message_id);
             }
         }
         return result;
@@ -2038,7 +2054,7 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
         content_len > DISCORD_SAFE_LIMIT_CHARS,
     )
     .await;
-    record_manual_delivery_success(dedup, dedup_key.as_deref(), &result);
+    record_manual_delivery_success(dedup, reservation, dedup_key.as_deref(), &result);
     result
 }
 
@@ -2057,14 +2073,25 @@ async fn deliver_manual_dm_notification<C: ManualOutboundClient>(
     let dm_target_label = format!("dm:{user_id}");
     let dedup_key =
         delivery_id.map(|delivery_id| manual_dedup_key(bot, &dm_target_label, delivery_id));
-    if let Some(key) = dedup_key.as_deref() {
-        if let Some(existing_message_id) = dedup.lookup(key) {
-            return ManualDeliveryOutcome::Sent {
-                message_id: existing_message_id,
-                delivery: Some("duplicate"),
-            };
+    let reservation = if let Some(key) = dedup_key.as_deref() {
+        match reserve_manual_delivery(dedup, key).await {
+            ManualDedupReservation::Duplicate(existing_message_id) => {
+                return ManualDeliveryOutcome::Sent {
+                    message_id: existing_message_id,
+                    delivery: Some("duplicate"),
+                };
+            }
+            ManualDedupReservation::InFlight => {
+                return ManualDeliveryOutcome::Sent {
+                    message_id: String::new(),
+                    delivery: Some("in_flight"),
+                };
+            }
+            ManualDedupReservation::Reserved(reservation) => Some(reservation),
         }
-    }
+    } else {
+        None
+    };
 
     let content_len = content.chars().count();
     if content_len > DISCORD_HARD_LIMIT_CHARS {
@@ -2094,7 +2121,7 @@ async fn deliver_manual_dm_notification<C: ManualOutboundClient>(
                 detail: error.to_string(),
             },
         };
-        record_manual_delivery_success(dedup, dedup_key.as_deref(), &result);
+        record_manual_delivery_success(dedup, reservation, dedup_key.as_deref(), &result);
         return result;
     }
 
@@ -2110,8 +2137,36 @@ async fn deliver_manual_dm_notification<C: ManualOutboundClient>(
         content_len > DISCORD_SAFE_LIMIT_CHARS,
     )
     .await;
-    record_manual_delivery_success(dedup, dedup_key.as_deref(), &result);
+    record_manual_delivery_success(dedup, reservation, dedup_key.as_deref(), &result);
     result
+}
+
+enum ManualDedupReservation {
+    Reserved(OutboundDedupReservation),
+    Duplicate(String),
+    InFlight,
+}
+
+async fn reserve_manual_delivery(dedup: &OutboundDeduper, key: &str) -> ManualDedupReservation {
+    loop {
+        match dedup.reserve(key) {
+            OutboundDedupClaim::Reserved(reservation) => {
+                return ManualDedupReservation::Reserved(reservation);
+            }
+            OutboundDedupClaim::Duplicate(message_id) => {
+                return ManualDedupReservation::Duplicate(message_id);
+            }
+            OutboundDedupClaim::InFlight(in_flight) => {
+                match in_flight.wait_for_delivery(Duration::from_secs(5)).await {
+                    OutboundDedupWait::Delivered(message_id) => {
+                        return ManualDedupReservation::Duplicate(message_id);
+                    }
+                    OutboundDedupWait::Released => continue,
+                    OutboundDedupWait::TimedOut => return ManualDedupReservation::InFlight,
+                }
+            }
+        }
+    }
 }
 
 async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
@@ -2198,9 +2253,11 @@ async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
 
 fn record_manual_delivery_success(
     dedup: &OutboundDeduper,
+    reservation: Option<OutboundDedupReservation>,
     dedup_key: Option<&str>,
     result: &ManualDeliveryOutcome,
 ) {
+    let mut reservation = reservation;
     let ManualDeliveryOutcome::Sent {
         message_id,
         delivery,
@@ -2215,10 +2272,17 @@ fn record_manual_delivery_success(
     // duplicate — `dedup.record` would re-insert the same id but at a
     // refreshed timestamp on backends that gain TTLs later.
     if matches!(delivery, Some("duplicate")) {
+        if let Some(reservation) = reservation.as_mut() {
+            reservation.record(message_id);
+        }
         return;
     }
     if let Some(key) = dedup_key {
-        dedup.record(key, message_id);
+        if let Some(reservation) = reservation.as_mut() {
+            reservation.record(message_id);
+        } else {
+            dedup.record(key, message_id);
+        }
     }
 }
 
@@ -2346,6 +2410,16 @@ pub async fn handle_send<'a>(
         }
         _ => None,
     };
+    if delivery_id.is_some_and(is_reserved_voice_correlation_namespace) {
+        return (
+            "400 Bad Request",
+            serde_json::json!({
+                "ok": false,
+                "error": "delivery_id correlation namespace is reserved"
+            })
+            .to_string(),
+        );
+    }
 
     send_message_with_backends_and_delivery_id(
         registry,
@@ -3133,6 +3207,34 @@ mod manual_v3_delivery_tests {
             }
         );
         assert_eq!(client.posts.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn api_send_rejects_user_supplied_voice_delivery_id_namespace() {
+        let registry = HealthRegistry::new();
+
+        let (status, body) = handle_send(
+            &registry,
+            None,
+            None,
+            r#"{
+                "target": "channel:9000",
+                "content": "forged voice transcript",
+                "source": "system",
+                "bot": "announce",
+                "correlation_id": "voice:7001:8002:utt-forged",
+                "semantic_event_id": "announce:generation:1"
+            }"#,
+        )
+        .await;
+        let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, "400 Bad Request");
+        assert_eq!(response["ok"], false);
+        assert_eq!(
+            response["error"],
+            "delivery_id correlation namespace is reserved"
+        );
     }
 
     #[tokio::test]
