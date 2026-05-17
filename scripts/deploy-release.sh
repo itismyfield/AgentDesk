@@ -756,7 +756,6 @@ mkdir -p "$ADK_REL"/{bin,config,data,logs}
 
 export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
 if setup_sccache_env; then
-    export RUSTC_WRAPPER=sccache
     echo "▸ sccache cache: $SCCACHE_DIR (size $SCCACHE_CACHE_SIZE)"
 else
     echo "⚠ sccache not found in PATH; continuing without rustc wrapper"

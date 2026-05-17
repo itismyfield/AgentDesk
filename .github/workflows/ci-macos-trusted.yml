@@ -1,0 +1,235 @@
+name: CI macOS Trusted
+
+on:
+  push:
+    branches-ignore:
+      - main
+  workflow_dispatch:
+  merge_group:
+    types:
+      - checks_requested
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-macos-trusted-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve_macos_runner:
+    name: Resolve macOS runner
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.resolve.outputs.mode }}
+      group: ${{ steps.resolve.outputs.group }}
+      labels: ${{ steps.resolve.outputs.labels }}
+    steps:
+      - name: Validate self-hosted macOS routing
+        id: resolve
+        shell: bash
+        env:
+          MACOS_RUNNER: ${{ vars.MACOS_RUNNER }}
+          MACOS_RUNNER_GROUP: ${{ vars.MACOS_RUNNER_GROUP }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${MACOS_RUNNER:-}" ]; then
+            {
+              echo "mode=hosted"
+              echo "group="
+              echo 'labels=[]'
+            } >> "$GITHUB_OUTPUT"
+            echo "MACOS_RUNNER is unset; using GitHub-hosted macos-latest."
+            exit 0
+          fi
+
+          if [ -z "${MACOS_RUNNER_GROUP:-}" ]; then
+            echo "::error::MACOS_RUNNER is set, but MACOS_RUNNER_GROUP is empty. Configure the org runner group first, restrict it to this repo, then set MACOS_RUNNER_GROUP to the exact group name."
+            exit 1
+          fi
+
+          labels="$(
+            python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          raw = os.environ.get("MACOS_RUNNER", "")
+          try:
+              labels = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              print(f"::error::MACOS_RUNNER must be a JSON array of runner labels: {exc}", file=sys.stderr)
+              sys.exit(1)
+
+          if not isinstance(labels, list) or not labels or not all(isinstance(label, str) and label for label in labels):
+              print("::error::MACOS_RUNNER must be a non-empty JSON array of non-empty strings.", file=sys.stderr)
+              sys.exit(1)
+
+          required = {"self-hosted", "macOS"}
+          missing = sorted(required.difference(labels))
+          if missing:
+              print(f"::error::MACOS_RUNNER is missing required label(s): {', '.join(missing)}", file=sys.stderr)
+              sys.exit(1)
+
+          if not any(label.startswith("agentdesk-") for label in labels):
+              print("::error::MACOS_RUNNER must include an AgentDesk fleet or host label such as agentdesk-macos or agentdesk-mac-mini.", file=sys.stderr)
+              sys.exit(1)
+
+          print(json.dumps(labels, separators=(",", ":")))
+          PY
+          )"
+
+          {
+            echo "mode=self-hosted"
+            echo "group=${MACOS_RUNNER_GROUP}"
+            echo "labels=${labels}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Validated self-hosted macOS labels for runner group '${MACOS_RUNNER_GROUP}'."
+
+  macos_hosted:
+    name: Trusted macOS check (hosted)
+    needs: resolve_macos_runner
+    if: needs.resolve_macos_runner.outputs.mode == 'hosted'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Disable sccache on hosted macOS
+        shell: bash
+        run: |
+          {
+            echo "RUSTC_WRAPPER="
+            echo "SCCACHE_GHA_ENABLED="
+          } >> "$GITHUB_ENV"
+
+      - name: Install Opus on macOS
+        shell: bash
+        run: |
+          brew install opus pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry & git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-trusted-macos-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-trusted-macos-
+
+      - name: cargo check
+        run: cargo check --all-targets
+
+      - name: cargo test (non-PG, targeted subset)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+          cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
+          cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+
+  macos_self_hosted:
+    name: Trusted macOS check (self-hosted)
+    needs: resolve_macos_runner
+    if: needs.resolve_macos_runner.outputs.mode == 'self-hosted'
+    runs-on:
+      group: ${{ needs.resolve_macos_runner.outputs.group }}
+      labels: ${{ fromJSON(needs.resolve_macos_runner.outputs.labels) }}
+    steps:
+      - name: Trusted event / runner sanity check
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUNNER_ENV: ${{ runner.environment }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+          echo "runner.name = ${RUNNER_NAME:-unknown}"
+          echo "runner.environment = ${RUNNER_ENV:-unknown}"
+          echo "github.event_name = ${EVENT_NAME}"
+          case "${EVENT_NAME}" in
+            push|workflow_dispatch|merge_group) ;;
+            *)
+              echo "::error::Unexpected event '${EVENT_NAME}' reached the self-hosted macOS workflow."
+              exit 1
+              ;;
+          esac
+
+          if [ "${RUNNER_ENV:-}" != "self-hosted" ]; then
+            echo "::error::Expected a self-hosted runner, got '${RUNNER_ENV:-unknown}'. Check MACOS_RUNNER_GROUP and MACOS_RUNNER."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Configure local sccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v sccache >/dev/null 2>&1; then
+            sccache_dir="${SCCACHE_DIR:-$HOME/.cache/sccache}"
+            {
+              echo "SCCACHE_GHA_ENABLED="
+              echo "RUSTC_WRAPPER=$(command -v sccache)"
+              echo "SCCACHE_DIR=${sccache_dir}"
+              echo "SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-20G}"
+            } >> "$GITHUB_ENV"
+            mkdir -p "$sccache_dir"
+          else
+            echo "::warning::sccache not found on self-hosted macOS runner; continuing without rustc wrapper."
+            {
+              echo "SCCACHE_GHA_ENABLED="
+              echo "RUSTC_WRAPPER="
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Install Opus on macOS
+        shell: bash
+        run: |
+          brew install opus pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry & git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-trusted-macos-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-trusted-macos-
+
+      - name: cargo check
+        run: cargo check --all-targets
+
+      - name: cargo test (non-PG, targeted subset)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+          cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
+          cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true

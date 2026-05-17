@@ -5,7 +5,7 @@
 lockouts under parallel campaign runs), it lets concurrent worktrees share
 compiled dependency crates and recover full cache hits after a clean.
 
-Tracking issue: [#1090](https://github.com/itismyfield-org/agentdesk/issues/1090)
+Tracking issue: [#1090](https://github.com/itismyfield/AgentDesk/issues/1090)
 ("sccache 도입 + 빌드 경로 반영").
 
 ---
@@ -41,14 +41,21 @@ binary is absent — no hard-fail.
 
 ```toml
 [build]
+rustc-wrapper = ""
 incremental = false
 ```
 
-`rustc-wrapper` is intentionally **not** set here. The previous value of
-`"sccache"` broke every bare `cargo` invocation on machines without sccache
-installed (Cargo errors with `No such file or directory (os error 2)`),
+`rustc-wrapper` is intentionally set to the empty string here. The previous
+value of `"sccache"` broke every bare `cargo` invocation on machines without
+sccache installed (Cargo errors with `No such file or directory (os error 2)`),
 forcing agents and developers to prefix every command with `RUSTC_WRAPPER=`.
-A wrapper script (`.sh`) is also not portable to native Windows Cargo
+The empty string disables the wrapper by default and overrides any stale
+parent `.cargo/config.toml` that still opts into sccache.
+
+Cargo treats `rustc-wrapper = ""` as "no wrapper" on Cargo 1.85 and newer.
+The repo CI toolchain is pinned to 1.94.1; local developers should use Cargo
+1.85+ or delete the key locally if they must build with an older toolchain. A
+wrapper script (`.sh`) is also not portable to native Windows Cargo
 invocations, so the supported pattern is to let callers opt in via the
 environment:
 
@@ -91,7 +98,7 @@ If sccache is not installed, both scripts **print a warning and continue** with
 ### 2.3 CI (`.github/workflows/ci-*.yml`)
 
 `RUSTC_WRAPPER: sccache` is set at the workflow `env:` level in `ci-main.yml`,
-`ci-pr.yml`, and `ci-nightly.yml`. Each Rust build job adds a
+`ci-pr.yml`, and `ci-nightly.yml` for Linux/Windows jobs. Each Rust build job adds a
 `Setup sccache` step:
 
 ```yaml
@@ -102,17 +109,27 @@ If sccache is not installed, both scripts **print a warning and continue** with
 Cache storage is backed by GitHub Actions cache (automatic when using the
 action) — no manual GCS/S3 wiring needed.
 
+macOS hosted jobs explicitly clear both `RUSTC_WRAPPER` and
+`SCCACHE_GHA_ENABLED` before build steps so a Homebrew `sccache` binary does
+not try to use the GitHub Actions backend without the action token. Trusted
+self-hosted macOS jobs in `ci-macos-trusted.yml` do not use the GHA backend;
+they clear `SCCACHE_GHA_ENABLED` and opt into the runner-local `sccache`
+binary when installed.
+
 ---
 
 ## 3. Env Var Matrix
 
 | Scope | `RUSTC_WRAPPER` | Incremental | `SCCACHE_DIR` | `SCCACHE_CACHE_SIZE` | Source |
 |-------|-----------------|-------------|---------------|----------------------|--------|
-| Local dev (bare `cargo build`) | `sccache` | disabled | `$HOME/.cache/sccache` (sccache default) | sccache default (10G advised) | `.cargo/config.toml` |
-| Campaign worktree build | `sccache` | disabled | `$HOME/.cache/sccache` | sccache default | `.cargo/config.toml` |
+| Local dev (bare `cargo build`) | none by default | disabled | n/a | n/a | `.cargo/config.toml` |
+| Local dev (opt-in) | `sccache` | disabled | `$HOME/.cache/sccache` (sccache default) | sccache default (10G advised) | shell env |
+| Campaign worktree build (opt-in) | `sccache` | disabled | `$HOME/.cache/sccache` | sccache default | shell env |
 | `scripts/build-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `10G` | `.cargo/config.toml` + `setup_sccache_env` |
 | `scripts/deploy-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `10G` | `.cargo/config.toml` + `setup_sccache_env` |
-| CI (`ci-*.yml`) | `sccache` | disabled | provided by `sccache-action` | provided by `sccache-action` | `.cargo/config.toml` + workflow `env:` + action |
+| CI Linux/Windows (`ci-*.yml`) | `sccache` | disabled | provided by `sccache-action` | provided by `sccache-action` | `.cargo/config.toml` + workflow `env:` + action |
+| CI macOS hosted | none | disabled | n/a | n/a | workflow clears `RUSTC_WRAPPER` + `SCCACHE_GHA_ENABLED` |
+| CI macOS self-hosted trusted | resolved `sccache` path when installed | disabled | `$HOME/.cache/sccache` | `20G` | `ci-macos-trusted.yml` + runner launchd env |
 
 To override per-session: `SCCACHE_DIR=/path SCCACHE_CACHE_SIZE=20G cargo build`.
 
@@ -213,10 +230,10 @@ output first.
 - **`error: process didn't exit successfully: rustc`** with a wrapper-related
   message — earlier versions of this repo set `rustc-wrapper = "sccache"` in
   `.cargo/config.toml`, which hard-fails when sccache is not installed. The
-  current `.cargo/config.toml` does not set `rustc-wrapper`, so this error
-  should no longer occur. If you still see it, check whether a stale
-  `~/.cargo/config.toml` (user-global) or an env override has reintroduced
-  the setting.
+  current `.cargo/config.toml` uses `rustc-wrapper = ""`; if Cargo reports
+  `program not found ""`, upgrade Cargo to 1.85+ or remove that local key
+  while using the older toolchain. If the wrapper is still `sccache`, check
+  whether `~/.cargo/config.toml` or an env override reintroduced it.
 - **No hit-rate improvement across worktrees** — confirm each worktree sees
   the same `SCCACHE_DIR`. By default it is `$HOME/.cache/sccache`, which is
   shared across worktrees.

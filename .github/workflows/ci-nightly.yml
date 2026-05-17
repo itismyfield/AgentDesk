@@ -34,14 +34,10 @@ jobs:
 
   full_macos:
     name: Full tests (macos-latest)
-    # Opt-in self-hosted macOS runner. Set repo variable MACOS_RUNNER to
-    # a JSON array of labels (e.g.
-    # '["self-hosted","macOS","arm64","agentdesk-mac-mini"]') to route
-    # this job to a self-hosted host. Default (variable unset) is
-    # macos-latest. This workflow is schedule + workflow_dispatch only,
-    # so there is no fork-PR exposure here.
-    # See docs/ci-self-hosted-runner.md.
-    runs-on: ${{ fromJSON(vars.MACOS_RUNNER != '' && vars.MACOS_RUNNER || '"macos-latest"') }}
+    # Nightly macOS always uses GitHub-hosted runners. Trusted self-hosted
+    # macOS execution is isolated in ci-macos-trusted.yml, which has no
+    # pull_request trigger and requires an org runner group.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +47,12 @@ jobs:
           toolchain: "1.94.1"
 
       - name: Disable sccache on macOS
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+        shell: bash
+        run: |
+          {
+            echo "RUSTC_WRAPPER="
+            echo "SCCACHE_GHA_ENABLED="
+          } >> "$GITHUB_ENV"
 
       - name: Install Opus on macOS
         run: |

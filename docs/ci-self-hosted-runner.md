@@ -1,9 +1,10 @@
 # Self-Hosted GitHub Actions Runner (macOS)
 
 Goal: reduce queue time on macOS CI jobs by hosting them on the operator's
-`mac-mini` (Apple Silicon). The workflow change in this PR is **opt-in** — it
-defaults to `macos-latest` and only routes to the self-hosted runner once the
-operator sets the repo variable `MACOS_RUNNER` (see [§4](#4-opt-in-from-the-workflow-side)).
+`mac-mini` (Apple Silicon). Self-hosted macOS execution is **opt-in** and is
+isolated to `.github/workflows/ci-macos-trusted.yml`, which has no
+`pull_request` or `pull_request_target` trigger. PR workflows and nightly
+macOS stay on GitHub-hosted runners.
 
 > **Status:** docs + workflow toggle only. Runner registration must be
 > performed by the operator on the host machine (requires a GitHub-issued
@@ -32,6 +33,10 @@ operator sets the repo variable `MACOS_RUNNER` (see [§4](#4-opt-in-from-the-wor
    target dirs across jobs). See [§5 Maintenance](#5-maintenance) for cleanup.
 5. **Network**: the runner needs outbound HTTPS to `github.com` and
    `*.actions.githubusercontent.com`. No inbound ports are required.
+6. **Org runner group**: create an org-level runner group for trusted macOS
+   CI, restrict repository access to `itismyfield/AgentDesk`, and do not share
+   it with other repos. The workflow requires the group name via
+   `vars.MACOS_RUNNER_GROUP` before it will route to self-hosted labels.
 
 ---
 
@@ -44,7 +49,8 @@ register/deregister. The operator fetches them at:
 https://github.com/<owner>/<repo>/settings/actions/runners/new
 ```
 
-For this repo: **Settings → Actions → Runners → New self-hosted runner →
+For this repo, create or select the org runner group first, then add the
+runner from **Settings → Actions → Runners → New self-hosted runner →
 macOS / ARM64**. Copy the `--token` value from the displayed `./config.sh`
 command.
 
@@ -70,7 +76,7 @@ tar xzf "./actions-runner-osx-arm64-${RUNNER_VERSION}.tar.gz"
 
 # Replace <REG_TOKEN> with the token from §2.
 ./config.sh \
-  --url    https://github.com/itismyfield-org/agentdesk \
+  --url    https://github.com/itismyfield/AgentDesk \
   --token  <REG_TOKEN> \
   --name   agentdesk-mac-mini \
   --labels self-hosted,macOS,arm64,agentdesk-macos,agentdesk-mac-mini \
@@ -121,7 +127,12 @@ Create `~/Library/LaunchAgents/com.agentdesk.ghrunner.plist`:
     <string>cd "$HOME/actions-runner" && exec ./run.sh</string>
   </array>
   <key>RunAtLoad</key>        <true/>
-  <key>KeepAlive</key>        <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key> <false/>
+    <key>Crashed</key>        <true/>
+  </dict>
+  <key>ThrottleInterval</key> <integer>30</integer>
   <key>ProcessType</key>      <string>Interactive</string>
   <key>StandardOutPath</key>  <string>/Users/REPLACE_ME/Library/Logs/agentdesk/ghrunner.out.log</string>
   <key>StandardErrorPath</key><string>/Users/REPLACE_ME/Library/Logs/agentdesk/ghrunner.err.log</string>
@@ -152,39 +163,27 @@ should show `Idle`.
 
 ## 4. Opt-in from the workflow side
 
-This PR introduces a single source of truth for the macOS runner label, used
-by both `ci-pr.yml` (`check_fast` matrix) and `ci-nightly.yml` (`full_macos`).
-The variable is consumed via `fromJSON` so multi-label matching works as
-documented by GitHub (label *intersection*, requiring an array of labels —
-not a comma-delimited string):
+Self-hosted macOS routing is owned by `ci-macos-trusted.yml` only. That
+workflow triggers on trusted `push`, `workflow_dispatch`, and `merge_group`
+events, never on PR events. A setup job validates the JSON labels and runner
+group before any self-hosted job is queued; malformed values fail with a
+normal workflow error instead of breaking workflow startup with `fromJSON`.
 
-```yaml
-# ci-pr.yml (matrix; self-hosted only on trusted events — push, workflow_dispatch)
-runs-on: ${{ fromJSON((matrix.os == 'macos-latest' && vars.MACOS_RUNNER != ''
-  && (github.event_name == 'push' || github.event_name == 'workflow_dispatch'))
-  && vars.MACOS_RUNNER || format('"{0}"', matrix.os)) }}
+**Default behaviour:** `vars.MACOS_RUNNER` is unset → the trusted macOS job
+runs on GitHub-hosted `macos-latest`.
 
-# ci-nightly.yml (schedule + workflow_dispatch only, no fork exposure)
-runs-on: ${{ fromJSON(vars.MACOS_RUNNER != '' && vars.MACOS_RUNNER || '"macos-latest"') }}
-```
-
-**Default behaviour: unchanged.** `vars.MACOS_RUNNER` is unset → jobs run on
-GitHub-hosted `macos-latest`.
-
-**Fork-PR safety: event-gated, not fork-gated.** `pull_request` and
-`pull_request_target` runs **always** stay on GitHub-hosted `macos-latest`,
-regardless of `vars.MACOS_RUNNER` or whether the PR is from a fork. Only
-`push` (which fork contributors cannot fire on this repo) and
-`workflow_dispatch` (which requires repo write access) can route to the
-self-hosted runner. A second-layer sanity check step in `check_fast` fails
-the macOS lane closed if any `pull_request*` event somehow lands on a
-self-hosted runner. See [§6 Security notes](#6-security-notes) for the
-threat model.
+**PR and nightly behaviour:** `ci-pr.yml` and `ci-nightly.yml` do not read
+`MACOS_RUNNER`; they cannot route to self-hosted macOS by variable change.
 
 To opt in *after* the runner is live and `Idle`:
 
-1. GitHub → **Settings → Secrets and variables → Actions → Variables**.
-2. Add repo variable `MACOS_RUNNER`. Two recommended values:
+1. GitHub organization settings → **Actions → Runner groups**:
+   confirm the trusted macOS runner group exists and is explicitly allowed
+   for `itismyfield/AgentDesk`.
+2. GitHub repo → **Settings → Secrets and variables → Actions → Variables**.
+3. Add repo variable `MACOS_RUNNER_GROUP` with the exact group name, for
+   example `AgentDesk trusted macOS`.
+4. Add repo variable `MACOS_RUNNER`. Two recommended values:
    - **Pinned to mac-mini** (only this host can pick up the job):
      ```json
      ["self-hosted","macOS","arm64","agentdesk-mac-mini"]
@@ -193,18 +192,19 @@ To opt in *after* the runner is live and `Idle`:
      ```json
      ["self-hosted","macOS","arm64","agentdesk-macos"]
      ```
-   The double quotes and brackets are required — `runs-on` selects a runner
-   that matches **all** labels in the array (intersection). A bare string
-   like `"macos-latest"` (quotes included) is also valid for GitHub-hosted
-   images. Do **not** use `["self-hosted","macOS","arm64"]` alone — without
-   a project label that pattern would match any visible self-hosted macOS
-   ARM64 runner, including ones registered for other purposes later.
-3. Re-run a PR from a same-repo branch (or `workflow_dispatch`). The macOS
-   lane should pick up the self-hosted runner. If it doesn't, see
-   [§7 Failure modes](#7-failure-modes).
+   The double quotes and brackets are required — `MACOS_RUNNER` must be a
+   JSON array, and `runs-on` selects a runner that matches **all** labels in
+   the array (intersection). Do **not** use
+   `["self-hosted","macOS","arm64"]` alone — without a project label that
+   pattern would match any visible self-hosted macOS ARM64 runner, including
+   ones registered for other purposes later.
+5. Trigger **CI macOS Trusted** with `workflow_dispatch`. The self-hosted
+   job logs `runner.name` before checkout so routing is easy to confirm. If
+   it doesn't pick up the expected runner, see [§7 Failure modes](#7-failure-modes).
 
-To roll back: delete the variable. Next workflow run goes back to
-`macos-latest`. No code change needed.
+To roll back: delete `vars.MACOS_RUNNER`. The next trusted macOS run goes
+back to `macos-latest`. No code change needed. Leave `MACOS_RUNNER_GROUP`
+set only if the org group remains valid.
 
 > **Why a variable and not a secret?** Labels are not sensitive and we want
 > them visible in logs for debugging.
@@ -241,27 +241,25 @@ canonical compromise vector and is called out in
 
 **Policy for this repo:**
 
-1. **`pull_request*` jobs never run on self-hosted — by event gate, not by
-   fork check.** Because a `pull_request` workflow file is supplied by the
-   PR head (i.e. PR-controlled), any workflow-local fork comparison can be
-   removed or rewritten by the PR itself and is therefore not a real
+1. **`pull_request*` jobs never run on self-hosted — by workflow structure,
+   not by fork check.** Because a `pull_request` workflow file is supplied
+   by the PR head (i.e. PR-controlled), any workflow-local fork comparison
+   can be removed or rewritten by the PR itself and is therefore not a real
    isolation boundary. The robust approach we use:
 
-   - The `runs-on` expression in `check_fast` selects the self-hosted
-     runner *only* when `github.event_name` is `push` or
-     `workflow_dispatch`. Any `pull_request` event (same-repo or fork)
-     falls back to `macos-latest` regardless of `vars.MACOS_RUNNER`.
-   - An "Event-gate / self-hosted runner sanity check" step runs first
-     on the macOS lane (before `actions/checkout`) and **fails closed**
-     if a `pull_request*` event lands on a self-hosted runner — covering
-     misconfiguration, future workflow edits, or unexpected event shapes.
+   - `ci-pr.yml` has no `MACOS_RUNNER`, runner-group, or self-hosted macOS
+     routing expression.
+   - `ci-nightly.yml` always uses GitHub-hosted `macos-latest`.
+   - `ci-macos-trusted.yml` is the only workflow that reads `MACOS_RUNNER`
+     and `MACOS_RUNNER_GROUP`, and it has no `pull_request` or
+     `pull_request_target` trigger.
+   - `scripts/check-ci-runner-hardening.sh` fails CI if a PR-triggered
+     workflow regains self-hosted macOS routing or if `MACOS_RUNNER` appears
+     outside the trusted workflow.
 
    This means: fork contributors cannot reach the self-hosted runner via
-   PRs at all. Trusted events (`push`, `workflow_dispatch`) require write
-   access, which fork contributors do not have.
-
-   `ci-nightly.yml` has no fork exposure (triggers are `schedule` +
-   `workflow_dispatch` only) and is not subject to this concern.
+   PRs at all. Trusted events (`push`, `workflow_dispatch`, `merge_group`)
+   are the only self-hosted entry points.
 
    **Required pre-flight before setting `MACOS_RUNNER`** (operator
    responsibility, in addition to the workflow-level event gate):
@@ -274,13 +272,15 @@ canonical compromise vector and is called out in
       event gate, this setting also protects any unrelated future
       self-hosted lanes added to the repo.
 
-   b. **Settings → Actions → Runners → Runner groups** (org plans) or, at a
-      minimum, ensure this runner is only registered against this single
-      repo (`config.sh --url https://github.com/<owner>/<repo>`).
+   b. **Organization settings → Actions → Runner groups**: create/select the
+      trusted macOS runner group, restrict repository access to
+      `itismyfield/AgentDesk`, and set `vars.MACOS_RUNNER_GROUP` to the
+      exact group name. The workflow fails before queuing self-hosted work
+      when `MACOS_RUNNER` is set without a group.
 
    **Until (a) and (b) are confirmed, do not set `MACOS_RUNNER`.**
 2. Acceptable triggers for the self-hosted runner: `push` to branches owned
-   by this repo, `schedule`, `workflow_dispatch`. Do **not** route
+   by this repo, `workflow_dispatch`, `merge_group`. Do **not** route
    `pull_request` (same-repo or fork) or `pull_request_target` to the
    self-hosted runner — both event shapes carry PR-controlled or
    elevated-permission risk that workflow-local checks cannot fully contain.
@@ -288,8 +288,25 @@ canonical compromise vector and is called out in
    within steps. Keep the runner dir on the same volume as the operator's
    home so file ownership is unsurprising.
 4. Do not register the same runner against multiple repos with the current
-   labels. If we need a shared runner later, add an org-level runner group
-   and route via `runs-on: group:`.
+   labels. Shared runners must stay behind the org runner group allow-list
+   and must not use broad labels such as `["self-hosted","macOS","arm64"]`
+   without an AgentDesk-specific fleet or host label.
+
+### 6.5 Incident response
+
+If the runner host is suspected compromised, assume `~/actions-runner/.runner`
+and `~/actions-runner/.credentials` were copied. Unloading launchd is not
+enough because those credentials can keep receiving jobs from another host.
+
+1. GitHub → **Settings → Actions → Runners → agentdesk-mac-mini → ⋯ →
+   Remove**. Use the force-remove UI path if the host is offline.
+2. Delete repo variable `MACOS_RUNNER` immediately. Leave
+   `MACOS_RUNNER_GROUP` only if the group remains valid and empty.
+3. Revoke any PATs, SSH keys, signing credentials, or deploy tokens cached
+   on the host.
+4. Rotate the runner by deleting `~/actions-runner`, registering a fresh
+   runner with a new token, and confirming the org runner group allow-list
+   before re-setting `MACOS_RUNNER`.
 
 ---
 
@@ -298,8 +315,9 @@ canonical compromise vector and is called out in
 | Symptom | What happens | Operator action |
 |---------|--------------|-----------------|
 | Runner offline (launchd dead, host off, network down) | Jobs **queue indefinitely** on the self-hosted label. GitHub does **not** auto-fall-back to hosted. | Either: (a) bring the runner back, or (b) delete `vars.MACOS_RUNNER` to revert to `macos-latest` and re-run. |
-| `pull_request` macOS job didn't pick up self-hosted runner (same-repo PR or fork PR) | Expected. The workflow forces `macos-latest` for **any** `pull_request*` event regardless of `MACOS_RUNNER`. Self-hosted is gated to `push` and `workflow_dispatch` only. | No action — this is the security boundary working as designed. To exercise the self-hosted lane on a branch, push directly to the branch in this repo or trigger `workflow_dispatch`. |
-| `MACOS_RUNNER` value rejected at runtime with a `fromJSON` error | The variable is not valid JSON. | Re-save it as a JSON array (with double quotes and brackets) — e.g. `["self-hosted","macOS","arm64","agentdesk-mac-mini"]`. |
+| `pull_request` macOS job didn't pick up self-hosted runner (same-repo PR or fork PR) | Expected. PR workflows do not read `MACOS_RUNNER`; self-hosted is isolated to **CI macOS Trusted**. | No action. To exercise self-hosted on a branch, push directly to the branch in this repo or trigger `workflow_dispatch`. |
+| `MACOS_RUNNER` rejected by the resolve job | The variable is missing required labels, not valid JSON, or `MACOS_RUNNER_GROUP` is unset. | Re-save `MACOS_RUNNER` as a JSON array and set `MACOS_RUNNER_GROUP` to the exact org runner group name. |
+| Job queues forever even though the runner is online | The selected runner does not have every label in `MACOS_RUNNER`, or it is not in the configured runner group. | Run `gh api /repos/itismyfield/AgentDesk/actions/runners --jq '.runners[] | {name,status,labels:[.labels[].name]}'` and confirm the runner is `online`, in the group, and has every configured label. |
 | Runner online but stuck on prior job | New jobs queue behind it. | `launchctl kickstart -k …` to restart; cancel any zombie job from GitHub UI. |
 | Token expired during `config.sh` | `config.sh` exits non-zero with `Http response code: NotFound`. | Re-fetch token (§2). Tokens last ~1h. |
 | Brew dep drift (e.g. `opus` removed) | Cargo build fails at link time. | Re-run §1 brew install line. Add the package to the launchd `EnvironmentVariables` `PATH` if it lands outside `/opt/homebrew/bin`. |
@@ -316,25 +334,20 @@ canonical compromise vector and is called out in
 These are tracked here rather than as separate issues until the operator
 confirms direction. Each item is independent.
 
-a. **sccache on local disk.** The workflow currently disables sccache on
-   macOS (`RUSTC_WRAPPER=` is exported). On self-hosted we want it **on**,
-   pointing at `~/.cache/sccache` (already set in the launchd plist). Gate
-   the disable step with `if: runner.os == 'macOS' && !contains(runner.labels, 'self-hosted')`.
-
-b. **Cache directory persistence.** GitHub's `actions/cache@v4` still works
+a. **Cache directory persistence.** GitHub's `actions/cache@v4` still works
    on self-hosted but writes to its own scratch dir. For maximum hit rate,
    add a step that hard-links / rsyncs to a persistent dir on the runner
    (e.g. `~/cache/cargo-registry`) and back. See `runner.tool_cache`.
 
-c. **Cleanup cron.** A launchd `StartCalendarInterval` agent that runs daily
+b. **Cleanup cron.** A launchd `StartCalendarInterval` agent that runs daily
    at 04:00 KST and prunes `_work/*` older than 3 days plus `sccache --zero-stats`
    if size > 18 GB.
 
-d. **Monitoring.** Polling `gh api /repos/{owner}/{repo}/actions/runners`
+c. **Monitoring.** Polling `gh api /repos/{owner}/{repo}/actions/runners`
    from the existing dcserver health loop and surfacing `status != online`
    to the operator's Discord channel.
 
-e. **`mac-book` as a second runner.** Repeat §3 with
+d. **`mac-book` as a second runner.** Repeat §3 with
    `--name agentdesk-mac-book --labels self-hosted,macOS,arm64,agentdesk-macos,agentdesk-mac-book`.
    Apply the same shared **fleet** label `agentdesk-macos` so the workflow
    variable `MACOS_RUNNER=["self-hosted","macOS","arm64","agentdesk-macos"]`

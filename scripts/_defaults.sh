@@ -43,7 +43,7 @@ setup_sccache_env() {
 
   export SCCACHE_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
   export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
-  export RUSTC_WRAPPER="${RUSTC_WRAPPER:-$sccache_bin}"
+  export RUSTC_WRAPPER="$sccache_bin"
   mkdir -p "$SCCACHE_DIR"
 }
 

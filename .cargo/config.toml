@@ -21,6 +21,9 @@
 #     only when sccache is found.
 #   * Local developers add `export RUSTC_WRAPPER=sccache` to their shell rc
 #     after installing sccache (see README + docs/ci/sccache-setup.md).
+#
+# Cargo treats an empty `rustc-wrapper` as "no wrapper" on Cargo 1.85+.
+# CI pins 1.94.1; local older toolchains should upgrade or remove this key.
 rustc-wrapper = ""
 # Campaign worktrees are build-once-and-discard; disabling incremental avoids
 # multi-GB target/debug/incremental caches in every parallel worktree. sccache

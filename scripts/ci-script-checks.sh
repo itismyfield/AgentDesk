@@ -17,6 +17,9 @@ fi
 echo "=== PG audit guard ==="
 ./scripts/pg-audit.sh
 
+echo "=== CI runner hardening guard ==="
+./scripts/check-ci-runner-hardening.sh
+
 echo "=== Check hardcoded port/path drift ==="
 grep -rn '8791\|8799' --include='*.rs' --include='*.js' --include='*.yaml' --include='*.json' \
   --exclude-dir=target --exclude-dir=.git --exclude-dir=node_modules \
