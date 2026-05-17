@@ -52,9 +52,7 @@ use std::time::Duration;
 
 use tokio::sync::broadcast::error::RecvError;
 
-use super::relay_producer_registry::{
-    RelayProducerRegistry, global_relay_producer_registry,
-};
+use super::relay_producer_registry::{RelayProducerRegistry, global_relay_producer_registry};
 use super::session_registry::{
     RegisteredSession, RegistryChange, SessionRegistry, global_session_registry,
 };
@@ -666,5 +664,80 @@ mod tests {
         let m2 = matched("c-prod-unblock", ProviderKind::Codex);
         registry.upsert(m2, Some("mac-mini"));
         let _ = tokio::time::timeout(Duration::from_secs(2), supervisor).await;
+    }
+
+    /// E5 (#2412) regression: cached `RelayProducer` clones outliving the
+    /// supervisor must NOT wedge the relay's shutdown. Pre-fix, the cached
+    /// clone (e.g. `tmux_watcher::cached_relay_producer`) kept the channel
+    /// open and the relay loop blocked on `rx.recv().await` forever — the
+    /// supervisor's `Removed`/`Updated` teardown then stalled inside
+    /// `handle.shutdown().await`. With receiver-side cancellation, teardown
+    /// completes promptly regardless of surviving sender clones.
+    #[tokio::test]
+    async fn supervisor_teardown_completes_with_outliving_producer_clone() {
+        use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
+
+        let registry = Arc::new(SessionRegistry::new());
+        let producers = Arc::new(RelayProducerRegistry::new());
+        let sink: Arc<CountingSink> = Arc::new(CountingSink::default());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let registry_clone = registry.clone();
+        let producers_clone = producers.clone();
+        let sink_clone: Arc<dyn RelaySink> = sink.clone();
+        let shutdown_clone = shutdown.clone();
+        let supervisor = tokio::spawn(async move {
+            run_watcher_supervisor_loop_with_registry_and_producers(
+                SupervisorConfig::for_test(),
+                sink_clone,
+                shutdown_clone,
+                registry_clone,
+                producers_clone,
+            )
+            .await;
+        });
+
+        let m = matched("c-wedge", ProviderKind::Claude);
+        registry.upsert(m.clone(), Some("mac-mini"));
+
+        // Wait until supervisor publishes the producer, then snapshot a
+        // clone and HOLD IT — this mimics `tmux_watcher::cached_relay_producer`
+        // pinning a sender across the supervisor's Removed teardown.
+        wait_for(
+            || producers.get_producer(&m.expected_session_name).is_some(),
+            "supervisor publishes producer",
+        )
+        .await;
+        let cached_clone = producers
+            .get_producer(&m.expected_session_name)
+            .expect("producer registered");
+
+        // Remove the session. Pre-fix, the supervisor's `handle.shutdown().await`
+        // wedged here because `cached_clone` kept the mpsc channel open.
+        let removed_at = std::time::Instant::now();
+        registry.remove(&m.expected_session_name);
+        wait_for(
+            || producers.get_producer(&m.expected_session_name).is_none(),
+            "supervisor deregisters producer after removal",
+        )
+        .await;
+        assert!(
+            removed_at.elapsed() < Duration::from_secs(5),
+            "supervisor teardown must not wedge on cached clone"
+        );
+
+        // The cached clone observes the shutdown flag — further sends fail
+        // fast instead of silently enqueueing into a dead channel.
+        assert!(
+            !cached_clone.try_send_frame("post-shutdown".into()),
+            "cached producer clone must refuse sends once relay has shut down"
+        );
+
+        // Supervisor itself shuts down cleanly.
+        shutdown.store(true, Ordering::Release);
+        let m_unblock = matched("c-wedge-unblock", ProviderKind::Codex);
+        registry.upsert(m_unblock, Some("mac-mini"));
+        let exited = tokio::time::timeout(Duration::from_secs(2), supervisor).await;
+        assert!(exited.is_ok(), "supervisor exits cleanly");
     }
 }

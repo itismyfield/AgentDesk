@@ -104,10 +104,7 @@ impl RelayProducerRegistry {
                 guard
                     .iter()
                     .map(|(name, producer)| {
-                        (
-                            name.clone(),
-                            producer.metrics().snapshot().frames_received,
-                        )
+                        (name.clone(), producer.metrics().snapshot().frames_received)
                     })
                     .collect()
             })
@@ -135,9 +132,7 @@ pub fn global_relay_producer_registry() -> Arc<RelayProducerRegistry> {
 mod tests {
     use super::*;
     use crate::services::cluster::session_matcher::{MatchedChannel, expected_rollout_path_for};
-    use crate::services::cluster::stream_relay::{
-        DiscardSink, RelaySink, spawn_stream_relay,
-    };
+    use crate::services::cluster::stream_relay::{DiscardSink, RelaySink, spawn_stream_relay};
     use crate::services::provider::ProviderKind;
 
     fn matched(channel: &str) -> MatchedChannel {
