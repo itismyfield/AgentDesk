@@ -1533,27 +1533,32 @@ fn execute_streaming_local_tui_tmux(
                 });
             }
             Err(error) => {
-                // Composer did not redraw within the 200ms probe budget.
-                // The assistant response already shipped, the pane is
-                // still alive — preserve the handoff so recovery /
-                // watcher-relay paths remain functional, and record a
-                // warning for telemetry. Making this case hard-fail
-                // would require the bridge to keep its inflight open
-                // beyond the 250ms drain (tracked as a follow-up to
-                // #2325).
+                // #2399 HIGH 2: composer did not redraw within the 200ms
+                // probe budget. The previous behaviour emitted
+                // `RuntimeReady` anyway "best-effort", which republished a
+                // CodexTui handoff against a TUI whose readiness was
+                // unknown. Downstream recovery / watcher-relay paths then
+                // operated on a non-ready session and ran into the
+                // original #2325 failure mode.
+                //
+                // Updated contract: on a readiness-timeout verdict we
+                // suppress `RuntimeReady` entirely. The bridge has already
+                // received the rollout-tail `Done` and finalised the
+                // assistant text; the only thing we *would* be publishing
+                // is the CodexTui handoff metadata. Skipping it forces the
+                // bridge to treat the next turn as a fresh session
+                // launch (or recovery), which is safer than reusing a
+                // possibly-hung pane.
+                //
+                // Session-dead and cancel cases are already handled by
+                // dedicated arms above — only the readiness-timeout path
+                // lands here, but we still log the error string verbatim
+                // so operators can correlate with the input.rs telemetry.
                 tracing::warn!(
                     tmux_session = tmux_session_name,
                     error = %error,
-                    "Codex TUI composer not yet input-ready inside post-turn probe budget; emitting RuntimeReady best-effort"
+                    "Codex TUI composer not yet input-ready inside post-turn probe budget; suppressing RuntimeReady to avoid republishing a non-ready handoff (#2399 HIGH 2)"
                 );
-                let _ = sender.send(StreamMessage::RuntimeReady {
-                    handoff: RuntimeHandoff::CodexTui {
-                        rollout_path: tail_result.rollout_path.display().to_string(),
-                        thread_id: tail_result.session_id,
-                        tmux_session_name: tmux_session_name.to_string(),
-                        last_offset: tail_result.final_offset,
-                    },
-                });
             }
         }
     }

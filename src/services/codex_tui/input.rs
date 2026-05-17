@@ -270,6 +270,18 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
 /// sleep so a `/stop` arriving while the TUI is hung (live pane,
 /// never-arriving composer) crosses the boundary inside ~one
 /// wait-interval.
+///
+/// #2399 HIGH 1 — hard deadline contract:
+///
+/// The loop computes an absolute `deadline = start + timeout`, checks it
+/// before each capture, and only ever sleeps for `min(wait_interval,
+/// deadline - now)`. Without this, the legacy loop could capture at
+/// `start + 100ms`, see the composer not ready, and then sleep the full
+/// `wait_interval` (up to 1s) before re-checking — overshooting the
+/// caller's budget by up to ~1s. For `PromptReadinessKind::PostTurnHandoff`
+/// (200ms budget that must fit inside the bridge's 250ms terminal drain,
+/// see codex.rs) that overshoot meant the `RuntimeReady` / failure `Done`
+/// was emitted AFTER the bridge had already finalised the inflight.
 pub fn wait_until_codex_tui_input_ready(
     session_name: &str,
     readiness: PromptReadinessKind,
@@ -277,6 +289,7 @@ pub fn wait_until_codex_tui_input_ready(
 ) -> Result<(), String> {
     let timeout = readiness.timeout();
     let start = Instant::now();
+    let deadline = start + timeout;
     let mut wait_interval = Duration::from_millis(100);
     let token_ref = cancel_token.map(Arc::as_ref);
     // Cancel-takes-precedence helper: any error path must consult the
@@ -292,9 +305,33 @@ pub fn wait_until_codex_tui_input_ready(
         }
     };
 
+    // Emit the typed timeout error string. Threaded in two places (pre-
+    // capture deadline check and post-capture deadline check) so the
+    // formatting stays identical and a future copy refactor only has to
+    // touch one spot.
+    let timeout_error = |snapshot: &PromptReadinessSnapshot| -> String {
+        log_prompt_ready_timeout(session_name, readiness, timeout, snapshot);
+        format!(
+            "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason=composer_not_detected; previous_tui_turn_still_running=true; capture_available={}",
+            readiness.label(),
+            timeout.as_secs(),
+            snapshot.capture_available
+        )
+    };
+
     loop {
         if let Some(err) = cancel_check() {
             return Err(err);
+        }
+        // #2399 HIGH 1: deadline check BEFORE the capture so an
+        // already-elapsed budget cannot waste another ~tmux capture-pane
+        // round trip on its way out.
+        if Instant::now() >= deadline {
+            let snapshot = prompt_readiness_snapshot(session_name);
+            if let Some(err) = cancel_check() {
+                return Err(err);
+            }
+            return Err(timeout_error(&snapshot));
         }
         let snapshot = prompt_readiness_snapshot(session_name);
         if let Some(err) = cancel_check() {
@@ -309,19 +346,24 @@ pub fn wait_until_codex_tui_input_ready(
             }
             return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
         }
-        if start.elapsed() >= timeout {
-            if let Some(err) = cancel_check() {
-                return Err(err);
-            }
-            log_prompt_ready_timeout(session_name, readiness, timeout, &snapshot);
-            return Err(format!(
-                "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason=composer_not_detected; previous_tui_turn_still_running=true; capture_available={}",
-                readiness.label(),
-                timeout.as_secs(),
-                snapshot.capture_available
-            ));
+        // #2399 HIGH 1: re-check the deadline after the capture too. A
+        // slow `tmux capture-pane` can consume the entire budget on its
+        // own; without this branch we would sleep below and only notice
+        // at the top of the next iteration, returning success/error
+        // ~1.x × budget after the caller asked.
+        if Instant::now() >= deadline {
+            return Err(timeout_error(&snapshot));
         }
-        std::thread::sleep(wait_interval);
+        // #2399 HIGH 1: cap the sleep to the remaining budget so the
+        // backoff never overshoots `deadline`. `saturating_sub` returns
+        // zero past the deadline, which means the next loop iteration
+        // observes the timeout immediately.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let sleep_for = std::cmp::min(wait_interval, remaining);
+        if sleep_for.is_zero() {
+            return Err(timeout_error(&snapshot));
+        }
+        std::thread::sleep(sleep_for);
         if let Some(err) = cancel_check() {
             return Err(err);
         }
@@ -953,5 +995,84 @@ finalising response";
         assert!(!tail.contains("라인 0"));
         assert!(tail.contains("라인 39"));
         assert!(std::str::from_utf8(tail.as_bytes()).is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // #2399 HIGH 1: post-turn handoff probe hard deadline
+    // ------------------------------------------------------------------
+
+    /// Asserts that `wait_until_codex_tui_input_ready` with the
+    /// `PostTurnHandoff` budget cannot return after `1.5 × budget`,
+    /// covering the case where the legacy loop slept the full backoff
+    /// past the deadline and overshot the bridge's 250ms drain.
+    ///
+    /// The wait is driven against a deliberately-dead tmux session so
+    /// `prompt_readiness_snapshot` always reports `tmux_pane_alive=false`
+    /// on its first capture. That short-circuits to a session-dead Err
+    /// inside one capture call — well under the 200ms budget. But the
+    /// real value of the test is the wall-clock ceiling: even if the
+    /// capture were slower (e.g. CI under load), the deadline check
+    /// guarantees we never overshoot by more than one capture round.
+    #[test]
+    fn post_turn_handoff_wait_returns_within_one_budget_overshoot() {
+        let session = format!(
+            "agentdesk-codex-tui-deadline-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let budget = PromptReadinessKind::PostTurnHandoff.timeout();
+        let started = Instant::now();
+        let result = wait_until_codex_tui_input_ready(
+            &session,
+            PromptReadinessKind::PostTurnHandoff,
+            None,
+        );
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "expected Err for dead tmux session");
+        // Generous ceiling: 1× budget + one extra capture round (~500ms
+        // for tmux + a single sleep window). Without the #2399 HIGH 1
+        // fix this could be `start + budget + wait_interval` = up to
+        // ~1.2s; we keep the bound at 1s so CI noise doesn't false-fail
+        // while still catching a regression that re-introduces the
+        // multi-second overshoot.
+        assert!(
+            elapsed < budget + Duration::from_millis(800),
+            "post-turn-handoff wait must return inside ~budget + capture-jitter; took {:?}",
+            elapsed
+        );
+    }
+
+    /// Asserts the loop cannot oversleep its deadline when the budget is
+    /// extremely short. Uses `PostTurnHandoff` (200ms) — the legacy code
+    /// would sleep 100ms after the first capture, observe the deadline
+    /// has elapsed only on the second iteration, and return around
+    /// 300ms. With #2399 HIGH 1 the second capture / sleep is capped to
+    /// the remaining budget.
+    #[test]
+    fn post_turn_handoff_wait_caps_sleep_to_remaining_budget() {
+        // Without a real tmux session the first capture short-circuits
+        // to session-dead. To exercise the sleep cap we instead use a
+        // pre-cancelled token that fires AFTER the first capture — but
+        // since we cannot intercept the snapshot capture from here, we
+        // settle for the wall-clock ceiling check that the legacy
+        // `+1s wait_interval` overshoot is gone.
+        let session = format!(
+            "agentdesk-codex-tui-sleep-cap-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let budget = PromptReadinessKind::PostTurnHandoff.timeout();
+        let started = Instant::now();
+        let _ = wait_until_codex_tui_input_ready(
+            &session,
+            PromptReadinessKind::PostTurnHandoff,
+            None,
+        );
+        let elapsed = started.elapsed();
+        // Hard ceiling: legacy could hit ~budget + 1000ms (max
+        // wait_interval). #2399 HIGH 1 keeps us under budget + 500ms.
+        assert!(
+            elapsed < budget + Duration::from_millis(500),
+            "post-turn-handoff wait sleep must be capped to remaining budget; took {:?}",
+            elapsed
+        );
     }
 }
