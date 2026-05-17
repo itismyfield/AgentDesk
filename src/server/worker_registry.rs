@@ -387,11 +387,13 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 11] = [
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
         execution_scope: WorkerExecutionScope::WorkerLocal,
         health_owner: "watcher-supervisor tracing + per-relay metrics",
-        notes: "Epic #2285 / E3 (#2345). Gated by cluster.session_bound_relay_enabled \
-                (default false); skipped entirely when the flag is off so legacy turn-bound \
-                relay paths remain authoritative until E4 (#2346) migrates call-sites. \
+        notes: "Epic #2285 / E3 (#2345), activated by E4 (#2346). Gated by \
+                cluster.session_bound_relay_enabled (default true since E4); flipping the flag \
+                off restores the legacy turn-bound watcher as the sole delivery path. \
                 Worker-local because tmux is host-scoped — relays live next to the sessions \
-                they observe. Uses a DiscardSink until E4 wires the Discord adapter.",
+                they observe. Uses RegistryAdapterSink (observation-only) so flag-on activation \
+                does not double-deliver alongside the still-active legacy tmux watcher; a \
+                follow-up issue swaps the legacy spawn site for direct sink-driven delivery.",
     },
     WorkerSpec {
         id: ServerWorkerId::WsBatchFlusher,
@@ -721,8 +723,16 @@ impl SupervisedWorkerRegistry {
                 // its own relays. No leader gating — peer hosts can't observe
                 // each other's sessions anyway.
                 self.register_tokio(spec, async move {
-                    crate::services::cluster::watcher_supervisor::run_with_discard_sink(shutdown)
-                        .await;
+                    // E4 (#2346): the supervisor runs against the production
+                    // observation sink. Delivery still flows through the
+                    // legacy turn-bound watcher; the sink only records frame
+                    // metrics so the new path's lifecycle is exercised end-
+                    // to-end before subsequent issues swap the legacy spawn
+                    // site for direct sink-driven delivery.
+                    crate::services::cluster::registry_adapter_sink::run_with_registry_adapter_sink(
+                        shutdown,
+                    )
+                    .await;
                 });
                 Ok(None)
             }
