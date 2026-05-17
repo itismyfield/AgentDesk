@@ -357,11 +357,16 @@ pub(super) fn render_dispatch_contract(
         }
         Some("review-decision") => {
             let card_id = current_task.card_id?;
+            let dispatch_hint = current_task
+                .dispatch_id
+                .map(|dispatch_id| format!(", `dispatch_id={dispatch_id}`"))
+                .unwrap_or_default();
             Some(format!(
                 "[Dispatch Contract]\n\
                  - 카운터 리뷰 피드백을 읽고 `accept|dispute|dismiss` 중 하나를 고른다.\n\
-                 - decision 제출 경로: `POST /api/reviews/decision` (`card_id={card_id}`).\n\
-                 - accept는 피드백 수용 후 rework, dispute는 반박 후 재리뷰, dismiss는 무시 후 done 경로다."
+                 - decision 제출 경로: `POST /api/reviews/decision` (`card_id={card_id}`{dispatch_hint}).\n\
+                 - accept는 피드백 수용 후 rework, dispute는 반박 후 재리뷰, dismiss는 무시 후 done 경로다.\n\
+                 - 리뷰 지적이 현재 카드 범위 밖이면 응답에 `DECISION: dispute`와 별도 줄 `OUT_OF_SCOPE: true`를 포함한다."
             ))
         }
         Some("phase-gate") => {

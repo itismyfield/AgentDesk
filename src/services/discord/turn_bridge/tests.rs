@@ -1,6 +1,7 @@
 use super::completion_guard::{
     build_verdict_payload, extract_explicit_review_verdict, extract_explicit_work_outcome,
     extract_review_decision, extract_review_decision_commit_sha,
+    extract_review_decision_out_of_scope,
 };
 use super::context_window::{
     apply_context_token_update, persisted_context_tokens, resolve_done_response,
@@ -2774,6 +2775,26 @@ fn review_decision_commit_sha_parser_prefers_keyed_commit() {
             .as_deref(),
         Some("abcdef1234567")
     );
+}
+
+#[test]
+fn review_decision_out_of_scope_parser_requires_dispute_and_explicit_marker() {
+    assert!(extract_review_decision_out_of_scope(
+        "DECISION: dispute\nOUT_OF_SCOPE: true\n리뷰 범위 밖입니다.",
+        "dispute",
+    ));
+    assert!(extract_review_decision_out_of_scope(
+        "결정: dispute\n범위 외: 예",
+        "dispute",
+    ));
+    assert!(!extract_review_decision_out_of_scope(
+        "DECISION: accept\nOUT_OF_SCOPE: true",
+        "accept",
+    ));
+    assert!(!extract_review_decision_out_of_scope(
+        "DECISION: dispute\n리뷰가 범위 밖이라고 생각합니다.",
+        "dispute",
+    ));
 }
 
 #[test]

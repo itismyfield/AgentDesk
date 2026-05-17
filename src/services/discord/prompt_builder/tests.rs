@@ -780,6 +780,8 @@ fn test_review_decision_identifiers_render_in_current_task_but_not_rules_section
     assert!(prompt.contains("Reviewed Commit: feedfacecafebeef"));
     assert!(prompt.contains("Decision Endpoint: POST /api/reviews/decision"));
     assert!(rules_section.contains("POST /api/reviews/decision {card_id, decision, comment}"));
+    assert!(prompt.contains("OUT_OF_SCOPE: true"));
+    assert!(prompt.contains("dispatch_id=dispatch-decision-692"));
     assert!(!rules_section.contains("owner/repo"));
     assert!(!rules_section.contains("#366"));
     assert!(!rules_section.contains("feedfacecafebeef"));

@@ -133,6 +133,21 @@ pub(in crate::services::discord) fn extract_review_decision(
     found
 }
 
+pub(in crate::services::discord) fn extract_review_decision_out_of_scope(
+    full_response: &str,
+    decision: &str,
+) -> bool {
+    if decision != "dispute" {
+        return false;
+    }
+    let Ok(explicit) = regex::Regex::new(
+        r"(?im)^\s*(?:out[_ -]?of[_ -]?scope|scope[_ -]?mismatch|범위\s*외|스코프\s*외)\s*:\s*(?:true|yes|y|1|맞음|예|네)\s*$",
+    ) else {
+        return false;
+    };
+    explicit.is_match(full_response)
+}
+
 pub(in crate::services::discord::turn_bridge) fn extract_review_decision_commit_sha(
     full_response: &str,
 ) -> Option<String> {
@@ -161,6 +176,7 @@ async fn submit_review_decision_fallback(
     let commit_sha = (decision == "accept")
         .then(|| extract_review_decision_commit_sha(full_response))
         .flatten();
+    let out_of_scope = extract_review_decision_out_of_scope(full_response, decision);
     crate::services::discord::internal_api::submit_review_decision(
         crate::server::routes::review_verdict::ReviewDecisionBody {
             card_id: card_id.to_string(),
@@ -168,7 +184,7 @@ async fn submit_review_decision_fallback(
             decision: decision.to_string(),
             comment: Some(comment),
             commit_sha,
-            out_of_scope: None,
+            out_of_scope: out_of_scope.then_some(true),
         },
     )
     .await

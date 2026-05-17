@@ -1535,6 +1535,7 @@ async fn idempotent_finalize_after_auto_accept_completed() {
             comment: Some("agent retrying accept".to_string()),
             commit_sha: None,
             dispatch_id: Some("dispatch-rd-auto-c".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1619,6 +1620,7 @@ async fn idempotent_finalize_after_auto_accept_cancelled_by_cleanup() {
             comment: None,
             commit_sha: None,
             dispatch_id: Some("dispatch-rd-auto-x".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1683,6 +1685,7 @@ async fn stale_state_failed_dispatch_does_not_short_circuit() {
             comment: None,
             commit_sha: None,
             dispatch_id: Some("dispatch-rd-failed".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1743,6 +1746,7 @@ async fn stale_state_arbitrary_cancellation_does_not_short_circuit() {
             comment: None,
             commit_sha: None,
             dispatch_id: Some("dispatch-rd-cancel".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1803,6 +1807,7 @@ async fn stale_state_dispatch_id_mismatch_returns_generic_conflict() {
             commit_sha: None,
             // Caller submits a dispatch_id that does NOT match the real one.
             dispatch_id: Some("guessed-dispatch-id".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1872,6 +1877,7 @@ async fn stale_state_omitted_dispatch_id_returns_generic_conflict() {
             commit_sha: None,
             // No dispatch_id — caller does not name the originating dispatch.
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -1939,6 +1945,7 @@ async fn stale_state_unknown_completion_source_does_not_short_circuit() {
             comment: None,
             commit_sha: None,
             dispatch_id: Some("dispatch-rd-unkn".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -3412,6 +3419,7 @@ async fn stale_dispatch_mismatch_dispatch_id_recovers_live_dispatched_row() {
             comment: Some("recovered via dispatch_id".to_string()),
             commit_sha: None,
             dispatch_id: Some("051cbf56-8e95-4bee-97d4-18268a3802e3".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -3470,6 +3478,7 @@ async fn stale_dispatch_mismatch_unknown_dispatch_id_returns_not_found() {
             comment: None,
             commit_sha: None,
             dispatch_id: Some("00000000-0000-0000-0000-000000000000".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -3524,6 +3533,7 @@ async fn stale_dispatch_mismatch_cross_card_dispatch_id_returns_not_found() {
             comment: None,
             commit_sha: None,
             dispatch_id: Some("dispatch-A".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -3573,6 +3583,7 @@ async fn stale_dispatch_mismatch_terminal_dispatch_id_falls_through_to_generic_c
             comment: None,
             commit_sha: None,
             dispatch_id: Some("dispatch-term".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -3654,6 +3665,7 @@ async fn stale_dispatch_mismatch_superseded_live_dispatch_id_returns_conflict() 
             comment: None,
             commit_sha: None,
             dispatch_id: Some("dispatch-old".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -3730,79 +3742,7 @@ async fn stale_dispatch_mismatch_equal_timestamp_tie_rejected() {
             comment: None,
             commit_sha: None,
             dispatch_id: Some("dispatch-tie-a".to_string()),
-        }),
-    )
-    .await;
-
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "equal-timestamp tie must fail closed (no unique latest): {}",
-        body.0
-    );
-    let body_str = body.0.to_string();
-    assert!(
-        body_str.contains("superseded"),
-        "expected 'superseded' message for tie, got: {body_str}"
-    );
-
-    // Neither dispatch may have been consumed.
-    let conn = db.lock().unwrap();
-    let (a, b): (String, String) = conn
-        .query_row(
-            "SELECT (SELECT status FROM task_dispatches WHERE id = 'dispatch-tie-a'), \
-                    (SELECT status FROM task_dispatches WHERE id = 'dispatch-tie-b')",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(a, "dispatched");
-    assert_eq!(b, "dispatched");
-}
-
-/// Codex round-2 [medium]: equal-timestamp ties must also fail closed.
-/// When two live same-card review-decision rows share `created_at`, neither
-/// id is uniquely "latest" — both should be rejected as superseded.
-#[tokio::test]
-async fn stale_dispatch_mismatch_equal_timestamp_tie_rejected() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    {
-        let conn = db.lock().unwrap();
-        conn.execute_batch("DROP INDEX IF EXISTS idx_single_active_review_decision;")
-            .unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
-             VALUES ('agent-1', 'Agent 1', '123', '456')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at) \
-             VALUES ('card-tie', 'Tie Card', 'review', 'agent-1', NULL, 'suggestion_pending', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-        // Two live dispatches with identical created_at — neither is
-        // strictly latest, so honoring either would be a 50/50 gamble.
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
-             VALUES ('dispatch-tie-a', 'card-tie', 'agent-1', 'review-decision', 'dispatched', '[Review Decision A]', '2026-01-01 00:00:00', '2026-01-01 00:00:00'), \
-                    ('dispatch-tie-b', 'card-tie', 'agent-1', 'review-decision', 'dispatched', '[Review Decision B]', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
-            [],
-        )
-        .unwrap();
-    }
-    let state = AppState::test_state(db.clone(), engine);
-
-    let (status, body) = submit_review_decision(
-        State(state),
-        Json(ReviewDecisionBody {
-            card_id: "card-tie".to_string(),
-            decision: "accept".to_string(),
-            comment: None,
-            commit_sha: None,
-            dispatch_id: Some("dispatch-tie-a".to_string()),
+            out_of_scope: None,
         }),
     )
     .await;
@@ -3855,6 +3795,7 @@ async fn stale_dispatch_mismatch_no_dispatch_id_no_pending_still_returns_conflic
             comment: None,
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
@@ -3922,6 +3863,7 @@ async fn stale_dispatch_mismatch_happy_path_pending_dispatch_still_accepts() {
             comment: None,
             commit_sha: None,
             dispatch_id: None,
+            out_of_scope: None,
         }),
     )
     .await;
