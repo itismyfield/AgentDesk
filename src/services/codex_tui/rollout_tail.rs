@@ -1636,6 +1636,7 @@ mod tests {
                 Duration::from_secs(2),
                 Some(Duration::from_secs(10)),
                 None,
+                true,
             )
         });
 
@@ -1722,6 +1723,7 @@ mod tests {
                 Duration::from_millis(150),
                 Some(Duration::from_secs(10)),
                 None,
+                true,
             )
         });
 
@@ -1798,6 +1800,7 @@ mod tests {
                 Duration::from_millis(150),
                 Some(Duration::from_secs(10)),
                 None,
+                true,
             )
         });
 
@@ -1879,6 +1882,7 @@ mod tests {
                 Duration::from_millis(250),
                 Some(Duration::from_secs(10)),
                 None,
+                true,
             )
         });
 
@@ -1974,6 +1978,7 @@ mod tests {
             // Short bounded recovery deadline — without this the tail
             // would block forever.
             Some(Duration::from_millis(200)),
+            true,
         )
         .unwrap();
         drop(tx);
@@ -2053,6 +2058,7 @@ mod tests {
             || alive.load(std::sync::atomic::Ordering::Relaxed),
             drain,
             deadline,
+            None,
             enable_task_complete_fast_path,
         )
         .unwrap();
@@ -2271,6 +2277,7 @@ mod tests {
                 || true,
                 Duration::from_secs(30),
                 Some(Duration::from_secs(60)),
+                None,
                 true,
             )
         });
