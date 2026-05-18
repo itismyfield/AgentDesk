@@ -218,9 +218,11 @@ pub(crate) async fn try_route_intake(
         IntakeRouteTarget::Local { reason } => {
             return IntakeRouterDecision::RanLocal {
                 reason: match reason {
-                    LocalRouteReason::NoPreference => RanLocalReason::AgentHasNoPreference,
                     LocalRouteReason::NoEligibleWorker => RanLocalReason::NoEligibleWorker,
                     LocalRouteReason::LeaderIsOnlyEligible => RanLocalReason::LeaderIsOnlyEligible,
+                    LocalRouteReason::NoPreference => unreachable!(
+                        "pick_intake_target cannot return no-preference after non-empty preference gate"
+                    ),
                 },
             };
         }

@@ -686,15 +686,6 @@ pub(super) fn clear_kv_prefix(prefix: &str) -> Result<(), String> {
     )
 }
 
-pub(super) async fn gc_stale_thread_sessions() -> Result<usize, String> {
-    let body = request_json(Method::DELETE, "/api/dispatched-sessions/gc-threads").await?;
-    Ok(body
-        .get("gc_threads")
-        .and_then(|value| value.as_u64())
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(0))
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod self_feedback_tests {
     //! #1103 — Tests for the self-feedback prompt block and rework category

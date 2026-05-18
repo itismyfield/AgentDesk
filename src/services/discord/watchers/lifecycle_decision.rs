@@ -151,7 +151,6 @@ pub(super) fn missing_inflight_fallback_observation(
     dispatch_resolved: bool,
     terminal_output_committed: bool,
     recent_turn_stop: bool,
-    _placeholder_cleanup_committed: bool,
     tmux_alive: bool,
 ) -> MissingInflightFallbackPlan {
     let unresolved_live_tmux =
@@ -234,14 +233,14 @@ mod tests {
 
     #[test]
     fn missing_inflight_committed_output_marks_live_tmux_degraded() {
-        let plan = missing_inflight_fallback_observation(true, false, true, false, false, true);
+        let plan = missing_inflight_fallback_observation(true, false, true, false, true);
         assert!(plan.warn);
         assert!(plan.mark_degraded);
     }
 
     #[test]
     fn missing_inflight_without_resolved_dispatch_marks_degraded() {
-        let plan = missing_inflight_fallback_observation(true, false, false, false, false, true);
+        let plan = missing_inflight_fallback_observation(true, false, false, false, true);
         assert!(plan.warn);
         assert!(plan.mark_degraded);
     }

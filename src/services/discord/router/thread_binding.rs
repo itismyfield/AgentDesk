@@ -19,12 +19,6 @@ pub(super) struct DispatchInfo {
     pub(super) context: Option<String>,
 }
 
-#[allow(dead_code)]
-pub(super) async fn lookup_card_thread(api_port: u16, dispatch_id: &str) -> Option<String> {
-    let info = lookup_dispatch_info(api_port, dispatch_id).await?;
-    info.active_thread_id
-}
-
 pub(super) async fn lookup_dispatch_info(api_port: u16, dispatch_id: &str) -> Option<DispatchInfo> {
     let _ = api_port;
     let body = crate::services::discord::internal_api::lookup_dispatch_info(dispatch_id)

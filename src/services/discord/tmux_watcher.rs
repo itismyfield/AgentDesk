@@ -2498,16 +2498,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if (was_paused || paused_now || epoch_changed_now) && !deferred_monitor_ready {
             // Clean up placeholder if we created one
             if let Some(msg_id) = placeholder_msg_id {
-                let _ = delete_nonterminal_placeholder(
-                    &http,
-                    channel_id,
-                    &shared,
-                    &watcher_provider,
-                    &tmux_session_name,
-                    msg_id,
-                    "watcher_pause_epoch_guard_cleanup",
-                )
-                .await;
+                if let Err(error) = channel_id.delete_message(&http, msg_id).await {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ watcher pause/epoch placeholder cleanup failed for channel {} msg {}: {}",
+                        channel_id.get(),
+                        msg_id.get(),
+                        error
+                    );
+                }
             }
             finish_monitor_auto_turn_if_claimed(
                 &shared,
@@ -4372,7 +4371,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             resolved_did.is_some(),
             terminal_output_committed,
             recent_turn_stop.is_some(),
-            placeholder_cleanup_committed,
             tmux_alive_for_missing_inflight,
         );
         if missing_inflight_plan.suppressed_by_recent_stop {
