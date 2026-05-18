@@ -716,23 +716,32 @@ impl SupervisedWorkerRegistry {
                 Ok(None)
             }
             ServerWorkerId::WatcherSupervisor => {
-                if !self.config.cluster.session_bound_relay_enabled {
-                    self.log_skip(spec, "cluster.session_bound_relay_enabled=false");
+                #[cfg(not(unix))]
+                {
+                    self.log_skip(spec, "session-bound relay supervisor requires Unix tmux");
                     return Ok(None);
                 }
-                let shutdown = self.shutdown.clone();
-                // Worker-local: tmux is host-scoped, so every node supervises
-                // its own relays. No leader gating — peer hosts can't observe
-                // each other's sessions anyway.
-                let health_registry = self.health_registry.clone();
-                self.register_tokio(spec, async move {
-                    crate::services::discord::run_session_bound_discord_relay_supervisor(
-                        health_registry,
-                        shutdown,
-                    )
-                    .await;
-                });
-                Ok(None)
+
+                #[cfg(unix)]
+                {
+                    if !self.config.cluster.session_bound_relay_enabled {
+                        self.log_skip(spec, "cluster.session_bound_relay_enabled=false");
+                        return Ok(None);
+                    }
+                    let shutdown = self.shutdown.clone();
+                    // Worker-local: tmux is host-scoped, so every node supervises
+                    // its own relays. No leader gating — peer hosts can't observe
+                    // each other's sessions anyway.
+                    let health_registry = self.health_registry.clone();
+                    self.register_tokio(spec, async move {
+                        crate::services::discord::run_session_bound_discord_relay_supervisor(
+                            health_registry,
+                            shutdown,
+                        )
+                        .await;
+                    });
+                    Ok(None)
+                }
             }
             ServerWorkerId::RoutineRuntime => {
                 if !self.config.routines.enabled {
