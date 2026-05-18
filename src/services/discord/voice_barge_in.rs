@@ -32,7 +32,7 @@ use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 use super::SharedData;
 use super::voice_background_driver::{
     VoiceBackgroundStartRequest, VoiceBackgroundTurnDriver, default_voice_announce_generation,
-    select_voice_background_driver,
+    select_voice_background_driver, voice_announce_delivery_id,
 };
 pub(in crate::services::discord) const INTERNAL_VOICE_MESSAGE_ID_START: u64 =
     9_000_000_000_000_000_000;
@@ -2355,6 +2355,77 @@ impl VoiceBargeInRuntime {
             &utterance.completed_at,
             utterance.samples_written,
         );
+        let generation = default_voice_announce_generation();
+        let voice_delivery_id = guild_id.map(|guild_id| {
+            voice_announce_delivery_id(
+                guild_id,
+                source_channel_id,
+                &utterance.utterance_id,
+                generation,
+            )
+        });
+        let durable_pending_key = voice_delivery_id
+            .as_ref()
+            .map(|delivery_id| {
+                crate::voice::announce_meta::durable_voice_announcement_pending_key(
+                    &delivery_id.correlation_id,
+                    &delivery_id.semantic_event_id,
+                )
+            })
+            .unwrap_or_else(|| {
+                crate::voice::announce_meta::durable_voice_announcement_pending_key(
+                    &format!(
+                        "voice:no-guild:{}:{}:{}",
+                        source_channel_id.get(),
+                        target_channel_id.get(),
+                        utterance.utterance_id
+                    ),
+                    &format!("announce:generation:{generation}"),
+                )
+            });
+        let announcement = crate::voice::prompt::append_voice_transcript_announcement_ref(
+            &announcement,
+            &durable_pending_key,
+        );
+        let mut durable_reserved = false;
+        if let Some(pool) = shared.pg_pool.as_ref() {
+            match crate::voice::announce_meta::persist_voice_announcement_reservation_durable(
+                pool,
+                &durable_pending_key,
+                source_channel_id,
+                &announcement,
+                &announcement_meta,
+            )
+            .await
+            {
+                Ok(true) => {
+                    durable_reserved = true;
+                }
+                Ok(false) => {
+                    tracing::warn!(
+                        source_channel_id = source_channel_id.get(),
+                        target_channel_id = target_channel_id.get(),
+                        utterance_id = %utterance.utterance_id,
+                        "voice transcript announcement durable reservation was already consumed; refusing to resurrect voice metadata"
+                    );
+                    return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(
+                        "voice transcript announcement was already consumed".to_string(),
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        source_channel_id = source_channel_id.get(),
+                        target_channel_id = target_channel_id.get(),
+                        utterance_id = %utterance.utterance_id,
+                        "voice transcript announcement durable reservation failed before publish"
+                    );
+                    return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(format!(
+                        "voice transcript announcement durable reservation failed: {error}"
+                    ));
+                }
+            }
+        }
         match driver
             .start(VoiceBackgroundStartRequest {
                 guild_id,
@@ -2362,15 +2433,52 @@ impl VoiceBargeInRuntime {
                 channel_id: source_channel_id,
                 shared,
                 utterance_id: &utterance.utterance_id,
-                generation: default_voice_announce_generation(),
+                generation,
                 message_content: &announcement,
             })
             .await
         {
             Ok(outcome) => {
                 if let Some(message_id) = outcome.message_id {
-                    crate::voice::announce_meta::global_store()
-                        .insert(message_id, announcement_meta);
+                    let mut cache_local_metadata = !durable_reserved;
+                    if durable_reserved {
+                        if let Some(pool) = shared.pg_pool.as_ref() {
+                            match crate::voice::announce_meta::bind_voice_announcement_durable_message_id(
+                                pool,
+                                &durable_pending_key,
+                                message_id,
+                            )
+                            .await
+                            {
+                                Ok(true) => {
+                                    cache_local_metadata = true;
+                                }
+                                Ok(false) => {
+                                    tracing::info!(
+                                        message_id = message_id.get(),
+                                        source_channel_id = source_channel_id.get(),
+                                        target_channel_id = target_channel_id.get(),
+                                        utterance_id = %utterance.utterance_id,
+                                        "voice transcript announcement durable reservation was already consumed or bound elsewhere; skipping local metadata cache"
+                                    );
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error = %error,
+                                        message_id = message_id.get(),
+                                        source_channel_id = source_channel_id.get(),
+                                        target_channel_id = target_channel_id.get(),
+                                        utterance_id = %utterance.utterance_id,
+                                        "voice transcript announcement durable reservation bind failed; skipping local metadata cache so workers must use the pending ref"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if cache_local_metadata {
+                        crate::voice::announce_meta::global_store()
+                            .insert(message_id, announcement_meta);
+                    }
                 }
                 tracing::info!(
                     source_channel_id = source_channel_id.get(),
@@ -2390,6 +2498,25 @@ impl VoiceBargeInRuntime {
                 };
             }
             Err(error) => {
+                if durable_reserved {
+                    if let Some(pool) = shared.pg_pool.as_ref() {
+                        if let Err(cancel_error) =
+                            crate::voice::announce_meta::cancel_voice_announcement_reservation_durable(
+                                pool,
+                                &durable_pending_key,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %cancel_error,
+                                source_channel_id = source_channel_id.get(),
+                                target_channel_id = target_channel_id.get(),
+                                utterance_id = %utterance.utterance_id,
+                                "voice transcript announcement durable reservation cleanup failed after publish error"
+                            );
+                        }
+                    }
+                }
                 tracing::warn!(
                     error = %error,
                     source_channel_id = source_channel_id.get(),

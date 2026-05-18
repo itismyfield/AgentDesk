@@ -3738,7 +3738,7 @@ pub(super) async fn kickoff_idle_queues(
         // degrade to plain text.
         if let Some(announcement) = intervention.voice_announcement.as_ref() {
             crate::voice::announce_meta::global_store()
-                .insert(intervention.message_id, announcement.clone());
+                .insert_accepted_replay(intervention.message_id, announcement.clone());
         }
         if let Err(e) = router::handle_text_message(
             &deps,
