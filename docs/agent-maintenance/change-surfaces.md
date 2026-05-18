@@ -353,7 +353,7 @@ The remaining giant-file modules under `src/services/` not covered above:
 - `src/services/codex_tui/rollout_tail.rs` (1031) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix.
-- `src/services/codex_tui/input.rs` (~1072) — Codex TUI input readiness
+- `src/services/codex_tui/input.rs` (~1311) — Codex TUI input readiness
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
   non-bugfix behavior beyond the readiness/cancel contract.

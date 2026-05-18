@@ -11,14 +11,13 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast, oneshot};
 
 const EVENT_BUFFER_CAPACITY: usize = 256;
-const CLAUDE_PROVIDER: &str = "claude";
 
 static HOOK_ENDPOINT: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
 static HOOK_SERVER_STATE: LazyLock<HookServerState> = LazyLock::new(HookServerState::new);
 static PROMPT_READY_NOTIFY: LazyLock<Arc<Notify>> = LazyLock::new(|| Arc::new(Notify::new()));
 
-/// Returns the global notify handle that is woken whenever a Claude hook event
-/// suggesting "prompt ready" arrives (currently `Stop` / `SubagentStop`).
+/// Returns the global notify handle that is woken whenever a provider hook
+/// event suggesting "prompt ready" arrives (currently `Stop` / `SubagentStop`).
 ///
 /// Callers that need to await prompt readiness should register a waiter via
 /// `notify.notified()` BEFORE issuing the prompt — `notify_waiters` only
@@ -36,7 +35,13 @@ pub(crate) fn signal_prompt_ready_for_test() {
 }
 
 fn should_signal_prompt_ready(provider: &str, kind: &HookEventKind) -> bool {
-    provider == CLAUDE_PROVIDER && matches!(kind, HookEventKind::Stop | HookEventKind::SubagentStop)
+    matches!(
+        (provider, kind),
+        (
+            "claude" | "codex",
+            HookEventKind::Stop | HookEventKind::SubagentStop
+        )
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -476,6 +481,37 @@ mod tests {
             .expect("Stop event should wake prompt_ready_notify waiter");
     }
 
+    #[tokio::test]
+    async fn codex_stop_event_wakes_prompt_ready_waiter() {
+        let notify = prompt_ready_notify();
+        let waiter = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
+                .await
+                .map_err(|_| "timeout")
+        });
+
+        tokio::task::yield_now().await;
+        let state = HookServerState::new();
+        let app = hook_receiver_router_with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/hooks/codex/Stop?session_id=sess-codex-wake")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"hook_event_name":"Stop"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        waiter
+            .await
+            .expect("waiter task did not panic")
+            .expect("Codex Stop event should wake prompt_ready_notify waiter");
+    }
+
     // Note: a "negative wake" test against the global PROMPT_READY_NOTIFY is
     // intentionally omitted — concurrent tests in the same process can race on
     // the shared notify and flake the assertion. The pure-function predicate
@@ -483,10 +519,15 @@ mod tests {
     // dispatch rule deterministically without touching global state.
 
     #[test]
-    fn should_signal_prompt_ready_only_for_stop_kinds() {
+    fn should_signal_prompt_ready_only_for_supported_provider_stop_kinds() {
         assert!(should_signal_prompt_ready("claude", &HookEventKind::Stop));
         assert!(should_signal_prompt_ready(
             "claude",
+            &HookEventKind::SubagentStop
+        ));
+        assert!(should_signal_prompt_ready("codex", &HookEventKind::Stop));
+        assert!(should_signal_prompt_ready(
+            "codex",
             &HookEventKind::SubagentStop
         ));
         // Notifications carry permission prompts etc.; conservatively skip.
@@ -498,8 +539,8 @@ mod tests {
             "claude",
             &HookEventKind::UserPromptSubmit
         ));
-        // Other providers must not poke the Claude-specific notify.
-        assert!(!should_signal_prompt_ready("codex", &HookEventKind::Stop));
+        // Unknown providers still cannot poke the shared readiness notify.
+        assert!(!should_signal_prompt_ready("qwen", &HookEventKind::Stop));
     }
 
     #[test]

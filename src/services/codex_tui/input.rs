@@ -17,9 +17,13 @@
 //!
 //! ## Signal source (priority order)
 //!
-//! The detector combines three complementary signals on every probe:
+//! The wait path combines provider hook events with pane verification:
 //!
-//! 1. **Bottom-anchored composer frame (primary).** The Codex TUI
+//! 1. **Provider hook Stop/SubagentStop fast path.** Codex hook events wake
+//!    the same prompt-ready notify used by Claude. The hook only shortens the
+//!    wait; we still take a post-event pane snapshot before returning ready.
+//!
+//! 2. **Bottom-anchored composer frame.** The Codex TUI
 //!    composer renders at the *bottom* of the pane. We require that
 //!    a composer-edge line (mostly Unicode box-drawing chars) appear
 //!    within the last [`COMPOSER_EDGE_BOTTOM_WINDOW`] non-empty lines
@@ -29,13 +33,13 @@
 //!    model-rendered table several screens up still has glyphs in
 //!    the scan tail.
 //!
-//! 2. **Adjacency.** The footer hint and the composer edge must
+//! 3. **Adjacency.** The footer hint and the composer edge must
 //!    co-occur within [`COMPOSER_FOOTER_ADJACENCY_LINES`] of each
 //!    other. A copied UI frame in assistant prose will not satisfy
 //!    this because it lacks the live footer underneath, and a real
 //!    footer never lives more than a few rows below the composer.
 //!
-//! 3. **Live pane (gate).** A dead pane cannot be ready; we fail
+//! 4. **Live pane (gate).** A dead pane cannot be ready; we fail
 //!    fast with a structured error instead of waiting out the full
 //!    timeout, so the caller can decide to recreate the session.
 //!
@@ -83,6 +87,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::services::provider::{CancelToken, cancel_requested};
+use tokio::runtime::{Handle, RuntimeFlavor};
+use tokio::sync::Notify;
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 const PROMPT_READY_CAPTURE_SCROLLBACK: i32 = -80;
@@ -110,12 +116,16 @@ const COMPOSER_FOOTER_ADJACENCY_LINES: usize = 3;
 
 pub const FRESH_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const FOLLOWUP_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
+const FRESH_PROMPT_READY_EVENT_BUDGET: Duration = Duration::from_millis(1500);
+const FOLLOWUP_PROMPT_READY_EVENT_BUDGET: Duration = Duration::from_millis(1500);
 /// Post-turn handoff probe budget. Sized to fit inside the turn-bridge
 /// `terminal_control_drain_until` window (250ms) so any
 /// `StreamMessage::RuntimeReady` / failure `Done` we emit after this
 /// probe still reaches the bridge before it finalises the inflight on
 /// the rollout-tail `Done`. See #2325 / Codex review.
 pub const POST_TURN_HANDOFF_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
+const POST_TURN_HANDOFF_EVENT_BUDGET: Duration = Duration::from_millis(150);
+const PROMPT_READY_POST_EVENT_SETTLE: Duration = Duration::from_millis(25);
 const PROMPT_READY_TIMEOUT_ERROR_PREFIX: &str = "timeout waiting for codex tui";
 const PROMPT_READY_SESSION_DEAD_ERROR: &str =
     "codex tui session died before prompt input was ready";
@@ -140,6 +150,14 @@ impl PromptReadinessKind {
         }
     }
 
+    fn event_budget(self) -> Duration {
+        match self {
+            Self::FreshTurn => FRESH_PROMPT_READY_EVENT_BUDGET,
+            Self::Followup => FOLLOWUP_PROMPT_READY_EVENT_BUDGET,
+            Self::PostTurnHandoff => POST_TURN_HANDOFF_EVENT_BUDGET,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::FreshTurn => "fresh",
@@ -147,6 +165,21 @@ impl PromptReadinessKind {
             Self::PostTurnHandoff => "post-turn-handoff",
         }
     }
+}
+
+/// Outcome of the provider hook-event fast path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HookFastPathOutcome {
+    /// Prompt marker was already visible in the subscribe-before-snapshot check.
+    PreSnapshotReady,
+    /// Pane disappeared before a prompt-ready event could help.
+    PreSnapshotSessionDead,
+    /// The caller cancelled while the hook fast path was waiting.
+    Cancelled,
+    /// Stop/SubagentStop arrived inside the hook budget.
+    Ready,
+    /// No hook arrived inside the hook budget; fall back to pane polling.
+    Pending,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -319,6 +352,86 @@ pub fn wait_until_codex_tui_input_ready(
         )
     };
 
+    let notify = crate::services::claude_tui::hook_server::prompt_ready_notify();
+    let (fast_path, post_event_snapshot) = run_prompt_ready_fast_path(
+        notify,
+        session_name.to_string(),
+        readiness.event_budget(),
+        deadline,
+        cancel_token.cloned(),
+    );
+
+    match fast_path {
+        HookFastPathOutcome::PreSnapshotReady => {
+            if let Some(err) = cancel_check() {
+                return Err(err);
+            }
+            if Instant::now() >= deadline {
+                let snapshot = prompt_readiness_snapshot(session_name);
+                return Err(timeout_error(&snapshot));
+            }
+            tracing::debug!(
+                tmux_session_name = session_name,
+                readiness = readiness.label(),
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "codex_tui prompt ready on pre-snapshot (no event wait needed)"
+            );
+            return Ok(());
+        }
+        HookFastPathOutcome::PreSnapshotSessionDead => {
+            if let Some(err) = cancel_check() {
+                return Err(err);
+            }
+            if Instant::now() >= deadline {
+                let snapshot = prompt_readiness_snapshot(session_name);
+                return Err(timeout_error(&snapshot));
+            }
+            return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
+        }
+        HookFastPathOutcome::Cancelled => return Err(PROMPT_READY_CANCELLED_ERROR.to_string()),
+        HookFastPathOutcome::Ready | HookFastPathOutcome::Pending => {}
+    }
+
+    if let Some(err) = cancel_check() {
+        return Err(err);
+    }
+    if let Some(snapshot) = post_event_snapshot {
+        if snapshot.composer_marker_detected {
+            if let Some(err) = cancel_check() {
+                return Err(err);
+            }
+            if Instant::now() >= deadline {
+                return Err(timeout_error(&snapshot));
+            }
+            tracing::debug!(
+                tmux_session_name = session_name,
+                readiness = readiness.label(),
+                hook_event_fast_path_hit = matches!(fast_path, HookFastPathOutcome::Ready),
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "codex_tui prompt ready via hook event fast path"
+            );
+            return Ok(());
+        }
+        if !snapshot.tmux_pane_alive {
+            if let Some(err) = cancel_check() {
+                return Err(err);
+            }
+            if Instant::now() >= deadline {
+                return Err(timeout_error(&snapshot));
+            }
+            return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
+        }
+    }
+
+    if !matches!(fast_path, HookFastPathOutcome::Ready) {
+        tracing::warn!(
+            tmux_session_name = session_name,
+            readiness = readiness.label(),
+            event_budget_ms = readiness.event_budget().as_millis() as u64,
+            "codex_tui hook didn't fire within budget, falling back to pane-scrape polling"
+        );
+    }
+
     loop {
         if let Some(err) = cancel_check() {
             return Err(err);
@@ -369,6 +482,139 @@ pub fn wait_until_codex_tui_input_ready(
             return Err(err);
         }
         wait_interval = std::cmp::min(wait_interval * 2, Duration::from_millis(1000));
+    }
+}
+
+/// Subscribe-before-snapshot fast path backed by provider hook Stop/SubagentStop
+/// events. The post-event snapshot still verifies the Codex composer marker, so
+/// a hook from another provider/session can only shorten the wait when this
+/// tmux pane is actually ready.
+fn run_prompt_ready_fast_path(
+    notify: Arc<Notify>,
+    session_name: String,
+    budget: Duration,
+    deadline: Instant,
+    cancel_token: Option<Arc<CancelToken>>,
+) -> (HookFastPathOutcome, Option<PromptReadinessSnapshot>) {
+    let fut = async move {
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        if cancel_requested(cancel_token.as_deref()) {
+            return (HookFastPathOutcome::Cancelled, None);
+        }
+        let pre_snapshot = prompt_readiness_snapshot(&session_name);
+        if cancel_requested(cancel_token.as_deref()) {
+            return (HookFastPathOutcome::Cancelled, None);
+        }
+        if pre_snapshot.composer_marker_detected {
+            return (HookFastPathOutcome::PreSnapshotReady, None);
+        }
+        if !pre_snapshot.tmux_pane_alive {
+            return (HookFastPathOutcome::PreSnapshotSessionDead, None);
+        }
+        // Keep the hook fast path inside the same absolute deadline enforced
+        // by the pane-polling path. This is especially important for the
+        // 200ms post-turn handoff probe that must fit inside the bridge drain.
+        let wait_budget = std::cmp::min(budget, deadline.saturating_duration_since(Instant::now()));
+        if wait_budget.is_zero() {
+            return (HookFastPathOutcome::Pending, Some(pre_snapshot));
+        }
+
+        let cancel_wait = async {
+            loop {
+                if cancel_requested(cancel_token.as_deref()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        tokio::pin!(cancel_wait);
+
+        let fast_path = tokio::select! {
+            _ = &mut notified => HookFastPathOutcome::Ready,
+            _ = tokio::time::sleep(wait_budget) => HookFastPathOutcome::Pending,
+            _ = &mut cancel_wait => HookFastPathOutcome::Cancelled,
+        };
+
+        if matches!(fast_path, HookFastPathOutcome::Cancelled) {
+            return (fast_path, None);
+        }
+        if matches!(fast_path, HookFastPathOutcome::Ready) {
+            tokio::time::sleep(PROMPT_READY_POST_EVENT_SETTLE).await;
+        }
+        if cancel_requested(cancel_token.as_deref()) {
+            return (HookFastPathOutcome::Cancelled, None);
+        }
+        let post_event_snapshot = prompt_readiness_snapshot(&session_name);
+        (fast_path, Some(post_event_snapshot))
+    };
+
+    drive_fast_path_future(fut)
+}
+
+/// Run an async hook fast-path future to completion using the caller's runtime
+/// when possible, falling back to a dedicated current-thread runtime otherwise.
+fn drive_fast_path_future<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static + FastPathFallback,
+{
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(fut))
+        }
+        _ => wait_on_dedicated_thread(fut),
+    }
+}
+
+fn wait_on_dedicated_thread<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static + FastPathFallback,
+{
+    match std::thread::Builder::new()
+        .name("codex-tui-prompt-ready".to_string())
+        .spawn(move || {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+            {
+                Ok(rt) => rt.block_on(fut),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to build local runtime for codex prompt readiness fast path; falling back to polling"
+                    );
+                    T::fallback()
+                }
+            }
+        }) {
+        Ok(handle) => handle.join().unwrap_or_else(|panic| {
+            tracing::warn!(
+                "codex prompt readiness fast-path worker panicked: {:?}; falling back to polling",
+                panic
+            );
+            T::fallback()
+        }),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to spawn codex prompt readiness fast-path worker; falling back to polling"
+            );
+            T::fallback()
+        }
+    }
+}
+
+trait FastPathFallback {
+    fn fallback() -> Self;
+}
+
+impl FastPathFallback for (HookFastPathOutcome, Option<PromptReadinessSnapshot>) {
+    fn fallback() -> Self {
+        (HookFastPathOutcome::Pending, None)
     }
 }
 
