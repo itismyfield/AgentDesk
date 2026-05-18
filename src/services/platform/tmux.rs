@@ -5,6 +5,7 @@
 
 use super::binary_resolver;
 use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
@@ -92,8 +93,139 @@ pub fn create_session(
     }
     cmd.arg(shell_command);
     cmd.env_remove("CLAUDECODE");
-    cmd.output()
-        .map_err(|e| format!("Failed to create tmux session: {e}"))
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to create tmux session: {e}"))?;
+    if output.status.success() {
+        install_dead_marker_hooks(session_name);
+    }
+    Ok(output)
+}
+
+fn sh_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn tmux_double_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn dead_marker_shell_command(session_name: &str, cleanup_hook_index: Option<u64>) -> String {
+    let marker_path = crate::services::tmux_common::session_dead_marker_path(session_name);
+    let parent = std::path::Path::new(&marker_path)
+        .parent()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| std::env::temp_dir().display().to_string());
+    let mut shell = format!(
+        "mkdir -p {}; : > {}",
+        sh_single_quote(&parent),
+        sh_single_quote(&marker_path)
+    );
+    if let Some(index) = cleanup_hook_index {
+        shell.push_str(&format!(
+            "; tmux set-hook -g -u {} >/dev/null 2>&1; tmux set-hook -g -u {} >/dev/null 2>&1",
+            sh_single_quote(&format!("pane-exited[{index}]")),
+            sh_single_quote(&format!("session-closed[{index}]"))
+        ));
+    }
+    shell
+}
+
+fn dead_marker_hook_command(session_name: &str, cleanup_hook_index: Option<u64>) -> String {
+    let shell = dead_marker_shell_command(session_name, cleanup_hook_index);
+    format!("run-shell -b {}", sh_single_quote(&shell))
+}
+
+fn dead_marker_global_hook_index(session_name: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    session_name.hash(&mut hasher);
+    // tmux hook arrays accept numeric indexes, but older builds are less happy
+    // with full-width u64 values. Keep the deterministic namespace compact.
+    hasher.finish() % 1_000_000_000
+}
+
+fn active_pane_id(session_name: &str) -> Option<String> {
+    tmux_command()
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &exact_target(session_name),
+            "#{pane_id}",
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|pane_id| !pane_id.is_empty())
+}
+
+fn install_dead_marker_hooks(session_name: &str) {
+    let target = exact_target(session_name);
+    let command = dead_marker_hook_command(session_name, None);
+    for hook in ["pane-exited", "session-closed"] {
+        let output = tmux_command()
+            .args(["set-hook", "-a", "-t", &target, hook, &command])
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!(
+                    "tmux dead-marker hook install failed: session={session_name} hook={hook} status={} stderr={}",
+                    output.status,
+                    stderr.trim()
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "tmux dead-marker hook install failed: session={session_name} hook={hook} error={error}"
+                );
+            }
+        }
+    }
+
+    let Some(pane_id) = active_pane_id(session_name) else {
+        return;
+    };
+    let index = dead_marker_global_hook_index(session_name);
+    let command = dead_marker_hook_command(session_name, Some(index));
+    let hooks = [
+        (
+            format!("pane-exited[{index}]"),
+            format!("#{{==:#{{hook_pane}},{pane_id}}}"),
+        ),
+        (
+            format!("session-closed[{index}]"),
+            format!("#{{==:#{{hook_session_name}},{session_name}}}"),
+        ),
+    ];
+    for (hook_name, condition) in hooks {
+        let guarded_command = format!(
+            "if-shell -F {} {}",
+            sh_single_quote(&condition),
+            tmux_double_quote(&command)
+        );
+        let output = tmux_command()
+            .args(["set-hook", "-g", &hook_name, &guarded_command])
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!(
+                    "tmux dead-marker global hook install failed: session={session_name} hook={hook_name} status={} stderr={}",
+                    output.status,
+                    stderr.trim()
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "tmux dead-marker global hook install failed: session={session_name} hook={hook_name} error={error}"
+                );
+            }
+        }
+    }
 }
 
 fn log_kill_request(session_name: &str, reason: &str) {
@@ -639,6 +771,59 @@ mod live_pane_tests {
         let _ = kill_session(&session, "live pane test cleanup");
 
         assert!(result);
+    }
+
+    #[test]
+    fn dead_marker_hook_writes_marker_on_pane_exit() {
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        if !is_available() {
+            eprintln!("skipping dead marker hook test: tmux is not available");
+            return;
+        }
+
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let previous_host = std::env::var_os("HOSTNAME");
+        let root = std::env::temp_dir().join(format!("adk-issue-2424-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", &root);
+            std::env::set_var("HOSTNAME", "issue-2424-hook-host");
+        }
+
+        let session = unique_test_session_name();
+        let marker_path = crate::services::tmux_common::session_dead_marker_path(&session);
+        let output = create_session(&session, None, "sleep 60")
+            .expect("temporary tmux session should be created");
+        if !output.status.success() {
+            panic!(
+                "temporary tmux session should be created: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let _ = kill_session(&session, "dead marker hook test trigger");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && !std::path::Path::new(&marker_path).exists() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            std::path::Path::new(&marker_path).exists(),
+            "tmux pane-exit hook should write dead marker: {marker_path}"
+        );
+
+        crate::services::tmux_common::cleanup_session_temp_files(&session);
+        let _ = std::fs::remove_dir_all(&root);
+        match previous_root {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+        match previous_host {
+            Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
+            None => unsafe { std::env::remove_var("HOSTNAME") },
+        }
     }
 }
 

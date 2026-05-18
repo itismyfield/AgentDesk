@@ -1,6 +1,14 @@
 use super::*;
 
 pub(super) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool {
+    if std::path::Path::new(&crate::services::tmux_common::session_dead_marker_path(
+        tmux_session_name,
+    ))
+    .exists()
+    {
+        return false;
+    }
+
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::task::spawn_blocking({

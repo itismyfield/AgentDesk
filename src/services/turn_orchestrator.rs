@@ -1404,9 +1404,75 @@ impl RecoveryDoneSignal {
     }
 }
 
+/// #2424 — generic "active turn finished" signal per channel.
+///
+/// Same latch shape as `RecoveryDoneSignal`: a terminal mailbox transition
+/// can happen before a deferred monitor auto-turn subscribes, so late
+/// subscribers must observe the already-finished state without falling back
+/// to mailbox-state polling.
+pub(crate) struct TurnFinishedSignal {
+    notify: Notify,
+    latched: std::sync::atomic::AtomicBool,
+}
+
+impl TurnFinishedSignal {
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+            latched: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn mark_done(&self) {
+        self.latched.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    pub(crate) fn reset(&self) {
+        self.latched.store(false, Ordering::Release);
+    }
+
+    pub(crate) async fn wait(&self) {
+        if self.latched.load(Ordering::Acquire) {
+            return;
+        }
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        if self.latched.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+}
+
 static GLOBAL_RECOVERY_DONE_SIGNALS: LazyLock<
     dashmap::DashMap<ChannelId, Arc<RecoveryDoneSignal>>,
 > = LazyLock::new(dashmap::DashMap::new);
+static GLOBAL_TURN_FINISHED_SIGNALS: LazyLock<
+    dashmap::DashMap<ChannelId, Arc<TurnFinishedSignal>>,
+> = LazyLock::new(dashmap::DashMap::new);
+
+fn turn_finished_signal(channel_id: ChannelId) -> Arc<TurnFinishedSignal> {
+    if let Some(existing) = GLOBAL_TURN_FINISHED_SIGNALS.get(&channel_id) {
+        return existing.value().clone();
+    }
+    let signal = Arc::new(TurnFinishedSignal::new());
+    match GLOBAL_TURN_FINISHED_SIGNALS.entry(channel_id) {
+        dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            entry.insert(signal.clone());
+            signal
+        }
+    }
+}
+
+fn reset_turn_finished_signal(channel_id: ChannelId) {
+    turn_finished_signal(channel_id).reset();
+}
+
+fn mark_turn_finished_signal_done(channel_id: ChannelId) {
+    turn_finished_signal(channel_id).mark_done();
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct ChannelMailboxRegistry {
@@ -1418,6 +1484,10 @@ pub(crate) struct ChannelMailboxRegistry {
     /// watchers/lifecycle consumer can take a clone without round-tripping
     /// through the actor's message channel.
     recovery_done: Arc<dashmap::DashMap<ChannelId, Arc<RecoveryDoneSignal>>>,
+    /// #2424 — per-channel generic "turn finished" signals consumed by
+    /// deferred monitor auto-turn. Stored beside `recovery_done` so callers
+    /// can clone the signal without actor round-trips.
+    turn_finished: Arc<dashmap::DashMap<ChannelId, Arc<TurnFinishedSignal>>>,
 }
 
 impl ChannelMailboxRegistry {
@@ -1471,6 +1541,28 @@ impl ChannelMailboxRegistry {
     /// that need a signal regardless should use the per-instance accessor.
     pub(crate) fn global_recovery_done(channel_id: ChannelId) -> Option<Arc<RecoveryDoneSignal>> {
         GLOBAL_RECOVERY_DONE_SIGNALS
+            .get(&channel_id)
+            .map(|entry| entry.value().clone())
+    }
+
+    pub(crate) fn turn_finished(&self, channel_id: ChannelId) -> Arc<TurnFinishedSignal> {
+        if let Some(existing) = self.turn_finished.get(&channel_id) {
+            return existing.clone();
+        }
+        let signal = turn_finished_signal(channel_id);
+        let resolved = match self.turn_finished.entry(channel_id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(signal.clone());
+                signal
+            }
+        };
+        GLOBAL_TURN_FINISHED_SIGNALS.insert(channel_id, resolved.clone());
+        resolved
+    }
+
+    pub(crate) fn global_turn_finished(channel_id: ChannelId) -> Option<Arc<TurnFinishedSignal>> {
+        GLOBAL_TURN_FINISHED_SIGNALS
             .get(&channel_id)
             .map(|entry| entry.value().clone())
     }
@@ -1788,6 +1880,79 @@ fn extend_active_watchdog_deadline(
     Ok(extension)
 }
 
+#[cfg(test)]
+mod turn_finished_signal_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn turn_finished_latch_short_circuits_late_subscribers() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(242_411);
+        let handle = registry.handle(channel_id);
+
+        assert!(
+            handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(24),
+                    MessageId::new(2411),
+                )
+                .await
+        );
+        let finished = handle.hard_stop().await;
+        assert!(finished.removed_token.is_some());
+
+        let signal =
+            ChannelMailboxRegistry::global_turn_finished(channel_id).expect("global signal");
+        tokio::time::timeout(std::time::Duration::from_millis(25), signal.wait())
+            .await
+            .expect("late subscriber should observe latched turn-finished signal");
+    }
+
+    #[tokio::test]
+    async fn turn_finished_reset_unlatches_on_new_turn() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(242_412);
+        let handle = registry.handle(channel_id);
+
+        assert!(
+            handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(24),
+                    MessageId::new(2412),
+                )
+                .await
+        );
+        let _ = handle.hard_stop().await;
+        let signal = registry.turn_finished(channel_id);
+        tokio::time::timeout(std::time::Duration::from_millis(25), signal.wait())
+            .await
+            .expect("finished turn should latch signal");
+
+        assert!(
+            handle
+                .try_start_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(24),
+                    MessageId::new(2413),
+                )
+                .await
+        );
+        let still_waiting =
+            tokio::time::timeout(std::time::Duration::from_millis(25), signal.wait()).await;
+        assert!(
+            still_waiting.is_err(),
+            "new active turn should reset the previous finished latch"
+        );
+
+        let _ = handle.hard_stop().await;
+        tokio::time::timeout(std::time::Duration::from_millis(250), signal.wait())
+            .await
+            .expect("fresh finish should wake reset waiter");
+    }
+}
+
 fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
     let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -1961,6 +2126,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let started = if state.cancel_token.is_some() {
                         false
                     } else {
+                        reset_turn_finished_signal(channel_id);
                         state.cancel_token = Some(cancel_token);
                         state.active_request_owner = Some(request_owner);
                         state.active_user_message_id = Some(user_message_id);
@@ -1977,6 +2143,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     user_message_id,
                     reply,
                 } => {
+                    reset_turn_finished_signal(channel_id);
                     let was_idle = state.cancel_token.is_none();
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
@@ -1993,6 +2160,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     user_message_id,
                     reply,
                 } => {
+                    reset_turn_finished_signal(channel_id);
                     let activated_turn = state.cancel_token.is_none();
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
@@ -2077,6 +2245,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         channel_id,
                         Some(&persistence),
                     ));
+                    mark_turn_finished_signal_done(channel_id);
                 }
                 ChannelMailboxMsg::HardStop { reply } => {
                     let persistence = state.last_persistence.clone();
@@ -2085,6 +2254,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         channel_id,
                         persistence.as_ref(),
                     ));
+                    mark_turn_finished_signal_done(channel_id);
                 }
                 ChannelMailboxMsg::Clear { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
@@ -2106,6 +2276,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         removed_token,
                         queue_exit_events,
                     });
+                    mark_turn_finished_signal_done(channel_id);
                 }
                 ChannelMailboxMsg::ReplaceQueue {
                     queue,

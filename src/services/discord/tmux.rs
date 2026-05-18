@@ -1063,6 +1063,9 @@ struct MonitorAutoTurnStart {
     deferred: bool,
 }
 
+const MONITOR_AUTO_TURN_MISSED_SIGNAL_FALLBACK: tokio::time::Duration =
+    tokio::time::Duration::from_secs(30);
+
 async fn start_monitor_auto_turn_when_available(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -1119,18 +1122,12 @@ async fn start_monitor_auto_turn_when_available(
             );
         }
 
-        // #2441 (H1) — this site is the 6th polling sleep called out in
-        // the issue, but it polls on **mailbox state** (waiting for the
-        // active user turn to release the slot), not on jsonl bytes.
-        // JsonlWatcher would not give us a useful wake-up here. The
-        // deterministic graduator for this loop is the same `Notify`
-        // family we introduced for #2443 (`recovery_done`) — a future
-        // follow-up can extend that to a generic "turn finished" signal
-        // on `ChannelMailboxRegistry`. For now we leave the 200ms cadence
-        // intact; this loop only runs while a monitor_auto_turn is
-        // *waiting* on a slot, so the CPU cost is bounded by the user-turn
-        // duration (not the wrapper's stream cadence).
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        // #2424 — wait on the mailbox actor's latched turn-finished signal
+        // instead of probing mailbox state every 200ms. The long timeout is
+        // only a missed-signal fallback for notify/backend bugs; the next
+        // loop iteration re-checks cancellation and the mailbox slot.
+        let signal = shared.mailboxes.turn_finished(channel_id);
+        let _ = tokio::time::timeout(MONITOR_AUTO_TURN_MISSED_SIGNAL_FALLBACK, signal.wait()).await;
     }
 }
 
@@ -1609,6 +1606,30 @@ mod terminal_finalize_liveness_tests {
             WatcherStopDecision::Continue,
             "non-committed terminal output is not a stop candidate even if liveness is gone"
         );
+    }
+}
+
+#[cfg(test)]
+mod monitor_auto_turn_signal_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn monitor_auto_turn_wait_wakes_on_turn_finished_signal() {
+        let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(2_424_000);
+        let signal = registry.turn_finished(channel);
+        let waiter = tokio::spawn({
+            let signal = signal.clone();
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(1), signal.wait())
+                    .await
+                    .expect("turn-finished signal should wake monitor auto-turn wait");
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        signal.mark_done();
+        waiter.await.expect("waiter task should not panic");
     }
 }
 
@@ -5928,7 +5949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn monitor_auto_turn_defers_until_user_turn_finishes_and_notifies()
+    async fn monitor_auto_turn_wait_wakes_on_turn_finished_signal()
     -> Result<(), Box<dyn std::error::Error>> {
         let _lock = match test_env_lock().lock() {
             Ok(guard) => guard,
