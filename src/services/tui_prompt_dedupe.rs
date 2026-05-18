@@ -9,6 +9,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 const PENDING_PROMPT_TTL: Duration = Duration::from_secs(10);
 const RECENT_OBSERVED_TTL: Duration = Duration::from_secs(30);
 const SESSION_MAPPING_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const PROMPT_ANCHOR_TTL: Duration = Duration::from_secs(30 * 60);
 const OBSERVED_PROMPT_BUFFER: usize = 128;
 
 static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
@@ -21,6 +22,12 @@ pub struct ObservedTuiPrompt {
     pub provider: String,
     pub tmux_session_name: String,
     pub prompt: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TuiPromptAnchor {
+    pub channel_id: u64,
+    pub message_id: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +67,7 @@ struct TuiPromptDedupeState {
     tmux_by_provider_session: HashMap<PromptKey, TimedValue<String>>,
     channel_by_tmux: HashMap<String, TimedValue<u64>>,
     runtime_by_tmux: HashMap<String, TimedValue<TuiRuntimeBinding>>,
+    prompt_anchor_by_tmux: HashMap<PromptKey, TimedValue<TuiPromptAnchor>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -148,6 +156,88 @@ pub fn owner_channel_for_tmux_session(tmux_session_name: &str) -> Option<u64> {
         .channel_by_tmux
         .get(tmux_session_name)
         .map(|entry| entry.value)
+}
+
+pub(crate) fn record_prompt_anchor(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    message_id: u64,
+) {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() || channel_id == 0 || message_id == 0 {
+        return;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    state.prompt_anchor_by_tmux.insert(
+        PromptKey::new(&provider, tmux_session_name),
+        TimedValue {
+            value: TuiPromptAnchor {
+                channel_id,
+                message_id,
+            },
+            recorded_at: Instant::now(),
+        },
+    );
+}
+
+pub(crate) fn take_prompt_anchor_for_response(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+) -> Option<TuiPromptAnchor> {
+    let anchor = prompt_anchor_for_response(provider, tmux_session_name, channel_id)?;
+    clear_prompt_anchor_for_response(provider, tmux_session_name, anchor);
+    Some(anchor)
+}
+
+pub(crate) fn prompt_anchor_for_response(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+) -> Option<TuiPromptAnchor> {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() || channel_id == 0 {
+        return None;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    let anchor = state.prompt_anchor_by_tmux.get(&key)?.value;
+    if anchor.channel_id != channel_id {
+        return None;
+    }
+    Some(anchor)
+}
+
+pub(crate) fn clear_prompt_anchor_for_response(
+    provider: &str,
+    tmux_session_name: &str,
+    anchor: TuiPromptAnchor,
+) -> bool {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() {
+        return false;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    let Some(current) = state
+        .prompt_anchor_by_tmux
+        .get(&key)
+        .map(|entry| entry.value)
+    else {
+        return false;
+    };
+    if current != anchor {
+        return false;
+    }
+    state.prompt_anchor_by_tmux.remove(&key);
+    true
 }
 
 pub(crate) fn runtime_binding_for_tmux_session(
@@ -489,6 +579,8 @@ impl TuiPromptDedupeState {
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= SESSION_MAPPING_TTL);
         self.runtime_by_tmux
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= SESSION_MAPPING_TTL);
+        self.prompt_anchor_by_tmux
+            .retain(|_, entry| now.duration_since(entry.recorded_at) <= PROMPT_ANCHOR_TTL);
     }
 }
 
@@ -544,6 +636,73 @@ mod tests {
                 last_offset: 77,
                 relay_last_offset: None,
             })
+        );
+    }
+
+    #[test]
+    fn prompt_anchor_is_consumed_for_matching_tmux_and_channel() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        record_prompt_anchor("Claude", "tmux-anchor", 42, 9001);
+
+        assert_eq!(
+            take_prompt_anchor_for_response("claude", "tmux-anchor", 43),
+            None
+        );
+        assert_eq!(
+            take_prompt_anchor_for_response("claude", "tmux-anchor", 42),
+            Some(TuiPromptAnchor {
+                channel_id: 42,
+                message_id: 9001,
+            })
+        );
+        assert_eq!(
+            take_prompt_anchor_for_response("claude", "tmux-anchor", 42),
+            None
+        );
+    }
+
+    #[test]
+    fn prompt_anchor_can_be_peeked_until_delivery_commits() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        let anchor = TuiPromptAnchor {
+            channel_id: 42,
+            message_id: 9001,
+        };
+        record_prompt_anchor(
+            "Claude",
+            "tmux-anchor",
+            anchor.channel_id,
+            anchor.message_id,
+        );
+
+        assert_eq!(
+            prompt_anchor_for_response("claude", "tmux-anchor", 42),
+            Some(anchor)
+        );
+        assert_eq!(
+            prompt_anchor_for_response("claude", "tmux-anchor", 42),
+            Some(anchor)
+        );
+        assert!(!clear_prompt_anchor_for_response(
+            "claude",
+            "tmux-anchor",
+            TuiPromptAnchor {
+                channel_id: 42,
+                message_id: 9002,
+            },
+        ));
+        assert!(clear_prompt_anchor_for_response(
+            "claude",
+            "tmux-anchor",
+            anchor,
+        ));
+        assert_eq!(
+            prompt_anchor_for_response("claude", "tmux-anchor", 42),
+            None
         );
     }
 

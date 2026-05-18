@@ -11,6 +11,23 @@ pub(in crate::services::discord) async fn send_channel_message(
         .await
 }
 
+pub(in crate::services::discord) async fn send_channel_message_with_reference(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    content: &str,
+    reference_channel_id: ChannelId,
+    reference_message_id: MessageId,
+) -> serenity::Result<Message> {
+    channel_id
+        .send_message(
+            http,
+            CreateMessage::new()
+                .reference_message((reference_channel_id, reference_message_id))
+                .content(content),
+        )
+        .await
+}
+
 /// Send a channel message with attached interactive components (buttons,
 /// select menus). Lives here so the maintainability audit's
 /// `direct_discord_sends` allowlist (which covers `discord/http.rs`)

@@ -3637,14 +3637,42 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 }
                 None => {
                     if has_current_response {
-                        match send_long_message_raw(&http, channel_id, &relay_text, &shared).await {
+                        let prompt_anchor =
+                            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                                watcher_provider.as_str(),
+                                &tmux_session_name,
+                                channel_id.get(),
+                            );
+                        let prompt_anchor_reference = prompt_anchor.map(|anchor| {
+                            (
+                                ChannelId::new(anchor.channel_id),
+                                MessageId::new(anchor.message_id),
+                            )
+                        });
+                        match crate::services::discord::formatting::send_long_message_raw_with_reference(
+                            &http,
+                            channel_id,
+                            &relay_text,
+                            &shared,
+                            prompt_anchor_reference,
+                        )
+                        .await
+                        {
                             Ok(_) => {
+                                if let Some(prompt_anchor) = prompt_anchor {
+                                    crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
+                                        watcher_provider.as_str(),
+                                        &tmux_session_name,
+                                        prompt_anchor,
+                                    );
+                                }
                                 direct_send_delivered = true;
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 tracing::info!(
-                                    "  [{ts}] 👁 ✓ relayed terminal response (new message) channel {} ({} chars)",
+                                    "  [{ts}] 👁 ✓ relayed terminal response (new message) channel {} ({} chars, prompt_anchor_message_id={:?})",
                                     channel_id.get(),
-                                    relay_text.len()
+                                    relay_text.len(),
+                                    prompt_anchor_reference.map(|(_, message_id)| message_id.get())
                                 );
                             }
                             Err(e) => {

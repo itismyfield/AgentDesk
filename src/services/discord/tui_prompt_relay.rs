@@ -118,6 +118,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
     };
+    crate::services::tui_prompt_dedupe::record_prompt_anchor(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        channel_id.get(),
+        anchor_message.id.get(),
+    );
     tracing::info!(
         provider = %prompt.provider,
         channel_id = channel_id.get(),

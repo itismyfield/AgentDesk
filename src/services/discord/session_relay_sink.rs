@@ -179,14 +179,31 @@ impl SessionBoundDiscordRelaySink {
                 Err(error) => Err(RelaySinkError::Transient(error.to_string())),
             }
         } else {
-            formatting::send_long_message_raw(&http, channel, &relay_text, &shared)
-                .await
-                .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            let prompt_anchor = ssh_direct_prompt_anchor_for_response(
+                &provider,
+                &delivery.session_name,
+                channel_id,
+            );
+            let prompt_anchor_reference = prompt_anchor_reference(prompt_anchor);
+            formatting::send_long_message_raw_with_reference(
+                &http,
+                channel,
+                &relay_text,
+                &shared,
+                prompt_anchor_reference,
+            )
+            .await
+            .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            if let Some(prompt_anchor) = prompt_anchor {
+                clear_ssh_direct_prompt_anchor(&provider, &delivery.session_name, prompt_anchor);
+            }
             self.delivered_total.fetch_add(1, Ordering::AcqRel);
             tracing::info!(
                 provider = provider.as_str(),
                 channel = channel_id,
                 tmux_session = %delivery.session_name,
+                prompt_anchor_message_id = prompt_anchor_reference
+                    .map(|(_, message_id)| message_id.get()),
                 chars = relay_text.chars().count(),
                 "session-bound relay sink delivered terminal response via new message"
             );
@@ -322,6 +339,41 @@ struct SessionRelayDelivery {
     session_name: String,
     response_text: String,
     task_notification_kind: Option<TaskNotificationKind>,
+}
+
+fn ssh_direct_prompt_anchor_for_response(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    channel_id: u64,
+) -> Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor> {
+    crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+        provider.as_str(),
+        tmux_session_name,
+        channel_id,
+    )
+}
+
+fn clear_ssh_direct_prompt_anchor(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    anchor: crate::services::tui_prompt_dedupe::TuiPromptAnchor,
+) {
+    crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
+        provider.as_str(),
+        tmux_session_name,
+        anchor,
+    );
+}
+
+fn prompt_anchor_reference(
+    anchor: Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor>,
+) -> Option<(ChannelId, MessageId)> {
+    anchor.map(|anchor| {
+        (
+            ChannelId::new(anchor.channel_id),
+            MessageId::new(anchor.message_id),
+        )
+    })
 }
 
 fn merge_task_notification_kind(

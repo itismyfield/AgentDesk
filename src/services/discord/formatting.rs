@@ -2271,6 +2271,18 @@ pub(super) async fn send_long_message_raw(
     text: &str,
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
+    send_long_message_raw_with_reference(http, channel_id, text, shared, None).await
+}
+
+/// Send a long message using raw HTTP, replying to `reference` for the first
+/// Discord message when available.
+pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    text: &str,
+    shared: &Arc<SharedData>,
+    reference: Option<(ChannelId, MessageId)>,
+) -> Result<(), Error> {
     let payload_byte_len = text.len();
     if payload_byte_len <= DISCORD_MSG_LIMIT {
         tracing::debug!(
@@ -2284,7 +2296,8 @@ pub(super) async fn send_long_message_raw(
             "discord send single"
         );
         rate_limit_wait(shared, channel_id).await;
-        match super::http::send_channel_message(http, channel_id, text).await {
+        match send_channel_message_with_optional_reference(http, channel_id, text, reference).await
+        {
             Ok(_) => {
                 tracing::debug!(
                     target: "discord::chunker",
@@ -2336,7 +2349,10 @@ pub(super) async fn send_long_message_raw(
             "discord send chunk"
         );
         rate_limit_wait(shared, channel_id).await;
-        let send_result = super::http::send_channel_message(http, channel_id, chunk).await;
+        let chunk_reference = if i == 0 { reference } else { None };
+        let send_result =
+            send_channel_message_with_optional_reference(http, channel_id, chunk, chunk_reference)
+                .await;
         match send_result {
             Ok(_) => {
                 if is_last {
@@ -2371,6 +2387,38 @@ pub(super) async fn send_long_message_raw(
     }
 
     Ok(())
+}
+
+async fn send_channel_message_with_optional_reference(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    content: &str,
+    reference: Option<(ChannelId, MessageId)>,
+) -> serenity::Result<serenity::Message> {
+    let Some((reference_channel_id, reference_message_id)) = reference else {
+        return super::http::send_channel_message(http, channel_id, content).await;
+    };
+    match super::http::send_channel_message_with_reference(
+        http,
+        channel_id,
+        content,
+        reference_channel_id,
+        reference_message_id,
+    )
+    .await
+    {
+        Ok(message) => Ok(message),
+        Err(error) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                reference_channel_id = reference_channel_id.get(),
+                reference_message_id = reference_message_id.get(),
+                error = %error,
+                "discord referenced send failed; falling back to plain message"
+            );
+            super::http::send_channel_message(http, channel_id, content).await
+        }
+    }
 }
 
 /// Replace an existing Discord message with the first chunk, then send the remaining chunks.
