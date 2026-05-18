@@ -3436,17 +3436,22 @@ impl VoiceBargeInRuntime {
                         .first_chunk_synthesis_ms
                         .unwrap_or(0)
                         .min(u64::MAX as u128) as u64;
-                    let play_ms = report
+                    let first_audio_out_ms = report
                         .first_audio_start_ms
                         .unwrap_or(0)
                         .min(u64::MAX as u128) as u64;
-                    crate::voice::metrics::record_tts(channel_id.get(), synth_ms, play_ms);
+                    crate::voice::metrics::record_tts(
+                        channel_id.get(),
+                        synth_ms,
+                        first_audio_out_ms,
+                    );
                     tracing::info!(
                         channel_id = channel_id.get(),
                         guild_id = guild_id.get(),
                         chunks = report.chunk_count,
                         played_chunks = report.played_chunks,
                         first_chunk_synthesis_ms = ?report.first_chunk_synthesis_ms,
+                        first_audio_out_ms,
                         first_audio_start_ms = ?report.first_audio_start_ms,
                         "voice final TTS chunked playback finished"
                     );
