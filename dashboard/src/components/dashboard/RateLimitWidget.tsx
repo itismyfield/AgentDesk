@@ -4,10 +4,10 @@ import type { TFunction } from "./model";
 import {
   SurfaceActionButton,
   SurfaceCard,
-  SurfaceEmptyState,
-  SurfaceNotice,
   SurfaceSection,
 } from "../common/SurfacePrimitives";
+import { StatusBadge } from "../common/StatusBadge";
+import { WidgetState } from "../common/WidgetState";
 import {
   getProviderLevelColors,
   getProviderMeta,
@@ -276,39 +276,56 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
       actions={sectionActions}
     >
       {error && hasProviders ? (
-        <SurfaceNotice className="mt-4" compact tone="warn">
-          {t({
-            ko: `최근 정상 데이터를 유지 중이며 새 동기화에 실패했습니다. (${error})`,
-            en: `Keeping the last good snapshot because the latest refresh failed. (${error})`,
-            ja: `直近の正常データを維持しつつ、最新の再同期に失敗しました。(${error})`,
-            zh: `正在保留最近一次正常数据，最新刷新失败。(${error})`,
-          })}
-        </SurfaceNotice>
+        <div className="mt-4">
+          <WidgetState
+            kind="stale"
+            compact
+            title={t({
+              ko: "최근 정상 데이터 유지 중",
+              en: "Showing the last successful snapshot",
+              ja: "直近の正常データを維持中",
+              zh: "正在保留最近一次正常数据",
+            })}
+            description={error}
+          />
+        </div>
       ) : null}
 
       {!hasProviders ? (
-        <SurfaceEmptyState className="mt-4 rounded-3xl p-4 text-sm leading-6">
-          {isRefreshing
-            ? t({
-                ko: "프로바이더 상태를 불러오는 중입니다.",
-                en: "Loading provider status.",
-                ja: "プロバイダー状態を読み込み中です。",
-                zh: "正在加载 provider 状态。",
-              })
-            : error
-              ? t({
-                  ko: `프로바이더 상태를 불러오지 못했습니다. ${error}`,
-                  en: `Unable to load provider status. ${error}`,
-                  ja: `プロバイダー状態を読み込めませんでした。${error}`,
-                  zh: `无法加载 provider 状态。${error}`,
-                })
-              : t({
-                  ko: "표시할 프로바이더 상태가 없습니다.",
-                  en: "No provider status is available yet.",
-                  ja: "表示できるプロバイダー状態がまだありません。",
-                  zh: "暂无可显示的 provider 状态。",
-                })}
-        </SurfaceEmptyState>
+        <div className="mt-4">
+          {isRefreshing ? (
+            <WidgetState
+              kind="loading"
+              title={t({
+                ko: "프로바이더 상태 동기화 중",
+                en: "Loading provider status",
+                ja: "プロバイダー状態を読み込み中",
+                zh: "正在加载 provider 状态",
+              })}
+            />
+          ) : error ? (
+            <WidgetState
+              kind="error"
+              title={t({
+                ko: "프로바이더 상태를 불러오지 못했습니다",
+                en: "Unable to load provider status",
+                ja: "プロバイダー状態を読み込めませんでした",
+                zh: "无法加载 provider 状态",
+              })}
+              description={error}
+            />
+          ) : (
+            <WidgetState
+              kind="empty"
+              title={t({
+                ko: "표시할 프로바이더 상태가 없습니다",
+                en: "No provider status available yet",
+                ja: "表示できるプロバイダー状態がまだありません",
+                zh: "暂无可显示的 provider 状态",
+              })}
+            />
+          )}
+        </div>
       ) : (
         <div className="mt-4 grid gap-4 xl:grid-cols-3">
           {providers.map((provider) => {
@@ -360,30 +377,14 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                             })}
                     </div>
                   </div>
-                  <span
-                    className="rounded-full px-2 py-1 text-[10px] font-medium"
-                    style={{
-                      color: provider.unsupported
-                        ? "var(--fg-dim)"
-                        : provider.stale
-                          ? "var(--warn)"
-                          : accent,
-                      border: `1px solid ${
-                        provider.unsupported
-                          ? "color-mix(in oklch, var(--fg-faint) 24%, var(--line) 76%)"
-                          : provider.stale
-                            ? "color-mix(in oklch, var(--warn) 28%, var(--line) 72%)"
-                            : providerMeta.border
-                      }`,
-                      background: provider.unsupported
-                        ? "color-mix(in oklch, var(--fg-faint) 10%, var(--bg-2) 90%)"
-                        : provider.stale
-                          ? "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)"
-                          : providerMeta.bg,
-                    }}
+                  <StatusBadge
+                    tone={provider.unsupported ? "idle" : provider.stale ? "warning" : "healthy"}
+                    size="xs"
+                    pulse={!provider.unsupported && !provider.stale}
+                    title={statusLabel}
                   >
                     {statusLabel}
-                  </span>
+                  </StatusBadge>
                 </div>
 
                 {provider.unsupported || provider.buckets.length === 0 ? (

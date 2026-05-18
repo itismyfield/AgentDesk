@@ -119,4 +119,19 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** apply `WidgetState` to RateLimitWidget + at least one more widget; or pivot to (c)/(d) — AppShell or HomeOverviewPage decomposition.
 
+### Round 7 — 2026-05-19 02:52~02:56 KST
+**Focus:** RateLimitWidget — Observability (8) + Real-time reliability (2) + Design-system consistency (7).
+
+**Changes:**
+- `dashboard/RateLimitWidget.tsx`:
+  - Bespoke `SurfaceNotice tone="warn"` (stale snapshot warning) → `WidgetState kind="stale"` for consistent escalation visuals.
+  - The "no providers" empty-state block previously branched inside a single `SurfaceEmptyState` between three messages — now split into three explicit `WidgetState` branches (`loading | error | empty`) with their own tone and ARIA role, so loading no longer looks identical to "nothing to show".
+  - Per-provider FRESH/STALE/N-A pill (bespoke color logic) replaced with `StatusBadge` (`healthy | warning | idle`, pulse on healthy).
+
+**Net effect:** the rate-limit widget now uses the same loading/empty/error language as BottleneckWidget — and the per-provider badges echo the system-wide system-health tones. One more widget moved off bespoke styling.
+
+**Verification:** `npm run build` ✓ in 3.6s. Existing primitive tests still green.
+
+**Next:** apply same treatment to AutoQueueHistoryWidget / CronTimelineWidget / ReceiptWidget; or pivot to action-in-place (HealthWidget refresh button, log-jump links) or mobile-first cleanup.
+
 EOF
