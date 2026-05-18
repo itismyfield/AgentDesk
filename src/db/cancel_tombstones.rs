@@ -7,19 +7,19 @@
 //! can still suppress the misleading 🔴 lifecycle notice.
 //!
 //! Lifecycle:
-//! - `insert_cancel_tombstone` is called fire-and-forget alongside the
-//!   in-memory record. The 10-minute `expires_at` window mirrors
-//!   `RECENT_TURN_STOP_TTL`.
-//! - `consume_cancel_tombstone` is called only when the in-memory store
-//!   misses (post-restart case). It returns the matching row AND deletes it
-//!   in the same transaction so suppression remains one-shot per cancel
-//!   (codex P1 on #1277).
+//! - `insert_cancel_tombstone` is awaited by the cancel path before the
+//!   matching in-memory tombstone is allowed to be consumed as complete. The
+//!   10-minute `expires_at` window mirrors `RECENT_TURN_STOP_TTL`.
+//! - `delete_cancel_tombstones_by_client_ids` removes the exact PG rows for
+//!   in-memory hits. `consume_cancel_tombstone` handles the post-restart case
+//!   where memory is empty, returning the matching row AND deleting it in the
+//!   same transaction so suppression remains one-shot per cancel (codex P1 on
+//!   #1277).
 //! - `prune_expired_cancel_tombstones` is invoked periodically by the
 //!   `cancel_tombstone_pruner` maintenance worker so the table cannot grow
 //!   without bound when the watcher never observes the death.
 
-use std::collections::VecDeque;
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -37,69 +37,6 @@ pub fn set_global_pool(pool: PgPool) {
 
 pub fn global_pool() -> Option<&'static PgPool> {
     GLOBAL_PG_POOL.get()
-}
-
-/// Window during which a UUID drained by the in-memory consume can still
-/// suppress the corresponding (possibly late-landing) PG row from being
-/// honoured. Mirrors `RECENT_TURN_STOP_METADATA_FALLBACK_TTL` so the PG
-/// shadow can never out-live the in-memory consume in practice. Codex
-/// rounds 3/4 on PR #1310 — the shared `client_id` plus this drained-set
-/// guards both the slow-PG cancel-race AND the late-PG-row stale-suppress
-/// race at once.
-const DRAINED_TTL_SECS: u64 = 60;
-const DRAINED_CAPACITY: usize = 256;
-
-#[derive(Debug, Clone, Copy)]
-struct DrainedEntry {
-    id: Uuid,
-    drained_at: std::time::Instant,
-}
-
-static RECENTLY_DRAINED_IDS: LazyLock<Mutex<VecDeque<DrainedEntry>>> =
-    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(DRAINED_CAPACITY)));
-
-fn drained_ids() -> std::sync::MutexGuard<'static, VecDeque<DrainedEntry>> {
-    match RECENTLY_DRAINED_IDS.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn prune_drained_ids(entries: &mut VecDeque<DrainedEntry>, now: std::time::Instant) {
-    let ttl = std::time::Duration::from_secs(DRAINED_TTL_SECS);
-    entries.retain(|entry| now.saturating_duration_since(entry.drained_at) <= ttl);
-}
-
-/// Register a UUID as having been consumed by the in-memory watcher path.
-/// `consume_cancel_tombstone` will skip + delete any PG row carrying this
-/// UUID for the next `DRAINED_TTL_SECS`, so a late-landing PG row from the
-/// fire-and-forget insert cannot false-suppress an unrelated watcher death
-/// later in the fallback window.
-pub fn register_drained_ids(ids: &[Uuid]) {
-    if ids.is_empty() {
-        return;
-    }
-    let now = std::time::Instant::now();
-    let mut entries = drained_ids();
-    prune_drained_ids(&mut entries, now);
-    for id in ids {
-        while entries.len() >= DRAINED_CAPACITY {
-            entries.pop_front();
-        }
-        entries.push_back(DrainedEntry {
-            id: *id,
-            drained_at: now,
-        });
-    }
-}
-
-fn is_id_drained(entries: &VecDeque<DrainedEntry>, id: &Uuid) -> bool {
-    entries.iter().any(|entry| entry.id == *id)
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-pub fn clear_drained_ids_for_tests() {
-    drained_ids().clear();
 }
 
 /// Mirrors `crate::services::discord::tmux::RECENT_TURN_STOP_TTL`.
@@ -126,10 +63,10 @@ pub struct CancelTombstone {
     pub reason: String,
 }
 
-/// Insert a cancel tombstone with `expires_at = NOW() + ttl`. The
-/// `client_id` is the same UUID that the in-memory entry carries — it is
-/// the cross-layer key that lets `consume_cancel_tombstone` recognise rows
-/// already drained via the in-memory path.
+/// Insert a cancel tombstone with `expires_at = NOW() + ttl`. The `client_id`
+/// is the same UUID that the in-memory entry carries, letting the
+/// in-process watcher delete the exact PG mirror after the durable write has
+/// completed.
 pub async fn insert_cancel_tombstone(
     pool: &PgPool,
     client_id: Uuid,
@@ -154,6 +91,24 @@ pub async fn insert_cancel_tombstone(
     .execute(pool)
     .await
     .map(|_| ())
+}
+
+/// Delete exact PG mirrors for tombstones already matched by the in-memory
+/// cache. The caller waits for the corresponding insert to finish before
+/// invoking this, so a zero-row delete means another consumer already removed
+/// the durable row.
+pub async fn delete_cancel_tombstones_by_client_ids(
+    pool: &PgPool,
+    client_ids: &[Uuid],
+) -> Result<u64, sqlx::Error> {
+    if client_ids.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query("DELETE FROM cancel_tombstones WHERE client_id = ANY($1)")
+        .bind(client_ids)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
 }
 
 /// Look up + DELETE matching tombstones in a single transaction. Returns
@@ -182,7 +137,7 @@ pub async fn consume_cancel_tombstone(
     // Lock candidate rows so a concurrent consume on a different
     // dcserver / worker cannot double-suppress.
     let rows = sqlx::query(
-        "SELECT id, client_id, tmux_session_name, stop_output_offset
+        "SELECT id, tmux_session_name, stop_output_offset
          FROM cancel_tombstones
          WHERE channel_id = $1
            AND recorded_at >= NOW() - ($2::bigint || ' seconds')::interval
@@ -196,30 +151,10 @@ pub async fn consume_cancel_tombstone(
     .fetch_all(&mut *tx)
     .await?;
 
-    let drained_snapshot = {
-        let mut entries = drained_ids();
-        prune_drained_ids(&mut entries, std::time::Instant::now());
-        entries.clone()
-    };
-
-    // Codex round-3/4 P2 on PR #1310: `delete_only_ids` are rows whose
-    // `client_id` was already drained by the in-memory consume — typically
-    // a late-landing PG row that arrived after the in-process watcher
-    // already suppressed via the in-memory tombstone. We DELETE these so
-    // the table doesn't accumulate stale rows AND so they can't false-
-    // suppress an unrelated future watcher death within the fallback
-    // window. We do NOT count them as a consume hit.
     let mut suppress_ids: Vec<i64> = Vec::new();
-    let mut delete_only_ids: Vec<i64> = Vec::new();
     for row in rows {
         let id: i64 = row.try_get("id")?;
-        let client_id: Uuid = row.try_get("client_id")?;
         let stop_offset: Option<i64> = row.try_get("stop_output_offset")?;
-
-        if is_id_drained(&drained_snapshot, &client_id) {
-            delete_only_ids.push(id);
-            continue;
-        }
 
         if let (Some(stop), Some(current)) = (stop_offset, current_output_offset) {
             if current > stop.saturating_add(CANCEL_TEARDOWN_GRACE_BYTES) {
@@ -230,22 +165,18 @@ pub async fn consume_cancel_tombstone(
         suppress_ids.push(id);
     }
 
-    let mut to_delete: Vec<i64> = Vec::with_capacity(suppress_ids.len() + delete_only_ids.len());
-    to_delete.extend(suppress_ids.iter().copied());
-    to_delete.extend(delete_only_ids.iter().copied());
-
-    if to_delete.is_empty() {
+    if suppress_ids.is_empty() {
         tx.rollback().await?;
         return Ok(false);
     }
 
     sqlx::query("DELETE FROM cancel_tombstones WHERE id = ANY($1)")
-        .bind(&to_delete)
+        .bind(&suppress_ids)
         .execute(&mut *tx)
         .await?;
 
     tx.commit().await?;
-    Ok(!suppress_ids.is_empty())
+    Ok(true)
 }
 
 /// Sweep expired tombstones. Runs from the maintenance scheduler so the

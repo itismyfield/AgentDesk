@@ -34,21 +34,83 @@ pub(in crate::services::discord) const TMUX_LIVENESS_PROBE_INTERVAL: tokio::time
 #[derive(Debug, Clone)]
 pub(in crate::services::discord) struct RecentTurnStop {
     /// #1309 codex round-3/4 fix: the same UUID is also stamped on the
-    /// PG `cancel_tombstones.client_id` row that mirrors this entry.
-    /// `cancel_induced_watcher_death` registers drained UUIDs with
-    /// `crate::db::cancel_tombstones::register_drained_ids` so a
-    /// late-landing PG row carrying the same UUID can be DELETEd without
-    /// false-suppressing an unrelated future watcher death.
+    /// PG `cancel_tombstones.client_id` row that mirrors this entry. Async
+    /// consumers wait for the durable write to finish, then delete exactly
+    /// this UUID from PG before reporting the tombstone consumed.
     pub(in crate::services::discord) id: uuid::Uuid,
     pub(in crate::services::discord) channel_id: ChannelId,
     pub(in crate::services::discord) tmux_session_name: Option<String>,
     pub(in crate::services::discord) stop_output_offset: Option<u64>,
     pub(in crate::services::discord) reason: String,
     pub(in crate::services::discord) recorded_at: std::time::Instant,
+    pg_persistence: Option<std::sync::Arc<CancelTombstonePersistence>>,
 }
 
 static RECENT_TURN_STOPS: LazyLock<Mutex<VecDeque<RecentTurnStop>>> =
     LazyLock::new(|| Mutex::new(VecDeque::with_capacity(RECENT_TURN_STOP_CAPACITY)));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelTombstonePersistOutcome {
+    Persisted,
+    Failed,
+}
+
+struct CancelTombstonePersistence {
+    outcome: Mutex<Option<CancelTombstonePersistOutcome>>,
+    notify: tokio::sync::Notify,
+}
+
+struct CancelTombstonePersistenceGuard(std::sync::Arc<CancelTombstonePersistence>);
+
+impl Drop for CancelTombstonePersistenceGuard {
+    fn drop(&mut self) {
+        if self.0.outcome().is_none() {
+            self.0.mark(CancelTombstonePersistOutcome::Failed);
+        }
+    }
+}
+
+impl std::fmt::Debug for CancelTombstonePersistence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancelTombstonePersistence")
+            .field("outcome", &self.outcome())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CancelTombstonePersistence {
+    fn new() -> Self {
+        Self {
+            outcome: Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn outcome(&self) -> Option<CancelTombstonePersistOutcome> {
+        *self
+            .outcome
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn mark(&self, outcome: CancelTombstonePersistOutcome) {
+        *self
+            .outcome
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(outcome);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) -> CancelTombstonePersistOutcome {
+        loop {
+            let notified = self.notify.notified();
+            if let Some(outcome) = self.outcome() {
+                return outcome;
+            }
+            notified.await;
+        }
+    }
+}
 
 fn recent_turn_stops() -> std::sync::MutexGuard<'static, VecDeque<RecentTurnStop>> {
     match RECENT_TURN_STOPS.lock() {
@@ -73,15 +135,11 @@ pub(in crate::services::discord) async fn record_recent_turn_stop(
     reason: &str,
 ) {
     let stop_output_offset = tmux_session_name.and_then(tmux_output_offset);
-    // #1309: in-memory publish is synchronous + immediate so an in-process
-    // watcher can suppress the very next death without waiting on PG.
-    // The PG insert is awaited (with a 500 ms cap) so a quick dcserver
-    // restart immediately after the cancel cannot lose the durable copy.
-    // Cross-restart correctness AND in-process race safety are layered:
-    //   - in-memory: instant suppression for live watchers
-    //   - PG: durable across restart
-    //   - shared `client_id` + drained-id registry: skip + delete late
-    //     PG rows whose UUID was already drained in-memory
+    // #2549: the in-memory entry is still published immediately so a live
+    // watcher can classify the cancel race, but async consumers wait for the
+    // PG insert tied to the same UUID before deleting/consuming the row. That
+    // makes PG the durable source of truth without the old drained-ID
+    // registry used to cover late inserts.
     record_recent_turn_stop_with_offset(
         channel_id,
         tmux_session_name,
@@ -92,13 +150,6 @@ pub(in crate::services::discord) async fn record_recent_turn_stop(
     .await;
 }
 
-/// Bounded foreground budget for the durable PG mirror. Normal inserts
-/// finish in well under 10 ms; if a saturated pool exceeds this we fall
-/// back to in-memory only and warn — the cancel signal must not stall
-/// behind PG since `turn_bridge` polls `cancel_token` and could kill the
-/// wrapper before the C-c path runs (codex round-3 P2 on PR #1310).
-const CANCEL_TOMBSTONE_PERSIST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
-
 async fn record_recent_turn_stop_with_offset(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
@@ -107,10 +158,15 @@ async fn record_recent_turn_stop_with_offset(
     pg_pool: Option<&sqlx::PgPool>,
 ) {
     let client_id = uuid::Uuid::new_v4();
+    let pg_persistence = pg_pool
+        .is_some()
+        .then(|| std::sync::Arc::new(CancelTombstonePersistence::new()));
 
     // Phase 1 — publish the in-memory entry synchronously. An in-process
-    // watcher firing right after `cancel_active_turn` returns will see
-    // the tombstone with zero PG dependency.
+    // watcher firing right after `cancel_active_turn` returns will see the
+    // tombstone. If PG is available, the watcher waits on `pg_persistence`
+    // before it deletes the durable row, closing the old memory-consume /
+    // late-insert race without a third drained-ID layer.
     let now = std::time::Instant::now();
     {
         let mut stops = recent_turn_stops();
@@ -125,42 +181,37 @@ async fn record_recent_turn_stop_with_offset(
             stop_output_offset,
             reason: reason.to_string(),
             recorded_at: now,
+            pg_persistence: pg_persistence.clone(),
         });
     }
 
-    // Phase 2 — durable PG mirror with a bounded foreground budget. The
-    // await guarantees the row is committed before the cancel path
-    // returns, so a dcserver restart immediately after the cancel can
-    // still see the tombstone (codex round-2/5 P1/P2 on PR #1310). The
-    // 500 ms timeout caps worst-case foreground latency under PG
-    // saturation.
-    if let Some(pool) = pg_pool {
+    // Phase 2 — durable PG mirror. The await is intentional: PG is the
+    // source of truth for cross-restart suppression, and in-process
+    // consumers use the shared UUID to delete the committed row exactly once.
+    if let (Some(pool), Some(persistence)) = (pg_pool, pg_persistence.as_ref()) {
+        let _mark_failed_on_drop = CancelTombstonePersistenceGuard(persistence.clone());
         let channel_id_i64 = channel_id.get() as i64;
         let stop_output_offset_i64 = stop_output_offset.map(|v| v as i64);
-        let persist = crate::db::cancel_tombstones::insert_cancel_tombstone(
+        match crate::db::cancel_tombstones::insert_cancel_tombstone(
             pool,
             client_id,
             channel_id_i64,
             tmux_session_name,
             stop_output_offset_i64,
             reason,
-        );
-        match tokio::time::timeout(CANCEL_TOMBSTONE_PERSIST_TIMEOUT, persist).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
+        )
+        .await
+        {
+            Ok(()) => {
+                persistence.mark(CancelTombstonePersistOutcome::Persisted);
+            }
+            Err(error) => {
                 tracing::warn!(
                     "[cancel-tombstone] PG persist failed for channel {}: {}",
                     channel_id_i64,
                     error
                 );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "[cancel-tombstone] PG persist for channel {} exceeded {:?}; \
-                     falling back to in-memory only",
-                    channel_id_i64,
-                    CANCEL_TOMBSTONE_PERSIST_TIMEOUT
-                );
+                persistence.mark(CancelTombstonePersistOutcome::Failed);
             }
         }
     }
@@ -212,86 +263,128 @@ pub(in crate::services::discord) fn cancel_induced_watcher_death(
     tmux_session_name: &str,
     current_output_offset: Option<u64>,
 ) -> bool {
+    !drain_cancel_induced_recent_turn_stops(channel_id, tmux_session_name, current_output_offset)
+        .is_empty()
+}
+
+fn drain_cancel_induced_recent_turn_stops(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    current_output_offset: Option<u64>,
+) -> Vec<RecentTurnStop> {
     let now = std::time::Instant::now();
-    let mut drained_ids: Vec<uuid::Uuid> = Vec::new();
-    {
-        let mut stops = recent_turn_stops();
-        prune_recent_turn_stops(&mut stops, now);
-        stops.retain(|entry| {
-            if entry.channel_id != channel_id {
-                return true;
-            }
-            if now.saturating_duration_since(entry.recorded_at)
-                > RECENT_TURN_STOP_METADATA_FALLBACK_TTL
-            {
-                return true;
-            }
-            let session_matches = match entry.tmux_session_name.as_deref() {
-                Some(entry_tmux) => entry_tmux == tmux_session_name,
-                None => true,
-            };
-            if !session_matches {
-                return true;
-            }
-            // codex P2 round 3: when both offsets are known, only consume
-            // the tombstone if the watcher has not moved past the cancel
-            // boundary (with a small grace for the wrapper's teardown
-            // bytes between cancel record and session kill). Past that
-            // boundary means a follow-up turn produced new output, so the
-            // death is unrelated to the cancel and must surface its own
-            // lifecycle/handoff signal.
-            if let (Some(stop_offset), Some(current_offset)) =
-                (entry.stop_output_offset, current_output_offset)
-            {
-                if current_offset > stop_offset.saturating_add(CANCEL_TEARDOWN_GRACE_BYTES) {
-                    return true;
-                }
-            }
-            drained_ids.push(entry.id);
-            false
-        });
-    }
-    if !drained_ids.is_empty() {
-        // codex round-3/4 fix on PR #1310: register the drained UUIDs so a
-        // late-landing PG row carrying any of them is skipped + deleted by
-        // `consume_cancel_tombstone` instead of false-suppressing an
-        // unrelated future watcher death within the 60 s fallback window.
-        crate::db::cancel_tombstones::register_drained_ids(&drained_ids);
-        true
-    } else {
+    let mut drained: Vec<RecentTurnStop> = Vec::new();
+    let mut stops = recent_turn_stops();
+    prune_recent_turn_stops(&mut stops, now);
+    stops.retain(|entry| {
+        if !recent_turn_stop_matches_watcher_death(
+            entry,
+            channel_id,
+            tmux_session_name,
+            current_output_offset,
+            now,
+        ) {
+            return true;
+        }
+        drained.push(entry.clone());
         false
+    });
+    drained
+}
+
+fn recent_turn_stop_matches_watcher_death(
+    entry: &RecentTurnStop,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    current_output_offset: Option<u64>,
+    now: std::time::Instant,
+) -> bool {
+    if entry.channel_id != channel_id {
+        return false;
     }
+    if now.saturating_duration_since(entry.recorded_at) > RECENT_TURN_STOP_METADATA_FALLBACK_TTL {
+        return false;
+    }
+    let session_matches = match entry.tmux_session_name.as_deref() {
+        Some(entry_tmux) => entry_tmux == tmux_session_name,
+        None => true,
+    };
+    if !session_matches {
+        return false;
+    }
+    // codex P2 round 3: when both offsets are known, only consume the
+    // tombstone if the watcher has not moved past the cancel boundary
+    // (with a small grace for the wrapper's teardown bytes between cancel
+    // record and session kill). Past that boundary means a follow-up turn
+    // produced new output, so the death is unrelated to the cancel and must
+    // surface its own lifecycle/handoff signal.
+    if let (Some(stop_offset), Some(current_offset)) =
+        (entry.stop_output_offset, current_output_offset)
+    {
+        if current_offset > stop_offset.saturating_add(CANCEL_TEARDOWN_GRACE_BYTES) {
+            return false;
+        }
+    }
+    true
 }
 
 /// PG-aware async wrapper around `cancel_induced_watcher_death` (#1309).
 ///
-/// In-memory hit is the fast path. On miss, fall back to the durable
-/// `cancel_tombstones` table so a dcserver restart between cancel and
-/// watcher-death observation can still suppress the misleading 🔴 lifecycle
-/// notice. The PG row is consumed (DELETEd) in the same tx so suppression
-/// remains one-shot per cancel.
+/// In-memory hit handles the same-process attach race, but it waits for the
+/// associated PG insert and deletes that exact durable row by UUID before
+/// returning. On memory miss, fall back to the `cancel_tombstones` table so a
+/// dcserver restart between cancel and watcher-death observation can still
+/// suppress the misleading lifecycle notice. The PG row is consumed (DELETEd)
+/// in the same tx so suppression remains one-shot per cancel.
 pub(in crate::services::discord) async fn cancel_induced_watcher_death_async(
     channel_id: ChannelId,
     tmux_session_name: &str,
     current_output_offset: Option<u64>,
     pg_pool: Option<&sqlx::PgPool>,
 ) -> bool {
-    let in_memory_hit =
-        cancel_induced_watcher_death(channel_id, tmux_session_name, current_output_offset);
+    let in_memory_hits = drain_cancel_induced_recent_turn_stops(
+        channel_id,
+        tmux_session_name,
+        current_output_offset,
+    );
 
     let Some(pool) = pg_pool else {
-        return in_memory_hit;
+        return !in_memory_hits.is_empty();
     };
 
     let channel_id_i64 = channel_id.get() as i64;
     let current_offset_i64 = current_output_offset.and_then(|v| i64::try_from(v).ok());
 
-    // codex round-1 P2 on PR #1310: even when the in-memory store hits, the
-    // PG mirror needs to be consumed so a follow-up watcher death within the
-    // 60s fallback window cannot inherit the stale row and silently swallow
-    // a real lifecycle/restart signal. The fire-and-forget insert from the
-    // record path may even land after the in-memory consume, so we always
-    // try to consume both layers and treat either hit as cancel-induced.
+    if !in_memory_hits.is_empty() {
+        let mut persisted_ids = Vec::new();
+        for entry in &in_memory_hits {
+            let Some(persistence) = entry.pg_persistence.as_ref() else {
+                continue;
+            };
+            match persistence.wait().await {
+                CancelTombstonePersistOutcome::Persisted => persisted_ids.push(entry.id),
+                CancelTombstonePersistOutcome::Failed => {}
+            }
+        }
+
+        if !persisted_ids.is_empty()
+            && let Err(error) =
+                crate::db::cancel_tombstones::delete_cancel_tombstones_by_client_ids(
+                    pool,
+                    &persisted_ids,
+                )
+                .await
+        {
+            tracing::warn!(
+                "[cancel-tombstone] PG delete failed for channel {} session {} after memory hit: {}",
+                channel_id_i64,
+                tmux_session_name,
+                error
+            );
+        }
+        return true;
+    }
+
     let pg_hit = match crate::db::cancel_tombstones::consume_cancel_tombstone(
         pool,
         channel_id_i64,
@@ -312,7 +405,7 @@ pub(in crate::services::discord) async fn cancel_induced_watcher_death_async(
         }
     };
 
-    in_memory_hit || pg_hit
+    pg_hit
 }
 
 pub(in crate::services::discord) fn recent_turn_stop_for_watcher_range(
@@ -395,6 +488,7 @@ pub(in crate::services::discord) fn record_recent_turn_stop_with_offset_for_test
         stop_output_offset: Some(stop_output_offset),
         reason: reason.to_string(),
         recorded_at: now,
+        pg_persistence: None,
     });
 }
 
@@ -414,5 +508,167 @@ pub(in crate::services::discord) fn record_recent_turn_stop_for_tests(
         stop_output_offset,
         reason: reason.to_string(),
         recorded_at,
+        pg_persistence: None,
     });
+}
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+mod tests {
+    use super::*;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    struct TestPg {
+        pool: sqlx::PgPool,
+        admin_url: String,
+        database_name: String,
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+    }
+
+    impl TestPg {
+        async fn teardown(self) {
+            let TestPg {
+                pool,
+                admin_url,
+                database_name,
+                _lifecycle,
+            } = self;
+            pool.close().await;
+            let _ = crate::db::postgres::drop_test_database(
+                &admin_url,
+                &database_name,
+                "tmux_kill_policy tests",
+            )
+            .await;
+        }
+    }
+
+    async fn fresh_pg() -> Option<TestPg> {
+        use crate::db::postgres;
+        let base = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE").ok()?;
+        let trimmed = base.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            return None;
+        }
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        let admin_url = format!("{}/{}", trimmed, admin_db);
+        let database_name = format!(
+            "agentdesk_tmux_kill_policy_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let lifecycle = postgres::lock_test_lifecycle();
+        postgres::create_test_database(&admin_url, &database_name, "tmux_kill_policy tests")
+            .await
+            .ok()?;
+
+        let connect_url = format!("{}/{}", trimmed, database_name);
+        let opts: PgConnectOptions = connect_url.parse().ok()?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(opts)
+            .await
+            .ok()?;
+        postgres::migrate(&pool).await.ok()?;
+        Some(TestPg {
+            pool,
+            admin_url,
+            database_name,
+            _lifecycle: lifecycle,
+        })
+    }
+
+    async fn wait_for_recent_stop(channel_id: ChannelId) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if recent_turn_stop_for_channel(channel_id).is_some() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("recent stop should be published before PG insert completes");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_memory_hit_waits_for_pg_insert_before_consume() {
+        let _lock = match crate::services::discord::runtime_store::test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_turn_stops_for_tests();
+        let Some(test_pg) = fresh_pg().await else {
+            eprintln!(
+                "[tmux_kill_policy] PG unavailable; skipping async memory/PG race regression"
+            );
+            return;
+        };
+        let pool = test_pg.pool.clone();
+        let channel = ChannelId::new(987_2549_001);
+        let tmux_name = "AgentDesk-codex-2549-pending-pg";
+
+        let mut lock_conn = pool.acquire().await.expect("acquire lock connection");
+        sqlx::query("BEGIN")
+            .execute(&mut *lock_conn)
+            .await
+            .expect("begin lock tx");
+        sqlx::query("LOCK TABLE cancel_tombstones IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock_conn)
+            .await
+            .expect("lock cancel_tombstones");
+
+        let record_pool = pool.clone();
+        let record_task = tokio::spawn(async move {
+            record_recent_turn_stop_with_offset(
+                channel,
+                Some(tmux_name),
+                Some(128),
+                "user-cancel",
+                Some(&record_pool),
+            )
+            .await;
+        });
+        wait_for_recent_stop(channel).await;
+
+        let consume_pool = pool.clone();
+        let consume_task = tokio::spawn(async move {
+            cancel_induced_watcher_death_async(channel, tmux_name, Some(128), Some(&consume_pool))
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !consume_task.is_finished(),
+            "memory hit must wait for the blocked PG insert before consuming"
+        );
+
+        sqlx::query("COMMIT")
+            .execute(&mut *lock_conn)
+            .await
+            .expect("release table lock");
+        drop(lock_conn);
+
+        record_task.await.expect("record task");
+        let consumed = tokio::time::timeout(std::time::Duration::from_secs(2), consume_task)
+            .await
+            .expect("consume completes after insert")
+            .expect("consume task");
+        assert!(consumed, "the post-cancel watcher death is suppressed");
+        assert_eq!(
+            crate::db::cancel_tombstones::count_cancel_tombstones_for_tests(&pool)
+                .await
+                .expect("count tombstones"),
+            0,
+            "PG mirror must be deleted after the in-memory hit consumes it"
+        );
+        assert!(
+            !cancel_induced_watcher_death_async(channel, tmux_name, Some(128), Some(&pool)).await,
+            "the tombstone remains one-shot after the race consumer"
+        );
+
+        clear_recent_turn_stops_for_tests();
+        test_pg.teardown().await;
+    }
 }

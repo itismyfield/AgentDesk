@@ -2234,9 +2234,9 @@ async fn mailbox_cancel_active_turn_with_reason(
         .await;
     #[cfg(unix)]
     if result.token.is_some() {
-        // #1309: in-memory publish is synchronous (instant suppression);
-        // PG mirror is awaited with a 500 ms cap so a quick dcserver
-        // restart cannot drop the durable copy.
+        // #2549: in-memory publish remains immediate, while the matching PG
+        // mirror is awaited before the cancel path returns so a quick
+        // dcserver restart cannot drop the durable tombstone.
         tmux::record_recent_turn_stop(channel_id, tmux_session_name.as_deref(), reason).await;
     }
     result

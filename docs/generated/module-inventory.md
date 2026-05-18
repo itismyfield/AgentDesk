@@ -84,7 +84,7 @@
 | `db::auto_queue::slots` | `src/db/auto_queue/slots.rs` | 209 |  |
 | `db::auto_queue::test_support` | `src/db/auto_queue/test_support.rs` | 178 |  |
 | `db::automation_candidates` | `src/db/automation_candidates.rs` | 995 |  |
-| `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
+| `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 420 |  |
 | `db::dispatch_semaphores` | `src/db/dispatch_semaphores.rs` | 331 |  |
 | `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1925 | giant-file |
 | `db::dispatches` | `src/db/dispatches/mod.rs` | 991 |  |
@@ -480,7 +480,7 @@
 | `services::discord::streaming_finalizer` | `src/services/discord/streaming_finalizer.rs` | 252 |  |
 | `services::discord::tmux` | `src/services/discord/tmux.rs` | 6344 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 324 |  |
-| `services::discord::tmux_kill_policy` | `src/services/discord/tmux_kill_policy.rs` | 418 |  |
+| `services::discord::tmux_kill_policy` | `src/services/discord/tmux_kill_policy.rs` | 674 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 1129 | giant-file |
 | `services::discord::tmux_output_stream` | `src/services/discord/tmux_output_stream.rs` | 590 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 478 |  |
