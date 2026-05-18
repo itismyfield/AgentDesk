@@ -423,8 +423,8 @@
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
 | `services::discord::outbound` | `src/services/discord/outbound/mod.rs` | 39 |  |
 | `services::discord::outbound::decision` | `src/services/discord/outbound/decision.rs` | 488 |  |
-| `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1016 | giant-file |
-| `services::discord::outbound::legacy` | `src/services/discord/outbound/legacy.rs` | 1228 | giant-file |
+| `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1093 | giant-file |
+| `services::discord::outbound::legacy` | `src/services/discord/outbound/legacy.rs` | 1233 | giant-file |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 629 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 191 |  |
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 309 |  |

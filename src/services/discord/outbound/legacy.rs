@@ -568,13 +568,18 @@ impl OutboundDedupReservation {
         self.dedup.record(&self.key, message_id);
         self.completed = true;
     }
+
+    pub(crate) fn release(&mut self) {
+        if !self.completed {
+            self.dedup.release_inflight(&self.key);
+            self.completed = true;
+        }
+    }
 }
 
 impl Drop for OutboundDedupReservation {
     fn drop(&mut self) {
-        if !self.completed {
-            self.dedup.release_inflight(&self.key);
-        }
+        self.release();
     }
 }
 
