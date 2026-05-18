@@ -841,7 +841,6 @@ pub(in crate::services::discord) fn streaming_final_complete_dispatch_with_resul
 }
 
 pub(in crate::services::discord) async fn queue_dispatch_followup_with_handles(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
     source: &str,
@@ -859,13 +858,8 @@ pub(in crate::services::discord) async fn queue_dispatch_followup_with_handles(
         return true;
     }
 
-    if let Some(db) = db {
-        crate::services::dispatches_followup::queue_dispatch_followup(db, dispatch_id);
-        return true;
-    }
-
     tracing::warn!(
-        "[{source}] no database handle available to enqueue dispatch followup for {dispatch_id}"
+        "[{source}] no postgres pool available to enqueue dispatch followup for {dispatch_id}"
     );
     false
 }
@@ -1632,7 +1626,6 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 Ok(_) => {
                     tracing::info!(dispatch_type = %snapshot.dispatch_type, "explicitly completed dispatch");
                     let _ = queue_dispatch_followup_with_handles(
-                        None::<&crate::db::Db>,
                         shared.pg_pool.as_ref(),
                         dispatch_id,
                         "turn_bridge_explicit",
@@ -1687,7 +1680,6 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         };
         if fallback_ok {
             let _ = queue_dispatch_followup_with_handles(
-                None::<&crate::db::Db>,
                 shared.pg_pool.as_ref(),
                 dispatch_id,
                 "turn_bridge_db_fallback",
@@ -1713,7 +1705,6 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             let ok = runtime_db_fallback_complete_with_result(dispatch_id, &fallback_result);
             if ok {
                 let _ = queue_dispatch_followup_with_handles(
-                    None::<&crate::db::Db>,
                     shared.pg_pool.as_ref(),
                     dispatch_id,
                     "turn_bridge_runtime_db_fallback",
@@ -1765,7 +1756,6 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 Ok(DispatchUpdateOutcome::Updated(_)) => {
                     tracing::info!(dispatch_type = %snapshot.dispatch_type, "explicitly completed dispatch via API");
                     let _ = queue_dispatch_followup_with_handles(
-                        None::<&crate::db::Db>,
                         shared.pg_pool.as_ref(),
                         dispatch_id,
                         "turn_bridge_explicit_api",
@@ -1783,7 +1773,6 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                         "explicit completion: dispatch already terminal (409); enqueueing followup only"
                     );
                     let _ = queue_dispatch_followup_with_handles(
-                        None::<&crate::db::Db>,
                         shared.pg_pool.as_ref(),
                         dispatch_id,
                         "turn_bridge_explicit_api_conflict",
@@ -1818,7 +1807,6 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         };
         if runtime_db_fallback_complete_with_result(dispatch_id, &runtime_result) {
             let _ = queue_dispatch_followup_with_handles(
-                None::<&crate::db::Db>,
                 shared.pg_pool.as_ref(),
                 dispatch_id,
                 "turn_bridge_runtime_db_fallback",

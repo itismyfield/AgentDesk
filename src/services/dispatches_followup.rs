@@ -14,30 +14,13 @@
 //! Manual dispatch completion (PATCH /api/dispatches/:id), outbox-driven
 //! follow-up, review-verdict completion, and recovery/turn-bridge completion
 //! all funnel through the same `queue_dispatch_followup_sync` / `_pg` pair,
-//! giving the call graph a single finalize guard shape (see
-//! `deduplicates_followup_for_manual_and_outbox_sources` test below).
+//! giving the call graph a single finalize guard shape.
 
 use sqlx::PgPool;
 
-/// Queue a dispatch completion follow-up row on the SQLite fallback DB.
-///
-/// This is a one-shot insert — `INSERT OR IGNORE` guarantees that repeat calls
-/// for the same dispatch_id do not create duplicate follow-up rows, which is
-/// what lets manual/outbox/recovery share the same guard.
-pub fn queue_dispatch_followup(db: &crate::db::Db, dispatch_id: &str) {
-    if let Ok(conn) = db.separate_conn() {
-        conn.execute(
-            "INSERT OR IGNORE INTO dispatch_outbox (dispatch_id, action) VALUES (?1, 'followup')",
-            [dispatch_id],
-        )
-        .ok();
-    }
-}
-
 /// Queue a dispatch completion follow-up row on Postgres.
 ///
-/// `ON CONFLICT DO NOTHING` is the Postgres-side analog of the SQLite
-/// `INSERT OR IGNORE`, preserving the single-finalize invariant for
+/// `ON CONFLICT DO NOTHING` preserves the single-finalize invariant for
 /// manual/outbox/recovery callers.
 pub async fn queue_dispatch_followup_pg(pg_pool: &PgPool, dispatch_id: &str) -> Result<(), String> {
     sqlx::query(
@@ -52,19 +35,13 @@ pub async fn queue_dispatch_followup_pg(pg_pool: &PgPool, dispatch_id: &str) -> 
     Ok(())
 }
 
-/// Sync wrapper over `queue_dispatch_followup_pg` that falls back to the
-/// SQLite path when no Postgres pool is available.
+/// Sync wrapper over `queue_dispatch_followup_pg`.
 ///
 /// This is the single entry point used by callers that don't want to deal
 /// with the async/sync boundary directly (service update_dispatch path,
 /// verdict route, etc.). All delivery finalize paths go through this
-/// function or through `queue_dispatch_followup_pg` directly — see the
-/// unified-guard test below.
-pub fn queue_dispatch_followup_sync(
-    db: &crate::db::Db,
-    pg_pool: Option<&PgPool>,
-    dispatch_id: &str,
-) {
+/// function or through `queue_dispatch_followup_pg` directly.
+pub fn queue_dispatch_followup_sync(pg_pool: Option<&PgPool>, dispatch_id: &str) {
     if let Some(pool) = pg_pool {
         let dispatch_id_owned = dispatch_id.to_string();
         if let Err(error) = crate::utils::async_bridge::block_on_pg_result(
@@ -82,62 +59,8 @@ pub fn queue_dispatch_followup_sync(
         return;
     }
 
-    queue_dispatch_followup(db, dispatch_id);
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::*;
-    use crate::db;
-
-    /// Unified finalize guard: manual + outbox + recovery all eventually call
-    /// one of the `queue_dispatch_followup*` variants. Regardless of how many
-    /// sources try to enqueue a follow-up for the same dispatch_id, the
-    /// `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` pair ensures only one
-    /// pending follow-up row exists at any time. This is the test that pins
-    /// the "shared guard" half of the dispatch lifecycle DoD.
-    #[test]
-    fn deduplicates_followup_for_manual_and_outbox_sources() {
-        let db = db::test_db();
-
-        // Simulate: manual PATCH /api/dispatches/:id fires first
-        queue_dispatch_followup(&db, "dispatch-shared-guard");
-        // Then outbox worker retries enqueue
-        queue_dispatch_followup(&db, "dispatch-shared-guard");
-        // Then recovery engine re-tries on the same id
-        queue_dispatch_followup(&db, "dispatch-shared-guard");
-
-        let conn = db.separate_conn().expect("open conn");
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_outbox
-                 WHERE dispatch_id = ?1 AND action = 'followup'",
-                ["dispatch-shared-guard"],
-                |row| row.get(0),
-            )
-            .expect("count");
-        assert_eq!(
-            count, 1,
-            "manual/outbox/recovery must share one finalize row"
-        );
-    }
-
-    /// The sync wrapper falls back to SQLite cleanly when no Postgres pool is
-    /// injected — mirroring manual dispatch update path and verdict route.
-    #[test]
-    fn sync_wrapper_without_pg_pool_inserts_into_sqlite() {
-        let db = db::test_db();
-        queue_dispatch_followup_sync(&db, None, "dispatch-sync-fallback");
-
-        let conn = db.separate_conn().expect("open conn");
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_outbox
-                 WHERE dispatch_id = ?1 AND action = 'followup'",
-                ["dispatch-sync-fallback"],
-                |row| row.get(0),
-            )
-            .expect("count");
-        assert_eq!(count, 1);
-    }
+    tracing::warn!(
+        dispatch_id = %dispatch_id,
+        "no postgres pool available to enqueue dispatch followup"
+    );
 }

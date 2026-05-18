@@ -1806,42 +1806,32 @@ pub(super) fn build_bg_trigger_session_key(
 /// command bot. The notify-bot is dropped at the intake gate, which is what
 /// keeps the auto-trigger path from feeding back into a new turn.
 ///
-/// **Storage backend** (#897 counter-model re-review round 2 Medium):
-/// matches `turn_bridge::enqueue_headless_delivery`'s priority —
-/// `pg_pool` first when available (primary production storage), falling
-/// back to the SQLite `Db` when only the legacy backend is wired in.
-/// Without this, a PG-backed runtime would reach the old SQLite-only
-/// code path with `Db::None` and silently fall back to direct-send,
-/// bypassing the new dedupe / failure-reconcile behaviour entirely.
+/// **Storage backend**: uses the Postgres message outbox when available.
+/// Without a PG pool the caller should direct-send, because no production
+/// worker drains a local legacy outbox for this path.
 ///
-/// **Dedupe** (#897 round 1 P1 #3): both `reason_code` and `session_key`
-/// are set so the lifecycle-notification dedupe in
-/// `message_outbox::enqueue` can arm. `session_key` encodes
+/// **Session identity** (#897 round 1 P1 #3): both `reason_code` and
+/// `session_key` are set so reconciliation and any future dedupe policy can
+/// identify the watcher range. `session_key` encodes
 /// `channel_id + data_start_offset + content hash`, so:
 ///   * Distinct background completions in the same channel produce distinct
 ///     session_keys (different offsets or different content) → each lands
 ///     as its own outbox row.
-///   * A duplicate retry of the exact same tmux range within the dedupe TTL
-///     (same offset, identical content) collapses into the single existing
-///     row, which guards against the watcher re-enqueuing while the outbox
-///     worker is still delivering.
-///   * The dedupe lookup filters out `status='failed'` rows, so a permanently
-///     failed prior attempt is NOT allowed to suppress a fresh re-stage.
+///   * Reconcile can parse failed rows back to the minimum tmux offset that
+///     needs re-staging.
 ///
 /// The PG path currently does INSERT without a per-tick dedupe query (the
-/// SQLite-only `enqueue` helper lives in `message_outbox.rs`; porting it
-/// to a shared sqlx/rusqlite interface is tracked separately). Same-row
-/// dedupe on the PG side is still achievable via a `UNIQUE(reason_code,
-/// session_key, status) WHERE status != 'failed'` partial index, but
-/// that's a schema change outside this PR's scope. Follow-up tracked in
-/// #898-family.
+/// SQLite-only `enqueue` helper lives in `message_outbox.rs`; porting it to a
+/// shared sqlx/rusqlite interface is tracked separately). Same-row dedupe on
+/// the PG side is still achievable via a `UNIQUE(reason_code, session_key,
+/// status) WHERE status != 'failed'` partial index, but that's a schema
+/// change outside this PR's scope. Follow-up tracked in #898-family.
 ///
-/// Returns `false` only when BOTH backends are unavailable or their
-/// insert fails — the caller falls back to a direct command-bot send in
-/// that case so the message is never silently lost.
+/// Returns `false` when Postgres is unavailable or the insert fails — the
+/// caller falls back to a direct command-bot send in that case so the message
+/// is never silently lost.
 pub(super) async fn enqueue_background_trigger_response_to_notify_outbox(
     pg_pool: Option<&sqlx::PgPool>,
-    db: Option<&crate::db::Db>,
     channel_id: ChannelId,
     content: &str,
     data_start_offset: u64,
@@ -1854,14 +1844,9 @@ pub(super) async fn enqueue_background_trigger_response_to_notify_outbox(
     let session_key = build_bg_trigger_session_key(channel_id.get(), data_start_offset, content);
 
     // #897 round-3 High: when `pg_pool` is configured, the outbox worker
-    // drains PG EXCLUSIVELY. Writing a row to SQLite as a "fallback" would
-    // silently black-hole the message because no worker polls it in that
-    // mode. On PG insert failure we return `false` so the caller falls
-    // back to a DIRECT Discord send (the only path that guarantees
-    // delivery in PG mode) rather than papering over the failure with an
-    // undeliverable SQLite row. Mirrors
-    // `turn_bridge::enqueue_headless_delivery` which also refuses to fall
-    // back to SQLite when PG is configured.
+    // drains PG exclusively. On PG insert failure we return `false` so the
+    // caller falls back to a direct Discord send rather than papering over
+    // the failure with an undeliverable local row.
     if let Some(pool) = pg_pool {
         return match sqlx::query(
             "INSERT INTO message_outbox
@@ -1886,7 +1871,7 @@ pub(super) async fn enqueue_background_trigger_response_to_notify_outbox(
         };
     }
 
-    let _ = (db, session_key);
+    let _ = session_key;
     false
 }
 
@@ -1898,10 +1883,8 @@ pub(super) async fn enqueue_background_trigger_response_to_notify_outbox(
 /// roll `last_enqueued_offset` back and re-stage the same tmux range on
 /// the next watcher tick.
 ///
-/// **Storage backend** (#897 round 2 Medium): prefers `pg_pool` when
-/// available, falling back to the SQLite `Db` — mirrors the enqueue
-/// path's ordering so a PG-backed runtime actually reconciles its own
-/// failed rows instead of silently skipping when `Db::None`.
+/// **Storage backend**: reconciles Postgres only. Without a PG pool there is
+/// no authoritative outbox store for failed background-trigger rows.
 ///
 /// Why this is safe to re-stage:
 /// * `message_outbox::enqueue`'s lifecycle dedupe filters out rows where
@@ -1916,17 +1899,16 @@ pub(super) async fn enqueue_background_trigger_response_to_notify_outbox(
 /// flagged. See PR #897.
 async fn reconcile_failed_bg_trigger_enqueues_for_channel(
     pg_pool: Option<&sqlx::PgPool>,
-    db: Option<&crate::db::Db>,
     channel_id: ChannelId,
 ) -> Option<u64> {
     let target = format!("channel:{}", channel_id.get());
 
-    // #897 round-3 High: when `pg_pool` is configured it is the ONLY
-    // authoritative store. Consulting SQLite as a "fallback" on PG
-    // failure or on an empty PG result would surface rows from a legacy
-    // test/dev database that the outbox worker never produced, and worse
-    // could delete rows written by a prior run. On PG error we surface
-    // `None` so the next poll retries; there is no data-safe fallback.
+    // #897 round-3 High: when `pg_pool` is configured it is the only
+    // authoritative store. Consulting a local legacy store on PG failure or
+    // on an empty PG result would surface rows that the outbox worker never
+    // produced, and worse could delete rows written by a prior run. On PG
+    // error we surface `None` so the next poll retries; there is no data-safe
+    // fallback.
     if let Some(pool) = pg_pool {
         let rows_res = sqlx::query_as::<_, (i64, Option<String>)>(
             "SELECT id, session_key FROM message_outbox
@@ -1985,7 +1967,6 @@ async fn reconcile_failed_bg_trigger_enqueues_for_channel(
         };
     }
 
-    let _ = db;
     None
 }
 
@@ -2382,6 +2363,7 @@ mod tests {
         watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
         watcher_stream_seed,
     };
+    use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::db::session_transcripts::SessionTranscriptEventKind;
     use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::{InflightTurnState, RelayOwnerKind};
@@ -2523,7 +2505,7 @@ mod tests {
     }
 
     #[test]
-    fn restored_live_tmux_session_falls_back_to_legacy_session_key() {
+    fn restored_live_tmux_session_ignores_legacy_session_key_without_postgres() {
         let db = crate::db::test_db();
         let provider = ProviderKind::Codex;
         let session_key = crate::services::discord::adk_session::build_legacy_session_key(
@@ -2540,7 +2522,7 @@ mod tests {
         assert_eq!(
             load_restored_provider_session_id(Some(&db), None, "tokenxyz", &provider, "adk-cdx",)
                 .as_deref(),
-            Some("legacy-sid-1")
+            None
         );
     }
 
@@ -4246,7 +4228,7 @@ mod tests {
     }
 
     #[test]
-    fn watcher_output_activity_refreshes_legacy_session_heartbeat() {
+    fn watcher_output_activity_ignores_legacy_session_heartbeat_without_postgres() {
         let db = crate::db::test_db();
         let provider = ProviderKind::Codex;
         let channel_name = "adk-cdx-t1485506232256168011";
@@ -4263,7 +4245,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(refresh_session_heartbeat_from_tmux_output(
+        assert!(!refresh_session_heartbeat_from_tmux_output(
             Some(&db),
             None,
             "tokenxyz",
@@ -4281,7 +4263,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_ne!(last_heartbeat, "2026-04-09 01:02:03");
+        assert_eq!(last_heartbeat, "2026-04-09 01:02:03");
     }
 
     #[test]
@@ -4976,13 +4958,13 @@ mod tests {
     /// the response as an actionable directive (infinite-loop hazard).
     #[tokio::test]
     async fn background_trigger_response_enqueues_notify_outbox_row() {
-        let db = crate::db::test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let channel = ChannelId::new(987_654_321);
         let content = "PR #825 리뷰 4건 fix 완료";
 
         let enqueued = enqueue_background_trigger_response_to_notify_outbox(
-            /*pg_pool*/ None,
-            Some(&db),
+            Some(&pool),
             channel,
             content,
             /*data_start_offset*/ 4096,
@@ -4990,10 +4972,9 @@ mod tests {
         .await;
         assert!(
             enqueued,
-            "background-trigger enqueue must succeed when db is present"
+            "background-trigger enqueue must succeed when postgres is present"
         );
 
-        let conn = db.lock().unwrap();
         let (target, stored_content, bot, source, reason_code, session_key): (
             String,
             String,
@@ -5001,23 +4982,13 @@ mod tests {
             String,
             Option<String>,
             Option<String>,
-        ) = conn
-            .query_row(
-                "SELECT target, content, bot, source, reason_code, session_key
-                 FROM message_outbox ORDER BY id DESC LIMIT 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
-            .expect("expected one outbox row");
+        ) = sqlx::query_as(
+            "SELECT target, content, bot, source, reason_code, session_key
+             FROM message_outbox ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("expected one outbox row");
 
         assert_eq!(target, format!("channel:{}", channel.get()));
         assert_eq!(stored_content, content);
@@ -5031,6 +5002,9 @@ mod tests {
             session_key.starts_with(&format!("bg_trigger:ch:{}:off:4096:h:", channel.get())),
             "session_key must encode channel + offset + content hash; got {session_key}"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     /// #897 P1 #3: consecutive background-task completions in the same
@@ -5040,12 +5014,12 @@ mod tests {
     /// the dedupe must NOT collapse legitimately-separate events into one.
     #[tokio::test]
     async fn background_trigger_response_does_not_dedupe_distinct_events() {
-        let db = crate::db::test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let channel = ChannelId::new(555_111_222);
         assert!(
             enqueue_background_trigger_response_to_notify_outbox(
-                None,
-                Some(&db),
+                Some(&pool),
                 channel,
                 "first completion",
                 /*data_start_offset*/ 1_000,
@@ -5054,8 +5028,7 @@ mod tests {
         );
         assert!(
             enqueue_background_trigger_response_to_notify_outbox(
-                None,
-                Some(&db),
+                Some(&pool),
                 channel,
                 "second completion",
                 /*data_start_offset*/ 2_000,
@@ -5063,33 +5036,33 @@ mod tests {
             .await
         );
 
-        let count: i64 = db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM message_outbox WHERE target = ?1 AND bot = 'notify'",
-                [format!("channel:{}", channel.get()).as_str()],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_outbox WHERE target = $1 AND bot = 'notify'",
+        )
+        .bind(format!("channel:{}", channel.get()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             count, 2,
             "consecutive events with distinct offsets/content must land as separate rows"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
-    /// #897 P1 #3: a genuine retry of the SAME tmux range (same offset +
-    /// identical content) within the dedupe TTL must collapse into a single
-    /// outbox row, preventing the watcher from re-enqueuing while the outbox
-    /// worker is still driving the same message to Discord.
+    /// The PG enqueue path preserves the current runtime behavior: each call
+    /// stages a row, and any retry/dedupe policy is owned by the caller or a
+    /// future schema-level guard.
     #[tokio::test]
-    async fn background_trigger_response_dedupes_identical_retry() {
-        let db = crate::db::test_db();
+    async fn background_trigger_response_records_identical_retry_on_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let channel = ChannelId::new(666_222_333);
         assert!(
             enqueue_background_trigger_response_to_notify_outbox(
-                None,
-                Some(&db),
+                Some(&pool),
                 channel,
                 "same content",
                 /*data_start_offset*/ 8_192,
@@ -5098,8 +5071,7 @@ mod tests {
         );
         assert!(
             enqueue_background_trigger_response_to_notify_outbox(
-                None,
-                Some(&db),
+                Some(&pool),
                 channel,
                 "same content",
                 /*data_start_offset*/ 8_192,
@@ -5107,60 +5079,60 @@ mod tests {
             .await
         );
 
-        let count: i64 = db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM message_outbox WHERE target = ?1 AND bot = 'notify'",
-                [format!("channel:{}", channel.get()).as_str()],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_outbox WHERE target = $1 AND bot = 'notify'",
+        )
+        .bind(format!("channel:{}", channel.get()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(
-            count, 1,
-            "identical retry at the same offset must dedupe to a single row"
+            count, 2,
+            "PG path currently records identical retries as separate rows"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     /// Empty/whitespace responses must short-circuit without writing a row —
     /// otherwise the user sees a noise notification with no content.
     #[tokio::test]
     async fn background_trigger_response_skips_empty_payload() {
-        let db = crate::db::test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let channel = ChannelId::new(111_222_333);
         assert!(
-            enqueue_background_trigger_response_to_notify_outbox(
-                None,
-                Some(&db),
-                channel,
-                "   \n",
-                0,
-            )
-            .await
+            enqueue_background_trigger_response_to_notify_outbox(Some(&pool), channel, "   \n", 0,)
+                .await
         );
-        let count: i64 = db
-            .lock()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
             .unwrap();
         assert_eq!(count, 0, "empty content must not produce an outbox row");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
-    /// When the database is unavailable, the helper reports failure so the
+    /// When Postgres is unavailable, the helper reports failure so the
     /// caller can fall back to a direct Discord send rather than silently
     /// dropping the response (#826 root cause was a silent drop).
     #[tokio::test]
-    async fn background_trigger_response_reports_failure_when_db_missing() {
+    async fn background_trigger_response_reports_failure_when_pg_missing() {
         let channel = ChannelId::new(999_888_777);
         let ok = enqueue_background_trigger_response_to_notify_outbox(
             /*pg_pool*/ None,
-            /*db*/ None,
             channel,
             "would-have-been-delivered",
             0,
         )
         .await;
-        assert!(!ok, "missing db must surface as failure to enable fallback");
+        assert!(
+            !ok,
+            "missing postgres must surface as failure to enable fallback"
+        );
     }
 
     /// #897 P1 #2 guard: `parse_bg_trigger_offset_from_session_key` must
@@ -5241,10 +5213,8 @@ mod tests {
     /// `None` and leaves direct-send fallback decisions to the caller.
     #[tokio::test]
     async fn reconcile_returns_none_when_no_failed_rows() {
-        let db = crate::db::test_db();
         let channel = ChannelId::new(888_555_222);
-        let min =
-            super::reconcile_failed_bg_trigger_enqueues_for_channel(None, Some(&db), channel).await;
+        let min = super::reconcile_failed_bg_trigger_enqueues_for_channel(None, channel).await;
         assert_eq!(min, None);
     }
 

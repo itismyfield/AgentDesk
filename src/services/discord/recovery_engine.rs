@@ -1653,7 +1653,6 @@ pub(super) async fn restore_inflight_turns(
                                     );
                                     let _ =
                                         super::turn_bridge::queue_dispatch_followup_with_handles(
-                                            None::<&crate::db::Db>,
                                             shared.pg_pool.as_ref(),
                                             did,
                                             "recovery_completed_during_downtime",
@@ -1687,7 +1686,6 @@ pub(super) async fn restore_inflight_turns(
                                 );
                             if dispatch_completed {
                                 let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
-                                    None::<&crate::db::Db>,
                                     shared.pg_pool.as_ref(),
                                     did,
                                     "recovery_completed_during_downtime_fallback",
@@ -2269,7 +2267,6 @@ pub(super) async fn restore_inflight_turns(
                                         );
                                         let _ =
                                             super::turn_bridge::queue_dispatch_followup_with_handles(
-                                                None::<&crate::db::Db>,
                                                 shared.pg_pool.as_ref(),
                                                 did,
                                                 "recovery_captured_full_response",
@@ -2302,7 +2299,6 @@ pub(super) async fn restore_inflight_turns(
                                 if dispatch_completed {
                                     let _ =
                                         super::turn_bridge::queue_dispatch_followup_with_handles(
-                                            None::<&crate::db::Db>,
                                             shared.pg_pool.as_ref(),
                                             did,
                                             "recovery_captured_full_response_fallback",
@@ -2318,7 +2314,6 @@ pub(super) async fn restore_inflight_turns(
                                 );
                             if dispatch_completed {
                                 let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
-                                    None::<&crate::db::Db>,
                                     shared.pg_pool.as_ref(),
                                     did,
                                     "recovery_captured_full_response_runtime_fallback",
@@ -2525,7 +2520,6 @@ pub(super) async fn restore_inflight_turns(
                                         );
                                         let _ =
                                             super::turn_bridge::queue_dispatch_followup_with_handles(
-                                                None::<&crate::db::Db>,
                                                 shared.pg_pool.as_ref(),
                                                 did,
                                                 "recovery_output_completed",
@@ -2558,7 +2552,6 @@ pub(super) async fn restore_inflight_turns(
                                 if dispatch_completed {
                                     let _ =
                                         super::turn_bridge::queue_dispatch_followup_with_handles(
-                                            None::<&crate::db::Db>,
                                             shared.pg_pool.as_ref(),
                                             did,
                                             "recovery_output_completed_fallback",
@@ -2574,7 +2567,6 @@ pub(super) async fn restore_inflight_turns(
                                 );
                             if dispatch_completed {
                                 let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
-                                    None::<&crate::db::Db>,
                                     shared.pg_pool.as_ref(),
                                     did,
                                     "recovery_output_completed_runtime_fallback",
