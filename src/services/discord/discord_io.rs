@@ -471,7 +471,7 @@ async fn deliver_channel_message(
             .map(str::to_string),
     );
 
-    match deliver_outbound(&client, discord_io_deduper(), outbound_msg, policy).await {
+    match deliver_outbound(&client, discord_io_deduper(), outbound_msg, policy, None).await {
         DeliveryResult::Success { message_id } => Ok(DiscordIoDeliveryReport {
             status: "success",
             message_id: Some(message_id),

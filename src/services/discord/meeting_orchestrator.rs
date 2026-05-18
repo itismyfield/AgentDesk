@@ -743,6 +743,7 @@ async fn deliver_meeting_message(
             meeting_deduper(),
             message,
             DiscordOutboundPolicy::preserve_inline_content(),
+            None,
         )
         .await,
     )
@@ -801,6 +802,7 @@ async fn edit_meeting_message(
             meeting_deduper(),
             message,
             DiscordOutboundPolicy::preserve_inline_content(),
+            None,
         )
         .await,
     )

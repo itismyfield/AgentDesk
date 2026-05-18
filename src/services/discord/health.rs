@@ -2213,7 +2213,7 @@ async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
         outbound_msg = outbound_msg.with_summary(summary.to_string());
     }
 
-    match deliver_v3_outbound(client, dedup, outbound_msg).await {
+    match deliver_v3_outbound(client, dedup, outbound_msg, None).await {
         DeliveryResult::Sent { messages, .. } => ManualDeliveryOutcome::Sent {
             message_id: first_raw_message_id(&messages).unwrap_or_default(),
             delivery: None,

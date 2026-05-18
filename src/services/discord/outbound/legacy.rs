@@ -380,6 +380,7 @@ pub(crate) enum DeliveryResult {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SkipReason {
     Duplicate,
+    Cancelled,
 }
 
 /// Transport abstraction over the Discord HTTP API. Production code uses an
@@ -630,6 +631,7 @@ pub(crate) async fn deliver_outbound<C>(
     dedup: &OutboundDeduper,
     message: DiscordOutboundMessage,
     policy: DiscordOutboundPolicy,
+    cancel_token: Option<&crate::services::provider::CancelToken>,
 ) -> DeliveryResult
 where
     C: DiscordOutboundClient,
@@ -645,8 +647,14 @@ where
 
     let v3_message = legacy_message_to_v3(&message, &policy);
     let overrides = legacy_delivery_overrides(&message, &policy);
-    match super::delivery::deliver_outbound_with_overrides(client, dedup, v3_message, overrides)
-        .await
+    match super::delivery::deliver_outbound_with_overrides(
+        client,
+        dedup,
+        v3_message,
+        overrides,
+        cancel_token,
+    )
+    .await
     {
         v3_result::DeliveryResult::Sent { messages, .. } => {
             let message_id = super::delivery::first_raw_message_id(&messages).unwrap_or_default();
@@ -677,8 +685,12 @@ where
             }
             DeliveryResult::Duplicate { message_id }
         }
-        v3_result::DeliveryResult::Skip { .. } => DeliveryResult::Skipped {
-            reason: SkipReason::Duplicate,
+        v3_result::DeliveryResult::Skip { reason } => DeliveryResult::Skipped {
+            reason: if reason == "cancelled" {
+                SkipReason::Cancelled
+            } else {
+                SkipReason::Duplicate
+            },
         },
         v3_result::DeliveryResult::PermanentFailure { reason } => {
             DeliveryResult::PermanentFailure { detail: reason }
@@ -930,7 +942,7 @@ mod tests {
         let msg = DiscordOutboundMessage::new("chan-1", long_content.clone());
         let policy = DiscordOutboundPolicy::default();
 
-        let result = deliver_outbound(&client, &dedup, msg, policy).await;
+        let result = deliver_outbound(&client, &dedup, msg, policy, None).await;
 
         match result {
             DeliveryResult::Fallback {
@@ -953,7 +965,7 @@ mod tests {
             .with_correlation("dispatch-1", "dispatch:1:sent");
         let policy = DiscordOutboundPolicy::default();
 
-        let result = deliver_outbound(&client, &dedup, msg, policy).await;
+        let result = deliver_outbound(&client, &dedup, msg, policy, None).await;
 
         assert!(matches!(result, DeliveryResult::Success { .. }));
         assert_eq!(client.posts().len(), 1);
@@ -967,7 +979,7 @@ mod tests {
         let msg = DiscordOutboundMessage::new("chan-1", "hello");
         let policy = DiscordOutboundPolicy::default();
 
-        let result = deliver_outbound(&client, &dedup, msg, policy).await;
+        let result = deliver_outbound(&client, &dedup, msg, policy, None).await;
 
         assert!(matches!(result, DeliveryResult::PermanentFailure { .. }));
         assert_eq!(client.posts().len(), 1);
@@ -983,10 +995,10 @@ mod tests {
         };
         let policy = DiscordOutboundPolicy::default();
 
-        let first = deliver_outbound(&client, &dedup, make(), policy.clone()).await;
+        let first = deliver_outbound(&client, &dedup, make(), policy.clone(), None).await;
         assert!(matches!(first, DeliveryResult::Success { .. }));
 
-        let second = deliver_outbound(&client, &dedup, make(), policy).await;
+        let second = deliver_outbound(&client, &dedup, make(), policy, None).await;
         assert!(matches!(
             second,
             DeliveryResult::Duplicate {
@@ -1005,7 +1017,8 @@ mod tests {
         let msg = DiscordOutboundMessage::new("chan-1", "hello")
             .with_correlation("dispatch-42", "dispatch:42:sent");
 
-        let result = deliver_outbound(&client, &dedup, msg, DiscordOutboundPolicy::default()).await;
+        let result =
+            deliver_outbound(&client, &dedup, msg, DiscordOutboundPolicy::default(), None).await;
 
         assert_eq!(
             result,
@@ -1023,7 +1036,8 @@ mod tests {
         let msg = DiscordOutboundMessage::new("chan-1", "hello")
             .with_correlation("dispatch-42", "dispatch:42:sent");
 
-        let result = deliver_outbound(&client, &dedup, msg, DiscordOutboundPolicy::default()).await;
+        let result =
+            deliver_outbound(&client, &dedup, msg, DiscordOutboundPolicy::default(), None).await;
 
         assert!(matches!(result, DeliveryResult::Success { .. }));
         assert_eq!(
@@ -1038,7 +1052,8 @@ mod tests {
         let dedup = OutboundDeduper::new();
         let msg = DiscordOutboundMessage::new("chan-1", "...").with_reference("chan-1", "msg-user");
 
-        let result = deliver_outbound(&client, &dedup, msg, DiscordOutboundPolicy::default()).await;
+        let result =
+            deliver_outbound(&client, &dedup, msg, DiscordOutboundPolicy::default(), None).await;
 
         assert!(matches!(result, DeliveryResult::Success { .. }));
         assert_eq!(
@@ -1059,7 +1074,8 @@ mod tests {
         let msg = DiscordOutboundMessage::new("chan-1", "updated")
             .with_edit_message_id("msg-placeholder");
 
-        let result = deliver_outbound(&client, &dedup, msg, DiscordOutboundPolicy::default()).await;
+        let result =
+            deliver_outbound(&client, &dedup, msg, DiscordOutboundPolicy::default(), None).await;
 
         assert_eq!(
             result,
@@ -1093,6 +1109,7 @@ mod tests {
             &dedup,
             msg,
             DiscordOutboundPolicy::preserve_inline_content(),
+            None,
         )
         .await;
 
@@ -1118,6 +1135,7 @@ mod tests {
             &dedup,
             msg,
             DiscordOutboundPolicy::preserve_inline_content(),
+            None,
         )
         .await;
 
@@ -1137,7 +1155,7 @@ mod tests {
             .with_thread_id("thread-existing");
         let policy = DiscordOutboundPolicy::dispatch_outbox("short".into());
 
-        let result = deliver_outbound(&client, &dedup, msg, policy).await;
+        let result = deliver_outbound(&client, &dedup, msg, policy, None).await;
 
         match result {
             DeliveryResult::Fallback {
@@ -1165,7 +1183,7 @@ mod tests {
             .with_correlation("dispatch-failfall", "dispatch:failfall:sent");
         let policy = DiscordOutboundPolicy::dispatch_outbox("short".into());
 
-        let result = deliver_outbound(&client, &dedup, msg, policy).await;
+        let result = deliver_outbound(&client, &dedup, msg, policy, None).await;
 
         match result {
             DeliveryResult::PermanentFailure { .. } => {}
@@ -1192,7 +1210,7 @@ mod tests {
             minimal_fallback: None,
         };
 
-        let result = deliver_outbound(&client, &dedup, msg, policy).await;
+        let result = deliver_outbound(&client, &dedup, msg, policy, None).await;
 
         assert!(matches!(result, DeliveryResult::PermanentFailure { .. }));
         assert!(client.posts().is_empty());

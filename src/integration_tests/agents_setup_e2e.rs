@@ -362,7 +362,7 @@ async fn wizard_pg_creates_agent_and_delivers_to_bound_channel() {
     let policy = DiscordOutboundPolicy::default();
     let msg = DiscordOutboundMessage::new(channel_id.to_string(), "wizard ready: hello agent")
         .with_correlation(format!("e2e:{agent_id}"), "watcher:agent-setup-e2e");
-    let delivery = deliver_outbound(&mock, &dedup, msg, policy).await;
+    let delivery = deliver_outbound(&mock, &dedup, msg, policy, None).await;
     assert!(
         matches!(delivery, DeliveryResult::Success { .. }),
         "outbound delivery must succeed against bound channel: {delivery:?}"

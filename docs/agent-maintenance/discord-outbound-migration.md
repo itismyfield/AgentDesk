@@ -1,11 +1,13 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
-> Implementation refresh for #1457 / #2368: v3 delivery now covers dispatch
+> Implementation refresh for #1457 / #2368 / #2533: v3 delivery now covers dispatch
 > outbox, review followups, short manual/DM notifications, gateway placeholder
 > sends, and dispatch completion summaries directly. `OutboundDeduper` now has
 > an in-flight reservation primitive for atomic lookup/send/record behavior.
+> Turn-owned delivery paths can pass a `CancelToken` so post-cancel sends,
+> fallback retries, split chunks, and headless outbox enqueue are suppressed.
 >
-> Last refreshed: 2026-05-17 (against #2368 outbound dedupe reservation refresh).
+> Last refreshed: 2026-05-18 (against #2533 outbound cancellation wiring).
 >
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
@@ -42,9 +44,9 @@ HTTP path.
 | `decide_policy(...) -> DiscordOutboundPolicyDecision` | `outbound/decision.rs:133` | active pure planner | Pure function that turns a v3 message + policy into a delivery plan (split / fallback / dedup). Does not perform I/O. |
 | `DiscordOutboundPolicy` (v3 in `policy.rs`) | `outbound/policy.rs:57` | active | New policy with named presets, including `dispatch_outbox()`, `review_notification()`, and `preserve_inline_content()`. |
 | `DeliveryResult` | `outbound/result.rs:126` | active | Successor of legacy `DeliveryResult`; richer error/fallback tagging with ordered `DeliveredMessage` metadata. |
-| **v3 delivery** `deliver_outbound<C>(...)` | `outbound/delivery.rs:42` | active | Executes the v3 message/policy/decision/result contract; currently reuses the legacy transport trait and deduper during migration. Split delivery records ordered chunk metadata and duplicate replay preserves it. |
+| **v3 delivery** `deliver_outbound<C>(...)` | `outbound/delivery.rs:46` | active | Executes the v3 message/policy/decision/result contract; currently reuses the legacy transport trait and deduper during migration. Accepts an optional `CancelToken`; split delivery records ordered chunk metadata and duplicate replay preserves it. |
 | **Legacy bridge** `DiscordOutboundMessage` (v2) | `outbound/legacy.rs:159` | compatibility facade | Two-arg constructor `(channel_id, content)` + builder fluent. Older producers still route through this while their callsites migrate. |
-| **Legacy bridge** `deliver_outbound<C>(...)` | `outbound/legacy.rs:455` | compatibility adapter over v3 | Converts v2 message/policy inputs into v3 envelopes, delegates to `outbound::delivery`, then maps v3 results back to legacy result variants. |
+| **Legacy bridge** `deliver_outbound<C>(...)` | `outbound/legacy.rs:629` | compatibility adapter over v3 | Converts v2 message/policy inputs into v3 envelopes, delegates to `outbound::delivery`, then maps v3 results back to legacy result variants. Carries the optional `CancelToken` through for turn-owned callers; non-turn producers pass `None`. |
 | `OutboundDeduper` | `outbound/legacy.rs:440` | active | In-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record window. v3 stores serialized `Vec<DeliveredMessage>`; the legacy facade still maps old single-message ids for compatibility. |
 
 Legacy re-exports remain in `outbound/mod.rs`; direct v3 callsites import from

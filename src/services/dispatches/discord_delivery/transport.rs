@@ -235,7 +235,7 @@ pub(crate) async fn post_dispatch_message_to_channel_with_delivery(
     )
     .with_summary(minimal_message.to_string());
 
-    match deliver_outbound(&outbound_client, &dedup, outbound_msg).await {
+    match deliver_outbound(&outbound_client, &dedup, outbound_msg, None).await {
         DeliveryResult::Sent { messages, .. } => {
             let message_id = first_raw_message_id(&messages).unwrap_or_default();
             Ok(DispatchMessagePostOutcome {

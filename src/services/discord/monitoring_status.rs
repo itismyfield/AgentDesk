@@ -133,6 +133,7 @@ async fn deliver_monitoring_status<C: DiscordOutboundClient>(
         dedup,
         message,
         DiscordOutboundPolicy::preserve_inline_content(),
+        None,
     )
     .await
     {

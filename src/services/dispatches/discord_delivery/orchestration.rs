@@ -1690,7 +1690,7 @@ async fn send_review_result_message_via_http(
         DiscordOutboundPolicy::review_notification(),
     );
 
-    match deliver_outbound(&outbound_client, dedup, outbound_msg).await {
+    match deliver_outbound(&outbound_client, dedup, outbound_msg, None).await {
         DeliveryResult::Sent { .. } | DeliveryResult::Fallback { .. } => Ok(()),
         DeliveryResult::Duplicate { .. } => {
             // Duplicate suppression is a success for the caller.

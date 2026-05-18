@@ -2002,6 +2002,7 @@ async fn enqueue_headless_delivery(
     session_key: Option<&str>,
     delivery_bot: Option<&str>,
     content: &str,
+    cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let target = format!("channel:{}", channel_id.get());
     let bot = delivery_bot
@@ -2019,8 +2020,12 @@ async fn enqueue_headless_delivery(
         session_key,
     };
     if let Some(pool) = shared.pg_pool.as_ref() {
-        match crate::services::message_outbox::enqueue_outbox_pg_returning_id(pool, outbox_message)
-            .await
+        match crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_cancel(
+            pool,
+            outbox_message,
+            cancel_token,
+        )
+        .await
         {
             Ok(Some(outbox_id)) => {
                 if let Some(session_key) =
@@ -2087,7 +2092,14 @@ async fn enqueue_headless_delivery(
                 }
                 return Ok(());
             }
-            Ok(None) => {}
+            Ok(None) => {
+                tracing::info!(
+                    channel_id = channel_id.get(),
+                    session_key,
+                    "skipped headless direct fallback after outbox enqueue returned no row"
+                );
+                return Ok(());
+            }
             Err(error) => {
                 tracing::warn!(
                     "[outbox] postgres enqueue failed for terminal response on channel {}: {}",
@@ -2096,6 +2108,15 @@ async fn enqueue_headless_delivery(
                 );
             }
         }
+    }
+
+    if cancel_requested(cancel_token) {
+        tracing::info!(
+            channel_id = channel_id.get(),
+            session_key,
+            "skipped headless direct fallback after turn cancellation"
+        );
+        return Ok(());
     }
 
     let notify_http = if let Some(registry) = shared.health_registry() {
@@ -5976,6 +5997,7 @@ pub(super) fn spawn_turn_bridge(
                         adk_session_key.as_deref(),
                         inflight_state.delivery_bot.as_deref(),
                         &delivery_response,
+                        Some(cancel_token.as_ref()),
                     )
                     .await
                     {

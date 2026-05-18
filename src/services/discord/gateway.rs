@@ -429,7 +429,7 @@ pub(super) async fn send_intake_placeholder(
             reference_message,
         ));
     }
-    outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg).await)?
+    outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg, None).await)?
         .ok_or_else(|| "intake placeholder delivery was skipped".to_string())
 }
 
@@ -443,7 +443,8 @@ pub(super) async fn edit_outbound_message(
     let client = SerenityTurnOutboundClient { http, shared };
     let msg = gateway_outbound_message(channel_id, content)
         .with_operation(OutboundOperation::Edit { message_id });
-    outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg).await).map(|_| ())
+    outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg, None).await)
+        .map(|_| ())
 }
 
 fn live_bot_owner_provider(live_turn: Option<&LiveDiscordTurnContext>) -> Option<ProviderKind> {
@@ -468,7 +469,7 @@ impl TurnGateway for DiscordGateway {
                 shared: self.shared.clone(),
             };
             let msg = gateway_outbound_message(channel_id, content);
-            outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg).await)?
+            outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg, None).await)?
                 .ok_or_else(|| "message delivery was skipped".to_string())
         })
     }
@@ -486,7 +487,7 @@ impl TurnGateway for DiscordGateway {
             };
             let msg = gateway_outbound_message(channel_id, content)
                 .with_operation(OutboundOperation::Edit { message_id });
-            outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg).await)
+            outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg, None).await)
                 .map(|_| ())
         })
     }

@@ -405,7 +405,7 @@ async fn send_issue_announcement_message(
         message = message.with_edit_message_id(message_id.to_string());
     }
     let policy = DiscordOutboundPolicy::review_notification(None);
-    match deliver_outbound(&client, issue_announcement_deduper(), message, policy).await {
+    match deliver_outbound(&client, issue_announcement_deduper(), message, policy, None).await {
         DeliveryResult::Success { message_id } | DeliveryResult::Fallback { message_id, .. } => {
             Ok(message_id)
         }

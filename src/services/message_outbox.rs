@@ -1,6 +1,7 @@
 use sqlx::PgPool;
 
 use crate::db::Db;
+use crate::services::provider::{CancelToken, cancel_requested};
 
 pub(crate) const LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS: i64 = 5 * 60;
 pub(crate) const LIFECYCLE_NOTIFIER_SOURCE: &str = "lifecycle_notifier";
@@ -275,6 +276,20 @@ pub(crate) async fn enqueue_outbox_pg_returning_id(
     enqueue_outbox_pg_returning_id_with_ttl(pool, message, LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS).await
 }
 
+pub(crate) async fn enqueue_outbox_pg_returning_id_with_cancel(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    cancel_token: Option<&CancelToken>,
+) -> Result<Option<i64>, sqlx::Error> {
+    enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
+        pool,
+        message,
+        LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS,
+        cancel_token,
+    )
+    .await
+}
+
 /// Variant of [`enqueue_outbox_pg_returning_id`] that lets the caller pick the
 /// dedupe TTL (in seconds). Use when the default 5-minute window is too short
 /// for the firing cadence (e.g. periodic GitHub sync alerts that fire every
@@ -283,6 +298,15 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
+) -> Result<Option<i64>, sqlx::Error> {
+    enqueue_outbox_pg_returning_id_with_ttl_and_cancel(pool, message, dedupe_ttl_secs, None).await
+}
+
+pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+    cancel_token: Option<&CancelToken>,
 ) -> Result<Option<i64>, sqlx::Error> {
     let reason_code = normalized_reason_code(message.reason_code);
     let session_key = normalized_session_key(message.target, message.session_key);
@@ -305,6 +329,18 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl(
             existing_id,
             dedupe_ttl_secs,
             "suppressed duplicate outbox message"
+        );
+        return Ok(None);
+    }
+
+    if cancel_requested(cancel_token) {
+        tracing::info!(
+            target = message.target,
+            bot = message.bot,
+            source = message.source,
+            reason_code,
+            session_key = session_key.as_deref(),
+            "skipped outbox enqueue after turn cancellation"
         );
         return Ok(None);
     }
@@ -424,9 +460,12 @@ mod tests {
     use super::{
         LIFECYCLE_NOTIFIER_SOURCE, OutboxMessage, enqueue_lifecycle_notification_pg,
         enqueue_lifecycle_notification_sqlite, enqueue_outbox_pg_returning_id,
-        warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure,
+        enqueue_outbox_pg_returning_id_with_cancel, warn_lifecycle_enqueue_failure,
+        warn_outbox_enqueue_failure,
     };
+    use crate::services::provider::CancelToken;
     use std::io::{self, Write};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
     struct TestDatabase {
@@ -677,6 +716,44 @@ mod tests {
         .await
         .expect("count postgres outbox rows");
         assert_eq!(count, 1);
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outbox_pg_cancelled_enqueue_returns_no_row_without_insert() {
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+        let token = CancelToken::new();
+        token.cancelled.store(true, Ordering::Relaxed);
+
+        let result = enqueue_outbox_pg_returning_id_with_cancel(
+            &pool,
+            OutboxMessage {
+                target: "channel:pg-cancelled",
+                content: "cancelled body",
+                bot: "notify",
+                source: "test",
+                reason_code: Some("test.cancelled"),
+                session_key: Some("session-cancelled"),
+            },
+            Some(&token),
+        )
+        .await
+        .expect("cancelled postgres outbox enqueue");
+
+        assert_eq!(result, None);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM message_outbox
+             WHERE target = $1",
+        )
+        .bind("channel:pg-cancelled")
+        .fetch_one(&pool)
+        .await
+        .expect("count postgres outbox rows");
+        assert_eq!(count, 0);
 
         pool.close().await;
         test_db.drop().await;

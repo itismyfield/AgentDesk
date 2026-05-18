@@ -478,8 +478,14 @@ impl RoutineDiscordLogger {
         if let Some(message_id) = message_id.filter(|value| parse_message_id(value).is_some()) {
             let message = DiscordOutboundMessage::new(channel_id.to_string(), content.to_string())
                 .with_edit_message_id(message_id.to_string());
-            match deliver_outbound(&client, routine_run_log_deduper(), message, policy.clone())
-                .await
+            match deliver_outbound(
+                &client,
+                routine_run_log_deduper(),
+                message,
+                policy.clone(),
+                None,
+            )
+            .await
             {
                 DeliveryResult::Success { message_id }
                 | DeliveryResult::Fallback { message_id, .. } => return Ok(message_id),
@@ -508,7 +514,7 @@ impl RoutineDiscordLogger {
         }
 
         let message = DiscordOutboundMessage::new(channel_id.to_string(), content.to_string());
-        match deliver_outbound(&client, routine_run_log_deduper(), message, policy).await {
+        match deliver_outbound(&client, routine_run_log_deduper(), message, policy, None).await {
             DeliveryResult::Success { message_id }
             | DeliveryResult::Fallback { message_id, .. } => Ok(message_id),
             DeliveryResult::Duplicate {

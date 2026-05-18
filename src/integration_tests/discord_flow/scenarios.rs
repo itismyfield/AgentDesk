@@ -43,7 +43,7 @@ async fn duplicate_relay_suppressed_by_dedupe() {
     // First watcher relays — transport sees one call, deduper remembers key.
     let msg_a = DiscordOutboundMessage::new(channel.clone(), "terminal response alpha")
         .with_correlation(correlation.clone(), semantic);
-    let first = deliver_outbound(&harness.mock_discord, &dedup, msg_a, policy.clone()).await;
+    let first = deliver_outbound(&harness.mock_discord, &dedup, msg_a, policy.clone(), None).await;
     assert!(
         matches!(first, DeliveryResult::Success { .. }),
         "first relay must succeed, got {first:?}"
@@ -54,7 +54,7 @@ async fn duplicate_relay_suppressed_by_dedupe() {
     // touched.
     let msg_b = DiscordOutboundMessage::new(channel.clone(), "terminal response alpha (replica)")
         .with_correlation(correlation, semantic);
-    let second = deliver_outbound(&harness.mock_discord, &dedup, msg_b, policy).await;
+    let second = deliver_outbound(&harness.mock_discord, &dedup, msg_b, policy, None).await;
     assert!(
         matches!(second, DeliveryResult::Duplicate { .. }),
         "second relay must be recorded as Duplicate, got {second:?}"

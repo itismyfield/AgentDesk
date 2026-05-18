@@ -418,6 +418,7 @@ async fn post_dispatch_completion_summary(
         &outbound_client,
         dispatch_completion_summary_deduper(),
         outbound_msg,
+        None,
     )
     .await
     {
