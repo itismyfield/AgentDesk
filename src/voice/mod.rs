@@ -9,6 +9,7 @@ pub(crate) mod prompt;
 pub(crate) mod receiver;
 pub(crate) mod sanitizer;
 pub(crate) mod stt;
+pub(crate) mod stt_streaming;
 pub(crate) mod tts;
 pub(crate) mod turn_link;
 pub(crate) mod utils;

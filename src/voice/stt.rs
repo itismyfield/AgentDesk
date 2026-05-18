@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use futures::future::BoxFuture;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use tokio::process::Command;
 use tracing::{debug, warn};
 
 use super::VoiceConfig;
+use super::stt_streaming::StreamingDecodeWindowMeta;
 use super::utils::expand_tilde;
 
 // === Tunables (was scattered constants) ===
@@ -76,6 +78,40 @@ pub(crate) struct SttCommandOutput {
 
 pub(crate) type SttCommandRunner =
     Arc<dyn Fn(SttCommandInvocation) -> BoxFuture<'static, Result<SttCommandOutput>> + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SttSessionHandle {
+    id: uuid::Uuid,
+}
+
+impl SttSessionHandle {
+    pub(crate) fn new() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PartialTranscript {
+    pub(crate) session: SttSessionHandle,
+    pub(crate) text: String,
+    pub(crate) window: Option<StreamingDecodeWindowMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FinalTranscript {
+    pub(crate) session: SttSessionHandle,
+    pub(crate) text: String,
+}
+
+#[async_trait]
+pub(crate) trait VoiceStt: Send + Sync {
+    async fn start_session(&self, language: &str) -> Result<SttSessionHandle>;
+    async fn feed(&self, session: &SttSessionHandle, pcm: &[f32]) -> Result<()>;
+    async fn poll_partial(&self, session: &SttSessionHandle) -> Result<Option<PartialTranscript>>;
+    async fn finalize(&self, session: SttSessionHandle) -> Result<FinalTranscript>;
+}
 
 #[derive(Clone)]
 pub(crate) struct SttRuntime {
