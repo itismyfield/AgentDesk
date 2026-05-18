@@ -491,7 +491,7 @@
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
 | `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4727 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 209 |  |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 7305 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 7554 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2475 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 88 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 194 |  |
@@ -505,7 +505,7 @@
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1571 | giant-file |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 150 |  |
 | `services::discord::voice_background_driver` | `src/services/discord/voice_background_driver.rs` | 228 |  |
-| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 4594 | giant-file |
+| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 4725 | giant-file |
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 160 |  |
 | `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 1849 | giant-file |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 255 |  |
