@@ -197,6 +197,58 @@ fn observe_claude_tui_transcript_state_for_session(
 }
 
 #[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HostedTuiBusyPreflightReadinessWait {
+    Codex,
+    ClaudePromptMarkerOnly,
+    ClaudePromptMarkerOrIdleTranscript(std::path::PathBuf),
+}
+
+#[cfg(unix)]
+fn hosted_tui_busy_preflight_readiness_wait(
+    provider: &ProviderKind,
+    current_path: Option<&str>,
+    session_id: Option<&str>,
+) -> HostedTuiBusyPreflightReadinessWait {
+    hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+        provider,
+        current_path,
+        session_id,
+        None,
+    )
+}
+
+#[cfg(unix)]
+fn hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+    provider: &ProviderKind,
+    current_path: Option<&str>,
+    session_id: Option<&str>,
+    claude_home: Option<&std::path::Path>,
+) -> HostedTuiBusyPreflightReadinessWait {
+    if matches!(provider, ProviderKind::Codex) {
+        return HostedTuiBusyPreflightReadinessWait::Codex;
+    }
+    let (Some(current_path), Some(session_id)) = (current_path, session_id) else {
+        return HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly;
+    };
+    let Ok(transcript_path) = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        std::path::Path::new(current_path),
+        session_id,
+        claude_home,
+    ) else {
+        return HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly;
+    };
+    // Missing Claude JSONL files currently observe as Idle. Only pass a
+    // transcript path to the fallback once the file exists, so cold sessions
+    // still require the visible prompt marker before we inject a follow-up.
+    if transcript_path.exists() {
+        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(transcript_path)
+    } else {
+        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
+    }
+}
+
+#[cfg(unix)]
 fn observe_codex_tui_rollout_state_for_cwd(
     current_path: Option<&str>,
     tmux_session_name: Option<&str>,
@@ -5495,19 +5547,63 @@ pub(in crate::services::discord) async fn handle_text_message(
             let wait_session_name = initial_diagnostic.tmux_session_name.clone();
             let wait_cancel_token = cancel_token.clone();
             let wait_provider = provider.clone();
-            let wait_result = tokio::task::spawn_blocking(move || match wait_provider {
-                ProviderKind::Codex => {
+            let wait_readiness = hosted_tui_busy_preflight_readiness_wait(
+                &wait_provider,
+                Some(&current_path),
+                session_id.as_deref(),
+            );
+            match &wait_readiness {
+                HostedTuiBusyPreflightReadinessWait::Codex => {
+                    tracing::debug!(
+                        channel_id = channel_id.get(),
+                        user_msg_id = user_msg_id.get(),
+                        tmux_session_name = %wait_session_name,
+                        "hosted tui busy preflight will wait for codex composer readiness"
+                    );
+                }
+                HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
+                    transcript_path,
+                ) => {
+                    tracing::debug!(
+                        channel_id = channel_id.get(),
+                        user_msg_id = user_msg_id.get(),
+                        tmux_session_name = %wait_session_name,
+                        transcript_path = %transcript_path.display(),
+                        "hosted tui busy preflight will allow claude idle transcript readiness"
+                    );
+                }
+                HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly => {
+                    tracing::debug!(
+                        channel_id = channel_id.get(),
+                        user_msg_id = user_msg_id.get(),
+                        tmux_session_name = %wait_session_name,
+                        "hosted tui busy preflight will require claude prompt marker readiness"
+                    );
+                }
+            }
+            let wait_result = tokio::task::spawn_blocking(move || match wait_readiness {
+                HostedTuiBusyPreflightReadinessWait::Codex => {
                     crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
                         &wait_session_name,
                         crate::services::codex_tui::input::PromptReadinessKind::Followup,
                         Some(&wait_cancel_token),
                     )
                 }
-                _ => crate::services::claude_tui::input::wait_for_prompt_ready(
+                HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
+                    transcript_path,
+                ) => crate::services::claude_tui::input::wait_for_prompt_ready_or_idle_transcript(
                     &wait_session_name,
                     crate::services::claude_tui::input::PromptReadinessKind::Followup,
                     Some(wait_cancel_token.as_ref()),
+                    &transcript_path,
                 ),
+                HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly => {
+                    crate::services::claude_tui::input::wait_for_prompt_ready(
+                        &wait_session_name,
+                        crate::services::claude_tui::input::PromptReadinessKind::Followup,
+                        Some(wait_cancel_token.as_ref()),
+                    )
+                }
             })
             .await
             .unwrap_or_else(|join_err| {
@@ -7847,6 +7943,91 @@ mod session_strategy_lifecycle_tests {
             diagnostic.transcript_turn_state,
             crate::services::tui_turn_state::TuiTurnState::Streaming
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_busy_preflight_uses_idle_transcript_wait_when_transcript_exists() {
+        let cwd = tempfile::tempdir().expect("create temp cwd");
+        let claude_home = tempfile::tempdir().expect("create temp claude home");
+        let session_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            session_id,
+            Some(claude_home.path()),
+        )
+        .expect("resolve transcript path");
+        std::fs::create_dir_all(transcript_path.parent().expect("transcript parent"))
+            .expect("create transcript parent");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#,
+        )
+        .expect("write transcript");
+
+        let wait_strategy = hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+            &ProviderKind::Claude,
+            cwd.path().to_str(),
+            Some(session_id),
+            Some(claude_home.path()),
+        );
+
+        assert_eq!(
+            wait_strategy,
+            HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
+                transcript_path
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
+        let cwd = tempfile::tempdir().expect("create temp cwd");
+        let claude_home = tempfile::tempdir().expect("create temp claude home");
+
+        assert_eq!(
+            hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+                &ProviderKind::Claude,
+                cwd.path().to_str(),
+                None,
+                Some(claude_home.path()),
+            ),
+            HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
+        );
+        assert_eq!(
+            hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+                &ProviderKind::Claude,
+                cwd.path().to_str(),
+                Some("not-a-uuid"),
+                Some(claude_home.path()),
+            ),
+            HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
+        );
+        assert_eq!(
+            hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+                &ProviderKind::Claude,
+                cwd.path().to_str(),
+                Some("01234567-89ab-cdef-0123-456789abcdef"),
+                Some(claude_home.path()),
+            ),
+            HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_busy_preflight_keeps_codex_readiness_wait() {
+        let cwd = tempfile::tempdir().expect("create temp cwd");
+
+        let wait_strategy = hosted_tui_busy_preflight_readiness_wait_with_claude_home(
+            &ProviderKind::Codex,
+            cwd.path().to_str(),
+            Some("01234567-89ab-cdef-0123-456789abcdef"),
+            None,
+        );
+
+        assert_eq!(wait_strategy, HostedTuiBusyPreflightReadinessWait::Codex);
     }
 
     #[cfg(unix)]
