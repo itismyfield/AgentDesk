@@ -108,10 +108,7 @@ pub(in crate::services::discord) fn reset_managed_process_session(session_name: 
             session_name,
             "managed session reset",
         );
-        if crate::services::platform::tmux::kill_session_with_reason(
-            session_name,
-            "managed session reset",
-        ) {
+        if crate::services::platform::tmux::kill_session(session_name, "managed session reset") {
             crate::services::tmux_common::cleanup_session_temp_files(session_name);
             reset = true;
         }
@@ -129,7 +126,7 @@ fn recreate_tmux_session(session_name: &str, reset_source: &str) -> bool {
         session_name,
         &format!("hard reset via {reset_source}"),
     );
-    let killed = crate::services::platform::tmux::kill_session_with_reason(
+    let killed = crate::services::platform::tmux::kill_session(
         session_name,
         &format!("hard reset via {reset_source}"),
     );
@@ -634,7 +631,7 @@ mod tests {
                 .expect("system clock after unix epoch")
                 .as_nanos()
         );
-        let _ = crate::services::platform::tmux::kill_session_with_reason(
+        let _ = crate::services::platform::tmux::kill_session(
             &session_name,
             "test cleanup before create",
         );
@@ -650,7 +647,7 @@ mod tests {
         let reset = reset_managed_process_session(&session_name);
         let still_exists = crate::services::platform::tmux::has_session(&session_name);
         if still_exists {
-            let _ = crate::services::platform::tmux::kill_session_with_reason(
+            let _ = crate::services::platform::tmux::kill_session(
                 &session_name,
                 "test cleanup after failed reset",
             );

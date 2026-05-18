@@ -148,7 +148,7 @@ handoff/inflight state on behalf of a cancelled turn.
 The cancel-before-rollout path (the rollout-wait helpers return an
 `Err("cancelled waiting for Codex rollout transcript")`) is also
 short-circuited: instead of tearing down the tmux session via
-`kill_session_with_reason` and returning that `Err` up to the
+`kill_session` and returning that `Err` up to the
 streaming-launch caller (which would translate it into
 `StreamMessage::Error`), the launch returns `Ok(())` with no
 `StreamMessage` emitted. The producer is silent post-cancel, the

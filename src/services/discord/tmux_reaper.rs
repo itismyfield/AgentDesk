@@ -138,7 +138,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
             std::time::Duration::from_secs(10),
             tokio::task::spawn_blocking(move || {
                 record_tmux_exit_reason(&name_clone, "orphan cleanup: no owning channel session");
-                crate::services::platform::tmux::kill_session_with_reason(
+                crate::services::platform::tmux::kill_session(
                     &name_clone,
                     "orphan cleanup: no owning channel session",
                 )
@@ -313,7 +313,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
         let sess = session_name.to_string();
         let kill_result = tokio::task::spawn_blocking(move || {
             record_tmux_exit_reason(&sess, "reaper: dead session with no watcher");
-            crate::services::platform::tmux::kill_session_output_with_reason(
+            crate::services::platform::tmux::kill_session_output(
                 &sess,
                 "reaper: dead session with no watcher",
             )
@@ -617,7 +617,7 @@ async fn process_unified_thread_kill_signals(_shared: &Arc<SharedData>) {
             for name in &names {
                 if name.starts_with(&prefix) && name.ends_with(&suffix_c) {
                     record_tmux_exit_reason(name, "unified-thread run completed");
-                    crate::services::platform::tmux::kill_session_with_reason(
+                    crate::services::platform::tmux::kill_session(
                         name,
                         "unified-thread run completed",
                     );

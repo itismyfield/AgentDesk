@@ -2062,7 +2062,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
-                    crate::services::platform::tmux::kill_session_with_reason(
+                    crate::services::platform::tmux::kill_session(
                         &sess,
                         "watcher cleanup: prompt too long",
                     );
@@ -2143,7 +2143,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
-                    crate::services::platform::tmux::kill_session_with_reason(
+                    crate::services::platform::tmux::kill_session(
                         &sess,
                         "watcher cleanup: authentication failed",
                     );
@@ -2303,10 +2303,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         None,
                     );
                     record_tmux_exit_reason(&sess, &termination_detail);
-                    crate::services::platform::tmux::kill_session_with_reason(
-                        &sess,
-                        &termination_detail,
-                    );
+                    crate::services::platform::tmux::kill_session(&sess, &termination_detail);
                 }),
             )
             .await;
@@ -2626,7 +2623,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &tmux_session_name,
                 "stale session resume detected — forcing fresh session before auto-retry",
             );
-            crate::services::platform::tmux::kill_session_with_reason(
+            crate::services::platform::tmux::kill_session(
                 &tmux_session_name,
                 "stale session resume detected — forcing fresh session before auto-retry",
             );
@@ -4136,7 +4133,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     // before the kill so we only tear down the same
                     // dead-paned session we capture-paned.
                     if tmux_session_exists(&sess) && !tmux_session_has_live_pane(&sess) {
-                        crate::services::platform::tmux::kill_session_with_reason(
+                        crate::services::platform::tmux::kill_session(
                             &sess,
                             "watcher cleanup: dead session after turn",
                         );

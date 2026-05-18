@@ -162,27 +162,19 @@ fn kill_session_output_internal_with_timeout(
 }
 
 /// Kill a tmux session. Returns true if the kill command succeeded.
-pub fn kill_session_with_reason(session_name: &str, reason: &str) -> bool {
+pub fn kill_session(session_name: &str, reason: &str) -> bool {
     kill_session_output_internal(session_name, reason)
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
-/// Kill a tmux session. Returns true if the kill command succeeded.
-pub fn kill_session(session_name: &str) -> bool {
-    kill_session_with_reason(session_name, "unspecified")
-}
-
 /// Kill a tmux session, returning full Output for error inspection.
-pub fn kill_session_output_with_reason(
-    session_name: &str,
-    reason: &str,
-) -> std::io::Result<Output> {
+pub fn kill_session_output(session_name: &str, reason: &str) -> std::io::Result<Output> {
     kill_session_output_internal(session_name, reason)
 }
 
 /// Kill a tmux session, enforcing a caller-supplied timeout.
-pub fn kill_session_output_with_reason_timeout(
+pub fn kill_session_output_timeout(
     session_name: &str,
     reason: &str,
     timeout: Duration,
@@ -190,14 +182,9 @@ pub fn kill_session_output_with_reason_timeout(
     kill_session_output_internal_with_timeout(session_name, reason, timeout)
 }
 
-/// Kill a tmux session, returning full Output for error inspection.
-pub fn kill_session_output(session_name: &str) -> std::io::Result<Output> {
-    kill_session_output_with_reason(session_name, "unspecified")
-}
-
 /// Kill a tmux session, returning an error on failure (for anyhow contexts).
 #[allow(dead_code)]
-pub fn kill_session_checked_with_reason(session_name: &str, reason: &str) -> Result<(), String> {
+pub fn kill_session_checked(session_name: &str, reason: &str) -> Result<(), String> {
     let output = kill_session_output_internal(session_name, reason)
         .map_err(|e| format!("tmux kill-session spawn failed: {e}"))?;
     if output.status.success() {
@@ -212,12 +199,6 @@ pub fn kill_session_checked_with_reason(session_name: &str, reason: &str) -> Res
             ))
         }
     }
-}
-
-/// Kill a tmux session, returning an error on failure (for anyhow contexts).
-#[allow(dead_code)]
-pub fn kill_session_checked(session_name: &str) -> Result<(), String> {
-    kill_session_checked_with_reason(session_name, "unspecified")
 }
 
 /// Send keys to a tmux session.
@@ -737,7 +718,7 @@ mod timeout_tests {
         write_fake_tmux(temp.path(), "sleep 5");
         let _path = PathOverride::prepend(temp.path());
 
-        let error = kill_session_output_with_reason_timeout(
+        let error = kill_session_output_timeout(
             "agentdesk-test",
             "test timeout",
             Duration::from_millis(20),

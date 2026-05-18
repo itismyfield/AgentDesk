@@ -1325,10 +1325,7 @@ fn execute_streaming_local_tui_tmux(
             "stale codex tui local session cleanup before recreate"
         };
         record_tmux_exit_reason(tmux_session_name, cleanup_reason);
-        crate::services::platform::tmux::kill_session_with_reason(
-            tmux_session_name,
-            cleanup_reason,
-        );
+        crate::services::platform::tmux::kill_session(tmux_session_name, cleanup_reason);
     }
 
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
@@ -1482,7 +1479,7 @@ fn execute_streaming_local_tui_tmux(
                 "Codex rollout tail failed; killing tmux session to avoid leak"
             );
             record_tmux_exit_reason(tmux_session_name, &format!("rollout tail failed: {error}"));
-            crate::services::platform::tmux::kill_session_with_reason(
+            crate::services::platform::tmux::kill_session(
                 tmux_session_name,
                 "codex rollout tail failed",
             );
@@ -1704,7 +1701,7 @@ fn execute_streaming_local_tmux(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
-                crate::services::platform::tmux::kill_session_with_reason(
+                crate::services::platform::tmux::kill_session(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
@@ -1718,10 +1715,7 @@ fn execute_streaming_local_tmux(
             "stale local session cleanup before recreate"
         };
         record_tmux_exit_reason(tmux_session_name, cleanup_reason);
-        crate::services::platform::tmux::kill_session_with_reason(
-            tmux_session_name,
-            cleanup_reason,
-        );
+        crate::services::platform::tmux::kill_session(tmux_session_name, cleanup_reason);
     }
 
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
