@@ -114,6 +114,128 @@ pub(super) fn classify_turn_finished_dispatch_kind(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundMemoryTaskKind {
+    Reflect,
+    Capture,
+}
+
+impl BackgroundMemoryTaskKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Reflect => "reflect",
+            Self::Capture => "capture",
+        }
+    }
+}
+
+struct BackgroundMemoryTask {
+    kind: BackgroundMemoryTaskKind,
+    handle: tokio::task::JoinHandle<crate::services::memory::CaptureResult>,
+}
+
+const BACKGROUND_MEMORY_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+enum BackgroundMemoryTaskOutcome {
+    Completed(crate::services::memory::CaptureResult),
+    JoinFailed(tokio::task::JoinError),
+    TimedOut,
+}
+
+struct ObservedBackgroundMemoryTask {
+    kind: BackgroundMemoryTaskKind,
+    outcome: BackgroundMemoryTaskOutcome,
+}
+
+async fn observe_one_background_memory_task(
+    mut task: BackgroundMemoryTask,
+    timeout: std::time::Duration,
+) -> ObservedBackgroundMemoryTask {
+    let outcome = tokio::select! {
+        result = &mut task.handle => match result {
+            Ok(result) => BackgroundMemoryTaskOutcome::Completed(result),
+            Err(err) => BackgroundMemoryTaskOutcome::JoinFailed(err),
+        },
+        _ = tokio::time::sleep(timeout) => {
+            task.handle.abort();
+            BackgroundMemoryTaskOutcome::TimedOut
+        }
+    };
+    ObservedBackgroundMemoryTask {
+        kind: task.kind,
+        outcome,
+    }
+}
+
+async fn observe_background_memory_tasks(
+    channel_id: ChannelId,
+    tasks: Vec<BackgroundMemoryTask>,
+    accumulated_memory_input_tokens: &mut u64,
+    accumulated_memory_output_tokens: &mut u64,
+) {
+    observe_background_memory_tasks_with_timeout(
+        channel_id,
+        tasks,
+        BACKGROUND_MEMORY_TASK_TIMEOUT,
+        accumulated_memory_input_tokens,
+        accumulated_memory_output_tokens,
+    )
+    .await;
+}
+
+async fn observe_background_memory_tasks_with_timeout(
+    channel_id: ChannelId,
+    tasks: Vec<BackgroundMemoryTask>,
+    timeout: std::time::Duration,
+    accumulated_memory_input_tokens: &mut u64,
+    accumulated_memory_output_tokens: &mut u64,
+) {
+    let mut observers = tokio::task::JoinSet::new();
+    for task in tasks {
+        observers.spawn(observe_one_background_memory_task(task, timeout));
+    }
+
+    while let Some(join_result) = observers.join_next().await {
+        match join_result {
+            Ok(observed) => {
+                let task_kind = observed.kind.as_str();
+                match observed.outcome {
+                    BackgroundMemoryTaskOutcome::Completed(result) => {
+                        *accumulated_memory_input_tokens = accumulated_memory_input_tokens
+                            .saturating_add(result.token_usage.input_tokens);
+                        *accumulated_memory_output_tokens = accumulated_memory_output_tokens
+                            .saturating_add(result.token_usage.output_tokens);
+                    }
+                    BackgroundMemoryTaskOutcome::JoinFailed(err) => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] [memory] {task_kind} background task join failed for channel {}: {}",
+                            channel_id.get(),
+                            err
+                        );
+                    }
+                    BackgroundMemoryTaskOutcome::TimedOut => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] [memory] {task_kind} background task timed out after {}s for channel {} — skipping token accounting",
+                            timeout.as_secs(),
+                            channel_id.get(),
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] [memory] background observer task join failed for channel {}: {}",
+                    channel_id.get(),
+                    err
+                );
+            }
+        }
+    }
+}
+
 /// Returns true when any nested object inside `value` has `key` set to boolean `true`.
 fn json_any_true_flag(value: &serde_json::Value, key: &str) -> bool {
     let mut stack = vec![value];
@@ -934,6 +1056,115 @@ mod dispatch_kind_tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+}
+
+#[cfg(test)]
+mod background_memory_task_tests {
+    use super::{
+        BackgroundMemoryTask, BackgroundMemoryTaskKind, observe_background_memory_tasks,
+        observe_background_memory_tasks_with_timeout,
+    };
+    use crate::services::memory::{CaptureResult, TokenUsage};
+    use poise::serenity_prelude::ChannelId;
+    use std::time::{Duration, Instant};
+
+    fn completed_task(
+        kind: BackgroundMemoryTaskKind,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> BackgroundMemoryTask {
+        BackgroundMemoryTask {
+            kind,
+            handle: tokio::spawn(async move {
+                CaptureResult {
+                    token_usage: TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                    },
+                    ..CaptureResult::default()
+                }
+            }),
+        }
+    }
+
+    fn pending_task(kind: BackgroundMemoryTaskKind) -> BackgroundMemoryTask {
+        BackgroundMemoryTask {
+            kind,
+            handle: tokio::spawn(async move { std::future::pending::<CaptureResult>().await }),
+        }
+    }
+
+    #[tokio::test]
+    async fn observes_reflect_and_capture_background_memory_tasks() {
+        let mut input_tokens = 0;
+        let mut output_tokens = 0;
+
+        observe_background_memory_tasks(
+            ChannelId::new(42),
+            vec![
+                completed_task(BackgroundMemoryTaskKind::Reflect, 3, 5),
+                completed_task(BackgroundMemoryTaskKind::Capture, 7, 11),
+            ],
+            &mut input_tokens,
+            &mut output_tokens,
+        )
+        .await;
+
+        assert_eq!(
+            (input_tokens, output_tokens),
+            (10, 16),
+            "reflect and capture handles must both be awaited and token-accounted"
+        );
+    }
+
+    #[tokio::test]
+    async fn observes_single_background_memory_task() {
+        let mut input_tokens = 0;
+        let mut output_tokens = 0;
+
+        observe_background_memory_tasks(
+            ChannelId::new(42),
+            vec![completed_task(BackgroundMemoryTaskKind::Capture, 13, 17)],
+            &mut input_tokens,
+            &mut output_tokens,
+        )
+        .await;
+
+        assert_eq!(
+            (input_tokens, output_tokens),
+            (13, 17),
+            "single-task behavior must keep token accounting unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn observes_background_memory_tasks_under_one_timeout_window() {
+        let mut input_tokens = 0;
+        let mut output_tokens = 0;
+        let started_at = Instant::now();
+
+        observe_background_memory_tasks_with_timeout(
+            ChannelId::new(42),
+            vec![
+                pending_task(BackgroundMemoryTaskKind::Reflect),
+                completed_task(BackgroundMemoryTaskKind::Capture, 7, 11),
+            ],
+            Duration::from_millis(25),
+            &mut input_tokens,
+            &mut output_tokens,
+        )
+        .await;
+
+        assert!(
+            started_at.elapsed() < Duration::from_millis(250),
+            "pending reflect plus completed capture must not serialize into two timeout windows"
+        );
+        assert_eq!(
+            (input_tokens, output_tokens),
+            (7, 11),
+            "completed task accounting should survive another task timing out"
+        );
     }
 }
 
@@ -6344,13 +6575,16 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
-        let mut background_memory_task = None;
+        let mut background_memory_tasks = Vec::new();
         if let Some(reflect_request) = reflect_request {
-            background_memory_task = Some(spawn_memory_reflect_task(
-                channel_id,
-                capture_memory_settings.clone(),
-                reflect_request,
-            ));
+            background_memory_tasks.push(BackgroundMemoryTask {
+                kind: BackgroundMemoryTaskKind::Reflect,
+                handle: spawn_memory_reflect_task(
+                    channel_id,
+                    capture_memory_settings.clone(),
+                    reflect_request,
+                ),
+            });
         }
         if should_spawn_memory_capture {
             let capture_request = CaptureRequest {
@@ -6365,37 +6599,24 @@ pub(super) fn spawn_turn_bridge(
                 user_text: user_text_owned.clone(),
                 assistant_text: full_response.clone(),
             };
-            background_memory_task = Some(spawn_memory_capture_task(
-                channel_id,
-                capture_memory_settings,
-                capture_request,
-            ));
+            background_memory_tasks.push(BackgroundMemoryTask {
+                kind: BackgroundMemoryTaskKind::Capture,
+                handle: spawn_memory_capture_task(
+                    channel_id,
+                    capture_memory_settings,
+                    capture_request,
+                ),
+            });
         }
 
-        if let Some(memory_task) = background_memory_task {
-            match tokio::time::timeout(std::time::Duration::from_secs(30), memory_task).await {
-                Ok(Ok(result)) => {
-                    accumulated_memory_input_tokens = accumulated_memory_input_tokens
-                        .saturating_add(result.token_usage.input_tokens);
-                    accumulated_memory_output_tokens = accumulated_memory_output_tokens
-                        .saturating_add(result.token_usage.output_tokens);
-                }
-                Ok(Err(err)) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] [memory] background task join failed for channel {}: {}",
-                        channel_id.get(),
-                        err
-                    );
-                }
-                Err(_) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] [memory] background task timed out after 30s for channel {} — skipping token accounting",
-                        channel_id.get(),
-                    );
-                }
-            }
+        if !background_memory_tasks.is_empty() {
+            observe_background_memory_tasks(
+                channel_id,
+                background_memory_tasks,
+                &mut accumulated_memory_input_tokens,
+                &mut accumulated_memory_output_tokens,
+            )
+            .await;
         }
 
         {
