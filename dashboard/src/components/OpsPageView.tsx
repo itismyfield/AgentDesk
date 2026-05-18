@@ -526,6 +526,7 @@ export default function OpsPageView({
 
           <OpsConnectionPanel
             wsConnected={wsConnected}
+            lastHealthAt={lastSuccessAt}
             health={health}
             connectedProviders={connectedProviders}
             providerCount={providerCount}

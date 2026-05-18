@@ -55,4 +55,19 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** continue replacing bespoke pills in Ops/Agents/Kanban surfaces, and/or wire `FreshnessIndicator` into per-widget refresh signals (HealthWidget, RateLimitWidget).
 
+### Round 3 — 2026-05-19 00:59~01:05 KST
+**Focus:** Ops surface — Design-system consistency (7) + Glanceability (1) + Real-time reliability (2).
+
+**Changes:**
+- `OpsPageModel.opsToneToHealth()`: new mapper from Ops's local `info|warn|danger|success` tone vocabulary to the shared `SystemHealthTone`. Lets Ops surfaces opt into `StatusBadge` incrementally without touching the dozens of in-table `chipClassFromTone` callers.
+- `OpsConnectionPanel`:
+  - Header now has an inline `FreshnessIndicator` (20s warn / 60s critical) wired to `lastHealthAt`. The operator can immediately tell whether the Ops panel is showing current state or a stale snapshot.
+  - "WS LIVE/DISCONNECTED" chip → `StatusBadge tone={healthy|critical}` with pulse on healthy.
+  - "HOT/BOOT" prompt-retention chip → `StatusBadge` via `opsToneToHealth(promptRetentionTone)`.
+- `OpsPageView`: now forwards the already-tracked `lastSuccessAt` as `lastHealthAt` to the connection panel.
+
+**Verification:** `npm run build` ✓ in 3.8s. No tests in the affected files; primitives' tests still cover behavior.
+
+**Next:** continue cleaning bespoke chips in OpsPageView itself (header, recovery signal rows, runtime rows) and pull the same `opsToneToHealth` adapter into other Ops sections — or wire HealthWidget/RateLimitWidget freshness next round.
+
 EOF

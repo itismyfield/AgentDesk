@@ -4,14 +4,18 @@ import type {
   PromptManifestRetentionStatus,
 } from "../api";
 import {
-  chipClassFromTone,
   formatNumber,
+  opsToneToHealth,
 } from "./OpsPageModel";
+import { StatusBadge } from "./common/StatusBadge";
+import { FreshnessIndicator } from "./common/FreshnessIndicator";
 
 type OpsTone = "info" | "warn" | "danger" | "success";
 
 interface OpsConnectionPanelProps {
   wsConnected: boolean;
+  /** Wall-clock ms timestamp of the most recent successful health refresh. */
+  lastHealthAt?: number | null;
   health: HealthResponse | null;
   connectedProviders: number;
   providerCount: number;
@@ -28,6 +32,7 @@ interface OpsConnectionPanelProps {
 
 export default function OpsConnectionPanel({
   wsConnected,
+  lastHealthAt,
   health,
   connectedProviders,
   providerCount,
@@ -44,7 +49,7 @@ export default function OpsConnectionPanel({
   return (
     <div className="card">
       <div className="card-head">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="card-title">{tr("Connection & Delivery", "Connection & Delivery")}</div>
           <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
             {tr(
@@ -53,6 +58,12 @@ export default function OpsConnectionPanel({
             )}
           </div>
         </div>
+        <FreshnessIndicator
+          timestamp={lastHealthAt ?? null}
+          compact
+          staleAfterSeconds={20}
+          criticalAfterSeconds={60}
+        />
       </div>
       <div data-testid="ops-connection-panel" className="card-body space-y-3">
         <div
@@ -81,9 +92,14 @@ export default function OpsConnectionPanel({
                     : tr("WS가 복구될 때까지 내부 polling으로 health를 유지합니다.", "Internal polling keeps health current until WS recovers.")}
                 </div>
               </div>
-              <span className={chipClassFromTone(wsConnected ? "success" : "danger")}>
+              <StatusBadge
+                tone={wsConnected ? "healthy" : "critical"}
+                size="sm"
+                pulse={wsConnected}
+                title={wsConnected ? tr("WS 연결 정상", "WS connection healthy") : tr("WS 끊김", "WS disconnected")}
+              >
                 {wsConnected ? "LIVE" : "DISCONNECTED"}
-              </span>
+              </StatusBadge>
             </div>
           </div>
         </div>
@@ -142,9 +158,9 @@ export default function OpsConnectionPanel({
                   {promptRetentionStorageNote}
                 </div>
               </div>
-              <span className={chipClassFromTone(promptRetentionTone)}>
+              <StatusBadge tone={opsToneToHealth(promptRetentionTone)} size="sm">
                 {promptRetention?.hot_reload ? "HOT" : promptRetention?.config_applied_at?.toUpperCase() ?? "BOOT"}
-              </span>
+              </StatusBadge>
             </div>
             {promptRetention?.config_source ? (
               <div className="mt-3 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>

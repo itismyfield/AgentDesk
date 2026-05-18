@@ -373,6 +373,27 @@ export function chipClassFromTone(tone: "info" | "warn" | "danger" | "success"):
   }
 }
 
+/**
+ * Maps Ops-local tone vocabulary to the shared SystemHealthTone the rest of
+ * the dashboard uses. Lets Ops surfaces opt into StatusBadge without rewriting
+ * every consumer at once.
+ */
+export function opsToneToHealth(
+  tone: "info" | "warn" | "danger" | "success",
+): "info" | "warning" | "critical" | "healthy" {
+  switch (tone) {
+    case "success":
+      return "healthy";
+    case "warn":
+      return "warning";
+    case "danger":
+      return "critical";
+    case "info":
+    default:
+      return "info";
+  }
+}
+
 export function surfaceStyleForSeverity(severity: SignalSeverity): { borderColor: string; background: string; valueColor: string } {
   switch (severity) {
     case "danger":
