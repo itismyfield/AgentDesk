@@ -172,7 +172,7 @@ fn codex_item_turn_state(json: &Value, completed: bool) -> TuiTurnState {
         .and_then(Value::as_str);
     match item_type {
         Some("user_message") | Some("user") => TuiTurnState::UserSubmitted,
-        Some("agent_message") if completed => TuiTurnState::Streaming,
+        Some("agent_message") if completed => TuiTurnState::Idle,
         Some("agent_message") => TuiTurnState::Streaming,
         _ => TuiTurnState::Streaming,
     }
@@ -277,6 +277,46 @@ mod tests {
         assert_eq!(
             observe_claude_jsonl_turn_state(file.path()),
             TuiTurnState::Unknown
+        );
+    }
+
+    #[test]
+    fn codex_turn_completed_marks_idle() {
+        let file = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":3}}"#,
+        ]);
+
+        assert_eq!(
+            observe_codex_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
+        );
+    }
+
+    #[test]
+    fn codex_function_call_marks_streaming() {
+        let file = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"run_cmd","arguments":"{}","call_id":"c1"}}"#,
+        ]);
+
+        assert_eq!(
+            observe_codex_jsonl_turn_state(file.path()),
+            TuiTurnState::Streaming
+        );
+    }
+
+    #[test]
+    fn codex_completed_agent_message_marks_idle() {
+        let file = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
+        ]);
+
+        assert_eq!(
+            observe_codex_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
         );
     }
 }
