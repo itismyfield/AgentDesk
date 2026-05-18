@@ -349,16 +349,14 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
     // for us to pick up and kill the shared tmux session.
     process_unified_thread_kill_signals(shared).await;
 
-    if matches!(provider, ProviderKind::Codex) {
-        reap_orphan_codex_wrapper_processes().await;
-    }
+    reap_orphan_tmux_wrapper_processes().await;
 }
 
 #[cfg(unix)]
-async fn reap_orphan_codex_wrapper_processes() {
+async fn reap_orphan_tmux_wrapper_processes() {
     let wrappers = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::task::spawn_blocking(list_orphan_codex_wrapper_processes),
+        tokio::task::spawn_blocking(list_orphan_tmux_wrapper_processes),
     )
     .await
     .ok()
@@ -378,7 +376,8 @@ async fn reap_orphan_codex_wrapper_processes() {
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] 🧹 killing orphan codex wrapper pid={} session={}",
+                "  [{ts}] 🧹 killing orphan {} wrapper pid={} session={}",
+                wrapper.provider.as_str(),
                 wrapper.pid,
                 wrapper.tmux_session_name.as_deref().unwrap_or("unknown")
             );
@@ -392,19 +391,20 @@ async fn reap_orphan_codex_wrapper_processes() {
 
     if killed > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!("  [{ts}] 🧹 Reaped {killed}/{count} orphan codex wrapper process(es)");
+        tracing::info!("  [{ts}] 🧹 Reaped {killed}/{count} orphan tmux wrapper process(es)");
     }
 }
 
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OrphanCodexWrapperProcess {
+struct OrphanTmuxWrapperProcess {
     pid: i32,
+    provider: ProviderKind,
     tmux_session_name: Option<String>,
 }
 
 #[cfg(unix)]
-fn list_orphan_codex_wrapper_processes() -> Vec<OrphanCodexWrapperProcess> {
+fn list_orphan_tmux_wrapper_processes() -> Vec<OrphanTmuxWrapperProcess> {
     let output = match std::process::Command::new("ps")
         .args(["-axo", "pid=,ppid=,command="])
         .output()
@@ -415,12 +415,12 @@ fn list_orphan_codex_wrapper_processes() -> Vec<OrphanCodexWrapperProcess> {
 
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(parse_orphan_codex_wrapper_process_line)
+        .filter_map(parse_orphan_tmux_wrapper_process_line)
         .collect()
 }
 
 #[cfg(unix)]
-fn parse_orphan_codex_wrapper_process_line(line: &str) -> Option<OrphanCodexWrapperProcess> {
+fn parse_orphan_tmux_wrapper_process_line(line: &str) -> Option<OrphanTmuxWrapperProcess> {
     let trimmed = line.trim_start();
     let first_end = trimmed.find(char::is_whitespace)?;
     let pid = trimmed[..first_end].parse::<i32>().ok()?;
@@ -429,33 +429,62 @@ fn parse_orphan_codex_wrapper_process_line(line: &str) -> Option<OrphanCodexWrap
     let ppid = rest[..second_end].parse::<i32>().ok()?;
     let command = rest[second_end..].trim_start();
 
-    if ppid != 1 || !command.contains(" codex-tmux-wrapper ") {
+    if ppid != 1 {
         return None;
     }
 
-    // Restrict this reaper to legacy/orphaned wrappers. Current managed tmux
-    // wrappers are owned by the tmux server and use persistent runtime paths.
-    if !command.contains("--input-mode pipe")
-        && !command.contains(".unused-fifo")
-        && !command.contains("/var/folders/")
-        && !command.contains("/tmp/")
-    {
+    let argv: Vec<&str> = command.split_whitespace().collect();
+    if !command_invokes_agentdesk_binary(&argv) {
+        return None;
+    }
+    let provider = argv
+        .iter()
+        .find_map(|token| provider_for_managed_tmux_wrapper_subcommand(token))?;
+
+    if extract_arg_value(&argv, "--output-file").is_none() {
         return None;
     }
 
-    Some(OrphanCodexWrapperProcess {
+    let has_input_fifo = extract_arg_value(&argv, "--input-fifo").is_some();
+    let has_pipe_input_mode = extract_arg_value(&argv, "--input-mode") == Some("pipe");
+    if !has_input_fifo && !has_pipe_input_mode {
+        return None;
+    }
+
+    Some(OrphanTmuxWrapperProcess {
         pid,
+        provider,
         tmux_session_name: extract_tmux_session_name_from_wrapper_command(command),
     })
 }
 
 #[cfg(unix)]
+fn command_invokes_agentdesk_binary(argv: &[&str]) -> bool {
+    argv.first()
+        .and_then(|exe| std::path::Path::new(exe).file_name())
+        .and_then(|basename| basename.to_str())
+        == Some("agentdesk")
+}
+
+#[cfg(unix)]
+fn provider_for_managed_tmux_wrapper_subcommand(token: &str) -> Option<ProviderKind> {
+    crate::services::provider::provider_registry()
+        .iter()
+        .filter(|entry| entry.managed_tmux_backend)
+        .find(|entry| entry.managed_tmux_wrapper_subcommand == Some(token))
+        .and_then(|entry| ProviderKind::from_str(entry.id))
+}
+
+#[cfg(unix)]
+fn extract_arg_value<'a>(argv: &'a [&str], flag: &str) -> Option<&'a str> {
+    argv.windows(2)
+        .find_map(|window| (window[0] == flag).then_some(window[1]))
+}
+
+#[cfg(unix)]
 fn extract_tmux_session_name_from_wrapper_command(command: &str) -> Option<String> {
-    let output_path = command
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .find_map(|window| (window[0] == "--output-file").then_some(window[1]))?;
+    let argv: Vec<&str> = command.split_whitespace().collect();
+    let output_path = extract_arg_value(&argv, "--output-file")?;
     let basename = std::path::Path::new(output_path).file_name()?.to_str()?;
     let stem = basename.strip_suffix(".jsonl").unwrap_or(basename);
     let pos = stem.find("AgentDesk-")?;
@@ -465,8 +494,10 @@ fn extract_tmux_session_name_from_wrapper_command(command: &str) -> Option<Strin
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        extract_tmux_session_name_from_wrapper_command, parse_orphan_codex_wrapper_process_line,
+        extract_tmux_session_name_from_wrapper_command, parse_orphan_tmux_wrapper_process_line,
+        provider_for_managed_tmux_wrapper_subcommand,
     };
+    use crate::services::provider::ProviderKind;
 
     #[test]
     fn extracts_tmux_session_name_from_legacy_output_path() {
@@ -481,17 +512,88 @@ mod tests {
     }
 
     #[test]
-    fn parses_only_ppid_one_legacy_codex_wrappers() {
+    fn parses_ppid_one_managed_provider_wrappers() {
+        let claude_line = " 6259     1 /Users/me/.adk/release/bin/agentdesk tmux-wrapper --output-file /var/folders/x/agentdesk-AgentDesk-claude-adk-cc.jsonl --input-fifo /var/folders/x/agentdesk-AgentDesk-claude-adk-cc.unused-fifo";
+        let claude = parse_orphan_tmux_wrapper_process_line(claude_line).unwrap();
+        assert_eq!(claude.pid, 6259);
+        assert_eq!(claude.provider, ProviderKind::Claude);
+        assert_eq!(
+            claude.tmux_session_name.as_deref(),
+            Some("AgentDesk-claude-adk-cc")
+        );
+
         let line = " 6260     1 /Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper --output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe";
-        let parsed = parse_orphan_codex_wrapper_process_line(line).unwrap();
+        let parsed = parse_orphan_tmux_wrapper_process_line(line).unwrap();
         assert_eq!(parsed.pid, 6260);
+        assert_eq!(parsed.provider, ProviderKind::Codex);
         assert_eq!(
             parsed.tmux_session_name.as_deref(),
             Some("AgentDesk-codex-adk-cdx")
         );
 
+        let qwen_line = " 6262     1 /Users/me/.adk/release/bin/agentdesk qwen-tmux-wrapper --output-file /var/folders/x/agentdesk-AgentDesk-qwen-adk-qw.jsonl --input-fifo /var/folders/x/agentdesk-AgentDesk-qwen-adk-qw.unused-fifo";
+        let qwen = parse_orphan_tmux_wrapper_process_line(qwen_line).unwrap();
+        assert_eq!(qwen.pid, 6262);
+        assert_eq!(qwen.provider, ProviderKind::Qwen);
+        assert_eq!(
+            qwen.tmux_session_name.as_deref(),
+            Some("AgentDesk-qwen-adk-qw")
+        );
+    }
+
+    #[test]
+    fn rejects_live_parent_wrappers() {
         let live_line = " 6261  6988 /Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper --output-file /Users/me/.adk/release/runtime/sessions/host-AgentDesk-codex-adk-cdx.jsonl";
-        assert!(parse_orphan_codex_wrapper_process_line(live_line).is_none());
+        assert!(parse_orphan_tmux_wrapper_process_line(live_line).is_none());
+    }
+
+    #[test]
+    fn rejects_partial_substring_matches() {
+        let line = " 6260     1 /Users/me/.adk/release/bin/agentdesk not-codex-tmux-wrapper --output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe";
+        assert!(parse_orphan_tmux_wrapper_process_line(line).is_none());
+
+        let flag_line = " 6260     1 /Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper --not-output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe";
+        assert!(parse_orphan_tmux_wrapper_process_line(flag_line).is_none());
+    }
+
+    #[test]
+    fn rejects_non_agentdesk_commands_with_wrapper_tokens() {
+        let line = " 6260     1 /usr/bin/python3 codex-tmux-wrapper --output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe";
+        assert!(parse_orphan_tmux_wrapper_process_line(line).is_none());
+    }
+
+    #[test]
+    fn accepts_persistent_runtime_session_paths() {
+        let line = " 6260     1 /Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper --output-file /Users/me/.adk/release/runtime/sessions/host-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe";
+        let parsed = parse_orphan_tmux_wrapper_process_line(line).unwrap();
+        assert_eq!(parsed.provider, ProviderKind::Codex);
+        assert_eq!(
+            parsed.tmux_session_name.as_deref(),
+            Some("AgentDesk-codex-adk-cdx")
+        );
+    }
+
+    #[test]
+    fn rejects_wrappers_without_required_input_flags() {
+        let line = " 6260     1 /Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper --output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl";
+        assert!(parse_orphan_tmux_wrapper_process_line(line).is_none());
+    }
+
+    #[test]
+    fn provider_helper_maps_only_managed_wrapper_subcommands() {
+        assert_eq!(
+            provider_for_managed_tmux_wrapper_subcommand("tmux-wrapper"),
+            Some(ProviderKind::Claude)
+        );
+        assert_eq!(
+            provider_for_managed_tmux_wrapper_subcommand("codex-tmux-wrapper"),
+            Some(ProviderKind::Codex)
+        );
+        assert_eq!(
+            provider_for_managed_tmux_wrapper_subcommand("qwen-tmux-wrapper"),
+            Some(ProviderKind::Qwen)
+        );
+        assert_eq!(provider_for_managed_tmux_wrapper_subcommand("gemini"), None);
     }
 }
 
