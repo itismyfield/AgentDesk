@@ -1401,6 +1401,8 @@ fn execute_streaming_local_tui_tmux(
     }
 
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
+    crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(tmux_session_name)
+        .cleanup_best_effort();
     write_tmux_owner_marker(tmux_session_name)?;
     let owner_path = tmux_owner_path(tmux_session_name);
 
@@ -1823,6 +1825,8 @@ fn execute_streaming_local_tmux(
     }
 
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
+    crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(tmux_session_name)
+        .cleanup_best_effort();
 
     std::fs::write(&output_path, "").map_err(|e| format!("Failed to create output file: {}", e))?;
 

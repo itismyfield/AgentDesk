@@ -6,6 +6,34 @@ use std::time::SystemTime;
 use super::rollout_tail::default_codex_sessions_dir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexTuiSessionFiles {
+    pub codex_home_path: PathBuf,
+    pub legacy_codex_home_path: PathBuf,
+}
+
+impl CodexTuiSessionFiles {
+    pub fn for_tmux_session(tmux_session_name: &str) -> Self {
+        Self {
+            codex_home_path: PathBuf::from(crate::services::tmux_common::session_temp_path(
+                tmux_session_name,
+                crate::services::tmux_common::CODEX_TUI_HOME_TEMP_EXT,
+            )),
+            legacy_codex_home_path: PathBuf::from(
+                crate::services::tmux_common::legacy_tmp_session_path(
+                    tmux_session_name,
+                    crate::services::tmux_common::CODEX_TUI_HOME_TEMP_EXT,
+                ),
+            ),
+        }
+    }
+
+    pub fn cleanup_best_effort(&self) {
+        let _ = std::fs::remove_dir_all(&self.codex_home_path);
+        let _ = std::fs::remove_dir_all(&self.legacy_codex_home_path);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexTuiSessionSelection {
     pub requested_session_id: Option<String>,
     pub selected_session_id: Option<String>,
@@ -225,6 +253,41 @@ fn read_rollout_session_meta(path: &Path) -> Option<RolloutSessionMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvRestore {
+        previous_root: Option<std::ffi::OsString>,
+        previous_host: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set_agentdesk_root_and_host(root: &Path, host: &str) -> Self {
+            let restore = Self {
+                previous_root: std::env::var_os("AGENTDESK_ROOT_DIR"),
+                previous_host: std::env::var_os("HOSTNAME"),
+            };
+            unsafe {
+                std::env::set_var("AGENTDESK_ROOT_DIR", root);
+                std::env::set_var("HOSTNAME", host);
+            }
+            restore
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.previous_root.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+            match self.previous_host.take() {
+                Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
+                None => unsafe { std::env::remove_var("HOSTNAME") },
+            }
+        }
+    }
 
     fn write_rollout(root: &Path, relative: &str, id: &str, cwd: &Path, suffix: &str) -> PathBuf {
         let path = root.join(relative);
@@ -240,6 +303,38 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    fn lock_test_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn cleanup_best_effort_removes_codex_tui_home() {
+        let _lock = lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::set_agentdesk_root_and_host(dir.path(), "codex-tui-cleanup-host");
+        let files = CodexTuiSessionFiles::for_tmux_session("AgentDesk-codex-cleanup-test");
+        let nested_file = files.codex_home_path.join("nested/config.toml");
+        std::fs::create_dir_all(nested_file.parent().unwrap()).unwrap();
+        std::fs::write(&nested_file, "seed").unwrap();
+        let legacy_nested_file = files.legacy_codex_home_path.join("nested/config.toml");
+        std::fs::create_dir_all(legacy_nested_file.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_nested_file, "legacy-seed").unwrap();
+
+        files.cleanup_best_effort();
+        files.cleanup_best_effort();
+
+        assert!(
+            !files.codex_home_path.exists(),
+            "cleanup_best_effort must remove the Codex TUI temp home recursively"
+        );
+        assert!(
+            !files.legacy_codex_home_path.exists(),
+            "cleanup_best_effort must remove the legacy Codex TUI temp home recursively"
+        );
     }
 
     #[test]

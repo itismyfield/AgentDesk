@@ -355,13 +355,13 @@
 | `services::cluster::session_registry` | `src/services/cluster/session_registry.rs` | 572 |  |
 | `services::cluster::stream_relay` | `src/services/cluster/stream_relay.rs` | 1049 | giant-file |
 | `services::cluster::watcher_supervisor` | `src/services/cluster/watcher_supervisor.rs` | 856 |  |
-| `services::codex` | `src/services/codex.rs` | 3463 | giant-file |
+| `services::codex` | `src/services/codex.rs` | 3467 | giant-file |
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 744 |  |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 3 |  |
 | `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 1653 | giant-file |
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 3373 | giant-file |
-| `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 326 |  |
+| `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 421 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 6539 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 910 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 413 |  |
