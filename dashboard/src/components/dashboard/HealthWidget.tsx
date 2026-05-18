@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCachedHealth, getHealth, type HealthResponse } from "../../api";
 import TooltipLabel from "../common/TooltipLabel";
+import { StatusBadge } from "../common/StatusBadge";
+import { FreshnessIndicator } from "../common/FreshnessIndicator";
+import type { SystemHealthTone } from "../../theme/statusTokens";
 import type { TFunction } from "./model";
-import { cx, dashboardBadge, dashboardCard } from "./ui";
+import { cx, dashboardCard } from "./ui";
 
 type HealthMetricLevel = "normal" | "warning" | "danger";
 type HealthPollState = "loading" | "live" | "stale" | "error" | "empty";
@@ -23,7 +26,8 @@ interface HealthMetricCard {
 
 interface HealthWidgetProps {
   t: TFunction;
-  localeTag: string;
+  /** Reserved for future locale-aware formatting; kept for prop-stable callers. */
+  localeTag?: string;
 }
 
 interface PollStateArgs {
@@ -144,6 +148,28 @@ function formatDurationCompact(value: number): string {
     return `${minutes}m ${seconds}s`;
   }
   return `${rounded}s`;
+}
+
+function healthLevelToTone(level: HealthMetricLevel): SystemHealthTone {
+  if (level === "danger") return "critical";
+  if (level === "warning") return "warning";
+  return "healthy";
+}
+
+function pollStateToTone(state: HealthPollState): SystemHealthTone {
+  switch (state) {
+    case "live":
+      return "healthy";
+    case "loading":
+      return "info";
+    case "stale":
+      return "warning";
+    case "error":
+      return "critical";
+    case "empty":
+    default:
+      return "idle";
+  }
 }
 
 function translateStatus(status: string, t: TFunction): string {
@@ -335,17 +361,7 @@ function buildSummary(data: HealthResponse, t: TFunction): string {
   });
 }
 
-function formatUpdatedAt(timestamp: number | null, localeTag: string): string {
-  if (!timestamp) return "n/a";
-  return new Date(timestamp).toLocaleTimeString(localeTag, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-}
-
-export default function HealthWidget({ t, localeTag }: HealthWidgetProps) {
+export default function HealthWidget({ t }: HealthWidgetProps) {
   const [data, setData] = useState<HealthResponse | null>(
     () => getCachedHealth()?.data ?? null,
   );
@@ -420,26 +436,21 @@ export default function HealthWidget({ t, localeTag }: HealthWidgetProps) {
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-1.5">
-          <span
-            className={cx(dashboardBadge.default, "font-bold uppercase tracking-[0.18em]")}
-            style={{
-              color: theme.text,
-              background: theme.surface,
-              border: `1px solid ${theme.border}`,
-            }}
+          <StatusBadge
+            tone={healthLevelToTone(topLevel)}
+            size="sm"
+            style={{ letterSpacing: "0.18em", textTransform: "uppercase" }}
           >
             {translateStatus(data?.status ?? "healthy", t)}
-          </span>
-          <span
-            className={cx(dashboardBadge.default, "font-bold uppercase tracking-[0.18em]")}
-            style={{
-              color: pollState === "error" ? "var(--color-danger)" : pollState === "stale" ? "var(--color-warning)" : "var(--color-info)",
-              background: pollState === "error" ? "var(--color-danger-soft)" : pollState === "stale" ? "var(--color-warning-soft)" : "var(--color-info-soft)",
-              border: pollState === "error" ? "1px solid var(--color-danger-border)" : pollState === "stale" ? "1px solid var(--color-warning-border)" : "1px solid var(--color-info-border)",
-            }}
+          </StatusBadge>
+          <StatusBadge
+            tone={pollStateToTone(pollState)}
+            size="sm"
+            pulse={pollState === "loading"}
+            style={{ letterSpacing: "0.18em", textTransform: "uppercase" }}
           >
             {translatePollState(pollState, t)}
-          </span>
+          </StatusBadge>
         </div>
       </div>
 
@@ -454,7 +465,12 @@ export default function HealthWidget({ t, localeTag }: HealthWidgetProps) {
           {summary}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
-          <span>{t({ ko: `업데이트 ${formatUpdatedAt(lastSuccessAt, localeTag)}`, en: `Updated ${formatUpdatedAt(lastSuccessAt, localeTag)}`, ja: `Updated ${formatUpdatedAt(lastSuccessAt, localeTag)}`, zh: `Updated ${formatUpdatedAt(lastSuccessAt, localeTag)}` })}</span>
+          <FreshnessIndicator
+            timestamp={lastSuccessAt}
+            label={t({ ko: "업데이트", en: "Updated", ja: "更新", zh: "更新" })}
+            staleAfterSeconds={45}
+            criticalAfterSeconds={HEALTH_STALE_AFTER_MS / 1000}
+          />
           {data?.db === false ? <span>{t({ ko: "DB 비정상", en: "DB down", ja: "DB down", zh: "DB down" })}</span> : null}
           {data?.dashboard === false ? <span>{t({ ko: "Dashboard dist 없음", en: "Dashboard dist missing", ja: "Dashboard dist missing", zh: "Dashboard dist missing" })}</span> : null}
         </div>
@@ -463,17 +479,13 @@ export default function HealthWidget({ t, localeTag }: HealthWidgetProps) {
       {data?.degraded_reasons && data.degraded_reasons.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {data.degraded_reasons.slice(0, 3).map((reason) => (
-            <span
+            <StatusBadge
               key={reason}
-              className={dashboardBadge.default}
-              style={{
-                color: topLevel === "danger" ? "var(--color-danger)" : "var(--color-warning)",
-                background: topLevel === "danger" ? "var(--color-danger-soft)" : "var(--color-warning-soft)",
-                border: topLevel === "danger" ? "1px solid var(--color-danger-border)" : "1px solid var(--color-warning-border)",
-              }}
+              tone={topLevel === "danger" ? "critical" : "warning"}
+              size="xs"
             >
               {describeDegradedReason(reason)}
-            </span>
+            </StatusBadge>
           ))}
         </div>
       ) : null}

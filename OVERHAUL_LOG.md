@@ -70,4 +70,21 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** continue cleaning bespoke chips in OpsPageView itself (header, recovery signal rows, runtime rows) and pull the same `opsToneToHealth` adapter into other Ops sections — or wire HealthWidget/RateLimitWidget freshness next round.
 
+### Round 4 — 2026-05-19 01:27~01:30 KST
+**Focus:** HealthWidget — Glanceability (1) + Real-time reliability (2) + Design-system consistency (7).
+
+**Changes:**
+- `dashboard/HealthWidget.tsx`:
+  - Header status chip ("HEALTHY/DEGRADED/UNHEALTHY") and poll-state chip ("Live/Stale/Error/Loading/Empty") now render through `StatusBadge`. New `healthLevelToTone()` and `pollStateToTone()` helpers map this widget's local vocabulary onto `SystemHealthTone`.
+  - "Updated HH:MM:SS" line replaced with `FreshnessIndicator` (45s warn, `HEALTH_STALE_AFTER_MS=75s` critical), so escalation aligns with the widget's existing stale threshold.
+  - Degraded-reason chips also adopt `StatusBadge` (warning/critical tone).
+  - Loading state pulses the poll-state badge for visible motion while syncing — silent loading was a regression-mode previously.
+- `formatUpdatedAt` helper removed (now obsolete); `localeTag` prop kept as optional for caller stability.
+
+**Verification:** `npm run build` ✓ in 3.6s. 16/16 tests pass (incl. all HealthWidget helper tests untouched).
+
+**Net effect:** the operations Health card now speaks the same visual + freshness language as the home overview and Ops connection panel. Three places that drove user trust now share one vocabulary.
+
+**Next:** apply the same treatment to RateLimitWidget + BottleneckWidget, or pivot to (g) explicit loading/empty/error surfaces for widgets that currently show silent blank states.
+
 EOF
