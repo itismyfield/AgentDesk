@@ -609,13 +609,19 @@ fn jsonl_terminal_can_confirm_completion(
             state.user_msg_id != 0 && state.current_msg_id == state.user_msg_id;
         let adopted_session_turn =
             state.rebind_origin && state.user_msg_id == 0 && state.current_msg_id == 0;
-        let can_confirm_turn = if state.rebind_origin {
+        let watcher_owned_session_bound_turn = matches!(
+            state.effective_relay_owner_kind(),
+            crate::services::discord::inflight::RelayOwnerKind::Watcher
+        ) && !state.rebind_origin;
+        let legacy_terminal_shortcut = if state.rebind_origin {
             adopted_session_turn
         } else {
             placeholderless_discord_turn
         };
 
-        has_session_binding && state.status_message_id.is_none() && can_confirm_turn
+        has_session_binding
+            && ((state.status_message_id.is_none() && legacy_terminal_shortcut)
+                || watcher_owned_session_bound_turn)
     })
 }
 
@@ -800,6 +806,53 @@ mod matched_session_jsonl_gate_tests {
         state.rebind_origin = false;
         state.tmux_session_name = None;
         assert!(!jsonl_terminal_can_confirm_completion(Some(&state)));
+    }
+
+    #[test]
+    fn jsonl_terminal_completion_accepts_session_bound_watcher_owned_placeholder() {
+        let mut state = state_for_matched_session(
+            ProviderKind::Claude,
+            "AgentDesk-claude-watcher-owned",
+            "/tmp/watcher-owned.jsonl",
+        );
+        state.current_msg_id = state.user_msg_id + 1;
+        state.status_message_id = Some(state.current_msg_id + 1);
+        state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+
+        assert!(
+            jsonl_terminal_can_confirm_completion(Some(&state)),
+            "session-bound watcher-owned terminal envelopes should finish cleanup even with a placeholder/status panel"
+        );
+    }
+
+    #[test]
+    fn jsonl_terminal_completion_keeps_bridge_owned_placeholder_on_legacy_path() {
+        let mut state = state_for_matched_session(
+            ProviderKind::Claude,
+            "AgentDesk-claude-bridge-owned",
+            "/tmp/bridge-owned.jsonl",
+        );
+        state.current_msg_id = state.user_msg_id + 1;
+        state.status_message_id = Some(state.current_msg_id + 1);
+
+        assert!(
+            !jsonl_terminal_can_confirm_completion(Some(&state)),
+            "bridge-owned placeholder inflights must still rely on the legacy pane/timer gate"
+        );
+
+        state
+            .set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::StandbyRelay);
+        assert!(
+            !jsonl_terminal_can_confirm_completion(Some(&state)),
+            "standby relay ownership is not the watcher-owned completion shortcut"
+        );
+
+        state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::None);
+        state.current_msg_id = state.user_msg_id;
+        assert!(
+            !jsonl_terminal_can_confirm_completion(Some(&state)),
+            "bridge-owned status-panel rows keep the existing status-panel restriction"
+        );
     }
 
     #[test]
