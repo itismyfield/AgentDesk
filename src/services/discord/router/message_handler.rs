@@ -82,6 +82,7 @@ struct ClaudeTuiBusyFollowupDiagnostic {
     watcher_state: &'static str,
     watcher_owner_channel_id: Option<u64>,
     inflight_state: &'static str,
+    transcript_turn_state: crate::services::tui_turn_state::TuiTurnState,
     pane_tail: String,
 }
 
@@ -97,6 +98,7 @@ impl ClaudeTuiBusyFollowupDiagnostic {
             "watcher_state": self.watcher_state,
             "watcher_owner_channel_id": self.watcher_owner_channel_id,
             "inflight_state": self.inflight_state,
+            "transcript_turn_state": self.transcript_turn_state.as_str(),
             "pane_tail": self.pane_tail,
         })
     }
@@ -139,22 +141,50 @@ fn classify_claude_tui_followup_submission(
     watcher_state: &'static str,
     watcher_owner_channel_id: Option<u64>,
     inflight_state: &'static str,
+    transcript_turn_state: crate::services::tui_turn_state::TuiTurnState,
     tmux_session_name: &str,
 ) -> Option<ClaudeTuiBusyFollowupDiagnostic> {
-    if snapshot.prompt_marker_detected || !snapshot.tmux_pane_alive {
+    if transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Idle {
         return None;
+    }
+    if snapshot.prompt_marker_detected || !snapshot.tmux_pane_alive {
+        if !transcript_turn_state.is_busy() {
+            return None;
+        }
     }
     Some(ClaudeTuiBusyFollowupDiagnostic {
         tmux_session_name: tmux_session_name.to_string(),
-        prompt_marker_detected: false,
+        prompt_marker_detected: snapshot.prompt_marker_detected,
         previous_tui_turn_still_running: true,
         tmux_pane_alive: snapshot.tmux_pane_alive,
         capture_available: snapshot.capture_available,
         watcher_state,
         watcher_owner_channel_id,
         inflight_state,
+        transcript_turn_state,
         pane_tail: snapshot.pane_tail.clone(),
     })
+}
+
+#[cfg(unix)]
+fn observe_claude_tui_transcript_state_for_session(
+    current_path: Option<&str>,
+    session_id: Option<&str>,
+) -> crate::services::tui_turn_state::TuiTurnState {
+    let (Some(current_path), Some(session_id)) = (current_path, session_id) else {
+        return crate::services::tui_turn_state::TuiTurnState::Unknown;
+    };
+    let Ok(transcript_path) = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        std::path::Path::new(current_path),
+        session_id,
+        None,
+    ) else {
+        return crate::services::tui_turn_state::TuiTurnState::Unknown;
+    };
+    let provider = ProviderKind::Claude;
+    let probe =
+        crate::services::tui_turn_state::JsonlTurnStateProbe::new(&provider, &transcript_path);
+    crate::services::tui_turn_state::TuiTurnStateProbe::observe(&probe)
 }
 
 #[cfg(unix)]
@@ -164,6 +194,8 @@ fn claude_tui_busy_followup_diagnostic(
     channel_id: serenity::ChannelId,
     tmux_session_name: Option<&str>,
     remote_profile_present: bool,
+    current_path: Option<&str>,
+    session_id: Option<&str>,
 ) -> Option<ClaudeTuiBusyFollowupDiagnostic> {
     if provider != &ProviderKind::Claude || remote_profile_present {
         return None;
@@ -207,13 +239,45 @@ fn claude_tui_busy_followup_diagnostic(
         .unwrap_or(("missing", None));
     let previous_inflight = super::super::inflight::load_inflight_state(provider, channel_id.get());
     let inflight_state = classify_inflight_diagnostic_state(previous_inflight.as_ref());
+    let transcript_turn_state =
+        observe_claude_tui_transcript_state_for_session(current_path, session_id);
     classify_claude_tui_followup_submission(
         &snapshot,
         watcher_state,
         watcher_owner_channel_id,
         inflight_state,
+        transcript_turn_state,
         tmux_session_name,
     )
+}
+
+async fn enqueue_busy_tui_followup_for_retry(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    request_owner: serenity::UserId,
+    user_msg_id: serenity::MessageId,
+    user_text: &str,
+    reply_context: Option<String>,
+    has_reply_boundary: bool,
+    merge_consecutive: bool,
+    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+) -> MailboxEnqueueOutcome {
+    super::super::mailbox_enqueue_intervention(
+        shared,
+        provider,
+        channel_id,
+        build_race_requeued_intervention(
+            request_owner,
+            user_msg_id,
+            user_text,
+            reply_context,
+            has_reply_boundary,
+            merge_consecutive,
+            voice_announcement,
+        ),
+    )
+    .await
 }
 
 #[cfg(unix)]
@@ -5306,6 +5370,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             channel_id,
             tmux_session_name.as_deref(),
             remote_profile.is_some(),
+            Some(&current_path),
+            session_id.as_deref(),
         );
         if let Some(initial_diagnostic) = initial {
             let wait_session_name = initial_diagnostic.tmux_session_name.clone();
@@ -5327,6 +5393,8 @@ pub(in crate::services::discord) async fn handle_text_message(
                 channel_id,
                 tmux_session_name.as_deref(),
                 remote_profile.is_some(),
+                Some(&current_path),
+                session_id.as_deref(),
             );
             // #2416: cancellation may have flipped during the up-to-45s wait
             // (user stop reaction, watchdog, etc.). If it did, do NOT continue
@@ -5387,12 +5455,157 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
     #[cfg(unix)]
     if let Some(diagnostic) = claude_tui_busy_diagnostic {
-        let diagnostic_json = diagnostic.to_json();
+        let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
+        let enqueue_outcome = enqueue_busy_tui_followup_for_retry(
+            shared,
+            &bot_owner_provider,
+            channel_id,
+            original_request_owner,
+            user_msg_id,
+            user_text,
+            reply_context.clone(),
+            has_reply_boundary,
+            merge_consecutive,
+            voice_announcement.clone(),
+        )
+        .await;
+        let queue_depth_after_busy_enqueue = super::super::mailbox_snapshot(shared, channel_id)
+            .await
+            .intervention_queue
+            .len();
+        let want_queued_card =
+            !turn_kind.is_background_trigger() && channel_id == original_channel_id;
+        let mut queued_card_rendered = false;
+        if enqueue_outcome.enqueued && want_queued_card {
+            let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
+            let persist_guard = persist_lock.lock_owned().await;
+            let snapshot = super::super::mailbox_snapshot(shared, channel_id).await;
+            let still_queued = snapshot.intervention_queue.iter().any(|intervention| {
+                intervention.message_id == user_msg_id
+                    || intervention.source_message_ids.contains(&user_msg_id)
+            });
+            if !still_queued {
+                drop(persist_guard);
+                let _ = channel_id.delete_message(http, placeholder_msg_id).await;
+                tracing::info!(
+                    channel_id = channel_id.get(),
+                    user_msg_id = user_msg_id.get(),
+                    placeholder_msg_id = placeholder_msg_id.get(),
+                    "claude_tui busy follow-up queue entry exited before queued-card render; deleted placeholder"
+                );
+            } else {
+                shared.insert_queued_placeholder_locked(
+                    channel_id,
+                    user_msg_id,
+                    placeholder_msg_id,
+                );
+                let gateway = DiscordGateway::new(
+                    http.clone(),
+                    shared.clone(),
+                    bot_owner_provider.clone(),
+                    None,
+                );
+                let key = super::super::placeholder_controller::PlaceholderKey {
+                    provider: bot_owner_provider.clone(),
+                    channel_id,
+                    message_id: placeholder_msg_id,
+                };
+                let queued_input = super::super::placeholder_controller::PlaceholderActiveInput {
+                    reason: super::super::formatting::MonitorHandoffReason::Queued,
+                    started_at_unix: chrono::Utc::now().timestamp(),
+                    tool_summary: None,
+                    command_summary: None,
+                    reason_detail: Some("claude_tui_busy_pre_submit".to_string()),
+                    context_line: None,
+                    request_line: Some(user_text.to_string()),
+                    progress_line: None,
+                };
+                let outcome = shared
+                    .placeholder_controller
+                    .ensure_queued(&gateway, key, queued_input)
+                    .await;
+                use super::super::placeholder_controller::PlaceholderControllerOutcome::*;
+                match outcome {
+                    Edited | Coalesced => {
+                        drop(persist_guard);
+                        queued_card_rendered = true;
+                        let emoji = if enqueue_outcome.merged {
+                            '➕'
+                        } else {
+                            '📬'
+                        };
+                        add_reaction(http, channel_id, user_msg_id, emoji).await;
+                        if !shared.queued_placeholder_still_owned(
+                            channel_id,
+                            user_msg_id,
+                            placeholder_msg_id,
+                        ) {
+                            super::super::formatting::remove_reaction_raw(
+                                http,
+                                channel_id,
+                                user_msg_id,
+                                emoji,
+                            )
+                            .await;
+                        }
+                    }
+                    _ => {
+                        let still_owned_under_lock = shared.queued_placeholder_still_owned(
+                            channel_id,
+                            user_msg_id,
+                            placeholder_msg_id,
+                        );
+                        if still_owned_under_lock {
+                            shared.remove_queued_placeholder_locked(channel_id, user_msg_id);
+                        }
+                        drop(persist_guard);
+                        if still_owned_under_lock {
+                            let _ = channel_id.delete_message(http, placeholder_msg_id).await;
+                        }
+                        tracing::warn!(
+                            channel_id = channel_id.get(),
+                            user_msg_id = user_msg_id.get(),
+                            placeholder_msg_id = placeholder_msg_id.get(),
+                            "claude_tui busy follow-up queued but queued-card render failed; dispatch will post a fresh card"
+                        );
+                    }
+                }
+            }
+        } else if enqueue_outcome.enqueued {
+            let _ = channel_id.delete_message(http, placeholder_msg_id).await;
+        } else {
+            let _ = super::super::http::edit_channel_message(
+                http,
+                channel_id,
+                placeholder_msg_id,
+                CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE,
+            )
+            .await;
+        }
+        let mut diagnostic_json = diagnostic.to_json();
+        if let Some(object) = diagnostic_json.as_object_mut() {
+            object.insert(
+                "queued_for_retry".to_string(),
+                serde_json::json!(enqueue_outcome.enqueued),
+            );
+            object.insert(
+                "queue_merged".to_string(),
+                serde_json::json!(enqueue_outcome.merged),
+            );
+            object.insert(
+                "queue_depth_after".to_string(),
+                serde_json::json!(queue_depth_after_busy_enqueue),
+            );
+            object.insert(
+                "queued_card_rendered".to_string(),
+                serde_json::json!(queued_card_rendered),
+            );
+        }
         tracing::warn!(
             channel_id = channel_id.get(),
             user_msg_id = user_msg_id.get(),
             diagnostics = %diagnostic_json,
-            "claude_tui follow-up blocked before prompt submission because hosted TUI is busy"
+            "claude_tui follow-up queued because hosted TUI is busy before prompt submission"
         );
         crate::services::observability::emit_inflight_lifecycle_event(
             provider.as_str(),
@@ -5403,15 +5616,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             "claude_tui_followup_busy_pre_submit",
             diagnostic_json,
         );
-        let _ = super::super::http::edit_channel_message(
-            http,
-            channel_id,
-            placeholder_msg_id,
-            CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE,
-        )
-        .await;
         super::super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
-        let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
         let kicked =
             release_mailbox_after_placeholder_post_failure(shared, &bot_owner_provider, channel_id)
                 .await;
@@ -5439,8 +5644,12 @@ pub(in crate::services::discord) async fn handle_text_message(
         .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
-            "  [{ts}] ⏭ Claude TUI busy follow-up suppressed before prompt submission (channel {}, queue_kickoff_scheduled={})",
+            "  [{ts}] 📬 Claude TUI busy follow-up queued before prompt submission (channel {}, enqueued={}, merged={}, depth={}, card_rendered={}, queue_kickoff_scheduled={})",
             channel_id,
+            enqueue_outcome.enqueued,
+            enqueue_outcome.merged,
+            queue_depth_after_busy_enqueue,
+            queued_card_rendered,
             kicked
         );
         cancel_token
@@ -7403,6 +7612,7 @@ mod session_strategy_lifecycle_tests {
             "attached",
             Some(1479671301387059200),
             "missing",
+            crate::services::tui_turn_state::TuiTurnState::Unknown,
             "AgentDesk-claude-adk-cdx-direct",
         )
         .expect("busy direct TUI turn should block follow-up submission");
@@ -7432,6 +7642,7 @@ mod session_strategy_lifecycle_tests {
                 "attached",
                 Some(1),
                 "present",
+                crate::services::tui_turn_state::TuiTurnState::Unknown,
                 "AgentDesk-claude-ready",
             )
             .is_none()
@@ -7449,9 +7660,60 @@ mod session_strategy_lifecycle_tests {
                 "missing",
                 None,
                 "stale",
+                crate::services::tui_turn_state::TuiTurnState::Unknown,
                 "AgentDesk-claude-dead",
             )
             .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_tui_transcript_idle_overrides_busy_pane_scrape() {
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "old assistant output with no visible prompt marker".to_string(),
+        };
+
+        assert!(
+            classify_claude_tui_followup_submission(
+                &snapshot,
+                "attached",
+                Some(1),
+                "missing",
+                crate::services::tui_turn_state::TuiTurnState::Idle,
+                "AgentDesk-claude-ready",
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_tui_transcript_busy_can_block_even_if_prompt_marker_is_visible() {
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "Ready for input (type message + Enter)".to_string(),
+        };
+
+        let diagnostic = classify_claude_tui_followup_submission(
+            &snapshot,
+            "attached",
+            Some(1),
+            "present",
+            crate::services::tui_turn_state::TuiTurnState::Streaming,
+            "AgentDesk-claude-streaming",
+        )
+        .expect("transcript streaming state must be authoritative over pane marker");
+
+        assert!(diagnostic.prompt_marker_detected);
+        assert_eq!(
+            diagnostic.transcript_turn_state,
+            crate::services::tui_turn_state::TuiTurnState::Streaming
         );
     }
 
@@ -9309,6 +9571,71 @@ mod tests {
         assert_eq!(
             snapshot.intervention_queue[0].message_id, queued_msg_id,
             "queued message identity must be preserved across mailbox_finish_turn"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn busy_pre_submit_requeues_active_message_before_releasing_mailbox() {
+        use crate::services::provider::CancelToken;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        let shared = super::super::super::make_shared_data_for_tests();
+        let provider = super::super::super::ProviderKind::Claude;
+        let channel_id = ChannelId::new(887_766_554);
+        let owner = UserId::new(44);
+        let active_msg_id = MessageId::new(2_500);
+
+        let cancel_token = Arc::new(CancelToken::new());
+        let started = super::super::super::mailbox_try_start_turn(
+            shared.as_ref(),
+            channel_id,
+            cancel_token,
+            owner,
+            active_msg_id,
+        )
+        .await;
+        assert!(started, "fresh mailbox should accept the active turn");
+        shared.global_active.fetch_add(1, Ordering::Relaxed);
+
+        let enqueue = enqueue_busy_tui_followup_for_retry(
+            &shared,
+            &provider,
+            channel_id,
+            owner,
+            active_msg_id,
+            "queued after transcript still streaming",
+            None,
+            false,
+            false,
+            None,
+        )
+        .await;
+        assert!(
+            enqueue.enqueued,
+            "busy pre-submit handling must queue the current message instead of dropping it"
+        );
+
+        let backlog_before = shared.deferred_hook_backlog.load(Ordering::Relaxed);
+        let kicked =
+            release_mailbox_after_placeholder_post_failure(&shared, &provider, channel_id).await;
+
+        assert!(
+            kicked,
+            "releasing the busy active slot must schedule the queued retry"
+        );
+        assert_eq!(
+            shared.deferred_hook_backlog.load(Ordering::Relaxed),
+            backlog_before + 1,
+            "queued retry must arm the deferred idle drain"
+        );
+
+        let snapshot = shared.mailbox(channel_id).snapshot().await;
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(snapshot.intervention_queue[0].message_id, active_msg_id);
+        assert_eq!(
+            snapshot.intervention_queue[0].text,
+            "queued after transcript still streaming"
         );
     }
 

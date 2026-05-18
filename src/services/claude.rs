@@ -1538,8 +1538,18 @@ fn emit_claude_tui_busy_followup_notice(
 #[cfg(unix)]
 fn claude_tui_followup_busy_before_submit(
     tmux_session_name: &str,
+    transcript_path: Option<&std::path::Path>,
 ) -> Option<crate::services::claude_tui::input::PromptReadinessSnapshot> {
     let snapshot = crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name);
+    if let Some(transcript_path) = transcript_path {
+        match crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
+            transcript_path,
+        ) {
+            crate::services::tui_turn_state::TuiTurnState::Idle => return None,
+            state if state.is_busy() && snapshot.tmux_pane_alive => return Some(snapshot),
+            _ => {}
+        }
+    }
     if snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected {
         Some(snapshot)
     } else {
@@ -1721,7 +1731,9 @@ fn execute_streaming_local_tui_tmux(
         // waiting (otherwise the follow-up reader would treat previous-turn
         // bytes as new-turn output).
         let mut busy_waited = false;
-        if let Some(snapshot) = claude_tui_followup_busy_before_submit(tmux_session_name) {
+        if let Some(snapshot) =
+            claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
+        {
             // #2416: instead of dropping the user's message when the TUI is busy,
             // wait for the next prompt-ready window using the existing
             // wait_for_prompt_ready infrastructure. Only emit the busy notice if

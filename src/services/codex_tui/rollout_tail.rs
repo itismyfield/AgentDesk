@@ -221,6 +221,12 @@ pub fn tail_latest_rollout_for_cwd(
     )
 }
 
+pub(crate) fn observe_rollout_turn_state(
+    rollout_path: &Path,
+) -> crate::services::tui_turn_state::TuiTurnState {
+    crate::services::tui_turn_state::observe_codex_jsonl_turn_state(rollout_path)
+}
+
 pub fn tail_latest_rollout_for_cwd_with_handoff(
     cwd: &Path,
     modified_since: SystemTime,

@@ -676,6 +676,7 @@ src/
 │   ├── tmux_wrapper.rs
 │   ├── tool_output_guard.rs
 │   ├── tui_prompt_dedupe.rs
+│   ├── tui_turn_state.rs
 │   ├── turn_cancel_finalizer.rs
 │   ├── turn_lifecycle.rs
 │   └── turn_orchestrator.rs

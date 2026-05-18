@@ -119,6 +119,12 @@ pub fn replay_transcript_file(
     })
 }
 
+pub(crate) fn observe_transcript_turn_state(
+    transcript_path: &Path,
+) -> crate::services::tui_turn_state::TuiTurnState {
+    crate::services::tui_turn_state::observe_claude_jsonl_turn_state(transcript_path)
+}
+
 pub(crate) fn encode_project_path(path: &Path) -> String {
     // Matches Claude Code's project-dir bucket shape observed under
     // ~/.claude/projects: every non-ASCII-alphanumeric path byte surface is
