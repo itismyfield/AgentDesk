@@ -467,7 +467,7 @@
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 3235 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 373 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 185 |  |
-| `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 526 |  |
+| `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 587 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1841 | giant-file |
 | `services::discord::settings` | `src/services/discord/settings.rs` | 2418 | giant-file |
 | `services::discord::settings::content` | `src/services/discord/settings/content.rs` | 422 |  |
