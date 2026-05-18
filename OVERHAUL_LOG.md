@@ -87,4 +87,18 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** apply the same treatment to RateLimitWidget + BottleneckWidget, or pivot to (g) explicit loading/empty/error surfaces for widgets that currently show silent blank states.
 
+### Round 5 — 2026-05-19 01:55~02:00 KST
+**Focus:** Ops page sweep — Design-system consistency (7) + Glanceability (1) + Real-time reliability (2).
+
+**Changes:**
+- `OpsPageView.tsx`: all 6 remaining `chipClassFromTone` callsites + the inline pulse-dot WS chip + the "STALE" warn chip + the "Updated …" plain chip + the recovery / provider / severity badges → `StatusBadge` (via `opsToneToHealth`).
+- Header "Updated HH:MM:SS" plain-chip replaced with `FreshnessIndicator` (thresholds tied to existing `STALE_AFTER_MS`).
+- Dead local `lastUpdatedLabel` + unused `formatUpdatedAt` import removed.
+
+**Net effect:** the entire Ops page now uses the same visual language. From the operator's perspective: WS status, health status, recovery, provider count, stale flag, bottleneck severity, recovery duration all read with one tone vocabulary. The "Updated X seconds ago" signal now escalates instead of looking constant.
+
+**Verification:** `npm run build` ✓ in 3.6s.
+
+**Next:** RateLimitWidget + BottleneckWidget tokenization, or pivot to (d) AppShell extraction / (e) HomeOverviewPage decomposition for performance + maintainability.
+
 EOF
