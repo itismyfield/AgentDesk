@@ -45,23 +45,23 @@ whichever comes first wins:
 
 1. **User cancel.** `cancel_requested(cancel_token)` returns `true`.
    - This is the relay boundary. See "Relay suppression" below.
-2. **Rollout terminal event.** The rollout JSONL emits an assistant
-   message; the tailer drains the terminal-drain window and emits
-   `StreamMessage::Done` with the captured assistant text.
-3. **Codex readiness / session death.** `tmux_session_has_live_pane`
+2. **Stop hook** (Codex hook relay, #2170/PR #2184, landed in #2585).
+   `hook_completion_seen && saw_assistant_text` fires in
+   `explicit_finalize_path`; the tailer emits `StreamMessage::Done`
+   with `RolloutFinalizePath::Hook`. This is the canonical completion
+   signal for Codex-driven turns; the rollout envelope (3) is the
+   backstop for older CLI versions that do not emit the hook.
+3. **Rollout terminal event.** The rollout JSONL emits an assistant
+   message and the explicit envelope (`composer_ready` / `task_complete`)
+   is received; the tailer emits `StreamMessage::Done` with
+   `RolloutFinalizePath::Envelope`.
+4. **Codex readiness / session death.** `tmux_session_has_live_pane`
    returns `false` before the assistant text is observed. The tailer
    returns `ReadOutputResult::SessionDied` and the streaming entrypoint
    emits a "session ended before producing a response" `Done`.
-4. **Assistant-response deadline (#2182 follow-up).** The tailer waited
+5. **Assistant-response deadline (#2182 follow-up).** The tailer waited
    at EOF for `DEFAULT_ASSISTANT_RESPONSE_DEADLINE_SECS` (30 min) without
    any assistant text. The tailer emits a "timed out" `Done`.
-
-Hooks (Stop hook from Codex hook relay #2170/PR #2184) are not in this
-priority list yet because their plumbing into the tail loop has not
-landed. When it does, hook-terminal events join this list between (1)
-and (2): a Codex-driven stop becomes the canonical signal, and the
-rollout terminal event becomes the backstop. The relay-suppression
-contract below does not change.
 
 ## Relay suppression — the cancel boundary
 
@@ -206,6 +206,26 @@ this: if the candidate kill PID is `pane_pid`, the hard-stop is skipped
 so SIGKILL never tears down the pane underneath a cooperatively
 stoppable Codex TUI.
 
+## Codex interactive interrupt sequence
+
+When `/stop` is received while Codex TUI is running:
+
+1. `interrupt_provider_cli_turn` sends `Escape` via `tmux send-keys`
+   (Codex TUI advertises `Esc to interrupt`, and this matches
+   `codex_tui::input::plan_cancel()`; unlike Claude, no wrapper is in
+   the way — `ProviderTurnInterruptPlan { keys: &["Escape"] }`).
+2. The SIGINT fallback also fires on the resolved provider PID as
+   defense-in-depth (`fallback_sigint_pid_for_provider` returns
+   `provider_pid` for `ProviderKind::Codex`).
+3. `cancel_active_token` flips the cancel flag after the interrupt
+   is delivered (ordering invariant, #1218).
+4. `RelaySuppressionSender` drops all subsequent rollout frames.
+5. If Codex does not return to the readiness prompt within
+   `PROVIDER_HARD_STOP_GRACE` (1.5s) and the cleanup policy is
+   `PreserveSession*`, `hard_stop_pid_for_unresponsive_provider`
+   skips the SIGKILL because the candidate PID equals `pane_pid`
+   (TUI-mode guard; killing it would tear down the session).
+
 ## What this ADR explicitly does NOT do
 
 - Migrate `execute_command_simple_with_timeout` to cancel-aware exec
@@ -213,22 +233,26 @@ stoppable Codex TUI.
 - Re-define the cancel infrastructure (cancel tombstones, restart-mode
   handshake, watcher replacement). Those are owned by
   `relay-state-contract.md` and the `#1222` family.
-- Add Codex Stop hook integration into the cancel-priority list (will
-  land when the hook-relay plumbing lands).
 
 ## Test coverage
 
 The contract above is pinned by:
 
-- `relay_suppression_drops_post_cancel_output` (this PR) — appends a
-  post-cancel assistant text to a live rollout and asserts no
+- `relay_suppression_drops_post_cancel_output` (rollout_tail.rs) —
+  appends a post-cancel assistant text to a live rollout and asserts no
   `Text` or `Done` frame is delivered downstream.
 - `select_provider_pid_returns_pane_pid_when_pane_is_claude_tui`
-  (existing, #1260 / #2163) — direct-TUI pane PID resolution.
+  (tmux_runtime.rs, #1260 / #2163) — direct-TUI pane PID resolution
+  (Claude).
+- `select_provider_pid_returns_pane_pid_when_pane_is_codex_tui`
+  (tmux_runtime.rs, #2172) — direct-TUI pane PID resolution (Codex).
 - `select_provider_pid_still_finds_wrapped_provider_descendant`
-  (existing) — wrapper child PID resolution.
+  (tmux_runtime.rs) — wrapper child PID resolution.
 - `stop_active_turn_runs_interrupt_before_cancel`
-  (existing, #1218) — interrupt-before-cancel ordering invariant.
+  (tmux_runtime.rs, #1218) — interrupt-before-cancel ordering invariant.
+- `codex_stop_hook_emits_done_before_drain`
+  (rollout_tail.rs, #2585) — stop hook fires as the primary completion
+  signal and triggers immediate Done without waiting for heuristic drain.
 
 Any change to the cancel boundary must update this ADR and the
 corresponding tests in the same change.

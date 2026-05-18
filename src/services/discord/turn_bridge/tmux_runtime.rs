@@ -69,9 +69,8 @@ fn provider_turn_interrupt_plan(provider: &ProviderKind) -> Option<ProviderTurnI
         // path instead; the empty key list signals "skip send-keys, go
         // straight to the SIGINT fallback".
         ProviderKind::Claude => Some(ProviderTurnInterruptPlan { keys: &[] }),
-        ProviderKind::Codex | ProviderKind::Qwen => {
-            Some(ProviderTurnInterruptPlan { keys: &["C-c"] })
-        }
+        ProviderKind::Codex => Some(ProviderTurnInterruptPlan { keys: &["Escape"] }),
+        ProviderKind::Qwen => Some(ProviderTurnInterruptPlan { keys: &["C-c"] }),
         ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => None,
     }
 }
@@ -1046,8 +1045,9 @@ mod tests {
     // C-c` therefore SIGINTs the wrapper and tears the session down. The
     // empty key list signals to `interrupt_provider_cli_turn` that it must
     // skip send-keys and proceed straight to the direct-SIGINT fallback.
-    // Codex/Qwen run as the PTY foreground themselves, so C-c via send-keys
-    // is still the correct primary interrupt.
+    // Codex runs as the PTY foreground itself, but its TUI advertises
+    // `Esc to interrupt`; keep the primary tmux key path aligned with
+    // `codex_tui::input::plan_cancel()`. Qwen still uses C-c.
     #[test]
     fn provider_interrupt_plan_skips_send_keys_for_claude_only() {
         assert_eq!(
@@ -1057,7 +1057,7 @@ mod tests {
         );
         assert_eq!(
             super::provider_turn_interrupt_plan(&ProviderKind::Codex).map(|plan| plan.keys),
-            Some(&["C-c"][..])
+            Some(&["Escape"][..])
         );
         assert_eq!(
             super::provider_turn_interrupt_plan(&ProviderKind::Qwen).map(|plan| plan.keys),
@@ -1341,6 +1341,41 @@ mod tests {
             resolved,
             Some(96964),
             "TUI mode: pane_pid is the claude CLI itself; stop must SIGINT it directly"
+        );
+    }
+
+    // #2172: Codex TUI direct-launch regression. Codex runs as the tmux pane
+    // foreground itself (no wrapper) in Direct TUI mode. Without the pane
+    // self-check, `descendant_processes` excludes pane_pid and the search
+    // returns None, causing stop emoji to silently SIGINT nothing while Codex
+    // keeps generating output. Mirrors the Claude TUI regression guard above.
+    #[cfg(unix)]
+    #[test]
+    fn select_provider_pid_returns_pane_pid_when_pane_is_codex_tui() {
+        let rows = vec![
+            super::ProcessRow {
+                pid: 88400,
+                ppid: 10240,
+                command: "/opt/homebrew/bin/codex --resume-session abc123".into(),
+            },
+            super::ProcessRow {
+                pid: 88450,
+                ppid: 88400,
+                command: "/bin/sh -c some-tool-invocation".into(),
+            },
+            super::ProcessRow {
+                pid: 88451,
+                ppid: 88400,
+                command: "node /opt/homebrew/lib/node_modules/codex/helper.js".into(),
+            },
+        ];
+
+        let resolved = super::select_provider_pid_in_pane(88400, &rows, &ProviderKind::Codex, None);
+
+        assert_eq!(
+            resolved,
+            Some(88400),
+            "Codex TUI direct mode: pane_pid is the codex CLI itself; interrupt must target it directly (#2172)"
         );
     }
 
