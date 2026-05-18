@@ -1655,6 +1655,7 @@ async fn send_review_result_message_via_http(
     use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
     use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
     use crate::services::discord::outbound::result::DeliveryResult;
+    use crate::services::discord::outbound::shared_outbound_deduper;
     use poise::serenity_prelude::ChannelId;
 
     let client = reqwest::Client::new();
@@ -1671,7 +1672,6 @@ async fn send_review_result_message_via_http(
 
     let outbound_client =
         HttpOutboundClient::new(client, token.to_string(), discord_api_base.to_string());
-    let dedup = review_followup_deduper();
     let event_kind = match kind {
         ReviewFollowupKind::Pass => "pass",
         ReviewFollowupKind::Unknown => "unknown",
@@ -1690,7 +1690,14 @@ async fn send_review_result_message_via_http(
         DiscordOutboundPolicy::review_notification(),
     );
 
-    match deliver_outbound(&outbound_client, dedup, outbound_msg, None).await {
+    match deliver_outbound(
+        &outbound_client,
+        shared_outbound_deduper(),
+        outbound_msg,
+        None,
+    )
+    .await
+    {
         DeliveryResult::Sent { .. } | DeliveryResult::Fallback { .. } => Ok(()),
         DeliveryResult::Duplicate { .. } => {
             // Duplicate suppression is a success for the caller.
@@ -1706,11 +1713,6 @@ async fn send_review_result_message_via_http(
             )),
         },
     }
-}
-
-fn review_followup_deduper() -> &'static crate::services::discord::outbound::OutboundDeduper {
-    static DEDUPER: OnceLock<crate::services::discord::outbound::OutboundDeduper> = OnceLock::new();
-    DEDUPER.get_or_init(crate::services::discord::outbound::OutboundDeduper::new)
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

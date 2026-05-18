@@ -195,12 +195,11 @@ pub(crate) async fn post_dispatch_message_to_channel_with_delivery(
     use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
     use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
     use crate::services::discord::outbound::result::{DeliveryResult, FallbackUsed};
-    use crate::services::discord::outbound::{HttpOutboundClient, OutboundDeduper};
+    use crate::services::discord::outbound::{HttpOutboundClient, shared_outbound_deduper};
     use poise::serenity_prelude::ChannelId;
 
     let outbound_client =
         HttpOutboundClient::new(client.clone(), token.to_string(), base_url.to_string());
-    let dedup = OutboundDeduper::new();
     let correlation_id = dispatch_id.map(dispatch_delivery_correlation_id);
     let semantic_event_id = dispatch_id.map(dispatch_delivery_semantic_event_id);
     let mut policy = DiscordOutboundPolicy::dispatch_outbox();
@@ -235,7 +234,14 @@ pub(crate) async fn post_dispatch_message_to_channel_with_delivery(
     )
     .with_summary(minimal_message.to_string());
 
-    match deliver_outbound(&outbound_client, &dedup, outbound_msg, None).await {
+    match deliver_outbound(
+        &outbound_client,
+        shared_outbound_deduper(),
+        outbound_msg,
+        None,
+    )
+    .await
+    {
         DeliveryResult::Sent { messages, .. } => {
             let message_id = first_raw_message_id(&messages).unwrap_or_default();
             Ok(DispatchMessagePostOutcome {

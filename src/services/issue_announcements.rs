@@ -3,7 +3,7 @@ use sqlx::{PgPool, Row};
 
 use crate::services::discord::outbound::{
     DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
-    OutboundDeduper, deliver_outbound,
+    deliver_outbound, shared_outbound_deduper,
 };
 
 #[derive(Clone, Debug)]
@@ -405,7 +405,7 @@ async fn send_issue_announcement_message(
         message = message.with_edit_message_id(message_id.to_string());
     }
     let policy = DiscordOutboundPolicy::review_notification(None);
-    match deliver_outbound(&client, issue_announcement_deduper(), message, policy, None).await {
+    match deliver_outbound(&client, shared_outbound_deduper(), message, policy, None).await {
         DeliveryResult::Success { message_id } | DeliveryResult::Fallback { message_id, .. } => {
             Ok(message_id)
         }
@@ -415,11 +415,6 @@ async fn send_issue_announcement_message(
         DeliveryResult::Skipped { .. } => Err("issue announcement delivery skipped".to_string()),
         DeliveryResult::PermanentFailure { detail } => Err(detail),
     }
-}
-
-fn issue_announcement_deduper() -> &'static OutboundDeduper {
-    static DEDUPER: std::sync::OnceLock<OutboundDeduper> = std::sync::OnceLock::new();
-    DEDUPER.get_or_init(OutboundDeduper::new)
 }
 
 fn normalize_channel_id(channel_id: &str) -> String {

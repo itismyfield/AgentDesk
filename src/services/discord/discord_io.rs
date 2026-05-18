@@ -1,10 +1,10 @@
 use super::*;
 use crate::services::discord::outbound::{
     DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, FallbackKind,
-    HttpOutboundClient, OutboundDeduper, deliver_outbound,
+    HttpOutboundClient, deliver_outbound, shared_outbound_deduper,
 };
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// Check if a user is authorized (owner or allowed user)
 /// Returns true if authorized, false if rejected.
@@ -442,11 +442,6 @@ struct DiscordIoDeliveryReport {
     fallback_kind: Option<&'static str>,
 }
 
-fn discord_io_deduper() -> &'static OutboundDeduper {
-    static DEDUPER: OnceLock<OutboundDeduper> = OnceLock::new();
-    DEDUPER.get_or_init(OutboundDeduper::new)
-}
-
 async fn deliver_channel_message(
     token: &str,
     channel_id: u64,
@@ -471,7 +466,15 @@ async fn deliver_channel_message(
             .map(str::to_string),
     );
 
-    match deliver_outbound(&client, discord_io_deduper(), outbound_msg, policy, None).await {
+    match deliver_outbound(
+        &client,
+        shared_outbound_deduper(),
+        outbound_msg,
+        policy,
+        None,
+    )
+    .await
+    {
         DeliveryResult::Success { message_id } => Ok(DiscordIoDeliveryReport {
             status: "success",
             message_id: Some(message_id),

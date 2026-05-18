@@ -3,23 +3,18 @@ use chrono::Datelike;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::{
     DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
-    OutboundDeduper, deliver_outbound,
+    deliver_outbound, shared_outbound_deduper,
 };
 
 use super::runtime::RoutineRunOutcome;
 use super::store::{ClaimedRoutineRun, RecoveredRoutineRun, RoutineRecord, RoutineStore};
 
 const RUN_LOG_SECTION_ORDER: [&str; 4] = ["started", "js_inputs", "js_action", "outcome"];
-
-fn routine_run_log_deduper() -> &'static OutboundDeduper {
-    static DEDUPER: OnceLock<OutboundDeduper> = OnceLock::new();
-    DEDUPER.get_or_init(OutboundDeduper::new)
-}
 
 #[derive(Clone)]
 pub struct RoutineDiscordLogger {
@@ -480,7 +475,7 @@ impl RoutineDiscordLogger {
                 .with_edit_message_id(message_id.to_string());
             match deliver_outbound(
                 &client,
-                routine_run_log_deduper(),
+                shared_outbound_deduper(),
                 message,
                 policy.clone(),
                 None,
@@ -514,7 +509,7 @@ impl RoutineDiscordLogger {
         }
 
         let message = DiscordOutboundMessage::new(channel_id.to_string(), content.to_string());
-        match deliver_outbound(&client, routine_run_log_deduper(), message, policy, None).await {
+        match deliver_outbound(&client, shared_outbound_deduper(), message, policy, None).await {
             DeliveryResult::Success { message_id }
             | DeliveryResult::Fallback { message_id, .. } => Ok(message_id),
             DeliveryResult::Duplicate {

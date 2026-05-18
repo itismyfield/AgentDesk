@@ -1,6 +1,6 @@
+use std::sync::Arc;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
@@ -21,7 +21,7 @@ use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
 use crate::services::discord::outbound::result::{DeliveryResult, FallbackUsed};
 use crate::services::discord::outbound::{
     DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DiscordOutboundClient, OutboundDedupClaim,
-    OutboundDedupReservation, OutboundDedupWait, OutboundDeduper,
+    OutboundDedupReservation, OutboundDedupWait, OutboundDeduper, shared_outbound_deduper,
 };
 use crate::services::provider::ProviderKind;
 
@@ -1571,7 +1571,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
     let outbound_client = SerenityManualOutboundClient { http };
     send_resolved_manual_message_with_client(
         &outbound_client,
-        manual_notification_deduper(),
+        shared_outbound_deduper(),
         channel_id_raw,
         target,
         content,
@@ -2329,11 +2329,6 @@ async fn deliver_chunked_manual_notification<C: ManualOutboundClient>(
     })
 }
 
-fn manual_notification_deduper() -> &'static OutboundDeduper {
-    static DEDUPER: OnceLock<OutboundDeduper> = OnceLock::new();
-    DEDUPER.get_or_init(OutboundDeduper::new)
-}
-
 pub async fn send_message(
     registry: &HealthRegistry,
     sqlite: &Db,
@@ -2534,7 +2529,7 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
 
     match deliver_manual_dm_notification(
         &SerenityManualOutboundClient { http },
-        manual_notification_deduper(),
+        shared_outbound_deduper(),
         request.user_id,
         &request.content,
         &request.bot,

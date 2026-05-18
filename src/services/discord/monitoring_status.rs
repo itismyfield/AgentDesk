@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use super::outbound::{
     DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
-    OutboundDeduper, deliver_outbound,
+    OutboundDeduper, deliver_outbound, shared_outbound_deduper,
 };
 use super::{SharedData, health, rate_limit_wait};
 use crate::server::routes::dispatches::discord_delivery::{
@@ -31,11 +31,6 @@ static SWEEPER_STARTED: OnceLock<()> = OnceLock::new();
 struct MonitoringOutboundClient {
     http: Arc<serenity::Http>,
     shared: Option<Arc<SharedData>>,
-}
-
-fn monitoring_deduper() -> &'static OutboundDeduper {
-    static DEDUPER: OnceLock<OutboundDeduper> = OnceLock::new();
-    DEDUPER.get_or_init(OutboundDeduper::new)
 }
 
 impl DiscordOutboundClient for MonitoringOutboundClient {
@@ -307,7 +302,7 @@ async fn render_channel_monitoring_from_store(
     if let Some(msg_id) = rendered_msg_id {
         match deliver_monitoring_status(
             &outbound_client,
-            monitoring_deduper(),
+            shared_outbound_deduper(),
             channel_id,
             Some(msg_id),
             &content,
@@ -331,7 +326,7 @@ async fn render_channel_monitoring_from_store(
 
     let message_id = deliver_monitoring_status(
         &outbound_client,
-        monitoring_deduper(),
+        shared_outbound_deduper(),
         channel_id,
         None,
         &content,

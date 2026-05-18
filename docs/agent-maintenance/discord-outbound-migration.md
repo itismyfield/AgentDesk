@@ -1,14 +1,15 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
-> Implementation refresh for #1457 / #2368 / #2533: v3 delivery now covers dispatch
+> Implementation refresh for #1457 / #2368 / #2533 / #2534: v3 delivery now covers dispatch
 > outbox, review followups, short manual/DM notifications, gateway placeholder
 > sends, and dispatch completion summaries directly. `OutboundDeduper` now has
 > an in-flight reservation primitive for atomic lookup/send/record/release
-> behavior. Turn-owned delivery paths can pass a `CancelToken` so post-cancel
-> sends, fallback retries, split chunks, and headless outbox enqueue are
-> suppressed.
+> behavior, and all migrated producers share one process-wide in-memory deduper
+> after building their outbound delivery key. Turn-owned delivery paths can pass
+> a `CancelToken` so post-cancel sends, fallback retries, split chunks, and
+> headless outbox enqueue are suppressed.
 >
-> Last refreshed: 2026-05-18 (against #2537 explicit outbound dedup release).
+> Last refreshed: 2026-05-18 (against #2534 shared outbound deduper release).
 >
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
@@ -49,6 +50,7 @@ HTTP path.
 | **Legacy bridge** `DiscordOutboundMessage` (v2) | `outbound/legacy.rs:159` | compatibility facade | Two-arg constructor `(channel_id, content)` + builder fluent. Older producers still route through this while their callsites migrate. |
 | **Legacy bridge** `deliver_outbound<C>(...)` | `outbound/legacy.rs:629` | compatibility adapter over v3 | Converts v2 message/policy inputs into v3 envelopes, delegates to `outbound::delivery`, then maps v3 results back to legacy result variants. Carries the optional `CancelToken` through for turn-owned callers; non-turn producers pass `None`. |
 | `OutboundDeduper` | `outbound/legacy.rs:440` | active | In-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record/release window. v3 stores serialized `Vec<DeliveredMessage>`; the legacy facade still maps old single-message ids for compatibility. `OutboundDedupReservation::release()` is the explicit terminal-failure path; `Drop` remains only a backstop. |
+| `shared_outbound_deduper()` | `outbound/mod.rs:47` | active | Process-wide in-memory deduper shared by migrated producers once they have built a structured outbound delivery key. This is only the final in-process duplicate-send guard; durable SQL outbox uniqueness still belongs to the `message_outbox` enqueue/claim path. |
 
 Legacy re-exports remain in `outbound/mod.rs`; direct v3 callsites import from
 their submodule paths (`outbound::message`, `outbound::policy`,

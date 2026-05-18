@@ -1002,6 +1002,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_deduper_blocks_same_key_across_producers() {
+        let client = MockClient::default();
+        let dedup = crate::services::discord::outbound::shared_outbound_deduper();
+        let suffix = uuid::Uuid::new_v4();
+        let correlation_id = format!("cross-producer:{suffix}");
+        let semantic_event_id = format!("cross-producer:{suffix}:notify");
+        let producer_a = || {
+            DiscordOutboundMessage::new(
+                correlation_id.clone(),
+                semantic_event_id.clone(),
+                "from producer A",
+                OutboundTarget::Channel(ChannelId::new(123)),
+                DiscordOutboundPolicy::review_notification(),
+            )
+        };
+        let producer_b = || {
+            DiscordOutboundMessage::new(
+                correlation_id.clone(),
+                semantic_event_id.clone(),
+                "from producer B",
+                OutboundTarget::Channel(ChannelId::new(123)),
+                DiscordOutboundPolicy::review_notification(),
+            )
+        };
+
+        let first = deliver_outbound(&client, dedup, producer_a(), None).await;
+        let second = deliver_outbound(&client, dedup, producer_b(), None).await;
+
+        assert!(matches!(first, DeliveryResult::Sent { .. }));
+        match second {
+            DeliveryResult::Duplicate {
+                dedup_key,
+                existing_messages,
+            } => {
+                assert_eq!(dedup_key.correlation_id, correlation_id);
+                assert_eq!(dedup_key.semantic_event_id, semantic_event_id);
+                assert_eq!(existing_messages[0].raw_message_id, "msg-123-15");
+            }
+            other => panic!("expected duplicate, got {other:?}"),
+        }
+        assert_eq!(
+            client.posts(),
+            vec![("123".to_string(), "from producer A".to_string())]
+        );
+    }
+
+    #[tokio::test]
     async fn v3_dedup_reservation_suppresses_concurrent_retry_send() {
         let client = MockClient::default();
         client.set_post_delay_ms(50);

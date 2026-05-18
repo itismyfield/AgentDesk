@@ -19,7 +19,7 @@ use super::meeting_state_machine::{self as msm, MeetingEvent, MeetingState};
 use super::org_schema;
 use super::outbound::{
     DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
-    OutboundDeduper, deliver_outbound, outbound_fingerprint,
+    deliver_outbound, outbound_fingerprint, shared_outbound_deduper,
 };
 use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
 use super::settings::{ResolvedMemorySettings, RoleBinding, load_role_prompt};
@@ -637,11 +637,6 @@ struct MeetingOutboundClient<'a> {
     shared: &'a Arc<SharedData>,
 }
 
-fn meeting_deduper() -> &'static OutboundDeduper {
-    static DEDUPER: std::sync::OnceLock<OutboundDeduper> = std::sync::OnceLock::new();
-    DEDUPER.get_or_init(OutboundDeduper::new)
-}
-
 impl DiscordOutboundClient for MeetingOutboundClient<'_> {
     async fn post_message(
         &self,
@@ -740,7 +735,7 @@ async fn deliver_meeting_message(
     meeting_delivery_result(
         deliver_outbound(
             &MeetingOutboundClient { http, shared },
-            meeting_deduper(),
+            shared_outbound_deduper(),
             message,
             DiscordOutboundPolicy::preserve_inline_content(),
             None,
@@ -799,7 +794,7 @@ async fn edit_meeting_message(
     meeting_delivery_result(
         deliver_outbound(
             &MeetingOutboundClient { http, shared },
-            meeting_deduper(),
+            shared_outbound_deduper(),
             message,
             DiscordOutboundPolicy::preserve_inline_content(),
             None,

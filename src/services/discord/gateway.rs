@@ -12,7 +12,7 @@ use super::outbound::message::{
 };
 use super::outbound::policy::DiscordOutboundPolicy;
 use super::outbound::result::DeliveryResult;
-use super::outbound::{DiscordOutboundClient, OutboundDeduper};
+use super::outbound::{DiscordOutboundClient, shared_outbound_deduper};
 use super::router;
 use super::router::handle_text_message;
 use super::turn_bridge::{auto_retry_with_history, release_retry_pending};
@@ -253,11 +253,6 @@ fn gateway_outbound_message(
     )
 }
 
-fn gateway_deduper() -> &'static OutboundDeduper {
-    static DEDUPER: std::sync::OnceLock<OutboundDeduper> = std::sync::OnceLock::new();
-    DEDUPER.get_or_init(OutboundDeduper::new)
-}
-
 impl DiscordOutboundClient for SerenityTurnOutboundClient {
     async fn post_message(
         &self,
@@ -429,7 +424,7 @@ pub(super) async fn send_intake_placeholder(
             reference_message,
         ));
     }
-    outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg, None).await)?
+    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)?
         .ok_or_else(|| "intake placeholder delivery was skipped".to_string())
 }
 
@@ -443,7 +438,7 @@ pub(super) async fn edit_outbound_message(
     let client = SerenityTurnOutboundClient { http, shared };
     let msg = gateway_outbound_message(channel_id, content)
         .with_operation(OutboundOperation::Edit { message_id });
-    outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg, None).await)
+    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)
         .map(|_| ())
 }
 
@@ -469,8 +464,10 @@ impl TurnGateway for DiscordGateway {
                 shared: self.shared.clone(),
             };
             let msg = gateway_outbound_message(channel_id, content);
-            outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg, None).await)?
-                .ok_or_else(|| "message delivery was skipped".to_string())
+            outbound_delivery_error(
+                deliver_outbound(&client, shared_outbound_deduper(), msg, None).await,
+            )?
+            .ok_or_else(|| "message delivery was skipped".to_string())
         })
     }
 
@@ -487,8 +484,10 @@ impl TurnGateway for DiscordGateway {
             };
             let msg = gateway_outbound_message(channel_id, content)
                 .with_operation(OutboundOperation::Edit { message_id });
-            outbound_delivery_error(deliver_outbound(&client, gateway_deduper(), msg, None).await)
-                .map(|_| ())
+            outbound_delivery_error(
+                deliver_outbound(&client, shared_outbound_deduper(), msg, None).await,
+            )
+            .map(|_| ())
         })
     }
 
