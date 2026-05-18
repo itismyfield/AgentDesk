@@ -11,30 +11,30 @@ use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested}
 
 const DEFAULT_ROLLOUT_WAIT_SECS: u64 = 30;
 /// Fallback EOF drain budget for rollouts that do NOT emit an explicit
-/// `event_msg/task_complete` signal (legacy Codex CLI versions or unexpected
-/// codex variants). Modern Codex CLI (>= 2026-03) emits `task_complete` per
-/// turn and the read loop completes immediately when it observes that signal
-/// + zero pending tool calls — this drain is only the safety net.
+/// hook/composer-ready completion signal (legacy Codex CLI versions or
+/// unexpected codex variants). Modern Codex TUI completion is driven by
+/// `event_msg/composer_ready` (explicit or wrapper-synthetic) or by provider
+/// Stop hooks; this drain is only the safety net.
 ///
 /// Issue #2423: previous value of 750ms produced premature `Done` whenever
 /// Codex paused for >750ms between rollout writes (e.g. tool-call burst
 /// boundary), truncating the assistant response. Issue #2419 / PR #2422 bumped
-/// this to 5000ms as a heuristic; #2423 replaces the heuristic with an
-/// explicit `task_complete` detection and keeps the 5s drain only for
+/// this to 5000ms as a heuristic; #2423 replaced the heuristic with an
+/// explicit completion detection and keeps this shorter drain only for
 /// legacy/unknown rollout variants. Tool-call gating (see
 /// `RolloutParseState::pending_tool_calls`) is the structural complement that
 /// suppresses drain entirely while one or more tools are in flight.
-const DEFAULT_TERMINAL_DRAIN_MS: u64 = 5000;
+const DEFAULT_TERMINAL_DRAIN_MS: u64 = 1000;
 /// Issue #2453: legacy Codex CLI builds (no `event_msg` records at all in the
-/// rollout) cannot benefit from the `task_complete` fast-path nor the
-/// token-count refresh signal. The 5s terminal drain stays structurally
-/// fragile against burst-pause-burst patterns with >5s mid-response pauses.
+/// rollout) cannot benefit from the explicit completion path nor the
+/// token-count refresh signal. The short terminal drain stays structurally
+/// fragile against burst-pause-burst patterns with multi-second pauses.
 /// When the tail observes ZERO `event_msg` records on a turn — the
 /// canonical legacy-CLI fingerprint — the drain budget is bumped to this
 /// longer value so a single quiet window must persist that long before the
 /// tail flushes `Done`. Modern CLIs always emit at least one `event_msg`
 /// (token_count is emitted alongside every message) and therefore retain the
-/// shorter 5s drain. See issue #2453 / PR #2432 follow-up.
+/// shorter base drain. See issue #2453 / PR #2432 follow-up.
 const DEFAULT_LEGACY_TERMINAL_DRAIN_MS: u64 = 15000;
 /// Upper bound on how long the tailer will sit at EOF waiting for the assistant
 /// response to begin streaming. Without this guard, a stuck Codex TUI (tool
@@ -147,9 +147,9 @@ struct RolloutParseState {
     /// `pending_tool_calls_unkeyed` is a fallback counter for lines that
     /// omit `call_id` (defensive — Codex normally emits one).
     ///
-    /// #2423 reuse: `has_pending_tool_call()` is the canonical predicate the
-    /// `task_complete` fast-path also consults, so a single source of truth
-    /// guards both the drain heuristic and the explicit completion path.
+    /// `has_pending_tool_call()` is the canonical predicate the explicit
+    /// completion path also consults, so a single source of truth guards both
+    /// hook/envelope finalization and the drain heuristic.
     pending_tool_calls: HashSet<String>,
     pending_tool_calls_unkeyed: usize,
     /// #2419: set by `process_rollout_line` per-call when a rollout record
@@ -174,8 +174,8 @@ struct RolloutParseState {
     /// Modern Codex CLI builds emit at least one such record per turn —
     /// typically `token_count` after each message. When this flag stays
     /// `false` at EOF, the tail is reading a legacy rollout writer and
-    /// must apply the longer `legacy_terminal_drain` to absorb >5s mid-
-    /// response pauses without truncating bursts.
+    /// must apply the longer `legacy_terminal_drain` to absorb multi-second
+    /// mid-response pauses without truncating bursts.
     seen_any_event_msg: bool,
     /// #2529: set after the tail observes an explicit or wrapper-synthetic
     /// `event_msg/composer_ready` envelope. This is not relayed as a Discord
@@ -183,6 +183,21 @@ struct RolloutParseState {
     /// handoff and follow-up prompt delivery no longer depend primarily on
     /// `tmux capture-pane` footer scraping.
     composer_ready_seen: bool,
+    /// Whether the composer-ready envelope was emitted directly by the
+    /// rollout writer rather than synthesized from another terminal hint.
+    explicit_composer_ready_seen: bool,
+    /// Whether AgentDesk synthesized composer-ready from task_complete or an
+    /// alternate final-agent-message item. This still acts as an explicit
+    /// envelope path when the task-complete fast path is enabled, but remains
+    /// covered by the legacy escape hatch.
+    synthetic_composer_ready_seen: bool,
+    /// Set when the provider hook receiver observes a Codex Stop/SubagentStop
+    /// event matching this rollout session. Hook completion is accepted before
+    /// the EOF drain when assistant text is already available.
+    hook_completion_seen: bool,
+    /// Prevent repeated warnings while an explicit completion signal has no
+    /// usable assistant text yet.
+    explicit_completion_missing_text_warned: bool,
     /// Legacy/alternate Codex JSONL writers may expose the final assistant
     /// item as `item.completed` / `agent_message` instead of
     /// `event_msg/task_complete`. We do not relay that schema from the TUI
@@ -802,6 +817,7 @@ fn tail_rollout_file_until_assistant_response(
     let mut buf = [0u8; 8192];
     let mut last_output_at: Option<Instant> = None;
     let started_at = Instant::now();
+    let mut hook_events = crate::services::claude_tui::hook_server::subscribe_hook_events();
     // #2172 cancel boundary: wrap the raw sender so any send after the
     // shared `cancel_token` flips becomes a no-op. The producer (this
     // tail) is the relay-suppression enforcement point — once the user
@@ -826,49 +842,17 @@ fn tail_rollout_file_until_assistant_response(
                     last_output_at = Some(Instant::now());
                     continue;
                 }
-                // #2423: explicit turn-complete fast-path. The Codex CLI
-                // emits exactly one `event_msg/task_complete` per turn (see
-                // `event_msg_message` for the contract). When we have
-                // observed it AND every in-flight `function_call` has been
-                // matched by its `_output` (via `has_pending_tool_call()`
-                // from #2419), emit `Done` immediately — do not wait for the
-                // `terminal_drain` heuristic which can truncate responses on
-                // legitimate burst boundaries.
-                if enable_task_complete_fast_path
-                    && state.turn_complete_seen
-                    && !state.has_pending_tool_call()
+                observe_codex_completion_hooks(&mut hook_events, &mut state);
+                if let Some(finalize_path) =
+                    explicit_finalize_path(&mut state, enable_task_complete_fast_path)
                 {
-                    // Recover the assistant text from `last_agent_message`
-                    // when the turn produced no `response_item/message`
-                    // (tool-only turns or rollouts where the assistant text
-                    // is only carried on `task_complete`).
-                    if !state.saw_assistant_text
-                        && let Some(text) = state.task_complete_fallback_text.take()
-                    {
-                        if !state.final_text.is_empty() {
-                            state.final_text.push_str("\n\n");
-                        }
-                        state.final_text.push_str(&text);
-                        state.saw_assistant_text = true;
-                    }
-                    // schema-drift guard (codex review HIGH-2): if task_complete
-                    // fires but `last_agent_message` was absent (field renamed or
-                    // removed in a future codex CLI build), do not emit an empty
-                    // Done. Fall through to drain fallback so any subsequent
-                    // assistant text still gets a chance to arrive.
-                    if state.saw_assistant_text {
-                        emit_done(&sender, &state);
-                        return Ok((
-                            ReadOutputResult::Completed {
-                                offset: current_offset,
-                            },
-                            outcome(&state, current_offset),
-                        ));
-                    } else {
-                        tracing::warn!(
-                            "codex rollout task_complete missing last_agent_message; falling back to drain"
-                        );
-                    }
+                    emit_done(&sender, &state, finalize_path, rollout_path, current_offset);
+                    return Ok((
+                        ReadOutputResult::Completed {
+                            offset: current_offset,
+                        },
+                        outcome(&state, current_offset),
+                    ));
                 }
                 // #2419: only consider the turn drainable when no tool call
                 // is currently in flight. Otherwise the natural silence while
@@ -879,7 +863,7 @@ fn tail_rollout_file_until_assistant_response(
                 // `legacy_terminal_drain`. Modern CLIs emit at least one
                 // `event_msg` per message, so this branch only widens the
                 // drain for legacy writers that lack the structural signals
-                // (token_count refresh, task_complete fast-path) the 5s
+                // (token_count refresh, hook/envelope completion) the short
                 // default leans on. The bump is applied only when the
                 // configured legacy drain is strictly longer than the
                 // base drain — `terminal_drain.is_zero()` (replay) and
@@ -896,7 +880,13 @@ fn tail_rollout_file_until_assistant_response(
                     if effective_drain.is_zero()
                         || last_output_at.is_some_and(|at| at.elapsed() >= effective_drain)
                     {
-                        emit_done(&sender, &state);
+                        emit_done(
+                            &sender,
+                            &state,
+                            RolloutFinalizePath::Heuristic,
+                            rollout_path,
+                            current_offset,
+                        );
                         return Ok((
                             ReadOutputResult::Completed {
                                 offset: current_offset,
@@ -969,7 +959,13 @@ fn tail_rollout_file_until_assistant_response(
                 }
                 if !is_alive() {
                     let result = if state.saw_assistant_text {
-                        emit_done(&sender, &state);
+                        emit_done(
+                            &sender,
+                            &state,
+                            RolloutFinalizePath::Heuristic,
+                            rollout_path,
+                            current_offset,
+                        );
                         ReadOutputResult::Completed {
                             offset: current_offset,
                         }
@@ -1108,7 +1104,147 @@ fn outcome(state: &RolloutParseState, final_offset: u64) -> RolloutTailOutcome {
     }
 }
 
-fn emit_done(sender: &RelaySuppressionSender<'_>, state: &RolloutParseState) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RolloutFinalizePath {
+    Hook,
+    Envelope,
+    Heuristic,
+}
+
+impl RolloutFinalizePath {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Hook => "hook",
+            Self::Envelope => "envelope",
+            Self::Heuristic => "heuristic",
+        }
+    }
+}
+
+fn observe_codex_completion_hooks(
+    hook_events: &mut tokio::sync::broadcast::Receiver<
+        crate::services::claude_tui::hook_server::HookEvent,
+    >,
+    state: &mut RolloutParseState,
+) {
+    loop {
+        match hook_events.try_recv() {
+            Ok(event) => {
+                if codex_completion_hook_matches(&event, state) {
+                    state.hook_completion_seen = true;
+                    state.lifecycle_activity = true;
+                    tracing::debug!(
+                        session_id = %event.session_id,
+                        event = event.kind.as_str(),
+                        "codex rollout tail observed completion hook"
+                    );
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                tracing::warn!(
+                    skipped,
+                    "codex rollout tail lagged while reading hook completion events"
+                );
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+        }
+    }
+}
+
+fn codex_completion_hook_matches(
+    event: &crate::services::claude_tui::hook_server::HookEvent,
+    state: &RolloutParseState,
+) -> bool {
+    if event.provider != "codex" {
+        return false;
+    }
+    if !matches!(
+        event.kind,
+        crate::services::claude_tui::hook_server::HookEventKind::Stop
+            | crate::services::claude_tui::hook_server::HookEventKind::SubagentStop
+    ) {
+        return false;
+    }
+    state
+        .session_id
+        .as_deref()
+        .is_some_and(|session_id| session_id == event.session_id)
+        || state
+            .tmux_session_name
+            .as_deref()
+            .is_some_and(|tmux_session_name| tmux_session_name == event.session_id)
+}
+
+fn explicit_finalize_path(
+    state: &mut RolloutParseState,
+    enable_task_complete_fast_path: bool,
+) -> Option<RolloutFinalizePath> {
+    if state.has_pending_tool_call() {
+        return None;
+    }
+
+    if state.hook_completion_seen && state.saw_assistant_text {
+        return Some(RolloutFinalizePath::Hook);
+    }
+
+    let envelope_completion_seen = state.explicit_composer_ready_seen
+        || (enable_task_complete_fast_path && state.synthetic_composer_ready_seen);
+    if !envelope_completion_seen {
+        return None;
+    }
+
+    // Recover the assistant text from `last_agent_message` when the turn
+    // produced no `response_item/message` (tool-only turns or rollouts where
+    // the assistant text is only carried on `task_complete`).
+    if !state.saw_assistant_text
+        && let Some(text) = state.task_complete_fallback_text.take()
+    {
+        if !state.final_text.is_empty() {
+            state.final_text.push_str("\n\n");
+        }
+        state.final_text.push_str(&text);
+        state.saw_assistant_text = true;
+    }
+
+    // Schema-drift guard: an explicit terminal signal without any assistant
+    // text is not enough to emit an empty Done. Fall through to the heuristic
+    // fallback so any subsequent assistant text still has a chance to arrive.
+    if !state.saw_assistant_text {
+        if !state.explicit_completion_missing_text_warned {
+            tracing::warn!(
+                hook_completion_seen = state.hook_completion_seen,
+                explicit_composer_ready_seen = state.explicit_composer_ready_seen,
+                synthetic_composer_ready_seen = state.synthetic_composer_ready_seen,
+                "codex rollout explicit completion signal missing assistant text; falling back to drain"
+            );
+            state.explicit_completion_missing_text_warned = true;
+        }
+        return None;
+    }
+
+    Some(RolloutFinalizePath::Envelope)
+}
+
+fn emit_done(
+    sender: &RelaySuppressionSender<'_>,
+    state: &RolloutParseState,
+    finalize_path: RolloutFinalizePath,
+    rollout_path: &Path,
+    offset: u64,
+) {
+    tracing::info!(
+        rollout_path = %rollout_path.display(),
+        offset,
+        finalize_path = finalize_path.as_str(),
+        session_id = state.session_id.as_deref(),
+        lines_read = state.lines_read,
+        bytes_read = state.bytes_read,
+        saw_assistant_text = state.saw_assistant_text,
+        hook_completion_seen = state.hook_completion_seen,
+        composer_ready_seen = state.composer_ready_seen,
+        "codex rollout tail emitting Done"
+    );
     sender.send(StreamMessage::Done {
         result: state.final_text.clone(),
         session_id: state.session_id.clone(),
@@ -1239,10 +1375,10 @@ fn response_item_messages(json: &Value, state: &mut RolloutParseState) -> Vec<St
             // that concurrent tool calls all hold the gate open until each
             // one resolves independently.
             //
-            // #2423: this same predicate (`has_pending_tool_call`) also gates
-            // the explicit `task_complete` fast-path so a rollout where the
-            // writer emits `task_complete` slightly before the final tool
-            // output line still drains correctly.
+            // This same predicate (`has_pending_tool_call`) also gates the
+            // explicit hook/envelope path so a rollout where the writer emits
+            // completion slightly before the final tool output line still
+            // drains correctly.
             match payload.get("call_id").and_then(Value::as_str) {
                 Some(id) if !id.is_empty() => {
                     state.pending_tool_calls.insert(id.to_string());
@@ -1377,6 +1513,11 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
         "agent_reasoning" => Some(StreamMessage::redacted_thinking()),
         "composer_ready" => {
             state.composer_ready_seen = true;
+            if synthetic {
+                state.synthetic_composer_ready_seen = true;
+            } else {
+                state.explicit_composer_ready_seen = true;
+            }
             state.lifecycle_activity = true;
             if let Some(tmux_session_name) = state.tmux_session_name.as_deref() {
                 crate::services::codex_tui::input::record_rollout_composer_ready(tmux_session_name);
@@ -2552,6 +2693,105 @@ mod tests {
         assert!(matches!(
             messages.last(),
             Some(StreamMessage::Done { result, .. }) if result == "hello"
+        ));
+    }
+
+    #[test]
+    fn composer_ready_envelope_emits_done_before_drain() {
+        let body = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ready by envelope"}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"composer_ready"}}"#,
+            "\n",
+        );
+        let (messages, elapsed) = run_tail_with_options(
+            body,
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+            true,
+        );
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "composer_ready envelope must short-circuit the 30s drain (took {:?})",
+            elapsed
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. }) if result == "ready by envelope"
+        ));
+    }
+
+    #[tokio::test]
+    async fn codex_stop_hook_emits_done_before_drain() {
+        use axum::body::Body;
+        use axum::http::{Method, Request};
+        use tower::ServiceExt;
+
+        let session = format!(
+            "agentdesk-codex-rollout-hook-done-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            concat!(
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ready by hook"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let path = file.path().to_path_buf();
+        let started = Instant::now();
+        let tail_session = session.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                Duration::from_secs(30),
+                Some(Duration::from_secs(60)),
+                None,
+                true,
+                None,
+                true,
+                Some(tail_session),
+                None,
+            )
+        });
+
+        std::thread::sleep(Duration::from_millis(250));
+        let app = crate::services::claude_tui::hook_server::hook_receiver_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/hooks/codex/Stop?session_id={session}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"hook_event_name":"Stop"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "Codex Stop hook must short-circuit the 30s drain (took {:?})",
+            elapsed
+        );
+
+        let messages = rx.iter().collect::<Vec<_>>();
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. }) if result == "ready by hook"
         ));
     }
 
