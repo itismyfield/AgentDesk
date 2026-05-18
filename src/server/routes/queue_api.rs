@@ -258,7 +258,9 @@ fn default_extend_secs() -> u64 {
 ///
 /// The per-turn deadline moves with accepted operator extensions. Extensions are
 /// intentionally uncapped so productive long-running turns can continue.
+/// Also refreshes the voice-background handoff marker TTL (#2352).
 pub async fn extend_turn_timeout(
+    State(state): State<AppState>,
     Path(channel_id): Path<String>,
     Json(body): Json<ExtendTimeoutBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -272,7 +274,13 @@ pub async fn extend_turn_timeout(
         }
     };
 
-    match crate::services::discord::extend_watchdog_deadline(channel_num, body.extend_secs).await {
+    match crate::services::discord::extend_watchdog_deadline(
+        channel_num,
+        body.extend_secs,
+        state.pg_pool_ref(),
+    )
+    .await
+    {
         Ok(extension) => {
             let now_ms = chrono::Utc::now().timestamp_millis();
             let remaining_min = (extension.new_deadline_ms - now_ms) / 1000 / 60;
@@ -348,9 +356,20 @@ mod tests {
     use super::*;
     use crate::services::provider::CancelToken;
     use crate::services::turn_orchestrator::ChannelMailboxRegistry;
+    use crate::voice::announce_meta::{VoiceBackgroundHandoffMeta, global_store};
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
+
+    fn make_state() -> AppState {
+        let db = crate::db::test_db();
+        let engine = crate::engine::PolicyEngine::new_with_legacy_db(
+            &crate::config::Config::default(),
+            db.clone(),
+        )
+        .unwrap();
+        AppState::test_state(db, engine)
+    }
 
     #[tokio::test]
     async fn extend_turn_timeout_reports_effective_deadline_and_tracked_max() {
@@ -372,6 +391,7 @@ mod tests {
         );
 
         let (status, Json(body)) = extend_turn_timeout(
+            State(make_state()),
             Path(channel_id.get().to_string()),
             Json(ExtendTimeoutBody { extend_secs: 30 }),
         )
@@ -387,5 +407,68 @@ mod tests {
         assert!(
             body["max_deadline_ms"].as_i64().unwrap() >= body["new_deadline_ms"].as_i64().unwrap()
         );
+    }
+
+    /// Verify that extending the watchdog deadline also refreshes the in-memory
+    /// voice-background handoff marker TTL (#2352): a short-TTL marker inserted
+    /// before the extension must still be readable afterwards.
+    #[tokio::test]
+    async fn extend_turn_timeout_refreshes_in_memory_handoff_meta_ttl() {
+        // Use a unique channel / message ID pair to avoid cross-test pollution
+        // in the process-level global store.
+        let channel_id = ChannelId::new(1_417_000_002);
+        let message_id = MessageId::new(8_200_002);
+
+        // Register an active turn so extend_watchdog_deadline can reach it
+        // through ChannelMailboxRegistry::global_handle.
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let token = Arc::new(CancelToken::new());
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        token
+            .watchdog_deadline_ms
+            .store(now_ms + 60_000, Ordering::Relaxed);
+        token
+            .watchdog_max_deadline_ms
+            .store(now_ms + 120_000, Ordering::Relaxed);
+        assert!(
+            handle
+                .try_start_turn(token.clone(), UserId::new(8), message_id)
+                .await
+        );
+
+        // Insert a handoff marker with a minimal TTL so that without the
+        // refresh it would be treated as nearly-expired.
+        let meta = VoiceBackgroundHandoffMeta {
+            voice_channel_id: 9_900_001,
+            background_channel_id: channel_id.get(),
+            agent_id: Some("test-agent".to_string()),
+            local_only_fallback: false,
+        };
+        global_store().insert_handoff_with_remaining_ttl(
+            message_id,
+            meta.clone(),
+            std::time::Duration::from_secs(1),
+        );
+
+        // Extend the watchdog — this must refresh the handoff marker's TTL.
+        let (status, Json(body)) = extend_turn_timeout(
+            State(make_state()),
+            Path(channel_id.get().to_string()),
+            Json(ExtendTimeoutBody { extend_secs: 3600 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "extend must succeed");
+        assert_eq!(body["ok"], true);
+
+        // The marker must still be readable — the TTL was refreshed.
+        assert_eq!(
+            global_store().get_handoff(message_id),
+            Some(meta),
+            "handoff meta must survive after watchdog extension refreshed its TTL"
+        );
+
+        // Clean up the global store entry to avoid polluting other tests.
+        let _ = global_store().take_handoff(message_id);
     }
 }
