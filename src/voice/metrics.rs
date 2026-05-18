@@ -20,8 +20,9 @@ use serde_json::{Value, json};
 use crate::services::observability::events;
 
 /// Final per-turn latency record. Times are wall-clock millis spent inside the
-/// voice pipeline. `tts_play_ms` is the time-to-first-audio (start of playback)
-/// rather than total playback duration.
+/// voice pipeline. `first_audio_out_ms` is the time-to-first-audio (start of
+/// playback) rather than total playback duration. `tts_play_ms` is retained as
+/// the legacy field name for existing dashboards/events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatencyTurn {
     pub channel_id: u64,
@@ -29,6 +30,8 @@ pub struct LatencyTurn {
     pub stt_ms: u64,
     pub agent_ms: u64,
     pub tts_synth_ms: u64,
+    #[serde(default)]
+    pub first_audio_out_ms: u64,
     pub tts_play_ms: u64,
     pub total_ms: u64,
     pub recorded_at_ms: i64,
@@ -40,12 +43,14 @@ impl LatencyTurn {
         let agent_ms = partial.agent_ms.unwrap_or(0);
         let tts_synth_ms = partial.tts_synth_ms.unwrap_or(0);
         let tts_play_ms = partial.tts_play_ms.unwrap_or(0);
+        let first_audio_out_ms = tts_play_ms;
         Self {
             channel_id,
             utterance_id: partial.utterance_id,
             stt_ms,
             agent_ms,
             tts_synth_ms,
+            first_audio_out_ms,
             tts_play_ms,
             total_ms: stt_ms
                 .saturating_add(agent_ms)
@@ -53,6 +58,13 @@ impl LatencyTurn {
                 .saturating_add(tts_play_ms),
             recorded_at_ms: now_millis(),
         }
+    }
+
+    fn with_latency_aliases(mut self) -> Self {
+        if self.first_audio_out_ms == 0 && self.tts_play_ms != 0 {
+            self.first_audio_out_ms = self.tts_play_ms;
+        }
+        self
     }
 
     pub fn to_payload(&self) -> Value {
@@ -147,18 +159,21 @@ pub fn record_agent(channel_id: u64, agent_ms: u64) {
     });
 }
 
-/// Record TTS stage timings and finalize the turn — the partial entry for
-/// `channel_id` is consumed, a [`LatencyTurn`] is built, and an event is
-/// pushed into the structured event log so the periodic JSONL flusher writes
-/// it to disk.
-pub fn record_tts(channel_id: u64, tts_synth_ms: u64, tts_play_ms: u64) -> Option<LatencyTurn> {
+/// Record TTS stage timings and finalize the turn. The final argument is
+/// first-audio-out millis; it is stored under both `first_audio_out_ms` and the
+/// legacy `tts_play_ms` field until downstream readers migrate.
+pub fn record_tts(
+    channel_id: u64,
+    tts_synth_ms: u64,
+    first_audio_out_ms: u64,
+) -> Option<LatencyTurn> {
     let partial = {
         let Ok(mut map) = registry().lock() else {
             return None;
         };
         let mut entry = map.remove(&channel_id).unwrap_or_default();
         entry.tts_synth_ms = Some(tts_synth_ms);
-        entry.tts_play_ms = Some(tts_play_ms);
+        entry.tts_play_ms = Some(first_audio_out_ms);
         entry
     };
     let turn = LatencyTurn::from_partial(partial, channel_id);
@@ -185,6 +200,7 @@ pub struct LatencySummary {
     pub avg_stt_ms: u64,
     pub avg_agent_ms: u64,
     pub avg_tts_synth_ms: u64,
+    pub avg_first_audio_out_ms: u64,
     pub avg_tts_play_ms: u64,
     pub avg_total_ms: u64,
     pub samples: Vec<LatencyTurn>,
@@ -204,6 +220,7 @@ pub fn recent_summary(limit: usize) -> LatencySummary {
         .rev()
         .filter(|ev| ev.event_type == "voice_latency_turn")
         .filter_map(|ev| serde_json::from_value::<LatencyTurn>(ev.payload).ok())
+        .map(LatencyTurn::with_latency_aliases)
         .take(limit)
         .collect();
 
@@ -214,6 +231,7 @@ pub fn recent_summary(limit: usize) -> LatencySummary {
             avg_stt_ms: 0,
             avg_agent_ms: 0,
             avg_tts_synth_ms: 0,
+            avg_first_audio_out_ms: 0,
             avg_tts_play_ms: 0,
             avg_total_ms: 0,
             samples,
@@ -239,6 +257,7 @@ pub fn recent_summary(limit: usize) -> LatencySummary {
         avg_stt_ms: avg(sum_stt),
         avg_agent_ms: avg(sum_agent),
         avg_tts_synth_ms: avg(sum_synth),
+        avg_first_audio_out_ms: avg(sum_play),
         avg_tts_play_ms: avg(sum_play),
         avg_total_ms: avg(sum_total),
         samples,
@@ -264,9 +283,12 @@ mod tests {
         assert_eq!(turn.stt_ms, 120);
         assert_eq!(turn.agent_ms, 850);
         assert_eq!(turn.tts_synth_ms, 300);
+        assert_eq!(turn.first_audio_out_ms, 200);
         assert_eq!(turn.tts_play_ms, 200);
         assert_eq!(turn.total_ms, 1470);
         assert_eq!(turn.utterance_id.as_deref(), Some("utt-1"));
+        assert_eq!(turn.to_payload()["first_audio_out_ms"], 200);
+        assert_eq!(turn.to_payload()["tts_play_ms"], 200);
     }
 
     #[test]
@@ -276,6 +298,7 @@ mod tests {
         let turn = record_tts(ch, 100, 50).expect("turn");
         assert_eq!(turn.stt_ms, 0);
         assert_eq!(turn.agent_ms, 400);
+        assert_eq!(turn.first_audio_out_ms, 50);
         assert_eq!(turn.total_ms, 550);
     }
 
