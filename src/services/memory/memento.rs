@@ -26,6 +26,7 @@ const MEMENTO_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_WORKING_MEMORY_LINES: usize = 6;
 const MAX_MEMORY_LINES: usize = 6;
 const MAX_SKIP_LINES: usize = 4;
+const MAX_CAPTURE_TURN_CHARS: usize = 2_000;
 const MEMENTO_MODEL_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug)]
@@ -408,6 +409,81 @@ impl MementoBackend {
         self.call_tool(config, "reflect", Value::Object(args))
             .await
             .map(|result| result.token_usage)
+    }
+
+    fn build_capture_remember_request(
+        &self,
+        request: CaptureRequest,
+        workspace: String,
+    ) -> Option<MementoRememberRequest> {
+        let user_text = normalize_whitespace(&request.user_text);
+        let assistant_text = normalize_whitespace(&request.assistant_text);
+        if user_text.is_empty() && assistant_text.is_empty() {
+            return None;
+        }
+
+        let provider = request.provider.as_str().to_string();
+        let agent_id = self.resolve_agent_id(&request.role_id, request.channel_id);
+        let mut content = Vec::new();
+        if !user_text.is_empty() {
+            content.push(format!(
+                "User: {}",
+                truncate_text(&user_text, MAX_CAPTURE_TURN_CHARS)
+            ));
+        }
+        if !assistant_text.is_empty() {
+            content.push(format!(
+                "Assistant: {}",
+                truncate_text(&assistant_text, MAX_CAPTURE_TURN_CHARS)
+            ));
+        }
+
+        let source = match request.dispatch_id.as_deref().map(str::trim) {
+            Some(dispatch_id) if !dispatch_id.is_empty() => format!(
+                "agentdesk:turn_capture/provider:{provider}/channel:{}/session:{}/dispatch:{dispatch_id}",
+                request.channel_id, request.session_id
+            ),
+            _ => format!(
+                "agentdesk:turn_capture/provider:{provider}/channel:{}/session:{}",
+                request.channel_id, request.session_id
+            ),
+        };
+        let topic = request
+            .dispatch_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|dispatch_id| format!("turn {dispatch_id}"))
+            .unwrap_or_else(|| format!("session {} turn", request.session_id));
+
+        Some(MementoRememberRequest {
+            content: content.join("\n"),
+            topic,
+            kind: "episode".to_string(),
+            importance: Some(0.45),
+            keywords: vec![
+                "agentdesk-turn".to_string(),
+                format!("provider:{provider}"),
+                format!("role:{}", request.role_id),
+                format!("session:{}", request.session_id),
+            ],
+            source: Some(source),
+            workspace: Some(workspace),
+            global: false,
+            channel_id: None,
+            channel_name: None,
+            agent_id: Some(agent_id),
+            case_id: request.dispatch_id,
+            goal: (!user_text.is_empty()).then(|| truncate_text(&user_text, 160)),
+            outcome: (!assistant_text.is_empty()).then(|| truncate_text(&assistant_text, 160)),
+            phase: Some("turn_capture".to_string()),
+            resolution_status: None,
+            assertion_status: None,
+            context_summary: Some(format!(
+                "Per-turn AgentDesk capture for provider={provider} role_id={} channel_id={} session_id={}",
+                request.role_id, request.channel_id, request.session_id
+            )),
+        })
     }
 
     pub(crate) async fn remember(
@@ -1525,10 +1601,64 @@ impl MemoryBackend for MementoBackend {
 
     fn capture<'a>(&'a self, request: CaptureRequest) -> MemoryFuture<'a, CaptureResult> {
         Box::pin(async move {
-            let _ = request;
-            CaptureResult {
-                skipped: true,
-                ..CaptureResult::default()
+            if request.user_text.trim().is_empty() && request.assistant_text.trim().is_empty() {
+                return CaptureResult {
+                    warnings: vec![
+                        "memento capture skipped because user and assistant text are empty"
+                            .to_string(),
+                    ],
+                    skipped: true,
+                    ..CaptureResult::default()
+                };
+            }
+
+            let config = match self.runtime_config() {
+                Ok(config) => config,
+                Err(err) => {
+                    return CaptureResult {
+                        warnings: vec![err],
+                        skipped: true,
+                        ..CaptureResult::default()
+                    };
+                }
+            };
+            let workspace =
+                self.resolve_workspace(&request.role_id, request.channel_id, None, &config);
+            let Some(remember_request) = self.build_capture_remember_request(request, workspace)
+            else {
+                return CaptureResult {
+                    warnings: vec![
+                        "memento capture skipped because user and assistant text are empty"
+                            .to_string(),
+                    ],
+                    skipped: true,
+                    ..CaptureResult::default()
+                };
+            };
+
+            match tokio::time::timeout(
+                Duration::from_millis(self.settings.capture_timeout_ms),
+                self.remember(remember_request),
+            )
+            .await
+            {
+                Ok(Ok(token_usage)) => CaptureResult {
+                    token_usage,
+                    ..CaptureResult::default()
+                },
+                Ok(Err(err)) => CaptureResult {
+                    warnings: vec![err],
+                    skipped: true,
+                    ..CaptureResult::default()
+                },
+                Err(_) => CaptureResult {
+                    warnings: vec![format!(
+                        "memento capture timed out after {}ms; skipping capture",
+                        self.settings.capture_timeout_ms
+                    )],
+                    skipped: true,
+                    ..CaptureResult::default()
+                },
             }
         })
     }
@@ -2709,8 +2839,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memento_capture_is_noop_by_design() {
+    async fn test_memento_capture_calls_remember_tool_over_mcp() {
+        let remember_content = serde_json::to_string(&json!({
+            "success": true,
+            "id": "memory-turn-1",
+            "usage": {
+                "inputTokens": 17,
+                "outputTokens": 2
+            }
+        }))
+        .unwrap();
+        let initialize_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": MEMENTO_PROTOCOL_VERSION
+            }
+        }))
+        .unwrap();
+        let tool_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": remember_content
+                    }
+                ],
+                "isError": false
+            }
+        }))
+        .unwrap();
+        let (base_url, request_rx, handle) = spawn_response_sequence_server(vec![
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-capture")],
+                body: initialize_response,
+            },
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-capture")],
+                body: tool_response,
+            },
+        ])
+        .await;
+        let (_guard, _temp, previous_root, previous_key, previous_workspace) =
+            install_memento_runtime(&base_url, None);
         let backend = MementoBackend::new(memento_settings());
+
+        let result = backend
+            .capture(CaptureRequest {
+                provider: ProviderKind::Codex,
+                role_id: "project-agentdesk".to_string(),
+                channel_id: 42,
+                session_id: "session-1".to_string(),
+                dispatch_id: Some("dispatch-1".to_string()),
+                user_text: "ship issue #2527".to_string(),
+                assistant_text: "implemented memento capture".to_string(),
+            })
+            .await;
+
+        let requests = request_rx.await.unwrap();
+        handle.abort();
+        restore_memento_runtime(previous_root, previous_key, previous_workspace);
+
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].contains("\"method\":\"tools/call\""));
+        assert!(requests[1].contains("\"name\":\"remember\""));
+        assert!(requests[1].contains("\"workspace\":\"agentdesk-project-agentdesk\""));
+        assert!(requests[1].contains("\"agentId\":\"project-agentdesk\""));
+        assert!(requests[1].contains("\"caseId\":\"dispatch-1\""));
+        assert!(requests[1].contains("\"topic\":\"turn dispatch-1\""));
+        assert!(requests[1].contains("\"type\":\"episode\""));
+        assert!(requests[1].contains("\"phase\":\"turn_capture\""));
+        assert!(requests[1].contains("User: ship issue #2527"));
+        assert!(requests[1].contains("Assistant: implemented memento capture"));
+        assert_eq!(
+            result,
+            CaptureResult {
+                warnings: Vec::new(),
+                skipped: false,
+                token_usage: crate::services::memory::TokenUsage {
+                    input_tokens: 17,
+                    output_tokens: 2,
+                },
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memento_capture_skips_empty_turn() {
+        let backend = MementoBackend::new(memento_settings());
+
         let result = backend
             .capture(CaptureRequest {
                 provider: ProviderKind::Codex,
@@ -2718,12 +2939,15 @@ mod tests {
                 channel_id: 42,
                 session_id: "session-1".to_string(),
                 dispatch_id: None,
-                user_text: "user".to_string(),
-                assistant_text: "assistant".to_string(),
+                user_text: "   ".to_string(),
+                assistant_text: "\n".to_string(),
             })
             .await;
 
         assert!(result.skipped);
-        assert!(result.warnings.is_empty());
+        assert_eq!(
+            result.warnings,
+            vec!["memento capture skipped because user and assistant text are empty".to_string()]
+        );
     }
 }

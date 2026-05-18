@@ -171,7 +171,7 @@ pub(super) fn plan_turn_end_memory(
         clear_provider_session,
         persist_transcript,
         analyze_recall_feedback: backend == settings::MemoryBackendKind::Memento,
-        spawn_capture: persist_transcript && backend != settings::MemoryBackendKind::Memento,
+        spawn_capture: persist_transcript,
     })
 }
 
