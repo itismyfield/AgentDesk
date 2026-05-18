@@ -39,7 +39,8 @@ function defaultToneFor(kind: WidgetStateKind): SystemHealthTone {
 function defaultIconFor(kind: WidgetStateKind) {
   switch (kind) {
     case "loading":
-      return <Loader2 size={18} className="animate-spin" aria-hidden />;
+      // motion-safe: only animate when prefers-reduced-motion: no-preference.
+      return <Loader2 size={18} className="motion-safe:animate-spin" aria-hidden />;
     case "error":
       return <AlertTriangle size={18} aria-hidden />;
     case "stale":

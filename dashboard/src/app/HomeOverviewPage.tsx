@@ -33,7 +33,8 @@ export default function HomeOverviewPage({
   isMobileViewport: boolean;
   isKo: boolean;
   wsConnected: boolean;
-  wsLastEventTs?: number | null;
+  /** Required — null only until the first WS event arrives. */
+  wsLastEventTs: number | null;
   currentOfficeLabel: string;
   stats: DashboardStats | null;
   agents: Agent[];

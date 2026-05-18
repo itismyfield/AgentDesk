@@ -39,4 +39,20 @@ describe("StatusBadge", () => {
     expect(html).toContain("data-pulse=\"true\"");
     expect(html).toContain("adkStatusPulse");
   });
+
+  it("does NOT render an aria-live region by default", () => {
+    const html = renderToStaticMarkup(<StatusBadge tone="healthy">정상</StatusBadge>);
+    expect(html).not.toContain("role=\"status\"");
+    expect(html).not.toContain("aria-live");
+  });
+
+  it("opts into role=status + aria-live=polite when announce is set", () => {
+    const html = renderToStaticMarkup(
+      <StatusBadge tone="critical" announce>
+        장애
+      </StatusBadge>,
+    );
+    expect(html).toContain("role=\"status\"");
+    expect(html).toContain("aria-live=\"polite\"");
+  });
 });

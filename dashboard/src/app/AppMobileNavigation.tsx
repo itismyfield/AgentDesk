@@ -35,6 +35,11 @@ function formatBadge(value: number): string {
   return value > 9 ? "9+" : String(value);
 }
 
+function badgeAriaSuffix(isKo: boolean, badge: number | undefined): string {
+  if (!badge || badge <= 0) return "";
+  return isKo ? `, 알림 ${badge}건` : `, ${badge} pending`;
+}
+
 export function AppMobileNavigation({
   activeRouteId,
   bottomSheetZIndex,
@@ -71,7 +76,10 @@ export function AppMobileNavigation({
               type="button"
               data-testid={`app-mobile-tab-${route.id}`}
               data-active={isActive || undefined}
-              aria-label={tr(`${isKo ? route.labelKo : route.labelEn} 열기`, `Open ${route.labelEn}`)}
+              aria-label={
+                tr(`${isKo ? route.labelKo : route.labelEn} 열기`, `Open ${route.labelEn}`) +
+                badgeAriaSuffix(isKo, badge)
+              }
               aria-current={isActive ? "page" : undefined}
               onClick={() => navigateToRoute(route.path)}
               className="adk-mobile-tab"
@@ -95,6 +103,7 @@ export function AppMobileNavigation({
           aria-haspopup="dialog"
           aria-expanded={moreOpen}
           aria-controls={moreOpen ? "app-mobile-more-menu" : undefined}
+          aria-label={tr("설정", "Settings") + badgeAriaSuffix(isKo, moreBadge)}
           onClick={() => setMoreOpen((prev) => !prev)}
           className="adk-mobile-tab"
         >
@@ -166,7 +175,10 @@ export function AppMobileNavigation({
                         <button
                           key={route.id}
                           type="button"
-                          aria-label={isKo ? route.labelKo : route.labelEn}
+                          aria-label={
+                            (isKo ? route.labelKo : route.labelEn) +
+                            badgeAriaSuffix(isKo, badge)
+                          }
                           onClick={() =>
                             navigateToRoute(
                               route.path,

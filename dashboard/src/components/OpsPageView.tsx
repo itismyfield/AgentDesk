@@ -58,15 +58,31 @@ export default function OpsPageView({
   const [failureCount, setFailureCount] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const refreshInFlightRef = useRef(false);
+  // Track mount status so async refresh callbacks that resolve after the Ops
+  // route is unmounted don't write to state and leak warnings.
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const refreshHealth = useCallback(async () => {
     if (refreshInFlightRef.current) return;
+    if (!mountedRef.current) return;
     refreshInFlightRef.current = true;
     setIsRefreshing(true);
     const [healthResult, retentionResult] = await Promise.allSettled([
       getHealth(),
       getPromptManifestRetention(),
     ]);
+
+    if (!mountedRef.current) {
+      refreshInFlightRef.current = false;
+      return;
+    }
 
     if (retentionResult.status === "fulfilled") {
       setPromptRetention(retentionResult.value);

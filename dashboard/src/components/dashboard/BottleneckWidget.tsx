@@ -251,32 +251,30 @@ function BottleneckWidgetImpl({ t }: BottleneckWidgetProps) {
         </div>
       ) : null}
 
-      {error ? (
+      {/*
+        State branches are exclusive:
+          - error + no cards   → error (no columns; nothing to show)
+          - error + cards      → stale banner + columns (operator still wants
+                                 to see the last snapshot)
+          - !error + loading + no cards → loading
+          - !error + no cards          → empty
+          - !error + cards             → columns
+      */}
+      {error && cards.length === 0 ? (
         <div className="mt-4">
           <WidgetState
-            kind={cards.length > 0 ? "stale" : "error"}
+            kind="error"
             compact
-            title={
-              cards.length > 0
-                ? t({
-                    ko: "최근 카드 스냅샷을 유지 중",
-                    en: "Showing the last successful snapshot",
-                    ja: "直近のスナップショットを維持中",
-                    zh: "显示最近一次成功的快照",
-                  })
-                : t({
-                    ko: "칸반 카드를 불러오지 못했습니다",
-                    en: "Unable to load kanban cards",
-                    ja: "kanban カードを読み込めませんでした",
-                    zh: "无法加载 kanban 卡片",
-                  })
-            }
+            title={t({
+              ko: "칸반 카드를 불러오지 못했습니다",
+              en: "Unable to load kanban cards",
+              ja: "kanban カードを読み込めませんでした",
+              zh: "无法加载 kanban 卡片",
+            })}
             description={error}
           />
         </div>
-      ) : null}
-
-      {loading && cards.length === 0 ? (
+      ) : loading && cards.length === 0 ? (
         <div className="mt-4">
           <WidgetState
             kind="loading"
@@ -294,7 +292,7 @@ function BottleneckWidgetImpl({ t }: BottleneckWidgetProps) {
             })}
           />
         </div>
-      ) : !loading && !error && cards.length === 0 ? (
+      ) : !loading && cards.length === 0 ? (
         <div className="mt-4">
           <WidgetState
             kind="empty"
@@ -313,7 +311,23 @@ function BottleneckWidgetImpl({ t }: BottleneckWidgetProps) {
           />
         </div>
       ) : (
-        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <>
+          {error ? (
+            <div className="mt-4">
+              <WidgetState
+                kind="stale"
+                compact
+                title={t({
+                  ko: "최근 카드 스냅샷을 유지 중",
+                  en: "Showing the last successful snapshot",
+                  ja: "直近のスナップショットを維持中",
+                  zh: "显示最近一次成功的快照",
+                })}
+                description={error}
+              />
+            </div>
+          ) : null}
+          <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
           <BottleneckColumn
             title={t({ ko: "리뷰 지연", en: "Review Delay", ja: "レビュー遅延", zh: "审查延迟" })}
             hint={t({
@@ -353,7 +367,8 @@ function BottleneckWidgetImpl({ t }: BottleneckWidgetProps) {
             accent="#f87171"
             t={t}
           />
-        </div>
+          </div>
+        </>
       )}
     </div>
   );

@@ -19,6 +19,13 @@ interface StatusBadgeProps {
   pulse?: boolean;
   /** Title attribute for tooltip-on-hover (a11y). */
   title?: string;
+  /**
+   * Opt-in: render as an `aria-live="polite"` status region. Off by default
+   * because most status pills are decorative repeats of nearby text — adding
+   * a live region by default floods screen readers when many pills mount at
+   * once. Turn this on only for a single canonical badge per surface.
+   */
+  announce?: boolean;
   className?: string;
   style?: CSSProperties;
   children: ReactNode;
@@ -50,6 +57,7 @@ export function StatusBadge({
   size = "sm",
   pulse = false,
   title,
+  announce = false,
   className,
   style,
   children,
@@ -58,10 +66,10 @@ export function StatusBadge({
   const s = SIZE_TOKENS[size];
   return (
     <span
-      role="status"
       title={title}
       className={className}
       data-pulse={pulse || undefined}
+      {...(announce ? { role: "status", "aria-live": "polite" } : {})}
       style={{
         display: "inline-flex",
         alignItems: "center",

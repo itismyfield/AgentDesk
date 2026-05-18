@@ -110,9 +110,8 @@ export function transformRawData(
               level,
             };
           });
-        if (rp.unsupported && buckets.length === 0) {
-          return [];
-        }
+        // Keep unsupported providers visible so the operator can see *why* a
+        // provider has no telemetry — dropping them silently was the bug.
         return [
           {
             provider: normalizeRateLimitProviderLabel(rp.provider),

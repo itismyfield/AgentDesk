@@ -10,8 +10,9 @@ export interface StatusTone {
  * for "healthy / warning / critical / idle / info / unknown" regardless of
  * which domain the value comes from (WS health, agent status, queue health…).
  *
- * Pair these with the CSS custom properties declared in `main.css`
- * (`--th-status-*`) so theme overrides apply consistently.
+ * Color values are kept literal here on purpose so consumers can `style={{}}`
+ * inline without depending on the global theme cascade. If the theme grows
+ * `--th-status-*` CSS custom properties later, switch these to `var()` calls.
  */
 export const SYSTEM_HEALTH_TONES = {
   healthy: {

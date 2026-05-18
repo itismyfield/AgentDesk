@@ -393,23 +393,59 @@ export function DashboardHomeOverview({
     setOverWidgetId(null);
   }, []);
 
-  const homeWidgetSpecs = buildDashboardHomeWidgetSpecs({
-    t,
-    numberFormatter,
-    dashboardStats,
-    reconnectingSessions,
-    activeSessions,
-    meetingSummary,
-    meetings,
-    homeAgents,
-    language,
-    onSelectAgent,
-    focusSignals,
-    agents,
-    localeTag,
-    homeActivityItems,
-    onSelectTab,
-  });
+  // Stabilize the array slices + the lambda callback so React.memo on the
+  // home snapshot widgets (round 14) actually short-circuits — passing
+  // homeAgents.slice(...) or `() => onSelectTab(...)` inline would create
+  // fresh references every render and defeat the memo comparator.
+  const topRosterAgents = useMemo(() => homeAgents.slice(0, 5), [homeAgents]);
+  const topOfficeAgents = useMemo(() => homeAgents.slice(0, 8), [homeAgents]);
+  const handleOpenAchievements = useCallback(() => {
+    onSelectTab("achievements");
+  }, [onSelectTab]);
+
+  const homeWidgetSpecs = useMemo(
+    () =>
+      buildDashboardHomeWidgetSpecs({
+        t,
+        numberFormatter,
+        dashboardStats,
+        reconnectingSessions,
+        activeSessions,
+        meetingSummary,
+        meetings,
+        homeAgents,
+        topRosterAgents,
+        topOfficeAgents,
+        language,
+        onSelectAgent,
+        focusSignals,
+        agents,
+        localeTag,
+        homeActivityItems,
+        onSelectTab,
+        onOpenAchievements: handleOpenAchievements,
+      }),
+    [
+      t,
+      numberFormatter,
+      dashboardStats,
+      reconnectingSessions,
+      activeSessions,
+      meetingSummary,
+      meetings,
+      homeAgents,
+      topRosterAgents,
+      topOfficeAgents,
+      language,
+      onSelectAgent,
+      focusSignals,
+      agents,
+      localeTag,
+      homeActivityItems,
+      onSelectTab,
+      handleOpenAchievements,
+    ],
+  );
 
   return (
     <>

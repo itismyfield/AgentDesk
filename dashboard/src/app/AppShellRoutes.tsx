@@ -5,6 +5,25 @@ import * as api from "../api/client";
 import { DEFAULT_ROUTE_PATH, PRIMARY_ROUTES } from "./routes";
 import HomeOverviewPage from "./HomeOverviewPage";
 
+/**
+ * Strongly-typed slice of the shell-routes context. The full ctx is still
+ * tracked as a plain record because typing all 50+ fields would be a sweeping
+ * refactor — but the *new* fields surfaced by the overhaul are typed here so
+ * a rename or removal fails the TS build instead of silently becoming
+ * undefined in a child component.
+ */
+export interface AppShellRoutesContext {
+  /** Wall-clock ms timestamp of the most recent WS event, or null pre-first. */
+  wsLastEventTs: number | null;
+  /** WS connection liveness. */
+  wsConnected: boolean;
+  // Index signature is intentionally `any` to keep existing untyped fields
+  // working until they are migrated one-by-one to typed slots. New fields
+  // should add an explicit typed key above before using them here.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [key: string]: any;
+}
+
 const OfficeView = lazy(() => import("../components/OfficeView"));
 const AchievementsPage = lazy(() => import("../components/AchievementsPage"));
 const StatsPageView = lazy(() => import("../components/StatsPageView"));
@@ -15,7 +34,7 @@ const AgentManagerView = lazy(() => import("../components/AgentManagerView"));
 const MeetingsAndSkillsPage = lazy(() => import("../components/MeetingsAndSkillsPage"));
 const SettingsView = lazy(() => import("../components/SettingsView"));
 
-export default function AppShellRoutes({ ctx }: { ctx: any }) {
+export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) {
   const {
     agents,
     agentsPageTab,
