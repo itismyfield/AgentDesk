@@ -1004,7 +1004,6 @@ mod tests {
         let result = parse_tasklist_line(line).expect("tasklist row");
         assert_eq!(result.command, "cmd.exe [AgentDesk Shell]");
     }
-
 }
 
 #[cfg(all(test, unix))]

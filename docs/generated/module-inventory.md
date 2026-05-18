@@ -69,7 +69,7 @@
 | `compat` | `src/compat/mod.rs` | 185 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 23 |  |
-| `config` | `src/config.rs` | 3202 | giant-file |
+| `config` | `src/config.rs` | 3095 | giant-file |
 | `crate` | `src/main.rs` | 49 |  |
 | `credential` | `src/credential.rs` | 180 |  |
 | `db` | `src/db/mod.rs` | 345 |  |
@@ -468,7 +468,7 @@
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 373 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 185 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1841 | giant-file |
-| `services::discord::settings` | `src/services/discord/settings.rs` | 2449 | giant-file |
+| `services::discord::settings` | `src/services/discord/settings.rs` | 2418 | giant-file |
 | `services::discord::settings::content` | `src/services/discord/settings/content.rs` | 422 |  |
 | `services::discord::settings::memory` | `src/services/discord/settings/memory.rs` | 127 |  |
 | `services::discord::settings::read` | `src/services/discord/settings/read.rs` | 522 |  |
@@ -566,7 +566,7 @@
 | `services::onboarding` | `src/services/onboarding/mod.rs` | 4946 | giant-file |
 | `services::onboarding::channel` | `src/services/onboarding/channel.rs` | 214 |  |
 | `services::onboarding::provider` | `src/services/onboarding/provider.rs` | 181 |  |
-| `services::opencode` | `src/services/opencode.rs` | 2731 | giant-file |
+| `services::opencode` | `src/services/opencode.rs` | 2721 | giant-file |
 | `services::pipeline_override` | `src/services/pipeline_override.rs` | 608 |  |
 | `services::pipeline_routes` | `src/services/pipeline_routes.rs` | 644 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 25 |  |
@@ -574,7 +574,7 @@
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 129 |  |
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 749 |  |
-| `services::process` | `src/services/process.rs` | 1442 | giant-file |
+| `services::process` | `src/services/process.rs` | 1407 | giant-file |
 | `services::provider` | `src/services/provider.rs` | 2768 | giant-file |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 240 |  |

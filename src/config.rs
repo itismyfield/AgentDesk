@@ -2125,7 +2125,6 @@ pub(crate) fn current_test_runtime_root_override() -> Option<std::path::PathBuf>
     test_runtime_root_override()
 }
 
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn set_test_runtime_root_override(path: Option<std::path::PathBuf>) {
     TEST_RUNTIME_ROOT_OVERRIDE.with(|slot| {
