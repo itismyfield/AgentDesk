@@ -254,6 +254,11 @@ pub(crate) fn observe_rollout_turn_state(
     crate::services::tui_turn_state::observe_codex_jsonl_turn_state(rollout_path)
 }
 
+pub(crate) fn rollout_file_matches_cwd(rollout_path: &Path, cwd: &Path) -> bool {
+    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    rollout_session_cwd_matches(rollout_path, &canonical_cwd)
+}
+
 pub fn tail_latest_rollout_for_cwd_with_handoff(
     cwd: &Path,
     modified_since: SystemTime,
