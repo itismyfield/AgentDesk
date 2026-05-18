@@ -201,12 +201,6 @@ pub fn should_recreate_session_after_stdin_error(err: &str) -> bool {
     false
 }
 
-/// Helper: returns true if tmux pane list output indicates at least one live pane.
-#[allow(dead_code)]
-pub fn pane_list_has_live_pane(output: &str) -> bool {
-    output.lines().any(|line| line.trim() == "0")
-}
-
 pub fn build_tmux_death_diagnostic(
     tmux_session_name: &str,
     output_path: Option<&str>,
@@ -233,8 +227,8 @@ mod tests {
 
     use super::{
         TMUX_NORMAL_COMPLETION_REASON, build_tmux_death_diagnostic, clear_tmux_exit_reason,
-        pane_list_has_live_pane, read_recent_output_hint, record_normal_tmux_exit_reason,
-        record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
+        read_recent_output_hint, record_normal_tmux_exit_reason, record_tmux_exit_reason,
+        should_recreate_session_after_followup_fifo_error,
         should_recreate_session_after_stdin_error, tmux_exit_reason_is_normal_completion,
     };
 
@@ -279,13 +273,6 @@ mod tests {
         let diag = build_tmux_death_diagnostic(&session, None).unwrap();
         assert!(diag.contains(TMUX_NORMAL_COMPLETION_REASON));
         clear_tmux_exit_reason(&session);
-    }
-
-    #[test]
-    fn test_pane_list_has_live_pane() {
-        assert!(pane_list_has_live_pane("1\n0\n"));
-        assert!(!pane_list_has_live_pane("1\n1\n"));
-        assert!(!pane_list_has_live_pane(""));
     }
 
     #[test]

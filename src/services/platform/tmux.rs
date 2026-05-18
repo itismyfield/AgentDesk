@@ -599,6 +599,50 @@ mod paste_tests {
 }
 
 #[cfg(test)]
+mod live_pane_tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    fn unique_test_session_name() -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "AgentDesk-live-pane-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    #[test]
+    fn has_live_pane_reports_live_tmux_session() {
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        if !is_available() {
+            eprintln!("skipping has_live_pane test: tmux is not available");
+            return;
+        }
+
+        let session = unique_test_session_name();
+        let output = create_session(&session, None, "sleep 60")
+            .expect("temporary tmux session should be created");
+
+        if !output.status.success() {
+            panic!(
+                "temporary tmux session should be created: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let result = has_live_pane(&session);
+        let _ = kill_session(&session, "live pane test cleanup");
+
+        assert!(result);
+    }
+}
+
+#[cfg(test)]
 mod session_server_tests {
     use super::*;
 

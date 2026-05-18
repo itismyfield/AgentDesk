@@ -574,7 +574,7 @@
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1368 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 129 |  |
-| `services::platform::tmux` | `src/services/platform/tmux.rs` | 730 |  |
+| `services::platform::tmux` | `src/services/platform/tmux.rs` | 774 |  |
 | `services::process` | `src/services/process.rs` | 1407 | giant-file |
 | `services::provider` | `src/services/provider.rs` | 2768 | giant-file |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 |  |
@@ -615,7 +615,7 @@
 | `services::slo` | `src/services/slo/mod.rs` | 634 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 411 |  |
 | `services::tmux_common` | `src/services/tmux_common.rs` | 878 |  |
-| `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 398 |  |
+| `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 385 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 727 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
 | `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 780 |  |
