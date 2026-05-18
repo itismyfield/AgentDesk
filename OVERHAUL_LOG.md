@@ -185,4 +185,21 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** wire the same pattern into RateLimitWidget (need a small abort-controller refactor) or pivot to (a) info hierarchy / (b) performance decomposition.
 
+### Round 11 — 2026-05-19 04:42~04:46 KST
+**Focus:** Information hierarchy (4) — Ops Missions priority ordering + emphasis.
+
+**Changes:**
+- `dashboard/DashboardHomeSnapshotWidgets.tsx`:
+  - New `signalPriority(row)` ordering function: zero-value rows score 0 regardless of tone; non-zero rows score `danger(4) > warn(3) > info(2) > success(1)`. The eye should always land on a card that needs action first.
+  - `DashboardHomeSignalsWidget` now sorts rows stably by `signalPriority` (preserving relative order inside each bucket via index tiebreak).
+  - **Visual hierarchy on top card**: the single highest-priority active row gets a stronger accent mix (44% vs 24%), a soft accent-tinted drop shadow, and an inset accent ring so it reads as "the one to look at".
+  - **De-emphasized cards**: rows with `value === 0` drop to opacity 0.78 — present but visibly secondary.
+  - Each card now carries `data-priority="top" | "active" | "inactive"` for future CSS overrides without round-tripping through props.
+
+**Net effect:** the Ops Missions card stops treating every signal equally. An operator scanning the home page now gets a clear "what to do first" without parsing five identical pills.
+
+**Verification:** `npm run build` ✓ in 4.1s.
+
+**Next:** propagate priority ordering to other signal lists (HomePulseSections); or wire RateLimitWidget refresh; or pivot to performance (memo on heavy widgets).
+
 EOF

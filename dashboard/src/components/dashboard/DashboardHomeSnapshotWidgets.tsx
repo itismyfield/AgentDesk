@@ -239,6 +239,26 @@ export function DashboardHomeOfficeWidget({
   );
 }
 
+/**
+ * Severity priority for the Ops Missions card. Higher = should be read first
+ * by the operator. Zero-value rows drop to the bottom regardless of their tone
+ * so the eye lands on actionable signals.
+ */
+function signalPriority(row: HomeSignalRow): number {
+  if (row.value <= 0) return 0;
+  switch (row.tone) {
+    case "danger":
+      return 4;
+    case "warn":
+      return 3;
+    case "info":
+      return 2;
+    case "success":
+    default:
+      return 1;
+  }
+}
+
 export function DashboardHomeSignalsWidget({
   rows,
   maxValue,
@@ -248,6 +268,18 @@ export function DashboardHomeSignalsWidget({
   maxValue: number;
   t: TFunction;
 }) {
+  // Stable sort by severity so the top card is always what needs attention
+  // first. We preserve the relative order inside each priority bucket by
+  // sorting indices.
+  const orderedRows = useMemo(() => {
+    const indexed = rows.map((row, index) => ({ row, index }));
+    indexed.sort((a, b) => {
+      const delta = signalPriority(b.row) - signalPriority(a.row);
+      return delta !== 0 ? delta : a.index - b.index;
+    });
+    return indexed.map((entry) => entry.row);
+  }, [rows]);
+  const topActivePriority = orderedRows[0] ? signalPriority(orderedRows[0]) : 0;
   return (
     <SurfaceSubsection
       title={t({ ko: "운영 미션", en: "Ops Missions", ja: "運用ミッション", zh: "运营任务" })}
@@ -284,16 +316,26 @@ export function DashboardHomeSignalsWidget({
       </div>
 
       <div className="space-y-2.5">
-        {rows.map((row) => {
+        {orderedRows.map((row) => {
           const accent = getSignalAccent(row.tone);
           const tone = row.tone === "info" ? "info" : row.tone;
           const ratio = Math.max(0, Math.min(100, (row.value / maxValue) * 100));
+          const priority = signalPriority(row);
+          const isTopActive = priority > 0 && priority === topActivePriority;
+          const isInactive = priority === 0;
+          const accentMix = isTopActive ? 44 : 24;
+          const surfaceMix = isTopActive ? 14 : 7;
           const body = (
             <div
+              data-priority={isTopActive ? "top" : isInactive ? "inactive" : "active"}
               className="rounded-[22px] border p-4 text-left transition-transform duration-150"
               style={{
-                borderColor: `color-mix(in srgb, ${accent} 24%, var(--th-border) 76%)`,
-                background: `linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 93%, ${accent} 7%) 0%, color-mix(in srgb, var(--th-bg-surface) 95%, transparent) 100%)`,
+                borderColor: `color-mix(in srgb, ${accent} ${accentMix}%, var(--th-border) ${100 - accentMix}%)`,
+                background: `linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) ${93 - surfaceMix}%, ${accent} ${surfaceMix}%) 0%, color-mix(in srgb, var(--th-bg-surface) 95%, transparent) 100%)`,
+                boxShadow: isTopActive
+                  ? `0 14px 38px -22px color-mix(in srgb, ${accent} 70%, transparent), inset 0 0 0 1px color-mix(in srgb, ${accent} 24%, transparent)`
+                  : undefined,
+                opacity: isInactive ? 0.78 : 1,
               }}
             >
               <div className="flex items-start gap-3">
