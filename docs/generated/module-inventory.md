@@ -365,7 +365,7 @@
 | `services::discord` | `src/services/discord/mod.rs` | 6504 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 910 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 413 |  |
-| `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1374 | giant-file |
+| `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1366 | giant-file |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 106 |  |
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 521 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1900 | giant-file |
