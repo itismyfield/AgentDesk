@@ -177,6 +177,18 @@ struct RolloutParseState {
     /// must apply the longer `legacy_terminal_drain` to absorb >5s mid-
     /// response pauses without truncating bursts.
     seen_any_event_msg: bool,
+    /// #2529: set after the tail observes an explicit or wrapper-synthetic
+    /// `event_msg/composer_ready` envelope. This is not relayed as a Discord
+    /// message; it wakes the Codex TUI input readiness wait so post-turn
+    /// handoff and follow-up prompt delivery no longer depend primarily on
+    /// `tmux capture-pane` footer scraping.
+    composer_ready_seen: bool,
+    /// Legacy/alternate Codex JSONL writers may expose the final assistant
+    /// item as `item.completed` / `agent_message` instead of
+    /// `event_msg/task_complete`. We do not relay that schema from the TUI
+    /// rollout adapter, but it is enough lifecycle evidence to synthesize the
+    /// composer-ready envelope once no tool calls are pending.
+    agent_message_item_completed_seen: bool,
     /// Optional tmux session owner used to classify rollout user messages as
     /// SSH-direct input versus Discord-routed duplicates.
     tmux_session_name: Option<String>,
@@ -1124,6 +1136,7 @@ fn process_rollout_line(
     state.lifecycle_activity = false;
     let messages = rollout_messages(&json, state);
     observe_rollout_user_prompt(&json, state);
+    maybe_observe_synthetic_composer_ready(state);
     let emitted = !messages.is_empty();
     for message in messages {
         sender.send(message);
@@ -1150,6 +1163,11 @@ fn rollout_messages(json: &Value, state: &mut RolloutParseState) -> Vec<StreamMe
         "session_meta" => session_meta_message(json, state).into_iter().collect(),
         "response_item" => response_item_messages(json, state),
         "event_msg" => event_msg_message(json, state).into_iter().collect(),
+        "item.completed" => item_completed_message(json, state).into_iter().collect(),
+        "turn.completed" => {
+            state.turn_complete_seen = true;
+            Vec::new()
+        }
         _ => Vec::new(),
     }
 }
@@ -1296,6 +1314,15 @@ fn response_message_items(payload: &Value, state: &mut RolloutParseState) -> Vec
         .collect()
 }
 
+fn item_completed_message(json: &Value, state: &mut RolloutParseState) -> Option<StreamMessage> {
+    let item = json.get("item")?;
+    if item.get("type").and_then(Value::as_str) == Some("agent_message") {
+        state.agent_message_item_completed_seen = true;
+        state.lifecycle_activity = true;
+    }
+    None
+}
+
 fn tool_call_message(payload: &Value) -> Option<StreamMessage> {
     let name = payload
         .get("name")
@@ -1338,10 +1365,24 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
     // drain decision in the read loop branches on this flag — legacy
     // writers (no event_msg whatsoever) use the longer drain so a >5s
     // burst-pause-burst response does not truncate.
-    state.seen_any_event_msg = true;
+    let synthetic = payload
+        .get("synthetic")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !synthetic {
+        state.seen_any_event_msg = true;
+    }
     match payload.get("type").and_then(Value::as_str)? {
         "token_count" => token_count_status(payload),
         "agent_reasoning" => Some(StreamMessage::redacted_thinking()),
+        "composer_ready" => {
+            state.composer_ready_seen = true;
+            state.lifecycle_activity = true;
+            if let Some(tmux_session_name) = state.tmux_session_name.as_deref() {
+                crate::services::codex_tui::input::record_rollout_composer_ready(tmux_session_name);
+            }
+            None
+        }
         "task_complete" => {
             // #2423: Codex CLI (>= 2026-03) emits exactly one
             // `event_msg/task_complete` per turn, after every assistant
@@ -1374,6 +1415,23 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
             None
         }
     }
+}
+
+fn maybe_observe_synthetic_composer_ready(state: &mut RolloutParseState) {
+    if state.composer_ready_seen || state.has_pending_tool_call() {
+        return;
+    }
+    if !state.turn_complete_seen && !state.agent_message_item_completed_seen {
+        return;
+    }
+    let synthetic = serde_json::json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "composer_ready",
+            "synthetic": true,
+        },
+    });
+    let _ = event_msg_message(&synthetic, state);
 }
 
 fn token_count_status(payload: &Value) -> Option<StreamMessage> {
@@ -2576,6 +2634,102 @@ mod tests {
             ),
             "expected Done with last_agent_message fallback, got {:?}",
             messages
+        );
+    }
+
+    #[test]
+    fn task_complete_synthesizes_composer_ready_for_tmux_session() {
+        let session = format!(
+            "agentdesk-codex-rollout-composer-ready-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let body = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ready"}]}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"ready"}}"#,
+            "\n",
+        );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), body).unwrap();
+        let (tx, _rx) = mpsc::channel();
+
+        tail_rollout_file_until_assistant_response(
+            file.path(),
+            0,
+            None,
+            &tx,
+            None,
+            || false,
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+            None,
+            true,
+            None,
+            true,
+            Some(session.clone()),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
+                &session,
+                crate::services::codex_tui::input::PromptReadinessKind::PostTurnHandoff,
+                None,
+            )
+            .is_ok(),
+            "synthetic composer_ready should release readiness without capture-pane"
+        );
+    }
+
+    #[test]
+    fn item_completed_agent_message_synthesizes_composer_ready_without_relaying_text() {
+        let session = format!(
+            "agentdesk-codex-rollout-item-ready-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let body = concat!(
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"exec text"}}"#,
+            "\n",
+        );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), body).unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        tail_rollout_file_until_assistant_response(
+            file.path(),
+            0,
+            None,
+            &tx,
+            None,
+            || false,
+            Duration::ZERO,
+            None,
+            None,
+            true,
+            None,
+            true,
+            Some(session.clone()),
+            None,
+        )
+        .unwrap();
+
+        let messages = rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .all(|message| !matches!(message, StreamMessage::Text { content } if content == "exec text")),
+            "item.completed agent_message remains a readiness hint, not relayed TUI text: {:?}",
+            messages
+        );
+        assert!(
+            crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
+                &session,
+                crate::services::codex_tui::input::PromptReadinessKind::PostTurnHandoff,
+                None,
+            )
+            .is_ok(),
+            "item.completed agent_message should release readiness without capture-pane"
         );
     }
 
