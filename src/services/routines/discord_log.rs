@@ -6,9 +6,11 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
+use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
+use crate::services::discord::outbound::message::{OutboundOperation, OutboundTarget};
 use crate::services::discord::outbound::{
     DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
-    deliver_outbound, shared_outbound_deduper,
+    shared_outbound_deduper,
 };
 
 use super::runtime::RoutineRunOutcome;
@@ -468,60 +470,83 @@ impl RoutineDiscordLogger {
             token,
             crate::server::routes::dispatches::discord_delivery::discord_api_base_url(),
         );
-        let policy = DiscordOutboundPolicy::default();
+        let channel = channel_id.parse::<u64>().map_err(|error| {
+            format!("invalid routine run Discord summary channel id {channel_id}: {error}")
+        })?;
+        let policy = DiscordOutboundPolicy::default().without_idempotency();
 
         if let Some(message_id) = message_id.filter(|value| parse_message_id(value).is_some()) {
-            let message = DiscordOutboundMessage::new(channel_id.to_string(), content.to_string())
-                .with_edit_message_id(message_id.to_string());
-            match deliver_outbound(
-                &client,
-                shared_outbound_deduper(),
-                message,
-                policy.clone(),
-                None,
+            let message_id = poise::serenity_prelude::MessageId::new(
+                message_id
+                    .parse::<u64>()
+                    .map_err(|error| format!("invalid routine summary message id: {error}"))?,
+            );
+            let message = DiscordOutboundMessage::new(
+                format!("routine-log:no-idempotency:{channel}"),
+                "routine-log:no-idempotency:edit",
+                content.to_string(),
+                OutboundTarget::Channel(poise::serenity_prelude::ChannelId::new(channel)),
+                policy,
             )
-            .await
-            {
-                DeliveryResult::Success { message_id }
-                | DeliveryResult::Fallback { message_id, .. } => return Ok(message_id),
+            .with_operation(OutboundOperation::Edit { message_id });
+            match deliver_outbound(&client, shared_outbound_deduper(), message, None).await {
+                DeliveryResult::Sent { messages, .. }
+                | DeliveryResult::Fallback { messages, .. } => {
+                    if let Some(message_id) = first_raw_message_id(&messages) {
+                        return Ok(message_id);
+                    }
+                    return Err(
+                        "routine run Discord summary edit returned no message id".to_string()
+                    );
+                }
                 DeliveryResult::Duplicate {
-                    message_id: Some(message_id),
-                } => return Ok(message_id),
-                DeliveryResult::Duplicate { message_id: None } => {
+                    existing_messages, ..
+                } => {
+                    if let Some(message_id) = first_raw_message_id(&existing_messages) {
+                        return Ok(message_id);
+                    }
                     return Err(
                         "routine run Discord summary edit duplicate without message id".to_string(),
                     );
                 }
-                DeliveryResult::Skipped { reason } => {
+                DeliveryResult::Skip { reason } => {
                     return Err(format!(
-                        "routine run Discord summary edit skipped: {reason:?}"
+                        "routine run Discord summary edit skipped: {reason}"
                     ));
                 }
-                DeliveryResult::PermanentFailure { detail } => {
+                DeliveryResult::PermanentFailure { reason } => {
                     tracing::warn!(
                         target = %target.target,
-                        message_id,
-                        error = %detail,
+                        message_id = %message_id,
+                        error = %reason,
                         "routine run Discord summary edit failed; sending replacement message"
                     );
                 }
             }
         }
 
-        let message = DiscordOutboundMessage::new(channel_id.to_string(), content.to_string());
-        match deliver_outbound(&client, shared_outbound_deduper(), message, policy, None).await {
-            DeliveryResult::Success { message_id }
-            | DeliveryResult::Fallback { message_id, .. } => Ok(message_id),
-            DeliveryResult::Duplicate {
-                message_id: Some(message_id),
-            } => Ok(message_id),
-            DeliveryResult::Duplicate { message_id: None } => {
-                Err("routine run Discord summary send duplicate without message id".to_string())
+        let message = DiscordOutboundMessage::new(
+            format!("routine-log:no-idempotency:{channel}"),
+            "routine-log:no-idempotency:send",
+            content.to_string(),
+            OutboundTarget::Channel(poise::serenity_prelude::ChannelId::new(channel)),
+            policy,
+        );
+        match deliver_outbound(&client, shared_outbound_deduper(), message, None).await {
+            DeliveryResult::Sent { messages, .. } | DeliveryResult::Fallback { messages, .. } => {
+                first_raw_message_id(&messages).ok_or_else(|| {
+                    "routine run Discord summary send returned no message id".to_string()
+                })
             }
-            DeliveryResult::Skipped { reason } => Err(format!(
-                "routine run Discord summary send skipped: {reason:?}"
+            DeliveryResult::Duplicate {
+                existing_messages, ..
+            } => first_raw_message_id(&existing_messages).ok_or_else(|| {
+                "routine run Discord summary send duplicate without message id".to_string()
+            }),
+            DeliveryResult::Skip { reason } => Err(format!(
+                "routine run Discord summary send skipped: {reason}"
             )),
-            DeliveryResult::PermanentFailure { detail } => Err(detail),
+            DeliveryResult::PermanentFailure { reason } => Err(reason),
         }
     }
 

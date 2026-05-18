@@ -16,9 +16,10 @@
 use std::sync::atomic::Ordering;
 
 use super::harness::{TestHarness, postgres_available};
+use crate::services::discord::outbound::delivery::deliver_outbound;
+use crate::services::discord::outbound::message::OutboundTarget;
 use crate::services::discord::outbound::{
     DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, OutboundDeduper,
-    deliver_outbound,
 };
 use crate::services::discord::test_harness_exports as flow;
 use crate::services::provider::ProviderKind;
@@ -41,20 +42,30 @@ async fn duplicate_relay_suppressed_by_dedupe() {
     let semantic = "watcher:terminal-relay";
 
     // First watcher relays — transport sees one call, deduper remembers key.
-    let msg_a = DiscordOutboundMessage::new(channel.clone(), "terminal response alpha")
-        .with_correlation(correlation.clone(), semantic);
-    let first = deliver_outbound(&harness.mock_discord, &dedup, msg_a, policy.clone(), None).await;
+    let msg_a = DiscordOutboundMessage::new(
+        correlation.clone(),
+        semantic,
+        "terminal response alpha",
+        OutboundTarget::Channel(ChannelId::new(SCENARIO_CHANNEL_ID)),
+        policy,
+    );
+    let first = deliver_outbound(&harness.mock_discord, &dedup, msg_a, None).await;
     assert!(
-        matches!(first, DeliveryResult::Success { .. }),
+        matches!(first, DeliveryResult::Sent { .. }),
         "first relay must succeed, got {first:?}"
     );
 
     // Second watcher (replica) tries to relay the same (correlation,
     // semantic) pair. Deduper short-circuits before the mock transport is
     // touched.
-    let msg_b = DiscordOutboundMessage::new(channel.clone(), "terminal response alpha (replica)")
-        .with_correlation(correlation, semantic);
-    let second = deliver_outbound(&harness.mock_discord, &dedup, msg_b, policy, None).await;
+    let msg_b = DiscordOutboundMessage::new(
+        correlation,
+        semantic,
+        "terminal response alpha (replica)",
+        OutboundTarget::Channel(ChannelId::new(SCENARIO_CHANNEL_ID)),
+        policy,
+    );
+    let second = deliver_outbound(&harness.mock_discord, &dedup, msg_b, None).await;
     assert!(
         matches!(second, DeliveryResult::Duplicate { .. }),
         "second relay must be recorded as Duplicate, got {second:?}"

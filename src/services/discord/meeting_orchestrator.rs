@@ -17,9 +17,11 @@ use super::formatting::send_long_message_raw;
 use super::meeting_artifact_store::{MeetingArtifactKind, MeetingArtifactRepo, StoreOutcome};
 use super::meeting_state_machine::{self as msm, MeetingEvent, MeetingState};
 use super::org_schema;
+use super::outbound::delivery::{deliver_outbound, first_raw_message_id};
+use super::outbound::message::{OutboundOperation, OutboundTarget};
 use super::outbound::{
     DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
-    deliver_outbound, outbound_fingerprint, shared_outbound_deduper,
+    outbound_fingerprint, shared_outbound_deduper,
 };
 use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
 use super::settings::{ResolvedMemorySettings, RoleBinding, load_role_prompt};
@@ -737,7 +739,6 @@ async fn deliver_meeting_message(
             &MeetingOutboundClient { http, shared },
             shared_outbound_deduper(),
             message,
-            DiscordOutboundPolicy::preserve_inline_content(),
             None,
         )
         .await,
@@ -750,13 +751,16 @@ fn meeting_outbound_message(
     event_key: &str,
 ) -> DiscordOutboundMessage {
     let content_hash = outbound_fingerprint(&[&content]);
-    DiscordOutboundMessage::new(channel_id.get().to_string(), content).with_correlation(
+    DiscordOutboundMessage::new(
         format!("meeting:{}", channel_id.get()),
         format!(
             "meeting:{}:{}:{content_hash}",
             channel_id.get(),
             normalize_meeting_event_key(event_key)
         ),
+        content,
+        OutboundTarget::Channel(channel_id),
+        DiscordOutboundPolicy::preserve_inline_content(),
     )
 }
 
@@ -790,13 +794,12 @@ async fn edit_meeting_message(
     let content = content.into();
     let message =
         meeting_outbound_message(channel_id, content, &format!("edit:{}", message_id.get()))
-            .with_edit_message_id(message_id.get().to_string());
+            .with_operation(OutboundOperation::Edit { message_id });
     meeting_delivery_result(
         deliver_outbound(
             &MeetingOutboundClient { http, shared },
             shared_outbound_deduper(),
             message,
-            DiscordOutboundPolicy::preserve_inline_content(),
             None,
         )
         .await,
@@ -806,18 +809,24 @@ async fn edit_meeting_message(
 
 fn meeting_delivery_result(result: DeliveryResult) -> Result<Option<serenity::MessageId>, String> {
     match result {
-        DeliveryResult::Success { message_id } | DeliveryResult::Fallback { message_id, .. } => {
-            parse_meeting_message_id(&message_id).map(Some)
+        DeliveryResult::Sent { messages, .. } | DeliveryResult::Fallback { messages, .. } => {
+            first_raw_message_id(&messages)
+                .as_deref()
+                .ok_or_else(|| "meeting delivery returned no message id".to_string())
+                .and_then(parse_meeting_message_id)
+                .map(Some)
         }
-        DeliveryResult::Duplicate { message_id } => message_id
+        DeliveryResult::Duplicate {
+            existing_messages, ..
+        } => first_raw_message_id(&existing_messages)
             .as_deref()
             .map(parse_meeting_message_id)
             .transpose(),
-        DeliveryResult::Skipped { reason } => {
+        DeliveryResult::Skip { reason } => {
             tracing::info!(?reason, "[meeting] outbound delivery skipped");
             Ok(None)
         }
-        DeliveryResult::PermanentFailure { detail } => Err(detail),
+        DeliveryResult::PermanentFailure { reason } => Err(reason),
     }
 }
 
@@ -3268,14 +3277,14 @@ mod tests {
             "meeting:m-1:round:1:header",
         );
 
-        assert_eq!(first.correlation_id.as_deref(), Some("meeting:42"));
+        assert_eq!(first.idempotency.correlation_id, "meeting:42");
         assert_eq!(
-            first.semantic_event_id.as_deref(),
-            retry.semantic_event_id.as_deref()
+            first.idempotency.semantic_event_id,
+            retry.idempotency.semantic_event_id
         );
         assert_ne!(
-            first.semantic_event_id.as_deref(),
-            changed.semantic_event_id.as_deref()
+            first.idempotency.semantic_event_id,
+            changed.idempotency.semantic_event_id
         );
     }
 
@@ -3283,7 +3292,7 @@ mod tests {
     fn meeting_outbound_message_normalizes_event_keys() {
         let channel_id = poise::serenity_prelude::ChannelId::new(42);
         let message = meeting_outbound_message(channel_id, "hello".to_string(), "summary done/ok");
-        let semantic = message.semantic_event_id.expect("semantic event id");
+        let semantic = message.idempotency.semantic_event_id;
         assert!(semantic.starts_with("meeting:42:summary_done_ok:"));
     }
 

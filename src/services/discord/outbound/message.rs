@@ -1,7 +1,7 @@
 //! New outbound message domain type (#1006 v3, slice 1.0 — types only).
 //!
-//! This is the v3 replacement for the legacy `DiscordOutboundMessage`
-//! defined in [`super::legacy`]. It pairs message content with an explicit
+//! This is the outbound message envelope used by v3 delivery. It pairs
+//! message content with an explicit
 //! [`OutboundTarget`] (so channel-vs-thread routing is encoded in the type
 //! system rather than in two parallel `Option<String>` fields) and embeds
 //! the per-message [`super::policy::DiscordOutboundPolicy`] so the deliver

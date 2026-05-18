@@ -122,7 +122,7 @@ function on a worker. We need a refactor that separates
 
 1. Worker can call Discord REST without IDENTIFY — token loads from
    the credential store on every node. (Validated by reading the
-   existing `HttpOutboundClient` in `services/discord/outbound/legacy.rs:533+`.)
+   existing `HttpOutboundClient` in `services/discord/outbound/transport.rs`.)
 2. `tmux_runtime::create_session()` fails fast if `cwd` is missing —
    worker can detect this and bail to leader without losing the
    message.

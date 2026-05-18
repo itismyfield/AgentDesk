@@ -26,10 +26,11 @@
 
 ### `discord_outbound`
 
-- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery}.rs`
-  (#1006 v3 domain types, pure planner, and delivery implementation).
-- legacy_modules: `src/services/discord/outbound/legacy.rs` (`deliver_outbound`,
-  `OutboundDeduper`, `DiscordOutbound*` types).
+- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery,transport}.rs`
+  (#1006 v3 domain types, pure planner, delivery implementation, and shared
+  transport/dedup primitives).
+- legacy_modules: none; `src/services/discord/outbound/legacy.rs` was removed
+  in #2535.
 - do_not_edit_without_migration_plan:
   `src/services/discord/formatting.rs::send_long_message_raw` (line 1971,
   ordered-chunk continuation contract not yet modelled in v3).
@@ -37,14 +38,13 @@
   [`discord-outbound-migration.md`](discord-outbound-migration.md) (table is
   the authoritative coverage record).
 - invariants: every new `send` or `edit` from production code goes through
-  `outbound::deliver_outbound` (or the v3 successor) — never `channel_id.say`,
+  `outbound::delivery::deliver_outbound` — never `channel_id.say`,
   `channel_id.send_message`, or raw `http.send_message` from a route or
   worker. Interaction-token responses (`ctx.say`, `ComponentInteraction`) are
   the only allowed exception per #1175.
-- allowed_changes: `bugfix` on `legacy.rs` only when the migration table marks
-  the calling row as `legacy`; `new_feature` only on the v3 `outbound/`
-  submodules; `extraction` from `formatting.rs` requires a contract update
-  for ordered chunk metadata.
+- allowed_changes: `new_feature` only on the v3 `outbound/` submodules;
+  `extraction` from `formatting.rs` requires a contract update for ordered
+  chunk metadata.
 - tests: `src/integration_tests/discord_flow/scenarios.rs`,
   `src/integration_tests/agents_setup_e2e.rs`, plus per-module unit tests in
   `outbound/{message,policy,decision,result}.rs`.

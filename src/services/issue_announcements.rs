@@ -1,9 +1,12 @@
 use chrono::{DateTime, Utc};
+use poise::serenity_prelude::{ChannelId, MessageId};
 use sqlx::{PgPool, Row};
 
+use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
+use crate::services::discord::outbound::message::{OutboundOperation, OutboundTarget};
 use crate::services::discord::outbound::{
     DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
-    deliver_outbound, shared_outbound_deduper,
+    shared_outbound_deduper,
 };
 
 #[derive(Clone, Debug)]
@@ -399,21 +402,37 @@ async fn send_issue_announcement_message(
         token.to_string(),
         crate::server::routes::dispatches::discord_delivery::discord_api_base_url(),
     );
-    let mut message = DiscordOutboundMessage::new(channel_id.to_string(), content.to_string())
-        .with_correlation(correlation_id.to_string(), event_id.to_string());
+    let channel_id = channel_id
+        .parse::<u64>()
+        .map(ChannelId::new)
+        .map_err(|error| format!("invalid issue announcement channel id {channel_id}: {error}"))?;
+    let mut message = DiscordOutboundMessage::new(
+        correlation_id.to_string(),
+        event_id.to_string(),
+        content.to_string(),
+        OutboundTarget::Channel(channel_id),
+        DiscordOutboundPolicy::review_notification(),
+    );
     if let Some(message_id) = edit_message_id {
-        message = message.with_edit_message_id(message_id.to_string());
+        let message_id = message_id
+            .parse::<u64>()
+            .map(MessageId::new)
+            .map_err(|error| {
+                format!("invalid issue announcement edit message id {message_id}: {error}")
+            })?;
+        message = message.with_operation(OutboundOperation::Edit { message_id });
     }
-    let policy = DiscordOutboundPolicy::review_notification(None);
-    match deliver_outbound(&client, shared_outbound_deduper(), message, policy, None).await {
-        DeliveryResult::Success { message_id } | DeliveryResult::Fallback { message_id, .. } => {
-            Ok(message_id)
+    match deliver_outbound(&client, shared_outbound_deduper(), message, None).await {
+        DeliveryResult::Sent { messages, .. } | DeliveryResult::Fallback { messages, .. } => {
+            first_raw_message_id(&messages)
+                .ok_or_else(|| "issue announcement delivery returned no message id".to_string())
         }
-        DeliveryResult::Duplicate { message_id } => {
-            message_id.ok_or_else(|| "duplicate issue announcement without message id".to_string())
-        }
-        DeliveryResult::Skipped { .. } => Err("issue announcement delivery skipped".to_string()),
-        DeliveryResult::PermanentFailure { detail } => Err(detail),
+        DeliveryResult::Duplicate {
+            existing_messages, ..
+        } => first_raw_message_id(&existing_messages)
+            .ok_or_else(|| "duplicate issue announcement without message id".to_string()),
+        DeliveryResult::Skip { .. } => Err("issue announcement delivery skipped".to_string()),
+        DeliveryResult::PermanentFailure { reason } => Err(reason),
     }
 }
 

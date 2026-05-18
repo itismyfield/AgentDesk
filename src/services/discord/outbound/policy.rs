@@ -1,8 +1,6 @@
 //! New outbound delivery policy (#1006 v3).
 //!
-//! Replaces the legacy [`super::legacy::DiscordOutboundPolicy`] (which mixed
-//! `max_len`, three independent fallback enums, and a `minimal_fallback`
-//! string) with a tighter three-field shape:
+//! Delivery policy for v3 outbound envelopes:
 //!
 //! - [`LengthStrategy`] — how to handle content beyond the Discord
 //!   per-message limit (split into multiple posts, compact via summary,
@@ -14,8 +12,7 @@
 //!   `(correlation_id, semantic_event_id)` pair. Stored as
 //!   [`std::time::Duration`] so wire formats can serialise it as seconds.
 //!
-//! These policies are consumed by [`super::delivery`] for direct v3 callsites
-//! and by [`super::legacy`] through its compatibility adapter.
+//! These policies are consumed by [`super::delivery`].
 
 use std::time::Duration;
 
