@@ -2123,10 +2123,7 @@ impl VoiceBargeInRuntime {
         announcement: &crate::voice::prompt::VoiceTranscriptAnnouncement,
         summary: &str,
     ) -> Result<VoiceBackgroundHandoffOutcome, String> {
-        let background_provider = self
-            .resolve_background_provider_for_target(target_channel_id)
-            .await;
-        let driver = select_voice_background_driver(&background_provider);
+        let driver = select_voice_background_driver();
         let guild_id = self.voice_turn_guild_id(source_channel_id, target_channel_id);
         let prompt = build_voice_background_handoff_prompt(
             &announcement.transcript,
@@ -2316,10 +2313,7 @@ impl VoiceBargeInRuntime {
         let foreground = self
             .resolve_effective_foreground_config(source_channel_id, target_channel_id)
             .await;
-        let background_provider = self
-            .resolve_background_provider_for_target(target_channel_id)
-            .await;
-        let driver = select_voice_background_driver(&background_provider);
+        let driver = select_voice_background_driver();
         let guild_id = self.voice_turn_guild_id(source_channel_id, target_channel_id);
         if guild_id.is_none() {
             tracing::warn!(
@@ -2480,7 +2474,6 @@ impl VoiceBargeInRuntime {
                     user_id = utterance.user_id,
                     utterance_id = %utterance.utterance_id,
                     turn_id = %outcome.turn_id,
-                    background_provider = %background_provider.as_str(),
                     background_driver = %outcome.driver_kind.as_str(),
                     foreground_provider = %foreground.provider,
                     foreground_model = %foreground.model,
@@ -2604,19 +2597,6 @@ impl VoiceBargeInRuntime {
             max_chars,
             timeout_ms,
         }
-    }
-
-    async fn resolve_background_provider_for_target(
-        &self,
-        target_channel_id: ChannelId,
-    ) -> ProviderKind {
-        let config = self.cached_config().await;
-        config
-            .agents
-            .iter()
-            .find(|agent| agent_text_channel_matches(agent, target_channel_id))
-            .map(|agent| ProviderKind::from_str_or_unsupported(&agent.provider))
-            .unwrap_or_else(|| ProviderKind::Unsupported("unknown".to_string()))
     }
 
     async fn resolve_voice_background_channel_for_source(

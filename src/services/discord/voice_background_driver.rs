@@ -1,6 +1,5 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::services::provider::ProviderKind;
 use poise::serenity_prelude::{ChannelId, GuildId, MessageId};
 
 use super::SharedData;
@@ -16,22 +15,17 @@ const VOICE_ANNOUNCE_DEFAULT_GENERATION: u64 = 1;
 /// an announce-bot transcript message in the routed text channel, which then
 /// flows through the normal Discord intake and turn bridge.
 ///
-/// Legacy headless and Claude TUI pseudo-headless are kept visible as candidate
-/// shapes so dual-path provider work can converge here later, but production
-/// voice start currently selects `AnnounceBotTranscript`.
+/// Production voice start currently has one supported background trigger:
+/// `AnnounceBotTranscript`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum VoiceBackgroundDriverKind {
     AnnounceBotTranscript,
-    HeadlessLegacy,
-    ClaudeTuiPseudoHeadless,
 }
 
 impl VoiceBackgroundDriverKind {
     pub(in crate::services::discord) const fn as_str(self) -> &'static str {
         match self {
             Self::AnnounceBotTranscript => "announce_bot_transcript",
-            Self::HeadlessLegacy => "headless_legacy",
-            Self::ClaudeTuiPseudoHeadless => "claude_tui_pseudo_headless",
         }
     }
 }
@@ -54,15 +48,6 @@ impl VoiceBackgroundDriverCapabilities {
         resume: true,
         progress_observation: true,
         terminal_result_delivery: true,
-    };
-
-    const CANDIDATE_NOT_ENABLED: Self = Self {
-        start: false,
-        follow_up: false,
-        cancel: false,
-        resume: false,
-        progress_observation: false,
-        terminal_result_delivery: false,
     };
 }
 
@@ -194,123 +179,25 @@ impl VoiceBackgroundTurnDriver for AnnounceBotTranscriptDriver {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(in crate::services::discord) struct HeadlessLegacyVoiceBackgroundDriver;
-
-impl VoiceBackgroundTurnDriver for HeadlessLegacyVoiceBackgroundDriver {
-    fn kind(&self) -> VoiceBackgroundDriverKind {
-        VoiceBackgroundDriverKind::HeadlessLegacy
-    }
-
-    fn capabilities(&self) -> VoiceBackgroundDriverCapabilities {
-        VoiceBackgroundDriverCapabilities::CANDIDATE_NOT_ENABLED
-    }
-
-    fn start<'a>(
-        &'a self,
-        _request: VoiceBackgroundStartRequest<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<VoiceBackgroundStartOutcome, String>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            Err(
-                "legacy direct headless voice trigger is disabled; use announce-bot transcript"
-                    .to_string(),
-            )
-        })
-    }
+pub(in crate::services::discord) fn select_voice_background_driver() -> AnnounceBotTranscriptDriver
+{
+    let driver = AnnounceBotTranscriptDriver;
+    debug_assert!(candidate_voice_background_driver_kinds().contains(&driver.kind()));
+    driver
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(in crate::services::discord) struct ClaudeTuiPseudoHeadlessDriver;
-
-impl VoiceBackgroundTurnDriver for ClaudeTuiPseudoHeadlessDriver {
-    fn kind(&self) -> VoiceBackgroundDriverKind {
-        VoiceBackgroundDriverKind::ClaudeTuiPseudoHeadless
-    }
-
-    fn capabilities(&self) -> VoiceBackgroundDriverCapabilities {
-        VoiceBackgroundDriverCapabilities::CANDIDATE_NOT_ENABLED
-    }
-
-    fn start<'a>(
-        &'a self,
-        _request: VoiceBackgroundStartRequest<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<VoiceBackgroundStartOutcome, String>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            Err(
-                "claude_tui_pseudo_headless driver is not enabled yet; use headless fallback"
-                    .to_string(),
-            )
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(in crate::services::discord) enum VoiceBackgroundDriver {
-    AnnounceBotTranscript(AnnounceBotTranscriptDriver),
-    HeadlessLegacy(HeadlessLegacyVoiceBackgroundDriver),
-    ClaudeTuiPseudoHeadless(ClaudeTuiPseudoHeadlessDriver),
-}
-
-impl VoiceBackgroundTurnDriver for VoiceBackgroundDriver {
-    fn kind(&self) -> VoiceBackgroundDriverKind {
-        match self {
-            Self::AnnounceBotTranscript(driver) => driver.kind(),
-            Self::HeadlessLegacy(driver) => driver.kind(),
-            Self::ClaudeTuiPseudoHeadless(driver) => driver.kind(),
-        }
-    }
-
-    fn capabilities(&self) -> VoiceBackgroundDriverCapabilities {
-        match self {
-            Self::AnnounceBotTranscript(driver) => driver.capabilities(),
-            Self::HeadlessLegacy(driver) => driver.capabilities(),
-            Self::ClaudeTuiPseudoHeadless(driver) => driver.capabilities(),
-        }
-    }
-
-    fn start<'a>(
-        &'a self,
-        request: VoiceBackgroundStartRequest<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<VoiceBackgroundStartOutcome, String>> + Send + 'a>>
-    {
-        match self {
-            Self::AnnounceBotTranscript(driver) => driver.start(request),
-            Self::HeadlessLegacy(driver) => driver.start(request),
-            Self::ClaudeTuiPseudoHeadless(driver) => driver.start(request),
-        }
-    }
-}
-
-pub(in crate::services::discord) fn select_voice_background_driver(
-    _provider: &ProviderKind,
-) -> VoiceBackgroundDriver {
-    VoiceBackgroundDriver::AnnounceBotTranscript(AnnounceBotTranscriptDriver)
-}
-
-pub(in crate::services::discord) fn candidate_driver_kinds_for_provider(
-    provider: &ProviderKind,
-) -> Vec<VoiceBackgroundDriverKind> {
-    match provider {
-        ProviderKind::Claude => vec![
-            VoiceBackgroundDriverKind::AnnounceBotTranscript,
-            VoiceBackgroundDriverKind::HeadlessLegacy,
-            VoiceBackgroundDriverKind::ClaudeTuiPseudoHeadless,
-        ],
-        _ => vec![VoiceBackgroundDriverKind::AnnounceBotTranscript],
-    }
+pub(in crate::services::discord) fn candidate_voice_background_driver_kinds()
+-> &'static [VoiceBackgroundDriverKind] {
+    &[VoiceBackgroundDriverKind::AnnounceBotTranscript]
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeTuiPseudoHeadlessDriver, HeadlessLegacyVoiceBackgroundDriver,
-        VoiceBackgroundDriverKind, VoiceBackgroundTurnDriver, candidate_driver_kinds_for_provider,
-        default_voice_announce_generation, select_voice_background_driver,
-        voice_announce_delivery_id,
+        VoiceBackgroundDriverKind, VoiceBackgroundTurnDriver,
+        candidate_voice_background_driver_kinds, default_voice_announce_generation,
+        select_voice_background_driver, voice_announce_delivery_id,
     };
-    use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, GuildId};
 
     #[test]
@@ -327,33 +214,15 @@ mod tests {
     }
 
     #[test]
-    fn claude_voice_background_candidates_keep_dual_path_visible() {
+    fn voice_background_candidates_match_selected_driver() {
         assert_eq!(
-            candidate_driver_kinds_for_provider(&ProviderKind::Claude),
-            vec![
-                VoiceBackgroundDriverKind::AnnounceBotTranscript,
-                VoiceBackgroundDriverKind::HeadlessLegacy,
-                VoiceBackgroundDriverKind::ClaudeTuiPseudoHeadless,
-            ]
+            candidate_voice_background_driver_kinds(),
+            &[VoiceBackgroundDriverKind::AnnounceBotTranscript]
         );
         assert_eq!(
-            select_voice_background_driver(&ProviderKind::Claude).kind(),
+            select_voice_background_driver().kind(),
             VoiceBackgroundDriverKind::AnnounceBotTranscript
         );
-        assert!(
-            select_voice_background_driver(&ProviderKind::Claude)
-                .capabilities()
-                .start
-        );
-        assert!(!ClaudeTuiPseudoHeadlessDriver.capabilities().start);
-        assert!(!HeadlessLegacyVoiceBackgroundDriver.capabilities().start);
-    }
-
-    #[test]
-    fn non_claude_providers_only_advertise_announce_candidate() {
-        assert_eq!(
-            candidate_driver_kinds_for_provider(&ProviderKind::Codex),
-            vec![VoiceBackgroundDriverKind::AnnounceBotTranscript]
-        );
+        assert!(select_voice_background_driver().capabilities().start);
     }
 }
