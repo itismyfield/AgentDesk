@@ -228,7 +228,7 @@ fn kill_agentdesk_tmux_sessions_local() -> usize {
     let mut count = 0;
     for name in &names {
         if name.starts_with("AgentDesk-") {
-            if crate::services::platform::tmux::kill_session_with_reason(
+            if crate::services::platform::tmux::kill_session(
                 name,
                 "CLI cleanup of all AgentDesk tmux sessions",
             ) {

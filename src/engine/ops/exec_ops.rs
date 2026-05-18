@@ -386,14 +386,12 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                 None,
             );
             let kill_result = match tmux_timeout {
-                Some(timeout) => {
-                    crate::services::platform::tmux::kill_session_output_with_reason_timeout(
-                        tmux_name,
-                        "force-kill via agentdesk.session.kill()",
-                        timeout,
-                    )
-                }
-                None => crate::services::platform::tmux::kill_session_output_with_reason(
+                Some(timeout) => crate::services::platform::tmux::kill_session_output_timeout(
+                    tmux_name,
+                    "force-kill via agentdesk.session.kill()",
+                    timeout,
+                ),
+                None => crate::services::platform::tmux::kill_session_output(
                     tmux_name,
                     "force-kill via agentdesk.session.kill()",
                 )

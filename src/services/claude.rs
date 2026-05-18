@@ -1912,7 +1912,7 @@ fn execute_streaming_local_tui_tmux(
                     tmux_session_name,
                     &format!("claude tui follow-up failed, recreating: {}", error),
                 );
-                crate::services::platform::tmux::kill_session_with_reason(
+                crate::services::platform::tmux::kill_session(
                     tmux_session_name,
                     &format!("claude tui follow-up failed, recreating: {}", error),
                 );
@@ -1937,7 +1937,7 @@ fn execute_streaming_local_tui_tmux(
                     tmux_session_name,
                     &format!("claude tui partial follow-up output delivered: {}", error),
                 );
-                crate::services::platform::tmux::kill_session_with_reason(
+                crate::services::platform::tmux::kill_session(
                     tmux_session_name,
                     &format!("claude tui partial follow-up output delivered: {}", error),
                 );
@@ -1959,7 +1959,7 @@ fn execute_streaming_local_tui_tmux(
             tmux_session_name,
             "stale claude tui session cleanup before recreate",
         );
-        crate::services::platform::tmux::kill_session_with_reason(
+        crate::services::platform::tmux::kill_session(
             tmux_session_name,
             "stale claude tui session cleanup before recreate",
         );
@@ -2057,7 +2057,7 @@ fn execute_streaming_local_tui_tmux(
                 tmux_session_name,
                 &format!("claude tui fresh turn failed: {}", error),
             );
-            crate::services::platform::tmux::kill_session_with_reason(
+            crate::services::platform::tmux::kill_session(
                 tmux_session_name,
                 &format!("claude tui fresh turn failed: {}", error),
             );
@@ -2078,7 +2078,7 @@ fn execute_streaming_local_tui_tmux(
             tmux_session_name,
             "claude tui session died before turn completion",
         );
-        crate::services::platform::tmux::kill_session_with_reason(
+        crate::services::platform::tmux::kill_session(
             tmux_session_name,
             "claude tui session died before turn completion",
         );
@@ -2528,7 +2528,7 @@ fn execute_streaming_local_tmux(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
-                crate::services::platform::tmux::kill_session_with_reason(
+                crate::services::platform::tmux::kill_session(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
@@ -2554,7 +2554,7 @@ fn execute_streaming_local_tmux(
                     tmux_session_name,
                     &format!("partial follow-up output already delivered: {}", error),
                 );
-                crate::services::platform::tmux::kill_session_with_reason(
+                crate::services::platform::tmux::kill_session(
                     tmux_session_name,
                     &format!("partial follow-up output already delivered: {}", error),
                 );
@@ -2586,7 +2586,7 @@ fn execute_streaming_local_tmux(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );
-        crate::services::platform::tmux::kill_session_with_reason(
+        crate::services::platform::tmux::kill_session(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );
@@ -3057,7 +3057,7 @@ pub fn terminate_local_session(session_name: &str) {
     #[cfg(unix)]
     if tmux_session_exists(session_name) {
         record_tmux_exit_reason(session_name, "model change requested fresh session");
-        let _ = crate::services::platform::tmux::kill_session_with_reason(
+        let _ = crate::services::platform::tmux::kill_session(
             session_name,
             "model change requested fresh session",
         );

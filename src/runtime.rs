@@ -102,7 +102,7 @@ impl SessionRuntime for TmuxRuntime {
     }
 
     fn kill_session(&self, session_name: &str) -> Result<()> {
-        crate::services::platform::tmux::kill_session_checked_with_reason(
+        crate::services::platform::tmux::kill_session_checked(
             session_name,
             "runtime::kill_session invocation",
         )

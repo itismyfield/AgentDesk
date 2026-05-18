@@ -145,7 +145,7 @@
 | `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 1668 | giant-file |
 | `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 600 |  |
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 534 |  |
-| `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 679 |  |
+| `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 677 |  |
 | `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 243 |  |
 | `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 1130 | giant-file |
 | `engine::ops::kv_ops` | `src/engine/ops/kv_ops.rs` | 211 |  |
@@ -355,7 +355,7 @@
 | `services::cluster::session_registry` | `src/services/cluster/session_registry.rs` | 572 |  |
 | `services::cluster::stream_relay` | `src/services/cluster/stream_relay.rs` | 874 |  |
 | `services::cluster::watcher_supervisor` | `src/services/cluster/watcher_supervisor.rs` | 858 |  |
-| `services::codex` | `src/services/codex.rs` | 3323 | giant-file |
+| `services::codex` | `src/services/codex.rs` | 3317 | giant-file |
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 744 |  |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 3 |  |
@@ -369,7 +369,7 @@
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 106 |  |
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 521 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1900 | giant-file |
-| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 928 |  |
+| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 925 |  |
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1064 | giant-file |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 117 |  |
 | `services::discord::commands::goals` | `src/services/discord/commands/goals.rs` | 97 |  |
@@ -488,7 +488,7 @@
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 83 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 597 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
-| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4202 | giant-file |
+| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4199 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 955 |  |
 | `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 7305 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2475 | giant-file |
@@ -573,7 +573,7 @@
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1368 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 129 |  |
-| `services::platform::tmux` | `src/services/platform/tmux.rs` | 749 |  |
+| `services::platform::tmux` | `src/services/platform/tmux.rs` | 730 |  |
 | `services::process` | `src/services/process.rs` | 1407 | giant-file |
 | `services::provider` | `src/services/provider.rs` | 2768 | giant-file |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 |  |

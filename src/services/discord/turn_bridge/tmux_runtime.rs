@@ -552,7 +552,7 @@ pub(in crate::services::discord) fn cancel_active_token(
                             termination_recorded = true;
                         }
                         record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
-                        crate::services::platform::tmux::kill_session_with_reason(
+                        crate::services::platform::tmux::kill_session(
                             &name,
                             &format!("explicit cleanup via {reason}"),
                         );

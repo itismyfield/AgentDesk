@@ -1822,7 +1822,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     None,
                 );
                 record_tmux_exit_reason(&sess, "startup cleanup: dead session");
-                crate::services::platform::tmux::kill_session_with_reason(
+                crate::services::platform::tmux::kill_session(
                     &sess,
                     "startup cleanup: dead session",
                 );

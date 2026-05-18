@@ -1205,7 +1205,7 @@ fn execute_streaming_local_tmux(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
-                crate::services::platform::tmux::kill_session_with_reason(
+                crate::services::platform::tmux::kill_session(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
@@ -1216,7 +1216,7 @@ fn execute_streaming_local_tmux(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );
-        crate::services::platform::tmux::kill_session_with_reason(
+        crate::services::platform::tmux::kill_session(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );
