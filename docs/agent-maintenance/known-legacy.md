@@ -4,7 +4,7 @@
 > owner issue. Touch these paths only inside the scope of the listed issue or
 > for a single narrow bugfix; do not extend them with new logic.
 >
-> Last refreshed: 2026-05-17 (against `main` @ `cfef5b4fae6f129fa6ee7f4b6eb48588712c28c0`).
+> Last refreshed: 2026-05-18 (against #2535 legacy outbound bridge removal).
 > Baseline note: legacy SQLite adapter crates are absent from the default
 > `cargo tree`.
 
@@ -14,31 +14,6 @@ Every entry uses the common §8 schema: `feature`, `canonical_modules`,
 `legacy_modules`, `do_not_edit_without_migration_plan`,
 `active_callsite_coverage`, `invariants`, `allowed_changes`, `tests`,
 `related_issues`.
-
-## Legacy Outbound (`outbound/legacy.rs`)
-
-- feature: `discord_outbound / legacy_helpers`
-- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery}.rs`
-  (v3 domain types, pure planner, and delivery implementation)
-- legacy_modules: `src/services/discord/outbound/legacy.rs` —
-  `deliver_outbound`, `OutboundDeduper`, all `Discord*` types and policy
-  enums. Also `src/services/discord/formatting.rs::send_long_message_raw`
-  (line 1971), kept direct because the ordered-chunk continuation contract
-  is not yet modelled in v3.
-- do_not_edit_without_migration_plan: do not extend `legacy.rs` types. New
-  send/edit features land on the v3 modules. Bugfix is permitted only when
-  the corresponding callsite row in
-  [`discord-outbound-migration.md`](discord-outbound-migration.md) is `legacy`
-  or `unknown`.
-- active_callsite_coverage: see the table in
-  [`discord-outbound-migration.md`](discord-outbound-migration.md).
-- invariants: `new_send_must_use_v3`,
-  `legacy_bugfix_only_when_table_legacy` (full text in the migration page).
-- allowed_changes: `bugfix` (per table); `extraction` to a v3 module is
-  encouraged.
-- tests: `src/integration_tests/discord_flow/scenarios.rs`,
-  `src/integration_tests/agents_setup_e2e.rs`.
-- related_issues: #1006, #1175, #1280.
 
 ## `legacy_db()` helper
 

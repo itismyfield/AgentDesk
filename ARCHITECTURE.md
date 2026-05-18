@@ -420,11 +420,11 @@ src/
 │   │   ├── outbound/
 │   │   │   ├── decision.rs
 │   │   │   ├── delivery.rs
-│   │   │   ├── legacy.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── policy.rs
-│   │   │   └── result.rs
+│   │   │   ├── result.rs
+│   │   │   └── transport.rs
 │   │   ├── placeholder_live_events/
 │   │   │   ├── common.rs
 │   │   │   ├── context_panel.rs

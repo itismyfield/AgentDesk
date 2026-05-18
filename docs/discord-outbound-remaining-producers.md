@@ -1,20 +1,26 @@
 # Discord Outbound Remaining Producers
 
-Issue #1175 finishes the remaining #1006 producer families after the core
+Issue #1175 finished the remaining #1006 producer families after the core
 dispatch, review, placeholder, gateway, and CLI text/DM helpers landed in
-#1188/#1189.
+#1188/#1189. Issue #2535 removed the final legacy outbound bridge by migrating
+issue announcements, monitoring status, meeting notifications, and routine
+Discord summaries to direct v3 envelopes.
 
 ## Migrated in this slice
 
-- `monitoring_status`: status banner send/edit now routes through
-  `deliver_outbound` with `preserve_inline_content`; only the delete path
-  remains direct because delete is not a send/edit operation in the current
-  shared contract.
+- `monitoring_status`: status banner send/edit routes through
+  `outbound::delivery::deliver_outbound` with `preserve_inline_content`; only
+  the delete path remains direct because delete is not a send/edit operation in
+  the current shared contract.
 - `meeting_orchestrator` and `commands/meeting_cmd`: meeting status, progress,
-  cancellation, parse-error, and failure notices now use the shared outbound
-  contract. Long meeting transcripts and summaries intentionally keep
+  cancellation, parse-error, and failure notices use direct v3 outbound
+  envelopes. Long meeting transcripts and summaries intentionally keep
   `send_long_message_raw` because the existing contract only models a single
   send/edit, not ordered continuation chunks.
+- `issue_announcements`: create/edit announcements use direct v3 envelopes and
+  `OutboundOperation::Edit` where applicable.
+- `routines::discord_log`: routine summary send/edit uses direct v3 envelopes
+  with idempotency disabled for repeated summary writes.
 - `message_outbox`: PG and sqlite drains pass row metadata into `/api/discord/send` as
   a `ManualOutboundDeliveryId`, so the shared send contract sees the source,
   reason/session correlation, and row semantic event instead of anonymous

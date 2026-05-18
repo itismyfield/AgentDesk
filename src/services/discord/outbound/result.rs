@@ -1,7 +1,6 @@
 //! New delivery outcome enum (#1006 v3).
 //!
-//! Replaces the legacy [`super::legacy::DeliveryResult`] with a cleaner
-//! variant set:
+//! Delivery outcome enum for v3 outbound delivery:
 //!
 //! - `Sent` — primary delivery succeeded; `messages` identifies every
 //!   created Discord message/chunk.
@@ -18,9 +17,7 @@
 //! - `PermanentFailure` — delivery failed and must not be retried. The
 //!   `reason` string is intended for logs / dead-letter queues.
 //!
-//! [`super::delivery`] constructs these variants for direct v3 callsites; the
-//! legacy facade maps them back to the older result shape while producers
-//! migrate.
+//! [`super::delivery`] constructs these variants for all outbound callsites.
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 use serde::{Deserialize, Serialize};

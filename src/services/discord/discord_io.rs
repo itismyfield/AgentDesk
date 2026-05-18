@@ -1,7 +1,10 @@
 use super::*;
+use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
+use crate::services::discord::outbound::message::OutboundTarget;
+use crate::services::discord::outbound::result::FallbackUsed;
 use crate::services::discord::outbound::{
-    DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, FallbackKind,
-    HttpOutboundClient, deliver_outbound, shared_outbound_deduper,
+    DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
+    shared_outbound_deduper,
 };
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
@@ -454,51 +457,72 @@ async fn deliver_channel_message(
         token.to_string(),
         crate::server::routes::dispatches::discord_delivery::discord_api_base_url(),
     );
-    let mut outbound_msg = DiscordOutboundMessage::new(channel_id.to_string(), message);
-    if let Some(delivery_id) = delivery_id.as_ref() {
-        outbound_msg = outbound_msg
-            .with_correlation(&delivery_id.correlation_id, &delivery_id.semantic_event_id);
+    let mut policy = DiscordOutboundPolicy::review_notification();
+    if delivery_id.is_none() {
+        policy = policy.without_idempotency();
     }
-    let policy = DiscordOutboundPolicy::review_notification(
-        minimal_fallback
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-    );
-
-    match deliver_outbound(
-        &client,
-        shared_outbound_deduper(),
-        outbound_msg,
+    let (correlation_id, semantic_event_id) = delivery_id
+        .as_ref()
+        .map(|delivery_id| {
+            (
+                delivery_id.correlation_id.clone(),
+                delivery_id.semantic_event_id.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                format!("discord-io:no-idempotency:{channel_id}"),
+                "discord-io:no-idempotency".to_string(),
+            )
+        });
+    let mut outbound_msg = DiscordOutboundMessage::new(
+        correlation_id,
+        semantic_event_id,
+        message,
+        OutboundTarget::Channel(poise::serenity_prelude::ChannelId::new(channel_id)),
         policy,
-        None,
-    )
-    .await
+    );
+    if let Some(summary) = minimal_fallback
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
-        DeliveryResult::Success { message_id } => Ok(DiscordIoDeliveryReport {
+        outbound_msg = outbound_msg.with_summary(summary.to_string());
+    }
+
+    match deliver_outbound(&client, shared_outbound_deduper(), outbound_msg, None).await {
+        DeliveryResult::Sent { messages, .. } => Ok(DiscordIoDeliveryReport {
             status: "success",
-            message_id: Some(message_id),
+            message_id: first_raw_message_id(&messages),
             fallback_kind: None,
         }),
-        DeliveryResult::Fallback { message_id, kind } => Ok(DiscordIoDeliveryReport {
+        DeliveryResult::Fallback {
+            messages,
+            fallback_used,
+            ..
+        } => Ok(DiscordIoDeliveryReport {
             status: "fallback",
-            message_id: Some(message_id),
-            fallback_kind: Some(match kind {
-                FallbackKind::Truncated => "truncated",
-                FallbackKind::MinimalFallback => "minimal_fallback",
+            message_id: first_raw_message_id(&messages),
+            fallback_kind: Some(match fallback_used {
+                FallbackUsed::MinimalFallback => "minimal_fallback",
+                FallbackUsed::LengthSplit => "chunked",
+                FallbackUsed::FileAttachment => "file_attachment",
+                FallbackUsed::ParentChannel => "parent_channel",
+                FallbackUsed::LengthCompacted => "truncated",
             }),
         }),
-        DeliveryResult::Duplicate { message_id } => Ok(DiscordIoDeliveryReport {
+        DeliveryResult::Duplicate {
+            existing_messages, ..
+        } => Ok(DiscordIoDeliveryReport {
             status: "duplicate",
-            message_id,
+            message_id: first_raw_message_id(&existing_messages),
             fallback_kind: None,
         }),
-        DeliveryResult::Skipped { .. } => Ok(DiscordIoDeliveryReport {
+        DeliveryResult::Skip { .. } => Ok(DiscordIoDeliveryReport {
             status: "skip",
             message_id: None,
             fallback_kind: None,
         }),
-        DeliveryResult::PermanentFailure { detail } => Err(detail),
+        DeliveryResult::PermanentFailure { reason } => Err(reason),
     }
 }
 

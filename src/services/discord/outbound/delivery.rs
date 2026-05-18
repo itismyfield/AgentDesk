@@ -2,9 +2,8 @@
 //!
 //! This module consumes the v3 envelope (`message.rs`), policy (`policy.rs`),
 //! planner (`decision.rs`), and result (`result.rs`) types. The transport
-//! trait and in-process deduper still live in `legacy.rs` during the migration
-//! so existing production clients do not need to be rewritten in the same
-//! slice.
+//! trait and in-process deduper live in `transport.rs` so delivery semantics
+//! stay separate from HTTP/test plumbing.
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -20,14 +19,14 @@ use super::decision::{
     LengthPolicyDecision, OutboundPolicyLimits, PrimaryDeliveryTarget, ThreadFallbackDecision,
     decide_policy_with_limits,
 };
-use super::legacy::{
-    DiscordOutboundClient, OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait,
-    OutboundDeduper,
-};
 use super::message::{
     DiscordOutboundMessage, OutboundDedupKey, OutboundOperation, OutboundReferenceContext,
 };
 use super::result::{DeliveredMessage, DeliveryResult, FallbackUsed};
+use super::transport::{
+    DiscordOutboundClient, OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait,
+    OutboundDeduper,
+};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DeliveryTransportOverrides {

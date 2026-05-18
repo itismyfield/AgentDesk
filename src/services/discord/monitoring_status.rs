@@ -6,9 +6,11 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 use tokio::sync::Mutex;
 
+use super::outbound::delivery::{deliver_outbound, first_raw_message_id};
+use super::outbound::message::{OutboundOperation, OutboundTarget};
 use super::outbound::{
     DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
-    OutboundDeduper, deliver_outbound, shared_outbound_deduper,
+    OutboundDeduper, shared_outbound_deduper,
 };
 use super::{SharedData, health, rate_limit_wait};
 use crate::server::routes::dispatches::discord_delivery::{
@@ -107,40 +109,49 @@ async fn deliver_monitoring_status<C: DiscordOutboundClient>(
     rendered_msg_id: Option<u64>,
     content: &str,
 ) -> Result<Option<u64>, String> {
-    let mut message = if rendered_msg_id.is_some() {
-        DiscordOutboundMessage::new(channel_id.get().to_string(), content)
+    let mut policy = DiscordOutboundPolicy::preserve_inline_content();
+    let message = if let Some(message_id) = rendered_msg_id {
+        policy = policy.without_idempotency();
+        DiscordOutboundMessage::new(
+            format!("monitoring:no-idempotency:{}", channel_id.get()),
+            "monitoring:no-idempotency:edit",
+            content,
+            OutboundTarget::Channel(channel_id),
+            policy,
+        )
+        .with_operation(OutboundOperation::Edit {
+            message_id: MessageId::new(message_id),
+        })
     } else {
-        DiscordOutboundMessage::new(channel_id.get().to_string(), content).with_correlation(
+        DiscordOutboundMessage::new(
             format!("monitoring:{}", channel_id.get()),
             format!(
                 "monitoring:{}:send:{}",
                 channel_id.get(),
                 uuid::Uuid::new_v4()
             ),
+            content,
+            OutboundTarget::Channel(channel_id),
+            policy,
         )
     };
-    if let Some(message_id) = rendered_msg_id {
-        message = message.with_edit_message_id(message_id.to_string());
-    }
 
-    match deliver_outbound(
-        client,
-        dedup,
-        message,
-        DiscordOutboundPolicy::preserve_inline_content(),
-        None,
-    )
-    .await
-    {
-        DeliveryResult::Success { message_id } | DeliveryResult::Fallback { message_id, .. } => {
-            parse_delivered_monitoring_message_id(&message_id).map(Some)
+    match deliver_outbound(client, dedup, message, None).await {
+        DeliveryResult::Sent { messages, .. } | DeliveryResult::Fallback { messages, .. } => {
+            first_raw_message_id(&messages)
+                .as_deref()
+                .ok_or_else(|| "monitoring delivery returned no message id".to_string())
+                .and_then(parse_delivered_monitoring_message_id)
+                .map(Some)
         }
-        DeliveryResult::Duplicate { message_id } => message_id
+        DeliveryResult::Duplicate {
+            existing_messages, ..
+        } => first_raw_message_id(&existing_messages)
             .as_deref()
             .map(parse_delivered_monitoring_message_id)
             .transpose(),
-        DeliveryResult::Skipped { .. } => Ok(rendered_msg_id),
-        DeliveryResult::PermanentFailure { detail } => Err(detail),
+        DeliveryResult::Skip { .. } => Ok(rendered_msg_id),
+        DeliveryResult::PermanentFailure { reason } => Err(reason),
     }
 }
 

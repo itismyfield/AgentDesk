@@ -8,7 +8,7 @@
 //! 2. Dry-run + execute through the public HTTP surface (`POST
 //!    /agents/setup`); assert all six mutation steps land on disk and DB.
 //! 3. Confirm the bound channel actually receives a Discord message via
-//!    [`crate::services::discord::outbound::deliver_outbound`] with the mock
+//!    [`crate::services::discord::outbound::delivery::deliver_outbound`] with the mock
 //!    transport — exactly one POST is recorded for that channel.
 //! 4. Inject a forced failure
 //!    (`AGENTDESK_TEST_AGENT_SETUP_FAIL_AFTER=prompt_file`) and assert the
@@ -35,9 +35,9 @@ use tower::ServiceExt;
 // observed by both lanes identical.
 use super::discord_flow::mock_discord::MockDiscord;
 
+use crate::services::discord::outbound::delivery::deliver_outbound;
 use crate::services::discord::outbound::{
     DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, OutboundDeduper,
-    deliver_outbound,
 };
 
 /// Lock used to serialize env-var mutations across the harness. Mirrors the
@@ -360,11 +360,18 @@ async fn wizard_pg_creates_agent_and_delivers_to_bound_channel() {
     let mock = MockDiscord::new();
     let dedup = OutboundDeduper::new();
     let policy = DiscordOutboundPolicy::default();
-    let msg = DiscordOutboundMessage::new(channel_id.to_string(), "wizard ready: hello agent")
-        .with_correlation(format!("e2e:{agent_id}"), "watcher:agent-setup-e2e");
-    let delivery = deliver_outbound(&mock, &dedup, msg, policy, None).await;
+    let msg = DiscordOutboundMessage::new(
+        format!("e2e:{agent_id}"),
+        "watcher:agent-setup-e2e",
+        "wizard ready: hello agent",
+        crate::services::discord::outbound::message::OutboundTarget::Channel(
+            poise::serenity_prelude::ChannelId::new(channel_id.parse().unwrap()),
+        ),
+        policy,
+    );
+    let delivery = deliver_outbound(&mock, &dedup, msg, None).await;
     assert!(
-        matches!(delivery, DeliveryResult::Success { .. }),
+        matches!(delivery, DeliveryResult::Sent { .. }),
         "outbound delivery must succeed against bound channel: {delivery:?}"
     );
     assert_eq!(

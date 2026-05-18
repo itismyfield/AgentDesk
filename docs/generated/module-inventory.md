@@ -5,7 +5,7 @@
 
 - Production Rust modules: `607`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `119`
+- Giant files: `118`
 
 ## Namespace Summary
 
@@ -166,11 +166,11 @@
 | `github::sync` | `src/github/sync.rs` | 1238 | giant-file |
 | `github::triage` | `src/github/triage.rs` | 159 |  |
 | `high_risk_recovery` | `src/high_risk_recovery.rs` | 1195 | giant-file |
-| `integration_tests::agents_setup_e2e` | `src/integration_tests/agents_setup_e2e.rs` | 651 |  |
+| `integration_tests::agents_setup_e2e` | `src/integration_tests/agents_setup_e2e.rs` | 658 |  |
 | `integration_tests::discord_flow` | `src/integration_tests/discord_flow/mod.rs` | 46 |  |
 | `integration_tests::discord_flow::harness` | `src/integration_tests/discord_flow/harness.rs` | 265 |  |
 | `integration_tests::discord_flow::mock_discord` | `src/integration_tests/discord_flow/mock_discord.rs` | 154 |  |
-| `integration_tests::discord_flow::scenarios` | `src/integration_tests/discord_flow/scenarios.rs` | 652 |  |
+| `integration_tests::discord_flow::scenarios` | `src/integration_tests/discord_flow/scenarios.rs` | 663 |  |
 | `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1693 | giant-file |
 | `kanban` | `src/kanban/mod.rs` | 25 |  |
 | `kanban::audit` | `src/kanban/audit.rs` | 143 |  |
@@ -392,7 +392,7 @@
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 394 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1351 | giant-file |
 | `services::discord::commands::voice` | `src/services/discord/commands/voice.rs` | 959 |  |
-| `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 588 |  |
+| `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 612 |  |
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 3838 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 1006 | giant-file |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
@@ -413,21 +413,21 @@
 | `services::discord::jsonl_watcher` | `src/services/discord/jsonl_watcher.rs` | 252 |  |
 | `services::discord::mcp_credential_watcher` | `src/services/discord/mcp_credential_watcher.rs` | 645 |  |
 | `services::discord::meeting_artifact_store` | `src/services/discord/meeting_artifact_store.rs` | 356 |  |
-| `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3777 | giant-file |
+| `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3786 | giant-file |
 | `services::discord::meeting_state_machine` | `src/services/discord/meeting_state_machine.rs` | 302 |  |
 | `services::discord::metrics` | `src/services/discord/metrics.rs` | 148 |  |
 | `services::discord::model_catalog` | `src/services/discord/model_catalog.rs` | 1273 | giant-file |
 | `services::discord::model_picker_interaction` | `src/services/discord/model_picker_interaction.rs` | 424 |  |
-| `services::discord::monitoring_status` | `src/services/discord/monitoring_status.rs` | 546 |  |
+| `services::discord::monitoring_status` | `src/services/discord/monitoring_status.rs` | 557 |  |
 | `services::discord::org_schema` | `src/services/discord/org_schema.rs` | 938 |  |
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
-| `services::discord::outbound` | `src/services/discord/outbound/mod.rs` | 52 |  |
+| `services::discord::outbound` | `src/services/discord/outbound/mod.rs` | 37 |  |
 | `services::discord::outbound::decision` | `src/services/discord/outbound/decision.rs` | 488 |  |
-| `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1140 | giant-file |
-| `services::discord::outbound::legacy` | `src/services/discord/outbound/legacy.rs` | 1233 | giant-file |
+| `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1139 | giant-file |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 629 |  |
-| `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 191 |  |
-| `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 309 |  |
+| `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 188 |  |
+| `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 306 |  |
+| `services::discord::outbound::transport` | `src/services/discord/outbound/transport.rs` | 367 |  |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 456 |  |
 | `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 2194 | giant-file |
 | `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 579 |  |
@@ -532,7 +532,7 @@
 | `services::git::repo_resolver` | `src/services/git/repo_resolver.rs` | 254 |  |
 | `services::git::runner` | `src/services/git/runner.rs` | 420 |  |
 | `services::git::worktree_resolver` | `src/services/git/worktree_resolver.rs` | 640 |  |
-| `services::issue_announcements` | `src/services/issue_announcements.rs` | 478 |  |
+| `services::issue_announcements` | `src/services/issue_announcements.rs` | 497 |  |
 | `services::kanban` | `src/services/kanban.rs` | 1 |  |
 | `services::kanban_cards` | `src/services/kanban_cards.rs` | 58 |  |
 | `services::maintenance` | `src/services/maintenance/mod.rs` | 465 |  |
@@ -600,7 +600,7 @@
 | `services::routines` | `src/services/routines/mod.rs` | 30 |  |
 | `services::routines::action` | `src/services/routines/action.rs` | 284 |  |
 | `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 727 |  |
-| `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 1654 | giant-file |
+| `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 1679 | giant-file |
 | `services::routines::loader` | `src/services/routines/loader.rs` | 2133 | giant-file |
 | `services::routines::runtime` | `src/services/routines/runtime.rs` | 786 |  |
 | `services::routines::runtime_config` | `src/services/routines/runtime_config.rs` | 108 |  |

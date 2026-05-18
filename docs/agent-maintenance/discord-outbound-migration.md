@@ -1,35 +1,29 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
-> Implementation refresh for #1457 / #2368 / #2533 / #2534: v3 delivery now covers dispatch
-> outbox, review followups, short manual/DM notifications, gateway placeholder
-> sends, and dispatch completion summaries directly. `OutboundDeduper` now has
-> an in-flight reservation primitive for atomic lookup/send/record/release
-> behavior, and all migrated producers share one process-wide in-memory deduper
-> after building their outbound delivery key. Turn-owned delivery paths can pass
-> a `CancelToken` so post-cancel sends, fallback retries, split chunks, and
-> headless outbox enqueue are suppressed.
+> Implementation refresh for #1457 / #2368 / #2533 / #2535: v3 delivery now
+> covers dispatch outbox, review followups, issue announcements, monitoring
+> status, meeting notifications, short manual/DM notifications, gateway
+> placeholder sends, routine Discord logs, and dispatch completion summaries
+> directly. `OutboundDeduper` has an in-flight reservation primitive for atomic
+> lookup/send/record/release behavior, and migrated producers can share one
+> process-wide in-memory deduper after building their outbound delivery key.
+> Turn-owned delivery paths can pass a `CancelToken` so post-cancel sends,
+> fallback retries, split chunks, and headless outbox enqueue are suppressed.
 >
-> Last refreshed: 2026-05-18 (against #2534 shared outbound deduper release).
+> Last refreshed: 2026-05-18 (against #2535 legacy outbound bridge removal).
 >
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
 This is the single source of truth for "where is each Discord outbound callsite
-on the v3 migration path?". It exists because the static analysis report
-(2026-04-27 §1.2/§4) found that two parallel APIs coexist inside
-`src/services/discord/outbound/`:
+on the v3 migration path?". The former compatibility facade
+`src/services/discord/outbound/legacy.rs` was removed in #2535 after the last
+production producers moved to direct v3 envelopes. The outbound API now lives
+in `src/services/discord/outbound/{message, policy, decision, result, delivery,
+transport}.rs`.
 
-- **legacy compatibility facade** — `src/services/discord/outbound/legacy.rs`,
-  exporting the v2 surface used by producers that have not yet migrated their
-  envelopes.
-- **v3** — `src/services/discord/outbound/{message, policy, decision, result,
-  delivery}.rs`, with a real `deliver_outbound` implementation in
-  `delivery.rs`.
-
-As of #1457, "migrated_v3" means the callsite builds a v3
+As of #2535, "migrated_v3" means the callsite builds a v3
 `DiscordOutboundMessage` and calls `outbound::delivery::deliver_outbound`
-directly. "migrated_v2" means the callsite still uses the legacy facade, whose
-`deliver_outbound` is now a thin compatibility adapter over the v3 delivery
-engine. Everything else is either a direct serenity call (`channel_id.say` /
+directly. Everything else is either a direct serenity call (`channel_id.say` /
 `channel_id.send_message` / `channel_id.edit_message` / `ctx.say`) or a custom
 HTTP path.
 
@@ -45,26 +39,23 @@ HTTP path.
 | `OutboundDedupKey` | `outbound/message.rs:68` | active | Structured key that prevents `("a::b","c")` vs `("a","b::c")` collisions in the legacy delimiter-joined form. |
 | `decide_policy(...) -> DiscordOutboundPolicyDecision` | `outbound/decision.rs:133` | active pure planner | Pure function that turns a v3 message + policy into a delivery plan (split / fallback / dedup). Does not perform I/O. |
 | `DiscordOutboundPolicy` (v3 in `policy.rs`) | `outbound/policy.rs:57` | active | New policy with named presets, including `dispatch_outbox()`, `review_notification()`, and `preserve_inline_content()`. |
-| `DeliveryResult` | `outbound/result.rs:126` | active | Successor of legacy `DeliveryResult`; richer error/fallback tagging with ordered `DeliveredMessage` metadata. |
-| **v3 delivery** `deliver_outbound<C>(...)` | `outbound/delivery.rs:46` | active | Executes the v3 message/policy/decision/result contract; currently reuses the legacy transport trait and deduper during migration. Accepts an optional `CancelToken`; split delivery records ordered chunk metadata and duplicate replay preserves it. Success paths record the reservation; terminal skip/permanent-failure paths explicitly release it before returning. |
-| **Legacy bridge** `DiscordOutboundMessage` (v2) | `outbound/legacy.rs:159` | compatibility facade | Two-arg constructor `(channel_id, content)` + builder fluent. Older producers still route through this while their callsites migrate. |
-| **Legacy bridge** `deliver_outbound<C>(...)` | `outbound/legacy.rs:629` | compatibility adapter over v3 | Converts v2 message/policy inputs into v3 envelopes, delegates to `outbound::delivery`, then maps v3 results back to legacy result variants. Carries the optional `CancelToken` through for turn-owned callers; non-turn producers pass `None`. |
-| `OutboundDeduper` | `outbound/legacy.rs:440` | active | In-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record/release window. v3 stores serialized `Vec<DeliveredMessage>`; the legacy facade still maps old single-message ids for compatibility. `OutboundDedupReservation::release()` is the explicit terminal-failure path; `Drop` remains only a backstop. |
-| `shared_outbound_deduper()` | `outbound/mod.rs:47` | active | Process-wide in-memory deduper shared by migrated producers once they have built a structured outbound delivery key. This is only the final in-process duplicate-send guard; durable SQL outbox uniqueness still belongs to the `message_outbox` enqueue/claim path. |
+| `DeliveryResult` | `outbound/result.rs:126` | active | Single outbound result source; carries ordered `DeliveredMessage` metadata for success, fallback, and duplicate replay. |
+| **v3 delivery** `deliver_outbound<C>(...)` | `outbound/delivery.rs:46` | active | Executes the v3 message/policy/decision/result contract. Accepts an optional `CancelToken`; split delivery records ordered chunk metadata and duplicate replay preserves it. Success paths record the reservation; terminal skip/permanent-failure paths explicitly release it before returning. |
+| `DiscordOutboundClient`, `HttpOutboundClient`, `OutboundDeduper` | `outbound/transport.rs` | active | Transport trait, HTTP client, fingerprint helper, and in-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record/release window. v3 stores serialized `Vec<DeliveredMessage>`. |
+| `shared_outbound_deduper()` | `outbound/mod.rs` | active | Process-wide in-memory deduper shared by migrated producers once they have built a structured outbound delivery key. This is only the final in-process duplicate-send guard; durable SQL outbox uniqueness still belongs to the `message_outbox` enqueue/claim path. |
 
-Legacy re-exports remain in `outbound/mod.rs`; direct v3 callsites import from
-their submodule paths (`outbound::message`, `outbound::policy`,
-`outbound::delivery`, `outbound::result`) so they do not shadow the legacy
-compatibility names.
+`outbound/mod.rs` re-exports the v3 message/policy/result and shared
+transport primitives. New production callsites should import
+`outbound::delivery::deliver_outbound` explicitly.
 
 ---
 
 ## 2. `production_callsite_coverage` map
 
 The five keys come from the static-analysis §1.2 schema. State values:
-`migrated_v2` = uses the legacy compatibility facade. `direct` = bypasses the
-outbound layer entirely. `migrated_v3` = uses v3 `outbound/message.rs` types
-and `outbound::delivery::deliver_outbound` directly.
+`direct` = bypasses the outbound layer entirely. `migrated_v3` = uses v3
+`outbound/message.rs` types and `outbound::delivery::deliver_outbound`
+directly.
 
 | Key | State | v3 ready? | Owner | Source of truth |
 |---|---|---|---|---|
@@ -92,36 +83,34 @@ attachment/chunk helpers until v3 grows attachment-capable transport.
 ### 3.A Migrated through outbound `deliver_outbound`
 
 These callsites already use the unified delivery engine. Rows marked
-`migrated_v3` build a v3 envelope and call `outbound::delivery` directly; rows
-marked `migrated_v2` still enter through the legacy facade, which delegates to
-the v3 delivery engine.
+`migrated_v3` build a v3 envelope and call `outbound::delivery` directly.
 
 | File:line | Producer | Notes |
 |---|---|---|
 | `src/server/routes/dispatches/discord_delivery.rs:782` (`post_dispatch_message_to_channel_with_delivery`) | `dispatch_outbox` | **migrated_v3**. Builds a v3 `DiscordOutboundMessage` with `OutboundTarget::Channel`, `DiscordOutboundPolicy::dispatch_outbox()`, and summary-based minimal fallback. Correlation = `dispatch:<id>`, semantic = `dispatch:<id>:notify`. |
 | `src/server/routes/dispatches/discord_delivery.rs:3153` (`send_review_result_message_via_http`) | `review_notifications` | **migrated_v3**. Pass/Unknown verdict followups use `DiscordOutboundPolicy::review_notification()`. Correlation = `review:<card_id>`, semantic = `review:<dispatch>:<verdict>:<api_base>`. Per-producer static `review_followup_deduper()`. |
 | `src/server/routes/dispatches/outbox.rs:1124` (`post_dispatch_completion_summary`) | final dispatch thread callback | **migrated_v3**. Ensures the dispatch thread is postable, then posts the completion summary through v3 with a per-producer `dispatch_completion_summary_deduper()`. |
-| `src/services/issue_announcements.rs:334` (`send_issue_announcement_message`) | issue announcements | Legacy compatibility facade. Review-style policy and per-producer static `issue_announcement_deduper()`. |
-| `src/services/discord/discord_io.rs:423` (`deliver_channel_message`) | CLI text/DM helper | Used by `--discord-sendmessage` / `--discord-senddm` *after* the DM channel has been resolved. Static `discord_io_deduper`. |
+| `src/services/issue_announcements.rs:408` (`send_issue_announcement_message`) | issue announcements | **migrated_v3**. Review-style policy, `OutboundOperation::Edit` for edits, and the shared process-wide outbound deduper. |
+| `src/services/discord/discord_io.rs:478` (`deliver_channel_message`) | CLI text/DM helper | **migrated_v3**. Used by `--discord-sendmessage` / `--discord-senddm` *after* the DM channel has been resolved. Static `discord_io_deduper`; no caller-supplied delivery id means `without_idempotency()`. |
 | `src/services/discord/health.rs:2802` (`deliver_manual_notification`) | manual `/api/discord/send` | **migrated_v3 for sub-2k text**. Over-limit content remains a compatibility shim to `post_text_attachment` (announce) or `deliver_chunked_manual_notification` (notify). |
 | `src/services/discord/health.rs:2873` (`deliver_manual_dm_notification`) | `dm_reply` / `/api/discord/send-dm` | **migrated_v3 for sub-2k text** using `OutboundTarget::DmUser(UserId)`. The v3 transport resolves the DM channel and duplicate delivery returns before a second resolve. Over-limit content keeps the compatibility attachment/chunk path. |
 | `src/services/discord/gateway.rs:359` (`send_intake_placeholder`) | `placeholder_sends` (intake) | **migrated_v3**. Posts the `"..."` placeholder before a turn via direct v3. Uses `preserve_inline_content().without_idempotency()` to preserve streaming behavior. |
 | `src/services/discord/gateway.rs:377` (`edit_outbound_message`) | `placeholder_sends` (edit) | **migrated_v3**. Encodes edit through `OutboundOperation::Edit`. |
 | `src/services/discord/gateway.rs:400` (`TurnGateway::{send_message, edit_message}`) | turn-bridge messages/edits | **migrated_v3 transitively via gateway**. Used for handoff, rollover freeze, snapshot, stable update, and terminal edit. |
-| `src/services/discord/monitoring_status.rs:131` (`update_status_banner`) | monitoring status | Status banner send + edit. `preserve_inline_content` policy. (#1175) |
-| `src/services/discord/meeting_orchestrator.rs:741, 799` (`deliver_meeting_notification`) | meeting status / cancel / parse-error | (#1175) |
-| `src/services/discord/outbound/legacy.rs:*` tests | n/a | 12 test callsites, ignored for coverage. |
+| `src/services/discord/monitoring_status.rs:115` (`deliver_monitoring_status`) | monitoring status | **migrated_v3**. Status banner send + edit with `preserve_inline_content`; edits use `without_idempotency()`. |
+| `src/services/discord/meeting_orchestrator.rs:754, 796` (`meeting_outbound_message` / edit path) | meeting status / cancel / parse-error | **migrated_v3**. Stable meeting dedup metadata plus `OutboundOperation::Edit`. |
+| `src/services/routines/discord_log.rs:486, 531` (`deliver_or_update_discord_summary`) | routine Discord summary | **migrated_v3**. Uses direct v3 send/edit and disables semantic dedupe for repeated summary writes. |
 | `src/integration_tests/discord_flow/scenarios.rs:44, 55` | integration test harness | Mock-Discord roundtrip for §1.2 validation. |
 | `src/integration_tests/agents_setup_e2e.rs:259` | integration test | Wizard-ready E2E. |
 
-Total **direct migrated_v3 production families: 6** (`dispatch_outbox`,
-`review_notifications`, final dispatch completion summaries, short manual
-notifications, short manual DM notifications, and gateway/turn-bridge
-placeholder sends/edits).
+Total **direct migrated_v3 production families: 11** (`dispatch_outbox`,
+`review_notifications`, final dispatch completion summaries, issue
+announcements, monitoring status, meeting notifications, routine Discord
+summaries, CLI text/DM helper, short manual notifications, short manual DM
+notifications, and gateway/turn-bridge placeholder sends/edits).
 
-Remaining production outbound callsites still include legacy-facade callers
-and explicit compatibility shims (excluding tests). Verify with
-`rg -n 'deliver_outbound\(' src --type rust | rg -v 'integration_tests|outbound/legacy.rs'`.
+No production caller uses the removed legacy facade. Verify with
+`git grep -n 'deliver_outbound' -- src/services src/bin tests`.
 
 ### 3.B Direct sends (bypass outbound)
 
@@ -236,28 +225,29 @@ button hits the manual outbound API, which is covered under §3.A
 
 ## 4. Recommended migration order
 
-1. **Landed in #1436 — v3 deliver impl + legacy compat shim +
-   `dispatch_outbox`.**
+1. **Landed in #1436 — v3 deliver impl + `dispatch_outbox`.**
    `outbound::delivery::deliver_outbound` consumes
-   `outbound::message::DiscordOutboundMessage`; `outbound/legacy.rs` is now a
-   compatibility adapter; `dispatch_outbox` calls v3 directly.
+   `outbound::message::DiscordOutboundMessage`; `dispatch_outbox` calls v3
+   directly.
 2. **Landed in #1457 — review followups, dispatch completion summaries,
    gateway/turn-bridge, and short manual/DM text.**
    These callsites now build v3 envelopes directly. `OutboundTarget::DmUser`
    owns the DM-channel resolve step for `/api/discord/send-dm` and duplicate replay uses
    stored delivery metadata before resolving again.
-3. **Next — attachment-capable v3 transport.**
+3. **Landed in #2535 — final legacy bridge removal.**
+   Issue announcements, monitoring status, meeting notifications, routine
+   Discord logs, and the CLI text helper now build v3 envelopes directly.
+   `outbound/legacy.rs` was deleted; `transport.rs` owns the shared
+   `DiscordOutboundClient`, `HttpOutboundClient`, fingerprint helper, and
+   in-memory deduper.
+4. **Next — attachment-capable v3 transport.**
    Remove the manual `/api/discord/send` and `/api/discord/send-dm` over-2k compatibility shims
    once v3 can send multipart attachment payloads or explicitly delegate to a
    chunk/attachment transport variant.
-4. **`discord_io.rs` CLI helpers.** Trivial after attachment-capable transport
-   or after deciding that CLI file upload stays permanently out of scope.
-5. **monitoring_status + meeting_orchestrator.** Already
-   migrated to legacy; mechanical port.
-6. **Direct-send candidates (low priority).** §B.1
+5. **Direct-send candidates (low priority).** §B.1
    intake-gate notices, §B.4 tmux lifecycle notices, §B.5 router announces.
    Each is a fixed short string; v3 buys consistent dedup keying.
-7. **Out of scope (separate follow-up issues recommended).**
+6. **Out of scope (separate follow-up issues recommended).**
    - §B.3 streaming chunker — needs a v3 stream/placeholder lifecycle variant.
    - §B.4 tmux rollover freeze/post — needs the same contract variant plus a
      "placeholder lifecycle" sub-API.
@@ -299,10 +289,9 @@ button hits the manual outbound API, which is covered under §3.A
 To stop new callsites slipping back to direct sends, the recommended belt +
 braces:
 
-1. **Module doc gate (landed in #1436).** `src/services/discord/outbound/mod.rs`
-   now states that the default re-exports remain the legacy compatibility
-   surface and that production callsites should move to v3 envelopes via
-   `outbound::delivery::deliver_outbound`.
+1. **Module doc gate (updated in #2535).** `src/services/discord/outbound/mod.rs`
+   now states that the legacy bridge is gone and production callsites should
+   use v3 envelopes via `outbound::delivery::deliver_outbound`.
 2. **`audit_maintainability.py` hard gate (medium cost).** Extend the audit
    script (#1282 follow-up) so a new `\.send_message\(|\.say\(|\.edit_message\(`
    inside `src/services/discord/` fails CI unless the callsite lives in a
