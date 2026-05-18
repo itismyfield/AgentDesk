@@ -2036,7 +2036,7 @@ fn turn_end_memory_plan_uses_reflect_for_memento_local_session_reset() {
             clear_provider_session: true,
             persist_transcript: true,
             analyze_recall_feedback: true,
-            spawn_capture: false,
+            spawn_capture: true,
         })
     );
 }
@@ -2079,7 +2079,7 @@ fn turn_end_memory_plan_keeps_memento_feedback_analysis_on_resume_failure() {
 }
 
 #[test]
-fn turn_end_memory_plan_skips_background_capture_for_normal_memento_turns() {
+fn turn_end_memory_plan_uses_background_capture_for_normal_memento_turns() {
     let session = sample_session();
     assert_eq!(
         plan_turn_end_memory(
@@ -2095,7 +2095,7 @@ fn turn_end_memory_plan_skips_background_capture_for_normal_memento_turns() {
             clear_provider_session: false,
             persist_transcript: true,
             analyze_recall_feedback: true,
-            spawn_capture: false,
+            spawn_capture: true,
         })
     );
 }
@@ -2146,8 +2146,8 @@ fn turn_end_memory_plan_keeps_recall_feedback_analysis_for_normal_memento_turns(
     assert!(plan.persist_transcript);
     assert!(plan.analyze_recall_feedback);
     assert!(
-        !plan.spawn_capture,
-        "memento turns should skip background capture while still analyzing recall feedback"
+        plan.spawn_capture,
+        "memento turns should capture per-turn memory while still analyzing recall feedback"
     );
 }
 

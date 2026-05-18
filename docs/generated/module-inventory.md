@@ -545,7 +545,7 @@
 | `services::mcp_config` | `src/services/mcp_config.rs` | 1532 | giant-file |
 | `services::memory` | `src/services/memory/mod.rs` | 374 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 116 |  |
-| `services::memory::memento` | `src/services/memory/memento.rs` | 2729 | giant-file |
+| `services::memory::memento` | `src/services/memory/memento.rs` | 2953 | giant-file |
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 503 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 474 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 729 |  |
