@@ -4,12 +4,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use poise::serenity_prelude::MessageId;
+use poise::serenity_prelude::{ChannelId, MessageId};
 use sqlx::PgPool;
 
 use super::prompt::VoiceTranscriptAnnouncement;
 
 const ANNOUNCEMENT_META_TTL: Duration = Duration::from_secs(30);
+/// Durable voice transcript announcement metadata can outlive the short
+/// process-local TTL because intake may be queued to another process or sit
+/// behind an active turn before worker execution.
+pub(crate) const DURABLE_ANNOUNCEMENT_META_TTL_SECS: i64 = 24 * 60 * 60;
 /// Voice-background handoff markers can outlive the short announce TTL because
 /// the background turn they trigger may run for minutes — or, with watchdog
 /// extensions, hours — before the terminal-delivery callback consults the
@@ -36,6 +40,7 @@ const DURABLE_HANDOFF_PENDING_PREFIX: &str = "pending:";
 struct StoredVoiceTranscriptAnnouncement {
     announcement: VoiceTranscriptAnnouncement,
     expires_at: Instant,
+    accepted_replay: bool,
 }
 
 /// Typed marker recorded by the voice foreground → background dispatch path
@@ -88,6 +93,23 @@ pub(crate) struct VoiceAnnouncementMetaStore {
 
 impl VoiceAnnouncementMetaStore {
     pub(crate) fn insert(&self, message_id: MessageId, announcement: VoiceTranscriptAnnouncement) {
+        self.insert_with_acceptance(message_id, announcement, false);
+    }
+
+    pub(crate) fn insert_accepted_replay(
+        &self,
+        message_id: MessageId,
+        announcement: VoiceTranscriptAnnouncement,
+    ) {
+        self.insert_with_acceptance(message_id, announcement, true);
+    }
+
+    fn insert_with_acceptance(
+        &self,
+        message_id: MessageId,
+        announcement: VoiceTranscriptAnnouncement,
+        accepted_replay: bool,
+    ) {
         if let Ok(mut entries) = self.entries.write() {
             let now = Instant::now();
             prune_expired_locked(&mut entries, now);
@@ -96,18 +118,41 @@ impl VoiceAnnouncementMetaStore {
                 StoredVoiceTranscriptAnnouncement {
                     announcement,
                     expires_at: now + ANNOUNCEMENT_META_TTL,
+                    accepted_replay,
                 },
+            );
+        } else {
+            tracing::warn!(
+                message_id = message_id.get(),
+                "voice transcript announcement metadata insert failed because store lock is poisoned"
             );
         }
     }
 
     pub(crate) fn take(&self, message_id: MessageId) -> Option<VoiceTranscriptAnnouncement> {
-        let mut entries = self.entries.write().ok()?;
+        self.take_with_acceptance(message_id)
+            .map(|(announcement, _)| announcement)
+    }
+
+    pub(crate) fn take_with_acceptance(
+        &self,
+        message_id: MessageId,
+    ) -> Option<(VoiceTranscriptAnnouncement, bool)> {
+        let mut entries = match self.entries.write() {
+            Ok(entries) => entries,
+            Err(_) => {
+                tracing::warn!(
+                    message_id = message_id.get(),
+                    "voice transcript announcement metadata take failed because store lock is poisoned"
+                );
+                return None;
+            }
+        };
         let now = Instant::now();
         prune_expired_locked(&mut entries, now);
         entries
             .remove(&message_id.get())
-            .map(|stored| stored.announcement)
+            .map(|stored| (stored.announcement, stored.accepted_replay))
     }
 
     pub(crate) fn contains(&self, message_id: MessageId) -> bool {
@@ -300,7 +345,16 @@ impl VoiceAnnouncementMetaStore {
     /// metadata must travel inside the Intervention because the in-memory
     /// store TTL (30s) is shorter than typical queue dwell times.
     pub(crate) fn peek_clone(&self, message_id: MessageId) -> Option<VoiceTranscriptAnnouncement> {
-        let mut entries = self.entries.write().ok()?;
+        let mut entries = match self.entries.write() {
+            Ok(entries) => entries,
+            Err(_) => {
+                tracing::warn!(
+                    message_id = message_id.get(),
+                    "voice transcript announcement metadata peek failed because store lock is poisoned"
+                );
+                return None;
+            }
+        };
         let now = Instant::now();
         prune_expired_locked(&mut entries, now);
         entries
@@ -333,6 +387,241 @@ fn prune_expired_locked(
 pub(crate) fn global_store() -> &'static VoiceAnnouncementMetaStore {
     static STORE: OnceLock<VoiceAnnouncementMetaStore> = OnceLock::new();
     STORE.get_or_init(VoiceAnnouncementMetaStore::default)
+}
+
+pub(crate) fn durable_voice_announcement_pending_key(
+    correlation_id: &str,
+    semantic_event_id: &str,
+) -> String {
+    format!("{correlation_id}::{semantic_event_id}")
+}
+
+fn decode_voice_announcement_value(
+    value: serde_json::Value,
+) -> Result<VoiceTranscriptAnnouncement, sqlx::Error> {
+    serde_json::from_value(value).map_err(|error| sqlx::Error::Decode(Box::new(error)))
+}
+
+/// Pre-publish reservation for a readable-only voice transcript announce.
+/// The Discord gateway can deliver the create event before the HTTP send call
+/// returns a message id, so the intake side can also bind this pending row by
+/// the opaque ref embedded in the announce-bot message.
+pub(crate) async fn persist_voice_announcement_reservation_durable(
+    pool: &PgPool,
+    pending_key: &str,
+    target_channel_id: ChannelId,
+    announce_content: &str,
+    announcement: &VoiceTranscriptAnnouncement,
+) -> Result<bool, sqlx::Error> {
+    let announcement = serde_json::to_value(announcement).map_err(|error| {
+        sqlx::Error::Encode(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("serialize voice transcript announcement: {error}"),
+        )))
+    })?;
+    let result = sqlx::query(
+        "INSERT INTO voice_transcript_announcement_meta (
+             pending_key, target_channel_id, announce_content, announcement
+         ) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (pending_key) DO UPDATE
+         SET target_channel_id = EXCLUDED.target_channel_id,
+             announce_content = EXCLUDED.announce_content,
+             announcement = EXCLUDED.announcement
+         WHERE voice_transcript_announcement_meta.consumed_at IS NULL",
+    )
+    .bind(pending_key)
+    .bind(target_channel_id.get().to_string())
+    .bind(announce_content)
+    .bind(announcement)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Bind the durable reservation to the Discord message id returned by the
+/// announce send. Returns false if the pending row was already consumed or
+/// was bound to a different message id by an impossible-looking race.
+pub(crate) async fn bind_voice_announcement_durable_message_id(
+    pool: &PgPool,
+    pending_key: &str,
+    message_id: MessageId,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE voice_transcript_announcement_meta
+         SET message_id = $2,
+             bound_at = COALESCE(bound_at, NOW())
+         WHERE pending_key = $1
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $3)
+           AND (message_id IS NULL OR message_id = $2)",
+    )
+    .bind(pending_key)
+    .bind(message_id.get().to_string())
+    .bind(DURABLE_ANNOUNCEMENT_META_TTL_SECS as f64)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Gateway-race recovery: exact pending-key bind for readable-only announce
+/// messages carrying an opaque `ADK_VOICE_ANNOUNCE_REF` marker.
+pub(crate) async fn bind_pending_voice_announcement_by_key_durable(
+    pool: &PgPool,
+    pending_key: &str,
+    target_channel_id: ChannelId,
+    message_id: MessageId,
+) -> Result<Option<VoiceTranscriptAnnouncement>, sqlx::Error> {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
+        "UPDATE voice_transcript_announcement_meta
+         SET message_id = $3,
+             bound_at = COALESCE(bound_at, NOW())
+         WHERE pending_key = $1
+           AND target_channel_id = $2
+           AND message_id IS NULL
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $4)
+         RETURNING announcement",
+    )
+    .bind(pending_key)
+    .bind(target_channel_id.get().to_string())
+    .bind(message_id.get().to_string())
+    .bind(DURABLE_ANNOUNCEMENT_META_TTL_SECS as f64)
+    .fetch_optional(pool)
+    .await?;
+    value.map(decode_voice_announcement_value).transpose()
+}
+
+/// Atomic consume variant for workers that receive a forwarded readable
+/// announcement before the posting process successfully binds `message_id`.
+pub(crate) async fn take_pending_voice_announcement_by_key_durable(
+    pool: &PgPool,
+    pending_key: &str,
+    target_channel_id: ChannelId,
+    message_id: MessageId,
+) -> Result<Option<VoiceTranscriptAnnouncement>, sqlx::Error> {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
+        "UPDATE voice_transcript_announcement_meta
+         SET message_id = $3,
+             bound_at = COALESCE(bound_at, NOW()),
+             consumed_at = NOW()
+         WHERE pending_key = $1
+           AND target_channel_id = $2
+           AND message_id IS NULL
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $4)
+         RETURNING announcement",
+    )
+    .bind(pending_key)
+    .bind(target_channel_id.get().to_string())
+    .bind(message_id.get().to_string())
+    .bind(DURABLE_ANNOUNCEMENT_META_TTL_SECS as f64)
+    .fetch_optional(pool)
+    .await?;
+    value.map(decode_voice_announcement_value).transpose()
+}
+
+pub(crate) async fn cancel_voice_announcement_reservation_durable(
+    pool: &PgPool,
+    pending_key: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM voice_transcript_announcement_meta
+         WHERE pending_key = $1
+           AND message_id IS NULL
+           AND consumed_at IS NULL",
+    )
+    .bind(pending_key)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub(crate) async fn load_voice_announcement_durable(
+    pool: &PgPool,
+    message_id: MessageId,
+) -> Result<Option<VoiceTranscriptAnnouncement>, sqlx::Error> {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT announcement
+         FROM voice_transcript_announcement_meta
+         WHERE message_id = $1
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $2)",
+    )
+    .bind(message_id.get().to_string())
+    .bind(DURABLE_ANNOUNCEMENT_META_TTL_SECS as f64)
+    .fetch_optional(pool)
+    .await?;
+    value.map(decode_voice_announcement_value).transpose()
+}
+
+pub(crate) async fn load_consumed_voice_announcement_durable(
+    pool: &PgPool,
+    message_id: MessageId,
+) -> Result<Option<VoiceTranscriptAnnouncement>, sqlx::Error> {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT announcement
+         FROM voice_transcript_announcement_meta
+         WHERE message_id = $1
+           AND consumed_at IS NOT NULL
+           AND created_at > NOW() - make_interval(secs => $2)",
+    )
+    .bind(message_id.get().to_string())
+    .bind(DURABLE_ANNOUNCEMENT_META_TTL_SECS as f64)
+    .fetch_optional(pool)
+    .await?;
+    value.map(decode_voice_announcement_value).transpose()
+}
+
+pub(crate) async fn take_voice_announcement_durable(
+    pool: &PgPool,
+    message_id: MessageId,
+) -> Result<Option<VoiceTranscriptAnnouncement>, sqlx::Error> {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
+        "UPDATE voice_transcript_announcement_meta
+         SET consumed_at = NOW()
+         WHERE message_id = $1
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $2)
+         RETURNING announcement",
+    )
+    .bind(message_id.get().to_string())
+    .bind(DURABLE_ANNOUNCEMENT_META_TTL_SECS as f64)
+    .fetch_optional(pool)
+    .await?;
+    value.map(decode_voice_announcement_value).transpose()
+}
+
+pub(crate) async fn mark_voice_announcement_durable_consumed(
+    pool: &PgPool,
+    message_id: MessageId,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE voice_transcript_announcement_meta
+         SET consumed_at = NOW()
+         WHERE message_id = $1
+           AND consumed_at IS NULL
+           AND created_at > NOW() - make_interval(secs => $2)",
+    )
+    .bind(message_id.get().to_string())
+    .bind(DURABLE_ANNOUNCEMENT_META_TTL_SECS as f64)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub(crate) async fn gc_expired_voice_announcement_meta_pg(
+    pool: &PgPool,
+    ttl: Duration,
+) -> Result<u64, sqlx::Error> {
+    let ttl_secs = ttl.as_secs_f64();
+    let result = sqlx::query(
+        "DELETE FROM voice_transcript_announcement_meta
+         WHERE created_at < NOW() - make_interval(secs => $1)",
+    )
+    .bind(ttl_secs)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 fn durable_pending_message_id(correlation_id: &str) -> String {
@@ -709,6 +998,25 @@ mod tests {
     }
 
     #[test]
+    fn store_distinguishes_accepted_replay_entries() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let message_id = MessageId::new(125);
+        let replay_message_id = MessageId::new(126);
+
+        store.insert(message_id, announcement());
+        store.insert_accepted_replay(replay_message_id, announcement());
+
+        let (_, accepted) = store
+            .take_with_acceptance(message_id)
+            .expect("normal entry");
+        assert!(!accepted);
+        let (_, accepted_replay) = store
+            .take_with_acceptance(replay_message_id)
+            .expect("accepted replay entry");
+        assert!(accepted_replay);
+    }
+
+    #[test]
     fn handoff_store_round_trips_typed_metadata() {
         let store = VoiceAnnouncementMetaStore::default();
         let message_id = MessageId::new(200);
@@ -787,6 +1095,465 @@ mod tests {
             agent_id: agent.map(str::to_string),
             local_only_fallback: false,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_voice_announcement_binds_pending_by_key_then_consumes_once() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(91_001);
+        let message_id = MessageId::new(82_001);
+        let pending_key =
+            durable_voice_announcement_pending_key("voice:1:91001:utt-1", "announce:generation:1");
+        let content = "🎙️ \"상태 알려줘\"";
+        let expected = announcement();
+
+        persist_voice_announcement_reservation_durable(
+            &pool,
+            &pending_key,
+            channel_id,
+            content,
+            &expected,
+        )
+        .await
+        .expect("persist durable voice announcement reservation");
+
+        assert!(
+            load_voice_announcement_durable(&pool, message_id)
+                .await
+                .expect("load before bind")
+                .is_none(),
+            "unbound pending row must not load by message id"
+        );
+
+        let bound = bind_pending_voice_announcement_by_key_durable(
+            &pool,
+            &pending_key,
+            channel_id,
+            message_id,
+        )
+        .await
+        .expect("bind pending by key")
+        .expect("pending row found");
+        assert_eq!(bound, expected);
+
+        let loaded = load_voice_announcement_durable(&pool, message_id)
+            .await
+            .expect("load after bind")
+            .expect("bound row loads by message id");
+        assert_eq!(loaded, expected);
+
+        assert!(
+            bind_pending_voice_announcement_by_key_durable(
+                &pool,
+                &pending_key,
+                channel_id,
+                message_id,
+            )
+            .await
+            .expect("second key bind")
+            .is_none(),
+            "key bind must be one-shot once the row has a message id"
+        );
+
+        let taken = take_voice_announcement_durable(&pool, message_id)
+            .await
+            .expect("take durable voice announcement")
+            .expect("first take consumes");
+        assert_eq!(taken, expected);
+        assert!(
+            take_voice_announcement_durable(&pool, message_id)
+                .await
+                .expect("second take")
+                .is_none(),
+            "durable voice announcement consume is one-shot"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_voice_announcement_bind_by_pending_key_is_idempotent() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(91_002);
+        let message_id = MessageId::new(82_002);
+        let pending_key =
+            durable_voice_announcement_pending_key("voice:1:91002:utt-1", "announce:generation:1");
+        let content = "🎙️ \"다시 알려줘\"";
+        let expected = announcement();
+
+        persist_voice_announcement_reservation_durable(
+            &pool,
+            &pending_key,
+            channel_id,
+            content,
+            &expected,
+        )
+        .await
+        .expect("persist durable voice announcement reservation");
+
+        assert!(
+            bind_voice_announcement_durable_message_id(&pool, &pending_key, message_id)
+                .await
+                .expect("bind message id"),
+            "first bind should succeed"
+        );
+        assert!(
+            bind_voice_announcement_durable_message_id(&pool, &pending_key, message_id)
+                .await
+                .expect("idempotent rebind"),
+            "same message id rebind should be idempotent"
+        );
+        assert_eq!(
+            load_voice_announcement_durable(&pool, message_id)
+                .await
+                .expect("load after bind"),
+            Some(expected)
+        );
+        assert!(
+            mark_voice_announcement_durable_consumed(&pool, message_id)
+                .await
+                .expect("mark consumed"),
+            "bound row should mark consumed"
+        );
+        assert!(
+            !bind_voice_announcement_durable_message_id(
+                &pool,
+                &pending_key,
+                MessageId::new(82_003),
+            )
+            .await
+            .expect("late bind after consume"),
+            "consumed row must not bind a new message id"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn durable_voice_announcement_concurrent_takes_yield_exactly_one_claim() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(91_003);
+        let message_id = MessageId::new(82_003);
+        let pending_key =
+            durable_voice_announcement_pending_key("voice:1:91003:utt-1", "announce:generation:1");
+        let content = "🎙️ \"동시에 처리해줘\"";
+        let expected = announcement();
+
+        persist_voice_announcement_reservation_durable(
+            &pool,
+            &pending_key,
+            channel_id,
+            content,
+            &expected,
+        )
+        .await
+        .expect("persist durable voice announcement reservation");
+        assert!(
+            bind_voice_announcement_durable_message_id(&pool, &pending_key, message_id)
+                .await
+                .expect("bind message id")
+        );
+
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let task_a = tokio::spawn(async move {
+            take_voice_announcement_durable(&pool_a, message_id)
+                .await
+                .unwrap()
+        });
+        let task_b = tokio::spawn(async move {
+            take_voice_announcement_durable(&pool_b, message_id)
+                .await
+                .unwrap()
+        });
+        let (result_a, result_b) =
+            tokio::try_join!(task_a, task_b).expect("join concurrent consumers");
+        let winners = [&result_a, &result_b]
+            .iter()
+            .filter(|result| result.is_some())
+            .count();
+        assert_eq!(winners, 1, "exactly one atomic durable consumer must win");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_voice_announcement_pending_key_disambiguates_same_content() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(91_004);
+        let message_a = MessageId::new(82_004);
+        let message_b = MessageId::new(82_005);
+        let key_a =
+            durable_voice_announcement_pending_key("voice:1:91004:utt-a", "announce:generation:1");
+        let key_b =
+            durable_voice_announcement_pending_key("voice:1:91004:utt-b", "announce:generation:1");
+        let content = "🎙️ \"같은 말\"";
+        let mut meta_a = announcement();
+        meta_a.utterance_id = "utt-a".to_string();
+        let mut meta_b = announcement();
+        meta_b.utterance_id = "utt-b".to_string();
+
+        persist_voice_announcement_reservation_durable(&pool, &key_a, channel_id, content, &meta_a)
+            .await
+            .expect("persist first reservation");
+        persist_voice_announcement_reservation_durable(&pool, &key_b, channel_id, content, &meta_b)
+            .await
+            .expect("persist second reservation");
+
+        assert_eq!(
+            bind_pending_voice_announcement_by_key_durable(&pool, &key_b, channel_id, message_b)
+                .await
+                .expect("bind second by key"),
+            Some(meta_b.clone())
+        );
+        assert_eq!(
+            load_voice_announcement_durable(&pool, message_b)
+                .await
+                .expect("load second message"),
+            Some(meta_b)
+        );
+        assert!(
+            load_voice_announcement_durable(&pool, message_a)
+                .await
+                .expect("first message remains unbound")
+                .is_none()
+        );
+        assert_eq!(
+            bind_pending_voice_announcement_by_key_durable(&pool, &key_a, channel_id, message_a)
+                .await
+                .expect("bind first by key"),
+            Some(meta_a)
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_voice_announcement_pending_key_bind_is_channel_scoped() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(91_006);
+        let wrong_channel_id = ChannelId::new(91_007);
+        let message_id = MessageId::new(82_007);
+        let pending_key =
+            durable_voice_announcement_pending_key("voice:1:91006:utt-1", "announce:generation:1");
+        let content = "🎙️ \"채널 확인\"";
+        let expected = announcement();
+
+        assert!(
+            persist_voice_announcement_reservation_durable(
+                &pool,
+                &pending_key,
+                channel_id,
+                content,
+                &expected,
+            )
+            .await
+            .expect("persist durable voice announcement reservation")
+        );
+
+        assert!(
+            bind_pending_voice_announcement_by_key_durable(
+                &pool,
+                &pending_key,
+                wrong_channel_id,
+                message_id,
+            )
+            .await
+            .expect("wrong-channel bind should not error")
+            .is_none(),
+            "copied/reflected ref in another channel must not bind the pending row"
+        );
+        assert_eq!(
+            bind_pending_voice_announcement_by_key_durable(
+                &pool,
+                &pending_key,
+                channel_id,
+                message_id,
+            )
+            .await
+            .expect("correct-channel bind"),
+            Some(expected)
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_voice_announcement_pending_key_take_consumes_without_bind_race() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(91_008);
+        let message_id = MessageId::new(82_008);
+        let pending_key =
+            durable_voice_announcement_pending_key("voice:1:91008:utt-1", "announce:generation:1");
+        let content = "🎙️ \"바로 처리해\"";
+        let expected = announcement();
+
+        assert!(
+            persist_voice_announcement_reservation_durable(
+                &pool,
+                &pending_key,
+                channel_id,
+                content,
+                &expected,
+            )
+            .await
+            .expect("persist durable voice announcement reservation")
+        );
+
+        assert_eq!(
+            take_pending_voice_announcement_by_key_durable(
+                &pool,
+                &pending_key,
+                channel_id,
+                message_id,
+            )
+            .await
+            .expect("take pending by key"),
+            Some(expected)
+        );
+        assert!(
+            take_pending_voice_announcement_by_key_durable(
+                &pool,
+                &pending_key,
+                channel_id,
+                message_id,
+            )
+            .await
+            .expect("second take pending by key")
+            .is_none(),
+            "pending-key consume must be one-shot"
+        );
+        assert!(
+            !bind_voice_announcement_durable_message_id(
+                &pool,
+                &pending_key,
+                MessageId::new(82_009),
+            )
+            .await
+            .expect("late bind after pending consume"),
+            "late bind must not resurrect a consumed pending row"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_voice_announcement_consumed_row_verifies_accepted_replay() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(91_009);
+        let message_id = MessageId::new(82_010);
+        let pending_key =
+            durable_voice_announcement_pending_key("voice:1:91009:utt-1", "announce:generation:1");
+        let content = "🎙️ \"대기열로 처리해\"";
+        let expected = announcement();
+
+        assert!(
+            persist_voice_announcement_reservation_durable(
+                &pool,
+                &pending_key,
+                channel_id,
+                content,
+                &expected,
+            )
+            .await
+            .expect("persist durable voice announcement reservation")
+        );
+        assert!(
+            bind_voice_announcement_durable_message_id(&pool, &pending_key, message_id)
+                .await
+                .expect("bind message id")
+        );
+        assert!(
+            mark_voice_announcement_durable_consumed(&pool, message_id)
+                .await
+                .expect("mark accepted queued replay consumed")
+        );
+        assert!(
+            load_voice_announcement_durable(&pool, message_id)
+                .await
+                .expect("live load after consume")
+                .is_none(),
+            "live durable lookup must still hide consumed rows"
+        );
+        assert_eq!(
+            load_consumed_voice_announcement_durable(&pool, message_id)
+                .await
+                .expect("consumed load after queue accept"),
+            Some(expected)
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_voice_announcement_persist_does_not_resurrect_consumed_row() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(91_005);
+        let message_id = MessageId::new(82_006);
+        let pending_key =
+            durable_voice_announcement_pending_key("voice:1:91005:utt-1", "announce:generation:1");
+        let content = "🎙️ \"되살리지 마\"";
+        let expected = announcement();
+
+        assert!(
+            persist_voice_announcement_reservation_durable(
+                &pool,
+                &pending_key,
+                channel_id,
+                content,
+                &expected,
+            )
+            .await
+            .expect("persist durable voice announcement reservation")
+        );
+        assert!(
+            bind_voice_announcement_durable_message_id(&pool, &pending_key, message_id)
+                .await
+                .expect("bind message id")
+        );
+        assert_eq!(
+            take_voice_announcement_durable(&pool, message_id)
+                .await
+                .expect("take once"),
+            Some(expected.clone())
+        );
+        assert!(
+            !persist_voice_announcement_reservation_durable(
+                &pool,
+                &pending_key,
+                channel_id,
+                content,
+                &expected,
+            )
+            .await
+            .expect("late persist after consume must not fail"),
+            "late persist must report no live reservation was written"
+        );
+        assert!(
+            take_voice_announcement_durable(&pool, message_id)
+                .await
+                .expect("take after late persist")
+                .is_none(),
+            "late persist must not clear consumed_at"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

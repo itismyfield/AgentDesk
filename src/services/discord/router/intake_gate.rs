@@ -85,6 +85,133 @@ fn should_skip_human_slash_message(
     known_slash_commands.is_some_and(|set| set.contains(command_name))
 }
 
+async fn resolve_voice_transcript_announcement_for_intake(
+    pg_pool: Option<&sqlx::PgPool>,
+    channel_id: serenity::ChannelId,
+    message_id: serenity::MessageId,
+    author_id: serenity::UserId,
+    announce_bot_id: Option<u64>,
+    content: &str,
+) -> Option<crate::voice::prompt::VoiceTranscriptAnnouncement> {
+    if announce_bot_id != Some(author_id.get()) {
+        return None;
+    }
+
+    if let Some(pool) = pg_pool {
+        match crate::voice::announce_meta::load_voice_announcement_durable(pool, message_id).await {
+            Ok(Some(announcement)) => return Some(announcement),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    channel_id = channel_id.get(),
+                    message_id = message_id.get(),
+                    "voice transcript announcement durable metadata load failed at intake gate"
+                );
+            }
+        }
+    } else if let Some(announcement) =
+        crate::voice::announce_meta::global_store().peek_clone(message_id)
+    {
+        return Some(announcement);
+    }
+    if !crate::voice::prompt::is_readable_voice_transcript_announcement(content) {
+        return None;
+    }
+    let pending_key = crate::voice::prompt::parse_voice_transcript_announcement_ref(content);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if pg_pool.is_none()
+            && let Some(announcement) =
+                crate::voice::announce_meta::global_store().peek_clone(message_id)
+        {
+            return Some(announcement);
+        }
+        if let Some(pool) = pg_pool {
+            match crate::voice::announce_meta::load_voice_announcement_durable(pool, message_id)
+                .await
+            {
+                Ok(Some(announcement)) => return Some(announcement),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        channel_id = channel_id.get(),
+                        message_id = message_id.get(),
+                        "voice transcript announcement durable metadata retry-load failed at intake gate"
+                    );
+                }
+            }
+            if let Some(pending_key) = pending_key.as_deref() {
+                match crate::voice::announce_meta::bind_pending_voice_announcement_by_key_durable(
+                    pool,
+                    pending_key,
+                    channel_id,
+                    message_id,
+                )
+                .await
+                {
+                    Ok(Some(announcement)) => return Some(announcement),
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            channel_id = channel_id.get(),
+                            message_id = message_id.get(),
+                            "voice transcript announcement pending metadata bind failed at intake gate"
+                        );
+                    }
+                }
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+async fn claim_voice_transcript_announcement_for_queue(
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    message_id: serenity::MessageId,
+    voice_announcement: &Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    context: &'static str,
+) -> bool {
+    if voice_announcement.is_none() {
+        return true;
+    }
+    let Some(pool) = data.shared.pg_pool.as_ref() else {
+        return true;
+    };
+    match crate::voice::announce_meta::mark_voice_announcement_durable_consumed(pool, message_id)
+        .await
+    {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                message_id = message_id.get(),
+                context,
+                "voice transcript announcement durable metadata already claimed before queue accept"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                channel_id = channel_id.get(),
+                message_id = message_id.get(),
+                context,
+                "voice transcript announcement durable metadata claim failed before queue accept"
+            );
+            false
+        }
+    }
+}
+
 fn build_soft_intervention(
     author_id: serenity::UserId,
     message_id: serenity::MessageId,
@@ -1208,26 +1335,19 @@ pub(in crate::services::discord) async fn handle_event(
             // intake-gate so we can both (a) cheaply classify the message and
             // (b) embed the full announcement in any queued Intervention we
             // construct on the busy-channel/thread-guard/drain-mode paths
-            // below. We prefer the durable store via `peek_clone` (no consume)
-            // so the active dispatch path still finds the entry when it later
-            // calls `take()`; falls back to parsing the message content when
-            // the store has no entry but the message itself is a valid
-            // announcement (post-restart hydrate or out-of-band publish).
-            let resolved_voice_announcement: Option<
-                crate::voice::prompt::VoiceTranscriptAnnouncement,
-            > = if announce_bot_id == Some(user_id.get()) {
-                crate::voice::announce_meta::global_store()
-                    .peek_clone(new_message.id)
-                    .or_else(|| {
-                        crate::voice::prompt::parse_authorized_voice_transcript_announcement(
-                            &new_message.content,
-                            user_id.get(),
-                            announce_bot_id,
-                        )
-                    })
-            } else {
-                None
-            };
+            // below. Resolution is non-consuming: local store, durable PG row,
+            // then a short pending-key wait for the gateway-before-send-response
+            // race. Legacy hidden metadata is deliberately not trusted here;
+            // the durable/ref path is the authority for new runtime routing.
+            let resolved_voice_announcement = resolve_voice_transcript_announcement_for_intake(
+                data.shared.pg_pool.as_ref(),
+                channel_id,
+                new_message.id,
+                user_id,
+                announce_bot_id,
+                &new_message.content,
+            )
+            .await;
             let is_voice_transcript_announcement = resolved_voice_announcement.is_some();
             if !is_voice_transcript_announcement
                 && validate_live_channel_routing_with_dm_hint(
@@ -1571,6 +1691,17 @@ pub(in crate::services::discord) async fn handle_event(
                                 channel_id,
                                 thread_id
                             );
+                            if !claim_voice_transcript_announcement_for_queue(
+                                data,
+                                channel_id,
+                                new_message.id,
+                                &resolved_voice_announcement,
+                                "thread_guard_queue",
+                            )
+                            .await
+                            {
+                                return Ok(());
+                            }
                             let outcome = enqueue_soft_intervention(
                                 data,
                                 channel_id,
@@ -1675,6 +1806,17 @@ pub(in crate::services::discord) async fn handle_event(
             )
             .await
             {
+                if !claim_voice_transcript_announcement_for_queue(
+                    data,
+                    channel_id,
+                    new_message.id,
+                    &resolved_voice_announcement,
+                    "busy_active_turn_queue",
+                )
+                .await
+                {
+                    return Ok(());
+                }
                 let outcome = enqueue_soft_intervention(
                     data,
                     channel_id,
@@ -1743,6 +1885,17 @@ pub(in crate::services::discord) async fn handle_event(
                 .reconcile_done
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
+                if !claim_voice_transcript_announcement_for_queue(
+                    data,
+                    channel_id,
+                    new_message.id,
+                    &resolved_voice_announcement,
+                    "reconcile_gate_queue",
+                )
+                .await
+                {
+                    return Ok(());
+                }
                 let _ = enqueue_soft_intervention(
                     data,
                     channel_id,
@@ -1781,6 +1934,17 @@ pub(in crate::services::discord) async fn handle_event(
                     .shutting_down
                     .load(std::sync::atomic::Ordering::Relaxed);
 
+                if !claim_voice_transcript_announcement_for_queue(
+                    data,
+                    channel_id,
+                    new_message.id,
+                    &resolved_voice_announcement,
+                    "drain_mode_queue",
+                )
+                .await
+                {
+                    return Ok(());
+                }
                 let outcome = enqueue_soft_intervention(
                     data,
                     channel_id,
@@ -1855,6 +2019,17 @@ pub(in crate::services::discord) async fn handle_event(
                 if has_active_turn || !has_pending_backlog {
                     None
                 } else {
+                    if !claim_voice_transcript_announcement_for_queue(
+                        data,
+                        channel_id,
+                        new_message.id,
+                        &resolved_voice_announcement,
+                        "idle_backlog_queue",
+                    )
+                    .await
+                    {
+                        return Ok(());
+                    }
                     Some(
                         enqueue_soft_intervention(
                             data,

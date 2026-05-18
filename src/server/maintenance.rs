@@ -68,6 +68,7 @@ impl MaintenanceJobRegistry {
             Arc::new(CancelTombstonePruneJob),
             Arc::new(PromptManifestRetentionJob::new(prompt_manifest_retention)),
             Arc::new(VoiceTurnLinkGcJob),
+            Arc::new(VoiceTranscriptAnnouncementMetaGcJob),
             Arc::new(VoiceBackgroundHandoffMetaGcJob),
         ])
     }
@@ -273,6 +274,43 @@ impl MaintenanceJob for PromptManifestRetentionJob {
                     trimmed = report.trimmed_full_content,
                     horizon_at = ?report.horizon_at,
                     "[maintenance] prompt_manifest_retention trimmed full content"
+                );
+            }
+            Ok(())
+        })
+    }
+}
+
+/// #2209 — leader-only GC for durable voice transcript announcement metadata.
+/// Rows are short-lived during normal operation, but a send failure or process
+/// crash can leave pending rows behind.
+struct VoiceTranscriptAnnouncementMetaGcJob;
+
+impl MaintenanceJob for VoiceTranscriptAnnouncementMetaGcJob {
+    fn name(&self) -> &'static str {
+        "storage.voice_transcript_announcement_meta_gc"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(Duration::from_secs(15 * 60), Duration::from_secs(60))
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let ttl = Duration::from_secs(
+                crate::voice::announce_meta::DURABLE_ANNOUNCEMENT_META_TTL_SECS as u64,
+            );
+            let deleted =
+                crate::voice::announce_meta::gc_expired_voice_announcement_meta_pg(pool, ttl)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("voice_transcript_announcement_meta_gc failed: {error}")
+                    })?;
+            if deleted > 0 {
+                tracing::info!(
+                    job = self.name(),
+                    deleted,
+                    "[maintenance] voice_transcript_announcement_meta_gc removed expired rows"
                 );
             }
             Ok(())
@@ -1081,6 +1119,18 @@ mod registry_membership_tests {
             "voice.turn_link_gc must be registered on the production \
              MaintenanceJobRegistry so the leader scheduler sweeps \
              terminal voice_turn_link rows (#2362). present jobs: {names:?}"
+        );
+    }
+
+    #[test]
+    fn static_registry_includes_voice_transcript_announcement_meta_gc() {
+        let registry = MaintenanceJobRegistry::static_registry();
+        let names: Vec<&'static str> = registry.jobs().iter().map(|job| job.name()).collect();
+        assert!(
+            names.contains(&"storage.voice_transcript_announcement_meta_gc"),
+            "storage.voice_transcript_announcement_meta_gc must be registered so \
+             durable voice announcement metadata cannot accumulate indefinitely. \
+             present jobs: {names:?}"
         );
     }
 

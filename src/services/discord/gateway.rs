@@ -684,7 +684,7 @@ impl TurnGateway for DiscordGateway {
             let has_embedded_voice_announcement = intervention.voice_announcement.is_some();
             if let Some(announcement) = intervention.voice_announcement.as_ref() {
                 crate::voice::announce_meta::global_store()
-                    .insert(intervention.message_id, announcement.clone());
+                    .insert_accepted_replay(intervention.message_id, announcement.clone());
             }
             // #2266: for voice-transcript queued items, the
             // `handle_text_message` voice-author authorization check at

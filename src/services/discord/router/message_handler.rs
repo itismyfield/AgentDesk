@@ -2754,6 +2754,45 @@ pub(crate) async fn execute_intake_turn_core(
     .await
 }
 
+async fn claim_voice_transcript_announcement_processing(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    already_accepted: bool,
+    context: &'static str,
+) -> bool {
+    if already_accepted {
+        return true;
+    }
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return true;
+    };
+    match crate::voice::announce_meta::mark_voice_announcement_durable_consumed(pool, message_id)
+        .await
+    {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                message_id = message_id.get(),
+                context,
+                "voice transcript announcement durable metadata already claimed; skipping duplicate processing"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                channel_id = channel_id.get(),
+                message_id = message_id.get(),
+                context,
+                "voice transcript announcement durable metadata claim failed; skipping processing"
+            );
+            false
+        }
+    }
+}
+
 pub(in crate::services::discord) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     channel_id: ChannelId,
@@ -2778,28 +2817,137 @@ pub(in crate::services::discord) async fn handle_text_message(
         token,
     } = *deps;
     let original_channel_id = channel_id;
-    let stored_voice_announcement = crate::voice::announce_meta::global_store().take(user_msg_id);
+    let stored_voice_announcement =
+        crate::voice::announce_meta::global_store().take_with_acceptance(user_msg_id);
     let has_stored_voice_announcement = stored_voice_announcement.is_some();
-    let parsed_voice_announcement =
-        if crate::voice::prompt::is_voice_transcript_announcement_candidate(user_text) {
-            crate::voice::prompt::parse_voice_transcript_announcement(user_text)
-        } else {
-            None
-        };
-    let announce_bot_id = if has_stored_voice_announcement || parsed_voice_announcement.is_some() {
+    let has_legacy_voice_announcement =
+        crate::voice::prompt::is_voice_transcript_announcement_candidate(user_text);
+    let is_readable_voice_announcement =
+        crate::voice::prompt::is_readable_voice_transcript_announcement(user_text);
+    let voice_announcement_ref = if is_readable_voice_announcement {
+        crate::voice::prompt::parse_voice_transcript_announcement_ref(user_text)
+    } else {
+        None
+    };
+    let announce_bot_id = if has_stored_voice_announcement
+        || has_legacy_voice_announcement
+        || is_readable_voice_announcement
+    {
         super::super::resolve_announce_bot_user_id(shared).await
     } else {
         None
     };
+    let mut voice_announcement_already_accepted = false;
     let voice_announcement = if announce_bot_id == Some(request_owner.get()) {
-        if has_stored_voice_announcement {
-            stored_voice_announcement
+        if let Some((announcement, accepted_replay)) = stored_voice_announcement {
+            if let Some(pool) = shared.pg_pool.as_ref() {
+                match crate::voice::announce_meta::load_voice_announcement_durable(
+                    pool,
+                    user_msg_id,
+                )
+                .await
+                {
+                    Ok(Some(durable)) => Some(durable),
+                    Ok(None) if accepted_replay => {
+                        match crate::voice::announce_meta::load_consumed_voice_announcement_durable(
+                            pool,
+                            user_msg_id,
+                        )
+                        .await
+                        {
+                            Ok(Some(consumed)) => {
+                                voice_announcement_already_accepted = true;
+                                Some(consumed)
+                            }
+                            Ok(None) => {
+                                tracing::info!(
+                                    channel_id = channel_id.get(),
+                                    message_id = user_msg_id.get(),
+                                    "accepted queued voice transcript announcement has no consumed durable row; refusing local replay"
+                                );
+                                None
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    channel_id = channel_id.get(),
+                                    message_id = user_msg_id.get(),
+                                    "accepted queued voice transcript announcement consumed durable metadata load failed"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::info!(
+                            channel_id = channel_id.get(),
+                            message_id = user_msg_id.get(),
+                            "stored voice transcript announcement has no live durable row; refusing local-only consume"
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            channel_id = channel_id.get(),
+                            message_id = user_msg_id.get(),
+                            "voice transcript announcement durable metadata load failed after local store hit"
+                        );
+                        None
+                    }
+                }
+            } else {
+                Some(announcement)
+            }
+        } else if is_readable_voice_announcement {
+            match shared.pg_pool.as_ref() {
+                Some(pool) => match crate::voice::announce_meta::load_voice_announcement_durable(
+                    pool,
+                    user_msg_id,
+                )
+                .await
+                {
+                    Ok(Some(announcement)) => Some(announcement),
+                    Ok(None) => {
+                        if let Some(pending_key) = voice_announcement_ref.as_deref() {
+                            match crate::voice::announce_meta::bind_pending_voice_announcement_by_key_durable(
+                                pool,
+                                pending_key,
+                                channel_id,
+                                user_msg_id,
+                            )
+                            .await
+                            {
+                                Ok(Some(announcement)) => Some(announcement),
+                                Ok(None) => None,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error = %error,
+                                        channel_id = channel_id.get(),
+                                        message_id = user_msg_id.get(),
+                                        "voice transcript announcement pending metadata bind failed"
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            channel_id = channel_id.get(),
+                            message_id = user_msg_id.get(),
+                            "voice transcript announcement durable metadata load failed"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            }
         } else {
-            crate::voice::prompt::parse_authorized_voice_transcript_announcement(
-                user_text,
-                request_owner.get(),
-                announce_bot_id,
-            )
+            None
         }
     } else {
         None
@@ -2811,7 +2959,9 @@ pub(in crate::services::discord) async fn handle_text_message(
             author_id = request_owner.get(),
             "dropping stored voice transcript announcement because announce bot user id is unavailable"
         );
-    } else if (has_stored_voice_announcement || parsed_voice_announcement.is_some())
+    } else if (has_stored_voice_announcement
+        || has_legacy_voice_announcement
+        || is_readable_voice_announcement)
         && voice_announcement.is_none()
     {
         tracing::warn!(
@@ -2819,10 +2969,22 @@ pub(in crate::services::discord) async fn handle_text_message(
             message_id = user_msg_id.get(),
             author_id = request_owner.get(),
             announce_bot_id = ?announce_bot_id,
-            "ignoring spoofed voice transcript announcement from non-announce author"
+            "ignoring voice transcript announcement without authorized durable metadata"
         );
     }
     let is_voice_announcement = voice_announcement.is_some();
+    if is_voice_announcement
+        && !claim_voice_transcript_announcement_processing(
+            shared,
+            channel_id,
+            user_msg_id,
+            voice_announcement_already_accepted,
+            "handle_text_message_pre_accept",
+        )
+        .await
+    {
+        return Ok(());
+    }
     let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
         let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
         if let Some(started_at) = announcement.started_at.as_deref() {
@@ -4002,13 +4164,11 @@ pub(in crate::services::discord) async fn handle_text_message(
                 reply_context.clone(),
                 has_reply_boundary,
                 merge_consecutive,
-                // #2266: the per-process `voice::announce_meta` store entry
-                // was already consumed at the top of `handle_text_message`
-                // (line ~2261). Embed the in-memory announcement payload in
-                // the queued `Intervention` so `dispatch_queued_turn` can
-                // reinsert it before re-entering `handle_text_message`, which
-                // restores the voice-transcript framing instead of degrading
-                // the queued reply to plain text.
+                // #2266: keep the voice payload self-contained in the queued
+                // `Intervention` so `dispatch_queued_turn` can reinsert it
+                // before re-entering `handle_text_message`, which restores
+                // the voice-transcript framing instead of degrading the queued
+                // reply to plain text.
                 voice_announcement.clone(),
             ),
         )

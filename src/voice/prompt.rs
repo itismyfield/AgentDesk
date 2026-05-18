@@ -16,6 +16,7 @@ pub(crate) struct VoiceTranscriptAnnouncement {
 }
 
 const VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX: &str = "ADK_VOICE_TRANSCRIPT v1";
+const VOICE_TRANSCRIPT_ANNOUNCEMENT_REF_PREFIX: &str = "ADK_VOICE_ANNOUNCE_REF v1";
 const VOICE_BACKGROUND_HANDOFF_PREFIX: &str = "ADK_VOICE_BACKGROUND_HANDOFF v1";
 const VOICE_BACKGROUND_HANDOFF_CORRELATION_PREFIX: &str = "voice-bg:";
 const TRANSCRIPT_TAG_PREFIX: &str = "user_transcript_";
@@ -280,6 +281,30 @@ pub(crate) fn build_voice_transcript_announcement(
     format!("🎙️ \"{transcript}\"")
 }
 
+pub(crate) fn append_voice_transcript_announcement_ref(
+    announcement: &str,
+    pending_key: &str,
+) -> String {
+    format!("{announcement}\n||{VOICE_TRANSCRIPT_ANNOUNCEMENT_REF_PREFIX} key={pending_key}||")
+}
+
+pub(crate) fn parse_voice_transcript_announcement_ref(text: &str) -> Option<String> {
+    let header = text
+        .lines()
+        .find_map(voice_transcript_announcement_ref_line)?;
+    let rest = header.strip_prefix(VOICE_TRANSCRIPT_ANNOUNCEMENT_REF_PREFIX)?;
+    for token in rest.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        let value = parse_header_value(value);
+        if key == "key" && is_valid_voice_transcript_announcement_ref(&value) {
+            return Some(value);
+        }
+    }
+    None
+}
+
 pub(crate) fn voice_transcript_announcement_meta(
     transcript: &str,
     user_id: u64,
@@ -364,6 +389,15 @@ pub(crate) fn is_voice_transcript_announcement_candidate(text: &str) -> bool {
         .any(|line| voice_transcript_header_line(line).is_some())
 }
 
+pub(crate) fn is_readable_voice_transcript_announcement(text: &str) -> bool {
+    let Some(first_line) = text.lines().map(str::trim).find(|line| !line.is_empty()) else {
+        return false;
+    };
+    first_line.starts_with("🎙️ \"")
+        && first_line.ends_with('"')
+        && first_line.len() > "🎙️ \"\"".len()
+}
+
 fn voice_transcript_header_line(line: &str) -> Option<&str> {
     let trimmed = line.trim();
     let unspoiled = trimmed
@@ -374,6 +408,26 @@ fn voice_transcript_header_line(line: &str) -> Option<&str> {
     unspoiled
         .starts_with(VOICE_TRANSCRIPT_ANNOUNCEMENT_PREFIX)
         .then_some(unspoiled)
+}
+
+fn voice_transcript_announcement_ref_line(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let unspoiled = trimmed
+        .strip_prefix("||")
+        .and_then(|value| value.strip_suffix("||"))
+        .unwrap_or(trimmed)
+        .trim();
+    unspoiled
+        .starts_with(VOICE_TRANSCRIPT_ANNOUNCEMENT_REF_PREFIX)
+        .then_some(unspoiled)
+}
+
+fn is_valid_voice_transcript_announcement_ref(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii() && !byte.is_ascii_whitespace() && byte != b'|')
 }
 
 fn voice_background_handoff_header_line(line: &str) -> Option<&str> {
@@ -536,6 +590,7 @@ mod tests {
         assert!(!announcement.contains("ADK_VOICE_TRANSCRIPT"));
         assert!(!announcement.contains("<user_transcript>"));
         assert!(!announcement.contains("||"));
+        assert!(is_readable_voice_transcript_announcement(&announcement));
     }
 
     #[test]
@@ -565,6 +620,32 @@ mod tests {
             Some("2026-05-14T18:00:01+09:00")
         );
         assert_eq!(meta.samples_written, Some(48_000));
+    }
+
+    #[test]
+    fn voice_transcript_announcement_ref_round_trips_and_keeps_readable_candidate() {
+        let announcement = build_voice_transcript_announcement(
+            "상태 알려줘",
+            42,
+            "utt-1",
+            "ko-KR",
+            true,
+            "2026-05-14T18:00:00+09:00",
+            "2026-05-14T18:00:01+09:00",
+            48_000,
+        );
+        let pending_key = "voice:1:2:utt-1::announce:generation:1";
+        let with_ref = append_voice_transcript_announcement_ref(&announcement, pending_key);
+
+        assert!(is_readable_voice_transcript_announcement(&with_ref));
+        assert_eq!(
+            parse_voice_transcript_announcement_ref(&with_ref).as_deref(),
+            Some(pending_key)
+        );
+        assert!(
+            parse_voice_transcript_announcement(&with_ref).is_none(),
+            "opaque ref must not restore transcript metadata parsing"
+        );
     }
 
     #[test]
