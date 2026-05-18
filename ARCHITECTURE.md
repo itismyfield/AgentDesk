@@ -486,7 +486,6 @@ src/
 │   │   ├── discord_io.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
-│   │   ├── handoff.rs
 │   │   ├── health.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs

@@ -70,7 +70,9 @@ pub(crate) fn discord_queue_exit_placeholder_clears_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_queue_exit_placeholder_clears"))
 }
 
-pub(super) fn discord_handoff_root() -> Option<PathBuf> {
+/// Retired durable handoff directory. Kept only so startup can remove
+/// legacy JSON records from builds that had a reader but no live writer.
+pub(super) fn legacy_discord_handoff_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_handoff"))
 }
 
@@ -259,7 +261,7 @@ mod tests {
                 "discord_queued_placeholders_root",
                 discord_queued_placeholders_root(),
             ),
-            ("discord_handoff_root", discord_handoff_root()),
+            ("legacy_discord_handoff_root", legacy_discord_handoff_root()),
             ("shared_agent_memory_root", shared_agent_memory_root()),
             ("last_message_root", last_message_root()),
         ];

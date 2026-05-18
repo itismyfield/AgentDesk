@@ -409,32 +409,32 @@ fn spawn_startup_thread_map_validation(pg_pool: Option<sqlx::PgPool>, token: Str
     });
 }
 
-/// Suppress durable handoff turns saved before a restart.
-/// Runs after tmux watcher restore and pending queue restore, but before
-/// restart report flush so stale handoff files do not synthesize a new turn.
-async fn execute_handoff_turns(
-    _http: &Arc<serenity::Http>,
-    _shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-) {
-    let handoffs = load_handoffs(provider);
-    if handoffs.is_empty() {
+/// Remove the retired durable handoff tree without parsing or executing it.
+/// Current recovery paths no longer write these JSON records, so any files here
+/// are legacy residue and must not affect boot behavior.
+fn purge_legacy_durable_handoffs() {
+    let Some(root) = super::runtime_store::legacy_discord_handoff_root() else {
+        return;
+    };
+    if !root.exists() {
         return;
     }
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] 📎 Found {} handoff record(s) to suppress",
-        handoffs.len()
-    );
-
-    for record in handoffs {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        let _ = update_handoff_state(provider, record.channel_id, "skipped");
-        clear_handoff(provider, record.channel_id);
-        tracing::info!(
-            "  [{ts}] ⏭ Suppressed auto post-restart handoff for channel {}",
-            record.channel_id
-        );
+    match std::fs::remove_dir_all(&root) {
+        Ok(()) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 🧹 Removed retired durable handoff directory: {}",
+                root.display()
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ Failed to remove retired durable handoff directory {}: {error}",
+                root.display()
+            );
+        }
     }
 }
 
@@ -1784,13 +1784,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             super::tmux::clear_recovery_handled_channels(&shared_for_tmux2).await;
                         }
 
-                        // Suppress durable handoffs so restart does not synthesize a new turn.
-                        execute_handoff_turns(
-                            &http_for_restart_reports,
-                            &shared_for_restart_reports,
-                            &provider_for_restore,
-                        )
-                        .await;
+                        // Remove retired durable handoffs so stale legacy JSON cannot
+                        // influence startup.
+                        purge_legacy_durable_handoffs();
 
                         // #164: Re-deliver orphan pending dispatches from before restart
                         recover_orphan_pending_dispatches(&shared_for_restart_reports).await;
@@ -2327,6 +2323,41 @@ agents:
 
         assert_eq!(map.get("123").map(String::as_str), Some("codex"));
         assert_eq!(map.get("999").map(String::as_str), Some("codex"));
+    }
+
+    #[test]
+    fn legacy_durable_handoff_cleanup_removes_retired_json_tree() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _reset = EnvReset(previous_root);
+
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let handoff_root = tmp
+            .path()
+            .join("runtime")
+            .join("discord_handoff")
+            .join("codex");
+        std::fs::create_dir_all(&handoff_root).unwrap();
+        std::fs::write(handoff_root.join("1486333430516945008.json"), "{}").unwrap();
+
+        purge_legacy_durable_handoffs();
+
+        assert!(
+            !tmp.path().join("runtime").join("discord_handoff").exists(),
+            "legacy handoff JSON must be removed without being parsed or consumed"
+        );
     }
 }
 

@@ -5,7 +5,6 @@ mod commands;
 mod discord_io;
 pub(crate) mod formatting;
 mod gateway;
-mod handoff;
 pub(crate) mod health;
 pub(crate) mod http;
 mod idle_detector;
@@ -134,7 +133,6 @@ use formatting::{
     BUILTIN_SKILLS, extract_skill_description, format_for_discord, format_tool_input,
     send_long_message_raw, truncate_str,
 };
-use handoff::{clear_handoff, load_handoffs, update_handoff_state};
 pub(crate) use inflight::clear_inflight_state;
 use inflight::{InflightTurnState, load_inflight_states, save_inflight_state};
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};

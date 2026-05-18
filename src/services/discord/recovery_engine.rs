@@ -5031,9 +5031,8 @@ mod tests {
             "이미 확인한 내용은 여기까지입니다. 이어서 원인과 대응을 설명하겠습니다.",
         );
 
-        let handoffs = crate::services::discord::handoff::load_handoffs(&ProviderKind::Codex);
         assert!(
-            handoffs.is_empty(),
+            !root.join("runtime").join("discord_handoff").exists(),
             "automatic post-restart handoff files must no longer be created"
         );
     }
