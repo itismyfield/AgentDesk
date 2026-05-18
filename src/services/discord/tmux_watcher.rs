@@ -469,6 +469,143 @@ impl TuiCompletionGateOutcome {
     }
 }
 
+fn external_input_jsonl_turn_state(
+    provider: &ProviderKind,
+    inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+) -> Option<crate::services::tui_turn_state::TuiTurnState> {
+    let state = inflight?;
+    if state.turn_source != crate::services::discord::inflight::TurnSource::ExternalInput
+        || state.tmux_session_name.as_deref() != Some(tmux_session_name)
+    {
+        return None;
+    }
+    let output_path = state
+        .output_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    let path = std::path::Path::new(output_path);
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Some(crate::services::tui_turn_state::TuiTurnState::Unknown);
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Some(crate::services::tui_turn_state::TuiTurnState::Unknown);
+    }
+    Some(crate::services::tui_turn_state::observe_provider_jsonl_turn_state(provider, path))
+}
+
+#[cfg(test)]
+mod external_input_jsonl_gate_tests {
+    use super::*;
+
+    fn state_for_external_input(
+        provider: ProviderKind,
+        tmux_session_name: &str,
+        output_path: &str,
+    ) -> crate::services::discord::inflight::InflightTurnState {
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            provider,
+            42,
+            Some("relay-test".to_string()),
+            7,
+            9001,
+            9002,
+            "typed over ssh".to_string(),
+            Some("session-1".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some(output_path.to_string()),
+            Some("/tmp/input.fifo".to_string()),
+            0,
+        );
+        state.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        state
+    }
+
+    #[test]
+    fn external_input_terminal_jsonl_confirms_idle() {
+        let file = tempfile::NamedTempFile::new().expect("temp jsonl");
+        std::fs::write(
+            file.path(),
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+        )
+        .expect("write jsonl");
+        let tmux_session_name = "AgentDesk-claude-relay-test";
+        let state = state_for_external_input(
+            ProviderKind::Claude,
+            tmux_session_name,
+            &file.path().display().to_string(),
+        );
+
+        assert_eq!(
+            external_input_jsonl_turn_state(&ProviderKind::Claude, Some(&state), tmux_session_name),
+            Some(crate::services::tui_turn_state::TuiTurnState::Idle)
+        );
+    }
+
+    #[test]
+    fn non_external_inflight_does_not_bypass_pane_gate() {
+        let file = tempfile::NamedTempFile::new().expect("temp jsonl");
+        std::fs::write(
+            file.path(),
+            r#"{"type":"result","result":"done","session_id":"s"}"#,
+        )
+        .expect("write jsonl");
+        let tmux_session_name = "AgentDesk-claude-relay-test";
+        let mut state = state_for_external_input(
+            ProviderKind::Claude,
+            tmux_session_name,
+            &file.path().display().to_string(),
+        );
+        state.turn_source = crate::services::discord::inflight::TurnSource::Managed;
+
+        assert_eq!(
+            external_input_jsonl_turn_state(&ProviderKind::Claude, Some(&state), tmux_session_name),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_external_input_jsonl_is_unknown_for_existing_inflight() {
+        let missing_path = std::env::temp_dir().join(format!(
+            "agentdesk-missing-external-jsonl-{}-{}.jsonl",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_file(&missing_path);
+        let tmux_session_name = "AgentDesk-claude-relay-test";
+        let state = state_for_external_input(
+            ProviderKind::Claude,
+            tmux_session_name,
+            &missing_path.display().to_string(),
+        );
+
+        assert_eq!(
+            external_input_jsonl_turn_state(&ProviderKind::Claude, Some(&state), tmux_session_name),
+            Some(crate::services::tui_turn_state::TuiTurnState::Unknown)
+        );
+    }
+}
+
+fn watcher_commit_should_advance_runtime_binding(terminal_output_committed: bool) -> bool {
+    terminal_output_committed
+}
+
+#[cfg(test)]
+mod runtime_binding_offset_tests {
+    use super::*;
+
+    #[test]
+    fn committed_watcher_output_advances_runtime_binding_even_without_inflight() {
+        assert!(watcher_commit_should_advance_runtime_binding(true));
+    }
+
+    #[test]
+    fn uncommitted_watcher_output_does_not_advance_runtime_binding() {
+        assert!(!watcher_commit_should_advance_runtime_binding(false));
+    }
+}
+
 pub(in crate::services::discord) async fn run_tui_completion_gate(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -477,6 +614,17 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
 ) -> TuiCompletionGateOutcome {
     let inflight =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get());
+    if external_input_jsonl_turn_state(provider, inflight.as_ref(), tmux_session_name)
+        == Some(crate::services::tui_turn_state::TuiTurnState::Idle)
+    {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            "confirmed SSH-direct external input completion from provider JSONL terminal envelope"
+        );
+        return TuiCompletionGateOutcome::ConfirmedIdle;
+    }
     let runtime_kind = inflight.as_ref().and_then(|state| state.runtime_kind);
     let rebind_origin = inflight
         .as_ref()
@@ -3057,6 +3205,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
+        if watcher_commit_should_advance_runtime_binding(terminal_output_committed) {
+            // Keep the SSH-direct replay watermark in lockstep with bytes the
+            // watcher already emitted or intentionally suppressed. This must
+            // happen before completion-gate/status awaits and before releasing
+            // the relay slot, otherwise a prompt observed immediately after a
+            // pane-bound relay can synthesize an inflight from the stale offset.
+            crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+                &tmux_session_name,
+                &output_path,
+                terminal_event_consumed_offset(current_offset, &all_data),
+            );
+        }
 
         // #2161 TUI completion gate: ClaudeTui sessions can land a
         // `result` JSONL event before the interactive pane is actually
@@ -3185,18 +3345,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &provider_kind,
             channel_id.get(),
         );
-        if terminal_output_committed
-            && !lifecycle_stage_paused
-            && inflight_state.as_ref().is_some_and(|state| {
-                state.turn_source == crate::services::discord::inflight::TurnSource::ExternalInput
-            })
-        {
-            crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
-                &tmux_session_name,
-                &output_path,
-                terminal_event_consumed_offset(current_offset, &all_data),
-            );
-        }
         let watcher_session_id = state.last_session_id.clone();
         if terminal_output_committed {
             persist_watcher_provider_session_id(

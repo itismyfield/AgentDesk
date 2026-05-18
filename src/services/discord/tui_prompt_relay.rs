@@ -16,8 +16,6 @@ use crate::services::tui_prompt_dedupe::{
 };
 
 const SSH_DIRECT_PROMPT_PREVIEW_LIMIT: usize = 1500;
-const SSH_DIRECT_INFLIGHT_SLOT_WAIT_ATTEMPTS: usize = 20;
-const SSH_DIRECT_INFLIGHT_SLOT_WAIT_MS: u64 = 250;
 
 pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: ProviderKind) {
     tokio::spawn(async move {
@@ -94,19 +92,8 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
-    let Some(slot) = wait_for_inflight_slot_and_pause_for_prompt(shared, &prompt, channel_id).await
-    else {
-        tracing::warn!(
-            provider = %prompt.provider,
-            channel_id = channel_id.get(),
-            tmux_session_name = %prompt.tmux_session_name,
-            "skipping SSH-direct TUI prompt notify; runtime handoff binding unavailable or channel stayed busy"
-        );
-        return;
-    };
-    let runtime_binding = slot.runtime_binding;
-    let start_offset = slot.start_offset;
-    let mut pause_guard = slot.pause_guard;
+    let mut slot = prepare_prompt_relay_slot(shared, &prompt, channel_id).await;
+    let mut pause_guard = slot.pause_guard.take();
     let notify_http = match super::health::resolve_bot_http(registry.as_ref(), "notify").await {
         Ok(http) => http,
         Err((status, body)) => {
@@ -137,35 +124,65 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
     };
-    match synthesize_ssh_direct_inflight(
-        &prompt,
-        channel_id,
-        anchor_message.id,
-        &runtime_binding,
-        start_offset,
-    ) {
-        Ok(()) => {
-            if let Some(guard) = pause_guard.as_mut() {
-                guard.commit_resume_offset(start_offset);
+    match slot.inflight_plan {
+        PromptRelayInflightPlan::Synthesize => {
+            let Some(runtime_binding) = slot.runtime_binding.as_ref() else {
+                tracing::warn!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    "SSH-direct TUI prompt notified without runtime binding; pane-bound watcher relay will handle output"
+                );
+                drop(pause_guard);
+                return;
+            };
+            let Some(start_offset) = slot.start_offset else {
+                tracing::warn!(
+                    provider = %prompt.provider,
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %prompt.tmux_session_name,
+                    "SSH-direct TUI prompt notified without replay offset; pane-bound watcher relay will handle output"
+                );
+                drop(pause_guard);
+                return;
+            };
+            match synthesize_ssh_direct_inflight(
+                &prompt,
+                channel_id,
+                anchor_message.id,
+                runtime_binding,
+                start_offset,
+            ) {
+                Ok(()) => {
+                    if let Some(guard) = pause_guard.as_mut() {
+                        guard.commit_resume_offset(start_offset);
+                    }
+                }
+                Err(super::inflight::CreateNewInflightError::AlreadyExists) => {
+                    tracing::info!(
+                        provider = %prompt.provider,
+                        channel_id = channel_id.get(),
+                        tmux_session_name = %prompt.tmux_session_name,
+                        "SSH-direct TUI prompt notify kept after concurrent inflight creation; pane-bound watcher relay will handle output"
+                    );
+                }
+                Err(super::inflight::CreateNewInflightError::Internal(error)) => {
+                    tracing::warn!(
+                        provider = %prompt.provider,
+                        channel_id = channel_id.get(),
+                        error = %error,
+                        "failed to create SSH-direct TUI inflight binding after notify; pane-bound watcher relay will handle output"
+                    );
+                }
             }
         }
-        Err(super::inflight::CreateNewInflightError::AlreadyExists) => {
-            let _ =
-                super::http::delete_channel_message(&*notify_http, channel_id, anchor_message.id)
-                    .await;
-            tracing::debug!(
+        PromptRelayInflightPlan::PaneBoundOnly(reason) => {
+            tracing::info!(
                 provider = %prompt.provider,
                 channel_id = channel_id.get(),
                 tmux_session_name = %prompt.tmux_session_name,
-                "removed SSH-direct TUI prompt notify after concurrent inflight creation"
-            );
-        }
-        Err(super::inflight::CreateNewInflightError::Internal(error)) => {
-            tracing::warn!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                error = %error,
-                "failed to create SSH-direct TUI inflight binding"
+                reason = reason.as_str(),
+                "SSH-direct TUI prompt notify kept without synthetic inflight; pane-bound watcher relay will handle output"
             );
         }
     }
@@ -287,101 +304,253 @@ fn build_ssh_direct_inflight_state(
 }
 
 struct PromptRelaySlot {
-    runtime_binding: TuiRuntimeBinding,
-    start_offset: u64,
+    runtime_binding: Option<TuiRuntimeBinding>,
+    start_offset: Option<u64>,
     pause_guard: Option<WatcherPauseGuard>,
+    inflight_plan: PromptRelayInflightPlan,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptRelayInflightPlan {
+    Synthesize,
+    PaneBoundOnly(PromptRelayFallbackReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptRelayFallbackReason {
+    RuntimeBindingUnavailable,
+    ExistingInflight,
+    OwnerWatcherActive,
+    WatcherPauseBusy,
+    WatcherRelayBusy,
+}
+
+impl PromptRelayFallbackReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RuntimeBindingUnavailable => "runtime_binding_unavailable",
+            Self::ExistingInflight => "existing_inflight",
+            Self::OwnerWatcherActive => "owner_watcher_active",
+            Self::WatcherPauseBusy => "watcher_pause_busy",
+            Self::WatcherRelayBusy => "watcher_relay_busy",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptWatcherPauseStatus {
+    Acquired,
+    Busy,
+    RelayBusy,
+    NotNeeded,
 }
 
 enum PromptWatcherPauseAttempt {
     Acquired(WatcherPauseGuard),
     Busy,
+    RelayBusy,
     NotNeeded,
 }
 
-async fn wait_for_inflight_slot_and_pause_for_prompt(
+impl PromptWatcherPauseAttempt {
+    fn status(&self) -> PromptWatcherPauseStatus {
+        match self {
+            Self::Acquired(_) => PromptWatcherPauseStatus::Acquired,
+            Self::Busy => PromptWatcherPauseStatus::Busy,
+            Self::RelayBusy => PromptWatcherPauseStatus::RelayBusy,
+            Self::NotNeeded => PromptWatcherPauseStatus::NotNeeded,
+        }
+    }
+}
+
+fn classify_prompt_relay_inflight_plan(
+    runtime_binding_available: bool,
+    inflight_exists: bool,
+    pause_status: PromptWatcherPauseStatus,
+) -> PromptRelayInflightPlan {
+    if !runtime_binding_available {
+        return PromptRelayInflightPlan::PaneBoundOnly(
+            PromptRelayFallbackReason::RuntimeBindingUnavailable,
+        );
+    }
+    if inflight_exists {
+        return PromptRelayInflightPlan::PaneBoundOnly(PromptRelayFallbackReason::ExistingInflight);
+    }
+    if pause_status == PromptWatcherPauseStatus::Busy {
+        return PromptRelayInflightPlan::PaneBoundOnly(PromptRelayFallbackReason::WatcherPauseBusy);
+    }
+    if pause_status == PromptWatcherPauseStatus::RelayBusy {
+        return PromptRelayInflightPlan::PaneBoundOnly(PromptRelayFallbackReason::WatcherRelayBusy);
+    }
+    PromptRelayInflightPlan::Synthesize
+}
+
+async fn prepare_prompt_relay_slot(
     shared: &Arc<SharedData>,
     prompt: &ObservedTuiPrompt,
     channel_id: ChannelId,
-) -> Option<PromptRelaySlot> {
-    for attempt in 0..=SSH_DIRECT_INFLIGHT_SLOT_WAIT_ATTEMPTS {
-        if inflight_exists_for_prompt(prompt, channel_id) {
-            if attempt == SSH_DIRECT_INFLIGHT_SLOT_WAIT_ATTEMPTS {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(
-                SSH_DIRECT_INFLIGHT_SLOT_WAIT_MS,
-            ))
-            .await;
-            continue;
-        }
-        let Some(runtime_binding) = runtime_binding_for_tmux_session(&prompt.tmux_session_name)
-        else {
-            return None;
+) -> PromptRelaySlot {
+    let Some(initial_runtime_binding) = runtime_binding_for_tmux_session(&prompt.tmux_session_name)
+    else {
+        return PromptRelaySlot {
+            runtime_binding: None,
+            start_offset: None,
+            pause_guard: None,
+            inflight_plan: classify_prompt_relay_inflight_plan(
+                false,
+                false,
+                PromptWatcherPauseStatus::NotNeeded,
+            ),
         };
-        let pause_attempt = pause_owner_watcher_for_prompt_relay(
+    };
+    let expected_output_path = initial_runtime_binding.relay_output_path().to_string();
+    if inflight_exists_for_prompt(prompt, channel_id) {
+        return PromptRelaySlot {
+            runtime_binding: Some(initial_runtime_binding),
+            start_offset: None,
+            pause_guard: None,
+            inflight_plan: classify_prompt_relay_inflight_plan(
+                true,
+                true,
+                PromptWatcherPauseStatus::NotNeeded,
+            ),
+        };
+    }
+
+    if owner_watcher_owns_prompt_relay_path(shared, channel_id, prompt, &expected_output_path) {
+        return PromptRelaySlot {
+            runtime_binding: Some(initial_runtime_binding),
+            start_offset: None,
+            pause_guard: None,
+            inflight_plan: PromptRelayInflightPlan::PaneBoundOnly(
+                PromptRelayFallbackReason::OwnerWatcherActive,
+            ),
+        };
+    }
+
+    let pause_attempt = pause_owner_watcher_for_prompt_relay(
+        shared,
+        channel_id,
+        prompt,
+        &expected_output_path,
+        None,
+    );
+    let mut pause_status = pause_attempt.status();
+    let mut pause_guard = match pause_attempt {
+        PromptWatcherPauseAttempt::Acquired(guard) => Some(guard),
+        PromptWatcherPauseAttempt::Busy
+        | PromptWatcherPauseAttempt::RelayBusy
+        | PromptWatcherPauseAttempt::NotNeeded => None,
+    };
+    if pause_status == PromptWatcherPauseStatus::Acquired
+        && owner_watcher_relay_slot_busy_for_prompt(
             shared,
             channel_id,
             prompt,
-            runtime_binding.relay_output_path(),
-            None,
-        );
-        if matches!(pause_attempt, PromptWatcherPauseAttempt::Busy) {
-            if attempt == SSH_DIRECT_INFLIGHT_SLOT_WAIT_ATTEMPTS {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(
-                SSH_DIRECT_INFLIGHT_SLOT_WAIT_MS,
-            ))
-            .await;
-            continue;
-        }
-        let mut pause_guard = match pause_attempt {
-            PromptWatcherPauseAttempt::Acquired(guard) => Some(guard),
-            PromptWatcherPauseAttempt::Busy => unreachable!(),
-            PromptWatcherPauseAttempt::NotNeeded => None,
-        };
-        let initial_start_offset = runtime_binding_replay_start_offset(&runtime_binding);
-        if let Some(guard) = pause_guard.as_mut() {
-            guard.arm_abort_resume_offset(initial_start_offset);
-        }
-        if !inflight_exists_for_prompt(prompt, channel_id) {
-            let Some(runtime_binding) = runtime_binding_for_tmux_session(&prompt.tmux_session_name)
-            else {
-                return None;
-            };
-            let start_offset = runtime_binding_replay_start_offset(&runtime_binding);
-            if let Some(guard) = pause_guard.as_mut() {
-                guard.arm_abort_resume_offset(start_offset);
-            }
-            if !inflight_exists_for_prompt(prompt, channel_id) {
-                return Some(PromptRelaySlot {
-                    runtime_binding,
-                    start_offset,
-                    pause_guard,
-                });
-            }
-        }
-        drop(pause_guard);
-        if attempt == SSH_DIRECT_INFLIGHT_SLOT_WAIT_ATTEMPTS {
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(
-            SSH_DIRECT_INFLIGHT_SLOT_WAIT_MS,
-        ))
-        .await;
+            &expected_output_path,
+        )
+    {
+        drop(pause_guard.take());
+        pause_status = PromptWatcherPauseStatus::RelayBusy;
     }
-    None
+    if pause_status == PromptWatcherPauseStatus::RelayBusy {
+        return PromptRelaySlot {
+            runtime_binding: Some(initial_runtime_binding),
+            start_offset: None,
+            pause_guard: None,
+            inflight_plan: classify_prompt_relay_inflight_plan(true, false, pause_status),
+        };
+    }
+    let Some(runtime_binding) = runtime_binding_for_tmux_session(&prompt.tmux_session_name) else {
+        drop(pause_guard.take());
+        return PromptRelaySlot {
+            runtime_binding: None,
+            start_offset: None,
+            pause_guard: None,
+            inflight_plan: classify_prompt_relay_inflight_plan(
+                false,
+                false,
+                PromptWatcherPauseStatus::NotNeeded,
+            ),
+        };
+    };
+    if runtime_binding.relay_output_path() != expected_output_path {
+        drop(pause_guard.take());
+        return PromptRelaySlot {
+            runtime_binding: Some(runtime_binding),
+            start_offset: None,
+            pause_guard: None,
+            inflight_plan: classify_prompt_relay_inflight_plan(
+                false,
+                false,
+                PromptWatcherPauseStatus::NotNeeded,
+            ),
+        };
+    }
+    let start_offset = runtime_binding_replay_start_offset(&runtime_binding);
+    if let Some(guard) = pause_guard.as_mut() {
+        guard.arm_abort_resume_offset(start_offset);
+    }
+    let inflight_after_pause = inflight_exists_for_prompt(prompt, channel_id);
+    let plan = classify_prompt_relay_inflight_plan(true, inflight_after_pause, pause_status);
+    if plan != PromptRelayInflightPlan::Synthesize {
+        drop(pause_guard.take());
+    }
+    PromptRelaySlot {
+        runtime_binding: Some(runtime_binding),
+        start_offset: Some(start_offset),
+        pause_guard,
+        inflight_plan: plan,
+    }
+}
+
+fn provider_kind_for_prompt(prompt: &ObservedTuiPrompt) -> Option<ProviderKind> {
+    ProviderKind::from_str(&prompt.provider).or_else(|| {
+        parse_provider_and_channel_from_tmux_name(&prompt.tmux_session_name)
+            .map(|(provider, _)| provider)
+    })
+}
+
+fn owner_watcher_relay_slot_busy_for_prompt(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    prompt: &ObservedTuiPrompt,
+    expected_output_path: &str,
+) -> bool {
+    if !owner_watcher_owns_prompt_relay_path(shared, channel_id, prompt, expected_output_path) {
+        return false;
+    }
+    let owner = shared
+        .tmux_watchers
+        .owner_channel_for_tmux_session(&prompt.tmux_session_name)
+        .unwrap_or(channel_id);
+    shared
+        .tmux_relay_coords
+        .get(&owner)
+        .is_some_and(|coord| coord.relay_slot.load(Ordering::Acquire) != 0)
+}
+
+fn owner_watcher_owns_prompt_relay_path(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    prompt: &ObservedTuiPrompt,
+    expected_output_path: &str,
+) -> bool {
+    let owner = shared
+        .tmux_watchers
+        .owner_channel_for_tmux_session(&prompt.tmux_session_name)
+        .unwrap_or(channel_id);
+    shared.tmux_watchers.get(&owner).is_some_and(|watcher| {
+        watcher.output_path == expected_output_path
+            && !watcher.cancel.load(Ordering::Acquire)
+            && !watcher.heartbeat_stale()
+    })
 }
 
 fn inflight_exists_for_prompt(prompt: &ObservedTuiPrompt, channel_id: ChannelId) -> bool {
-    ProviderKind::from_str(&prompt.provider)
-        .or_else(|| {
-            parse_provider_and_channel_from_tmux_name(&prompt.tmux_session_name)
-                .map(|(provider, _)| provider)
-        })
-        .is_some_and(|provider| {
-            super::inflight::load_inflight_state(&provider, channel_id.get()).is_some()
-        })
+    provider_kind_for_prompt(prompt).is_some_and(|provider| {
+        super::inflight::load_inflight_state(&provider, channel_id.get()).is_some()
+    })
 }
 
 fn runtime_binding_replay_start_offset(binding: &TuiRuntimeBinding) -> u64 {
@@ -417,6 +586,28 @@ fn pause_owner_watcher_for_prompt_relay(
             "skipping SSH-direct TUI prompt watcher pause; owner watches a different output path"
         );
         return PromptWatcherPauseAttempt::NotNeeded;
+    }
+    if watcher.cancel.load(Ordering::Acquire) || watcher.heartbeat_stale() {
+        tracing::debug!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            "skipping SSH-direct TUI prompt watcher pause; owner watcher is cancelled or stale"
+        );
+        return PromptWatcherPauseAttempt::NotNeeded;
+    }
+    if shared
+        .tmux_relay_coords
+        .get(&owner)
+        .is_some_and(|coord| coord.relay_slot.load(Ordering::Acquire) != 0)
+    {
+        tracing::debug!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            "waiting for SSH-direct TUI prompt watcher pause; owner watcher is mid-relay"
+        );
+        return PromptWatcherPauseAttempt::RelayBusy;
     }
     let already_paused = watcher.paused.load(Ordering::Acquire);
     if already_paused {
@@ -706,5 +897,59 @@ mod tests {
             Some(77),
             Some(42)
         ));
+    }
+
+    #[test]
+    fn prompt_relay_plan_synthesizes_when_runtime_is_ready_and_channel_free() {
+        assert_eq!(
+            classify_prompt_relay_inflight_plan(true, false, PromptWatcherPauseStatus::Acquired),
+            PromptRelayInflightPlan::Synthesize
+        );
+        assert_eq!(
+            classify_prompt_relay_inflight_plan(true, false, PromptWatcherPauseStatus::NotNeeded),
+            PromptRelayInflightPlan::Synthesize
+        );
+    }
+
+    #[test]
+    fn prompt_relay_plan_keeps_pane_bound_notify_when_inflight_is_busy() {
+        assert_eq!(
+            classify_prompt_relay_inflight_plan(true, true, PromptWatcherPauseStatus::NotNeeded),
+            PromptRelayInflightPlan::PaneBoundOnly(PromptRelayFallbackReason::ExistingInflight)
+        );
+    }
+
+    #[test]
+    fn prompt_relay_can_keep_pane_bound_notify_when_owner_watcher_is_active() {
+        assert_eq!(
+            PromptRelayFallbackReason::OwnerWatcherActive.as_str(),
+            "owner_watcher_active"
+        );
+    }
+
+    #[test]
+    fn prompt_relay_plan_keeps_pane_bound_notify_when_watcher_pause_is_busy() {
+        assert_eq!(
+            classify_prompt_relay_inflight_plan(true, false, PromptWatcherPauseStatus::Busy),
+            PromptRelayInflightPlan::PaneBoundOnly(PromptRelayFallbackReason::WatcherPauseBusy)
+        );
+    }
+
+    #[test]
+    fn prompt_relay_plan_keeps_pane_bound_notify_when_watcher_relay_is_busy() {
+        assert_eq!(
+            classify_prompt_relay_inflight_plan(true, false, PromptWatcherPauseStatus::RelayBusy),
+            PromptRelayInflightPlan::PaneBoundOnly(PromptRelayFallbackReason::WatcherRelayBusy)
+        );
+    }
+
+    #[test]
+    fn prompt_relay_plan_keeps_pane_bound_notify_without_runtime_binding() {
+        assert_eq!(
+            classify_prompt_relay_inflight_plan(false, false, PromptWatcherPauseStatus::NotNeeded),
+            PromptRelayInflightPlan::PaneBoundOnly(
+                PromptRelayFallbackReason::RuntimeBindingUnavailable
+            )
+        );
     }
 }
