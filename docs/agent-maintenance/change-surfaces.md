@@ -111,10 +111,11 @@
   - `src/services/discord/watchers/lifecycle.rs` (1942 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (6344 lines after #2376 relay-owner
+  - `src/services/discord/tmux.rs` (6337 lines after #2558 dead-code sweep;
     failover guard; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (3524 lines after #1520 watcher
-    loop extraction + #2427 D/A explicit-cleanup wires; split loop helpers
+  - `src/services/discord/tmux_watcher.rs` (4200 lines after #2558
+    dead-code sweep; #1520 watcher loop extraction + #2427 D/A
+    explicit-cleanup wires; split loop helpers
     further before adding behavior).
   - `src/services/discord/recovery_engine.rs` (4842 lines).
   - `src/services/discord/health.rs` (4880 lines after #1879 snapshot/mailbox
@@ -142,7 +143,8 @@
   - `src/services/discord/formatting.rs` (3247 lines).
   - `src/services/discord/settings.rs` (2445 lines).
   - `src/services/discord/prompt_builder.rs` (2114 lines).
-  - `src/services/discord/runtime_bootstrap.rs` (2844 lines).
+  - `src/services/discord/runtime_bootstrap.rs` (3235 lines after #2558
+    thread-session GC loopback shim cleanup).
   - `src/services/discord/session_runtime.rs` (1887 lines).
   - `src/services/discord/voice_barge_in.rs` (1783 lines; voice STT/TTS,
     lobby routing, progress mirroring, and barge-in orchestration surface;
@@ -172,6 +174,9 @@
   helpers for SSH-direct prompt relay. The migration-sensitive invariant remains
   one owner per `(tmux_session, output_path)` and separate runtime-vs-relay
   offsets for Codex rollout wrappers.
+- 2026-05-18 refresh: #2558 removed dead watcher/placeholder cleanup parameters
+  and retained a warning log for pause/epoch placeholder delete failures; no
+  new watcher ownership path was introduced.
 - tests: `src/integration_tests/tests/*` cancel/recovery suites.
 - related_issues: #964, #1112, #1138, #1222, #1223, #1283.
 

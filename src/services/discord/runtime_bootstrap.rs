@@ -1942,14 +1942,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // but rows still carrying an active_dispatch_id stay until the
                 // 3-hour safety TTL so warm-resume sessions keep DB ownership.
                 {
-                    let api_port = shared_clone.api_port;
                     let shared_for_session_gc = shared_clone.clone();
                     tokio::spawn(async move {
                         // Run every 10 minutes, initial delay 2 minutes
                         tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
                         loop {
                             gc_stale_fixed_working_sessions(&shared_for_session_gc).await;
-                            gc_stale_thread_sessions_via_api(api_port).await;
+                            gc_stale_thread_sessions(&shared_for_session_gc).await;
                             tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
                         }
                     });
@@ -2220,18 +2219,19 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     }
 }
 
-/// Periodic GC: delete stale idle/disconnected thread sessions from DB via cleanup API.
-async fn gc_stale_thread_sessions_via_api(api_port: u16) {
-    let _ = api_port;
-    match super::internal_api::gc_stale_thread_sessions().await {
-        Ok(gc) if gc > 0 => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] 🧹 GC: removed {gc} stale thread session(s) from DB");
+/// Periodic GC: delete stale idle/disconnected thread sessions from DB.
+async fn gc_stale_thread_sessions(shared: &Arc<SharedData>) {
+    match shared.pg_pool.as_ref() {
+        Some(pool) => {
+            let gc = crate::db::dispatched_sessions::gc_stale_thread_sessions_pg(pool).await;
+            if gc > 0 {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] 🧹 GC: removed {gc} stale thread session(s) from DB");
+            }
         }
-        Ok(_) => {}
-        Err(err) => {
+        None => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!("  [{ts}] ⚠ Thread session GC error: {err}");
+            tracing::warn!("  [{ts}] ⚠ Thread session GC skipped: postgres pool unavailable");
         }
     }
 }

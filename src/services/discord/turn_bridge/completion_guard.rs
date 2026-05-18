@@ -930,20 +930,6 @@ pub(in crate::services::discord) async fn store_reconcile_marker_with_handles(
     false
 }
 
-#[allow(dead_code)]
-pub(in crate::services::discord) fn runtime_db_fallback_complete(
-    dispatch_id: &str,
-    source: &str,
-) -> bool {
-    runtime_db_fallback_complete_with_result(
-        dispatch_id,
-        &serde_json::json!({
-            "completion_source": source,
-            "needs_reconcile": true,
-        }),
-    )
-}
-
 /// Extract the last git commit SHA from agent turn output.
 ///
 /// Scans the output for `git commit` result lines like:

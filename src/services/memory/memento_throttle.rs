@@ -461,35 +461,6 @@ pub(crate) fn note_recall_context_size(bucket: RecallSizeBucket, bytes: usize) {
     }
 }
 
-#[allow(dead_code)] // exposed for ad-hoc inspection / future stats endpoint
-pub(crate) fn recall_size_snapshot() -> Value {
-    fn average(total: u64, count: u64) -> u64 {
-        if count == 0 { 0 } else { total / count }
-    }
-
-    let full_total = FULL_CONTEXT_BYTES_TOTAL.load(Ordering::Relaxed);
-    let full_turns = FULL_CONTEXT_TURNS.load(Ordering::Relaxed);
-    let identity_total = IDENTITY_CONTEXT_BYTES_TOTAL.load(Ordering::Relaxed);
-    let identity_turns = IDENTITY_CONTEXT_TURNS.load(Ordering::Relaxed);
-    let skipped_turns = SKIPPED_CONTEXT_TURNS.load(Ordering::Relaxed);
-
-    json!({
-        "full": {
-            "turns": full_turns,
-            "bytes_total": full_total,
-            "bytes_avg": average(full_total, full_turns),
-        },
-        "identity_only": {
-            "turns": identity_turns,
-            "bytes_total": identity_total,
-            "bytes_avg": average(identity_total, identity_turns),
-        },
-        "skipped": {
-            "turns": skipped_turns,
-        },
-    })
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn reset_memento_throttle_for_tests() {
     with_state(|state| {

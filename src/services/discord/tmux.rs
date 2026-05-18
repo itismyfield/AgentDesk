@@ -3449,26 +3449,25 @@ mod tests {
 
     #[test]
     fn missing_inflight_fallback_warns_and_marks_live_tmux_degraded_on_db_miss() {
-        let plan = missing_inflight_fallback_observation(true, false, true, false, false, true);
+        let plan = missing_inflight_fallback_observation(true, false, true, false, true);
         assert!(plan.warn);
         assert!(plan.mark_degraded);
         assert!(!plan.suppressed_by_recent_stop);
 
-        let resolved = missing_inflight_fallback_observation(true, true, true, false, false, true);
+        let resolved = missing_inflight_fallback_observation(true, true, true, false, true);
         assert!(resolved.warn);
         assert!(!resolved.mark_degraded);
 
-        let uncommitted =
-            missing_inflight_fallback_observation(true, false, false, false, false, true);
+        let uncommitted = missing_inflight_fallback_observation(true, false, false, false, true);
         assert!(uncommitted.warn);
         assert!(uncommitted.mark_degraded);
 
-        let stopped = missing_inflight_fallback_observation(true, false, true, true, false, true);
+        let stopped = missing_inflight_fallback_observation(true, false, true, true, true);
         assert!(stopped.warn);
         assert!(!stopped.mark_degraded);
         assert!(stopped.suppressed_by_recent_stop);
 
-        let cleaned = missing_inflight_fallback_observation(true, false, true, false, true, true);
+        let cleaned = missing_inflight_fallback_observation(true, false, true, false, true);
         assert!(cleaned.warn);
         assert!(cleaned.mark_degraded);
         assert!(
@@ -3476,8 +3475,7 @@ mod tests {
             "terminal placeholder cleanup alone must not suppress live-session observation"
         );
 
-        let dead_tmux =
-            missing_inflight_fallback_observation(true, false, true, false, false, false);
+        let dead_tmux = missing_inflight_fallback_observation(true, false, true, false, false);
         assert!(dead_tmux.warn);
         assert!(dead_tmux.mark_degraded);
         assert!(!dead_tmux.suppressed_by_recent_stop);
@@ -3486,7 +3484,7 @@ mod tests {
     #[test]
     fn missing_inflight_recent_stop_still_suppresses_placeholder_cleanup_observation() {
         let stopped_and_cleaned =
-            missing_inflight_fallback_observation(true, false, true, true, true, true);
+            missing_inflight_fallback_observation(true, false, true, true, true);
 
         assert!(stopped_and_cleaned.warn);
         assert!(!stopped_and_cleaned.mark_degraded);
@@ -3586,7 +3584,7 @@ mod tests {
         // Keep the existing counter increment wired for visibility.
         let counters = crate::services::observability::metrics::ObservabilityCounters::new();
 
-        let plan = missing_inflight_fallback_observation(true, false, true, false, false, true);
+        let plan = missing_inflight_fallback_observation(true, false, true, false, true);
         assert!(
             plan.mark_degraded,
             "DB fallback resolve failure on committed terminal output should be observable"
@@ -3621,7 +3619,7 @@ mod tests {
         let channel = ChannelId::new(987_1857_001);
         assert!(super::super::inflight::load_inflight_state(&provider, channel.get()).is_none());
 
-        let plan = missing_inflight_fallback_observation(true, false, true, false, false, true);
+        let plan = missing_inflight_fallback_observation(true, false, true, false, true);
         assert!(plan.warn);
         assert!(plan.mark_degraded);
         assert!(!plan.suppressed_by_recent_stop);
@@ -3660,7 +3658,7 @@ mod tests {
             "cancelled turn range should match the stop tombstone"
         );
 
-        let plan = missing_inflight_fallback_observation(true, false, true, true, false, true);
+        let plan = missing_inflight_fallback_observation(true, false, true, true, true);
         assert!(!plan.mark_degraded);
         assert!(plan.suppressed_by_recent_stop);
 
@@ -3697,7 +3695,6 @@ mod tests {
             false,
             true,
             recent_turn_stop_for_watcher_range(channel, tmux_name, 127).is_some(),
-            false,
             true,
         );
         assert!(!stopped.mark_degraded);
@@ -3708,7 +3705,6 @@ mod tests {
             false,
             true,
             recent_turn_stop_for_watcher_range(channel, tmux_name, 129).is_some(),
-            false,
             true,
         );
         assert!(later.mark_degraded);
@@ -3742,7 +3738,6 @@ mod tests {
             false,
             true,
             recent_turn_stop_for_watcher_range(channel, tmux_name, 2048).is_some(),
-            false,
             true,
         );
         assert!(later.mark_degraded);
@@ -3994,7 +3989,6 @@ mod tests {
             false,
             true,
             recent_turn_stop_for_watcher_range(channel, tmux_name, 4096).is_some(),
-            false,
             true,
         );
         assert!(!fallback.mark_degraded);
@@ -4019,7 +4013,6 @@ mod tests {
             false,
             true,
             recent_turn_stop_for_watcher_range(channel, tmux_name, 4097).is_some(),
-            false,
             true,
         );
         assert!(later.mark_degraded);

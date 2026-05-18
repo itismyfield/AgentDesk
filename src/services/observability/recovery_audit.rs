@@ -246,7 +246,8 @@ pub async fn fetch_recovery_audit(
     rows.into_iter().map(decode_recovery_audit_record).collect()
 }
 
-pub async fn fetch_recovery_audit_for_turn(
+#[cfg(test)]
+async fn fetch_recovery_audit_for_turn(
     pool: &PgPool,
     turn_id: impl AsRef<str>,
 ) -> Result<Option<RecoveryAuditRecord>> {

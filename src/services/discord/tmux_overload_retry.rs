@@ -209,12 +209,24 @@ mod completion_release_tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    #[derive(Default)]
     struct CompletionOnlyGateway {
         completion_calls: Arc<AtomicUsize>,
         legacy_calls: Arc<AtomicUsize>,
         seen_text: Arc<Mutex<Option<String>>>,
         completion_observed: Arc<tokio::sync::Notify>,
+        bot_owner_provider: Option<ProviderKind>,
+    }
+
+    impl CompletionOnlyGateway {
+        fn new(bot_owner_provider: Option<ProviderKind>) -> Self {
+            Self {
+                completion_calls: Arc::new(AtomicUsize::new(0)),
+                legacy_calls: Arc::new(AtomicUsize::new(0)),
+                seen_text: Arc::new(Mutex::new(None)),
+                completion_observed: Arc::new(tokio::sync::Notify::new()),
+                bot_owner_provider,
+            }
+        }
     }
 
     impl TurnGateway for CompletionOnlyGateway {
@@ -319,13 +331,13 @@ mod completion_release_tests {
         }
 
         fn bot_owner_provider(&self) -> Option<ProviderKind> {
-            Some(ProviderKind::Codex)
+            self.bot_owner_provider.clone()
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn retry_release_helper_uses_completion_gateway_variant() {
-        let fake = Arc::new(CompletionOnlyGateway::default());
+        let fake = Arc::new(CompletionOnlyGateway::new(None));
         let gateway: Arc<dyn TurnGateway> = fake.clone();
         let channel = ChannelId::new(999_000_378_900);
 

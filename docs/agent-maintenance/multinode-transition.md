@@ -35,6 +35,11 @@
 - active_callsite_coverage: single-node runtime with an existing gateway lease.
   It does not yet define cluster role discovery, worker heartbeats, or a
   capability registry for non-gateway workers.
+- 2026-05-18 audit note (#2558): stale thread-session GC in
+  `runtime_bootstrap` now calls the leader runtime's Postgres pool directly
+  instead of looping back through the internal HTTP cleanup route. The singleton
+  assumption remains unchanged: the task is still spawned from the leased
+  gateway runtime.
 - invariants: `singleton_on_leader`,
   `heartbeat_capability_registry_routing`.
 - allowed_changes: `bugfix` only before #876/#877. New gateway, reconnect,

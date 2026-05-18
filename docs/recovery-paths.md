@@ -23,7 +23,7 @@ alias until the mechanical split lands):
 - `recovery_paths/restart.rs`
 - `recovery_paths/runtime.rs`
 - `recovery_paths/manual_rebind.rs`
-- `recovery_paths/shared.rs`  ← SSoT helpers (currently: `clear_inflight_by_tmux_name` wrapper)
+- `recovery_paths/shared.rs`  ← shared helpers once they are used by multiple recovery paths
 
 ## Entry Conditions
 
@@ -139,13 +139,10 @@ Public wrappers:
 - `src/services/discord/mod.rs` — re-exports as `pub(crate) fn`.
 - `src/services/turn_lifecycle.rs` — thin wrapper that forwards to the discord
   wrapper (no private directory scan).
-- `src/services/discord/recovery_paths/shared.rs` — forwards to the discord
-  wrapper for eventual use by
-  `recovery_paths::{restart,runtime,manual_rebind}`.
 
 Invariant: **exactly one** `std::fs::remove_file` call graph for inflight JSON
 files keyed by tmux session. If you add a new caller, route through the
-discord or recovery-shared wrapper. Do not re-implement the directory scan.
+discord or turn-lifecycle wrapper. Do not re-implement the directory scan.
 
 ## Discord Adapter Boundary
 
