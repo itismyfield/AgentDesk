@@ -548,7 +548,7 @@
 | `services::memory::memento` | `src/services/memory/memento.rs` | 2729 | giant-file |
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 503 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 474 |  |
-| `services::message_outbox` | `src/services/message_outbox.rs` | 437 |  |
+| `services::message_outbox` | `src/services/message_outbox.rs` | 729 |  |
 | `services::observability` | `src/services/observability/mod.rs` | 1158 | giant-file |
 | `services::observability::emit` | `src/services/observability/emit.rs` | 477 |  |
 | `services::observability::events` | `src/services/observability/events.rs` | 399 |  |

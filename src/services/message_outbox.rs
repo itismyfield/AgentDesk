@@ -26,15 +26,16 @@ fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<Str
         })
 }
 
+fn normalized_reason_code(reason_code: Option<&str>) -> Option<&str> {
+    reason_code.map(str::trim).filter(|value| !value.is_empty())
+}
+
 fn warn_outbox_enqueue_failure(
     backend: &'static str,
     message: OutboxMessage<'_>,
     error: impl std::fmt::Display,
 ) {
-    let reason_code = message
-        .reason_code
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let reason_code = normalized_reason_code(message.reason_code);
     let session_key = normalized_session_key(message.target, message.session_key);
     tracing::warn!(
         backend,
@@ -135,7 +136,7 @@ fn enqueue_lifecycle_notification_sqlite(
     reason_code: &str,
     content: &str,
 ) -> Result<bool, String> {
-    let reason_code = reason_code.trim();
+    let reason_code = normalized_reason_code(Some(reason_code));
     let Some(session_key) = normalized_session_key(target, session_key) else {
         return Ok(false);
     };
@@ -144,8 +145,8 @@ fn enqueue_lifecycle_notification_sqlite(
     let conn = db
         .lock()
         .map_err(|error| format!("db lock failed: {error}"))?;
-    let duplicate_id = conn
-        .query_row(
+    let duplicate_id = if let Some(reason_code) = reason_code {
+        conn.query_row(
             "SELECT id
              FROM message_outbox
              WHERE target = ?1
@@ -158,28 +159,113 @@ fn enqueue_lifecycle_notification_sqlite(
             [target, reason_code, session_key.as_str(), ttl_secs.as_str()],
             |row| row.get::<_, i64>(0),
         )
-        .ok();
+        .ok()
+    } else {
+        conn.query_row(
+            "SELECT id
+             FROM message_outbox
+             WHERE target = ?1
+               AND reason_code IS NULL
+               AND content = ?2
+               AND session_key = ?3
+               AND status != 'failed'
+               AND created_at >= datetime('now', '-' || ?4 || ' seconds')
+             ORDER BY id DESC
+             LIMIT 1",
+            [target, content, session_key.as_str(), ttl_secs.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()
+    };
 
     if duplicate_id.is_some() {
         return Ok(false);
     }
 
-    conn.execute(
-        "INSERT INTO message_outbox
-         (target, content, bot, source, reason_code, session_key)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        [
-            target,
-            content,
-            "notify",
-            LIFECYCLE_NOTIFIER_SOURCE,
-            reason_code,
-            session_key.as_str(),
-        ],
-    )
-    .map_err(|error| format!("insert lifecycle notification sqlite: {error}"))?;
+    if let Some(reason_code) = reason_code {
+        conn.execute(
+            "INSERT INTO message_outbox
+             (target, content, bot, source, reason_code, session_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            [
+                target,
+                content,
+                "notify",
+                LIFECYCLE_NOTIFIER_SOURCE,
+                reason_code,
+                session_key.as_str(),
+            ],
+        )
+        .map_err(|error| format!("insert lifecycle notification sqlite: {error}"))?;
+    } else {
+        conn.execute(
+            "INSERT INTO message_outbox
+             (target, content, bot, source, reason_code, session_key)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+            [
+                target,
+                content,
+                "notify",
+                LIFECYCLE_NOTIFIER_SOURCE,
+                session_key.as_str(),
+            ],
+        )
+        .map_err(|error| format!("insert lifecycle notification sqlite: {error}"))?;
+    }
 
     Ok(true)
+}
+
+async fn find_duplicate_outbox_message_pg(
+    pool: &PgPool,
+    target: &str,
+    content: &str,
+    reason_code: Option<&str>,
+    session_key: Option<&str>,
+    dedupe_ttl_secs: i64,
+) -> Result<Option<i64>, sqlx::Error> {
+    let Some(session_key) = session_key else {
+        return Ok(None);
+    };
+
+    if let Some(reason_code) = reason_code {
+        return sqlx::query_scalar::<_, i64>(
+            "SELECT id
+             FROM message_outbox
+             WHERE target = $1
+               AND reason_code = $2
+               AND session_key = $3
+               AND status != 'failed'
+               AND created_at >= NOW() - ($4::BIGINT * INTERVAL '1 second')
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind(target)
+        .bind(reason_code)
+        .bind(session_key)
+        .bind(dedupe_ttl_secs)
+        .fetch_optional(pool)
+        .await;
+    }
+
+    sqlx::query_scalar::<_, i64>(
+        "SELECT id
+         FROM message_outbox
+         WHERE target = $1
+           AND reason_code IS NULL
+           AND content = $2
+           AND session_key = $3
+           AND status != 'failed'
+           AND created_at >= NOW() - ($4::BIGINT * INTERVAL '1 second')
+         ORDER BY id DESC
+         LIMIT 1",
+    )
+    .bind(target)
+    .bind(content)
+    .bind(session_key)
+    .bind(dedupe_ttl_secs)
+    .fetch_optional(pool)
+    .await
 }
 
 pub(crate) async fn enqueue_outbox_pg_returning_id(
@@ -198,42 +284,29 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl(
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
 ) -> Result<Option<i64>, sqlx::Error> {
-    let reason_code = message
-        .reason_code
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let reason_code = normalized_reason_code(message.reason_code);
     let session_key = normalized_session_key(message.target, message.session_key);
 
-    if let (Some(reason_code), Some(session_key)) = (reason_code, session_key.as_deref()) {
-        let duplicate_id = sqlx::query_scalar::<_, i64>(
-            "SELECT id
-             FROM message_outbox
-             WHERE target = $1
-               AND reason_code = $2
-               AND session_key = $3
-               AND status != 'failed'
-               AND created_at >= NOW() - ($4::BIGINT * INTERVAL '1 second')
-             ORDER BY id DESC
-             LIMIT 1",
-        )
-        .bind(message.target)
-        .bind(reason_code)
-        .bind(session_key)
-        .bind(dedupe_ttl_secs)
-        .fetch_optional(pool)
-        .await?;
+    let duplicate_id = find_duplicate_outbox_message_pg(
+        pool,
+        message.target,
+        message.content,
+        reason_code,
+        session_key.as_deref(),
+        dedupe_ttl_secs,
+    )
+    .await?;
 
-        if let Some(existing_id) = duplicate_id {
-            tracing::info!(
-                target = message.target,
-                reason_code,
-                session_key,
-                existing_id,
-                dedupe_ttl_secs,
-                "suppressed duplicate outbox message"
-            );
-            return Ok(None);
-        }
+    if let Some(existing_id) = duplicate_id {
+        tracing::info!(
+            target = message.target,
+            reason_code,
+            session_key = session_key.as_deref(),
+            existing_id,
+            dedupe_ttl_secs,
+            "suppressed duplicate outbox message"
+        );
+        return Ok(None);
     }
 
     let outbox_id = sqlx::query_scalar::<_, i64>(
@@ -305,38 +378,28 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
     reason_code: &str,
     content: &str,
 ) -> Result<bool, sqlx::Error> {
-    let reason_code = reason_code.trim();
+    let reason_code = normalized_reason_code(Some(reason_code));
     let session_key = normalized_session_key(target, session_key);
 
-    if let Some(session_key) = session_key.as_deref() {
-        let duplicate_id = sqlx::query_scalar::<_, i64>(
-            "SELECT id
-             FROM message_outbox
-             WHERE target = $1
-               AND reason_code = $2
-               AND session_key = $3
-               AND status != 'failed'
-               AND created_at >= NOW() - ($4::BIGINT * INTERVAL '1 second')
-             ORDER BY id DESC
-             LIMIT 1",
-        )
-        .bind(target)
-        .bind(reason_code)
-        .bind(session_key)
-        .bind(LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS)
-        .fetch_optional(pool)
-        .await?;
+    let duplicate_id = find_duplicate_outbox_message_pg(
+        pool,
+        target,
+        content,
+        reason_code,
+        session_key.as_deref(),
+        LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS,
+    )
+    .await?;
 
-        if let Some(existing_id) = duplicate_id {
-            tracing::info!(
-                target,
-                reason_code,
-                session_key,
-                existing_id,
-                "suppressed duplicate lifecycle notification"
-            );
-            return Ok(false);
-        }
+    if let Some(existing_id) = duplicate_id {
+        tracing::info!(
+            target,
+            reason_code,
+            session_key = session_key.as_deref(),
+            existing_id,
+            "suppressed duplicate lifecycle notification"
+        );
+        return Ok(false);
     }
 
     sqlx::query(
@@ -358,9 +421,103 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
-    use super::{OutboxMessage, warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure};
+    use super::{
+        LIFECYCLE_NOTIFIER_SOURCE, OutboxMessage, enqueue_lifecycle_notification_pg,
+        enqueue_lifecycle_notification_sqlite, enqueue_outbox_pg_returning_id,
+        warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure,
+    };
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
+
+    struct TestDatabase {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestDatabase {
+        async fn create() -> Self {
+            let admin_url = admin_database_url();
+            let database_name =
+                format!("agentdesk_message_outbox_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "message_outbox pg tests",
+            )
+            .await
+            .expect("create postgres test db");
+
+            Self {
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "message_outbox pg tests",
+            )
+            .await
+            .expect("migrate postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "message_outbox pg tests",
+            )
+            .await
+            .expect("drop postgres test db");
+        }
+    }
+
+    fn base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", base_database_url(), admin_db)
+    }
 
     #[derive(Clone)]
     struct TestLogWriter {
@@ -433,5 +590,140 @@ mod tests {
         assert!(logs.contains("failed to enqueue lifecycle notification"));
         assert!(logs.contains("postgres"));
         assert!(logs.contains("session_key=\"channel:123\""));
+    }
+
+    #[test]
+    fn lifecycle_sqlite_dedupes_empty_reason_by_content_and_target_session() {
+        let db = crate::db::test_db();
+
+        let first = enqueue_lifecycle_notification_sqlite(
+            &db,
+            "channel:sqlite-partial",
+            None,
+            " ",
+            "same body",
+        )
+        .expect("enqueue first sqlite lifecycle message");
+        let second = enqueue_lifecycle_notification_sqlite(
+            &db,
+            "channel:sqlite-partial",
+            None,
+            "",
+            "same body",
+        )
+        .expect("enqueue duplicate sqlite lifecycle message");
+
+        assert!(first);
+        assert!(!second);
+
+        let conn = db.read_conn().expect("sqlite read conn");
+        let row: (i64, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(reason_code), MAX(session_key), MAX(source)
+                 FROM message_outbox
+                 WHERE target = 'channel:sqlite-partial'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read sqlite message_outbox rows");
+        assert_eq!(row.0, 1);
+        assert_eq!(row.1, None);
+        assert_eq!(row.2, "channel:sqlite-partial");
+        assert_eq!(row.3, LIFECYCLE_NOTIFIER_SOURCE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outbox_pg_dedupes_missing_reason_code_by_content_and_target_session() {
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+
+        let first = enqueue_outbox_pg_returning_id(
+            &pool,
+            OutboxMessage {
+                target: "channel:pg-partial",
+                content: "same body",
+                bot: "notify",
+                source: "test",
+                reason_code: None,
+                session_key: None,
+            },
+        )
+        .await
+        .expect("enqueue first postgres outbox message");
+        let second = enqueue_outbox_pg_returning_id(
+            &pool,
+            OutboxMessage {
+                target: "channel:pg-partial",
+                content: "same body",
+                bot: "notify",
+                source: "test",
+                reason_code: None,
+                session_key: None,
+            },
+        )
+        .await
+        .expect("enqueue duplicate postgres outbox message");
+
+        assert!(first.is_some());
+        assert_eq!(second, None);
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM message_outbox
+             WHERE target = $1",
+        )
+        .bind("channel:pg-partial")
+        .fetch_one(&pool)
+        .await
+        .expect("count postgres outbox rows");
+        assert_eq!(count, 1);
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_pg_dedupes_empty_reason_code_by_content_and_target_session() {
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+
+        let first = enqueue_lifecycle_notification_pg(
+            &pool,
+            "channel:pg-lifecycle-partial",
+            None,
+            " ",
+            "same lifecycle body",
+        )
+        .await
+        .expect("enqueue first postgres lifecycle message");
+        let second = enqueue_lifecycle_notification_pg(
+            &pool,
+            "channel:pg-lifecycle-partial",
+            None,
+            "",
+            "same lifecycle body",
+        )
+        .await
+        .expect("enqueue duplicate postgres lifecycle message");
+
+        assert!(first);
+        assert!(!second);
+
+        let row: (i64, Option<String>, String, String) = sqlx::query_as(
+            "SELECT COUNT(*), MAX(reason_code), MAX(session_key), MAX(source)
+             FROM message_outbox
+             WHERE target = $1",
+        )
+        .bind("channel:pg-lifecycle-partial")
+        .fetch_one(&pool)
+        .await
+        .expect("read postgres lifecycle rows");
+        assert_eq!(row.0, 1);
+        assert_eq!(row.1, None);
+        assert_eq!(row.2, "channel:pg-lifecycle-partial");
+        assert_eq!(row.3, LIFECYCLE_NOTIFIER_SOURCE);
+
+        pool.close().await;
+        test_db.drop().await;
     }
 }
