@@ -1,15 +1,22 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
+use hound::{SampleFormat, WavSpec, WavWriter};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use super::VoiceConfig;
-use super::stt_streaming::StreamingDecodeWindowMeta;
+use super::config::VoiceSttMode;
+use super::stt_streaming::{
+    StreamingDecodeWindow, StreamingDecodeWindowMeta, StreamingOverlapConfig,
+    WHISPER_STREAM_SAMPLE_RATE_HZ, WhisperStreamOverlapSegmenter,
+};
 use super::utils::expand_tilde;
 
 // === Tunables (was scattered constants) ===
@@ -39,6 +46,7 @@ pub(crate) struct SttConfig {
     pub(crate) language: String,
     pub(crate) temp_dir: PathBuf,
     pub(crate) timeout: Duration,
+    pub(crate) stream_overlap: StreamingOverlapConfig,
 }
 
 impl SttConfig {
@@ -50,6 +58,12 @@ impl SttConfig {
             language: config.stt.language.clone(),
             temp_dir: expand_tilde(&config.audio.temp_dir),
             timeout: STT_TIMEOUT,
+            stream_overlap: StreamingOverlapConfig {
+                sample_rate_hz: WHISPER_STREAM_SAMPLE_RATE_HZ,
+                step_ms: config.stt.stream.step_ms,
+                length_ms: config.stt.stream.length_ms,
+                keep_ms: config.stt.stream.keep_ms,
+            },
         }
     }
 }
@@ -111,6 +125,7 @@ pub(crate) trait VoiceStt: Send + Sync {
     async fn feed(&self, session: &SttSessionHandle, pcm: &[f32]) -> Result<()>;
     async fn poll_partial(&self, session: &SttSessionHandle) -> Result<Option<PartialTranscript>>;
     async fn finalize(&self, session: SttSessionHandle) -> Result<FinalTranscript>;
+    async fn transcribe_file(&self, wav_path: &Path) -> Result<String>;
 }
 
 #[derive(Clone)]
@@ -295,6 +310,288 @@ impl SttRuntime {
                 converted_path.display()
             )
         })
+    }
+}
+
+#[async_trait]
+impl VoiceStt for SttRuntime {
+    async fn start_session(&self, _language: &str) -> Result<SttSessionHandle> {
+        Ok(SttSessionHandle::new())
+    }
+
+    async fn feed(&self, _session: &SttSessionHandle, _pcm: &[f32]) -> Result<()> {
+        Ok(())
+    }
+
+    async fn poll_partial(&self, _session: &SttSessionHandle) -> Result<Option<PartialTranscript>> {
+        Ok(None)
+    }
+
+    async fn finalize(&self, session: SttSessionHandle) -> Result<FinalTranscript> {
+        Ok(FinalTranscript {
+            session,
+            text: String::new(),
+        })
+    }
+
+    async fn transcribe_file(&self, wav_path: &Path) -> Result<String> {
+        self.transcribe(wav_path).await
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum VoiceSttRuntime {
+    File(SttRuntime),
+    Stream {
+        stream: WhisperStream,
+        fallback: SttRuntime,
+    },
+}
+
+impl VoiceSttRuntime {
+    pub(crate) fn from_voice_config(config: &VoiceConfig) -> Self {
+        Self::with_runner(
+            config.stt.mode,
+            SttConfig::from_voice_config(config),
+            subprocess_runner(STT_TIMEOUT),
+        )
+    }
+
+    pub(crate) fn with_runner(
+        mode: VoiceSttMode,
+        config: SttConfig,
+        runner: SttCommandRunner,
+    ) -> Self {
+        let fallback = SttRuntime::with_runner(config.clone(), runner.clone());
+        match mode {
+            VoiceSttMode::File => Self::File(fallback),
+            VoiceSttMode::Stream => Self::Stream {
+                stream: WhisperStream::with_runner(config, runner),
+                fallback,
+            },
+        }
+    }
+
+    pub(crate) fn is_streaming(&self) -> bool {
+        matches!(self, Self::Stream { .. })
+    }
+}
+
+#[async_trait]
+impl VoiceStt for VoiceSttRuntime {
+    async fn start_session(&self, language: &str) -> Result<SttSessionHandle> {
+        match self {
+            Self::File(runtime) => runtime.start_session(language).await,
+            Self::Stream { stream, .. } => stream.start_session(language).await,
+        }
+    }
+
+    async fn feed(&self, session: &SttSessionHandle, pcm: &[f32]) -> Result<()> {
+        match self {
+            Self::File(runtime) => runtime.feed(session, pcm).await,
+            Self::Stream { stream, .. } => stream.feed(session, pcm).await,
+        }
+    }
+
+    async fn poll_partial(&self, session: &SttSessionHandle) -> Result<Option<PartialTranscript>> {
+        match self {
+            Self::File(runtime) => runtime.poll_partial(session).await,
+            Self::Stream { stream, .. } => stream.poll_partial(session).await,
+        }
+    }
+
+    async fn finalize(&self, session: SttSessionHandle) -> Result<FinalTranscript> {
+        match self {
+            Self::File(runtime) => runtime.finalize(session).await,
+            Self::Stream { stream, .. } => stream.finalize(session).await,
+        }
+    }
+
+    async fn transcribe_file(&self, wav_path: &Path) -> Result<String> {
+        match self {
+            Self::File(runtime) => runtime.transcribe_file(wav_path).await,
+            Self::Stream { fallback, .. } => fallback.transcribe_file(wav_path).await,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct WhisperStream {
+    config: SttConfig,
+    runner: SttCommandRunner,
+    sessions: Arc<Mutex<HashMap<SttSessionHandle, Arc<Mutex<WhisperStreamSession>>>>>,
+}
+
+struct WhisperStreamSession {
+    language: String,
+    segmenter: WhisperStreamOverlapSegmenter,
+    last_partial: Option<PartialTranscript>,
+    last_partial_taken: bool,
+}
+
+impl WhisperStream {
+    pub(crate) fn with_runner(config: SttConfig, runner: SttCommandRunner) -> Self {
+        Self {
+            config,
+            runner,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn session(
+        &self,
+        session: &SttSessionHandle,
+    ) -> Result<Arc<Mutex<WhisperStreamSession>>> {
+        self.sessions
+            .lock()
+            .await
+            .get(session)
+            .cloned()
+            .with_context(|| format!("unknown voice STT stream session {}", session.id))
+    }
+
+    async fn decode_window(
+        &self,
+        session: &SttSessionHandle,
+        language: &str,
+        window: &StreamingDecodeWindow,
+    ) -> Result<String> {
+        fs::create_dir_all(&self.config.temp_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "create streaming STT temp dir {}",
+                    self.config.temp_dir.display()
+                )
+            })?;
+
+        let temp_id = format!(
+            "agentdesk-stt-stream-{}-{}-{}",
+            std::process::id(),
+            session.id,
+            window.meta.sequence
+        );
+        let wav_path = self.config.temp_dir.join(format!("{temp_id}.wav"));
+        let transcript_prefix = self.config.temp_dir.join(format!("{temp_id}-transcript"));
+        let transcript_path = transcript_prefix.with_extension("txt");
+
+        let result = async {
+            write_stream_window_wav(&wav_path, &window.samples, window.meta.sample_rate_hz).await?;
+            let invocation = SttCommandInvocation {
+                kind: SttCommandKind::Whisper,
+                program: self.config.whisper_command.clone(),
+                args: vec![
+                    "-m".to_string(),
+                    self.config.model_path.to_string_lossy().to_string(),
+                    "-f".to_string(),
+                    wav_path.to_string_lossy().to_string(),
+                    "-l".to_string(),
+                    language.to_string(),
+                    "-nt".to_string(),
+                    "-otxt".to_string(),
+                    "-sns".to_string(),
+                    "-nf".to_string(),
+                    "-nth".to_string(),
+                    WHISPER_NO_SPEECH_THRESHOLD.to_string(),
+                    "-et".to_string(),
+                    WHISPER_ENTROPY_THRESHOLD.to_string(),
+                    "-lpt".to_string(),
+                    WHISPER_LOGPROB_THRESHOLD.to_string(),
+                    "-of".to_string(),
+                    transcript_prefix.to_string_lossy().to_string(),
+                ],
+                output_path: None,
+                transcript_path: Some(transcript_path.clone()),
+            };
+            let output = (self.runner)(invocation).await.with_context(|| {
+                format!(
+                    "run whisper-cli for streaming STT window {} session {}",
+                    window.meta.sequence, session.id
+                )
+            })?;
+            let raw = read_whisper_text(&transcript_path, &output).await?;
+            Ok(clean_transcript(&raw))
+        }
+        .await;
+
+        cleanup_temp_file(&wav_path).await;
+        cleanup_temp_file(&transcript_path).await;
+        result
+    }
+}
+
+#[async_trait]
+impl VoiceStt for WhisperStream {
+    async fn start_session(&self, language: &str) -> Result<SttSessionHandle> {
+        let handle = SttSessionHandle::new();
+        let segmenter = WhisperStreamOverlapSegmenter::new(self.config.stream_overlap)?;
+        self.sessions.lock().await.insert(
+            handle.clone(),
+            Arc::new(Mutex::new(WhisperStreamSession {
+                language: language.to_string(),
+                segmenter,
+                last_partial: None,
+                last_partial_taken: false,
+            })),
+        );
+        Ok(handle)
+    }
+
+    async fn feed(&self, session: &SttSessionHandle, pcm: &[f32]) -> Result<()> {
+        if pcm.is_empty() {
+            return Ok(());
+        }
+
+        let session_state = self.session(session).await?;
+        let mut state = session_state.lock().await;
+        let windows = state.segmenter.feed(pcm);
+        let language = state.language.clone();
+        for window in windows {
+            let text = self.decode_window(session, &language, &window).await?;
+            state.last_partial = Some(PartialTranscript {
+                session: session.clone(),
+                text,
+                window: Some(window.meta),
+            });
+            state.last_partial_taken = false;
+        }
+        Ok(())
+    }
+
+    async fn poll_partial(&self, session: &SttSessionHandle) -> Result<Option<PartialTranscript>> {
+        let session_state = self.session(session).await?;
+        let mut state = session_state.lock().await;
+        if state.last_partial_taken {
+            return Ok(None);
+        }
+        state.last_partial_taken = true;
+        Ok(state.last_partial.clone())
+    }
+
+    async fn finalize(&self, session: SttSessionHandle) -> Result<FinalTranscript> {
+        let session_state = self
+            .sessions
+            .lock()
+            .await
+            .remove(&session)
+            .with_context(|| format!("unknown voice STT stream session {}", session.id))?;
+        let mut state = session_state.lock().await;
+        let language = state.language.clone();
+        let mut text = state
+            .last_partial
+            .as_ref()
+            .map(|partial| partial.text.clone())
+            .unwrap_or_default();
+        if let Some(window) = state.segmenter.finish() {
+            text = self.decode_window(&session, &language, &window).await?;
+        }
+        Ok(FinalTranscript { session, text })
+    }
+
+    async fn transcribe_file(&self, wav_path: &Path) -> Result<String> {
+        SttRuntime::with_runner(self.config.clone(), self.runner.clone())
+            .transcribe(wav_path)
+            .await
     }
 }
 
@@ -605,6 +902,34 @@ fn preview_output(bytes: &[u8]) -> String {
     trimmed.chars().take(2048).collect()
 }
 
+async fn write_stream_window_wav(path: &Path, samples: &[f32], sample_rate_hz: u32) -> Result<()> {
+    let path = path.to_path_buf();
+    let samples = samples.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: sample_rate_hz,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::create(&path, spec)
+            .with_context(|| format!("create streaming STT window WAV {}", path.display()))?;
+        for sample in samples {
+            let sample = sample.clamp(-1.0, 1.0);
+            writer
+                .write_sample((sample * i16::MAX as f32) as i16)
+                .with_context(|| format!("write streaming STT window WAV {}", path.display()))?;
+        }
+        writer
+            .finalize()
+            .with_context(|| format!("finalize streaming STT window WAV {}", path.display()))?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("streaming STT WAV writer task failed")??;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,6 +944,12 @@ mod tests {
             language: "ko".to_string(),
             temp_dir,
             timeout: Duration::from_secs(5),
+            stream_overlap: StreamingOverlapConfig {
+                sample_rate_hz: 1_000,
+                step_ms: 4,
+                length_ms: 8,
+                keep_ms: 2,
+            },
         }
     }
 
@@ -768,5 +1099,85 @@ mod tests {
         assert!(whisper.args.iter().any(|arg| arg == "-otxt"));
         assert!(whisper.args.iter().any(|arg| arg == "-sns"));
         assert!(whisper.args.iter().any(|arg| arg == "-nf"));
+    }
+
+    #[tokio::test]
+    async fn whisper_stream_decodes_overlap_windows_and_finalizes_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let invocations = Arc::new(Mutex::new(Vec::<SttCommandInvocation>::new()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = invocations.clone();
+        let call_counter = calls.clone();
+        let runner: SttCommandRunner = Arc::new(move |invocation| {
+            let seen = seen.clone();
+            let call_counter = call_counter.clone();
+            Box::pin(async move {
+                seen.lock().unwrap().push(invocation.clone());
+                assert_eq!(invocation.kind, SttCommandKind::Whisper);
+                assert!(invocation.args.windows(2).any(|pair| pair == ["-l", "en"]));
+                assert!(
+                    invocation
+                        .args
+                        .windows(2)
+                        .any(|pair| pair == ["-m", "/models/ko.bin"])
+                );
+                let call = call_counter.fetch_add(1, Ordering::SeqCst);
+                let text = if call == 0 {
+                    "partial window"
+                } else {
+                    "final tail"
+                };
+                fs::write(invocation.transcript_path.as_ref().unwrap(), text).await?;
+                Ok(SttCommandOutput::default())
+            })
+        });
+        let stream = WhisperStream::with_runner(test_config(temp.path().to_path_buf()), runner);
+        let session = stream.start_session("en").await.unwrap();
+
+        stream.feed(&session, &[0.1, 0.2, 0.3]).await.unwrap();
+        assert!(stream.poll_partial(&session).await.unwrap().is_none());
+
+        stream.feed(&session, &[0.4]).await.unwrap();
+        let partial = stream.poll_partial(&session).await.unwrap().unwrap();
+        assert_eq!(partial.session, session);
+        assert_eq!(partial.text, "partial window");
+        assert_eq!(partial.window.unwrap().sequence, 0);
+        assert!(stream.poll_partial(&session).await.unwrap().is_none());
+
+        stream.feed(&session, &[0.5, 0.6]).await.unwrap();
+        let final_transcript = stream.finalize(session.clone()).await.unwrap();
+
+        assert_eq!(final_transcript.session, session);
+        assert_eq!(final_transcript.text, "final tail");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let invocations = invocations.lock().unwrap();
+        assert_eq!(invocations.len(), 2);
+        for invocation in invocations.iter() {
+            assert!(
+                invocation.args.iter().any(|arg| arg == "-otxt"),
+                "streaming windows must use whisper text output for clean parsing"
+            );
+        }
+    }
+
+    #[test]
+    fn voice_stt_runtime_selects_file_by_default_and_stream_when_configured() {
+        let temp = tempfile::tempdir().unwrap();
+        let runner: SttCommandRunner =
+            Arc::new(|_| Box::pin(async { Ok(SttCommandOutput::default()) }));
+
+        let file = VoiceSttRuntime::with_runner(
+            VoiceSttMode::File,
+            test_config(temp.path().to_path_buf()),
+            runner.clone(),
+        );
+        let stream = VoiceSttRuntime::with_runner(
+            VoiceSttMode::Stream,
+            test_config(temp.path().to_path_buf()),
+            runner,
+        );
+
+        assert!(!file.is_streaming());
+        assert!(stream.is_streaming());
     }
 }

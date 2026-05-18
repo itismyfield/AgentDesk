@@ -72,6 +72,10 @@ voice:
     # Directory for short-lived conversion and buffering files.
     temp_dir: "~/.adk/voice/tmp"
   stt:
+    # STT mode. Default `file` preserves the existing utterance-final workflow.
+    # Set to `stream` to feed live PCM into whisper.cpp overlap windows while
+    # keeping partial transcripts internal-only.
+    mode: file
     # ffmpeg executable name or absolute path.
     ffmpeg_command: "ffmpeg"
     # whisper.cpp CLI executable name or absolute path.
@@ -80,6 +84,13 @@ voice:
     model_path: "~/.adk/voice/models/ggml-large-v3-turbo.bin"
     # whisper.cpp language code.
     language: "ko"
+    stream:
+      # Decode cadence for overlap streaming.
+      step_ms: 500
+      # Recent audio context decoded on each step.
+      length_ms: 5000
+      # Audio retained across windows.
+      keep_ms: 200
   tts:
     # TTS backend selector. Currently supported: edge.
     backend: edge

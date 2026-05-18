@@ -5,7 +5,7 @@
 
 - Production Rust modules: `610`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `119`
+- Giant files: `120`
 
 ## Namespace Summary
 
@@ -504,7 +504,7 @@
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1571 | giant-file |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 150 |  |
 | `services::discord::voice_background_driver` | `src/services/discord/voice_background_driver.rs` | 228 |  |
-| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 4888 | giant-file |
+| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 5146 | giant-file |
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 160 |  |
 | `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 1849 | giant-file |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 254 |  |
@@ -638,7 +638,7 @@
 | `voice::barge_in` | `src/voice/barge_in.rs` | 925 |  |
 | `voice::cancel_tombstone` | `src/voice/cancel_tombstone.rs` | 201 |  |
 | `voice::commands` | `src/voice/commands.rs` | 835 |  |
-| `voice::config` | `src/voice/config.rs` | 550 |  |
+| `voice::config` | `src/voice/config.rs` | 592 |  |
 | `voice::metrics` | `src/voice/metrics.rs` | 324 |  |
 | `voice::progress` | `src/voice/progress.rs` | 445 |  |
 | `voice::prompt` | `src/voice/prompt.rs` | 784 |  |
@@ -646,7 +646,7 @@
 | `voice::runtime_boundary` | `src/voice/runtime_boundary.rs` | 276 |  |
 | `voice::runtime_process` | `src/voice/runtime_process.rs` | 196 |  |
 | `voice::sanitizer` | `src/voice/sanitizer.rs` | 325 |  |
-| `voice::stt` | `src/voice/stt.rs` | 772 |  |
+| `voice::stt` | `src/voice/stt.rs` | 1183 | giant-file |
 | `voice::stt_streaming` | `src/voice/stt_streaming.rs` | 290 |  |
 | `voice::tts` | `src/voice/tts/mod.rs` | 472 |  |
 | `voice::tts::chunks` | `src/voice/tts/chunks.rs` | 378 |  |

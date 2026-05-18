@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
@@ -23,7 +23,7 @@ use crate::voice::config::DEFAULT_STT_LANGUAGE;
 use crate::voice::progress;
 use crate::voice::runtime_boundary::VoiceRuntimeConfigSnapshot;
 use crate::voice::sanitizer::{foreground_spoken_only_with_limit, spoken_result_only_with_limit};
-use crate::voice::stt::SttRuntime;
+use crate::voice::stt::{SttSessionHandle, VoiceStt, VoiceSttRuntime};
 use crate::voice::tts::{
     TtsRuntime, TtsSynthesisKind,
     playback::{DEFAULT_TTS_CHUNK_MAX_CHARS, play_chunked_with_prefetch},
@@ -198,6 +198,12 @@ struct LivePlaybackSession {
     player: Arc<dyn BargeInPlayerStop>,
     cancellation: CancellationToken,
     owner: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct StreamingSttKey {
+    channel_id: u64,
+    user_id: u64,
 }
 
 struct SpokenResultPlaybackSession {
@@ -850,7 +856,10 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     voice_config_state: RwLock<VoiceConfig>,
     spoken_result_language: RwLock<String>,
     verbose_progress: AtomicBool,
-    stt: RwLock<Option<SttRuntime>>,
+    stt: RwLock<Option<VoiceSttRuntime>>,
+    streaming_stt_sessions: dashmap::DashMap<StreamingSttKey, SttSessionHandle>,
+    streaming_stt_feed_tasks:
+        dashmap::DashMap<StreamingSttKey, Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>>,
     tts: RwLock<Option<TtsRuntime>>,
     progress_tx: broadcast::Sender<VoiceProgressEvent>,
     monitors: dashmap::DashMap<u64, Arc<std::sync::Mutex<LiveBargeInMonitor>>>,
@@ -885,7 +894,7 @@ impl VoiceBargeInRuntime {
         let default_sensitivity = config.barge_in.sensitivity;
         let conservative_ttl = Duration::from_secs(config.barge_in.conservative_ttl_secs.max(1));
         let stt = if config.enabled {
-            Some(SttRuntime::from_voice_config(config))
+            Some(VoiceSttRuntime::from_voice_config(config))
         } else {
             None
         };
@@ -912,6 +921,8 @@ impl VoiceBargeInRuntime {
             spoken_result_language: RwLock::new(config.stt.language.clone()),
             verbose_progress: AtomicBool::new(config.verbose_progress),
             stt: RwLock::new(stt),
+            streaming_stt_sessions: dashmap::DashMap::new(),
+            streaming_stt_feed_tasks: dashmap::DashMap::new(),
             tts: RwLock::new(tts),
             progress_tx,
             monitors: dashmap::DashMap::new(),
@@ -944,6 +955,8 @@ impl VoiceBargeInRuntime {
             spoken_result_language: RwLock::new(DEFAULT_STT_LANGUAGE.to_string()),
             verbose_progress: AtomicBool::new(false),
             stt: RwLock::new(None),
+            streaming_stt_sessions: dashmap::DashMap::new(),
+            streaming_stt_feed_tasks: dashmap::DashMap::new(),
             tts: RwLock::new(None),
             progress_tx,
             monitors: dashmap::DashMap::new(),
@@ -1207,7 +1220,9 @@ impl VoiceBargeInRuntime {
         };
         *self.spoken_result_language.write().await = language;
         if self.enabled {
-            *self.stt.write().await = Some(SttRuntime::from_voice_config(&config));
+            self.streaming_stt_sessions.clear();
+            self.streaming_stt_feed_tasks.clear();
+            *self.stt.write().await = Some(VoiceSttRuntime::from_voice_config(&config));
         }
     }
 
@@ -1873,6 +1888,146 @@ impl VoiceBargeInRuntime {
                     "voice live barge-in stop failed"
                 );
                 None
+            }
+        }
+    }
+
+    pub(in crate::services::discord) fn observe_streaming_stt_pcm_i16(
+        self: &Arc<Self>,
+        channel_id: ChannelId,
+        user_id: u64,
+        samples: &[i16],
+    ) {
+        if samples.is_empty() {
+            return;
+        }
+        let pcm = discord_pcm_i16_stereo_48k_to_mono_f32_16k(samples);
+        if pcm.is_empty() {
+            return;
+        }
+        let runtime = self.clone();
+        let key = StreamingSttKey {
+            channel_id: channel_id.get(),
+            user_id,
+        };
+        let task_bucket = self
+            .streaming_stt_feed_tasks
+            .entry(key)
+            .or_insert_with(|| Arc::new(StdMutex::new(Vec::new())))
+            .clone();
+        let handle = tokio::spawn(async move {
+            runtime
+                .feed_streaming_stt_pcm(channel_id, user_id, pcm)
+                .await;
+        });
+        if let Ok(mut tasks) = task_bucket.lock() {
+            tasks.push(handle);
+        } else {
+            handle.abort();
+        }
+    }
+
+    async fn feed_streaming_stt_pcm(
+        self: &Arc<Self>,
+        channel_id: ChannelId,
+        user_id: u64,
+        pcm: Vec<f32>,
+    ) {
+        let Some(stt) = self.stt.read().await.clone() else {
+            return;
+        };
+        if !stt.is_streaming() {
+            return;
+        }
+
+        let key = StreamingSttKey {
+            channel_id: channel_id.get(),
+            user_id,
+        };
+        let session = match self.streaming_stt_sessions.get(&key) {
+            Some(entry) => entry.value().clone(),
+            None => {
+                let language = self.spoken_result_language().await;
+                let new_session = match stt.start_session(&language).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            channel_id = channel_id.get(),
+                            user_id,
+                            "voice streaming STT session start failed"
+                        );
+                        return;
+                    }
+                };
+                match self.streaming_stt_sessions.entry(key) {
+                    dashmap::mapref::entry::Entry::Occupied(entry) => {
+                        let existing = entry.get().clone();
+                        if let Err(error) = stt.finalize(new_session).await {
+                            tracing::debug!(
+                                error = %error,
+                                channel_id = channel_id.get(),
+                                user_id,
+                                "discarding duplicate voice streaming STT session failed"
+                            );
+                        }
+                        existing
+                    }
+                    dashmap::mapref::entry::Entry::Vacant(entry) => {
+                        entry.insert(new_session.clone());
+                        new_session
+                    }
+                }
+            }
+        };
+
+        if let Err(error) = stt.feed(&session, &pcm).await {
+            tracing::warn!(
+                error = %error,
+                channel_id = channel_id.get(),
+                user_id,
+                "voice streaming STT feed failed"
+            );
+            return;
+        }
+
+        match stt.poll_partial(&session).await {
+            Ok(Some(partial)) => {
+                tracing::debug!(
+                    channel_id = channel_id.get(),
+                    user_id,
+                    sequence = partial.window.as_ref().map(|window| window.sequence),
+                    chars = partial.text.chars().count(),
+                    "voice streaming STT partial updated"
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    channel_id = channel_id.get(),
+                    user_id,
+                    "voice streaming STT partial poll failed"
+                );
+            }
+        }
+    }
+
+    async fn drain_streaming_stt_feed_tasks(&self, key: StreamingSttKey) {
+        let Some((_, task_bucket)) = self.streaming_stt_feed_tasks.remove(&key) else {
+            return;
+        };
+        let tasks = match task_bucket.lock() {
+            Ok(mut tasks) => tasks.drain(..).collect::<Vec<_>>(),
+            Err(error) => error.into_inner().drain(..).collect::<Vec<_>>(),
+        };
+        for task in tasks {
+            if let Err(error) = task.await {
+                tracing::debug!(
+                    ?key,
+                    %error,
+                    "voice streaming STT feed task finished with join error before finalization"
+                );
             }
         }
     }
@@ -3486,7 +3641,48 @@ impl VoiceBargeInRuntime {
     ) -> Option<String> {
         let stt_started_at = std::time::Instant::now();
         if let Some(stt) = self.stt.read().await.clone() {
-            match stt.transcribe(&utterance.path).await {
+            if stt.is_streaming() {
+                let key = StreamingSttKey {
+                    channel_id: channel_id.get(),
+                    user_id: utterance.user_id,
+                };
+                self.drain_streaming_stt_feed_tasks(key).await;
+                if let Some((_, session)) = self.streaming_stt_sessions.remove(&key) {
+                    match stt.finalize(session).await {
+                        Ok(transcript) if !transcript.text.trim().is_empty() => {
+                            crate::voice::metrics::record_stt(
+                                channel_id.get(),
+                                Some(&utterance.utterance_id),
+                                stt_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                            );
+                            return Some(transcript.text);
+                        }
+                        Ok(_) => {
+                            tracing::debug!(
+                                channel_id = channel_id.get(),
+                                utterance_id = %utterance.utterance_id,
+                                "voice streaming STT finalized empty transcript; falling back to file STT"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                channel_id = channel_id.get(),
+                                utterance_id = %utterance.utterance_id,
+                                "voice streaming STT finalize failed; falling back to file STT"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        channel_id = channel_id.get(),
+                        utterance_id = %utterance.utterance_id,
+                        "voice streaming STT had no live session for utterance; falling back to file STT"
+                    );
+                }
+            }
+
+            match stt.transcribe_file(&utterance.path).await {
                 Ok(transcript) => {
                     crate::voice::metrics::record_stt(
                         channel_id.get(),
@@ -3648,8 +3844,10 @@ impl DiscordVoiceBargeInHook {
 }
 
 impl VoiceReceiveHook for DiscordVoiceBargeInHook {
-    fn observe_pcm(&self, control_channel_id: u64, _user_id: u64, samples: &[i16]) {
+    fn observe_pcm(&self, control_channel_id: u64, user_id: u64, samples: &[i16]) {
         let channel_id = ChannelId::new(control_channel_id);
+        self.runtime
+            .observe_streaming_stt_pcm_i16(channel_id, user_id, samples);
         let Some(cut) = self.runtime.observe_live_pcm_i16(channel_id, samples) else {
             return;
         };
@@ -3740,6 +3938,21 @@ fn pcm_i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
     bytes
 }
 
+fn discord_pcm_i16_stereo_48k_to_mono_f32_16k(samples: &[i16]) -> Vec<f32> {
+    samples
+        .chunks_exact(6)
+        .map(|chunk| {
+            let mut sum = 0.0f32;
+            for frame in 0..3 {
+                let left = chunk[frame * 2] as f32;
+                let right = chunk[frame * 2 + 1] as f32;
+                sum += (left + right) * 0.5;
+            }
+            (sum / 3.0) / i16::MAX as f32
+        })
+        .collect()
+}
+
 /// #2156: 일반 wav/segment 삭제. NotFound 는 무시, 그 외 에러는 debug 로그.
 async fn remove_file_quietly(path: &Path) {
     match tokio::fs::remove_file(path).await {
@@ -3814,6 +4027,51 @@ mod tests {
         config.enabled = true;
         config.barge_in.acknowledgement_enabled = false;
         VoiceBargeInRuntime::from_voice_config(&config)
+    }
+
+    #[tokio::test]
+    async fn voice_runtime_uses_file_stt_by_default_and_stream_when_opted_in() {
+        let mut file_config = VoiceConfig::default();
+        file_config.enabled = true;
+        let file_runtime = VoiceBargeInRuntime::from_voice_config(&file_config);
+        assert!(
+            !file_runtime
+                .stt
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .is_streaming(),
+            "default STT mode must remain file"
+        );
+
+        let mut stream_config = VoiceConfig::default();
+        stream_config.enabled = true;
+        stream_config.stt.mode = crate::voice::config::VoiceSttMode::Stream;
+        let stream_runtime = VoiceBargeInRuntime::from_voice_config(&stream_config);
+        assert!(
+            stream_runtime
+                .stt
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .is_streaming(),
+            "stream STT must only activate when configured"
+        );
+    }
+
+    #[test]
+    fn discord_pcm_conversion_downsamples_stereo_48k_to_mono_16k() {
+        let samples = [
+            32_767, 32_767, 0, 0, -32_767, -32_767, 16_384, 16_384, 16_384, 16_384, 16_384, 16_384,
+        ];
+
+        let converted = discord_pcm_i16_stereo_48k_to_mono_f32_16k(&samples);
+
+        assert_eq!(converted.len(), 2);
+        assert!(converted[0].abs() < 0.0001);
+        assert!((converted[1] - 0.5).abs() < 0.001);
     }
 
     #[tokio::test]

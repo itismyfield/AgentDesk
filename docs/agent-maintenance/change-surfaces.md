@@ -6,7 +6,7 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-05-18 (against #2524 StreamRelay ack metrics giant-file registration).
+> Last refreshed: 2026-05-19 (against #2158 streaming STT wiring giant-file registration).
 
 ## Read This First
 
@@ -155,6 +155,9 @@
   - `src/voice/receiver.rs` (1104 lines; voice receive pipeline, utterance
     segmentation, artifact cleanup, and retention policy surface; split before
     adding non-bugfix behavior).
+  - `src/voice/stt.rs` (1183 lines after #2158 streaming STT wiring; whisper
+    CLI STT runtime plus streaming session adapter surface, split before adding
+    non-bugfix behavior).
   - `src/services/discord/commands/config.rs` (1877 lines).
   - `src/services/discord/commands/inspect.rs` (1058 lines, post-#1701
     context-view manifest binding pushed it past the giant-file threshold).
