@@ -1034,9 +1034,10 @@ async fn fresh_watcher_without_cached_context_falls_back_to_bridge_delivery() {
     crate::services::discord::clear_inflight_state(&provider, channel_id.get());
 }
 
-/// #2263: on a cluster-standby node the RuntimeReady handler spawns a
-/// standalone `standby_relay` task (no tmux watcher) and persists
-/// inflight with `watcher_owns_live_relay = false` — intentionally.
+/// #2263/#2376: on a cluster-standby node the RuntimeReady handler spawns a
+/// standalone `standby_relay` task (no tmux watcher), persists the legacy
+/// `watcher_owns_live_relay = false`, and records typed
+/// `relay_owner_kind = standby_relay`.
 ///
 /// The flag's downstream contract in
 /// `tmux::watcher_should_yield_to_inflight_state` is narrowly "the
@@ -1050,10 +1051,9 @@ async fn fresh_watcher_without_cached_context_falls_back_to_bridge_delivery() {
 /// recovery-engine sweep clears.
 ///
 /// This regression test pins that intent so a future "fix" that flips
-/// the flag to `true` here trips the assertion and forces the author to
-/// introduce a typed `relay_owner_kind` field instead.
+/// the flag to `true` or drops the typed standby owner trips the assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn standby_runtime_ready_keeps_watcher_owns_live_relay_false() {
+async fn standby_runtime_ready_keeps_watcher_owns_live_relay_false_and_restored_watcher_yields() {
     let shared = make_shared_data_for_tests();
     // Force `on_standby = true` (cached_serenity_ctx empty) BUT make
     // `serenity_http_or_token_fallback()` return Some so the branch
@@ -1174,6 +1174,34 @@ async fn standby_runtime_ready_keeps_watcher_owns_live_relay_false() {
         saved.runtime_kind,
         Some(RuntimeHandoffKind::LegacyTmuxWrapper)
     );
+    assert_eq!(
+        saved.relay_owner_kind,
+        super::super::inflight::RelayOwnerKind::StandbyRelay,
+        "#2376: standby relay ownership must be typed because the legacy bool \
+         cannot distinguish StandbyRelay from bridge-owned None"
+    );
+    assert!(
+        super::super::tmux::test_watcher_should_yield_to_inflight_state(
+            Some(&saved),
+            &tmux_name,
+            saved.last_offset,
+            300,
+        ),
+        "#2376: a watcher restored by another process from the persisted \
+         standby last_offset must yield while the standby relay owns live delivery"
+    );
+    let mut overclaimed_saved = saved.clone();
+    overclaimed_saved.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+    assert!(
+        !super::super::tmux::test_watcher_should_yield_to_inflight_state(
+            Some(&overclaimed_saved),
+            &tmux_name,
+            saved.last_offset,
+            300,
+        ),
+        "#2376: if standby relay state over-claimed watcher ownership, a \
+         restored watcher would not yield and could duplicate relay delivery"
+    );
     // The standby branch must remove the watcher slot it briefly claimed
     // so a follow-up turn does not falsely reuse a "live" watcher that
     // was never actually spawned.
@@ -1283,6 +1311,94 @@ async fn resumed_watcher_owned_turn_suppresses_bridge_assistant_delivery() {
 
     crate::services::discord::clear_inflight_state(&provider, channel_id.get());
     shared.tmux_watchers.remove(&channel_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumed_standby_owned_turn_suppresses_bridge_assistant_delivery() {
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1505500000000002376);
+    let channel_name = format!("adk-cdx-t{}", channel_id.get());
+    let tmux_name = provider.build_tmux_session_name(&channel_name);
+    let user_msg_id = MessageId::new(1505500000000002377);
+    let current_msg_id = MessageId::new(1505500000000002378);
+
+    let gateway = Arc::new(CountingGateway::default());
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let mut inflight_state = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some(channel_name.clone()),
+        343742347365974026,
+        user_msg_id.get(),
+        current_msg_id.get(),
+        "resumed standby relay".to_string(),
+        None,
+        Some(tmux_name),
+        Some("/tmp/agentdesk-2376-standby-output.jsonl".to_string()),
+        Some("/tmp/agentdesk-2376-standby-input.fifo".to_string()),
+        0,
+    );
+    inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::StandbyRelay);
+
+    super::spawn_turn_bridge(
+        shared.clone(),
+        Arc::new(CancelToken::new()),
+        stream_rx,
+        super::TurnBridgeContext {
+            provider: provider.clone(),
+            gateway: gateway.clone(),
+            channel_id,
+            user_msg_id,
+            user_text_owned: "resumed standby relay".to_string(),
+            request_owner_name: "tester".to_string(),
+            role_binding: None,
+            adk_session_key: None,
+            adk_session_name: Some(channel_name),
+            adk_session_info: None,
+            adk_cwd: None,
+            dispatch_id: None,
+            dispatch_kind: None,
+            memory_recall_usage: TokenUsage::default(),
+            context_window_tokens: provider.default_context_window(),
+            context_compact_percent: 100,
+            current_msg_id,
+            response_sent_offset: 0,
+            full_response: String::new(),
+            tmux_last_offset: Some(0),
+            new_session_id: None,
+            defer_watcher_resume: false,
+            reuse_status_panel_message: true,
+            completion_tx: Some(completion_tx),
+            inflight_state,
+        },
+    );
+
+    stream_tx
+        .send(StreamMessage::Text {
+            content: "standby relay should still own resumed output".to_string(),
+        })
+        .expect("send text");
+    stream_tx
+        .send(StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        })
+        .expect("send done");
+    drop(stream_tx);
+
+    tokio::time::timeout(Duration::from_secs(5), completion_rx)
+        .await
+        .expect("turn bridge should finish")
+        .expect("completion sender should complete");
+
+    assert_eq!(gateway.send_count.load(Ordering::Relaxed), 0);
+    assert_eq!(gateway.edit_count.load(Ordering::Relaxed), 0);
+    assert_eq!(gateway.replace_count.load(Ordering::Relaxed), 0);
+    assert_eq!(gateway.remove_reaction_count.load(Ordering::Relaxed), 0);
+
+    crate::services::discord::clear_inflight_state(&provider, channel_id.get());
 }
 
 #[tokio::test]

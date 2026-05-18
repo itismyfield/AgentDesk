@@ -281,7 +281,7 @@ fn build_ssh_direct_inflight_state(
     );
     state.runtime_kind = Some(runtime_binding.runtime_kind);
     state.turn_source = super::inflight::TurnSource::ExternalInput;
-    state.watcher_owns_live_relay = true;
+    state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
     state.last_watcher_relayed_offset = Some(start_offset);
     Some(state)
 }

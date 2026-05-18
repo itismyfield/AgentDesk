@@ -116,8 +116,18 @@ fn classify_inflight_diagnostic_state(inflight: Option<&InflightTurnState>) -> &
         .saturating_sub(updated_at_unix);
     if age_secs >= super::super::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64 {
         "stale"
-    } else if inflight.watcher_owns_live_relay {
+    } else if inflight.effective_relay_owner_kind()
+        == super::super::inflight::RelayOwnerKind::Watcher
+    {
         "watcher_owned"
+    } else if inflight.effective_relay_owner_kind()
+        == super::super::inflight::RelayOwnerKind::StandbyRelay
+    {
+        "standby_relay_owned"
+    } else if inflight.effective_relay_owner_kind()
+        == super::super::inflight::RelayOwnerKind::Unknown
+    {
+        "relay_owner_unknown"
     } else {
         "present"
     }
@@ -7356,13 +7366,13 @@ mod session_strategy_lifecycle_tests {
             "present"
         );
 
-        inflight.watcher_owns_live_relay = true;
+        inflight.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
         assert_eq!(
             classify_inflight_diagnostic_state(Some(&inflight)),
             "watcher_owned"
         );
 
-        inflight.watcher_owns_live_relay = false;
+        inflight.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::None);
         inflight.updated_at = (chrono::Local::now()
             - chrono::Duration::seconds(
                 crate::services::discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64 + 1,

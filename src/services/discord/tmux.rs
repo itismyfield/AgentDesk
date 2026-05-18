@@ -2072,12 +2072,34 @@ fn watcher_should_yield_to_inflight_state(
     if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
         return false;
     }
-    if state.watcher_owns_live_relay {
-        return false;
+    match state.effective_relay_owner_kind() {
+        super::inflight::RelayOwnerKind::Watcher => return false,
+        super::inflight::RelayOwnerKind::StandbyRelay => {
+            return current_offset > data_start_offset;
+        }
+        super::inflight::RelayOwnerKind::Unknown => {
+            return current_offset > data_start_offset;
+        }
+        super::inflight::RelayOwnerKind::None => {}
     }
 
     let turn_start_offset = state.turn_start_offset.unwrap_or(state.last_offset);
     data_start_offset <= turn_start_offset && turn_start_offset < current_offset
+}
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(in crate::services::discord) fn test_watcher_should_yield_to_inflight_state(
+    state: Option<&super::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+    current_offset: u64,
+) -> bool {
+    watcher_should_yield_to_inflight_state(
+        state,
+        tmux_session_name,
+        data_start_offset,
+        current_offset,
+    )
 }
 
 async fn reconcile_orphan_suppressed_placeholder_for_restored_watcher(
@@ -2377,7 +2399,7 @@ mod tests {
     };
     use crate::db::session_transcripts::SessionTranscriptEventKind;
     use crate::services::agent_protocol::TaskNotificationKind;
-    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::discord::inflight::{InflightTurnState, RelayOwnerKind};
     use crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome;
     use crate::services::discord::runtime_store::test_env_lock;
     use crate::services::provider::{CancelToken, ProviderKind, ReadyForInputIdleTracker};
@@ -4147,6 +4169,34 @@ mod tests {
             "#AgentDesk-codex-deadlock-manager",
             100,
             180,
+        ));
+    }
+
+    #[test]
+    fn unknown_live_relay_owner_yields_to_avoid_duplicate_delivery() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("deadlock-manager".to_string()),
+            7,
+            9,
+            11,
+            "ping".to_string(),
+            Some("session-1".to_string()),
+            Some("#AgentDesk-codex-deadlock-manager".to_string()),
+            Some("/tmp/output.jsonl".to_string()),
+            Some("/tmp/input.fifo".to_string()),
+            0,
+        );
+        state.turn_start_offset = Some(120);
+        state.last_offset = 180;
+        state.set_relay_owner_kind(RelayOwnerKind::Unknown);
+
+        assert!(watcher_should_yield_to_inflight_state(
+            Some(&state),
+            "#AgentDesk-codex-deadlock-manager",
+            180,
+            200,
         ));
     }
 
