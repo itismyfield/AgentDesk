@@ -42,4 +42,17 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** Wire `FreshnessIndicator` into the WS connection chip + replace bespoke status pills across HomeOverview/Ops with `StatusBadge`.
 
+### Round 2 — 2026-05-19 00:29~00:35 KST
+**Focus:** Real-time reliability (2) + Glanceability (1) + Design-system consistency (7).
+
+**Changes:**
+- `useDashboardSocket.lastEventTs` propagated through `App.tsx → AppShell → AppShellRoutes → HomeOverviewPage` as `wsLastEventTs` prop.
+- `HomeOverviewPage` header chip: replaced the bespoke ws-dot + "all systems normal" span with `StatusBadge` (`tone="healthy"|"critical"`, pulse when healthy) + inline `FreshnessIndicator` showing "n초 전" with 45s warn / 180s critical thresholds. The header now answers "is the screen live?" at a glance.
+- `DashboardHomeOverview` (the larger overview surface) `systemState`: refactored from ad-hoc `{label,color,pulseColor}` to `{label, tone: SystemHealthTone}` and rendered via `StatusBadge`. Three branches (warning / info / healthy) now speak the same visual language as the rest of the system.
+- Net: 2 places that previously spoke their own visual language now share the system-health vocabulary; "stale data" is now an explicit, escalating signal instead of an invisible failure mode.
+
+**Verification:** `npm run build` ✓ in 3.6s. No new tests needed (UI surfaces; existing tests untouched).
+
+**Next:** continue replacing bespoke pills in Ops/Agents/Kanban surfaces, and/or wire `FreshnessIndicator` into per-widget refresh signals (HealthWidget, RateLimitWidget).
+
 EOF

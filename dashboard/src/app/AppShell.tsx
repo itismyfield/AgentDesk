@@ -41,6 +41,11 @@ import { getAgentLevelFromXp } from "../components/gamification/GamificationShar
 
 interface AppShellProps {
   wsConnected: boolean;
+  /**
+   * Wall-clock ms timestamp of the latest WS event (`null` before first event).
+   * Drives the dashboard freshness indicator.
+   */
+  wsLastEventTs: number | null;
   notifications: Notification[];
   pushNotification: (message: string, type?: Notification["type"]) => string;
   updateNotification: (
@@ -66,6 +71,7 @@ const SHELL_TOAST_Z_INDEX = 95;
 const SHELL_MODAL_Z_INDEX = 100;
 export default function AppShell({
   wsConnected,
+  wsLastEventTs,
   notifications,
   pushNotification,
   updateNotification,
@@ -523,6 +529,7 @@ export default function AppShell({
                 upsertKanbanCard,
                 visibleDispatchedSessions,
                 wsConnected,
+                wsLastEventTs,
                 currentOfficeName,
                 refreshAgents,
                 refreshAllAgents,

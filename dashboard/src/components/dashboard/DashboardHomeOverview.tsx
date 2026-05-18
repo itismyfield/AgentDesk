@@ -18,6 +18,8 @@ import {
 } from "@dnd-kit/sortable";
 import type { DashboardTab } from "../../app/dashboardTabs";
 import type { Agent, CompanySettings, DashboardStats, DispatchedSession, RoundTableMeeting } from "../../types";
+import { StatusBadge } from "../common/StatusBadge";
+import type { SystemHealthTone } from "../../theme/statusTokens";
 import {
   formatElapsedCompact,
   getAgentWorkElapsedMs,
@@ -195,7 +197,7 @@ export function DashboardHomeOverview({
     }).format(new Date());
     return formatted.replace(", ", " · ");
   }, [localeTag]);
-  const systemState = useMemo(() => {
+  const systemState = useMemo<{ label: string; tone: SystemHealthTone }>(() => {
     if (staleLinkedSessions.length > 0 || reconnectingSessions.length > 0 || dashboardStats.kanban.blocked > 0) {
       return {
         label: t({
@@ -204,8 +206,7 @@ export function DashboardHomeOverview({
           ja: "注意が必要",
           zh: "需要关注",
         }),
-        color: "var(--th-accent-warn)",
-        pulseColor: "var(--th-accent-warn)",
+        tone: "warning",
       };
     }
     if (dashboardStats.kanban.review_queue > 0 || dashboardStats.kanban.waiting_acceptance > 0) {
@@ -216,8 +217,7 @@ export function DashboardHomeOverview({
           ja: "キューを監視中",
           zh: "监控队列中",
         }),
-        color: "var(--th-accent-info)",
-        pulseColor: "var(--th-accent-info)",
+        tone: "info",
       };
     }
     return {
@@ -227,8 +227,7 @@ export function DashboardHomeOverview({
         ja: "all systems normal",
         zh: "all systems normal",
       }),
-      color: "var(--th-accent-success)",
-      pulseColor: "var(--th-accent-success)",
+      tone: "healthy",
     };
   }, [
     dashboardStats.kanban.blocked,
@@ -423,16 +422,14 @@ export function DashboardHomeOverview({
             >
               <span style={{ fontFamily: "var(--font-mono)" }}>{dateLabel}</span>
               <span aria-hidden="true" className="inline-flex h-1 w-1 rounded-full" style={{ background: "var(--th-text-muted)" }} />
-              <span className="inline-flex items-center gap-2" style={{ color: systemState.color }}>
-                <span
-                  className="inline-flex h-2 w-2 rounded-full"
-                  style={{
-                    background: systemState.pulseColor,
-                    boxShadow: `0 0 0 4px color-mix(in srgb, ${systemState.pulseColor} 16%, transparent)`,
-                  }}
-                />
-                <span style={{ fontFamily: "var(--font-mono)" }}>{systemState.label}</span>
-              </span>
+              <StatusBadge
+                tone={systemState.tone}
+                size="xs"
+                pulse={systemState.tone !== "healthy"}
+                style={{ fontFamily: "var(--font-mono)" }}
+              >
+                {systemState.label}
+              </StatusBadge>
             </div>
             <h1 className="text-[1.9rem] font-black tracking-tight sm:text-[2rem]" style={{ color: "var(--th-text-heading)" }}>
               {t({

@@ -50,6 +50,7 @@ export default function AppShellRoutes({ ctx }: { ctx: any }) {
     upsertKanbanCard,
     visibleDispatchedSessions,
     wsConnected,
+    wsLastEventTs,
     currentOfficeName,
     refreshAgents,
     refreshAllAgents,
@@ -68,6 +69,7 @@ export default function AppShellRoutes({ ctx }: { ctx: any }) {
                     isMobileViewport={isMobileViewport}
                     isKo={isKo}
                     wsConnected={wsConnected}
+                    wsLastEventTs={wsLastEventTs}
                     currentOfficeLabel={currentOfficeName}
                     stats={stats}
                     agents={agentsWithDispatched}
