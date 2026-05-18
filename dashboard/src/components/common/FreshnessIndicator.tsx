@@ -93,17 +93,33 @@ export function FreshnessIndicator({
   }, [timestamp, tickMs]);
 
   const ms = toMs(timestamp);
-  // Track which tone we previously rendered so we can fire one polite
-  // announcement *only* when the tone transitions, not on every tick.
-  const lastToneRef = useRef<FreshnessTone | "empty" | null>(null);
+  const currentTone: FreshnessTone | "empty" =
+    ms == null
+      ? "empty"
+      : deriveTone(
+          Math.max(0, (now - ms) / 1000),
+          staleAfterSeconds,
+          criticalAfterSeconds,
+        );
+  // The tone we last *committed* (effect ran). Mutating during render would
+  // mis-fire under StrictMode's double-invoke and discarded concurrent
+  // renders, so the bookkeeping lives in an effect.
   const announcedToneRef = useRef<FreshnessTone | "empty" | null>(null);
+  const [liveMessage, setLiveMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!announceToneChange) return;
+    if (announcedToneRef.current === currentTone) return;
+    announcedToneRef.current = currentTone;
+    setLiveMessage(
+      currentTone === "empty"
+        ? emptyLabel
+        : `${label}: ${currentTone}`,
+    );
+  }, [announceToneChange, currentTone, emptyLabel, label]);
 
   if (ms == null) {
     const tone = getSystemHealthTone("unknown");
-    lastToneRef.current = "empty";
-    const shouldAnnounce =
-      announceToneChange && announcedToneRef.current !== "empty";
-    if (shouldAnnounce) announcedToneRef.current = "empty";
     return (
       <span
         className={className}
@@ -115,31 +131,28 @@ export function FreshnessIndicator({
           color: tone.text,
           ...style,
         }}
-        {...(shouldAnnounce ? { role: "status", "aria-live": "polite" } : {})}
       >
         <span
           aria-hidden
           style={{ width: 6, height: 6, borderRadius: "50%", background: tone.accent }}
         />
         {emptyLabel}
+        {announceToneChange ? (
+          <span
+            role="status"
+            aria-live="polite"
+            style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)" }}
+          >
+            {liveMessage}
+          </span>
+        ) : null}
       </span>
     );
   }
 
+  const tone = getSystemHealthTone(currentTone as FreshnessTone);
   const deltaSeconds = Math.max(0, (now - ms) / 1000);
-  const toneName = deriveTone(deltaSeconds, staleAfterSeconds, criticalAfterSeconds);
-  const tone = getSystemHealthTone(toneName);
   const text = formatRelative(deltaSeconds);
-
-  // Announcement only fires once per transition: if the tone changed since
-  // last render *and* differs from the last announced tone, we attach the
-  // live region attributes for this render. Subsequent renders at the same
-  // tone are plain spans, so screen readers stay quiet.
-  const toneChanged = lastToneRef.current !== toneName;
-  const shouldAnnounce =
-    announceToneChange && toneChanged && announcedToneRef.current !== toneName;
-  if (shouldAnnounce) announcedToneRef.current = toneName;
-  lastToneRef.current = toneName;
 
   return (
     <span
@@ -153,7 +166,6 @@ export function FreshnessIndicator({
         color: tone.text,
         ...style,
       }}
-      {...(shouldAnnounce ? { role: "status", "aria-live": "polite" } : {})}
     >
       <span
         aria-hidden
@@ -166,6 +178,15 @@ export function FreshnessIndicator({
         }}
       />
       {compact ? text : `${label} · ${text}`}
+      {announceToneChange ? (
+        <span
+          role="status"
+          aria-live="polite"
+          style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)" }}
+        >
+          {liveMessage}
+        </span>
+      ) : null}
     </span>
   );
 }

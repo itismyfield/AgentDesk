@@ -85,45 +85,69 @@ export function transformRawData(
   warningPct: number,
   dangerPct: number,
 ): RateLimitData {
-  return {
-    providers: raw.providers
-      .filter((rp) => !HIDDEN_PROVIDERS.has(rp.provider.toLowerCase()))
-      .flatMap((rp) => {
-        const buckets = rp.buckets
-          .filter((b) => !HIDDEN_BUCKETS.has(b.name))
-          .map((b) => {
-            const utilization =
-              b.limit > 0 && b.used >= 0 && b.remaining >= 0
-                ? Math.round((b.used / b.limit) * 100)
-                : null;
-            const level: "normal" | "warning" | "danger" =
-              utilization !== null && utilization >= dangerPct
-                ? "danger"
-                : utilization !== null && utilization >= warningPct
-                  ? "warning"
-                  : "normal";
-            return {
-              id: b.name,
-              label: b.name,
-              utilization,
-              resets_at: b.reset > 0 ? new Date(b.reset * 1000).toISOString() : null,
-              level,
-            };
-          });
-        // Keep unsupported providers visible so the operator can see *why* a
-        // provider has no telemetry — dropping them silently was the bug.
-        return [
-          {
-            provider: normalizeRateLimitProviderLabel(rp.provider),
-            fetched_at: rp.fetched_at,
-            stale: rp.stale,
-            unsupported: Boolean(rp.unsupported),
-            reason: typeof rp.reason === "string" ? rp.reason : null,
-            buckets,
-          },
-        ];
-      }),
-  };
+  // Build rows first, then coalesce by normalized provider name so the
+  // upstream API emitting two entries for the same provider (e.g. one
+  // unsupported placeholder + one with measurable buckets) cannot produce
+  // duplicate React keys downstream. When merging, prefer the row that has
+  // measurable buckets so we never overwrite real telemetry with a
+  // "no telemetry" placeholder.
+  const rows = raw.providers
+    .filter((rp) => !HIDDEN_PROVIDERS.has(rp.provider.toLowerCase()))
+    .map((rp) => {
+      const buckets = rp.buckets
+        .filter((b) => !HIDDEN_BUCKETS.has(b.name))
+        .map((b) => {
+          const utilization =
+            b.limit > 0 && b.used >= 0 && b.remaining >= 0
+              ? Math.round((b.used / b.limit) * 100)
+              : null;
+          const level: "normal" | "warning" | "danger" =
+            utilization !== null && utilization >= dangerPct
+              ? "danger"
+              : utilization !== null && utilization >= warningPct
+                ? "warning"
+                : "normal";
+          return {
+            id: b.name,
+            label: b.name,
+            utilization,
+            resets_at: b.reset > 0 ? new Date(b.reset * 1000).toISOString() : null,
+            level,
+          };
+        });
+      return {
+        provider: normalizeRateLimitProviderLabel(rp.provider),
+        fetched_at: rp.fetched_at,
+        stale: rp.stale,
+        unsupported: Boolean(rp.unsupported),
+        reason: typeof rp.reason === "string" ? rp.reason : null,
+        buckets,
+      };
+    });
+
+  const seen = new Map<string, number>();
+  const merged: RateLimitProvider[] = [];
+  for (const row of rows) {
+    const existingIndex = seen.get(row.provider);
+    if (existingIndex === undefined) {
+      seen.set(row.provider, merged.length);
+      merged.push(row);
+      continue;
+    }
+    const existing = merged[existingIndex];
+    // Prefer the row with measurable buckets; if both empty, keep the
+    // newer fetched_at + carry the latest reason.
+    if (row.buckets.length > 0 && existing.buckets.length === 0) {
+      merged[existingIndex] = { ...row, reason: row.reason ?? existing.reason };
+    } else if (row.buckets.length === 0 && existing.buckets.length > 0) {
+      merged[existingIndex] = { ...existing, reason: existing.reason ?? row.reason };
+    } else {
+      // Both have buckets, or both empty — keep the freshest by fetched_at.
+      const newer = row.fetched_at >= existing.fetched_at ? row : existing;
+      merged[existingIndex] = { ...newer, reason: newer.reason ?? existing.reason ?? row.reason };
+    }
+  }
+  return { providers: merged };
 }
 
 const PROVIDER_ICONS: Record<string, string> = {

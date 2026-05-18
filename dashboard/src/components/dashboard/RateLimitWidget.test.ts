@@ -8,7 +8,7 @@ describe("RateLimitWidget helpers", () => {
     expect(normalizeRateLimitProviderLabel("qwen")).toBe("Qwen");
   });
 
-  it("hides unsupported providers without measurable buckets and keeps measurable rows", () => {
+  it("keeps unsupported providers visible and coalesces duplicate provider rows by name", () => {
     const data = transformRawData(
       {
         providers: [
@@ -42,24 +42,56 @@ describe("RateLimitWidget helpers", () => {
       95,
     );
 
+    // Two rows out (one per normalized provider name) — coalesces the two
+    // "qwen" entries so React rendering doesn't see duplicate keys.
     expect(data.providers).toHaveLength(2);
-    expect(data.providers[0]?.provider).toBe("Gemini");
-    expect(data.providers[0]?.buckets[0]).toMatchObject({
-      label: "1h",
-      utilization: 25,
-      level: "normal",
-    });
-    expect(data.providers[1]).toMatchObject({
+
+    // Qwen is index 0 because it was the first row in the input. The
+    // measurable second row wins over the empty placeholder.
+    expect(data.providers[0]).toMatchObject({
       provider: "Qwen",
       stale: true,
       unsupported: true,
-      reason: "Rendering last known measurable bucket until live telemetry lands.",
     });
-    expect(data.providers[1]?.buckets[0]).toMatchObject({
+    expect(data.providers[0]?.buckets[0]).toMatchObject({
       label: "1h",
       utilization: 20,
       level: "normal",
     });
+
+    expect(data.providers[1]).toMatchObject({ provider: "Gemini", unsupported: false });
+    expect(data.providers[1]?.buckets[0]).toMatchObject({
+      label: "1h",
+      utilization: 25,
+      level: "normal",
+    });
+  });
+
+  it("keeps an unsupported provider with no measurable buckets visible (instead of dropping it)", () => {
+    const data = transformRawData(
+      {
+        providers: [
+          {
+            provider: "qwen",
+            buckets: [],
+            fetched_at: 1_700_000_000,
+            stale: false,
+            unsupported: true,
+            reason: "No Qwen rate-limit telemetry source is implemented yet.",
+          },
+        ],
+      },
+      80,
+      95,
+    );
+
+    expect(data.providers).toHaveLength(1);
+    expect(data.providers[0]).toMatchObject({
+      provider: "Qwen",
+      unsupported: true,
+      reason: "No Qwen rate-limit telemetry source is implemented yet.",
+    });
+    expect(data.providers[0]?.buckets).toHaveLength(0);
   });
 
   it("maps negative usage sentinels to unknown utilization instead of negative percentages", () => {
