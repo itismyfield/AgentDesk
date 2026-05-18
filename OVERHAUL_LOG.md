@@ -150,4 +150,24 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** add the same in-card refresh pattern to BottleneckWidget / RateLimitWidget, or pivot to (b) responsive (AppMobileNavigation cleanup) / (c) HomeOverviewPage decomposition.
 
+### Round 9 — 2026-05-19 03:47~03:51 KST
+**Focus:** Responsive (5) + Maintainability — AppMobileNavigation cleanup.
+
+**Changes:**
+- New `app/AppMobileNavigation.css`: 12 inline styles extracted into named classes (`adk-mobile-tabbar`, `adk-mobile-tab`, `adk-mobile-tab-badge`, `adk-mobile-sheet`, `adk-mobile-sheet-item`, etc.). Mobile-specific tokens (`--adk-mobile-tap-min: 44px`, tabbar gradient, sheet shadow, badge colors) live in `:root` so they can be tuned in one place.
+- Mobile-first improvements baked in:
+  - 44px minimum touch target enforced via `min-height: var(--adk-mobile-tap-min)` on every interactive element.
+  - `:focus-visible` outline so keyboard / Switch Control users see the same affordance.
+  - `:active` scale-down (0.96) on tabs and sheet items for tactile press feedback.
+  - `prefers-reduced-motion` fallback that suppresses the sheet entry animation and the active scale.
+  - Badge positioned via CSS only (no `right-[28%]` Tailwind percent leaking into JS).
+  - `nav` got an `aria-label` and the slide-in animation now starts a touch lower so it actually reads as "rising" on mid-range Android.
+- `AppMobileNavigation.tsx`: refactored to use the new classes and the `data-active` attribute selector for the active tone; lost a `formatBadge` duplication in the process.
+
+**Net effect:** mobile chrome is now a single CSS surface that can be themed, A/B'd, or migrated to mobile-first responsive layouts without touching JSX. Operators on phones get bigger reliable tap targets, focus rings, and motion-respect.
+
+**Verification:** `npm run build` ✓ in 3.7s. Total bundle slightly smaller (`index-Ik41W5cg.js` 351 kB vs prior 353 kB — inline-style strings moved to compressed CSS).
+
+**Next:** propagate the same CSS-extraction pattern to AppSidebar / AppTopBar; or pivot to (c) HomeOverviewPage decomposition; or (d) info hierarchy of the home grid.
+
 EOF
