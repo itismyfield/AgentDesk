@@ -46,6 +46,33 @@ pub(in crate::services::discord) fn session_bound_discord_relay_can_own_terminal
     state.rebind_origin || matches!(state.effective_relay_owner_kind(), RelayOwnerKind::Watcher)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionBoundTerminalDeliveryRoute {
+    NewMessage,
+    PlaceholderEdit(MessageId),
+}
+
+fn session_bound_terminal_delivery_route(
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) -> Option<SessionBoundTerminalDeliveryRoute> {
+    if tmux_session_name.trim().is_empty() {
+        return None;
+    }
+    let Some(state) = inflight else {
+        return Some(SessionBoundTerminalDeliveryRoute::NewMessage);
+    };
+    if !session_bound_discord_relay_can_own_terminal_delivery(Some(state), tmux_session_name) {
+        return None;
+    }
+    if !state.rebind_origin && state.current_msg_id != 0 {
+        return Some(SessionBoundTerminalDeliveryRoute::PlaceholderEdit(
+            MessageId::new(state.current_msg_id),
+        ));
+    }
+    Some(SessionBoundTerminalDeliveryRoute::NewMessage)
+}
+
 pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
     health_registry: Arc<HealthRegistry>,
     frames_total: AtomicU64,
@@ -97,18 +124,17 @@ impl SessionBoundDiscordRelaySink {
         let inflight =
             wait_for_session_bound_delivery_inflight(&provider, channel_id, &delivery.session_name)
                 .await;
-        if !session_bound_discord_relay_can_own_terminal_delivery(
-            inflight.as_ref(),
-            &delivery.session_name,
-        ) {
+        let route =
+            session_bound_terminal_delivery_route(inflight.as_ref(), &delivery.session_name);
+        let Some(route) = route else {
             tracing::debug!(
                 provider = provider.as_str(),
                 channel = channel_id,
                 tmux_session = %delivery.session_name,
-                "session-bound relay sink skipped bridge-owned, missing, or mismatched inflight"
+                "session-bound relay sink skipped bridge-owned or mismatched inflight"
             );
             return Ok(());
-        }
+        };
 
         let formatted = if shared.status_panel_v2_enabled {
             formatting::format_for_discord_with_status_panel(&delivery.response_text, &provider)
@@ -124,12 +150,7 @@ impl SessionBoundDiscordRelaySink {
             formatted
         };
         let channel = ChannelId::new(channel_id);
-        let placeholder_msg_id = inflight
-            .as_ref()
-            .filter(|state| !state.rebind_origin && state.current_msg_id != 0)
-            .map(|state| MessageId::new(state.current_msg_id));
-
-        if let Some(msg_id) = placeholder_msg_id {
+        if let SessionBoundTerminalDeliveryRoute::PlaceholderEdit(msg_id) = route {
             match formatting::replace_long_message_raw_with_outcome(
                 &http,
                 channel,
@@ -437,6 +458,46 @@ mod tests {
             Some(&watcher_owned),
             "AgentDesk-claude-other"
         ));
+    }
+
+    #[test]
+    fn terminal_delivery_route_allows_missing_inflight_as_pane_bound_new_message() {
+        let tmux = "AgentDesk-claude-relay-test";
+
+        assert_eq!(
+            session_bound_terminal_delivery_route(None, tmux),
+            Some(SessionBoundTerminalDeliveryRoute::NewMessage)
+        );
+        assert_eq!(session_bound_terminal_delivery_route(None, ""), None);
+    }
+
+    #[test]
+    fn terminal_delivery_route_preserves_bridge_owned_skip_and_watcher_routes() {
+        let tmux = "AgentDesk-claude-relay-test";
+        let bridge_owned = inflight_for(tmux, RelayOwnerKind::None, false);
+        assert_eq!(
+            session_bound_terminal_delivery_route(Some(&bridge_owned), tmux),
+            None
+        );
+
+        let watcher_owned = inflight_for(tmux, RelayOwnerKind::Watcher, false);
+        assert_eq!(
+            session_bound_terminal_delivery_route(Some(&watcher_owned), tmux),
+            Some(SessionBoundTerminalDeliveryRoute::PlaceholderEdit(
+                MessageId::new(9002)
+            ))
+        );
+
+        let rebind_origin = inflight_for(tmux, RelayOwnerKind::Watcher, true);
+        assert_eq!(
+            session_bound_terminal_delivery_route(Some(&rebind_origin), tmux),
+            Some(SessionBoundTerminalDeliveryRoute::NewMessage)
+        );
+
+        assert_eq!(
+            session_bound_terminal_delivery_route(Some(&watcher_owned), "AgentDesk-claude-other"),
+            None
+        );
     }
 
     #[test]
