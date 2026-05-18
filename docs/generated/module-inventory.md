@@ -413,7 +413,7 @@
 | `services::discord::jsonl_watcher` | `src/services/discord/jsonl_watcher.rs` | 252 |  |
 | `services::discord::mcp_credential_watcher` | `src/services/discord/mcp_credential_watcher.rs` | 645 |  |
 | `services::discord::meeting_artifact_store` | `src/services/discord/meeting_artifact_store.rs` | 356 |  |
-| `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3786 | giant-file |
+| `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3861 | giant-file |
 | `services::discord::meeting_state_machine` | `src/services/discord/meeting_state_machine.rs` | 302 |  |
 | `services::discord::metrics` | `src/services/discord/metrics.rs` | 148 |  |
 | `services::discord::model_catalog` | `src/services/discord/model_catalog.rs` | 1273 | giant-file |
