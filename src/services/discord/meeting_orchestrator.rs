@@ -1656,10 +1656,20 @@ async fn start_meeting_with_reviewer(
             (participants, selection_reason)
         }
         Ok(_) => {
+            let _ = record_meeting_transition(
+                &meeting_id,
+                MeetingState::Starting,
+                MeetingEvent::ProviderFailed,
+            );
             cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
             return Err("참여자를 선정하지 못했어.".into());
         }
         Err(e) => {
+            let _ = record_meeting_transition(
+                &meeting_id,
+                MeetingState::Starting,
+                MeetingEvent::ProviderFailed,
+            );
             cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
             return Err(format!("참여자 선정 실패: {}", e).into());
         }
@@ -1764,6 +1774,16 @@ async fn start_meeting_with_reviewer(
             let mut core = shared.core.lock().await;
             match core.active_meetings.get_mut(&channel_id) {
                 Some(m) if m.id == meeting_id => {
+                    let from_state = if m.current_round == 0 {
+                        MeetingState::Starting
+                    } else {
+                        m.status.to_state()
+                    };
+                    let _ = record_meeting_transition(
+                        &meeting_id,
+                        from_state,
+                        MeetingEvent::RoundComplete,
+                    );
                     m.current_round = round;
                 }
                 _ => return Ok(None),
@@ -2632,6 +2652,11 @@ async fn conclude_meeting(
                 if m.status == MeetingStatus::Cancelled {
                     return Ok(false);
                 }
+                let _ = record_meeting_transition(
+                    meeting_id,
+                    m.status.to_state(),
+                    MeetingEvent::Summarize,
+                );
                 m.status = MeetingStatus::Concluding;
             }
             _ => return Ok(false),
@@ -2871,6 +2896,11 @@ async fn conclude_meeting(
         match core.active_meetings.get_mut(&channel_id) {
             Some(m) if m.id == meeting_id => {
                 m.summary = summary_text;
+                let _ = record_meeting_transition(
+                    meeting_id,
+                    m.status.to_state(),
+                    MeetingEvent::MarkComplete,
+                );
                 m.status = MeetingStatus::Completed;
             }
             _ => return Ok(false),
@@ -3201,15 +3231,16 @@ mod tests {
     use super::{
         ActiveMeetingSlot, DEFAULT_MEETING_SELECTION_STAGE_TIMEOUT_SECS,
         MAX_MEETING_STAGE_TIMEOUT_SECS, MIN_MEETING_STAGE_TIMEOUT_SECS, Meeting,
-        MeetingAgentConfig, MeetingConfig, MeetingStatus, MeetingUtterance, ProviderKind,
-        ResolvedMemorySettings, SummaryAgentConfig, agent_metadata_card,
-        build_fallback_meeting_summary, build_meeting_markdown, build_meeting_start_status_message,
-        build_meeting_status_payload, build_selection_reason_line, clamp_max_participants,
-        display_query_hash, effective_round_count, meeting_cancel_event_key,
-        meeting_outbound_message, meeting_query_hash, meeting_slot_state, parse_meeting_start_text,
-        parse_participant_selection_response, resolve_meeting_stage_timeout_secs,
-        select_participants, summary_agent_context, thread_query_hash, truncate_for_meeting,
-        validate_fixed_participants,
+        MeetingAgentConfig, MeetingConfig, MeetingEvent, MeetingState, MeetingStatus,
+        MeetingUtterance, ProviderKind, ResolvedMemorySettings, SummaryAgentConfig,
+        agent_metadata_card, build_fallback_meeting_summary, build_meeting_markdown,
+        build_meeting_start_status_message, build_meeting_status_payload,
+        build_selection_reason_line, clamp_max_participants, display_query_hash,
+        effective_round_count, meeting_cancel_event_key, meeting_outbound_message,
+        meeting_query_hash, meeting_slot_state, parse_meeting_start_text,
+        parse_participant_selection_response, record_meeting_transition,
+        resolve_meeting_stage_timeout_secs, select_participants, summary_agent_context,
+        thread_query_hash, truncate_for_meeting, validate_fixed_participants,
     };
     use serde_json::json;
 
@@ -3674,6 +3705,50 @@ mod tests {
         assert_eq!(
             meeting_slot_state(Some(&meeting), "mtg-a"),
             ActiveMeetingSlot::MissingOrReplaced
+        );
+    }
+
+    #[test]
+    fn test_orchestrator_records_full_state_machine_lifecycle_events() {
+        assert_eq!(
+            record_meeting_transition("mtg-a", MeetingState::Pending, MeetingEvent::Start),
+            Some(MeetingState::Starting)
+        );
+        assert_eq!(
+            record_meeting_transition("mtg-a", MeetingState::Starting, MeetingEvent::RoundComplete,),
+            Some(MeetingState::Running)
+        );
+        assert_eq!(
+            record_meeting_transition(
+                "mtg-a",
+                MeetingStatus::InProgress.to_state(),
+                MeetingEvent::RoundComplete,
+            ),
+            Some(MeetingState::Running)
+        );
+        assert_eq!(
+            record_meeting_transition(
+                "mtg-a",
+                MeetingStatus::InProgress.to_state(),
+                MeetingEvent::Summarize,
+            ),
+            Some(MeetingState::Summarizing)
+        );
+        assert_eq!(
+            record_meeting_transition(
+                "mtg-a",
+                MeetingStatus::Concluding.to_state(),
+                MeetingEvent::MarkComplete,
+            ),
+            Some(MeetingState::Completed)
+        );
+        assert_eq!(
+            record_meeting_transition(
+                "mtg-a",
+                MeetingStatus::SelectingParticipants.to_state(),
+                MeetingEvent::ProviderFailed,
+            ),
+            Some(MeetingState::Failed)
         );
     }
 
