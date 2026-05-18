@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { getCachedHealth, getHealth, type HealthResponse } from "../../api";
 import TooltipLabel from "../common/TooltipLabel";
 import { StatusBadge } from "../common/StatusBadge";
@@ -371,36 +372,44 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(() => !getCachedHealth());
   const [now, setNow] = useState(() => Date.now());
+  // Track mount state across the lifetime of the component so the manual
+  // refresh handler and the poll timer share the same guard.
+  const mountedRef = useRef(true);
+  // Coalesce manual + poll refreshes so a button press during an in-flight
+  // request doesn't spawn a duplicate fetch.
+  const inflightRef = useRef(false);
+
+  const loadHealth = useCallback(async () => {
+    if (inflightRef.current) return;
+    inflightRef.current = true;
+    if (mountedRef.current) setIsRefreshing(true);
+    try {
+      const next = await getHealth();
+      if (!mountedRef.current) return;
+      setData(next);
+      setLastSuccessAt(Date.now());
+      setError(null);
+    } catch (nextError) {
+      if (!mountedRef.current) return;
+      const resolved = nextError instanceof Error ? nextError.message : String(nextError);
+      setError(resolved);
+    } finally {
+      inflightRef.current = false;
+      if (mountedRef.current) setIsRefreshing(false);
+    }
+  }, []);
 
   useEffect(() => {
-    let mounted = true;
-
-    const load = async () => {
-      if (mounted) setIsRefreshing(true);
-      try {
-        const next = await getHealth();
-        if (!mounted) return;
-        setData(next);
-        setLastSuccessAt(Date.now());
-        setError(null);
-      } catch (nextError) {
-        if (!mounted) return;
-        const resolved = nextError instanceof Error ? nextError.message : String(nextError);
-        setError(resolved);
-      } finally {
-        if (mounted) setIsRefreshing(false);
-      }
-    };
-
-    void load();
-    const pollTimer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
+    mountedRef.current = true;
+    void loadHealth();
+    const pollTimer = window.setInterval(() => void loadHealth(), POLL_INTERVAL_MS);
     const staleTimer = window.setInterval(() => setNow(Date.now()), 15_000);
     return () => {
-      mounted = false;
+      mountedRef.current = false;
       window.clearInterval(pollTimer);
       window.clearInterval(staleTimer);
     };
-  }, []);
+  }, [loadHealth]);
 
   const pollState = derivePollState({ data, error, isRefreshing, lastSuccessAt, now });
   const metrics = useMemo(() => (data ? buildMetricCards(data, t) : []), [data, t]);
@@ -451,6 +460,39 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
           >
             {translatePollState(pollState, t)}
           </StatusBadge>
+          <button
+            type="button"
+            onClick={() => void loadHealth()}
+            disabled={isRefreshing}
+            aria-label={t({
+              ko: "Health 데이터 새로고침",
+              en: "Refresh health data",
+              ja: "Health データを更新",
+              zh: "刷新 Health 数据",
+            })}
+            title={t({
+              ko: "지금 새로고침",
+              en: "Refresh now",
+              ja: "今すぐ更新",
+              zh: "立即刷新",
+            })}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 24,
+              height: 24,
+              borderRadius: 999,
+              border: `1px solid ${theme.border}`,
+              background: theme.surface,
+              color: theme.text,
+              cursor: isRefreshing ? "wait" : "pointer",
+              opacity: isRefreshing ? 0.6 : 1,
+              transition: "opacity 120ms ease",
+            }}
+          >
+            <RefreshCw size={12} className={isRefreshing ? "animate-spin" : undefined} aria-hidden />
+          </button>
         </div>
       </div>
 

@@ -134,4 +134,20 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** apply same treatment to AutoQueueHistoryWidget / CronTimelineWidget / ReceiptWidget; or pivot to action-in-place (HealthWidget refresh button, log-jump links) or mobile-first cleanup.
 
+### Round 8 — 2026-05-19 03:20~03:22 KST
+**Focus:** Action-in-place (3) — HealthWidget manual refresh.
+
+**Changes:**
+- `dashboard/HealthWidget.tsx`:
+  - Hoisted the `load` function from inside `useEffect` to a `useCallback` (`loadHealth`) that the auto-poll *and* a new manual refresh button share.
+  - Added `mountedRef` + `inflightRef` so the manual refresh doesn't fire a duplicate fetch while a poll is in flight and doesn't write to state after unmount.
+  - New circular refresh icon button in the header (next to the status + poll badges) — same `RefreshCw` icon and spin pattern Ops uses, but bound to the per-widget header instead of forcing the user to leave the screen. Honors `prefers-reduced-motion` via the existing `animate-spin` Tailwind utility.
+  - Localized ARIA label + title for ko/en/ja/zh.
+
+**Net effect:** if a deploy or restart just happened, operators no longer have to wait for the 30s poll cycle to see the change. The Health card now has a "trust but verify" affordance in place.
+
+**Verification:** `npm run build` ✓ (11.9s, cold cache). 21/21 tests pass.
+
+**Next:** add the same in-card refresh pattern to BottleneckWidget / RateLimitWidget, or pivot to (b) responsive (AppMobileNavigation cleanup) / (c) HomeOverviewPage decomposition.
+
 EOF
