@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::voice::barge_in::BargeInSensitivity;
+use crate::voice::runtime_process::VoiceRuntimeProcessConfig;
 
 // F17 (#2046): 상대경로(`.cache/...`)는 dcserver CWD 에 따라 위치가 달라져 launchd
 // 실행 시 `/` CWD 에서 권한 거부가 발생했다. STT/Receiver 와 동일하게 `~/.adk/...`
@@ -41,6 +42,7 @@ pub(crate) struct VoiceConfig {
     pub active_agent_ttl_seconds: u64,
     pub foreground: VoiceForegroundConfig,
     pub spoken_result: VoiceSpokenResultConfig,
+    pub runtime_process: VoiceRuntimeProcessConfig,
     pub default_sensitivity_mode: BargeInSensitivity,
     pub auto_join_channel_ids: Vec<String>,
     /// `false` (기본값) 이면 utterance / segment wav 와 transcript sidecar 를
@@ -67,6 +69,7 @@ impl Default for VoiceConfig {
             active_agent_ttl_seconds: DEFAULT_ACTIVE_AGENT_TTL_SECS,
             foreground: VoiceForegroundConfig::default(),
             spoken_result: VoiceSpokenResultConfig::default(),
+            runtime_process: VoiceRuntimeProcessConfig::default(),
             default_sensitivity_mode: BargeInSensitivity::Normal,
             auto_join_channel_ids: Vec::new(),
             keep_recordings: false,
@@ -356,6 +359,8 @@ mod tests {
         assert_eq!(config.tts.backend, VoiceTtsBackendKind::Edge);
         assert_eq!(config.foreground, VoiceForegroundConfig::default());
         assert_eq!(config.spoken_result, VoiceSpokenResultConfig::default());
+        assert!(!config.runtime_process.enabled);
+        assert!(config.runtime_process.launch_spec().is_none());
         assert_eq!(
             config.tts.progress_cache_dir,
             PathBuf::from(DEFAULT_PROGRESS_TTS_CACHE_DIR)
@@ -487,6 +492,33 @@ tts:
         assert_eq!(config.tts.edge.command, "edge-tts");
         assert_eq!(config.tts.edge.voice, "ko-KR-InJoonNeural");
         assert_eq!(config.tts.edge.rate, "-10%");
+    }
+
+    #[test]
+    fn voice_config_deserializes_external_runtime_process_settings() {
+        let config: VoiceConfig = serde_yaml::from_str(
+            r#"
+runtime_process:
+  enabled: true
+  command: /usr/local/bin/agentdesk-voice-runtime
+  args:
+    - --stdio
+  env:
+    ADK_VOICE_RUNTIME: external
+"#,
+        )
+        .unwrap();
+
+        let spec = config.runtime_process.launch_spec().unwrap();
+        assert_eq!(
+            spec.executable,
+            PathBuf::from("/usr/local/bin/agentdesk-voice-runtime")
+        );
+        assert_eq!(spec.args, vec!["--stdio"]);
+        assert_eq!(
+            spec.env.get("ADK_VOICE_RUNTIME").map(String::as_str),
+            Some("external")
+        );
     }
 
     #[test]

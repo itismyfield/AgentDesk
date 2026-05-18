@@ -21,6 +21,7 @@ use crate::voice::commands::{
 };
 use crate::voice::config::DEFAULT_STT_LANGUAGE;
 use crate::voice::progress;
+use crate::voice::runtime_boundary::VoiceRuntimeConfigSnapshot;
 use crate::voice::sanitizer::{foreground_spoken_only_with_limit, spoken_result_only_with_limit};
 use crate::voice::stt::SttRuntime;
 use crate::voice::tts::{
@@ -962,6 +963,15 @@ impl VoiceBargeInRuntime {
 
     pub(in crate::services::discord) fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub(in crate::services::discord) async fn runtime_config_snapshot(
+        &self,
+    ) -> VoiceRuntimeConfigSnapshot {
+        let config = self.voice_config_state.read().await;
+        let mut snapshot = VoiceRuntimeConfigSnapshot::from(&*config);
+        snapshot.verbose_progress = self.verbose_progress_enabled();
+        snapshot
     }
 
     /// #2250: register a CancelToken for an in-flight foreground/voice Codex
@@ -3804,6 +3814,26 @@ mod tests {
         config.enabled = true;
         config.barge_in.acknowledgement_enabled = false;
         VoiceBargeInRuntime::from_voice_config(&config)
+    }
+
+    #[tokio::test]
+    async fn runtime_config_snapshot_reflects_mutable_voice_state() {
+        let runtime = enabled_runtime();
+
+        runtime.set_runtime_language("en".to_string()).await;
+        runtime
+            .set_runtime_tts_voice("en-US-AriaNeural".to_string())
+            .await;
+        runtime.set_verbose_progress_enabled(true);
+
+        let snapshot = runtime.runtime_config_snapshot().await;
+
+        assert!(snapshot.enabled);
+        assert!(snapshot.barge_in_enabled);
+        assert!(snapshot.verbose_progress);
+        assert_eq!(snapshot.stt_language, "en");
+        assert_eq!(snapshot.tts_voice, "en-US-AriaNeural");
+        assert_eq!(snapshot.wake_words, vec!["agentdesk"]);
     }
 
     #[test]
