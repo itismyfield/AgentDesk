@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw } from "lucide-react";
 
 import * as api from "../../api/client";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
@@ -72,31 +73,39 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
     persistBottleneckThresholds(thresholds);
   }, [thresholds]);
 
+  // Share mount + in-flight guards between the auto-poll and the new manual
+  // refresh button so a button press during a poll doesn't fire a duplicate
+  // fetch.
+  const mountedRef = useRef(true);
+  const inflightRef = useRef(false);
+
+  const loadCards = useCallback(async () => {
+    if (inflightRef.current) return;
+    inflightRef.current = true;
+    if (mountedRef.current) setLoading(true);
+    try {
+      const next = await api.getKanbanCards();
+      if (!mountedRef.current) return;
+      setCards(next);
+      setError(null);
+    } catch (nextError) {
+      if (!mountedRef.current) return;
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      inflightRef.current = false;
+      if (mountedRef.current) setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    let mounted = true;
-
-    const load = async () => {
-      if (mounted) setLoading(true);
-      try {
-        const next = await api.getKanbanCards();
-        if (!mounted) return;
-        setCards(next);
-        setError(null);
-      } catch (nextError) {
-        if (!mounted) return;
-        setError(nextError instanceof Error ? nextError.message : String(nextError));
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    };
-
-    void load();
-    const timer = setInterval(() => void load(), 60_000);
+    mountedRef.current = true;
+    void loadCards();
+    const timer = setInterval(() => void loadCards(), 60_000);
     return () => {
-      mounted = false;
+      mountedRef.current = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [loadCards]);
 
   const groups = useMemo(() => buildBottleneckGroups(cards, Date.now(), thresholds), [cards, thresholds]);
   const totalAlerts = useMemo(() => {
@@ -143,6 +152,34 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void loadCards()}
+            disabled={loading}
+            aria-label={t({
+              ko: "병목 데이터 새로고침",
+              en: "Refresh bottleneck data",
+              ja: "ボトルネックデータを更新",
+              zh: "刷新瓶颈数据",
+            })}
+            title={t({
+              ko: "지금 새로고침",
+              en: "Refresh now",
+              ja: "今すぐ更新",
+              zh: "立即刷新",
+            })}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-full"
+            style={{
+              border: "1px solid rgba(148,163,184,0.2)",
+              background: "rgba(148,163,184,0.14)",
+              color: "var(--th-text)",
+              cursor: loading ? "wait" : "pointer",
+              opacity: loading ? 0.6 : 1,
+              transition: "opacity 120ms ease",
+            }}
+          >
+            <RefreshCw size={12} className={loading ? "animate-spin" : undefined} aria-hidden />
+          </button>
           <button
             type="button"
             className="rounded-full px-3 py-1 text-[11px] font-semibold"

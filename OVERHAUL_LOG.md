@@ -170,4 +170,19 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** propagate the same CSS-extraction pattern to AppSidebar / AppTopBar; or pivot to (c) HomeOverviewPage decomposition; or (d) info hierarchy of the home grid.
 
+### Round 10 — 2026-05-19 04:15~04:18 KST
+**Focus:** Action-in-place (3) — propagate the HealthWidget refresh pattern.
+
+**Changes:**
+- `dashboard/BottleneckWidget.tsx`:
+  - Hoisted the cards-load function from inside `useEffect` into a `useCallback` (`loadCards`) shared between the 60s poll timer and a new manual-refresh button.
+  - Added `mountedRef` + `inflightRef` so a button press during an in-flight fetch doesn't fan out into two simultaneous calls and so post-unmount state writes are suppressed.
+  - New circular `RefreshCw` button in the header next to the "Tune thresholds" toggle, with disabled+spin state and localized ARIA label.
+
+**Net effect:** the two highest-signal cards on Home (Health + Bottleneck) now have identical in-card refresh affordances. Operators don't have to wait for the 30s/60s cycle when they just kicked something off.
+
+**Verification:** `npm run build` ✓ in 4.0s.
+
+**Next:** wire the same pattern into RateLimitWidget (need a small abort-controller refactor) or pivot to (a) info hierarchy / (b) performance decomposition.
+
 EOF
