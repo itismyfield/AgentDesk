@@ -307,6 +307,34 @@ mod pane_dead_identity_tests {
 /// producer for this session (flag off, supervisor not running, or this
 /// session simply not in the registry's matched set) the function is a
 /// total no-op and adds no measurable overhead vs the pre-E5 hot path.
+#[derive(Clone)]
+struct SessionBoundRelayAckTarget {
+    metrics: std::sync::Arc<crate::services::cluster::stream_relay::RelayMetrics>,
+    sequence: u64,
+}
+
+#[derive(Clone)]
+struct SupervisorRelayForward {
+    mirrored: bool,
+    ack_target: Option<SessionBoundRelayAckTarget>,
+}
+
+impl SupervisorRelayForward {
+    fn mirrored_without_ack() -> Self {
+        Self {
+            mirrored: true,
+            ack_target: None,
+        }
+    }
+
+    fn not_mirrored() -> Self {
+        Self {
+            mirrored: false,
+            ack_target: None,
+        }
+    }
+}
+
 fn forward_chunk_to_supervisor_relay(
     tmux_session_name: &str,
     chunk: &[u8],
@@ -314,15 +342,15 @@ fn forward_chunk_to_supervisor_relay(
         crate::services::cluster::relay_producer_registry::RelayProducerRegistry,
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
-) -> bool {
+) -> SupervisorRelayForward {
     if chunk.is_empty() {
-        return true;
+        return SupervisorRelayForward::mirrored_without_ack();
     }
     if cached_producer.is_none() {
         *cached_producer = registry.get_producer(tmux_session_name);
     }
     let Some(producer) = cached_producer.as_ref() else {
-        return false;
+        return SupervisorRelayForward::not_mirrored();
     };
     // The relay treats each `try_send_frame` call as one frame. We pass the
     // chunk verbatim (UTF-8 lossy) rather than re-splitting on newlines so
@@ -330,15 +358,72 @@ fn forward_chunk_to_supervisor_relay(
     // session-bound Discord sink and the local watcher both maintain their
     // own newline buffers.
     let payload = String::from_utf8_lossy(chunk).into_owned();
-    let still_alive = producer.try_send_frame(payload);
-    if !still_alive {
+    let outcome = producer.try_send_frame_with_sequence(payload);
+    if !outcome.is_alive() {
         // Relay was torn down between our registry read and the send —
         // drop the cache so the next chunk re-resolves. If the supervisor
         // republishes for the same session name (Updated event), the
         // next call will hit the new producer.
         *cached_producer = None;
+        return SupervisorRelayForward::not_mirrored();
     }
-    still_alive
+    SupervisorRelayForward {
+        mirrored: true,
+        ack_target: outcome.sequence.map(|sequence| SessionBoundRelayAckTarget {
+            metrics: producer.metrics().clone(),
+            sequence,
+        }),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionBoundRelayAckOutcome {
+    Delivered,
+    Dropped,
+    SinkError,
+    TimedOut,
+    MissingTarget,
+}
+
+fn sequence_reached(latest: Option<u64>, target: u64) -> bool {
+    latest.is_some_and(|sequence| sequence >= target)
+}
+
+fn session_bound_relay_ack_snapshot_outcome(
+    target: Option<&SessionBoundRelayAckTarget>,
+) -> Option<SessionBoundRelayAckOutcome> {
+    let target = target?;
+    let snapshot = target.metrics.snapshot();
+    if sequence_reached(snapshot.last_delivered_sequence, target.sequence) {
+        return Some(SessionBoundRelayAckOutcome::Delivered);
+    }
+    if sequence_reached(snapshot.last_sink_error_sequence, target.sequence) {
+        return Some(SessionBoundRelayAckOutcome::SinkError);
+    }
+    if sequence_reached(snapshot.last_dropped_sequence, target.sequence) {
+        return Some(SessionBoundRelayAckOutcome::Dropped);
+    }
+    None
+}
+
+async fn wait_for_session_bound_relay_delivery_ack(
+    target: Option<&SessionBoundRelayAckTarget>,
+    timeout: std::time::Duration,
+) -> SessionBoundRelayAckOutcome {
+    if target.is_none() {
+        return SessionBoundRelayAckOutcome::MissingTarget;
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(outcome) = session_bound_relay_ack_snapshot_outcome(target) {
+            return outcome;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return SessionBoundRelayAckOutcome::TimedOut;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25).min(deadline - now)).await;
+    }
 }
 
 fn terminal_event_consumed_offset(current_offset: u64, unprocessed_tail: &str) -> u64 {
@@ -831,6 +916,64 @@ mod matched_session_jsonl_gate_tests {
         );
     }
 
+    #[tokio::test]
+    async fn session_bound_relay_ack_success_commits_and_failure_outcomes_do_not() {
+        let metrics =
+            std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+        let target = SessionBoundRelayAckTarget {
+            metrics: metrics.clone(),
+            sequence: 7,
+        };
+        assert_eq!(
+            wait_for_session_bound_relay_delivery_ack(
+                Some(&target),
+                std::time::Duration::from_millis(1),
+            )
+            .await,
+            SessionBoundRelayAckOutcome::TimedOut
+        );
+
+        metrics.record_sink_error_sequence_for_test(7);
+        assert_eq!(
+            session_bound_relay_ack_snapshot_outcome(Some(&target)),
+            Some(SessionBoundRelayAckOutcome::SinkError)
+        );
+
+        let dropped_metrics =
+            std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+        let dropped_target = SessionBoundRelayAckTarget {
+            metrics: dropped_metrics.clone(),
+            sequence: 9,
+        };
+        dropped_metrics.record_dropped_sequence_for_test(9);
+        assert_eq!(
+            session_bound_relay_ack_snapshot_outcome(Some(&dropped_target)),
+            Some(SessionBoundRelayAckOutcome::Dropped)
+        );
+
+        let delivered_metrics =
+            std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+        let delivered_target = SessionBoundRelayAckTarget {
+            metrics: delivered_metrics.clone(),
+            sequence: 3,
+        };
+        delivered_metrics.record_delivered_sequence_for_test(3);
+        delivered_metrics.record_sink_error_sequence_for_test(4);
+        assert_eq!(
+            wait_for_session_bound_relay_delivery_ack(
+                Some(&delivered_target),
+                std::time::Duration::from_millis(1),
+            )
+            .await,
+            SessionBoundRelayAckOutcome::Delivered
+        );
+        assert_eq!(
+            wait_for_session_bound_relay_delivery_ack(None, std::time::Duration::from_millis(1))
+                .await,
+            SessionBoundRelayAckOutcome::MissingTarget
+        );
+    }
+
     #[test]
     fn missing_matched_session_jsonl_is_unknown_for_existing_inflight() {
         let missing_path = std::env::temp_dir().join(format!(
@@ -1050,6 +1193,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut all_data = String::new();
     let mut all_data_start_offset = current_offset;
     let mut all_data_fully_mirrored_to_session_relay = true;
+    let mut all_data_session_bound_relay_ack: Option<SessionBoundRelayAckTarget> = None;
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
     let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
@@ -1308,13 +1452,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 // frames directly for eligible session-bound inflight shapes;
                 // this watcher remains the fallback for bridge-owned/no-
                 // inflight envelopes.
-                let data_mirrored_to_session_relay = forward_chunk_to_supervisor_relay(
+                let data_forwarded_to_session_relay = forward_chunk_to_supervisor_relay(
                     &tmux_session_name,
                     &data,
                     &producer_registry,
                     &mut cached_relay_producer,
                 );
-                (data, off, data_mirrored_to_session_relay)
+                if let Some(ack_target) = data_forwarded_to_session_relay.ack_target.clone() {
+                    all_data_session_bound_relay_ack = Some(ack_target);
+                }
+                (data, off, data_forwarded_to_session_relay.mirrored)
             }
             _ => {
                 match tmux_liveness_decision(
@@ -1535,6 +1682,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 all_data.clear();
                 all_data_start_offset = current_offset;
                 all_data_fully_mirrored_to_session_relay = true;
+                all_data_session_bound_relay_ack = None;
                 continue;
             }
             ensure_monitor_auto_turn_inflight(
@@ -1568,6 +1716,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             all_data.clear();
             all_data_start_offset = current_offset;
             all_data_fully_mirrored_to_session_relay = true;
+            all_data_session_bound_relay_ack = None;
             continue;
         }
         if !found_result {
@@ -1623,12 +1772,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         // every chunk read off the tmux output file is also
                         // pushed into the relay's MPSC so the session-bound
                         // Discord sink receives frames in production.
-                        let chunk_mirrored_to_session_relay = forward_chunk_to_supervisor_relay(
+                        let chunk_forwarded_to_session_relay = forward_chunk_to_supervisor_relay(
                             &tmux_session_name,
                             &chunk,
                             &producer_registry,
                             &mut cached_relay_producer,
                         );
+                        if let Some(ack_target) = chunk_forwarded_to_session_relay.ack_target {
+                            all_data_session_bound_relay_ack = Some(ack_target);
+                        }
+                        let chunk_mirrored_to_session_relay =
+                            chunk_forwarded_to_session_relay.mirrored;
                         session_bound_relay_turn_fully_mirrored &= chunk_mirrored_to_session_relay;
                         maybe_refresh_watcher_activity_heartbeat(
                             None::<&crate::db::Db>,
@@ -2313,6 +2467,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             all_data.clear();
             all_data_start_offset = current_offset;
             all_data_fully_mirrored_to_session_relay = true;
+            all_data_session_bound_relay_ack = None;
             continue;
         }
 
@@ -3186,14 +3341,33 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 );
         }
         let session_bound_relay_owns_terminal_delivery =
-            session_bound_relay_should_own_terminal_delivery(
+            if session_bound_relay_should_own_terminal_delivery(
                 relay_decision.should_direct_send,
                 session_bound_discord_delivery_enabled,
                 session_bound_relay_turn_fully_mirrored,
                 relay_producer_session_name,
                 session_bound_delivery_inflight.as_ref(),
                 &tmux_session_name,
-            );
+            ) {
+                let ack_outcome = wait_for_session_bound_relay_delivery_ack(
+                    all_data_session_bound_relay_ack.as_ref(),
+                    std::time::Duration::from_secs(10),
+                )
+                .await;
+                let delivered = matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered);
+                if !delivered {
+                    tracing::warn!(
+                        provider = watcher_provider.as_str(),
+                        channel = channel_id.get(),
+                        tmux_session = %tmux_session_name,
+                        ?ack_outcome,
+                        "session-bound StreamRelay terminal delivery was not acknowledged"
+                    );
+                }
+                delivered
+            } else {
+                false
+            };
         let relay_ok = if session_bound_relay_owns_terminal_delivery {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -3462,6 +3636,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 all_data.clear();
                 all_data_start_offset = current_offset;
                 all_data_fully_mirrored_to_session_relay = true;
+                all_data_session_bound_relay_ack = None;
                 relay_coord
                     .relay_slot
                     .store(0, std::sync::atomic::Ordering::Release);

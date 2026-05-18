@@ -6,7 +6,7 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-05-17 (against PR #2369 voice/turn_link.rs + maintenance.rs giant-file registration).
+> Last refreshed: 2026-05-18 (against #2524 StreamRelay ack metrics giant-file registration).
 
 ## Read This First
 
@@ -125,6 +125,9 @@
   - `src/services/discord/placeholder_sweeper.rs` (1022 lines; placeholder
     sweep loop and delivered-response idempotency surface — bugfix only
     outside a split plan).
+  - `src/services/cluster/stream_relay.rs` (1049 lines; session-bound
+    StreamRelay queue, delivery metrics, and terminal ack sequencing surface —
+    split before adding non-bugfix behavior).
   - `src/services/discord/gateway.rs` (1006 lines; Discord gateway adapter
     and `TurnGateway` bridge for turn send/edit/pin/unpin behavior — bugfix
     only outside a split plan).

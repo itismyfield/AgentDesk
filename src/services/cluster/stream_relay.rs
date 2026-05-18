@@ -91,6 +91,9 @@ pub struct RelayMetrics {
     pub frames_delivered: AtomicU64,
     pub dropped_frames: AtomicU64,
     pub sink_errors: AtomicU64,
+    last_delivered_sequence_plus_one: AtomicU64,
+    last_dropped_sequence_plus_one: AtomicU64,
+    last_sink_error_sequence_plus_one: AtomicU64,
 }
 
 impl RelayMetrics {
@@ -100,7 +103,36 @@ impl RelayMetrics {
             frames_delivered: self.frames_delivered.load(Ordering::Acquire),
             dropped_frames: self.dropped_frames.load(Ordering::Acquire),
             sink_errors: self.sink_errors.load(Ordering::Acquire),
+            last_delivered_sequence: decode_sequence_marker(
+                self.last_delivered_sequence_plus_one
+                    .load(Ordering::Acquire),
+            ),
+            last_dropped_sequence: decode_sequence_marker(
+                self.last_dropped_sequence_plus_one.load(Ordering::Acquire),
+            ),
+            last_sink_error_sequence: decode_sequence_marker(
+                self.last_sink_error_sequence_plus_one
+                    .load(Ordering::Acquire),
+            ),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_delivered_sequence_for_test(&self, sequence: u64) {
+        self.last_delivered_sequence_plus_one
+            .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_dropped_sequence_for_test(&self, sequence: u64) {
+        self.last_dropped_sequence_plus_one
+            .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_sink_error_sequence_for_test(&self, sequence: u64) {
+        self.last_sink_error_sequence_plus_one
+            .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
     }
 }
 
@@ -110,6 +142,46 @@ pub struct RelayMetricsSnapshot {
     pub frames_delivered: u64,
     pub dropped_frames: u64,
     pub sink_errors: u64,
+    pub last_delivered_sequence: Option<u64>,
+    pub last_dropped_sequence: Option<u64>,
+    pub last_sink_error_sequence: Option<u64>,
+}
+
+fn encode_sequence_marker(sequence: u64) -> u64 {
+    sequence.saturating_add(1)
+}
+
+fn decode_sequence_marker(marker: u64) -> Option<u64> {
+    marker.checked_sub(1)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelaySendOutcome {
+    pub sequence: Option<u64>,
+    pub dropped_oldest_sequence: Option<u64>,
+    pub closed: bool,
+}
+
+impl RelaySendOutcome {
+    fn enqueued(sequence: u64, dropped_oldest_sequence: Option<u64>) -> Self {
+        Self {
+            sequence: Some(sequence),
+            dropped_oldest_sequence,
+            closed: false,
+        }
+    }
+
+    fn closed() -> Self {
+        Self {
+            sequence: None,
+            dropped_oldest_sequence: None,
+            closed: true,
+        }
+    }
+
+    pub fn is_alive(self) -> bool {
+        !self.closed
+    }
 }
 
 /// Abstract destination for relayed frames. E3 keeps this trait
@@ -194,6 +266,13 @@ impl RelayProducer {
     /// has exited). Callers in production must always go through this entry
     /// point — the producer registry hands out clones of this struct.
     pub fn try_send_frame(&self, payload: String) -> bool {
+        self.try_send_frame_with_sequence(payload).is_alive()
+    }
+
+    /// Non-blocking enqueue with the assigned relay sequence. Watchers use
+    /// the sequence to distinguish "handed to relay" from "Discord sink has
+    /// actually accepted the terminal frame" before clearing inflight state.
+    pub fn try_send_frame_with_sequence(&self, payload: String) -> RelaySendOutcome {
         try_send_frame_inner(
             &self.matched,
             &self.queue,
@@ -216,7 +295,7 @@ impl std::fmt::Debug for RelayProducer {
 
 enum QueuePushResult {
     Enqueued,
-    DroppedOldest,
+    DroppedOldest(u64),
     Closed,
 }
 
@@ -255,17 +334,16 @@ impl RelayFrameQueue {
         if inner.closed {
             return QueuePushResult::Closed;
         }
-        let dropped = if inner.frames.len() >= self.capacity {
-            inner.frames.pop_front();
-            true
+        let dropped_sequence = if inner.frames.len() >= self.capacity {
+            inner.frames.pop_front().map(|frame| frame.sequence)
         } else {
-            false
+            None
         };
         inner.frames.push_back(frame);
         drop(inner);
         self.notify.notify_one();
-        if dropped {
-            QueuePushResult::DroppedOldest
+        if let Some(sequence) = dropped_sequence {
+            QueuePushResult::DroppedOldest(sequence)
         } else {
             QueuePushResult::Enqueued
         }
@@ -320,9 +398,9 @@ fn try_send_frame_inner(
     metrics: &Arc<RelayMetrics>,
     sequence: &Arc<AtomicU64>,
     payload: String,
-) -> bool {
+) -> RelaySendOutcome {
     if shutdown.load(Ordering::Acquire) {
-        return false;
+        return RelaySendOutcome::closed();
     }
     let seq = sequence.fetch_add(1, Ordering::AcqRel);
     let frame = StreamFrame {
@@ -333,12 +411,15 @@ fn try_send_frame_inner(
     };
     metrics.frames_received.fetch_add(1, Ordering::AcqRel);
     match queue.push_drop_oldest(frame) {
-        QueuePushResult::Enqueued => true,
-        QueuePushResult::DroppedOldest => {
+        QueuePushResult::Enqueued => RelaySendOutcome::enqueued(seq, None),
+        QueuePushResult::DroppedOldest(dropped_sequence) => {
             metrics.dropped_frames.fetch_add(1, Ordering::AcqRel);
-            true
+            metrics
+                .last_dropped_sequence_plus_one
+                .fetch_max(encode_sequence_marker(dropped_sequence), Ordering::AcqRel);
+            RelaySendOutcome::enqueued(seq, Some(dropped_sequence))
         }
-        QueuePushResult::Closed => false,
+        QueuePushResult::Closed => RelaySendOutcome::closed(),
     }
 }
 
@@ -370,6 +451,12 @@ impl StreamRelayHandle {
     /// increments. Returns `false` only if the relay task has already exited
     /// — the upstream caller should then treat the relay as dead.
     pub fn try_send_frame(&self, payload: String) -> bool {
+        self.try_send_frame_with_sequence(payload).is_alive()
+    }
+
+    /// Test/diagnostic variant of [`Self::try_send_frame`] that exposes the
+    /// assigned sequence for delivery-ack logic.
+    pub fn try_send_frame_with_sequence(&self, payload: String) -> RelaySendOutcome {
         try_send_frame_inner(
             &self.matched,
             &self.queue,
@@ -575,9 +662,15 @@ async fn deliver_frame(
     match sink.deliver(frame).await {
         Ok(()) => {
             metrics.frames_delivered.fetch_add(1, Ordering::AcqRel);
+            metrics
+                .last_delivered_sequence_plus_one
+                .fetch_max(encode_sequence_marker(frame.sequence), Ordering::AcqRel);
         }
         Err(error) => {
             metrics.sink_errors.fetch_add(1, Ordering::AcqRel);
+            metrics
+                .last_sink_error_sequence_plus_one
+                .fetch_max(encode_sequence_marker(frame.sequence), Ordering::AcqRel);
             tracing::warn!(
                 session = %session_name,
                 seq = frame.sequence,
@@ -618,6 +711,23 @@ mod tests {
                 return Err(RelaySinkError::Transient("forced".into()));
             }
             self.frames.lock().unwrap().push(frame.clone());
+            Ok(())
+        }
+    }
+
+    struct BlockingSequenceSink {
+        first_started: tokio::sync::Notify,
+        unblock: tokio::sync::Notify,
+        block_first: AtomicBool,
+    }
+
+    #[async_trait]
+    impl RelaySink for BlockingSequenceSink {
+        async fn deliver(&self, _frame: &StreamFrame) -> Result<(), RelaySinkError> {
+            if self.block_first.swap(false, Ordering::AcqRel) {
+                self.first_started.notify_one();
+                self.unblock.notified().await;
+            }
             Ok(())
         }
     }
@@ -671,6 +781,67 @@ mod tests {
         assert_eq!(handle.metrics().snapshot().frames_delivered, 5);
         assert_eq!(handle.metrics().snapshot().dropped_frames, 0);
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sequence_outcome_tracks_delivery_error_and_drop_sequences() {
+        let sink = Arc::new(CapturingSink::default());
+        sink.fail_next.store(true, Ordering::Release);
+        let handle = spawn_stream_relay_with_buffer(matched_for("c-seq"), sink.clone(), 2);
+
+        let first = handle.try_send_frame_with_sequence("will fail".into());
+        let second = handle.try_send_frame_with_sequence("will deliver".into());
+        assert_eq!(first.sequence, Some(0));
+        assert_eq!(second.sequence, Some(1));
+        wait_until(
+            || handle.metrics().snapshot().last_delivered_sequence == Some(1),
+            "second frame delivered",
+        )
+        .await;
+
+        let snap = handle.metrics().snapshot();
+        assert_eq!(snap.last_sink_error_sequence, Some(0));
+        assert_eq!(snap.last_delivered_sequence, Some(1));
+        handle.shutdown().await;
+
+        let blocking_sink = Arc::new(BlockingSequenceSink {
+            first_started: tokio::sync::Notify::new(),
+            unblock: tokio::sync::Notify::new(),
+            block_first: AtomicBool::new(true),
+        });
+        let drop_handle = spawn_stream_relay_with_buffer(
+            matched_for("c-seq-drop"),
+            blocking_sink.clone() as Arc<dyn RelaySink>,
+            1,
+        );
+        assert_eq!(
+            drop_handle
+                .try_send_frame_with_sequence("blocked".into())
+                .sequence,
+            Some(0)
+        );
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            blocking_sink.first_started.notified(),
+        )
+        .await
+        .expect("first frame reaches blocked sink");
+        let queued = drop_handle.try_send_frame_with_sequence("queued".into());
+        let newest = drop_handle.try_send_frame_with_sequence("newest".into());
+        assert_eq!(queued.sequence, Some(1));
+        assert_eq!(newest.sequence, Some(2));
+        assert_eq!(newest.dropped_oldest_sequence, Some(1));
+        assert_eq!(
+            drop_handle.metrics().snapshot().last_dropped_sequence,
+            Some(1)
+        );
+        blocking_sink.unblock.notify_waiters();
+        wait_until(
+            || drop_handle.metrics().snapshot().last_delivered_sequence == Some(2),
+            "newest frame delivered",
+        )
+        .await;
+        drop_handle.shutdown().await;
     }
 
     #[tokio::test]
