@@ -1,0 +1,45 @@
+# Dashboard Overhaul Log
+
+**Branch:** `wt/dashboard-overhaul-20260518` (based on `origin/main`)
+**Worktree:** `/Users/itismyfield/.adk/release/worktrees/dashboard-overhaul-20260518`
+**Started:** 2026-05-18 23:48 KST
+**Deadline:** 2026-05-19 07:00 KST
+**Operator:** adk-dashboard (autonomous /loop)
+
+## Goals
+Improve the AgentDesk dashboard along 8 quality dimensions:
+
+1. **Glanceability** — health visible in <5s (status badges, sparklines, color-coded summaries)
+2. **Real-time reliability** — WS freshness indicator, separated loading/empty/error states
+3. **Action-in-place** — operational actions available in context (no page hops)
+4. **Information hierarchy** — card sizing/placement reflects priority
+5. **Responsive (mobile first-class)** — mobile-specific IA, not a desktop shrink-down
+6. **Performance** — virtualization, code splitting, reduced re-renders
+7. **Design system consistency** — tokenized colors/spacing, same-meaning = same-visual
+8. **Observability** — timestamps everywhere, links to logs/sources, traceability
+
+## Baseline (captured pre-overhaul)
+- React 19 + Vite 6 + Tailwind 4 + React Router 7 + React Query + Pixi.js
+- 11 primary routes, 3 contexts (Office/Settings/Kanban), `useDashboardSocket` hook
+- Mobile breakpoint at 900px; mobile layout via overrides (not mobile-first CSS)
+- ~155 TSX components, 6 pages >590 LOC, 1875 inline styles, 43 test files
+- Existing design tokens: `src/theme/statusTokens.ts` (kanban-focused); CSS `--th-*` custom properties
+- WS hook exposes only `wsConnected` boolean — no event freshness signal
+
+## Rounds
+
+### Round 1 — 2026-05-18 23:48~23:57 KST
+**Focus:** Design system (7) + Real-time reliability (2) + Glanceability (1) — foundation primitives.
+
+**Changes:**
+- `theme/statusTokens.ts`: added `SYSTEM_HEALTH_TONES` (healthy/warning/critical/idle/info/unknown) + `getSystemHealthTone()`. The kanban-only token file now also speaks a generic system-health language.
+- `components/common/StatusBadge.tsx`: new reusable badge — accepts a named tone or a custom `StatusTone`, supports xs/sm/md sizes and a live-pulse dot. 4 unit tests.
+- `components/common/FreshnessIndicator.tsx`: new "n초 전" indicator with healthy→warning→critical escalation, self-ticking, ms/s/ISO timestamp tolerant, `데이터 없음` for null. 6 unit tests.
+- `styles/main.css`: added `@keyframes adkStatusPulse` and `prefers-reduced-motion` handling.
+- `app/useDashboardSocket.ts`: now exposes `lastEventTs` so consumers can wire `FreshnessIndicator` to the live WS stream.
+
+**Verification:** 10/10 new tests pass; full `npm run build` succeeds in 6.4s.
+
+**Next:** Wire `FreshnessIndicator` into the WS connection chip + replace bespoke status pills across HomeOverview/Ops with `StatusBadge`.
+
+EOF

@@ -55,6 +55,9 @@ function writePersistedLastEventId(id: string): void {
 
 export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
   const [wsConnected, setWsConnected] = useState(false);
+  // Wall-clock timestamp (ms) of the most recently received WS event. Drives
+  // freshness indicators across the dashboard — null until the first event.
+  const [lastEventTs, setLastEventTs] = useState<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const wsRetryRef = useRef(0);
   const wsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -98,6 +101,7 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
             lastEventIdRef.current = event.id;
             writePersistedLastEventId(event.id);
           }
+          setLastEventTs(Date.now());
           onEventRef.current(event);
           window.dispatchEvent(new CustomEvent("pcd-ws-event", { detail: event }));
         } catch {
@@ -128,5 +132,5 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
     };
   }, []);
 
-  return { wsConnected, wsRef };
+  return { wsConnected, wsRef, lastEventTs };
 }

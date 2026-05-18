@@ -417,3 +417,28 @@ textarea {
   opacity: 0.55;
   filter: none;
 }
+
+/* ── Shared status/freshness animations ── */
+@keyframes adkStatusPulse {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 1;
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+    opacity: 0.6;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-pulse] {
+    animation: none !important;
+  }
+  [data-pulse] > [aria-hidden] {
+    animation: none !important;
+  }
+}
