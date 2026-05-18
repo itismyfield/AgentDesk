@@ -2499,10 +2499,13 @@ fn handle_codex_json_line(
 mod tui_hosting_tests {
     use super::{
         CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides, base_tui_args,
-        build_codex_tui_args, build_tmux_launch_env_lines,
-        codex_tui_existing_session_termination_reason,
-        codex_wrapper_existing_session_termination_reason, direct_tui_material_fallback_reason,
+        build_codex_tui_args, build_tmux_launch_env_lines, direct_tui_material_fallback_reason,
         render_codex_tui_tmux_script, render_codex_wrapper_tmux_script,
+    };
+    #[cfg(unix)]
+    use super::{
+        codex_tui_existing_session_termination_reason,
+        codex_wrapper_existing_session_termination_reason,
     };
     use crate::services::discord::restart_report::{
         RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
@@ -2742,6 +2745,7 @@ mod tui_hosting_tests {
         assert!(CodexRuntimeKind::SimpleHeadless.uses_codex_exec_json());
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_tui_existing_session_audit_reasons_match_cleanup_paths() {
         assert_eq!(
@@ -2758,6 +2762,7 @@ mod tui_hosting_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_wrapper_existing_session_audit_reasons_match_cleanup_paths() {
         assert_eq!(
