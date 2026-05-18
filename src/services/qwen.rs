@@ -28,9 +28,8 @@ use crate::services::provider_runtime::{
 };
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
-    insert_process_session, process_session_is_alive, process_session_probe,
-    read_output_file_until_result, read_output_file_until_result_tracked, remove_process_session,
-    send_process_session_input,
+    ReadOutputFailure, StreamLineState, insert_process_session, process_session_is_alive,
+    process_session_probe, process_stream_line, remove_process_session, send_process_session_input,
 };
 #[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
@@ -591,6 +590,136 @@ fn collect_qwen_stream_events(
     }
 }
 
+fn qwen_read_output_file_until_result(
+    output_path: &str,
+    start_offset: u64,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    probe: SessionProbe,
+    tmux_session_name: Option<&str>,
+) -> Result<ReadOutputResult, String> {
+    qwen_read_output_file_until_result_tracked(
+        output_path,
+        start_offset,
+        sender,
+        cancel_token,
+        probe,
+        tmux_session_name,
+    )
+    .map_err(|failure| failure.error)
+}
+
+fn qwen_read_output_file_until_result_tracked(
+    output_path: &str,
+    start_offset: u64,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    probe: SessionProbe,
+    tmux_session_name: Option<&str>,
+) -> Result<ReadOutputResult, ReadOutputFailure> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let mut state = StreamLineState::new();
+    let SessionProbe {
+        is_alive,
+        is_ready_for_input,
+    } = probe;
+    let last_offset = Arc::new(AtomicU64::new(start_offset));
+    let offset_sender = sender.clone();
+    let line_sender = sender.clone();
+    let synthetic_sender = sender.clone();
+    let error_sender = sender.clone();
+    let last_offset_for_emit = last_offset.clone();
+    let tmux_session_name = tmux_session_name.map(str::to_string);
+
+    let result = crate::services::provider::poll_output_file_until_result(
+        output_path,
+        start_offset,
+        cancel_token,
+        &mut state,
+        move || is_alive(),
+        move || is_ready_for_input(),
+        move |offset| {
+            last_offset_for_emit.store(offset, Ordering::Relaxed);
+            let _ = offset_sender.send(StreamMessage::OutputOffset { offset });
+        },
+        move |line, state| {
+            observe_qwen_user_prompt_line(line, tmux_session_name.as_deref());
+            process_stream_line(line, &line_sender, state)
+        },
+        |state| state.final_result.is_some(),
+        move |state| {
+            synthetic_sender
+                .send(StreamMessage::Done {
+                    result: String::new(),
+                    session_id: state.last_session_id.clone(),
+                })
+                .is_ok()
+        },
+        move |state| {
+            if let Some((message, stdout_raw)) = &state.stdout_error {
+                let _ = error_sender.send(StreamMessage::Error {
+                    message: message.clone(),
+                    stdout: stdout_raw.clone(),
+                    stderr: String::new(),
+                    exit_code: None,
+                });
+            }
+        },
+    );
+
+    match result {
+        Ok(result) => Ok(result),
+        Err(error) => Err(ReadOutputFailure {
+            error,
+            last_offset: last_offset.load(Ordering::Relaxed),
+        }),
+    }
+}
+
+pub(crate) fn observe_qwen_user_prompt_line(
+    line: &str,
+    tmux_session_name: Option<&str>,
+) -> Option<crate::services::tui_prompt_dedupe::PromptObservation> {
+    let tmux_session_name = tmux_session_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let json = serde_json::from_str::<Value>(line).ok()?;
+    let prompt = crate::services::tui_prompt_dedupe::extract_qwen_jsonl_user_prompt(&json)?;
+    let observation = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux(
+        "qwen",
+        tmux_session_name,
+        &prompt,
+    );
+    tracing::debug!(
+        tmux_session_name,
+        observation = ?observation,
+        "observed Qwen JSONL user prompt"
+    );
+    Some(observation)
+}
+
+#[cfg(unix)]
+fn register_qwen_tmux_runtime_binding(
+    tmux_session_name: &str,
+    output_path: &str,
+    input_fifo_path: &str,
+    last_offset: u64,
+) {
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        tmux_session_name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper,
+            output_path: output_path.to_string(),
+            relay_output_path: None,
+            input_fifo_path: Some(input_fifo_path.to_string()),
+            session_id: None,
+            last_offset,
+            relay_last_offset: None,
+        },
+    );
+}
+
 fn process_qwen_stream_line(line: &str, state: &mut QwenAttemptState) {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -1039,6 +1168,9 @@ fn execute_streaming_local_tmux(
         crate::services::tmux_common::session_temp_path(tmux_session_name, "input");
     let prompt_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "prompt");
     let owner_path = tmux_owner_path(tmux_session_name);
+    if let Some(channel_id) = report_channel_id {
+        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
+    }
 
     // Accept either the new persistent location or the legacy /tmp location
     // so that dcserver restarts that lost /tmp files still re-attach to a
@@ -1187,6 +1319,11 @@ fn execute_streaming_local_tmux(
     std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Failed to write launch script: {}", e))?;
 
+    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+        ProviderKind::Qwen.as_str(),
+        tmux_session_name,
+        prompt,
+    );
     let tmux_result = crate::services::platform::tmux::create_session(
         tmux_session_name,
         Some(working_dir),
@@ -1200,6 +1337,11 @@ fn execute_streaming_local_tmux(
         let _ = std::fs::remove_file(&prompt_path);
         let _ = std::fs::remove_file(&owner_path);
         let _ = std::fs::remove_file(&script_path);
+        crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+            ProviderKind::Qwen.as_str(),
+            tmux_session_name,
+            prompt,
+        );
         return Err(format!("tmux error: {}", stderr));
     }
 
@@ -1215,16 +1357,33 @@ fn execute_streaming_local_tmux(
             Some(tmux_session_name.to_string());
     }
 
-    let read_result = read_output_file_until_result(
+    let read_result = match qwen_read_output_file_until_result(
         &output_path,
         0,
         sender.clone(),
         cancel_token,
         SessionProbe::tmux(tmux_session_name.to_string(), ProviderKind::Qwen),
-    )?;
+        Some(tmux_session_name),
+    ) {
+        Ok(read_result) => read_result,
+        Err(error) => {
+            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                ProviderKind::Qwen.as_str(),
+                tmux_session_name,
+                prompt,
+            );
+            return Err(error);
+        }
+    };
 
     match read_result {
         ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+            register_qwen_tmux_runtime_binding(
+                tmux_session_name,
+                &output_path,
+                &input_fifo_path,
+                offset,
+            );
             let _ = sender.send(StreamMessage::TmuxReady {
                 output_path,
                 input_fifo_path,
@@ -1233,6 +1392,11 @@ fn execute_streaming_local_tmux(
             });
         }
         ReadOutputResult::SessionDied { .. } => {
+            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                ProviderKind::Qwen.as_str(),
+                tmux_session_name,
+                prompt,
+            );
             let _ = sender.send(StreamMessage::Done {
                 result: "⚠ 세션이 종료되었습니다. 새 메시지를 보내면 새 세션이 시작됩니다."
                     .to_string(),
@@ -1279,17 +1443,24 @@ fn send_followup_to_tmux(
         return Err(e);
     }
 
+    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+        ProviderKind::Qwen.as_str(),
+        tmux_session_name,
+        prompt,
+    );
+
     if let Some(ref token) = cancel_token {
         *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(tmux_session_name.to_string());
     }
 
-    let read_result = match read_output_file_until_result_tracked(
+    let read_result = match qwen_read_output_file_until_result_tracked(
         output_path,
         start_offset,
         sender.clone(),
         cancel_token,
         SessionProbe::tmux(tmux_session_name.to_string(), ProviderKind::Qwen),
+        Some(tmux_session_name),
     ) {
         Ok(read_result) => read_result,
         Err(failure) => {
@@ -1326,6 +1497,12 @@ fn send_followup_to_tmux(
                         session_id: None,
                     });
                 }
+                register_qwen_tmux_runtime_binding(
+                    tmux_session_name,
+                    output_path,
+                    input_fifo_path,
+                    fallback.last_offset,
+                );
                 let _ = sender.send(StreamMessage::TmuxReady {
                     output_path: output_path.to_string(),
                     input_fifo_path: input_fifo_path.to_string(),
@@ -1341,6 +1518,11 @@ fn send_followup_to_tmux(
                     "  [{ts}] ⚠ qwen follow-up read failed and tmux session died for {tmux_session_name}: {}; recreating session",
                     failure.error
                 );
+                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                    ProviderKind::Qwen.as_str(),
+                    tmux_session_name,
+                    prompt,
+                );
                 return Ok(FollowupResult::RecreateSession {
                     error: failure.error,
                 });
@@ -1353,12 +1535,23 @@ fn send_followup_to_tmux(
                 output_exists,
                 input_exists
             );
+            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                ProviderKind::Qwen.as_str(),
+                tmux_session_name,
+                prompt,
+            );
             return Err(failure.error);
         }
     };
 
     match read_result {
         ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+            register_qwen_tmux_runtime_binding(
+                tmux_session_name,
+                output_path,
+                input_fifo_path,
+                offset,
+            );
             let _ = sender.send(StreamMessage::TmuxReady {
                 output_path: output_path.to_string(),
                 input_fifo_path: input_fifo_path.to_string(),
@@ -1367,9 +1560,16 @@ fn send_followup_to_tmux(
             });
             Ok(FollowupResult::Delivered)
         }
-        ReadOutputResult::SessionDied { .. } => Ok(FollowupResult::RecreateSession {
-            error: "session died during follow-up output reading".to_string(),
-        }),
+        ReadOutputResult::SessionDied { .. } => {
+            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                ProviderKind::Qwen.as_str(),
+                tmux_session_name,
+                prompt,
+            );
+            Ok(FollowupResult::RecreateSession {
+                error: "session died during follow-up output reading".to_string(),
+            })
+        }
     }
 }
 
@@ -1407,12 +1607,13 @@ fn execute_streaming_local_process(
             BASE64_STANDARD.encode(prompt.as_bytes())
         );
         send_process_session_input(session_name, &encoded)?;
-        let read_result = read_output_file_until_result(
+        let read_result = qwen_read_output_file_until_result(
             &output_path,
             start_offset,
             sender.clone(),
             cancel_token,
             process_session_probe(session_name),
+            None,
         )?;
 
         match read_result {
@@ -1487,12 +1688,13 @@ fn execute_streaming_local_process(
 
     insert_process_session(session_name.to_string(), handle);
 
-    let read_result = read_output_file_until_result(
+    let read_result = qwen_read_output_file_until_result(
         &output_path,
         0,
         sender.clone(),
         cancel_token,
         process_session_probe(session_name),
+        None,
     )?;
 
     match read_result {
@@ -1962,8 +2164,8 @@ mod tests {
         QWEN_CODE_SYSTEM_SETTINGS_ENV, QwenAttemptState, QwenResumeStrategy, QwenStreamEvent,
         QwenStreamLoopResult, QwenStreamWatchdog, build_simple_exec_args, build_stream_exec_args,
         collect_qwen_stream_events, compose_qwen_prompt, create_system_settings_override,
-        extract_text_from_json_output, normalize_resume_strategy, process_qwen_json_event,
-        qwen_project_cache_key, resolve_allowed_core_tools,
+        extract_text_from_json_output, normalize_resume_strategy, observe_qwen_user_prompt_line,
+        process_qwen_json_event, qwen_project_cache_key, resolve_allowed_core_tools,
     };
     use crate::services::agent_protocol::StreamMessage;
     use crate::services::provider::CancelToken;
@@ -1974,6 +2176,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     fn with_temp_qwen_home<F>(f: F)
     where
@@ -2460,5 +2663,40 @@ mod tests {
             state.buffered_messages.last(),
             Some(StreamMessage::Thinking { summary: None })
         ));
+    }
+
+    #[test]
+    fn observe_qwen_user_prompt_line_suppresses_discord_originated_prompt() {
+        let tmux_session_name = format!("qwen-test-{}", Uuid::new_v4());
+        crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+            "qwen",
+            &tmux_session_name,
+            "from discord",
+        );
+
+        let observation = observe_qwen_user_prompt_line(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"from discord"}]}}"#,
+            Some(&tmux_session_name),
+        );
+
+        assert_eq!(
+            observation,
+            Some(crate::services::tui_prompt_dedupe::PromptObservation::SuppressedDiscordDuplicate)
+        );
+    }
+
+    #[test]
+    fn observe_qwen_user_prompt_line_publishes_ssh_direct_prompt() {
+        let tmux_session_name = format!("qwen-test-{}", Uuid::new_v4());
+
+        let observation = observe_qwen_user_prompt_line(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"typed over ssh"}]}}"#,
+            Some(&tmux_session_name),
+        );
+
+        assert_eq!(
+            observation,
+            Some(crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect)
+        );
     }
 }

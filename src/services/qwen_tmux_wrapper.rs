@@ -732,15 +732,28 @@ fn normalize_assistant_message(json: &Value, state: &mut TurnNormalizationState)
 }
 
 fn normalize_user_message(json: &Value) -> Vec<Value> {
+    let mut events = Vec::new();
+    if let Some(prompt) = crate::services::tui_prompt_dedupe::extract_qwen_jsonl_user_prompt(json) {
+        events.push(json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": prompt,
+                }]
+            }
+        }));
+    }
+
     let Some(content) = json
         .get("message")
         .and_then(|v| v.get("content"))
         .and_then(|v| v.as_array())
     else {
-        return Vec::new();
+        return events;
     };
 
-    let mut events = Vec::new();
     for block in content {
         if block.get("type").and_then(|v| v.as_str()) != Some("tool_result") {
             continue;
@@ -949,9 +962,10 @@ fn emit_json_line(output: &mut std::fs::File, value: Value) -> Result<(), String
 mod tests {
     use super::{
         TurnNormalizationState, TurnWatchdogOutcome, build_turn_args, decode_external_prompt,
-        next_turn_watchdog_outcome, normalize_qwen_line,
+        next_turn_watchdog_outcome, normalize_qwen_line, normalize_user_message,
     };
     use crate::services::qwen::qwen_project_cache_key;
+    use serde_json::json;
     use std::fs;
     use std::io::Write;
     use std::time::Duration;
@@ -1216,5 +1230,57 @@ mod tests {
                 TurnWatchdogOutcome::Break => panic!("idle watchdog should not break"),
             }
         }
+    }
+
+    #[test]
+    fn normalize_user_message_preserves_qwen_prompt_text() {
+        let events = normalize_user_message(&json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "typed over ssh" }
+                ]
+            }
+        }));
+
+        assert_eq!(
+            events,
+            vec![json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "typed over ssh"
+                    }]
+                }
+            })]
+        );
+    }
+
+    #[test]
+    fn normalize_user_message_preserves_string_qwen_prompt_text() {
+        let events = normalize_user_message(&json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": "typed over ssh"
+            }
+        }));
+
+        assert_eq!(
+            events,
+            vec![json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "typed over ssh"
+                    }]
+                }
+            })]
+        );
     }
 }

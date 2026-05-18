@@ -53,6 +53,19 @@ fn jsonl_tail_contains_ready_for_input_sentinel(output_path: &str) -> bool {
     String::from_utf8_lossy(&buf).contains(&needle)
 }
 
+fn observe_qwen_user_prompts_in_buffer(
+    buffer: &str,
+    provider: &crate::services::provider::ProviderKind,
+    tmux_session_name: &str,
+) {
+    if !matches!(provider, crate::services::provider::ProviderKind::Qwen) {
+        return;
+    }
+    for line in buffer.lines() {
+        let _ = crate::services::qwen::observe_qwen_user_prompt_line(line, Some(tmux_session_name));
+    }
+}
+
 /// #2427 D/A wires — emit an explicit-signal inflight cleanup attempt.
 ///
 /// Used by the TurnCompleted broadcast and the dead-pane post-mortem
@@ -1188,6 +1201,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
         // Process any complete lines we already have
         let initial_buffer_len = all_data.len();
+        observe_qwen_user_prompts_in_buffer(&all_data, &watcher_provider, &tmux_session_name);
         let initial_outcome = process_watcher_lines(
             &mut all_data,
             &mut state,
@@ -1363,6 +1377,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         all_data.push_str(&String::from_utf8_lossy(&chunk));
                         let chunk_buffer_start_offset = all_data_start_offset;
                         let chunk_buffer_len = all_data.len();
+                        observe_qwen_user_prompts_in_buffer(
+                            &all_data,
+                            &watcher_provider,
+                            &tmux_session_name,
+                        );
                         let outcome = process_watcher_lines(
                             &mut all_data,
                             &mut state,

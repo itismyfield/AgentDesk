@@ -313,6 +313,21 @@ pub fn extract_codex_rollout_user_prompt(json: &Value) -> Option<String> {
     extract_message_content_text(payload)
 }
 
+pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
+    if json.get("type").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    let message = json.get("message")?;
+    if message
+        .get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role != "user")
+    {
+        return None;
+    }
+    extract_message_content_text(message)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptObservation {
     PublishedSshDirect,
@@ -725,5 +740,41 @@ mod tests {
             extract_codex_rollout_user_prompt(&json).as_deref(),
             Some("hello\nworld")
         );
+    }
+
+    #[test]
+    fn extracts_qwen_jsonl_user_message_text() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "hello" },
+                    { "type": "text", "text": "world" }
+                ]
+            }
+        });
+
+        assert_eq!(
+            extract_qwen_jsonl_user_prompt(&json).as_deref(),
+            Some("hello\nworld")
+        );
+    }
+
+    #[test]
+    fn ignores_qwen_tool_result_user_messages() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "content": "done",
+                    "is_error": false
+                }]
+            }
+        });
+
+        assert_eq!(extract_qwen_jsonl_user_prompt(&json), None);
     }
 }
