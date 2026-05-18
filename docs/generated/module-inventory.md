@@ -650,5 +650,5 @@
 | `voice::tts::chunks` | `src/voice/tts/chunks.rs` | 182 |  |
 | `voice::tts::edge` | `src/voice/tts/edge.rs` | 356 |  |
 | `voice::tts::playback` | `src/voice/tts/playback.rs` | 258 |  |
-| `voice::turn_link` | `src/voice/turn_link.rs` | 1282 | giant-file |
+| `voice::turn_link` | `src/voice/turn_link.rs` | 2136 | giant-file |
 | `voice::utils` | `src/voice/utils.rs` | 77 |  |
