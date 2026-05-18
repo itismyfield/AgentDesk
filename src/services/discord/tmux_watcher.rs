@@ -643,68 +643,6 @@ fn session_bound_relay_should_own_terminal_delivery(
         )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn claim_session_bound_terminal_delivery_inflight_if_missing(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    channel_name: Option<String>,
-    tmux_session_name: &str,
-    output_path: &str,
-    input_fifo_path: Option<&str>,
-    session_id: Option<&str>,
-    turn_start_offset: u64,
-    last_offset: u64,
-    task_notification_kind: Option<TaskNotificationKind>,
-) -> Option<crate::services::discord::inflight::InflightTurnState> {
-    if let Some(existing) =
-        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
-    {
-        return Some(existing);
-    }
-
-    let mut claim = crate::services::discord::inflight::InflightTurnState::new(
-        provider.clone(),
-        channel_id.get(),
-        channel_name,
-        0,
-        0,
-        0,
-        format!("Pane-bound terminal output from {tmux_session_name}"),
-        session_id.map(str::to_string),
-        Some(tmux_session_name.to_string()),
-        Some(output_path.to_string()),
-        input_fifo_path
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .map(str::to_string),
-        last_offset,
-    );
-    claim.turn_start_offset = Some(turn_start_offset);
-    claim.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
-    claim.task_notification_kind = task_notification_kind;
-    claim.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
-    claim.last_watcher_relayed_offset = Some(turn_start_offset);
-    claim.last_watcher_relayed_generation_mtime_ns =
-        Some(read_generation_file_mtime_ns(tmux_session_name));
-
-    match crate::services::discord::inflight::save_inflight_state_create_new(&claim) {
-        Ok(()) => Some(claim),
-        Err(crate::services::discord::inflight::CreateNewInflightError::AlreadyExists) => {
-            crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
-        }
-        Err(crate::services::discord::inflight::CreateNewInflightError::Internal(error)) => {
-            tracing::warn!(
-                provider = provider.as_str(),
-                channel = channel_id.get(),
-                tmux_session = %tmux_session_name,
-                error = %error,
-                "failed to claim session-bound terminal delivery inflight"
-            );
-            crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
-        }
-    }
-}
-
 #[cfg(test)]
 mod matched_session_jsonl_gate_tests {
     use super::*;
@@ -959,7 +897,7 @@ mod matched_session_jsonl_gate_tests {
             tmux_session_name,
         ));
         assert!(
-            !session_bound_relay_should_own_terminal_delivery(
+            session_bound_relay_should_own_terminal_delivery(
                 true,
                 true,
                 true,
@@ -967,7 +905,7 @@ mod matched_session_jsonl_gate_tests {
                 None,
                 tmux_session_name,
             ),
-            "missing inflight must be claimed before the session relay sink owns delivery"
+            "matched session binding is enough for session relay ownership; inflight only selects edit metadata"
         );
 
         state.rebind_origin = false;
@@ -1074,6 +1012,13 @@ fn watcher_commit_should_advance_runtime_binding(terminal_output_committed: bool
     terminal_output_committed
 }
 
+fn missing_inflight_after_session_bound_delivery(
+    inflight_missing: bool,
+    session_bound_relay_delivered: bool,
+) -> bool {
+    inflight_missing && !session_bound_relay_delivered
+}
+
 #[cfg(test)]
 mod runtime_binding_offset_tests {
     use super::*;
@@ -1086,6 +1031,13 @@ mod runtime_binding_offset_tests {
     #[test]
     fn uncommitted_watcher_output_does_not_advance_runtime_binding() {
         assert!(!watcher_commit_should_advance_runtime_binding(false));
+    }
+
+    #[test]
+    fn acknowledged_session_bound_delivery_is_not_missing_inflight_fallback() {
+        assert!(!missing_inflight_after_session_bound_delivery(true, true));
+        assert!(missing_inflight_after_session_bound_delivery(true, false));
+        assert!(!missing_inflight_after_session_bound_delivery(false, false));
     }
 }
 
@@ -3384,38 +3336,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let relay_producer_session_name = cached_relay_producer
             .as_ref()
             .map(|producer| producer.session_name());
-        let mut session_bound_delivery_inflight = inflight_before_relay.clone();
-        if relay_decision.should_direct_send
-            && session_bound_discord_delivery_enabled
-            && session_bound_relay_turn_fully_mirrored
-            && relay_producer_session_name == Some(tmux_session_name.as_str())
-            && session_bound_delivery_inflight.is_none()
-        {
-            session_bound_delivery_inflight =
-                claim_session_bound_terminal_delivery_inflight_if_missing(
-                    &watcher_provider,
-                    channel_id,
-                    if watcher_channel_name.trim().is_empty() {
-                        None
-                    } else {
-                        Some(watcher_channel_name.clone())
-                    },
-                    &tmux_session_name,
-                    &output_path,
-                    Some(input_fifo_path.as_str()),
-                    state.last_session_id.as_deref(),
-                    turn_data_start_offset,
-                    current_offset,
-                    task_notification_kind,
-                );
-        }
         let session_bound_relay_owns_terminal_delivery =
             if session_bound_relay_should_own_terminal_delivery(
                 relay_decision.should_direct_send,
                 session_bound_discord_delivery_enabled,
                 session_bound_relay_turn_fully_mirrored,
                 relay_producer_session_name,
-                session_bound_delivery_inflight.as_ref(),
+                inflight_before_relay.as_ref(),
                 &tmux_session_name,
             ) {
                 let ack_outcome = wait_for_session_bound_relay_delivery_ack(
@@ -4396,8 +4323,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             tracing::warn!("  [{ts}] ⚠ watcher: relay failed — preserving inflight for retry");
         }
 
+        let inflight_missing_for_fallback = missing_inflight_after_session_bound_delivery(
+            inflight_state.is_none(),
+            session_bound_relay_owns_terminal_delivery,
+        );
         let tmux_alive_for_missing_inflight =
-            if inflight_state.is_none() && resolved_did.is_none() && terminal_output_committed {
+            if inflight_missing_for_fallback && resolved_did.is_none() && terminal_output_committed
+            {
                 probe_tmux_session_liveness(&tmux_session_name).await
             } else {
                 true
@@ -4412,7 +4344,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             )
         });
         let missing_inflight_plan = missing_inflight_fallback_observation(
-            inflight_state.is_none(),
+            inflight_missing_for_fallback,
             resolved_did.is_some(),
             terminal_output_committed,
             recent_turn_stop.is_some(),

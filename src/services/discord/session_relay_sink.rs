@@ -1,15 +1,14 @@
 //! Discord [`RelaySink`] for the session-bound `StreamRelay` path.
 //!
 //! `tmux_watcher` remains the tmux file reader / producer, but when the
-//! supervisor has a matched session and the inflight row says a session-bound
-//! relay owner is valid (`rebind_origin` or `RelayOwnerKind::Watcher`), this
-//! sink performs the terminal Discord write. The watcher then treats terminal
-//! delivery as delegated instead of sending directly.
+//! supervisor has a matched session, this sink performs the terminal Discord
+//! write. Inflight state only selects placeholder-edit metadata; a missing
+//! inflight is still a valid pane-bound new-message route. The watcher then
+//! treats terminal delivery as delegated instead of sending directly.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serenity::model::id::{ChannelId, MessageId};
@@ -38,7 +37,7 @@ pub(in crate::services::discord) fn session_bound_discord_relay_can_own_terminal
         return false;
     }
     let Some(state) = inflight else {
-        return false;
+        return true;
     };
     if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
         return false;
@@ -121,9 +120,7 @@ impl SessionBoundDiscordRelaySink {
             ))
         })?;
 
-        let inflight =
-            wait_for_session_bound_delivery_inflight(&provider, channel_id, &delivery.session_name)
-                .await;
+        let inflight = super::inflight::load_inflight_state(&provider, channel_id);
         let route =
             session_bound_terminal_delivery_route(inflight.as_ref(), &delivery.session_name);
         let Some(route) = route else {
@@ -392,38 +389,6 @@ fn merge_task_notification_kind(
     }
 }
 
-async fn wait_for_session_bound_delivery_inflight(
-    provider: &ProviderKind,
-    channel_id: u64,
-    tmux_session_name: &str,
-) -> Option<InflightTurnState> {
-    for attempt in 0..10 {
-        let inflight = super::inflight::load_inflight_state(provider, channel_id);
-        if should_return_session_bound_delivery_inflight(
-            inflight.as_ref(),
-            tmux_session_name,
-            attempt,
-            10,
-        ) {
-            return inflight;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    None
-}
-
-fn should_return_session_bound_delivery_inflight(
-    inflight: Option<&InflightTurnState>,
-    _tmux_session_name: &str,
-    attempt: usize,
-    max_attempts: usize,
-) -> bool {
-    if inflight.is_none() {
-        return attempt + 1 >= max_attempts;
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,7 +446,7 @@ mod tests {
             Some(&bridge_owned),
             tmux
         ));
-        assert!(!session_bound_discord_relay_can_own_terminal_delivery(
+        assert!(session_bound_discord_relay_can_own_terminal_delivery(
             None, tmux
         ));
         assert!(!session_bound_discord_relay_can_own_terminal_delivery(
@@ -558,39 +523,6 @@ mod tests {
             session_bound_terminal_delivery_route(Some(&watcher_owned), "AgentDesk-claude-other"),
             None
         );
-    }
-
-    #[test]
-    fn wait_helper_waits_for_missing_inflight_but_returns_existing_owner_shape() {
-        let tmux = "AgentDesk-claude-relay-test";
-        let bridge_owned = inflight_for(tmux, RelayOwnerKind::None, false);
-        assert!(should_return_session_bound_delivery_inflight(
-            Some(&bridge_owned),
-            tmux,
-            0,
-            3,
-        ));
-        assert!(should_return_session_bound_delivery_inflight(
-            Some(&bridge_owned),
-            tmux,
-            2,
-            3,
-        ));
-
-        assert!(!should_return_session_bound_delivery_inflight(
-            None, tmux, 0, 3,
-        ));
-        assert!(should_return_session_bound_delivery_inflight(
-            None, tmux, 2, 3,
-        ));
-
-        let watcher_owned = inflight_for(tmux, RelayOwnerKind::Watcher, false);
-        assert!(should_return_session_bound_delivery_inflight(
-            Some(&watcher_owned),
-            tmux,
-            0,
-            3,
-        ));
     }
 
     #[test]
