@@ -150,7 +150,7 @@
 | `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 1130 | giant-file |
 | `engine::ops::kv_ops` | `src/engine/ops/kv_ops.rs` | 211 |  |
 | `engine::ops::log_ops` | `src/engine/ops/log_ops.rs` | 39 |  |
-| `engine::ops::message_ops` | `src/engine/ops/message_ops.rs` | 241 |  |
+| `engine::ops::message_ops` | `src/engine/ops/message_ops.rs` | 233 |  |
 | `engine::ops::pipeline_ops` | `src/engine/ops/pipeline_ops.rs` | 225 |  |
 | `engine::ops::quality_ops` | `src/engine/ops/quality_ops.rs` | 95 |  |
 | `engine::ops::queue_ops` | `src/engine/ops/queue_ops.rs` | 202 |  |

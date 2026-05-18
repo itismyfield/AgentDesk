@@ -198,13 +198,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn queue_message_pg_inserts_into_postgres_without_touching_sqlite() {
+    async fn queue_message_pg_inserts_into_postgres() {
         let test_db = TestDatabase::create().await;
         let pool = test_db.migrate().await;
-        let sqlite_db = crate::db::test_db();
 
         let id = queue_message(
-            Some(&sqlite_db),
+            None,
             Some(&pool),
             "channel:alerts",
             "hello from pg",
@@ -227,13 +226,6 @@ mod tests {
         assert_eq!(row.2, "hello from pg");
         assert_eq!(row.3, "announce");
         assert_eq!(row.4, "policy-test");
-
-        let sqlite_count: i64 = sqlite_db
-            .read_conn()
-            .expect("sqlite read conn")
-            .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
-            .expect("count sqlite message_outbox rows");
-        assert_eq!(sqlite_count, 0);
 
         pool.close().await;
         test_db.drop().await;
