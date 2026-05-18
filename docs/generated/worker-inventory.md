@@ -21,13 +21,13 @@
                 cannot stomp each other's entries. Boot reconcile runs immediately; subsequent \
                 polls every 10s. External request_discovery_tick() nudges fire an immediate tick \
                 for E3 event hooks. |
-| watcher_supervisor_loop | `tokio::spawn` | `services::cluster::watcher_supervisor::run_watcher_supervisor_loop` | `src/server/worker_registry.rs:377` | stage=after_boot_reconcile; order=67; restart=loop_owned; shutdown=runtime_shutdown; owner=server::worker_registry; health=watcher-supervisor tracing + per-relay metrics; responsibility=Spawn/teardown session-bound StreamRelay tasks in response to SessionRegistry events; Epic #2285 / E3 (#2345), wired through E4 (#2411) and E5 (#2412). Gated by \
+| watcher_supervisor_loop | `tokio::spawn` | `services::discord::run_session_bound_discord_relay_supervisor` | `src/server/worker_registry.rs:377` | stage=after_boot_reconcile; order=67; restart=loop_owned; shutdown=runtime_shutdown; owner=server::worker_registry; health=watcher-supervisor tracing + per-relay metrics; responsibility=Spawn/teardown session-bound StreamRelay tasks in response to SessionRegistry events; Epic #2285 / E3 (#2345), wired through E4 (#2411) and E5 (#2412). Gated by \
                 cluster.session_bound_relay_enabled (default true since E5); flipping the flag \
-                off restores the legacy turn-bound watcher as the sole delivery path. \
+                off restores the legacy watcher as the sole terminal delivery path. \
                 Worker-local because tmux is host-scoped — relays live next to the sessions \
-                they observe. Uses RegistryAdapterSink (observation-only) so flag-on activation \
-                does not double-deliver alongside the still-active legacy tmux watcher. E5 wires \
-                the producer side via RelayProducerRegistry so tmux_watcher pushes every chunk \
-                it reads into the supervisor-owned relay — the new path is no longer dark. A \
-                follow-up issue swaps the legacy spawn site for direct sink-driven delivery. |
+                they observe. Production wires a Discord RelaySink that parses provider JSONL \
+                frames and owns Discord terminal delivery for eligible session-bound inflight \
+                shapes (rebind-origin/adopted sessions and watcher-owned relays). The legacy \
+                watcher remains a fallback for bridge-owned/no-inflight envelopes and for \
+                runtimes without a HealthRegistry. |
 | spawn_batch_flusher | `spawn helper` | `ws::spawn_batch_flusher` | `src/server/worker_registry.rs:400` | stage=after_websocket_broadcast; order=70; restart=loop_owned; shutdown=runtime_shutdown; owner=server::worker_registry; health=websocket broadcast throughput and tracing logs; responsibility=Flush deduplicated websocket events into the shared broadcast channel; Starts after the broadcast sender exists because it owns the shared batch buffer |

@@ -36,14 +36,12 @@
 //! When `false`, the supervisor is not started by the worker registry and
 //! the legacy turn-bound relay path remains the only delivery channel —
 //! that escape hatch lets operators disable the new path if a regression
-//! surfaces. Under the default-on configuration the supervisor runs against
-//! the production observation sink
-//! ([`super::registry_adapter_sink::RegistryAdapterSink`]) and the
-//! production tmux frame producer (`services::discord::tmux_watcher`)
-//! pushes frames into the supervisor-owned relay via
-//! [`super::relay_producer_registry::RelayProducerRegistry`]. The legacy
-//! turn-bound watcher still owns Discord delivery; the new path is
-//! observation-only until a later issue swaps the legacy spawn site.
+//! surfaces. Under the default-on configuration the production worker wires a
+//! Discord sink and the production tmux frame producer
+//! (`services::discord::tmux_watcher`) pushes frames into the supervisor-owned
+//! relay via [`super::relay_producer_registry::RelayProducerRegistry`]. The
+//! metrics-only [`super::registry_adapter_sink::RegistryAdapterSink`] remains
+//! available for tests/fallback runtimes without Discord state.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -130,8 +128,8 @@ impl ActiveRelays {
 /// `producers` is the side-table that exposes a clonable
 /// [`super::stream_relay::RelayProducer`] keyed by tmux session name. The
 /// production tmux frame producer (`tmux_watcher`) looks up its session
-/// there; E5 (#2412) wires this up so the supervisor-owned relay actually
-/// receives frames instead of being a dark pipe (see issue body).
+/// there so the supervisor-owned relay receives the provider stream frames
+/// consumed by the configured sink.
 fn apply_change(
     active: &mut ActiveRelays,
     change: &RegistryChange,

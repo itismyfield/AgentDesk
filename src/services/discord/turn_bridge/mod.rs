@@ -271,7 +271,7 @@ fn json_any_true_flag(value: &serde_json::Value, key: &str) -> bool {
 /// turns. Since voice-background routing was first merged in #2207
 /// (immediate predecessor of this fix), there are no long-running
 /// in-flight turns to migrate. The hard cutover is safe.
-fn is_voice_background_handoff_prompt(user_msg_id: MessageId, _text: &str) -> bool {
+fn has_voice_background_handoff_marker(user_msg_id: MessageId, _text: &str) -> bool {
     crate::voice::announce_meta::global_store()
         .get_handoff(user_msg_id)
         .is_some()
@@ -493,7 +493,7 @@ async fn voice_background_completion_target(
 #[cfg(test)]
 mod dispatch_kind_tests {
     use super::{
-        classify_turn_finished_dispatch_kind, is_voice_background_handoff_prompt,
+        classify_turn_finished_dispatch_kind, has_voice_background_handoff_marker,
         voice_background_completion_target,
     };
     use poise::serenity_prelude::{ChannelId, MessageId};
@@ -555,15 +555,15 @@ mod dispatch_kind_tests {
     #[test]
     fn handoff_prompt_classification_requires_typed_marker() {
         let user_msg_id = MessageId::new(7_000_001);
-        assert!(!is_voice_background_handoff_prompt(
+        assert!(!has_voice_background_handoff_marker(
             user_msg_id,
             "보이스 foreground가 이 요청을 백그라운드 에이전트로 이관했다.\n\n이관 요약: 로그 확인"
         ));
-        assert!(!is_voice_background_handoff_prompt(
+        assert!(!has_voice_background_handoff_marker(
             MessageId::new(7_000_002),
             "Voice foreground handed this request to the background agent.\n\nHandoff summary: check logs"
         ));
-        assert!(!is_voice_background_handoff_prompt(
+        assert!(!has_voice_background_handoff_marker(
             MessageId::new(7_000_003),
             "일반 텍스트 요청"
         ));
@@ -582,7 +582,7 @@ mod dispatch_kind_tests {
                 local_only_fallback: false,
             },
         );
-        assert!(is_voice_background_handoff_prompt(
+        assert!(has_voice_background_handoff_marker(
             user_msg_id,
             "user-controlled body that does not match any prefix",
         ));

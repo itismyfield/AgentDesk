@@ -49,7 +49,7 @@ struct StoredVoiceTranscriptAnnouncement {
 /// into the foreground voice channel.
 ///
 /// This replaces the user-controllable Korean-prefix substring match that
-/// `is_voice_background_handoff_prompt` previously used (issue #2236).
+/// the old voice-background handoff prompt classifier used (issue #2236).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VoiceBackgroundHandoffMeta {
     /// Voice channel that originated the handoff (where the spoken summary

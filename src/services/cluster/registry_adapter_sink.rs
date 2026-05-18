@@ -1,33 +1,23 @@
-//! `RegistryAdapterSink` — production [`RelaySink`] for the
-//! [`WatcherSupervisor`] (E3) that bridges the session-bound relay path into
-//! the existing turn-bound Discord delivery infrastructure.
+//! `RegistryAdapterSink` — metrics-only [`RelaySink`] for tests and fallback
+//! [`WatcherSupervisor`] runs.
 //!
 //! Epic #2285 / E4 (issue #2346).
 //!
-//! # Why a bridge, not a replacement
+//! # Why this still exists
 //!
 //! E3 (#2345 / #2408) landed the session-bound relay infrastructure
-//! (`SessionRegistry` → `WatcherSupervisor` → `StreamRelay`) alongside the
-//! legacy turn-bound watcher (`services::discord::tmux_watcher`). Both paths
-//! observe the same tmux sessions; only the legacy watcher currently performs
-//! Discord delivery.
-//!
-//! Replacing the 3.3kloc tmux watcher with a session-bound delivery pipeline
-//! is a major surface change that must land in stages (subsequent issues in
-//! epic #2285). E4 explicitly keeps the legacy delivery path as the fallback
-//! and ships the supervisor + relay lifecycle in production with this
-//! *observation-only* sink. Concretely, this sink:
+//! (`SessionRegistry` → `WatcherSupervisor` → `StreamRelay`) with a small
+//! cluster-local sink so the supervisor/producer wiring could be tested
+//! without Discord runtime state. E4 (#2346) production now wires the
+//! supervisor through `services::discord::session_relay_sink`, which performs
+//! Discord terminal delivery for eligible session-bound inflight shapes.
+//! This sink remains useful for fallback runtimes without a `HealthRegistry`
+//! and for tests that only need to prove frames flow through the relay:
 //!
 //! 1. Acknowledges every frame so the relay loop never blocks.
 //! 2. Records per-session frame counts (lock-free atomics) for telemetry
 //!    and for the e2e test that verifies end-to-end wiring.
-//! 3. Does **NOT** write to Discord — the legacy tmux watcher remains the
-//!    sole delivery owner for the duration of the flag-flip release.
-//!
-//! When the legacy spawn site is migrated (follow-up issue), the sink can be
-//! extended to perform Discord delivery directly. Until then, flipping
-//! `cluster.session_bound_relay_enabled = true` is safe: it only activates
-//! observation infrastructure that already passes its E3 test suite.
+//! 3. Never writes to Discord.
 //!
 //! # Why this lives in `services::cluster`
 //!
@@ -45,8 +35,8 @@ use async_trait::async_trait;
 use super::stream_relay::{RelaySink, RelaySinkError, StreamFrame};
 use super::watcher_supervisor::{SupervisorConfig, run_watcher_supervisor_loop};
 
-/// Observation-only [`RelaySink`] used in production when
-/// `cluster.session_bound_relay_enabled = true`. See module docs.
+/// Metrics-only [`RelaySink`] used by tests and by runtimes that cannot build
+/// the Discord sink. See module docs.
 #[derive(Debug, Default)]
 pub struct RegistryAdapterSink {
     frames_total: AtomicU64,
@@ -101,27 +91,22 @@ impl RelaySink for RegistryAdapterSink {
             entry.frames_observed = entry.frames_observed.saturating_add(1);
             entry.last_sequence = frame.sequence;
         }
-        // E4 stance: legacy tmux_watcher remains the delivery owner. We
-        // intentionally do NOT echo `frame.payload` anywhere — emitting it
-        // would risk duplicate Discord delivery while the legacy spawn site
-        // is still active. Subsequent issues in epic #2285 will swap this
-        // for a real Discord adapter once the legacy spawn site is gated
-        // off.
+        // Metrics fallback: intentionally do not echo `frame.payload` here.
+        // Production Discord delivery is implemented by
+        // services::discord::session_relay_sink.
         tracing::trace!(
             session = %frame.session_name,
             channel_id = %frame.binding.channel_id,
             provider = frame.binding.provider.as_str(),
             sequence = frame.sequence,
-            "registry-adapter-sink: observed frame (delivery deferred to legacy watcher)"
+            "registry-adapter-sink: counted frame"
         );
         Ok(())
     }
 }
 
-/// Convenience entry-point wired by `worker_registry` when the
-/// `cluster.session_bound_relay_enabled` flag is on. Runs the supervisor
-/// against a single shared [`RegistryAdapterSink`] so cumulative counters are
-/// available globally for diagnostics.
+/// Convenience entry-point for tests/fallback runtimes. Production worker
+/// registration prefers the Discord sink.
 pub async fn run_with_registry_adapter_sink(shutdown: Arc<AtomicBool>) {
     let sink: Arc<dyn RelaySink> = Arc::new(RegistryAdapterSink::new());
     run_watcher_supervisor_loop(SupervisorConfig::default(), sink, shutdown).await;

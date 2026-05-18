@@ -725,7 +725,11 @@ mod tests {
 
         let frames = [
             r#"{"type":"message","content":"hello"}"#,
+            r#"{"type":"task_notification","kind":"monitor_auto_turn"}"#,
+            r#"{"type":"task_notification","kind":"background"}"#,
             r#"{"type":"tool_use","name":"Task","input":{"prompt":"sub-agent"}}"#,
+            r#"{"type":"task_notification","kind":"subagent"}"#,
+            r#"{"type":"inflight","rebind_origin":true,"user_msg_id":0,"current_msg_id":0}"#,
             r#"{"type":"message","content":"intermediate done"}"#,
             r#"{"type":"thinking","content":"..."}"#,
             r#"{"type":"message","content":"final after sub-agent"}"#,

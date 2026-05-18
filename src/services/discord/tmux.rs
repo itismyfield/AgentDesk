@@ -380,40 +380,25 @@ fn terminal_relay_decision(
     task_notification_kind: Option<TaskNotificationKind>,
     assistant_text_seen: bool,
 ) -> TerminalRelayDecision {
-    match task_notification_kind {
-        Some(TaskNotificationKind::MonitorAutoTurn) => TerminalRelayDecision {
-            should_direct_send: has_assistant_response,
-            should_tag_monitor_origin: has_assistant_response,
-            should_enqueue_notify_outbox: false,
-            suppressed: !has_assistant_response,
-        },
-        Some(TaskNotificationKind::Background) => TerminalRelayDecision {
-            // Background task_notification marks that a background event (Monitor
-            // completion, task_complete, etc.) fired during the turn. The response
-            // after that event is user-facing content and must reach Discord.
-            // Historical behavior suppressed the whole terminal relay, which
-            // caused #1044 A→C: user messages streamed after the tag were lost.
-            should_direct_send: has_assistant_response,
-            should_tag_monitor_origin: false,
-            should_enqueue_notify_outbox: false,
-            suppressed: !has_assistant_response,
-        },
-        Some(TaskNotificationKind::Subagent) => TerminalRelayDecision {
-            // A pure subagent completion only has the task notification/result
-            // fallback and must stay internal. If the parent turn emits real
-            // assistant text after the child closes, that text is user-facing
-            // and must be relayed.
-            should_direct_send: has_assistant_response && assistant_text_seen,
-            should_tag_monitor_origin: false,
-            should_enqueue_notify_outbox: false,
-            suppressed: !(has_assistant_response && assistant_text_seen),
-        },
-        None => TerminalRelayDecision {
-            should_direct_send: has_assistant_response,
-            should_tag_monitor_origin: false,
-            should_enqueue_notify_outbox: false,
-            suppressed: false,
-        },
+    let is_task_notification = task_notification_kind.is_some();
+    let has_user_visible_assistant_text = if is_task_notification {
+        // Task-notification routing is source-neutral: monitor/background/
+        // subagent events all relay only when the session buffer/inflight
+        // state has user-visible assistant text. The kind remains available
+        // for audit/format decoration, not for deciding relay lifetime.
+        has_assistant_response && assistant_text_seen
+    } else {
+        has_assistant_response
+    };
+
+    TerminalRelayDecision {
+        should_direct_send: has_user_visible_assistant_text,
+        should_tag_monitor_origin: matches!(
+            task_notification_kind,
+            Some(TaskNotificationKind::MonitorAutoTurn)
+        ) && has_user_visible_assistant_text,
+        should_enqueue_notify_outbox: false,
+        suppressed: is_task_notification && !has_user_visible_assistant_text,
     }
 }
 
@@ -2346,7 +2331,7 @@ pub(super) use self::tmux_watcher::{
 };
 #[path = "tmux_output_stream.rs"]
 mod tmux_output_stream;
-pub(super) use self::tmux_output_stream::{
+pub(in crate::services::discord) use self::tmux_output_stream::{
     WatcherToolState, build_watcher_placeholder_status_block, flush_placeholder_live_events,
     force_next_watcher_status_update, process_watcher_lines,
 };
@@ -5296,11 +5281,20 @@ mod tests {
     }
 
     #[test]
-    fn terminal_relay_decision_suppresses_internal_task_notifications_without_notify_outbox() {
+    fn terminal_relay_decision_uses_visible_text_for_task_notifications() {
         assert_eq!(
             terminal_relay_decision(true, None, true),
             super::TerminalRelayDecision {
                 should_direct_send: true,
+                should_tag_monitor_origin: false,
+                should_enqueue_notify_outbox: false,
+                suppressed: false,
+            }
+        );
+        assert_eq!(
+            terminal_relay_decision(false, None, false),
+            super::TerminalRelayDecision {
+                should_direct_send: false,
                 should_tag_monitor_origin: false,
                 should_enqueue_notify_outbox: false,
                 suppressed: false,
@@ -5313,6 +5307,15 @@ mod tests {
                 should_tag_monitor_origin: true,
                 should_enqueue_notify_outbox: false,
                 suppressed: false,
+            }
+        );
+        assert_eq!(
+            terminal_relay_decision(true, Some(TaskNotificationKind::MonitorAutoTurn), false),
+            super::TerminalRelayDecision {
+                should_direct_send: false,
+                should_tag_monitor_origin: false,
+                should_enqueue_notify_outbox: false,
+                suppressed: true,
             }
         );
         assert_eq!(
@@ -5342,8 +5345,15 @@ mod tests {
                 suppressed: false,
             }
         );
-        // Background kind with assistant response = user-facing content after a
-        // mid-turn background event (e.g. Monitor completion). Must relay (#1058).
+        assert_eq!(
+            terminal_relay_decision(true, Some(TaskNotificationKind::Background), false),
+            super::TerminalRelayDecision {
+                should_direct_send: false,
+                should_tag_monitor_origin: false,
+                should_enqueue_notify_outbox: false,
+                suppressed: true,
+            }
+        );
         assert_eq!(
             terminal_relay_decision(true, Some(TaskNotificationKind::Background), true),
             super::TerminalRelayDecision {
@@ -5353,8 +5363,6 @@ mod tests {
                 suppressed: false,
             }
         );
-        // Background kind without any assistant response = only the tag arrived,
-        // nothing to show user. Suppress.
         assert_eq!(
             terminal_relay_decision(false, Some(TaskNotificationKind::Background), false),
             super::TerminalRelayDecision {

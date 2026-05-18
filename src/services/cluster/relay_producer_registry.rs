@@ -3,10 +3,9 @@
 //!
 //! Epic #2285 / E5 (issue #2412). E3 (#2408) shipped the supervisor that
 //! owns one [`super::stream_relay::StreamRelayHandle`] per matched session,
-//! and E4 (#2411) wired the sink side via
-//! [`super::registry_adapter_sink::RegistryAdapterSink`]. Neither, however,
-//! gave the **production tmux frame producer** (`services::discord::
-//! tmux_watcher`) any way to push frames into those relays:
+//! and E4 (#2411/#2346) wires the sink side through Discord delivery. The
+//! missing piece before E5 was giving the **production tmux frame producer**
+//! (`services::discord::tmux_watcher`) a way to push frames into those relays:
 //! `StreamRelayHandle` owns a `JoinHandle` and cannot be cloned, and the
 //! supervisor's `ActiveRelays` map is private to the supervisor loop.
 //!
@@ -22,10 +21,9 @@
 //! bookkeeping, pause/resume gating, and TUI completion gating out of the
 //! per-turn watcher. E5's contract is more modest: keep the existing tmux
 //! consumer in place, but **also** mirror its output into the
-//! supervisor-owned relay so the new path stops being dark. The legacy
-//! delivery sink remains the source of truth for Discord output; the
-//! supervisor-owned relay observes via [`RegistryAdapterSink`] until later
-//! issues swap the legacy spawn site for direct sink-driven delivery.
+//! supervisor-owned relay so session-bound sinks can consume the same stream.
+//! Production now uses that relay for Discord terminal delivery when inflight
+//! metadata marks the session-bound relay as the delivery owner.
 //!
 //! # Concurrency
 //!

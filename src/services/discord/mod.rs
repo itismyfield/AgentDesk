@@ -40,6 +40,8 @@ mod relay_health;
 mod relay_recovery;
 pub(crate) mod response_sanitizer;
 #[cfg(unix)]
+mod session_relay_sink;
+#[cfg(unix)]
 mod standby_relay;
 // #1074: landing zone for the future recovery-engine module split
 // (restart / runtime / manual_rebind). See `docs/recovery-paths.md`.
@@ -87,6 +89,8 @@ pub(crate) use meeting_orchestrator as meeting;
 pub(in crate::services::discord) use recovery_engine as recovery;
 pub(crate) use restart_mode::InflightRestartMode;
 pub(crate) use router::HeadlessTurnStartError;
+#[cfg(unix)]
+pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
 // Phase 2-pre.3 of intake-node-routing: worker entry point. Phase 3 will
 // add the worker polling loop that imports these names; until then they
 // are intentionally exposed but unused at the crate boundary.

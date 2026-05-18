@@ -853,15 +853,16 @@ pub struct ClusterConfig {
     pub semaphores: BTreeMap<String, ClusterSemaphoreConfig>,
     /// Epic #2285 / E3 + E4 + E5 gate. When `true` (default since E5 / #2412),
     /// the session-bound `WatcherSupervisor` + `StreamRelay` infrastructure runs
-    /// in production against the observation-only `RegistryAdapterSink`, AND
-    /// the production tmux frame producer (`services::discord::tmux_watcher`)
-    /// pushes every chunk it reads into the supervisor-owned relay via
-    /// `RelayProducerRegistry`. The legacy per-turn tmux watcher remains the
-    /// authoritative Discord delivery path; subsequent epic #2285 issues
-    /// migrate the turn-bound spawn sites to consume from the supervisor
-    /// directly. Setting the flag to `false` skips the supervisor entirely and
-    /// the producer-side lookups become silent no-ops (the registry stays
-    /// empty), restoring pre-E5 behavior.
+    /// in production with a Discord `RelaySink`, and the production tmux frame
+    /// producer (`services::discord::tmux_watcher`) pushes every chunk it reads
+    /// into the supervisor-owned relay via `RelayProducerRegistry`. The
+    /// session-bound sink owns Discord terminal delivery for eligible inflight
+    /// shapes (rebind-origin/adopted sessions and watcher-owned relays); the
+    /// legacy watcher remains a fallback for bridge-owned/no-inflight envelopes
+    /// and runtimes that have no Discord health registry. Setting the flag to
+    /// `false` skips the supervisor entirely and the producer-side lookups
+    /// become silent no-ops (the registry stays empty), restoring pre-E5
+    /// behavior.
     #[serde(default = "default_session_bound_relay_enabled")]
     pub session_bound_relay_enabled: bool,
 }
@@ -1657,15 +1658,12 @@ fn default_cluster_lease_ttl_secs() -> u64 {
     30
 }
 fn default_session_bound_relay_enabled() -> bool {
-    // Epic #2285 / E5 (#2412): flipped to `true` now that the production
-    // tmux frame producer (`services::discord::tmux_watcher`) actually
-    // pushes frames into the supervisor-owned StreamRelay via
-    // `RelayProducerRegistry`. Before E5 the supervisor was a dark pipe —
-    // every chunk read off the tmux output file is now mirrored into the
-    // session-bound relay, the legacy turn-bound delivery still owns
-    // Discord output (`RegistryAdapterSink` is observation-only), and the
-    // `/api/cluster/sessions` diagnostic surfaces per-session frame counts
-    // so an unintended zero-frame regression is detectable.
+    // Epic #2285 / E5 (#2412): flipped to `true` once the production tmux
+    // frame producer (`services::discord::tmux_watcher`) pushed frames into
+    // the supervisor-owned StreamRelay via `RelayProducerRegistry`. E4
+    // (#2346) now wires that relay to a Discord sink for session-bound
+    // terminal delivery on eligible inflight shapes, while preserving the
+    // legacy watcher as fallback for bridge-owned/no-inflight envelopes.
     true
 }
 fn default_memory_backend() -> String {
