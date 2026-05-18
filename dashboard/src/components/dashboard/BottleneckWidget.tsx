@@ -16,6 +16,8 @@ import {
   type BottleneckRow,
   type BottleneckThresholds,
 } from "./dashboardInsights";
+import { StatusBadge } from "../common/StatusBadge";
+import { WidgetState } from "../common/WidgetState";
 
 const BOTTLE_NECK_THRESHOLDS_STORAGE_KEY = STORAGE_KEYS.dashboardBottleneckThresholds;
 
@@ -155,12 +157,13 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
               ? t({ ko: "기준 닫기", en: "Hide thresholds", ja: "基準を閉じる", zh: "收起阈值" })
               : t({ ko: "기준 조정", en: "Tune thresholds", ja: "基準調整", zh: "调整阈值" })}
           </button>
-          <span
-            className="rounded-full px-3 py-1 text-xs font-semibold"
-            style={{ color: "#fca5a5", background: "rgba(239,68,68,0.14)" }}
+          <StatusBadge
+            tone={totalAlerts === 0 ? "healthy" : totalAlerts >= 5 ? "critical" : "warning"}
+            size="sm"
+            pulse={totalAlerts >= 5}
           >
             {totalAlerts} {t({ ko: "경고", en: "alerts", ja: "警告", zh: "警报" })}
-          </span>
+          </StatusBadge>
         </div>
       </div>
 
@@ -212,26 +215,65 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
       ) : null}
 
       {error ? (
-        <div className="mt-4 rounded-2xl border px-3 py-2 text-xs" style={{ borderColor: "rgba(251,191,36,0.28)", background: "rgba(251,191,36,0.12)", color: "#fde68a" }}>
-          {cards.length > 0
-            ? t({
-                ko: `최근 카드 스냅샷을 유지 중이며 새 동기화에 실패했습니다. (${error})`,
-                en: `Keeping the last card snapshot because refresh failed. (${error})`,
-                ja: `最新同期に失敗したため、直近のカードスナップショットを維持しています。(${error})`,
-                zh: `最新同步失败，正在保留最近一次卡片快照。(${error})`,
-              })
-            : t({
-                ko: `칸반 카드를 불러오지 못했습니다. (${error})`,
-                en: `Unable to load kanban cards. (${error})`,
-                ja: `kanban カードを読み込めませんでした。(${error})`,
-                zh: `无法加载 kanban 卡片。(${error})`,
-              })}
+        <div className="mt-4">
+          <WidgetState
+            kind={cards.length > 0 ? "stale" : "error"}
+            compact
+            title={
+              cards.length > 0
+                ? t({
+                    ko: "최근 카드 스냅샷을 유지 중",
+                    en: "Showing the last successful snapshot",
+                    ja: "直近のスナップショットを維持中",
+                    zh: "显示最近一次成功的快照",
+                  })
+                : t({
+                    ko: "칸반 카드를 불러오지 못했습니다",
+                    en: "Unable to load kanban cards",
+                    ja: "kanban カードを読み込めませんでした",
+                    zh: "无法加载 kanban 卡片",
+                  })
+            }
+            description={error}
+          />
         </div>
       ) : null}
 
-      {loading && totalAlerts === 0 ? (
-        <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-          {t({ ko: "운영 병목을 확인하는 중입니다", en: "Scanning bottlenecks", ja: "ボトルネックを確認中", zh: "正在扫描瓶颈" })}
+      {loading && cards.length === 0 ? (
+        <div className="mt-4">
+          <WidgetState
+            kind="loading"
+            title={t({
+              ko: "운영 병목을 확인하는 중",
+              en: "Scanning bottlenecks",
+              ja: "ボトルネックを確認中",
+              zh: "正在扫描瓶颈",
+            })}
+            description={t({
+              ko: "review/rework/blocked 카드 스냅샷을 가져오고 있습니다.",
+              en: "Pulling review/rework/blocked card snapshots.",
+              ja: "review/rework/blocked カードを取得中。",
+              zh: "正在获取 review/rework/blocked 卡片快照。",
+            })}
+          />
+        </div>
+      ) : !loading && !error && cards.length === 0 ? (
+        <div className="mt-4">
+          <WidgetState
+            kind="empty"
+            title={t({
+              ko: "칸반 카드 데이터가 없습니다",
+              en: "No kanban cards in scope",
+              ja: "kanban カードがありません",
+              zh: "暂无 kanban 卡片",
+            })}
+            description={t({
+              ko: "선택된 오피스에서 카드가 만들어지면 병목 검사가 활성화됩니다.",
+              en: "Bottleneck analysis activates once cards exist in the selected office.",
+              ja: "選択中のオフィスにカードが作成されると分析が有効化されます。",
+              zh: "在所选 office 中创建卡片后，瓶颈分析将被激活。",
+            })}
+          />
         </div>
       ) : (
         <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">

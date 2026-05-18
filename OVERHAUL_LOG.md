@@ -101,4 +101,22 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** RateLimitWidget + BottleneckWidget tokenization, or pivot to (d) AppShell extraction / (e) HomeOverviewPage decomposition for performance + maintainability.
 
+### Round 6 — 2026-05-19 02:23~02:27 KST
+**Focus:** Observability (8) + Real-time reliability (2) — explicit loading/empty/error surfaces.
+
+**Changes:**
+- New primitive `components/common/WidgetState.tsx`: unified loading / empty / error / stale surface. Auto-maps each kind to a `SystemHealthTone` (info / idle / critical / warning) with appropriate icon, `role="status"`/`role="alert"`, `aria-live`, and an optional action slot. Compact mode for inline use.
+- 5 unit tests cover the kind→tone mapping, accessibility roles, and tone override.
+- `BottleneckWidget`:
+  - Bespoke red error block → `WidgetState kind={"stale"|"error"}` so the operator sees whether they are looking at a stale snapshot vs total failure.
+  - "Scanning bottlenecks" plain text → `WidgetState kind="loading"`.
+  - **New empty state** wired explicitly — previously, if `cards.length === 0` and not loading and no error, the widget rendered three empty columns silently. Now it surfaces an explicit "no kanban cards in scope" message.
+  - Alerts pill → `StatusBadge` (healthy/warning/critical based on count) with pulse on ≥5 alerts.
+
+**Net effect:** introduces a reusable widget-state primitive that future rounds can wire into RateLimitWidget, HealthWidget metrics, AutoQueueHistoryWidget etc. BottleneckWidget no longer fails silently; its alert count now reads as a tone-coded badge instead of a one-style danger pill regardless of severity.
+
+**Verification:** 5/5 new tests pass; full primitives suite still green; `npm run build` ✓ in 3.5s.
+
+**Next:** apply `WidgetState` to RateLimitWidget + at least one more widget; or pivot to (c)/(d) — AppShell or HomeOverviewPage decomposition.
+
 EOF
