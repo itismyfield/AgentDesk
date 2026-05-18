@@ -830,6 +830,10 @@ impl VoiceProgressChannelState {
     }
 }
 
+fn progress_feedback_channel_id(channel_id: u64, playback_channel_id: Option<u64>) -> u64 {
+    playback_channel_id.unwrap_or(channel_id)
+}
+
 pub(in crate::services::discord) struct VoiceBargeInRuntime {
     enabled: bool,
     barge_in_enabled: bool,
@@ -1427,6 +1431,14 @@ impl VoiceBargeInRuntime {
             if let Some(state) = states.get_mut(&event.channel_id) {
                 state.mark_done();
             }
+            self.play_processing_chime(
+                shared,
+                ChannelId::new(progress_feedback_channel_id(
+                    event.channel_id,
+                    event.playback_channel_id,
+                )),
+            )
+            .await;
             return;
         }
 
@@ -3787,6 +3799,16 @@ mod tests {
         config.enabled = true;
         config.barge_in.acknowledgement_enabled = false;
         VoiceBargeInRuntime::from_voice_config(&config)
+    }
+
+    #[test]
+    fn progress_feedback_channel_prefers_playback_channel() {
+        assert_eq!(progress_feedback_channel_id(10, Some(20)), 20);
+    }
+
+    #[test]
+    fn progress_feedback_channel_falls_back_to_source_channel() {
+        assert_eq!(progress_feedback_channel_id(10, None), 10);
     }
 
     fn voice_handoff_shared_for_tests() -> Arc<SharedData> {
