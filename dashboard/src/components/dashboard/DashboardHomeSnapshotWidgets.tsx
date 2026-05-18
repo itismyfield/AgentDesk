@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import type { Agent, CompanySettings, DashboardStats, DispatchedSession } from "../../types";
 import { timeAgo, type TFunction } from "./model";
 import AgentAvatar from "../AgentAvatar";
@@ -39,7 +39,7 @@ interface HomeAgentRow {
 
 type HomeSignalTone = "info" | "warn" | "danger" | "success";
 
-export function DashboardHomeMetricTile({
+function DashboardHomeMetricTileImpl({
   title,
   value,
   badge,
@@ -108,7 +108,7 @@ export function DashboardHomeMetricTile({
   );
 }
 
-export function DashboardHomeOfficeWidget({
+function DashboardHomeOfficeWidgetImpl({
   rows,
   stats,
   language,
@@ -259,7 +259,7 @@ function signalPriority(row: HomeSignalRow): number {
   }
 }
 
-export function DashboardHomeSignalsWidget({
+function DashboardHomeSignalsWidgetImpl({
   rows,
   maxValue,
   t,
@@ -413,7 +413,7 @@ export function DashboardHomeSignalsWidget({
   );
 }
 
-export function DashboardHomeRosterWidget({
+function DashboardHomeRosterWidgetImpl({
   rows,
   t,
   numberFormatter,
@@ -500,7 +500,7 @@ export function DashboardHomeRosterWidget({
   );
 }
 
-export function DashboardHomeActivityWidget({
+function DashboardHomeActivityWidgetImpl({
   items,
   localeTag,
   t,
@@ -616,3 +616,27 @@ function getSignalAccent(tone: HomeSignalTone): string {
       return "#14b8a6";
   }
 }
+
+/**
+ * Memoize the home snapshot widgets so unrelated parent re-renders (WS
+ * events, settings toggles, sibling state) don't force the home grid
+ * to recompute layouts and sub-card mappings every time.
+ *
+ * Callers pass props built with useMemo / useCallback in HomeOverviewPage
+ * and DashboardPageView, so referential equality holds and the memo
+ * comparator can short-circuit cleanly.
+ */
+export const DashboardHomeMetricTile = memo(DashboardHomeMetricTileImpl);
+DashboardHomeMetricTile.displayName = "DashboardHomeMetricTile";
+
+export const DashboardHomeOfficeWidget = memo(DashboardHomeOfficeWidgetImpl);
+DashboardHomeOfficeWidget.displayName = "DashboardHomeOfficeWidget";
+
+export const DashboardHomeSignalsWidget = memo(DashboardHomeSignalsWidgetImpl);
+DashboardHomeSignalsWidget.displayName = "DashboardHomeSignalsWidget";
+
+export const DashboardHomeRosterWidget = memo(DashboardHomeRosterWidgetImpl);
+DashboardHomeRosterWidget.displayName = "DashboardHomeRosterWidget";
+
+export const DashboardHomeActivityWidget = memo(DashboardHomeActivityWidgetImpl);
+DashboardHomeActivityWidget.displayName = "DashboardHomeActivityWidget";

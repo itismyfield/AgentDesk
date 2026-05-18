@@ -231,4 +231,21 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** AppShell decomposition; or memo propagation; or AppSidebar / AppTopBar CSS extraction.
 
+### Round 14 — 2026-05-19 06:06~06:08 KST
+**Focus:** Performance (6) — `React.memo` across all five home snapshot widgets.
+
+**Changes:**
+- `dashboard/DashboardHomeSnapshotWidgets.tsx`: extracted each of the 5 exported widgets to an `*Impl` name and wrapped its public export in `React.memo` with a `displayName` for DevTools:
+  - `DashboardHomeMetricTile` (sparkline KPI card, rendered 4× on Home)
+  - `DashboardHomeOfficeWidget` (current-office summary card)
+  - `DashboardHomeSignalsWidget` (Ops Missions priority list — got round-11 hierarchy treatment)
+  - `DashboardHomeRosterWidget` (agent roster)
+  - `DashboardHomeActivityWidget` (recent activity feed)
+
+**Net effect:** the Home grid now has memoization at every leaf widget that does non-trivial layout/transform work. Combined with the round-12 memos on Health/Bottleneck/RateLimit, WS-driven App-level re-renders should no longer cascade through the entire Home tree — only widgets whose own props/state changed will re-render.
+
+**Verification:** `npm run build` ✓ in 3.5s. Bundle unchanged (memo wrapper compresses cleanly).
+
+**Next:** AppSidebar / AppTopBar CSS extraction (round-9 pattern), or AppShell partial decomposition for maintainability.
+
 EOF
