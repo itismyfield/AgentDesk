@@ -34,6 +34,9 @@ pub(in crate::services::discord) fn session_bound_discord_relay_can_own_terminal
     inflight: Option<&InflightTurnState>,
     tmux_session_name: &str,
 ) -> bool {
+    if tmux_session_name.trim().is_empty() {
+        return false;
+    }
     let Some(state) = inflight else {
         return false;
     };
@@ -102,7 +105,7 @@ impl SessionBoundDiscordRelaySink {
                 provider = provider.as_str(),
                 channel = channel_id,
                 tmux_session = %delivery.session_name,
-                "session-bound relay sink skipped bridge-owned or missing inflight"
+                "session-bound relay sink skipped bridge-owned, missing, or mismatched inflight"
             );
             return Ok(());
         }
@@ -338,12 +341,14 @@ async fn wait_for_session_bound_delivery_inflight(
 
 fn should_return_session_bound_delivery_inflight(
     inflight: Option<&InflightTurnState>,
-    tmux_session_name: &str,
+    _tmux_session_name: &str,
     attempt: usize,
     max_attempts: usize,
 ) -> bool {
-    session_bound_discord_relay_can_own_terminal_delivery(inflight, tmux_session_name)
-        || attempt + 1 >= max_attempts
+    if inflight.is_none() {
+        return attempt + 1 >= max_attempts;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -403,6 +408,12 @@ mod tests {
             Some(&bridge_owned),
             tmux
         ));
+        assert!(!session_bound_discord_relay_can_own_terminal_delivery(
+            None, tmux
+        ));
+        assert!(!session_bound_discord_relay_can_own_terminal_delivery(
+            None, ""
+        ));
 
         let watcher_owned = inflight_for(tmux, RelayOwnerKind::Watcher, false);
         assert!(session_bound_discord_relay_can_own_terminal_delivery(
@@ -426,16 +437,13 @@ mod tests {
             Some(&watcher_owned),
             "AgentDesk-claude-other"
         ));
-        assert!(!session_bound_discord_relay_can_own_terminal_delivery(
-            None, tmux
-        ));
     }
 
     #[test]
-    fn wait_helper_ignores_non_owning_inflight_until_timeout() {
+    fn wait_helper_waits_for_missing_inflight_but_returns_existing_owner_shape() {
         let tmux = "AgentDesk-claude-relay-test";
         let bridge_owned = inflight_for(tmux, RelayOwnerKind::None, false);
-        assert!(!should_return_session_bound_delivery_inflight(
+        assert!(should_return_session_bound_delivery_inflight(
             Some(&bridge_owned),
             tmux,
             0,
@@ -446,6 +454,13 @@ mod tests {
             tmux,
             2,
             3,
+        ));
+
+        assert!(!should_return_session_bound_delivery_inflight(
+            None, tmux, 0, 3,
+        ));
+        assert!(should_return_session_bound_delivery_inflight(
+            None, tmux, 2, 3,
         ));
 
         let watcher_owned = inflight_for(tmux, RelayOwnerKind::Watcher, false);
