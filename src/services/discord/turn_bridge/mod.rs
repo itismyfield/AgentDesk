@@ -2018,6 +2018,50 @@ fn response_portion_after_offset(full_response: &str, response_sent_offset: usiz
     full_response.get(response_sent_offset..).unwrap_or("")
 }
 
+fn bridge_pre_submission_tui_prompt_error(provider: &ProviderKind, full_response: &str) -> bool {
+    let Some(error_text) = full_response
+        .trim_start()
+        .strip_prefix("Error:")
+        .map(str::trim_start)
+    else {
+        return false;
+    };
+    match provider {
+        ProviderKind::Claude => {
+            crate::services::claude_tui::input::is_prompt_ready_timeout_error(error_text)
+        }
+        ProviderKind::Codex => {
+            crate::services::codex_tui::input::is_prompt_ready_timeout_error(error_text)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod pre_submission_tui_prompt_error_tests {
+    use super::*;
+
+    #[test]
+    fn classifier_matches_wrapped_readiness_errors() {
+        assert!(bridge_pre_submission_tui_prompt_error(
+            &ProviderKind::Claude,
+            "Error: timeout waiting for claude tui follow-up prompt input readiness after 45s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; capture_available=true",
+        ));
+        assert!(bridge_pre_submission_tui_prompt_error(
+            &ProviderKind::Codex,
+            "Error: timeout waiting for codex tui follow-up prompt input readiness after 45s; reason=composer_not_detected; previous_tui_turn_still_running=true; capture_available=true",
+        ));
+        assert!(!bridge_pre_submission_tui_prompt_error(
+            &ProviderKind::Claude,
+            "Error: claude tui session died during follow-up output reading",
+        ));
+        assert!(!bridge_pre_submission_tui_prompt_error(
+            &ProviderKind::Claude,
+            "timeout waiting for claude tui follow-up prompt input readiness after 45s",
+        ));
+    }
+}
+
 fn should_delegate_bridge_relay_to_watcher(
     watcher_owns_assistant_relay: bool,
     watcher_relay_available_for_turn: bool,
@@ -6372,8 +6416,11 @@ pub(super) fn spawn_turn_bridge(
             // the two gate sites.
             #[cfg(unix)]
             {
+                let pre_submission_tui_prompt_error =
+                    transport_error && bridge_pre_submission_tui_prompt_error(&provider, &full_response);
                 let bridge_gate_outcome = if terminal_delivery_committed
                     && !preserve_inflight_for_cleanup_retry
+                    && !pre_submission_tui_prompt_error
                 {
                     if let Some(outcome) = bridge_tui_gate_outcome_early {
                         outcome
@@ -6391,6 +6438,13 @@ pub(super) fn spawn_turn_bridge(
                         super::tmux::TuiCompletionGateOutcome::NotGated
                     }
                 } else {
+                    if terminal_delivery_committed && pre_submission_tui_prompt_error {
+                        tracing::info!(
+                            provider = %provider.as_str(),
+                            channel = channel_id.get(),
+                            "pre-submission TUI prompt readiness error was already delivered; skipping quiescence gate so inflight cleanup can complete"
+                        );
+                    }
                     super::tmux::TuiCompletionGateOutcome::NotGated
                 };
 

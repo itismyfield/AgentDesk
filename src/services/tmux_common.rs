@@ -9,9 +9,26 @@ const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
 const CLAUDE_TUI_READY_BANNER: &str = "Ready for input (type message + Enter)";
 const CLAUDE_TUI_PROMPT_MARKER: &str = "\u{276f}";
 
+fn trim_prompt_line(line: &str) -> &str {
+    line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}')
+}
+
 pub(crate) fn tmux_line_is_claude_tui_ready_prompt(line: &str) -> bool {
-    let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
-    trimmed == CLAUDE_TUI_PROMPT_MARKER
+    trim_prompt_line(line) == CLAUDE_TUI_PROMPT_MARKER
+}
+
+fn tmux_line_is_claude_tui_prompt_draft(line: &str) -> bool {
+    let Some(rest) = trim_prompt_line(line).strip_prefix(CLAUDE_TUI_PROMPT_MARKER) else {
+        return false;
+    };
+    let rest = rest.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+    // AgentDesk injects submitted Discord turns as lines like
+    // `❯ [User: name (ID: ...)] ...`. Those are pane history, not an active
+    // composer draft, so do not block the transcript-idle readiness fallback.
+    let discord_submitted_prompt = rest
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[User:"));
+    !rest.is_empty() && !discord_submitted_prompt
 }
 
 pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -> bool {
@@ -21,6 +38,16 @@ pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -
         .filter(|l| !l.trim().is_empty())
         .take(CLAUDE_TUI_READY_SCAN_LINES)
         .any(|l| l.contains(CLAUDE_TUI_READY_BANNER) || tmux_line_is_claude_tui_ready_prompt(l))
+}
+
+pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
+    capture
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(CLAUDE_TUI_READY_SCAN_LINES)
+        .find(|line| trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER))
+        .is_some_and(tmux_line_is_claude_tui_prompt_draft)
 }
 
 pub(crate) fn tmux_capture_indicates_generic_ready_banner(capture: &str) -> bool {
@@ -519,6 +546,30 @@ mod sentinel_tests {
             Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
             None => unsafe { std::env::remove_var("HOSTNAME") },
         }
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_blocks_active_operator_draft() {
+        let capture = "\
+assistant output
+─────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}operator is still typing
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ██░░░░░░░░ │ 24%";
+
+        assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(!tmux_capture_indicates_claude_tui_ready_for_input(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_ignores_submitted_discord_history_prompt() {
+        let capture = "\
+❯ [User: 0hbujang (ID: 343742347365974026)] 이전 턴
+⏺ 처리했습니다.
+✻ Baked for 2s
+  🤖 Opus(H) │ ██░░░░░░░░ │ 24%";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
     }
 }
 

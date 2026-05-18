@@ -78,6 +78,7 @@ enum HookFastPathOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptReadinessSnapshot {
     pub prompt_marker_detected: bool,
+    pub prompt_draft_detected: bool,
     pub tmux_pane_alive: bool,
     pub capture_available: bool,
     pub pane_tail: String,
@@ -165,12 +166,16 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
         PROMPT_READY_CAPTURE_SCROLLBACK,
     );
     let prompt_marker_detected = pane.as_deref().is_some_and(pane_looks_ready_for_prompt);
+    let prompt_draft_detected = pane
+        .as_deref()
+        .is_some_and(crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft);
     let pane_tail = pane
         .as_deref()
         .map(prompt_ready_debug_tail)
         .unwrap_or_else(|| "<capture unavailable>".to_string());
     PromptReadinessSnapshot {
         prompt_marker_detected,
+        prompt_draft_detected,
         tmux_pane_alive: crate::services::tmux_diagnostics::tmux_session_has_live_pane(
             session_name,
         ),
@@ -270,6 +275,55 @@ pub fn wait_for_prompt_ready(
     readiness: PromptReadinessKind,
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
+    wait_for_prompt_ready_inner(session_name, readiness, cancel_token, None)
+}
+
+pub fn wait_for_prompt_ready_or_idle_transcript(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+    cancel_token: Option<&CancelToken>,
+    transcript_path: &std::path::Path,
+) -> Result<(), String> {
+    wait_for_prompt_ready_inner(session_name, readiness, cancel_token, Some(transcript_path))
+}
+
+pub fn send_followup_prompt_or_idle_transcript(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+    transcript_path: &std::path::Path,
+) -> Result<(), String> {
+    let actions = plan_prompt_submit(prompt)?;
+    wait_for_prompt_ready_or_idle_transcript(
+        session_name,
+        PromptReadinessKind::Followup,
+        cancel_token,
+        transcript_path,
+    )?;
+    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+        "claude",
+        session_name,
+        prompt,
+    );
+    match run_actions(session_name, &actions, cancel_token) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                "claude",
+                session_name,
+                prompt,
+            );
+            Err(error)
+        }
+    }
+}
+
+fn wait_for_prompt_ready_inner(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+    cancel_token: Option<&CancelToken>,
+    transcript_path: Option<&std::path::Path>,
+) -> Result<(), String> {
     check_prompt_cancel(cancel_token)?;
     let timeout = readiness.timeout();
     let start = Instant::now();
@@ -281,6 +335,7 @@ pub fn wait_for_prompt_ready(
             timeout,
             start,
             cancel_token,
+            transcript_path,
         );
     }
 
@@ -331,6 +386,16 @@ pub fn wait_for_prompt_ready(
             );
             return Ok(());
         }
+        if transcript_idle_confirms_prompt_ready(&snapshot, transcript_path) {
+            check_prompt_cancel(cancel_token)?;
+            tracing::info!(
+                tmux_session_name = session_name,
+                readiness = readiness.label(),
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "claude_tui prompt ready via idle transcript fallback after hook fast path"
+            );
+            return Ok(());
+        }
         if !snapshot.tmux_pane_alive {
             check_prompt_cancel(cancel_token)?;
             return Err("claude tui session died before prompt input was ready".to_string());
@@ -349,7 +414,14 @@ pub fn wait_for_prompt_ready(
         );
     }
 
-    wait_for_prompt_ready_polling(session_name, readiness, timeout, start, cancel_token)
+    wait_for_prompt_ready_polling(
+        session_name,
+        readiness,
+        timeout,
+        start,
+        cancel_token,
+        transcript_path,
+    )
 }
 
 /// Sync wrapper that awaits the global prompt-ready notify with a bounded
@@ -514,6 +586,7 @@ fn wait_for_prompt_ready_polling(
     timeout: Duration,
     start: Instant,
     cancel_token: Option<&CancelToken>,
+    transcript_path: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let mut wait_interval = Duration::from_millis(100);
     loop {
@@ -521,6 +594,15 @@ fn wait_for_prompt_ready_polling(
         let snapshot = prompt_readiness_snapshot(session_name);
         check_prompt_cancel(cancel_token)?;
         if snapshot.prompt_marker_detected {
+            return Ok(());
+        }
+        if transcript_idle_confirms_prompt_ready(&snapshot, transcript_path) {
+            tracing::info!(
+                tmux_session_name = session_name,
+                readiness = readiness.label(),
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "claude_tui prompt ready via idle transcript fallback"
+            );
             return Ok(());
         }
         if !snapshot.tmux_pane_alive {
@@ -547,6 +629,19 @@ fn pane_looks_ready_for_prompt(pane: &str) -> bool {
     crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(pane)
 }
 
+fn transcript_idle_confirms_prompt_ready(
+    snapshot: &PromptReadinessSnapshot,
+    transcript_path: Option<&std::path::Path>,
+) -> bool {
+    if !snapshot.tmux_pane_alive || snapshot.prompt_draft_detected {
+        return false;
+    }
+    transcript_path.is_some_and(|path| {
+        crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(path)
+            == crate::services::tui_turn_state::TuiTurnState::Idle
+    })
+}
+
 fn log_prompt_ready_timeout(
     session_name: &str,
     readiness: PromptReadinessKind,
@@ -558,6 +653,7 @@ fn log_prompt_ready_timeout(
         readiness = readiness.label(),
         timeout_secs = timeout.as_secs(),
         prompt_marker_detected = snapshot.prompt_marker_detected,
+        prompt_draft_detected = snapshot.prompt_draft_detected,
         previous_tui_turn_still_running = snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
         tmux_pane_alive = snapshot.tmux_pane_alive,
         capture_available = snapshot.capture_available,
@@ -567,11 +663,12 @@ fn log_prompt_ready_timeout(
     crate::services::claude::debug_log_to(
         "claude_tui.log",
         &format!(
-            "prompt readiness timeout session={} readiness={} timeout={}s prompt_marker_detected={} previous_tui_turn_still_running={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
+            "prompt readiness timeout session={} readiness={} timeout={}s prompt_marker_detected={} prompt_draft_detected={} previous_tui_turn_still_running={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
             session_name,
             readiness.label(),
             timeout.as_secs(),
             snapshot.prompt_marker_detected,
+            snapshot.prompt_draft_detected,
             snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
             snapshot.tmux_pane_alive,
             snapshot.capture_available,
@@ -718,6 +815,94 @@ line 12
 line 13";
 
         assert!(!pane_looks_ready_for_prompt(pane));
+    }
+
+    #[test]
+    fn idle_transcript_can_confirm_readiness_when_prompt_marker_is_absent() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+        )
+        .unwrap();
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "status footer without prompt glyph".to_string(),
+        };
+
+        assert!(transcript_idle_confirms_prompt_ready(
+            &snapshot,
+            Some(file.path())
+        ));
+    }
+
+    #[test]
+    fn idle_transcript_does_not_override_active_prompt_draft() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+        )
+        .unwrap();
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\u{276f} operator draft".to_string(),
+        };
+
+        assert!(!transcript_idle_confirms_prompt_ready(
+            &snapshot,
+            Some(file.path())
+        ));
+    }
+
+    #[test]
+    fn idle_transcript_does_not_override_dead_pane() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+        )
+        .unwrap();
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: false,
+            capture_available: true,
+            pane_tail: "dead pane".to_string(),
+        };
+
+        assert!(!transcript_idle_confirms_prompt_ready(
+            &snapshot,
+            Some(file.path())
+        ));
+    }
+
+    #[test]
+    fn non_idle_transcript_does_not_confirm_readiness() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"still streaming"}]}}"#,
+        )
+        .unwrap();
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "streaming turn".to_string(),
+        };
+
+        assert!(!transcript_idle_confirms_prompt_ready(
+            &snapshot,
+            Some(file.path())
+        ));
     }
 
     #[test]

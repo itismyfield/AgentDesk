@@ -1511,6 +1511,7 @@ fn emit_claude_tui_busy_followup_notice(
     tracing::warn!(
         tmux_session_name,
         prompt_marker_detected = snapshot.prompt_marker_detected,
+        prompt_draft_detected = snapshot.prompt_draft_detected,
         previous_tui_turn_still_running = snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
         tmux_pane_alive = snapshot.tmux_pane_alive,
         capture_available = snapshot.capture_available,
@@ -1518,9 +1519,10 @@ fn emit_claude_tui_busy_followup_notice(
         "claude_tui follow-up blocked before prompt submission because hosted TUI is busy"
     );
     debug_log(&format!(
-        "Claude TUI follow-up blocked before prompt submission: session={} prompt_marker_detected={} previous_tui_turn_still_running={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
+        "Claude TUI follow-up blocked before prompt submission: session={} prompt_marker_detected={} prompt_draft_detected={} previous_tui_turn_still_running={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
         tmux_session_name,
         snapshot.prompt_marker_detected,
+        snapshot.prompt_draft_detected,
         snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
         snapshot.tmux_pane_alive,
         snapshot.capture_available,
@@ -1735,13 +1737,14 @@ fn execute_streaming_local_tui_tmux(
             claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
         {
             // #2416: instead of dropping the user's message when the TUI is busy,
-            // wait for the next prompt-ready window using the existing
-            // wait_for_prompt_ready infrastructure. Only emit the busy notice if
-            // the wait times out (or otherwise fails).
-            match crate::services::claude_tui::input::wait_for_prompt_ready(
+            // wait for the next prompt-ready window. The transcript-idle
+            // fallback covers Claude TUI redraws where the JSONL terminal
+            // envelope is authoritative but the prompt glyph is not visible.
+            match crate::services::claude_tui::input::wait_for_prompt_ready_or_idle_transcript(
                 tmux_session_name,
                 crate::services::claude_tui::input::PromptReadinessKind::Followup,
                 cancel_token.as_deref(),
+                &transcript_path,
             ) {
                 Ok(()) => {
                     busy_waited = true;
@@ -1792,10 +1795,12 @@ fn execute_streaming_local_tui_tmux(
                             "tmux_session_name": tmux_session_name,
                             "transcript_path": transcript_path_string,
                             "prompt_marker_detected": post_wait_snapshot.prompt_marker_detected,
+                            "prompt_draft_detected": post_wait_snapshot.prompt_draft_detected,
                             "previous_tui_turn_still_running": post_wait_snapshot.tmux_pane_alive && !post_wait_snapshot.prompt_marker_detected,
                             "tmux_pane_alive": post_wait_snapshot.tmux_pane_alive,
                             "capture_available": post_wait_snapshot.capture_available,
                             "initial_busy_snapshot_prompt_marker_detected": snapshot.prompt_marker_detected,
+                            "initial_busy_snapshot_prompt_draft_detected": snapshot.prompt_draft_detected,
                             "wait_outcome": if timed_out { "timeout" } else { "error" },
                             "wait_error": err,
                         }),
@@ -1833,11 +1838,14 @@ fn execute_streaming_local_tui_tmux(
             );
             return Ok(());
         }
-        if let Err(error) = crate::services::claude_tui::input::send_followup_prompt(
-            tmux_session_name,
-            prompt,
-            cancel_token.as_deref(),
-        ) {
+        if let Err(error) =
+            crate::services::claude_tui::input::send_followup_prompt_or_idle_transcript(
+                tmux_session_name,
+                prompt,
+                cancel_token.as_deref(),
+                &transcript_path,
+            )
+        {
             if crate::services::claude_tui::input::is_prompt_ready_cancelled_error(&error) {
                 debug_log(&format!(
                     "Claude TUI follow-up: cancellation observed during prompt submission, aborting injection (session={})",
