@@ -248,4 +248,72 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** AppSidebar / AppTopBar CSS extraction (round-9 pattern), or AppShell partial decomposition for maintainability.
 
+---
+
+## Final Summary — 2026-05-19 06:09 KST (stopped by operator)
+
+The loop was halted one round before the original 07:00 KST deadline at the user's request. Below: a single source of truth for what shipped.
+
+### Rounds at a glance
+
+| #  | Commit      | Focus                                  | Headline                                              |
+|----|-------------|----------------------------------------|-------------------------------------------------------|
+| 1  | `a330ac1`   | design-system / real-time / glanceability | New primitives: `SYSTEM_HEALTH_TONES`, `StatusBadge`, `FreshnessIndicator`, WS `lastEventTs` |
+| 2  | `b023fd6`   | real-time / glanceability / design-system | HomeOverview + DashboardHomeOverview chips → `StatusBadge` + freshness |
+| 3  | `35862dbc`  | design-system / glanceability          | Ops Connection panel chips tokenized + header freshness |
+| 4  | `2efe3d8`   | glanceability / real-time / design-system | HealthWidget status/poll/freshness/degraded all tokenized |
+| 5  | `6ea13a7`   | design-system                          | All remaining Ops page chips → `StatusBadge` + header freshness |
+| 6  | `5f7c19e`   | observability / reliability            | **New primitive `WidgetState`** + BottleneckWidget loading/empty/error |
+| 7  | `ecfa9687`  | observability / design-system          | RateLimitWidget loading/empty/error split + provider badges |
+| 8  | `54380a4`   | action-in-place                        | HealthWidget in-card manual refresh |
+| 9  | `25817eb`   | responsive / maintainability           | AppMobileNavigation 12 inline-styles → `AppMobileNavigation.css` with `--adk-mobile-*` tokens, 44px touch targets, focus rings, `prefers-reduced-motion` |
+| 10 | `98f8c910`  | action-in-place                        | BottleneckWidget in-card manual refresh |
+| 11 | `cea3090b`  | info hierarchy                         | Ops Missions priority ordering — top severity card emphasized, value=0 demoted |
+| 12 | `7a948bf`   | performance                            | `React.memo` on HealthWidget / BottleneckWidget / RateLimitWidget |
+| 13 | `63778bba`  | action-in-place                        | RateLimitWidget in-card manual refresh (refresh trifecta complete) |
+| 14 | `c2cbab5`   | performance                            | `React.memo` on all five home snapshot widgets |
+
+### Impact by quality dimension
+
+1. **Glanceability** — Every status now reads in <5s through one badge vocabulary: `healthy / warning / critical / idle / info / unknown`. Pulse animation on live state. Top-priority Ops signal visually emphasized (R11).
+2. **Real-time reliability** — `useDashboardSocket` exposes `lastEventTs`. `FreshnessIndicator` wired into 4 places (Home header, Ops panel header, Ops page header, HealthWidget) with escalating tones (45s warn / 75–180s critical). Stale data is no longer invisible.
+3. **Action-in-place** — In-card "Refresh now" button on Health, Bottleneck, RateLimit — all share identical icon, spin, disabled state, ARIA shape. Operators no longer wait 30/60s after a deploy.
+4. **Information hierarchy** — Ops Missions sorts by severity (danger > warn > info > success, value=0 last). Top active row gets accent ring + drop shadow; inactive rows fall to 0.78 opacity.
+5. **Responsive (mobile first-class)** — AppMobileNavigation rewritten: 12 inline styles → dedicated CSS with `--adk-mobile-*` tokens, 44px minimum touch targets, `:focus-visible` outlines, `:active` press feedback, `prefers-reduced-motion` respected. Theme can now be tuned without JSX edits.
+6. **Performance** — `React.memo` on 8 widgets (Health, Bottleneck, RateLimit + 5 home snapshot widgets). Parent `t` confirmed stable via `useCallback` at all call sites, so memo short-circuits cleanly. Mobile nav extraction also reduced main bundle ~2 kB.
+7. **Design-system consistency** — `StatusBadge` adopted in 9 places, `chipClassFromTone` adapter `opsToneToHealth()` bridges Ops's local vocabulary to `SystemHealthTone`. Color/tone now means the same thing across HomeOverview, Ops, Health, Bottleneck, RateLimit.
+8. **Observability** — New `WidgetState` primitive (loading / empty / error / stale) with auto-mapped tone + ARIA role + live region + action slot. Applied to BottleneckWidget and RateLimitWidget — silent blank states eliminated. Stale ≠ Error is now explicit.
+
+### Net code change
+
+`dashboard/` only: **23 files, +1459 / -310**.
+
+### New reusable primitives (the long-tail win)
+
+- `components/common/StatusBadge.tsx` (with 4 tests)
+- `components/common/FreshnessIndicator.tsx` (with 6 tests)
+- `components/common/WidgetState.tsx` (with 5 tests)
+- `theme/statusTokens.ts` — `SYSTEM_HEALTH_TONES` + `getSystemHealthTone()` + `SystemHealthTone` type
+- `app/AppMobileNavigation.css` — first dedicated route-level CSS file with mobile-first tokens
+- `useDashboardSocket.lastEventTs` — new public API for any widget that wants live-data freshness
+
+Total: **15 new tests, all green.**
+
+### Recommended next steps (post-loop)
+
+1. **Propagate `WidgetState`** to AutoQueueHistoryWidget, CronTimelineWidget, ReceiptWidget, MeetingTimelineCard (mechanical, ~30min/widget).
+2. **AppSidebar / AppTopBar CSS extraction** following round-9's `AppMobileNavigation.css` pattern.
+3. **AppShell.tsx (594 LOC)** decomposition — pull out the WS-notification glue into a hook; pull AppShellRoutes data-prop ctx into a typed context. Risky but high maintainability win.
+4. **HomeOverviewPage (597 LOC)** + **OfficeView (597 LOC)** decomposition + lazy-import the heaviest leaves (Pixi scene, emoji picker etc.) so the Home initial render gets back under 1s on cold cache.
+5. **Playwright smoke** covering the Home page render + Ops refresh flow — locks in the refactor surface against regression.
+
+### How to ship
+
+```bash
+git -C /Users/itismyfield/.adk/release/workspaces/agentdesk push origin wt/dashboard-overhaul-20260518
+gh pr create --base main --head wt/dashboard-overhaul-20260518 \
+  --title "Dashboard quality overhaul (R1–R14)" \
+  --body-file /Users/itismyfield/.adk/release/worktrees/dashboard-overhaul-20260518/OVERHAUL_LOG.md
+```
+
 EOF
