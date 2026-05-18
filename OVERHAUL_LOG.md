@@ -216,4 +216,19 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** memo HomeOverview's signal/activity widgets; or pivot to AppShell decomposition; or RateLimitWidget refresh wiring.
 
+### Round 13 — 2026-05-19 05:39~05:43 KST
+**Focus:** Action-in-place (3) — complete the in-card refresh trifecta.
+
+**Changes:**
+- `dashboard/RateLimitWidget.tsx`:
+  - New `refreshNonce` state + `requestRefresh()` callback. The existing 30s poll effect now also depends on `refreshNonce`, so bumping it re-triggers the entire effect (which already correctly aborts in-flight requests via `controller.abort()` on cleanup). No need to fork the abort/timeout logic.
+  - New circular `RefreshCw` button hoisted into `sectionActions` alongside the "임계치 설정" link. Disabled+spin while `isRefreshing`; localized ARIA + title for ko/en/ja/zh.
+  - `sectionActions` simplified: the `onOpenSettings` ternary now lives inside one fragment rather than duplicating the tooltip across two branches.
+
+**Net effect:** all three polling-driven home widgets (Health, Bottleneck, RateLimit) now share an identical "Refresh now" affordance — same icon, same spin behavior, same disabled state, same ARIA shape — so operators muscle-memorize one pattern.
+
+**Verification:** `npm run build` ✓ in 3.5s.
+
+**Next:** AppShell decomposition; or memo propagation; or AppSidebar / AppTopBar CSS extraction.
+
 EOF

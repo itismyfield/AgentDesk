@@ -1,4 +1,5 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import TooltipLabel from "../common/TooltipLabel";
 import type { TFunction } from "./model";
 import {
@@ -164,6 +165,12 @@ function RateLimitWidgetImpl({ t, onOpenSettings }: RateLimitWidgetProps) {
   const [thresholds, setThresholds] = useState({ warning: 80, danger: 95 });
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(true);
+  // Bumped by the manual refresh button so the existing poll-driven effect
+  // re-runs on demand without forking the abort/cleanup logic.
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const requestRefresh = useCallback(() => {
+    setRefreshNonce((current) => current + 1);
+  }, []);
   const title = t({
     ko: "프로바이더 상태",
     en: "Provider Status",
@@ -240,25 +247,53 @@ function RateLimitWidgetImpl({ t, onOpenSettings }: RateLimitWidgetProps) {
       activeController?.abort();
       window.clearInterval(timer);
     };
-  }, [thresholds]);
+  }, [thresholds, refreshNonce]);
 
-  const sectionActions = onOpenSettings ? (
+  const refreshButton = (
+    <button
+      type="button"
+      onClick={requestRefresh}
+      disabled={isRefreshing}
+      aria-label={t({
+        ko: "프로바이더 상태 새로고침",
+        en: "Refresh provider status",
+        ja: "プロバイダー状態を更新",
+        zh: "刷新 provider 状态",
+      })}
+      title={t({
+        ko: "지금 새로고침",
+        en: "Refresh now",
+        ja: "今すぐ更新",
+        zh: "立即刷新",
+      })}
+      className="inline-flex h-7 w-7 items-center justify-center rounded-full"
+      style={{
+        border: "1px solid rgba(148,163,184,0.22)",
+        background: "rgba(148,163,184,0.14)",
+        color: "var(--th-text)",
+        cursor: isRefreshing ? "wait" : "pointer",
+        opacity: isRefreshing ? 0.6 : 1,
+        transition: "opacity 120ms ease",
+      }}
+    >
+      <RefreshCw size={12} className={isRefreshing ? "animate-spin" : undefined} aria-hidden />
+    </button>
+  );
+
+  const sectionActions = (
     <>
       <TooltipLabel
         text={t({ ko: "설명", en: "About", ja: "説明", zh: "说明" })}
         tooltip={tooltip}
         className="max-w-fit text-sm"
       />
-      <SurfaceActionButton onClick={onOpenSettings} tone="info" compact>
-        {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
-      </SurfaceActionButton>
+      {refreshButton}
+      {onOpenSettings ? (
+        <SurfaceActionButton onClick={onOpenSettings} tone="info" compact>
+          {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
+        </SurfaceActionButton>
+      ) : null}
     </>
-  ) : (
-    <TooltipLabel
-      text={t({ ko: "설명", en: "About", ja: "説明", zh: "说明" })}
-      tooltip={tooltip}
-      className="max-w-fit text-sm"
-    />
   );
   const providers = data?.providers ?? [];
   const hasProviders = providers.length > 0;
