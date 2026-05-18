@@ -9,8 +9,8 @@ use super::AppState;
 pub use crate::db::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg;
 pub(crate) use crate::services::dispatched_sessions::force_kill_session_impl_with_reason;
 pub use crate::services::dispatched_sessions::{
-    DeleteSessionQuery, ForceKillBody, ForceKillOptions, HookSessionBody,
-    ListDispatchedSessionsQuery, TmuxOutputQuery, UpdateDispatchedSessionBody,
+    DeleteSessionQuery, ForceKillOptions, HookSessionBody, ListDispatchedSessionsQuery,
+    TmuxOutputQuery, UpdateDispatchedSessionBody,
 };
 
 /// GET /api/dispatched-sessions
@@ -120,12 +120,4 @@ pub async fn force_kill_session(
         Json(body),
     )
     .await
-}
-
-/// Legacy body-based wrapper retained for compatibility tests and direct callers.
-pub async fn force_kill_session_legacy(
-    State(state): State<AppState>,
-    Json(body): Json<ForceKillBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    crate::services::dispatched_sessions::force_kill_session_legacy(State(state), Json(body)).await
 }

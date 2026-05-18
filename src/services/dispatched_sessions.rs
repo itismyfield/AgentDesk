@@ -688,14 +688,6 @@ pub async fn update_dispatched_session(
 }
 
 #[derive(Deserialize)]
-pub struct ForceKillBody {
-    pub session_key: String,
-    /// If true, mark the dispatch as 'failed' and create a retry dispatch.
-    #[serde(default)]
-    pub retry: bool,
-}
-
-#[derive(Deserialize)]
 pub struct ForceKillOptions {
     /// If true, mark the dispatch as 'failed' and create a retry dispatch.
     #[serde(default)]
@@ -1140,17 +1132,6 @@ pub async fn force_kill_session(
     .await
 }
 
-/// Legacy body-based wrapper retained for compatibility tests and direct callers.
-///
-/// This helper is no longer exposed as an HTTP route; use
-/// `POST /api/sessions/{session_key}/force-kill` instead.
-pub async fn force_kill_session_legacy(
-    State(state): State<AppState>,
-    Json(body): Json<ForceKillBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    force_kill_session_impl(&state, &body.session_key, body.retry).await
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
     use super::*;
@@ -1524,7 +1505,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn force_kill_session_legacy_wrapper_pg_uses_same_core_without_retry() {
+    async fn force_kill_session_path_route_pg_uses_same_core_without_retry() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
@@ -1554,11 +1535,13 @@ mod tests {
         )
         .await;
 
-        let (status, body) = force_kill_session_legacy(
+        let (status, body) = force_kill_session(
             State(state),
-            Json(ForceKillBody {
-                session_key: "host:claude-agent-force-legacy".to_string(),
+            HeaderMap::new(),
+            Path("host:claude-agent-force-legacy".to_string()),
+            Json(ForceKillOptions {
                 retry: false,
+                reason: None,
             }),
         )
         .await;

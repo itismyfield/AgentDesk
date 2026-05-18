@@ -221,7 +221,7 @@
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 302 |  |
-| `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 131 |  |
+| `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 123 |  |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 99 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 1070 | giant-file |
 | `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 23 |  |
@@ -513,7 +513,7 @@
 | `services::discord_dm_reply_store` | `src/services/discord_dm_reply_store.rs` | 207 |  |
 | `services::disk_monitor` | `src/services/disk_monitor.rs` | 351 |  |
 | `services::dispatch_watchdog` | `src/services/dispatch_watchdog.rs` | 254 |  |
-| `services::dispatched_sessions` | `src/services/dispatched_sessions.rs` | 3262 | giant-file |
+| `services::dispatched_sessions` | `src/services/dispatched_sessions.rs` | 3245 | giant-file |
 | `services::dispatches` | `src/services/dispatches/mod.rs` | 559 |  |
 | `services::dispatches::discord_delivery` | `src/services/dispatches/discord_delivery/mod.rs` | 28 |  |
 | `services::dispatches::discord_delivery::guard` | `src/services/dispatches/discord_delivery/guard.rs` | 943 |  |
