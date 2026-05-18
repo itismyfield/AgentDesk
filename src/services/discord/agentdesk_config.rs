@@ -146,18 +146,10 @@ fn agent_channel_for_setup(input: &AgentSetupConfigInput) -> Option<AgentChannel
     ProviderKind::from_str(&input.provider)?;
     Some(AgentChannel::Detailed(AgentChannelConfig {
         id: Some(input.channel_id.clone()),
-        name: None,
-        aliases: Vec::new(),
         prompt_file: Some(input.prompt_file.clone()),
         workspace: Some(input.workspace.clone()),
         provider: Some(input.provider.clone()),
-        model: None,
-        reasoning_effort: None,
-        peer_agents: None,
-        quality_feedback_injection: None,
-        dispatch_profile: None,
-        isolate_override: None,
-        cache_ttl_minutes: None,
+        ..AgentChannelConfig::default()
     }))
 }
 
