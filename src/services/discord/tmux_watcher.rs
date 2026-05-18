@@ -680,7 +680,6 @@ fn claim_session_bound_terminal_delivery_inflight_if_missing(
         last_offset,
     );
     claim.turn_start_offset = Some(turn_start_offset);
-    claim.rebind_origin = true;
     claim.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
     claim.task_notification_kind = task_notification_kind;
     claim.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
@@ -822,6 +821,24 @@ mod matched_session_jsonl_gate_tests {
         assert!(
             jsonl_terminal_can_confirm_completion(Some(&state)),
             "session-bound watcher-owned terminal envelopes should finish cleanup even with a placeholder/status panel"
+        );
+    }
+
+    #[test]
+    fn jsonl_terminal_completion_accepts_watcher_owned_external_zero_message_claim() {
+        let mut state = state_for_matched_session(
+            ProviderKind::Claude,
+            "AgentDesk-claude-watcher-external",
+            "/tmp/watcher-external.jsonl",
+        );
+        state.user_msg_id = 0;
+        state.current_msg_id = 0;
+        state.rebind_origin = false;
+        state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+
+        assert!(
+            jsonl_terminal_can_confirm_completion(Some(&state)),
+            "watcher-owned external pane claims should not need rebind_origin to finish cleanup"
         );
     }
 

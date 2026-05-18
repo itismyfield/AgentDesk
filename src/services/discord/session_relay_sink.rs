@@ -488,6 +488,14 @@ mod tests {
             ))
         );
 
+        let mut watcher_external = inflight_for(tmux, RelayOwnerKind::Watcher, false);
+        watcher_external.user_msg_id = 0;
+        watcher_external.current_msg_id = 0;
+        assert_eq!(
+            session_bound_terminal_delivery_route(Some(&watcher_external), tmux),
+            Some(SessionBoundTerminalDeliveryRoute::NewMessage)
+        );
+
         let rebind_origin = inflight_for(tmux, RelayOwnerKind::Watcher, true);
         assert_eq!(
             session_bound_terminal_delivery_route(Some(&rebind_origin), tmux),
