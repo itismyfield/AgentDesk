@@ -484,7 +484,7 @@
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 1129 | giant-file |
 | `services::discord::tmux_output_stream` | `src/services/discord/tmux_output_stream.rs` | 590 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 478 |  |
-| `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 537 |  |
+| `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 639 |  |
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 83 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 597 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
@@ -575,7 +575,7 @@
 | `services::platform::shell` | `src/services/platform/shell.rs` | 129 |  |
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 749 |  |
 | `services::process` | `src/services/process.rs` | 1442 | giant-file |
-| `services::provider` | `src/services/provider.rs` | 2621 | giant-file |
+| `services::provider` | `src/services/provider.rs` | 2653 | giant-file |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 240 |  |
 | `services::provider_cli::context` | `src/services/provider_cli/context.rs` | 74 |  |

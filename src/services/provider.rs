@@ -57,6 +57,7 @@ pub struct ProviderRegistryEntry {
     pub default_behavior: ProviderDefaultBehavior,
     pub default_context_window: u64,
     pub managed_tmux_backend: bool,
+    pub managed_tmux_wrapper_subcommand: Option<&'static str>,
 }
 
 const CLAUDE_COUNTERPARTS: &[&str] = &["codex", "gemini", "opencode", "qwen"];
@@ -86,6 +87,7 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         },
         default_context_window: 1_000_000,
         managed_tmux_backend: true,
+        managed_tmux_wrapper_subcommand: Some("tmux-wrapper"),
     },
     ProviderRegistryEntry {
         id: "codex",
@@ -107,6 +109,7 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         },
         default_context_window: 200_000,
         managed_tmux_backend: true,
+        managed_tmux_wrapper_subcommand: Some("codex-tmux-wrapper"),
     },
     ProviderRegistryEntry {
         id: "gemini",
@@ -128,6 +131,7 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         },
         default_context_window: 1_000_000,
         managed_tmux_backend: false,
+        managed_tmux_wrapper_subcommand: None,
     },
     ProviderRegistryEntry {
         id: "opencode",
@@ -149,6 +153,7 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         },
         default_context_window: 128_000,
         managed_tmux_backend: false,
+        managed_tmux_wrapper_subcommand: None,
     },
     ProviderRegistryEntry {
         id: "qwen",
@@ -170,6 +175,7 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         },
         default_context_window: 128_000,
         managed_tmux_backend: true,
+        managed_tmux_wrapper_subcommand: Some("qwen-tmux-wrapper"),
     },
 ];
 
@@ -422,6 +428,11 @@ impl ProviderKind {
             .unwrap_or(false)
     }
 
+    pub fn managed_tmux_wrapper_subcommand(&self) -> Option<&'static str> {
+        self.registry_entry()
+            .and_then(|entry| entry.managed_tmux_wrapper_subcommand)
+    }
+
     pub fn build_tmux_session_name(&self, channel_name: &str) -> String {
         let sanitized: String = channel_name
             .chars()
@@ -565,6 +576,27 @@ mod prompt_reuse_tests {
         ProviderKind, compact_resumed_provider_turn_prompt, should_omit_repeated_system_prompt,
         system_prompt_for_provider_turn,
     };
+
+    #[test]
+    fn provider_registry_exposes_managed_tmux_wrapper_subcommands() {
+        assert_eq!(
+            ProviderKind::Claude.managed_tmux_wrapper_subcommand(),
+            Some("tmux-wrapper")
+        );
+        assert_eq!(
+            ProviderKind::Codex.managed_tmux_wrapper_subcommand(),
+            Some("codex-tmux-wrapper")
+        );
+        assert_eq!(
+            ProviderKind::Qwen.managed_tmux_wrapper_subcommand(),
+            Some("qwen-tmux-wrapper")
+        );
+        assert_eq!(ProviderKind::Gemini.managed_tmux_wrapper_subcommand(), None);
+        assert_eq!(
+            ProviderKind::OpenCode.managed_tmux_wrapper_subcommand(),
+            None
+        );
+    }
 
     #[test]
     fn codex_resume_omits_repeated_system_prompt() {
