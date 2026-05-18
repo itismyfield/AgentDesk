@@ -453,7 +453,7 @@
 | `services::discord::response_sanitizer` | `src/services/discord/response_sanitizer.rs` | 192 |  |
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 113 |  |
 | `services::discord::restart_mode` | `src/services/discord/restart_mode.rs` | 32 |  |
-| `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 499 |  |
+| `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 559 |  |
 | `services::discord::role_map` | `src/services/discord/role_map.rs` | 860 |  |
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 28 |  |
 | `services::discord::router::authorization` | `src/services/discord/router/authorization.rs` | 48 |  |

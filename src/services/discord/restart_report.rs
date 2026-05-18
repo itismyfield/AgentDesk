@@ -223,7 +223,29 @@ fn report_age(report: &RestartCompletionReport) -> Option<Duration> {
 }
 
 fn is_unrecoverable_flush_error(error: &str) -> bool {
-    error.contains("Unknown Channel")
+    let error = error.to_ascii_lowercase();
+    [
+        "unknown channel",
+        "missing access",
+        "missing permissions",
+        "forbidden",
+        "not found",
+        "403 forbidden",
+        "404 not found",
+    ]
+    .iter()
+    .any(|pattern| error.contains(pattern))
+        || contains_error_code(&error, "50001")
+        || contains_error_code(&error, "50013")
+}
+
+fn contains_error_code(error: &str, code: &str) -> bool {
+    error.match_indices(code).any(|(index, _)| {
+        let before = error[..index].chars().next_back();
+        let after = error[index + code.len()..].chars().next();
+        !before.is_some_and(|ch| ch.is_ascii_alphanumeric())
+            && !after.is_some_and(|ch| ch.is_ascii_alphanumeric())
+    })
 }
 
 pub(super) async fn flush_restart_reports(
@@ -492,8 +514,46 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_channel_is_unrecoverable() {
-        assert!(is_unrecoverable_flush_error("Unknown Channel"));
-        assert!(!is_unrecoverable_flush_error("temporary network error"));
+    fn test_permanent_flush_errors_are_unrecoverable() {
+        let cases = [
+            "Unknown Channel",
+            "unknown channel",
+            "Discord API returned Missing Access",
+            "missing permissions for channel",
+            "Forbidden while sending restart report",
+            "channel Not Found",
+            "HTTP 403 Forbidden",
+            "404 Not Found while sending restart report",
+            "Discord API error code 50001",
+            "Discord API error code: 50013",
+        ];
+
+        for case in cases {
+            assert!(
+                is_unrecoverable_flush_error(case),
+                "expected unrecoverable: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_retryable_flush_errors_stay_recoverable() {
+        let cases = [
+            "temporary network error",
+            "request timed out",
+            "HTTP 500 Internal Server Error",
+            "502 Bad Gateway",
+            "503 Service Unavailable",
+            "Discord 5xx retryable failure",
+            "transient 150013 upstream marker",
+            "upstream marker x50013y",
+        ];
+
+        for case in cases {
+            assert!(
+                !is_unrecoverable_flush_error(case),
+                "expected retryable: {case}"
+            );
+        }
     }
 }
