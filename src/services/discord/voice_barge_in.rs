@@ -1887,7 +1887,10 @@ impl VoiceBargeInRuntime {
             .inflight_foreground_cancels
             .get(&channel_id.get())
             .is_some_and(|entry| !entry.value().is_empty());
-        if !super::mailbox_has_active_turn(shared, channel_id).await && !has_inflight_foreground {
+        let cancel_channel = self
+            .active_barge_in_mailbox_channel(shared, channel_id)
+            .await;
+        if cancel_channel.is_none() && !has_inflight_foreground {
             return VoiceBargeInTranscriptOutcome::NoActiveTurn;
         }
 
@@ -1904,9 +1907,10 @@ impl VoiceBargeInRuntime {
                 let inflight_cancelled = self
                     .cancel_inflight_foreground_calls(channel_id, "voice_barge_in_explicit_stop");
                 let _ = inflight_cancelled;
+                let cancel_channel = cancel_channel.unwrap_or(channel_id);
                 let result = super::mailbox_cancel_active_turn_with_reason(
                     shared,
-                    channel_id,
+                    cancel_channel,
                     "voice_barge_in_explicit_stop",
                 )
                 .await;
@@ -1916,6 +1920,7 @@ impl VoiceBargeInRuntime {
                 let playback_active = self.playbacks.contains_key(&channel_id.get());
                 tracing::info!(
                     channel_id = channel_id.get(),
+                    cancel_channel_id = cancel_channel.get(),
                     cancelled = result.token.is_some(),
                     already_stopping = result.already_stopping,
                     transcript_chars = transcript.chars().count(),
@@ -2726,6 +2731,26 @@ impl VoiceBargeInRuntime {
             .find_map(|agent| agent_voice_background_channel_for(agent, source_channel_id))
     }
 
+    async fn active_barge_in_mailbox_channel(
+        &self,
+        shared: &Arc<SharedData>,
+        source_channel_id: ChannelId,
+    ) -> Option<ChannelId> {
+        let routed_channel_id = self
+            .active_voice_routes
+            .get(&source_channel_id.get())
+            .map(|entry| entry.value().channel_id);
+        if let Some(channel_id) = routed_channel_id {
+            if super::mailbox_has_active_turn(shared, channel_id).await {
+                return Some(channel_id);
+            }
+        }
+        if super::mailbox_has_active_turn(shared, source_channel_id).await {
+            return Some(source_channel_id);
+        }
+        None
+    }
+
     /// Reverse lookup: given a background text channel, find the foreground
     /// voice channel that should hear the spoken summary.
     ///
@@ -3066,7 +3091,12 @@ impl VoiceBargeInRuntime {
             .inflight_foreground_cancels
             .get(&channel_id.get())
             .is_some_and(|entry| !entry.value().is_empty());
-        if super::mailbox_has_active_turn(shared, channel_id).await || has_inflight_foreground {
+        if self
+            .active_barge_in_mailbox_channel(shared, channel_id)
+            .await
+            .is_some()
+            || has_inflight_foreground
+        {
             return self
                 .handle_processing_transcript(shared, provider, channel_id, transcript)
                 .await;
@@ -3622,15 +3652,21 @@ impl VoiceReceiveHook for DiscordVoiceBargeInHook {
         let foreground_cancelled = self
             .runtime
             .cancel_inflight_foreground_calls(channel_id, "voice_barge_in_live_cut");
+        let runtime = self.runtime.clone();
         tokio::spawn(async move {
+            let cancel_channel = runtime
+                .active_barge_in_mailbox_channel(&shared, channel_id)
+                .await
+                .unwrap_or(channel_id);
             let result = super::mailbox_cancel_active_turn_with_reason(
                 &shared,
-                channel_id,
+                cancel_channel,
                 "voice_barge_in_live_cut",
             )
             .await;
             tracing::info!(
                 channel_id = channel_id.get(),
+                cancel_channel_id = cancel_channel.get(),
                 mean_db = cut.levels.mean_db,
                 max_db = cut.levels.max_db,
                 sensitivity = ?cut.sensitivity,
@@ -4268,6 +4304,76 @@ mod tests {
                 .voice_channel_for_background(ChannelId::new(201), None)
                 .await,
             Some(ChannelId::new(301))
+        );
+    }
+
+    #[tokio::test]
+    async fn active_barge_in_mailbox_channel_prefers_routed_background_turn() {
+        let runtime = enabled_runtime();
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel_id = ChannelId::new(301);
+        let target_channel_id = ChannelId::new(201);
+        runtime.active_voice_routes.insert(
+            source_channel_id.get(),
+            ActiveVoiceRoute {
+                agent_id: "project-agentdesk".to_string(),
+                channel_id: target_channel_id,
+                updated_at: Instant::now(),
+            },
+        );
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            shared
+                .mailbox(target_channel_id)
+                .try_start_turn(token, serenity::UserId::new(7), MessageId::new(77))
+                .await
+        );
+
+        assert_eq!(
+            runtime
+                .active_barge_in_mailbox_channel(&shared, source_channel_id)
+                .await,
+            Some(target_channel_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_stop_barge_in_cancels_routed_background_turn() {
+        let runtime = enabled_runtime();
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel_id = ChannelId::new(301);
+        let target_channel_id = ChannelId::new(201);
+        runtime.active_voice_routes.insert(
+            source_channel_id.get(),
+            ActiveVoiceRoute {
+                agent_id: "project-agentdesk".to_string(),
+                channel_id: target_channel_id,
+                updated_at: Instant::now(),
+            },
+        );
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            shared
+                .mailbox(target_channel_id)
+                .try_start_turn(token.clone(), serenity::UserId::new(7), MessageId::new(77))
+                .await
+        );
+
+        let outcome = runtime
+            .handle_processing_transcript(&shared, &ProviderKind::Claude, source_channel_id, "멈춰")
+            .await;
+
+        assert!(matches!(
+            outcome,
+            VoiceBargeInTranscriptOutcome::ExplicitStop {
+                cancelled: true,
+                already_stopping: false
+            }
+        ));
+        assert!(token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            token.cancel_source().as_deref(),
+            Some("voice_barge_in_explicit_stop")
         );
     }
 
