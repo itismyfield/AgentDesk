@@ -5,7 +5,7 @@
 
 - Production Rust modules: `608`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `118`
+- Giant files: `119`
 
 ## Namespace Summary
 
@@ -353,7 +353,7 @@
 | `services::cluster::session_discovery` | `src/services/cluster/session_discovery.rs` | 939 |  |
 | `services::cluster::session_matcher` | `src/services/cluster/session_matcher.rs` | 866 |  |
 | `services::cluster::session_registry` | `src/services/cluster/session_registry.rs` | 572 |  |
-| `services::cluster::stream_relay` | `src/services/cluster/stream_relay.rs` | 878 |  |
+| `services::cluster::stream_relay` | `src/services/cluster/stream_relay.rs` | 1049 | giant-file |
 | `services::cluster::watcher_supervisor` | `src/services/cluster/watcher_supervisor.rs` | 856 |  |
 | `services::codex` | `src/services/codex.rs` | 3317 | giant-file |
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 |  |
@@ -489,7 +489,7 @@
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 83 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 597 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
-| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4552 | giant-file |
+| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4727 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 955 |  |
 | `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 7305 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2475 | giant-file |
