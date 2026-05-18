@@ -81,7 +81,8 @@ where
     let dedup_key = decision.dedup_key.clone();
     let store_key = dedup_store_key(&dedup_key);
 
-    let (stored_duplicate, reservation) = if message.policy.idempotency_window > Duration::ZERO {
+    let (stored_duplicate, mut reservation) = if message.policy.idempotency_window > Duration::ZERO
+    {
         loop {
             match dedup.reserve(&store_key) {
                 OutboundDedupClaim::Duplicate(stored) => break (Some(stored), None),
@@ -126,16 +127,21 @@ where
     }
 
     if let Some(result) = cancelled_delivery_result(cancel_token) {
+        release_reservation(reservation.as_mut());
         return result;
     }
 
     let (target_channel, delivered_channel_id) =
         match resolve_primary_delivery_target(client, &decision.primary_target, &overrides).await {
             Ok(target) => target,
-            Err(reason) => return DeliveryResult::PermanentFailure { reason },
+            Err(reason) => {
+                release_reservation(reservation.as_mut());
+                return DeliveryResult::PermanentFailure { reason };
+            }
         };
 
     if let Some(result) = cancelled_delivery_result(cancel_token) {
+        release_reservation(reservation.as_mut());
         return result;
     }
 
@@ -202,17 +208,24 @@ where
             )
             .await
         }
-        LengthPolicyDecision::FileAttachment { .. } => DeliveryResult::PermanentFailure {
-            reason: "v3 file-attachment delivery requires an attachment-capable transport".into(),
-        },
+        LengthPolicyDecision::FileAttachment { .. } => {
+            release_reservation(reservation.as_mut());
+            DeliveryResult::PermanentFailure {
+                reason: "v3 file-attachment delivery requires an attachment-capable transport"
+                    .into(),
+            }
+        }
         LengthPolicyDecision::RejectOverLimit {
             char_count,
             inline_char_limit,
-        } => DeliveryResult::PermanentFailure {
-            reason: format!(
-                "content length {char_count} exceeds inline limit {inline_char_limit} (RejectOverLimit)"
-            ),
-        },
+        } => {
+            release_reservation(reservation.as_mut());
+            DeliveryResult::PermanentFailure {
+                reason: format!(
+                    "content length {char_count} exceeds inline limit {inline_char_limit} (RejectOverLimit)"
+                ),
+            }
+        }
     }
 }
 
@@ -256,6 +269,7 @@ where
         }
         Err(error) => {
             if let Some(result) = cancelled_delivery_result(cancel_token) {
+                release_reservation(reservation.as_mut());
                 return result;
             }
             if error.kind() == DispatchMessagePostErrorKind::MessageTooLong {
@@ -301,8 +315,10 @@ where
                     }
                     Err(parent_error) => {
                         if let Some(result) = cancelled_delivery_result(cancel_token) {
+                            release_reservation(reservation.as_mut());
                             return result;
                         }
+                        release_reservation(reservation.as_mut());
                         return DeliveryResult::PermanentFailure {
                             reason: parent_error.to_string(),
                         };
@@ -310,6 +326,7 @@ where
                 }
             }
 
+            release_reservation(reservation.as_mut());
             DeliveryResult::PermanentFailure {
                 reason: error.to_string(),
             }
@@ -372,8 +389,10 @@ where
             }
             Err(error) => {
                 if let Some(result) = cancelled_delivery_result(cancel_token) {
+                    release_reservation(reservation.as_deref_mut());
                     return Some(result);
                 }
+                release_reservation(reservation.as_deref_mut());
                 DeliveryResult::PermanentFailure {
                     reason: error.to_string(),
                 }
@@ -400,6 +419,7 @@ where
 {
     let mut reservation = reservation;
     if matches!(message.operation, OutboundOperation::Edit { .. }) {
+        release_reservation(reservation.as_mut());
         return DeliveryResult::PermanentFailure {
             reason: "split length strategy cannot edit one message into multiple chunks".into(),
         };
@@ -422,8 +442,10 @@ where
             Ok(message_id) => message_id,
             Err(error) => {
                 if let Some(result) = cancelled_delivery_result(cancel_token) {
+                    release_reservation(reservation.as_mut());
                     return result;
                 }
+                release_reservation(reservation.as_mut());
                 return DeliveryResult::PermanentFailure {
                     reason: error.to_string(),
                 };
@@ -574,6 +596,12 @@ fn record_success(
         reservation.record(&encoded);
     } else {
         dedup.record(&dedup_store_key(dedup_key), &encoded);
+    }
+}
+
+fn release_reservation(reservation: Option<&mut OutboundDedupReservation>) {
+    if let Some(reservation) = reservation {
+        reservation.release();
     }
 }
 
@@ -892,26 +920,52 @@ mod tests {
         let dedup = OutboundDeduper::new();
         let token = Arc::new(CancelToken::new());
         client.cancel_after_post_count(1, token.clone());
-        let message = DiscordOutboundMessage::new(
-            "dispatch:split-cancel",
-            "dispatch:split-cancel:notify",
-            "ABCDEFGHIJK",
-            OutboundTarget::Channel(ChannelId::new(123)),
-            DiscordOutboundPolicy::default(),
-        );
+        let make = || {
+            DiscordOutboundMessage::new(
+                "dispatch:split-cancel",
+                "dispatch:split-cancel:notify",
+                "ABCDEFGHIJK",
+                OutboundTarget::Channel(ChannelId::new(123)),
+                DiscordOutboundPolicy::default(),
+            )
+        };
         let overrides = DeliveryTransportOverrides {
             limits: Some(OutboundPolicyLimits::for_tests(4)),
             ..DeliveryTransportOverrides::default()
         };
 
-        let result =
-            deliver_outbound_with_overrides(&client, &dedup, message, overrides, Some(&token))
-                .await;
+        let result = deliver_outbound_with_overrides(
+            &client,
+            &dedup,
+            make(),
+            overrides.clone(),
+            Some(&token),
+        )
+        .await;
 
         assert!(matches!(result, DeliveryResult::Skip { reason } if reason == "cancelled"));
         assert_eq!(
             client.posts(),
             vec![("123".to_string(), "ABCD".to_string())]
+        );
+
+        let retry = deliver_outbound_with_overrides(&client, &dedup, make(), overrides, None).await;
+
+        assert!(matches!(
+            retry,
+            DeliveryResult::Fallback {
+                fallback_used: FallbackUsed::LengthSplit,
+                ..
+            }
+        ));
+        assert_eq!(
+            client.posts(),
+            vec![
+                ("123".to_string(), "ABCD".to_string()),
+                ("123".to_string(), "ABCD".to_string()),
+                ("123".to_string(), "EFGH".to_string()),
+                ("123".to_string(), "IJK".to_string()),
+            ]
         );
     }
 
@@ -1011,6 +1065,29 @@ mod tests {
             .count();
         assert_eq!(sent_count, 1);
         assert_eq!(failure_count, 1);
+        assert_eq!(client.posts().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn v3_dedup_reservation_releases_after_terminal_failure_for_retry() {
+        let client = MockClient::default();
+        client.fail_next_send();
+        let dedup = OutboundDeduper::new();
+        let make = || {
+            DiscordOutboundMessage::new(
+                "dispatch:2368:terminal-fail",
+                "dispatch:2368:notify",
+                "hello",
+                OutboundTarget::Channel(ChannelId::new(123)),
+                DiscordOutboundPolicy::dispatch_outbox(),
+            )
+        };
+
+        let first = deliver_outbound(&client, &dedup, make(), None).await;
+        let second = deliver_outbound(&client, &dedup, make(), None).await;
+
+        assert!(matches!(first, DeliveryResult::PermanentFailure { .. }));
+        assert!(matches!(second, DeliveryResult::Sent { .. }));
         assert_eq!(client.posts().len(), 2);
     }
 }
