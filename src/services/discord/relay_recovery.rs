@@ -29,7 +29,6 @@ pub(in crate::services::discord) enum RelayRecoveryActionKind {
     ClearStaleThreadProof,
     ClearOrphanPendingToken,
     ReattachWatcher,
-    MarkRelayDegraded,
 }
 
 impl RelayRecoveryActionKind {
@@ -39,7 +38,6 @@ impl RelayRecoveryActionKind {
             Self::ClearStaleThreadProof => "clear_stale_thread_proof",
             Self::ClearOrphanPendingToken => "clear_orphan_pending_token",
             Self::ReattachWatcher => "reattach_watcher",
-            Self::MarkRelayDegraded => "mark_relay_degraded",
         }
     }
 }
@@ -358,8 +356,8 @@ pub(in crate::services::discord) fn plan_relay_recovery(
             )
         }
         RelayStallState::QueueBlocked => (
-            RelayRecoveryActionKind::MarkRelayDegraded,
-            "queued work is blocked without enough evidence for local cleanup",
+            RelayRecoveryActionKind::ObserveOnly,
+            "queued work is already surfaced as degraded health; relay recovery has no safe local cleanup",
             false,
             Some("operator_inspection_required"),
         ),
@@ -621,19 +619,17 @@ async fn apply_relay_recovery_decision(
                 },
             }
         }
-        RelayRecoveryActionKind::ObserveOnly | RelayRecoveryActionKind::MarkRelayDegraded => {
-            RelayRecoveryApplyResult {
-                status: "skipped",
-                removed_thread_proofs: 0,
-                removed_mailbox_token: false,
-                post_mailbox_has_cancel_token: None,
-                post_mailbox_queue_depth: None,
-                reattach_watcher_spawned: None,
-                reattach_watcher_replaced: None,
-                reattach_initial_offset: None,
-                reattach_error: None,
-            }
-        }
+        RelayRecoveryActionKind::ObserveOnly => RelayRecoveryApplyResult {
+            status: "skipped",
+            removed_thread_proofs: 0,
+            removed_mailbox_token: false,
+            post_mailbox_has_cancel_token: None,
+            post_mailbox_queue_depth: None,
+            reattach_watcher_spawned: None,
+            reattach_watcher_replaced: None,
+            reattach_initial_offset: None,
+            reattach_error: None,
+        },
     }
 }
 
@@ -750,6 +746,29 @@ mod tests {
         assert_eq!(
             decision.auto_heal.skipped_reason,
             Some("live_foreground_turn")
+        );
+    }
+
+    #[test]
+    fn queue_blocked_is_honest_observe_only_because_health_already_degrades() {
+        let decision = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                queue_depth: 2,
+                ..snapshot()
+            },
+            RelayStallState::QueueBlocked,
+            1_000,
+        );
+
+        assert_eq!(decision.action, RelayRecoveryActionKind::ObserveOnly);
+        assert_eq!(
+            decision.reason,
+            "queued work is already surfaced as degraded health; relay recovery has no safe local cleanup"
+        );
+        assert!(!decision.auto_heal.eligible);
+        assert_eq!(
+            decision.auto_heal.skipped_reason,
+            Some("operator_inspection_required")
         );
     }
 
