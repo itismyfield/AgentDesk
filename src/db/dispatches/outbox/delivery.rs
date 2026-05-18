@@ -50,7 +50,8 @@ pub(crate) async fn mark_dispatch_dispatched_pg(
     let changed = sqlx::query(
         "UPDATE task_dispatches
             SET status = 'dispatched',
-                updated_at = NOW()
+                updated_at = NOW(),
+                last_stuck_alert_at = NULL
           WHERE id = $1
             AND status = 'pending'",
     )

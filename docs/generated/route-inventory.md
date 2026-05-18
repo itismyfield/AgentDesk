@@ -148,8 +148,8 @@
 | `POST` | `/api/kanban-repos` | `kanban_repos::create_repo` | `src/server/routes/kanban_repos.rs:78` | `src/server/routes/domains/kanban.rs:52` |
 | `DELETE` | `/api/kanban-repos/{owner}/{repo}` | `kanban_repos::delete_repo` | `src/server/routes/kanban_repos.rs:234` | `src/server/routes/domains/kanban.rs:56` |
 | `PATCH` | `/api/kanban-repos/{owner}/{repo}` | `kanban_repos::update_repo` | `src/server/routes/kanban_repos.rs:153` | `src/server/routes/domains/kanban.rs:56` |
-| `PATCH` | `/api/kanban-reviews/{id}/decisions` | `reviews::update_decisions` | `src/server/routes/reviews.rs:526` | `src/server/routes/domains/reviews.rs:13` |
-| `POST` | `/api/kanban-reviews/{id}/trigger-rework` | `reviews::trigger_rework` | `src/server/routes/reviews.rs:580` | `src/server/routes/domains/reviews.rs:17` |
+| `PATCH` | `/api/kanban-reviews/{id}/decisions` | `reviews::update_decisions` | `src/server/routes/reviews.rs:527` | `src/server/routes/domains/reviews.rs:13` |
+| `POST` | `/api/kanban-reviews/{id}/trigger-rework` | `reviews::trigger_rework` | `src/server/routes/reviews.rs:581` | `src/server/routes/domains/reviews.rs:17` |
 | `GET` | `/api/machine-status` | `analytics::machine_status` | `src/server/routes/analytics.rs:503` | `src/server/routes/domains/admin.rs:81` |
 | `GET` | `/api/maintenance/jobs` | `maintenance::list_jobs` | `src/server/routes/maintenance.rs:7` | `src/server/routes/domains/ops.rs:217` |
 | `POST` | `/api/memory/forget` | `memory_api::memory_forget` | `src/server/routes/memory_api.rs:245` | `src/server/routes/domains/admin.rs:90` |
@@ -219,7 +219,7 @@
 | `GET` | `/api/rate-limits` | `analytics::rate_limits` | `src/server/routes/analytics.rs:511` | `src/server/routes/domains/admin.rs:82` |
 | `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:170` | `src/server/routes/domains/admin.rs:83` |
 | `POST` | `/api/reviews/decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:2719` | `src/server/routes/domains/reviews.rs:23` |
-| `POST` | `/api/reviews/recovery` | `reviews::recover_review_target` | `src/server/routes/reviews.rs:562` | `src/server/routes/domains/reviews.rs:21` |
+| `POST` | `/api/reviews/recovery` | `reviews::recover_review_target` | `src/server/routes/reviews.rs:563` | `src/server/routes/domains/reviews.rs:21` |
 | `POST` | `/api/reviews/tuning/aggregate` | `review_verdict::aggregate_review_tuning` | `src/server/routes/review_verdict/tuning_aggregate.rs:438` | `src/server/routes/domains/reviews.rs:27` |
 | `POST` | `/api/reviews/verdict` | `review_verdict::submit_verdict` | `src/server/routes/review_verdict/verdict_route.rs:212` | `src/server/routes/domains/reviews.rs:22` |
 | `GET` | `/api/round-table-meetings` | `meetings::list_meetings` | `src/server/routes/meetings.rs:669` | `src/server/routes/domains/integrations.rs:36` |

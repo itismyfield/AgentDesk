@@ -208,6 +208,111 @@ fn terminal_dispatch_status_clears_linked_session_active_dispatch() {
 }
 
 #[test]
+fn stuck_alert_marker_resets_for_terminal_then_redispatched_row() {
+    let db = test_db();
+    seed_card(&db, "card-stuck-alert-reset", "ready");
+    let conn = db.separate_conn().unwrap();
+    let dispatch_id = "dispatch-stuck-alert-reset";
+    conn.execute(
+        "INSERT INTO task_dispatches (
+             id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+             ?1, 'card-stuck-alert-reset', 'agent-1', 'review', 'pending', 'Alert reset',
+             datetime('now'), datetime('now')
+         )",
+        [dispatch_id],
+    )
+    .unwrap();
+
+    set_dispatch_status_on_conn(
+        &conn,
+        dispatch_id,
+        "dispatched",
+        None,
+        "test_dispatch_outbox",
+        Some(&["pending"]),
+        false,
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE task_dispatches
+         SET updated_at = datetime('now', '-4 hours'),
+             last_stuck_alert_at = datetime('now', '-3 hours')
+         WHERE id = ?1",
+        [dispatch_id],
+    )
+    .unwrap();
+
+    // Mirrors the dispatch_watchdog::scan_once eligibility gate with SQLite
+    // datetime syntax so the test fails if the alert marker stays sticky.
+    let before_reset: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM task_dispatches
+             WHERE id = ?1
+               AND status = 'dispatched'
+               AND completed_at IS NULL
+               AND last_stuck_alert_at IS NULL
+               AND updated_at < datetime('now', '-90 minutes')",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        before_reset, 0,
+        "pre-reset marker should suppress the watchdog predicate"
+    );
+
+    set_dispatch_status_on_conn(
+        &conn,
+        dispatch_id,
+        "completed",
+        Some(&json!({"completion_source":"test"})),
+        "test_complete",
+        Some(&["dispatched"]),
+        true,
+    )
+    .unwrap();
+
+    set_dispatch_status_on_conn(
+        &conn,
+        dispatch_id,
+        "dispatched",
+        None,
+        "test_redispatch",
+        Some(&["completed"]),
+        false,
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE task_dispatches
+         SET completed_at = NULL,
+             updated_at = datetime('now', '-4 hours')
+         WHERE id = ?1",
+        [dispatch_id],
+    )
+    .unwrap();
+
+    let eligible_after_redispatch: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM task_dispatches
+             WHERE id = ?1
+               AND status = 'dispatched'
+               AND completed_at IS NULL
+               AND last_stuck_alert_at IS NULL
+               AND updated_at < datetime('now', '-90 minutes')",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        eligible_after_redispatch, 1,
+        "a redispatched row that gets stuck again must be watchdog-eligible"
+    );
+}
+
+#[test]
 fn ensure_dispatch_notify_outbox_skips_completed_dispatch() {
     let db = test_db();
     seed_card(&db, "card-completed-notify", "done");

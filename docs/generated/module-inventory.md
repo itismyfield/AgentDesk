@@ -86,13 +86,13 @@
 | `db::automation_candidates` | `src/db/automation_candidates.rs` | 995 |  |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
 | `db::dispatch_semaphores` | `src/db/dispatch_semaphores.rs` | 331 |  |
-| `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1923 | giant-file |
+| `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1925 | giant-file |
 | `db::dispatches` | `src/db/dispatches/mod.rs` | 991 |  |
 | `db::dispatches::delivery_events` | `src/db/dispatches/delivery_events.rs` | 479 |  |
 | `db::dispatches::metadata` | `src/db/dispatches/metadata.rs` | 262 |  |
 | `db::dispatches::outbox` | `src/db/dispatches/outbox/mod.rs` | 43 |  |
 | `db::dispatches::outbox::claim` | `src/db/dispatches/outbox/claim.rs` | 163 |  |
-| `db::dispatches::outbox::delivery` | `src/db/dispatches/outbox/delivery.rs` | 164 |  |
+| `db::dispatches::outbox::delivery` | `src/db/dispatches/outbox/delivery.rs` | 165 |  |
 | `db::dispatches::outbox::diagnostics` | `src/db/dispatches/outbox/diagnostics.rs` | 127 |  |
 | `db::dispatches::outbox::followup` | `src/db/dispatches/outbox/followup.rs` | 91 |  |
 | `db::dispatches::outbox::model` | `src/db/dispatches/outbox/model.rs` | 65 |  |
@@ -115,7 +115,7 @@
 | `db::prompt_manifests::repository` | `src/db/prompt_manifests/repository.rs` | 268 |  |
 | `db::prompt_manifests::retention` | `src/db/prompt_manifests/retention.rs` | 96 |  |
 | `db::prompt_manifests::storage_stats` | `src/db/prompt_manifests/storage_stats.rs` | 122 |  |
-| `db::schema` | `src/db/schema.rs` | 3223 | giant-file |
+| `db::schema` | `src/db/schema.rs` | 3225 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 505 |  |
 | `db::session_observability` | `src/db/session_observability.rs` | 459 |  |
 | `db::session_status` | `src/db/session_status.rs` | 78 |  |
@@ -123,12 +123,12 @@
 | `db::table_metadata` | `src/db/table_metadata.rs` | 231 |  |
 | `db::turns` | `src/db/turns.rs` | 216 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 70 |  |
-| `dispatch::dispatch_cancel` | `src/dispatch/dispatch_cancel.rs` | 589 |  |
+| `dispatch::dispatch_cancel` | `src/dispatch/dispatch_cancel.rs` | 591 |  |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 78 |  |
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 6370 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 3785 | giant-file |
 | `dispatch::dispatch_query` | `src/dispatch/dispatch_query.rs` | 176 |  |
-| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 2175 | giant-file |
+| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 2185 | giant-file |
 | `dispatch::dispatch_summary` | `src/dispatch/dispatch_summary.rs` | 326 |  |
 | `dispatch::test_support` | `src/dispatch/test_support.rs` | 401 |  |
 | `dispatch::types` | `src/dispatch/types.rs` | 32 |  |
@@ -265,7 +265,7 @@
 | `server::routes::review_verdict::review_state_repo` | `src/server/routes/review_verdict/review_state_repo.rs` | 35 |  |
 | `server::routes::review_verdict::tuning_aggregate` | `src/server/routes/review_verdict/tuning_aggregate.rs` | 703 |  |
 | `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 554 |  |
-| `server::routes::reviews` | `src/server/routes/reviews.rs` | 1173 | giant-file |
+| `server::routes::reviews` | `src/server/routes/reviews.rs` | 1174 | giant-file |
 | `server::routes::routes_tests` | `src/server/routes/routes_tests/mod.rs` | 26 |  |
 | `server::routes::routes_tests::common` | `src/server/routes/routes_tests/common.rs` | 1418 | giant-file |
 | `server::routes::routines` | `src/server/routes/routines.rs` | 839 |  |
@@ -278,7 +278,7 @@
 | `server::routes::v1` | `src/server/routes/v1.rs` | 1857 | giant-file |
 | `server::routes::voice_config` | `src/server/routes/voice_config.rs` | 462 |  |
 | `server::state` | `src/server/state.rs` | 235 |  |
-| `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 1038 | giant-file |
+| `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 1039 | giant-file |
 | `server::test_phase_runs` | `src/server/test_phase_runs.rs` | 426 |  |
 | `server::worker_registry` | `src/server/worker_registry.rs` | 1090 | giant-file |
 | `server::ws` | `src/server/ws.rs` | 277 |  |
@@ -491,7 +491,7 @@
 | `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4202 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 955 |  |
 | `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 7305 | giant-file |
-| `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2474 | giant-file |
+| `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2475 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 88 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 194 |  |
 | `services::discord::turn_bridge::output_lifecycle` | `src/services/discord/turn_bridge/output_lifecycle.rs` | 78 |  |
@@ -622,7 +622,7 @@
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 409 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 782 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 3336 | giant-file |
-| `supervisor` | `src/supervisor/mod.rs` | 867 |  |
+| `supervisor` | `src/supervisor/mod.rs` | 868 |  |
 | `ui` | `src/ui/mod.rs` | 1 |  |
 | `ui::ai_screen` | `src/ui/ai_screen.rs` | 155 |  |
 | `utils` | `src/utils/mod.rs` | 7 |  |

@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS task_dispatches (
     chain_depth         INTEGER DEFAULT 0,
     created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_stuck_alert_at DATETIME,
     completed_at        DATETIME
 );
 

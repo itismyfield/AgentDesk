@@ -1429,6 +1429,7 @@ pub async fn gc_stale_fixed_working_sessions_db_pg(pool: &PgPool) -> usize {
             "UPDATE task_dispatches
              SET status = 'failed',
                  updated_at = NOW(),
+                 last_stuck_alert_at = NULL,
                  completed_at = COALESCE(completed_at, NOW())
              WHERE id = $1
                AND status IN ('pending', 'dispatched')",
@@ -1499,6 +1500,7 @@ pub(crate) async fn disconnect_stale_fixed_session_by_key_pg(
             "UPDATE task_dispatches
              SET status = 'failed',
                  updated_at = NOW(),
+                 last_stuck_alert_at = NULL,
                  completed_at = COALESCE(completed_at, NOW())
              WHERE id = $1
                AND status IN ('pending', 'dispatched')",

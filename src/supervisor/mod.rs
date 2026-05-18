@@ -517,7 +517,8 @@ impl RuntimeSupervisor {
                     "UPDATE task_dispatches
                      SET status = 'failed',
                          result = $1,
-                         updated_at = NOW()
+                         updated_at = NOW(),
+                         last_stuck_alert_at = NULL
                      WHERE id = $2
                        AND status = $3",
                 )

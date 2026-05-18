@@ -340,7 +340,8 @@ async fn recover_review_target_pg(
              status = $2,
              result = CASE WHEN status = 'failed' THEN NULL ELSE result END,
              completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END,
-             updated_at = NOW()
+             updated_at = NOW(),
+             last_stuck_alert_at = NULL
          WHERE id = $3",
     )
     .bind(new_context.to_string())

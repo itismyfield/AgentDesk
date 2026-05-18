@@ -256,7 +256,8 @@ async fn claim_task_dispatches_with_cluster_config(
                    claimed_at = NOW(),
                    claim_owner = $2,
                    claim_expires_at = NOW() + ($3::BIGINT * INTERVAL '1 second'),
-                   updated_at = NOW()
+                   updated_at = NOW(),
+                   last_stuck_alert_at = NULL
              WHERE id = $1
              RETURNING id, kanban_card_id, to_agent_id, dispatch_type, title,
                        claim_owner, claim_expires_at, required_capabilities

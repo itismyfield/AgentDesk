@@ -583,6 +583,7 @@ async fn set_dispatch_status_on_pg_with_sync(
              SET status = $1,
                  result = CAST($2 AS jsonb),
                  updated_at = NOW(),
+                 last_stuck_alert_at = NULL,
                  completed_at = CASE
                      WHEN $1 = 'completed' THEN COALESCE(completed_at, NOW())
                      ELSE completed_at
@@ -602,7 +603,8 @@ async fn set_dispatch_status_on_pg_with_sync(
             "UPDATE task_dispatches
              SET status = $1,
                  result = CAST($2 AS jsonb),
-                 updated_at = NOW()
+                 updated_at = NOW(),
+                 last_stuck_alert_at = NULL
              WHERE id = $3
                AND status = $4",
         )
@@ -618,6 +620,7 @@ async fn set_dispatch_status_on_pg_with_sync(
             "UPDATE task_dispatches
              SET status = $1,
                  updated_at = NOW(),
+                 last_stuck_alert_at = NULL,
                  completed_at = CASE
                      WHEN $1 = 'completed' THEN COALESCE(completed_at, NOW())
                      ELSE completed_at
@@ -635,7 +638,8 @@ async fn set_dispatch_status_on_pg_with_sync(
         (None, false) => sqlx::query(
             "UPDATE task_dispatches
              SET status = $1,
-                 updated_at = NOW()
+                 updated_at = NOW(),
+                 last_stuck_alert_at = NULL
              WHERE id = $2
                AND status = $3",
         )
@@ -1284,6 +1288,7 @@ fn set_dispatch_status_on_conn_with_sync(
                  SET status = ?1,
                      result = ?2,
                      updated_at = datetime('now'),
+                     last_stuck_alert_at = NULL,
                      completed_at = CASE
                          WHEN ?1 = 'completed' THEN COALESCE(completed_at, datetime('now'))
                          ELSE completed_at
@@ -1295,7 +1300,8 @@ fn set_dispatch_status_on_conn_with_sync(
                 "UPDATE task_dispatches
                  SET status = ?1,
                      result = ?2,
-                     updated_at = datetime('now')
+                     updated_at = datetime('now'),
+                     last_stuck_alert_at = NULL
                  WHERE id = ?3 AND status = ?4",
                 sqlite_test::params![to_status, result.to_string(), dispatch_id, current_status],
             )?,
@@ -1303,6 +1309,7 @@ fn set_dispatch_status_on_conn_with_sync(
                 "UPDATE task_dispatches
                  SET status = ?1,
                      updated_at = datetime('now'),
+                     last_stuck_alert_at = NULL,
                      completed_at = CASE
                          WHEN ?1 = 'completed' THEN COALESCE(completed_at, datetime('now'))
                          ELSE completed_at
@@ -1313,7 +1320,8 @@ fn set_dispatch_status_on_conn_with_sync(
             (None, false) => conn.execute(
                 "UPDATE task_dispatches
                  SET status = ?1,
-                     updated_at = datetime('now')
+                     updated_at = datetime('now'),
+                     last_stuck_alert_at = NULL
                  WHERE id = ?2 AND status = ?3",
                 sqlite_test::params![to_status, dispatch_id, current_status],
             )?,
@@ -1688,6 +1696,7 @@ fn set_dispatch_status_sqlite_for_tests(
              SET status = ?1,
                  result = COALESCE(?2, result),
                  updated_at = datetime('now'),
+                 last_stuck_alert_at = NULL,
                  completed_at = CASE WHEN ?1 = 'completed' THEN datetime('now') ELSE completed_at END
              WHERE id = ?3",
             sqlite_test::params![to_status, result_json, dispatch_id],
@@ -1697,7 +1706,8 @@ fn set_dispatch_status_sqlite_for_tests(
             "UPDATE task_dispatches
              SET status = ?1,
                  result = COALESCE(?2, result),
-                 updated_at = datetime('now')
+                 updated_at = datetime('now'),
+                 last_stuck_alert_at = NULL
              WHERE id = ?3",
             sqlite_test::params![to_status, result_json, dispatch_id],
         )?

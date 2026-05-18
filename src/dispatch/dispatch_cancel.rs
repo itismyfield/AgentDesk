@@ -227,7 +227,8 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
             "UPDATE task_dispatches
              SET status = 'cancelled',
                  result = $1,
-                 updated_at = NOW()
+                 updated_at = NOW(),
+                 last_stuck_alert_at = NULL
              WHERE id = $2
                AND status = $3",
         )
@@ -241,7 +242,8 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
         None => sqlx::query(
             "UPDATE task_dispatches
              SET status = 'cancelled',
-                 updated_at = NOW()
+                 updated_at = NOW(),
+                 last_stuck_alert_at = NULL
              WHERE id = $1
                AND status = $2",
         )

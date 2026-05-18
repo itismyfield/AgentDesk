@@ -710,7 +710,8 @@ fn runtime_pg_fail_dispatch_with_result(
                 "UPDATE task_dispatches
                  SET status = 'failed',
                      result = CAST($1 AS jsonb),
-                     updated_at = NOW()
+                     updated_at = NOW(),
+                     last_stuck_alert_at = NULL
                  WHERE id = $2
                    AND status = $3",
             )
