@@ -146,6 +146,47 @@ async fn refresh_memory_health_for_five_min_tick() {
     crate::services::memory::refresh_backend_health(MEMORY_HEALTH_FIVE_MIN_REASON).await;
 }
 
+async fn cleanup_stale_pending_queue_tmp_files_for_five_min_tick() {
+    let result = tokio::task::spawn_blocking(
+        crate::services::turn_orchestrator::cleanup_stale_pending_queue_tmp_files_all_tokens,
+    )
+    .await;
+    match result {
+        Ok(audits) => {
+            let removed_stale = audits
+                .iter()
+                .filter(|audit| audit.action == "removed_stale")
+                .count();
+            let remove_failed = audits
+                .iter()
+                .filter(|audit| audit.action == "remove_failed")
+                .count();
+            let preserved_active = audits
+                .iter()
+                .filter(|audit| audit.action == "preserved_active")
+                .count();
+            if removed_stale > 0 || remove_failed > 0 {
+                tracing::warn!(
+                    scanned_tmp = audits.len(),
+                    removed_stale,
+                    remove_failed,
+                    preserved_active,
+                    "[policy-tick] pending_queue tmp cleanup completed"
+                );
+            } else if preserved_active > 0 {
+                tracing::debug!(
+                    scanned_tmp = audits.len(),
+                    preserved_active,
+                    "[policy-tick] pending_queue tmp cleanup found only active tmp writes"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!("[policy-tick] pending_queue tmp cleanup task failed: {error}");
+        }
+    }
+}
+
 fn is_five_min_policy_tick(count: u64) -> bool {
     count != 0 && count % FIVE_MIN_POLICY_TICK_INTERVAL == 0
 }
@@ -541,6 +582,7 @@ async fn policy_tick_loop(
         if is_five_min_policy_tick(count) {
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick5min", "5min").await;
             refresh_memory_health_for_five_min_tick().await;
+            cleanup_stale_pending_queue_tmp_files_for_five_min_tick().await;
             // #2257 concern 5: sweep expired idempotency_keys rows so the
             // table stays bounded. The endpoint defaults are 24h TTL; one
             // 5-min sweep is plenty even under heavy use.

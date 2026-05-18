@@ -195,7 +195,7 @@
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 161 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
-| `server` | `src/server/mod.rs` | 4028 | giant-file |
+| `server` | `src/server/mod.rs` | 4070 | giant-file |
 | `server::cluster` | `src/server/cluster.rs` | 1205 | giant-file |
 | `server::cluster_session_routing` | `src/server/cluster_session_routing.rs` | 416 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
@@ -622,7 +622,7 @@
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 322 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 469 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 768 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 3336 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 3434 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 868 |  |
 | `ui` | `src/ui/mod.rs` | 1 |  |
 | `ui::ai_screen` | `src/ui/ai_screen.rs` | 155 |  |

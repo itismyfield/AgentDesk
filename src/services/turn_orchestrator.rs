@@ -425,6 +425,47 @@ fn cleanup_stale_pending_queue_tmp_files_in_dir(
     audits
 }
 
+fn cleanup_stale_pending_queue_tmp_files_under_root(
+    root: &Path,
+    now: SystemTime,
+    stale_after: Duration,
+) -> Vec<PendingQueueTmpCleanupAudit> {
+    let Ok(provider_entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut audits = Vec::new();
+    for provider_entry in provider_entries.flatten() {
+        let provider_path = provider_entry.path();
+        if !provider_path.is_dir() {
+            continue;
+        }
+        let Some(provider_name) = provider_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let provider = ProviderKind::from_str_or_unsupported(provider_name);
+        let Ok(token_entries) = fs::read_dir(&provider_path) else {
+            continue;
+        };
+        for token_entry in token_entries.flatten() {
+            let token_path = token_entry.path();
+            if !token_path.is_dir() {
+                continue;
+            }
+            let Some(token_hash) = token_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            audits.extend(cleanup_stale_pending_queue_tmp_files_in_dir(
+                &provider,
+                token_hash,
+                &token_path,
+                now,
+                stale_after,
+            ));
+        }
+    }
+    audits
+}
+
 pub(crate) fn cleanup_stale_pending_queue_tmp_files(
     provider: &ProviderKind,
     token_hash: &str,
@@ -437,6 +478,18 @@ pub(crate) fn cleanup_stale_pending_queue_tmp_files(
         provider,
         token_hash,
         &dir,
+        SystemTime::now(),
+        STALE_PENDING_QUEUE_TMP_AGE,
+    )
+}
+
+pub(crate) fn cleanup_stale_pending_queue_tmp_files_all_tokens() -> Vec<PendingQueueTmpCleanupAudit>
+{
+    let Some(root) = pending_queue_root() else {
+        return Vec::new();
+    };
+    cleanup_stale_pending_queue_tmp_files_under_root(
+        &root,
         SystemTime::now(),
         STALE_PENDING_QUEUE_TMP_AGE,
     )
@@ -2300,6 +2353,51 @@ mod actor_hydrate_regression_tests {
         assert_eq!(audits[0].channel_id, Some(45678));
         assert_eq!(audits[0].action, "preserved_active");
         assert!(active_tmp.exists(), "fresh tmp writes must be preserved");
+    }
+
+    #[test]
+    fn cleanup_stale_pending_queue_tmp_files_under_root_scans_all_token_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let claude_token_dir = root.path().join("claude").join("token-a");
+        let codex_token_dir = root.path().join("codex").join("token-b");
+        std::fs::create_dir_all(&claude_token_dir).unwrap();
+        std::fs::create_dir_all(&codex_token_dir).unwrap();
+
+        let stale_tmp = claude_token_dir.join(".11111.json.interrupted.tmp");
+        let stale_tmp_other_provider = codex_token_dir.join(".22222.json.inflight.tmp");
+        let queue_json = claude_token_dir.join("33333.json");
+        let out_of_scope_tmp = root.path().join(".44444.json.interrupted.tmp");
+        std::fs::write(&stale_tmp, b"partial").unwrap();
+        std::fs::write(&stale_tmp_other_provider, b"partial").unwrap();
+        std::fs::write(&queue_json, b"[]").unwrap();
+        std::fs::write(&out_of_scope_tmp, b"partial").unwrap();
+
+        let audits = cleanup_stale_pending_queue_tmp_files_under_root(
+            root.path(),
+            SystemTime::now() + Duration::from_secs(120),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(audits.len(), 2);
+        assert!(
+            audits.iter().any(|audit| {
+                audit.channel_id == Some(11111) && audit.action == "removed_stale"
+            }),
+            "stale tmp files in token directories should be removed"
+        );
+        assert!(
+            audits.iter().any(|audit| {
+                audit.channel_id == Some(22222) && audit.action == "removed_stale"
+            }),
+            "old tmp files for every provider/token should be checked"
+        );
+        assert!(!stale_tmp.exists());
+        assert!(!stale_tmp_other_provider.exists());
+        assert!(queue_json.exists(), "real queue files must be preserved");
+        assert!(
+            out_of_scope_tmp.exists(),
+            "root-level tmp files are not pending queue token snapshots"
+        );
     }
 
     /// #2374 — the mailbox actor must own the reason-write so that the

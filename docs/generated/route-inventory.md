@@ -270,4 +270,4 @@
 | `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:262` | `src/server/routes/domains/ops.rs:312` |
 | `GET` | `/api/voice/config` | `voice_config::get_voice_config` | `src/server/routes/voice_config.rs:109` | `src/server/routes/domains/admin.rs:64` |
 | `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:117` | `src/server/routes/domains/admin.rs:64` |
-| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:161` | `src/server/mod.rs:380` |
+| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:161` | `src/server/mod.rs:421` |
