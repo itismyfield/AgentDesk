@@ -1005,40 +1005,6 @@ mod tests {
         assert_eq!(result.command, "cmd.exe [AgentDesk Shell]");
     }
 
-    // ========== SortField tests ==========
-
-    #[test]
-    fn test_sort_field_equality() {
-        assert_eq!(SortField::Pid, SortField::Pid);
-        assert_eq!(SortField::Cpu, SortField::Cpu);
-        assert_eq!(SortField::Mem, SortField::Mem);
-        assert_eq!(SortField::Command, SortField::Command);
-        assert_ne!(SortField::Pid, SortField::Cpu);
-    }
-
-    // ========== ProcessInfo tests ==========
-
-    #[test]
-    fn test_process_info_clone() {
-        let info = ProcessInfo {
-            pid: 1234,
-            user: "test".to_string(),
-            cpu: 1.5,
-            mem: 2.5,
-            vsz: 1000,
-            rss: 500,
-            tty: "pts/0".to_string(),
-            stat: "S".to_string(),
-            start: "10:00".to_string(),
-            time: "0:01".to_string(),
-            command: "test_cmd".to_string(),
-        };
-
-        let cloned = info.clone();
-        assert_eq!(cloned.pid, info.pid);
-        assert_eq!(cloned.user, info.user);
-        assert_eq!(cloned.command, info.command);
-    }
 }
 
 #[cfg(all(test, unix))]

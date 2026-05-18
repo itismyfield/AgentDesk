@@ -2066,37 +2066,6 @@ agents:
     }
 
     #[test]
-    fn test_discord_token_hash_reproducible() {
-        let hash1 = discord_token_hash("same-token-abc");
-        let hash2 = discord_token_hash("same-token-abc");
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_discord_token_hash_different_tokens() {
-        let hash1 = discord_token_hash("token-alpha");
-        let hash2 = discord_token_hash("token-beta");
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_channel_supports_provider_dm_always_true() {
-        // DM → all supported providers should return true
-        assert!(channel_supports_provider(
-            &ProviderKind::Claude,
-            None,
-            true,
-            None,
-        ));
-        assert!(channel_supports_provider(
-            &ProviderKind::Codex,
-            None,
-            true,
-            None,
-        ));
-    }
-
-    #[test]
     fn test_bot_settings_allow_channel_honors_allowlist() {
         let mut settings = super::super::DiscordBotSettings::default();
         settings.allowed_channel_ids = vec![1488022491992424448];

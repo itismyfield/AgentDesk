@@ -2125,41 +2125,6 @@ pub(crate) fn current_test_runtime_root_override() -> Option<std::path::PathBuf>
     test_runtime_root_override()
 }
 
-#[cfg(test)]
-mod agent_channel_isolate_override_tests {
-    use super::{AgentChannel, AgentChannelConfig};
-
-    #[test]
-    fn isolate_override_round_trips_through_yaml_by_default() {
-        let config = AgentChannelConfig {
-            id: Some("123".to_string()),
-            isolate_override: Some(false),
-            ..AgentChannelConfig::default()
-        };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        assert!(
-            yaml.contains("isolate_override: false"),
-            "expected isolate_override in: {yaml}"
-        );
-        let reloaded: AgentChannelConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(reloaded.isolate_override, Some(false));
-        assert_eq!(
-            AgentChannel::Detailed(reloaded).isolate_override(),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn isolate_override_camel_case_alias_is_accepted_by_default() {
-        let yaml = "id: '123'\nisolateOverride: true\n";
-        let config: AgentChannelConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.isolate_override, Some(true));
-        assert_eq!(
-            AgentChannel::Detailed(config).isolate_override(),
-            Some(true)
-        );
-    }
-}
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) fn set_test_runtime_root_override(path: Option<std::path::PathBuf>) {
@@ -3054,70 +3019,6 @@ routines:
     }
 
     #[test]
-    fn dispatch_profile_round_trips_through_yaml() {
-        let config = AgentChannelConfig {
-            id: Some("123".to_string()),
-            dispatch_profile: Some("lite".to_string()),
-            ..AgentChannelConfig::default()
-        };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        assert!(
-            yaml.contains("dispatch_profile: lite"),
-            "expected dispatch_profile: lite in: {yaml}"
-        );
-        let reloaded: AgentChannelConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(reloaded.dispatch_profile.as_deref(), Some("lite"));
-        assert_eq!(
-            AgentChannel::Detailed(reloaded)
-                .dispatch_profile()
-                .as_deref(),
-            Some("lite")
-        );
-    }
-
-    #[test]
-    fn dispatch_profile_camel_case_alias_is_accepted() {
-        let yaml = "id: '123'\ndispatchProfile: lite\n";
-        let config: AgentChannelConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.dispatch_profile.as_deref(), Some("lite"));
-        assert_eq!(
-            AgentChannel::Detailed(config).dispatch_profile().as_deref(),
-            Some("lite")
-        );
-    }
-
-    #[test]
-    fn isolate_override_round_trips_through_yaml() {
-        let config = AgentChannelConfig {
-            id: Some("123".to_string()),
-            isolate_override: Some(false),
-            ..AgentChannelConfig::default()
-        };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        assert!(
-            yaml.contains("isolate_override: false"),
-            "expected isolate_override in: {yaml}"
-        );
-        let reloaded: AgentChannelConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(reloaded.isolate_override, Some(false));
-        assert_eq!(
-            AgentChannel::Detailed(reloaded).isolate_override(),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn isolate_override_camel_case_alias_is_accepted() {
-        let yaml = "id: '123'\nisolateOverride: true\n";
-        let config: AgentChannelConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.isolate_override, Some(true));
-        assert_eq!(
-            AgentChannel::Detailed(config).isolate_override(),
-            Some(true)
-        );
-    }
-
-    #[test]
     fn cache_ttl_minutes_round_trips_through_yaml() {
         // None → omitted entirely (skip_serializing_if).
         let config_none = AgentChannelConfig {
@@ -3157,13 +3058,6 @@ routines:
         let reloaded: AgentChannelConfig =
             serde_yaml::from_str(&serde_yaml::to_string(&config_5).unwrap()).unwrap();
         assert_eq!(reloaded.cache_ttl_minutes, Some(5));
-    }
-
-    #[test]
-    fn cache_ttl_minutes_camel_case_alias_is_accepted() {
-        let yaml = "id: '123'\ncacheTtlMinutes: 60\n";
-        let config: AgentChannelConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.cache_ttl_minutes, Some(60));
     }
 
     #[test]

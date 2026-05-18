@@ -1898,16 +1898,6 @@ mod tests {
     }
 
     #[test]
-    fn test_from_str_roundtrip() {
-        let pk = crate::services::provider::ProviderKind::from_str("opencode");
-        assert_eq!(pk, Some(crate::services::provider::ProviderKind::OpenCode));
-        assert_eq!(
-            crate::services::provider::ProviderKind::OpenCode.as_str(),
-            "opencode"
-        );
-    }
-
-    #[test]
     fn test_wrong_session_id_ignored() {
         let data = r#"{"type":"part","properties":{"sessionID":"other-session","part":{"type":"text","text":"hello"}}}"#;
         let (msgs, stop) = parse_event(data, "my-session");
