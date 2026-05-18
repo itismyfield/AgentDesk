@@ -30,7 +30,7 @@ pub(super) fn spawn_memory_capture_task(
     })
 }
 
-pub(super) fn spawn_memory_reflect_task(
+pub(in crate::services::discord) fn spawn_memory_reflect_task(
     channel_id: ChannelId,
     reflect_memory_settings: settings::ResolvedMemorySettings,
     reflect_request: ReflectRequest,
@@ -76,7 +76,7 @@ fn build_memento_transcript(history: &[HistoryItem]) -> String {
         .join("\n")
 }
 
-pub(super) fn take_memento_reflect_request(
+pub(in crate::services::discord) fn take_memento_reflect_request(
     session: &mut DiscordSession,
     memory_settings: &settings::ResolvedMemorySettings,
     provider: &ProviderKind,

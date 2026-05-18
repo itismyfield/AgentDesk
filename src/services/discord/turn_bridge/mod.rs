@@ -1394,6 +1394,8 @@ use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
 use memory_lifecycle::{
     optional_metric_token_fields, plan_turn_end_memory, spawn_memory_capture_task,
+};
+pub(in crate::services::discord) use memory_lifecycle::{
     spawn_memory_reflect_task, take_memento_reflect_request,
 };
 use recall_feedback::{

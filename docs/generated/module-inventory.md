@@ -404,7 +404,7 @@
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 204 |  |
 | `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 666 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 69 |  |
-| `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 587 |  |
+| `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 712 |  |
 | `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 465 |  |
 | `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 140 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 3196 | giant-file |
@@ -491,7 +491,7 @@
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
 | `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4780 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 209 |  |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 7554 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 7556 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2475 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 88 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 194 |  |
@@ -544,7 +544,7 @@
 | `services::maintenance::jobs::target_sweep` | `src/services/maintenance/jobs/target_sweep.rs` | 248 |  |
 | `services::maintenance::jobs::worktree_orphan_sweep` | `src/services/maintenance/jobs/worktree_orphan_sweep.rs` | 279 |  |
 | `services::mcp_config` | `src/services/mcp_config.rs` | 1532 | giant-file |
-| `services::memory` | `src/services/memory/mod.rs` | 374 |  |
+| `services::memory` | `src/services/memory/mod.rs` | 373 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 116 |  |
 | `services::memory::memento` | `src/services/memory/memento.rs` | 2953 | giant-file |
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 503 |  |

@@ -110,7 +110,6 @@ pub(crate) struct CaptureRequest {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionEndReason {
-    #[allow(dead_code)]
     IdleExpiry,
     LocalSessionReset,
     TurnCapReached,

@@ -41,7 +41,9 @@ use poise::serenity_prelude::ChannelId;
 
 use super::SharedData;
 use super::monitoring_status;
+use super::settings::{self, ResolvedMemorySettings, RoleBinding};
 use crate::server::routes::state::global_monitoring_store;
+use crate::services::memory::{ReflectRequest, SessionEndReason};
 use crate::services::provider::ProviderKind;
 
 /// Freshness threshold. Active turns whose freshness anchor (the later of
@@ -193,7 +195,53 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
             )
         };
         apply_classification(channel_id, classification, health_registry.as_ref()).await;
+        if classification == IdleClassification::Idle {
+            spawn_idle_expiry_reflect_if_needed(shared, provider, channel_id).await;
+        }
     }
+}
+
+async fn spawn_idle_expiry_reflect_if_needed(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) {
+    let channel_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+    };
+    let role_binding = settings::resolve_role_binding(channel_id, channel_name.as_deref());
+    let reflect_job = {
+        let mut data = shared.core.lock().await;
+        let Some(session) = data.sessions.get_mut(&channel_id) else {
+            return;
+        };
+        take_idle_expiry_reflect_request(session, provider, role_binding.as_ref(), channel_id)
+    };
+    let Some((memory_settings, reflect_request)) = reflect_job else {
+        return;
+    };
+    super::turn_bridge::spawn_memory_reflect_task(channel_id, memory_settings, reflect_request);
+}
+
+fn take_idle_expiry_reflect_request(
+    session: &mut super::DiscordSession,
+    provider: &ProviderKind,
+    role_binding: Option<&RoleBinding>,
+    channel_id: ChannelId,
+) -> Option<(ResolvedMemorySettings, ReflectRequest)> {
+    let memory_settings = settings::memory_settings_for_binding(role_binding);
+    let reflect_request = super::turn_bridge::take_memento_reflect_request(
+        session,
+        &memory_settings,
+        provider,
+        role_binding,
+        channel_id.get(),
+        SessionEndReason::IdleExpiry,
+    )?;
+    Some((memory_settings, reflect_request))
 }
 
 async fn apply_classification(
@@ -332,7 +380,9 @@ async fn fetch_last_heartbeat(
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
+    use super::settings::MemoryBackendKind;
     use super::*;
+    use crate::ui::ai_screen::{HistoryItem, HistoryType};
     use chrono::Duration as ChronoDuration;
 
     /// Helper: a heartbeat older than the 15-minute threshold.
@@ -518,6 +568,81 @@ mod tests {
         assert!(parse_last_heartbeat("").is_none());
         assert!(parse_last_heartbeat("   ").is_none());
         assert!(parse_last_heartbeat("not-a-timestamp").is_none());
+    }
+
+    fn sample_session() -> super::super::DiscordSession {
+        super::super::DiscordSession {
+            session_id: Some("session-1".to_string()),
+            memento_context_loaded: true,
+            memento_reflected: false,
+            current_path: Some("/tmp/project".to_string()),
+            history: vec![
+                HistoryItem {
+                    item_type: HistoryType::User,
+                    content: "hello".to_string(),
+                },
+                HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: "world".to_string(),
+                },
+            ],
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: Some(42),
+            channel_name: Some("adk-cdx".to_string()),
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+            assistant_turns: 0,
+        }
+    }
+
+    fn memento_role_binding() -> RoleBinding {
+        RoleBinding {
+            role_id: "project-agentdesk".to_string(),
+            prompt_file: "AGENTS.md".to_string(),
+            provider: Some(ProviderKind::Codex),
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: false,
+            quality_feedback_injection_enabled: false,
+            memory: ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            },
+        }
+    }
+
+    #[test]
+    fn idle_expiry_reflect_request_uses_memento_reason_once() {
+        let mut session = sample_session();
+        let role_binding = memento_role_binding();
+
+        let (_memory_settings, request) = take_idle_expiry_reflect_request(
+            &mut session,
+            &ProviderKind::Codex,
+            Some(&role_binding),
+            ChannelId::new(42),
+        )
+        .expect("idle expiry should prepare memento reflect request");
+
+        assert_eq!(request.reason, SessionEndReason::IdleExpiry);
+        assert_eq!(request.session_id, "session-1");
+        assert_eq!(request.role_id, "project-agentdesk");
+        assert_eq!(request.transcript, "[User]: hello\n[Assistant]: world");
+        assert!(session.memento_reflected);
+        assert!(
+            take_idle_expiry_reflect_request(
+                &mut session,
+                &ProviderKind::Codex,
+                Some(&role_binding),
+                ChannelId::new(42),
+            )
+            .is_none(),
+            "idle detector must not spawn duplicate reflects for the same session"
+        );
     }
 
     /// Drive the apply step end-to-end through the shared monitoring store.
