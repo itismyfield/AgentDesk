@@ -195,7 +195,7 @@
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 161 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
-| `server` | `src/server/mod.rs` | 3889 | giant-file |
+| `server` | `src/server/mod.rs` | 4028 | giant-file |
 | `server::cluster` | `src/server/cluster.rs` | 1205 | giant-file |
 | `server::cluster_session_routing` | `src/server/cluster_session_routing.rs` | 416 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |

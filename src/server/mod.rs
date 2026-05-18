@@ -150,6 +150,81 @@ fn is_five_min_policy_tick(count: u64) -> bool {
     count != 0 && count % FIVE_MIN_POLICY_TICK_INTERVAL == 0
 }
 
+fn should_run_slo_api_friction_aggregation(count: u64, leader_epoch_pending: bool) -> bool {
+    leader_epoch_pending || is_five_min_policy_tick(count)
+}
+
+async fn run_slo_api_friction_aggregation_tick(
+    engine: &PolicyEngine,
+    pg_pool: Option<&PgPool>,
+    reason: &str,
+) {
+    let pool = pg_pool.or_else(|| engine.pg_pool());
+    tracing::debug!(reason, "[policy-tick] running SLO/api-friction aggregation");
+
+    if let Err(error) =
+        crate::services::api_friction::process_api_friction_patterns(pool, None, None).await
+    {
+        tracing::warn!(
+            reason,
+            "[policy-tick] api-friction aggregation failed: {error}"
+        );
+    }
+
+    // #1072 turn-lifecycle SLO aggregation (Epic #905 Phase 1):
+    // compute + persist + alert on threshold breach.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let aggregates = crate::services::slo::run_aggregation_tick(None, pool, now_ms).await;
+    tracing::debug!(
+        reason,
+        aggregate_count = aggregates.len(),
+        "[policy-tick] SLO aggregation completed"
+    );
+}
+
+async fn run_leader_epoch_slo_api_friction_kickstart(
+    engine: &PolicyEngine,
+    pg_pool: Option<&PgPool>,
+) -> bool {
+    let pool = pg_pool.or_else(|| engine.pg_pool());
+    let advisory_lock = if let Some(pool) = pool {
+        match try_acquire_pg_singleton_lock(
+            pool,
+            POLICY_TICK_ADVISORY_LOCK_ID,
+            "policy-tick-leader-epoch",
+        )
+        .await
+        {
+            Ok(Some(conn)) => Some(conn),
+            Ok(None) => {
+                tracing::debug!(
+                    "[policy-tick] leader-epoch SLO/API-friction kickstart skipped: advisory lock held elsewhere"
+                );
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!("[policy-tick] leader-epoch advisory lock failed: {error}");
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+
+    run_slo_api_friction_aggregation_tick(engine, pool, "leader_epoch").await;
+
+    if let Some(conn) = advisory_lock {
+        release_pg_singleton_lock(
+            conn,
+            POLICY_TICK_ADVISORY_LOCK_ID,
+            "policy-tick-leader-epoch",
+        )
+        .await;
+    }
+
+    true
+}
+
 pub(crate) async fn run(
     config: Config,
     engine: PolicyEngine,
@@ -347,8 +422,34 @@ async fn policy_tick_loop(
 ) {
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
 
-    let mut interval_30s = tokio::time::interval(Duration::from_secs(30));
     let mut count = 0u64;
+    let mut leader_epoch_slo_api_friction_pending = true;
+
+    if shutdown
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Acquire))
+    {
+        tracing::info!("[policy-tick] shutdown requested before leader-epoch kickstart");
+        return;
+    }
+
+    if let Some(runtime) = cluster_runtime.as_ref()
+        && !runtime.is_leader()
+    {
+        tracing::warn!(
+            instance_id = runtime.instance_id(),
+            "[policy-tick] self-fenced before leader-epoch kickstart after cluster leadership was lost"
+        );
+        return;
+    }
+
+    if should_run_slo_api_friction_aggregation(count, leader_epoch_slo_api_friction_pending)
+        && run_leader_epoch_slo_api_friction_kickstart(&engine, pg_pool.as_deref()).await
+    {
+        leader_epoch_slo_api_friction_pending = false;
+    }
+
+    let mut interval_30s = tokio::time::interval(Duration::from_secs(30));
 
     // Skip the first immediate tick
     interval_30s.tick().await;
@@ -391,6 +492,22 @@ async fn policy_tick_loop(
             }
         } else {
             None
+        };
+
+        let ran_slo_api_friction_this_tick = if should_run_slo_api_friction_aggregation(
+            count,
+            leader_epoch_slo_api_friction_pending,
+        ) {
+            let reason = if leader_epoch_slo_api_friction_pending {
+                "leader_epoch_retry"
+            } else {
+                "five_min_tick"
+            };
+            run_slo_api_friction_aggregation_tick(&engine, pg_pool.as_deref(), reason).await;
+            leader_epoch_slo_api_friction_pending = false;
+            true
+        } else {
+            false
         };
 
         // ── 30s tier: every tick ── (#134: fire by name for dynamic hook binding)
@@ -444,20 +561,11 @@ async fn policy_tick_loop(
                     }
                 }
             }
-            if let Err(error) = crate::services::api_friction::process_api_friction_patterns(
-                pg_pool.as_deref().or_else(|| engine.pg_pool()),
-                None,
-                None,
-            )
-            .await
-            {
-                tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
+            if !ran_slo_api_friction_this_tick {
+                run_slo_api_friction_aggregation_tick(&engine, pg_pool.as_deref(), "five_min_tick")
+                    .await;
             }
-            // #1072 turn-lifecycle SLO aggregation (Epic #905 Phase 1):
-            // compute + persist + alert on threshold breach.
             let slo_pool = pg_pool.as_deref().or_else(|| engine.pg_pool());
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            let _ = crate::services::slo::run_aggregation_tick(None, slo_pool, now_ms).await;
             if let Some(pool) = slo_pool {
                 match crate::reconcile::reconcile_completed_queue_review_drift_pg(
                     pool, None, &engine,
@@ -973,6 +1081,37 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
                 tracing::warn!("[rate-limit-sync] Gemini rate_limit fetch failed: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_tick_schedule_tests {
+    use super::{is_five_min_policy_tick, should_run_slo_api_friction_aggregation};
+
+    #[test]
+    fn slo_api_friction_aggregation_runs_while_leader_epoch_is_pending() {
+        assert!(should_run_slo_api_friction_aggregation(0, true));
+        assert!(should_run_slo_api_friction_aggregation(1, true));
+        assert!(should_run_slo_api_friction_aggregation(9, true));
+        assert!(should_run_slo_api_friction_aggregation(10, true));
+    }
+
+    #[test]
+    fn slo_api_friction_aggregation_falls_back_to_five_min_after_kickstart() {
+        assert!(!should_run_slo_api_friction_aggregation(0, false));
+        assert!(!should_run_slo_api_friction_aggregation(1, false));
+        assert!(!should_run_slo_api_friction_aggregation(9, false));
+        assert!(should_run_slo_api_friction_aggregation(10, false));
+        assert!(should_run_slo_api_friction_aggregation(20, false));
+    }
+
+    #[test]
+    fn five_min_policy_tick_runs_on_every_tenth_nonzero_iteration() {
+        assert!(!is_five_min_policy_tick(0));
+        assert!(!is_five_min_policy_tick(1));
+        assert!(!is_five_min_policy_tick(9));
+        assert!(is_five_min_policy_tick(10));
+        assert!(is_five_min_policy_tick(20));
     }
 }
 
