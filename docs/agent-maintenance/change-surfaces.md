@@ -111,8 +111,8 @@
   - `src/services/discord/watchers/lifecycle.rs` (1942 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (6208 lines after #1435 lifecycle
-    extraction; still giant-file territory).
+  - `src/services/discord/tmux.rs` (6344 lines after #2376 relay-owner
+    failover guard; still giant-file territory).
   - `src/services/discord/tmux_watcher.rs` (3524 lines after #1520 watcher
     loop extraction + #2427 D/A explicit-cleanup wires; split loop helpers
     further before adding behavior).
@@ -130,7 +130,7 @@
     only outside a split plan).
   - `src/services/discord/router/message_handler.rs` (7013 lines).
   - `src/services/discord/meeting_orchestrator.rs` (3779 lines).
-  - `src/services/discord/turn_bridge/mod.rs` (4267 lines).
+  - `src/services/discord/turn_bridge/mod.rs` (7062 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1525 lines; provider
     stop-token/tmux binding runtime + PID-exit observation helper (#2426),
     split before adding non-bugfix behavior).

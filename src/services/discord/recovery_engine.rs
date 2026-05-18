@@ -4889,6 +4889,7 @@ mod tests {
             rebind_origin: false,
             long_running_placeholder_active: false,
             watcher_owns_live_relay: false,
+            relay_owner_kind: crate::services::discord::inflight::RelayOwnerKind::None,
             turn_source: crate::services::discord::inflight::TurnSource::Managed,
         };
 
@@ -5016,6 +5017,7 @@ mod tests {
             rebind_origin: false,
             long_running_placeholder_active: false,
             watcher_owns_live_relay: false,
+            relay_owner_kind: crate::services::discord::inflight::RelayOwnerKind::None,
             turn_source: crate::services::discord::inflight::TurnSource::Managed,
         };
 

@@ -2221,6 +2221,8 @@ fn handle_watcher_runtime_handoff(
                         std::time::Duration::from_secs(1800),
                     ));
                     *standby_relay_owns_output = true;
+                    inflight_state
+                        .set_relay_owner_kind(super::inflight::RelayOwnerKind::StandbyRelay);
                     // #2263: intentionally leave `watcher_owns_live_relay = false`
                     // on the standby branch.
                     //
@@ -2258,11 +2260,12 @@ fn handle_watcher_runtime_handoff(
                     // mode is the user-visible stall on the FOLLOW-UP
                     // turn until staleness sweep, NOT a dropped response.
                     //
-                    // A typed `relay_owner_kind` (Watcher / StandbyRelay
-                    // / None) plus an owner-lease timestamp would allow
-                    // distinguishing dead-standby from live-standby and
-                    // remove this stall entirely. That refactor is
-                    // tracked separately and is out of scope for #2263.
+                    // #2376 records `relay_owner_kind = standby_relay` so a
+                    // restored watcher can yield for every live batch, not
+                    // only batches that overlap the original turn_start_offset.
+                    // A future owner-lease timestamp can distinguish
+                    // dead-standby from live-standby and remove the phantom
+                    // yield window entirely.
                     //
                     // Per-turn in-process state is still correctly tracked
                     // by `standby_relay_owns_output = true` above; that
@@ -2278,7 +2281,7 @@ fn handle_watcher_runtime_handoff(
                 }
             } else if let Some(http_bg) = shared_owned.serenity_http_or_token_fallback() {
                 let shared_bg = shared_owned.clone();
-                inflight_state.watcher_owns_live_relay = true;
+                inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
                 let restored_turn = super::tmux::restored_watcher_turn_from_inflight(
                     inflight_state,
                     &tmux_session_name,
@@ -2328,7 +2331,7 @@ fn handle_watcher_runtime_handoff(
     }
     if watcher_ready_for_relay {
         *tmux_handed_off = true;
-        inflight_state.watcher_owns_live_relay = true;
+        inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
         *watcher_owns_assistant_relay = true;
         if let Some(watcher) = shared_owned.tmux_watchers.get(watcher_owner_channel_id) {
             *watcher_relay_available_for_turn = true;
@@ -2416,10 +2419,19 @@ pub(super) fn spawn_turn_bridge(
         let mut any_tool_used = bridge.inflight_state.any_tool_used;
         let mut has_post_tool_text = bridge.inflight_state.has_post_tool_text;
         let mut tmux_handed_off = false;
-        let mut watcher_owns_assistant_relay = bridge.inflight_state.watcher_owns_live_relay;
+        let initial_relay_owner_kind = bridge.inflight_state.effective_relay_owner_kind();
+        let mut watcher_owns_assistant_relay =
+            matches!(initial_relay_owner_kind, super::inflight::RelayOwnerKind::Watcher);
         let mut watcher_relay_available_for_turn = watcher_owns_assistant_relay
             && live_watcher_registered_for_relay(shared_owned.as_ref(), channel_id);
-        let mut standby_relay_owns_output = false;
+        // Durable recovery must honor typed non-bridge owners too. `Unknown`
+        // is treated like a live external owner so future relay variants do
+        // not fail open and duplicate bridge-owned Discord delivery.
+        let mut standby_relay_owns_output = matches!(
+            initial_relay_owner_kind,
+            super::inflight::RelayOwnerKind::StandbyRelay
+                | super::inflight::RelayOwnerKind::Unknown
+        );
         // #1452 (Codex iter 3 P1): track whether THIS turn published a
         // mailbox-finalization debt onto the watcher handle. Without this
         // flag, the bridge's non-delegation `compare_exchange(true, false, ...)`
@@ -3907,6 +3919,9 @@ pub(super) fn spawn_turn_bridge(
                                                 std::time::Duration::from_secs(1800),
                                             ));
                                             standby_relay_owns_output = true;
+                                            inflight_state.set_relay_owner_kind(
+                                                super::inflight::RelayOwnerKind::StandbyRelay,
+                                            );
                                             // #2263: see the helper-fn
                                             // `handle_watcher_runtime_handoff`
                                             // standby branch — intentionally
@@ -3918,8 +3933,9 @@ pub(super) fn spawn_turn_bridge(
                                             // by a different node, risking
                                             // duplicate Discord delivery.
                                             // Per-turn delivery ownership is
-                                            // already captured by
-                                            // `standby_relay_owns_output`.
+                                            // tracked both locally by
+                                            // `standby_relay_owns_output` and
+                                            // durably by `relay_owner_kind`.
                                             let _ = save_inflight_state(&inflight_state);
                                         } else {
                                             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3935,7 +3951,9 @@ pub(super) fn spawn_turn_bridge(
                                         // the response independently.
                                     } else if let Some(http_bg) = shared_owned.serenity_http_or_token_fallback() {
                                         let shared_bg = shared_owned.clone();
-                                        inflight_state.watcher_owns_live_relay = true;
+                                        inflight_state.set_relay_owner_kind(
+                                            super::inflight::RelayOwnerKind::Watcher,
+                                        );
                                         let restored_turn =
                                             super::tmux::restored_watcher_turn_from_inflight(
                                                 &inflight_state,
@@ -3986,7 +4004,9 @@ pub(super) fn spawn_turn_bridge(
                             }
                             if watcher_ready_for_relay {
                                 tmux_handed_off = true;
-                                inflight_state.watcher_owns_live_relay = true;
+                                inflight_state.set_relay_owner_kind(
+                                    super::inflight::RelayOwnerKind::Watcher,
+                                );
                                 watcher_owns_assistant_relay = true;
                                 if let Some(watcher) =
                                     shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
@@ -4264,7 +4284,7 @@ pub(super) fn spawn_turn_bridge(
                 status_panel_dirty = false;
             }
 
-            if !watcher_owns_assistant_relay {
+            if !watcher_owns_assistant_relay && !standby_relay_owns_output {
                 loop {
                     let current_portion =
                         response_portion_after_offset(&full_response, response_sent_offset);
@@ -4773,17 +4793,28 @@ pub(super) fn spawn_turn_bridge(
                 "review_dispatch_pending",
             );
         }
-        let bridge_relay_delegated_to_watcher = should_delegate_bridge_relay_to_watcher(
-            watcher_owns_assistant_relay,
-            watcher_relay_available_for_turn,
-            !response_portion_after_offset(&full_response, response_sent_offset)
-                .trim()
-                .is_empty(),
-            cancelled,
-            is_prompt_too_long,
-            transport_error,
-            recovery_retry,
-        );
+        let terminal_error_path =
+            cancelled || is_prompt_too_long || transport_error || recovery_retry;
+        // A bridge rebuilt from durable state must honor the row's existing
+        // relay owner. The pending-response guard below only applies to
+        // in-process handoffs where the bridge may already own unsent bytes.
+        let recovered_watcher_owns_output =
+            matches!(initial_relay_owner_kind, super::inflight::RelayOwnerKind::Watcher)
+                && watcher_owns_assistant_relay
+                && watcher_relay_available_for_turn
+                && !terminal_error_path;
+        let bridge_relay_delegated_to_watcher = recovered_watcher_owns_output
+            || should_delegate_bridge_relay_to_watcher(
+                watcher_owns_assistant_relay,
+                watcher_relay_available_for_turn,
+                !response_portion_after_offset(&full_response, response_sent_offset)
+                    .trim()
+                    .is_empty(),
+                cancelled,
+                is_prompt_too_long,
+                transport_error,
+                recovery_retry,
+            );
         let bridge_output_owner = classify_bridge_output_owner(
             standby_relay_owns_output
                 && !cancelled

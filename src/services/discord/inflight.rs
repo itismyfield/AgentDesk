@@ -207,6 +207,14 @@ pub(super) struct InflightTurnState {
     /// stream or terminal-replace assistant text while this is true.
     #[serde(default)]
     pub watcher_owns_live_relay: bool,
+    /// #2376: typed replacement for `watcher_owns_live_relay`.
+    ///
+    /// The legacy boolean can only distinguish "watcher" from "not watcher".
+    /// A standby JSONL relay is not a watcher, but it is still a live relay
+    /// owner that restored watchers must yield to. Keep the boolean for on-disk
+    /// compatibility while new writers populate this typed field.
+    #[serde(default, deserialize_with = "deserialize_relay_owner_kind_tolerant")]
+    pub relay_owner_kind: RelayOwnerKind,
     /// #2285 audit trail — origin of the turn that produced this inflight.
     /// Recorded for diagnostics; the session-bound relay does NOT branch on
     /// this value (epic #2285 acceptance criterion E: relay is decided by
@@ -244,6 +252,34 @@ pub(in crate::services::discord) enum TurnSource {
     ExternalAdopted,
 }
 
+/// Active relay owner persisted with an in-flight turn.
+///
+/// `None` preserves the historical bridge-owned/default shape. `Watcher` is
+/// equivalent to legacy `watcher_owns_live_relay = true`. `StandbyRelay`
+/// captures the cluster-standby JSONL relay: it does not own a tmux watcher
+/// slot, but it does own live Discord delivery while it is running. `Unknown`
+/// is a conservative forward-compat fallback for future live-owner variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::services::discord) enum RelayOwnerKind {
+    #[default]
+    None,
+    Watcher,
+    StandbyRelay,
+    Unknown,
+}
+
+impl RelayOwnerKind {
+    pub(in crate::services::discord) fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Watcher => "watcher",
+            Self::StandbyRelay => "standby_relay",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 impl TurnSource {
     /// Stable wire representation for audit logs / metrics labels.
     pub(in crate::services::discord) fn as_str(self) -> &'static str {
@@ -258,7 +294,8 @@ impl TurnSource {
 
 #[cfg(test)]
 mod turn_source_tests {
-    use super::TurnSource;
+    use super::{InflightTurnState, RelayOwnerKind, TurnSource};
+    use crate::services::provider::ProviderKind;
 
     #[test]
     fn default_is_managed_for_legacy_rows() {
@@ -300,6 +337,104 @@ mod turn_source_tests {
         }
         let parsed: Probe = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed.turn_source, TurnSource::Managed);
+    }
+
+    #[test]
+    fn relay_owner_kind_defaults_to_none_for_legacy_rows() {
+        #[derive(serde::Deserialize, Debug)]
+        struct Probe {
+            #[serde(default)]
+            relay_owner_kind: RelayOwnerKind,
+        }
+
+        let parsed: Probe = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.relay_owner_kind, RelayOwnerKind::None);
+    }
+
+    #[test]
+    fn relay_owner_kind_uses_legacy_bool_when_typed_field_absent() {
+        let state: InflightTurnState = serde_json::from_value(serde_json::json!({
+            "version": 8,
+            "provider": "codex",
+            "channel_id": 42,
+            "channel_name": "adk-cdx",
+            "request_owner_user_id": 7,
+            "user_msg_id": 8,
+            "current_msg_id": 9,
+            "current_msg_len": 0,
+            "user_text": "hello",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": "AgentDesk-codex-adk-cdx",
+            "output_path": "/tmp/out.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-05-17 10:00:00",
+            "updated_at": "2026-05-17 10:00:00",
+            "watcher_owns_live_relay": true
+        }))
+        .expect("legacy bool-only row should deserialize");
+
+        assert_eq!(state.relay_owner_kind, RelayOwnerKind::None);
+        assert_eq!(state.effective_relay_owner_kind(), RelayOwnerKind::Watcher);
+    }
+
+    #[test]
+    fn relay_owner_kind_unknown_value_deserializes_as_unknown() {
+        let state: InflightTurnState = serde_json::from_value(serde_json::json!({
+            "version": 8,
+            "provider": "codex",
+            "channel_id": 42,
+            "channel_name": "adk-cdx",
+            "request_owner_user_id": 7,
+            "user_msg_id": 8,
+            "current_msg_id": 9,
+            "current_msg_len": 0,
+            "user_text": "hello",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": "AgentDesk-codex-adk-cdx",
+            "output_path": "/tmp/out.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-05-17 10:00:00",
+            "updated_at": "2026-05-17 10:00:00",
+            "watcher_owns_live_relay": false,
+            "relay_owner_kind": "future_owner"
+        }))
+        .expect("future relay owner must not make the whole row malformed");
+
+        assert_eq!(state.relay_owner_kind, RelayOwnerKind::Unknown);
+        assert_eq!(state.effective_relay_owner_kind(), RelayOwnerKind::Unknown);
+    }
+
+    #[test]
+    fn relay_owner_kind_typed_field_wins_over_legacy_bool() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx".to_string()),
+            7,
+            8,
+            9,
+            "hello".to_string(),
+            None,
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.watcher_owns_live_relay = true;
+        state.relay_owner_kind = RelayOwnerKind::StandbyRelay;
+
+        assert_eq!(
+            state.effective_relay_owner_kind(),
+            RelayOwnerKind::StandbyRelay
+        );
     }
 }
 
@@ -372,12 +507,25 @@ impl InflightTurnState {
             rebind_origin: false,
             long_running_placeholder_active: false,
             watcher_owns_live_relay: false,
+            relay_owner_kind: RelayOwnerKind::None,
             turn_source: TurnSource::Managed,
         }
     }
 
     pub fn provider_kind(&self) -> Option<ProviderKind> {
         ProviderKind::from_str(&self.provider)
+    }
+
+    pub(in crate::services::discord) fn effective_relay_owner_kind(&self) -> RelayOwnerKind {
+        match self.relay_owner_kind {
+            RelayOwnerKind::None if self.watcher_owns_live_relay => RelayOwnerKind::Watcher,
+            kind => kind,
+        }
+    }
+
+    pub(in crate::services::discord) fn set_relay_owner_kind(&mut self, kind: RelayOwnerKind) {
+        self.relay_owner_kind = kind;
+        self.watcher_owns_live_relay = matches!(kind, RelayOwnerKind::Watcher);
     }
 
     pub fn set_restart_mode(&mut self, restart_mode: InflightRestartMode) {
@@ -474,6 +622,24 @@ where
         "process_backend" => Some(RuntimeHandoffKind::ProcessBackend),
         _ => None,
     }))
+}
+
+/// #2376: tolerant deserializer for `relay_owner_kind`. Older binaries must
+/// not delete an otherwise valid inflight row just because a newer binary
+/// wrote a relay-owner variant they do not understand.
+fn deserialize_relay_owner_kind_tolerant<'de, D>(
+    deserializer: D,
+) -> Result<RelayOwnerKind, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(match raw.as_deref() {
+        Some("watcher") => RelayOwnerKind::Watcher,
+        Some("standby_relay") => RelayOwnerKind::StandbyRelay,
+        Some("none") | None => RelayOwnerKind::None,
+        _ => RelayOwnerKind::Unknown,
+    })
 }
 
 fn serialize_task_notification_kind<S>(
