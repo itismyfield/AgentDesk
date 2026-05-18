@@ -807,17 +807,11 @@ mod dispatch_kind_tests {
         pg_db.drop().await;
     }
 
-    /// #2274 Codex round-2 finding: a durable-write failure at dispatch
-    /// time used to drop the spoken summary, because the PG-authoritative
-    /// terminal-delivery path (added in the round-1 fix) returns
-    /// `Ok(None)` when no row exists. This regressed pre-#2274 local-only
-    /// behaviour for transient DB outages.
-    ///
-    /// The fix flips a `local_only_fallback` flag on the in-memory marker
-    /// at dispatch time when persist fails. Terminal delivery then
-    /// consumes the local marker (one-shot via `take_handoff`) and emits a
-    /// `voice_background_handoff_local_only_fallback` warn so operators
-    /// can see persistence is failing.
+    /// Legacy safety: completion still understands an explicitly-flagged
+    /// local-only marker so already-created fallback markers do not become
+    /// plain-text drops. New PG-enabled dispatches do not create this state:
+    /// `dispatch_voice_background_handoff` now refuses to publish when the
+    /// pre-publish durable reservation fails (#2355).
     ///
     /// This test exercises three properties together:
     ///   1. With a flagged local marker and an empty PG table,
@@ -827,7 +821,7 @@ mod dispatch_kind_tests {
     ///   3. The `voice_background_handoff_local_only_fallback` warn fires
     ///      and carries the marker context.
     #[tokio::test(flavor = "current_thread")]
-    async fn background_completion_target_uses_local_only_fallback_when_pg_persist_failed() {
+    async fn background_completion_target_consumes_legacy_flagged_local_only_fallback() {
         use std::{
             io::{self, Write},
             sync::{Arc, Mutex},
@@ -861,9 +855,9 @@ mod dispatch_kind_tests {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         // Deliberately do NOT call persist_handoff_durable — this
-        // simulates the post-persist-failure state where the dispatch
-        // path inserted into the in-memory store and flagged
-        // `local_only_fallback`, but no PG row exists.
+        // simulates a legacy local-only marker that was flagged before
+        // #2355 made PG-enabled dispatch refuse publish on reservation
+        // failure.
         let user_msg_id = MessageId::new(7_950_001);
         let store = crate::voice::announce_meta::global_store();
         store.insert_handoff(

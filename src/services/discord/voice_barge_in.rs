@@ -2168,18 +2168,12 @@ impl VoiceBargeInRuntime {
                         source_channel_id = source_channel_id.get(),
                         target_channel_id = target_channel_id.get(),
                         utterance_id = %announcement.utterance_id,
-                        "voice background handoff durable reservation failed before publish; falling back to local-only marker"
+                        "voice background handoff durable reservation failed before publish; refusing to publish"
                     );
-                    if store.mark_handoff_reservation_local_only_fallback(&correlation_id) {
-                        tracing::warn!(
-                            event = "voice_background_handoff_local_only_fallback",
-                            correlation_id = %correlation_id,
-                            source_channel_id = source_channel_id.get(),
-                            target_channel_id = target_channel_id.get(),
-                            utterance_id = %announcement.utterance_id,
-                            "voice background handoff reservation flagged local-only fallback before publish"
-                        );
-                    }
+                    store.cancel_handoff_reservation(&correlation_id);
+                    return Err(format!(
+                        "voice background handoff durable reservation failed before publish: {error}"
+                    ));
                 }
             }
         } else {
@@ -3667,6 +3661,12 @@ mod tests {
     }
 
     fn voice_handoff_shared_for_tests() -> Arc<SharedData> {
+        voice_handoff_shared_for_tests_with_pg_pool(None)
+    }
+
+    fn voice_handoff_shared_for_tests_with_pg_pool(
+        pg_pool: Option<sqlx::PgPool>,
+    ) -> Arc<SharedData> {
         Arc::new(super::super::SharedData {
             core: tokio::sync::Mutex::new(super::super::CoreState {
                 sessions: std::collections::HashMap::new(),
@@ -3733,7 +3733,7 @@ mod tests {
             api_port: 9,
             #[cfg(all(test, feature = "legacy-sqlite-tests"))]
             sqlite: None,
-            pg_pool: None,
+            pg_pool,
             engine: None,
             health_registry: std::sync::Weak::new(),
             known_slash_commands: tokio::sync::OnceCell::new(),
@@ -4384,6 +4384,49 @@ mod tests {
         let event = rx.recv().await.unwrap();
         assert_eq!(event.channel_id, 42);
         assert_eq!(event.label, "tool:Bash");
+    }
+
+    #[tokio::test]
+    async fn background_handoff_refuses_publish_when_pg_reservation_fails() {
+        let runtime = enabled_runtime();
+        let pg_pool = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(
+            sqlx::postgres::PgConnectOptions::new()
+                .host("localhost")
+                .username("agentdesk")
+                .database("agentdesk"),
+        );
+        pg_pool.close().await;
+        let shared = voice_handoff_shared_for_tests_with_pg_pool(Some(pg_pool));
+        let announcement = crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: "status please".to_string(),
+            user_id: "42".to_string(),
+            utterance_id: "2355-reservation-failure".to_string(),
+            language: "en-US".to_string(),
+            verbose_progress: false,
+            started_at: None,
+            completed_at: None,
+            samples_written: None,
+        };
+
+        let error = runtime
+            .dispatch_voice_background_handoff(
+                &shared,
+                ChannelId::new(2_355_001),
+                ChannelId::new(2_355_002),
+                &announcement,
+                "background summary",
+            )
+            .await
+            .expect_err("closed PG pool must fail before publish");
+
+        assert!(
+            error.contains("durable reservation failed before publish"),
+            "must refuse before publishing when durable reservation fails: {error}"
+        );
+        assert!(
+            !error.contains("health registry unavailable"),
+            "announce driver should not be reached after PG reservation failure"
+        );
     }
 
     #[test]

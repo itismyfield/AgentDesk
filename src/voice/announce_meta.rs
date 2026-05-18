@@ -61,20 +61,16 @@ pub(crate) struct VoiceBackgroundHandoffMeta {
     /// `voice_channel_for_background` to disambiguate when multiple agents
     /// map onto the same background channel.
     pub agent_id: Option<String>,
-    /// Set at dispatch time when the durable PG write failed (or no pool
-    /// was available). When `true`, terminal delivery on this node may
-    /// fall back to consuming the in-memory marker even though no PG row
-    /// exists — restoring the pre-#2274 local-only behaviour under DB
-    /// unavailability. Always `false` for markers loaded from PG, since
-    /// those rows are themselves the durable source of truth.
+    /// Legacy escape hatch for markers that were explicitly flagged by
+    /// older dispatch code. New PG-enabled dispatches refuse to publish
+    /// when the pre-publish durable reservation fails (#2355), and no-PG
+    /// development mode already consumes local markers without consulting
+    /// this flag. Always `false` for markers loaded from PG, since those
+    /// rows are themselves the durable source of truth.
     ///
-    /// Codex #2274 round-2 finding: without this flag, a transient PG
-    /// outage at dispatch would silently drop the spoken summary because
-    /// the PG-authoritative claim path would return `Ok(None)` and refuse
-    /// to route. The flag scopes the fallback to exactly the case it is
-    /// meant to handle (persist failed AT DISPATCH) and never to the case
-    /// PG actually consumed a real row (since `forget_handoff` clears the
-    /// local copy in that branch).
+    /// Codex #2274 round-2 finding: terminal delivery still understands
+    /// the old flagged state so already-created local fallback markers do
+    /// not become plain-text drops after an upgrade.
     pub local_only_fallback: bool,
 }
 
@@ -224,23 +220,6 @@ impl VoiceAnnouncementMetaStore {
         entries.remove(correlation_id).is_some()
     }
 
-    pub(crate) fn mark_handoff_reservation_local_only_fallback(
-        &self,
-        correlation_id: &str,
-    ) -> bool {
-        let Ok(mut entries) = self.pending_handoff_entries.write() else {
-            return false;
-        };
-        let now = Instant::now();
-        prune_pending_handoff_expired_locked(&mut entries, now);
-        if let Some(stored) = entries.get_mut(correlation_id) {
-            stored.meta.local_only_fallback = true;
-            true
-        } else {
-            false
-        }
-    }
-
     /// Insert with an explicit remaining-lifetime override. Used by
     /// `rehydrate_handoffs_from_pg` (#2274 Codex review finding #3) so a
     /// row that already survived 59 minutes in PG only gets the matching
@@ -277,14 +256,15 @@ impl VoiceAnnouncementMetaStore {
         }
     }
 
-    /// Flip the `local_only_fallback` flag on an in-memory marker. Called
-    /// at dispatch time when the durable PG write failed (or no pool was
-    /// available), so the terminal-delivery path knows it is safe to fall
-    /// back to consuming the local marker without a backing PG row.
+    /// Flip the `local_only_fallback` flag on an in-memory marker for
+    /// legacy completion-path tests. Runtime PG-enabled dispatch no
+    /// longer creates this state: it refuses to publish when the durable
+    /// pre-publish reservation fails (#2355).
     /// Returns true iff a marker existed and was updated.
     ///
     /// Codex #2274 round-2 finding: see the `local_only_fallback` doc
     /// comment on `VoiceBackgroundHandoffMeta`.
+    #[cfg(test)]
     pub(crate) fn mark_handoff_local_only_fallback(&self, message_id: MessageId) -> bool {
         let Ok(mut entries) = self.handoff_entries.write() else {
             return false;
