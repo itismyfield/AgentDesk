@@ -47,6 +47,7 @@ const SESSIONS_SUBDIR: &str = "runtime/sessions";
 pub(crate) const CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT: &str = "claude-tui-settings.json";
 pub(crate) const CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT: &str = "claude-tui.sh";
 pub(crate) const CODEX_TUI_HOME_TEMP_EXT: &str = "codex-tui-home";
+pub(crate) const TMUX_DEAD_MARKER_TEMP_EXT: &str = "pane_dead";
 
 /// Returns the persistent AgentDesk sessions directory, if a runtime root
 /// is configured. This is the new canonical location for session temp files
@@ -144,6 +145,13 @@ pub fn session_temp_path(session_name: &str, extension: &str) -> String {
     )
 }
 
+/// Canonical marker written by tmux pane/session hooks when a session's pane
+/// exits. Watchers treat this as an explicit "tmux died" wake-up; the legacy
+/// liveness probe remains as a hook-miss safety net.
+pub fn session_dead_marker_path(session_name: &str) -> String {
+    session_temp_path(session_name, TMUX_DEAD_MARKER_TEMP_EXT)
+}
+
 /// Build a path to the *legacy* `/tmp/`-based location for a session temp
 /// file. Wrappers spawned before the migration hold open fds to these files;
 /// readers must be able to still find them during the migration window.
@@ -187,6 +195,7 @@ pub fn cleanup_session_temp_files(session_name: &str) {
         "sh",
         "generation",
         "exit_reason",
+        TMUX_DEAD_MARKER_TEMP_EXT,
         CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
         CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
     ];
@@ -468,6 +477,48 @@ mod sentinel_tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains(&format!("\"type\":\"{}\"", WRAPPER_READY_FOR_INPUT_EVENT)));
         assert!(content.contains("\"provider\":\"codex\""));
+    }
+
+    #[test]
+    fn dead_marker_path_is_cleaned_with_session_temp_files() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let previous_host = std::env::var_os("HOSTNAME");
+
+        let tdir =
+            std::env::temp_dir().join(format!("adk-issue-2424-cleanup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tdir);
+
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", &tdir);
+            std::env::set_var("HOSTNAME", "issue-2424-host");
+        }
+
+        let session = format!("issue-2424-cleanup-sess-{}", std::process::id());
+        let marker_path = session_dead_marker_path(&session);
+        if let Some(parent) = std::path::Path::new(&marker_path).parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&marker_path, "pane-exited").unwrap();
+
+        cleanup_session_temp_files(&session);
+
+        assert!(
+            !std::path::Path::new(&marker_path).exists(),
+            "cleanup_session_temp_files must remove pane-death marker: {marker_path}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tdir);
+        match previous_root {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+        match previous_host {
+            Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
+            None => unsafe { std::env::remove_var("HOSTNAME") },
+        }
     }
 }
 
@@ -831,6 +882,7 @@ mod tests {
             "sh",
             "generation",
             "exit_reason",
+            TMUX_DEAD_MARKER_TEMP_EXT,
             CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
             CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
         ];

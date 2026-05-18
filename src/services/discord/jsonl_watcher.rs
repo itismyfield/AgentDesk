@@ -249,4 +249,28 @@ mod tests {
         // Just confirm no panic and the watcher object is usable.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn jsonl_watcher_notifies_on_dead_marker_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("session.pane_dead");
+        let watcher = JsonlWatcher::spawn(marker.clone());
+        let notify = watcher.notify();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let waiter = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(3), notify.notified())
+                .await
+                .map(|_| ())
+        });
+
+        std::fs::write(&marker, "pane-exited").unwrap();
+
+        let result = waiter.await.expect("waiter task panicked");
+        assert!(
+            result.is_ok(),
+            "JsonlWatcher Notify should fire on dead marker create"
+        );
+    }
 }

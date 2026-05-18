@@ -11,11 +11,27 @@ use super::*;
 async fn sleep_or_jsonl_event(
     sleep: std::time::Duration,
     jsonl_notify: &std::sync::Arc<tokio::sync::Notify>,
+    dead_marker_notify: &std::sync::Arc<tokio::sync::Notify>,
 ) {
     tokio::select! {
         _ = tokio::time::sleep(sleep) => {}
         _ = jsonl_notify.notified() => {}
+        _ = dead_marker_notify.notified() => {}
     }
+}
+
+fn tmux_dead_marker_exists(tmux_session_name: &str) -> bool {
+    std::path::Path::new(&crate::services::tmux_common::session_dead_marker_path(
+        tmux_session_name,
+    ))
+    .exists()
+}
+
+fn should_probe_tmux_liveness(
+    elapsed_since_last_probe: std::time::Duration,
+    dead_marker_present: bool,
+) -> bool {
+    dead_marker_present || elapsed_since_last_probe >= TMUX_LIVENESS_PROBE_INTERVAL
 }
 
 /// #2442 (H3) — fast-path check for the wrapper's `ready_for_input` JSONL
@@ -1291,6 +1307,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         std::path::PathBuf::from(&output_path),
     );
     let jsonl_notify = jsonl_watcher.notify();
+    let dead_marker_watcher =
+        crate::services::discord::jsonl_watcher::JsonlWatcher::spawn(std::path::PathBuf::from(
+            crate::services::tmux_common::session_dead_marker_path(&tmux_session_name),
+        ));
+    let dead_marker_notify = dead_marker_watcher.notify();
 
     'watcher_loop: loop {
         last_heartbeat_ts_ms.store(
@@ -1354,8 +1375,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     // poll onto the notify-backed JsonlWatcher. A wrapper
                     // write wakes us early; the sleep stays as the upper
                     // bound.
-                    sleep_or_jsonl_event(tokio::time::Duration::from_millis(200), &jsonl_notify)
-                        .await;
+                    sleep_or_jsonl_event(
+                        tokio::time::Duration::from_millis(200),
+                        &jsonl_notify,
+                        &dead_marker_notify,
+                    )
+                    .await;
                     continue;
                 }
                 TmuxLivenessDecision::QuietStop => {
@@ -1497,6 +1522,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         sleep_or_jsonl_event(
                             tokio::time::Duration::from_millis(250),
                             &jsonl_notify,
+                            &dead_marker_notify,
                         )
                         .await;
                         continue;
@@ -1544,7 +1570,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             WatcherOutputPollDecision::Continue => {
                 // #2441 (H1) — notify-backed wake-up for the
                 // poll-decision "wait more" branch.
-                sleep_or_jsonl_event(tokio::time::Duration::from_millis(250), &jsonl_notify).await;
+                sleep_or_jsonl_event(
+                    tokio::time::Duration::from_millis(250),
+                    &jsonl_notify,
+                    &dead_marker_notify,
+                )
+                .await;
                 continue;
             }
             WatcherOutputPollDecision::QuietStop => {
@@ -1921,7 +1952,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     }
                     Ok(Ok(Ok((_, off)))) => {
                         current_offset = off;
-                        if last_liveness_probe_at.elapsed() >= TMUX_LIVENESS_PROBE_INTERVAL {
+                        if should_probe_tmux_liveness(
+                            last_liveness_probe_at.elapsed(),
+                            tmux_dead_marker_exists(&tmux_session_name),
+                        ) {
                             last_liveness_probe_at = tokio::time::Instant::now();
                             match watcher_output_poll_decision(
                                 0,
@@ -1948,6 +1982,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         sleep_or_jsonl_event(
                             tokio::time::Duration::from_millis(200),
                             &jsonl_notify,
+                            &dead_marker_notify,
                         )
                         .await;
                         let now = std::time::Instant::now();
@@ -2044,6 +2079,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         sleep_or_jsonl_event(
                             tokio::time::Duration::from_millis(200),
                             &jsonl_notify,
+                            &dead_marker_notify,
                         )
                         .await;
                     }
@@ -3664,7 +3700,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 relay_coord
                     .relay_slot
                     .store(0, std::sync::atomic::Ordering::Release);
-                sleep_or_jsonl_event(tokio::time::Duration::from_millis(500), &jsonl_notify).await;
+                sleep_or_jsonl_event(
+                    tokio::time::Duration::from_millis(500),
+                    &jsonl_notify,
+                    &dead_marker_notify,
+                )
+                .await;
                 continue 'watcher_loop;
             }
             relay_ok
@@ -4745,11 +4786,23 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_event_consumed_offset;
+    use super::{should_probe_tmux_liveness, terminal_event_consumed_offset};
 
     #[test]
     fn terminal_event_consumed_offset_excludes_buffered_tail() {
         assert_eq!(terminal_event_consumed_offset(128, "next-turn\n"), 118);
         assert_eq!(terminal_event_consumed_offset(8, "longer-than-offset"), 0);
+    }
+
+    #[test]
+    fn tmux_dead_marker_short_circuits_liveness_interval() {
+        assert!(should_probe_tmux_liveness(
+            std::time::Duration::from_millis(1),
+            true,
+        ));
+        assert!(!should_probe_tmux_liveness(
+            std::time::Duration::from_millis(1),
+            false,
+        ));
     }
 }
