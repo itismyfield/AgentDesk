@@ -12,6 +12,10 @@ pub async fn query_analytics_pg(
     filters: &crate::services::observability::AnalyticsFilters,
 ) -> Result<AnalyticsResponse, sqlx::Error> {
     let limit = filters.event_limit.min(1000) as i64;
+    let counters = crate::services::observability::live_analytics_counter_values(
+        filters,
+        filters.counter_limit,
+    );
     let mut events_query = QueryBuilder::new(
         "SELECT id::TEXT AS id,
                 provider,
@@ -57,7 +61,7 @@ pub async fn query_analytics_pg(
 
     Ok(AnalyticsResponse {
         generated_at: chrono::Utc::now().to_rfc3339(),
-        counters: Vec::new(),
+        counters,
         events,
     })
 }

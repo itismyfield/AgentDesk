@@ -1,77 +1,25 @@
 //! #2049: public `query_*` façade split out of `mod.rs`. Holds the
-//! orchestration logic (filter normalization, live counter fold-in,
-//! fallback chains) — actual SQL lives in `pg_io`, alert pipeline in
-//! `quality_alert`. Public surface unchanged.
-
-use std::collections::HashSet;
+//! orchestration logic (filter normalization and fallback chains) — actual SQL
+//! lives in `pg_io`, alert pipeline in `quality_alert`.
 
 use anyhow::{Result, anyhow};
 use sqlx::PgPool;
 
 use super::helpers::{
-    counter_snapshot_from_values, normalized_counter_limit, normalized_event_limit,
-    normalized_invariant_limit, normalized_quality_daily_limit, normalized_quality_days,
-    normalized_quality_limit, normalized_quality_ranking_limit, now_kst,
+    normalized_quality_daily_limit, normalized_quality_days, normalized_quality_limit,
+    normalized_quality_ranking_limit, now_kst,
 };
 use super::pg_io::{
     pick_ranking_metric_value, query_agent_quality_daily_pg, query_agent_quality_events_pg,
-    query_agent_quality_ranking_pg, query_counter_snapshots_pg, query_events_pg,
-    query_invariant_counts_pg, query_invariant_events_pg, ranking_window_sample_size,
+    query_agent_quality_ranking_pg, ranking_window_sample_size,
     synth_agent_quality_daily_from_events_pg, upsert_agent_quality_daily_pg,
 };
 use super::quality_alert::enqueue_quality_regression_alerts_pg;
-use super::worker::snapshot_rows;
 use super::{
     AgentQualityDailyRecord, AgentQualityEventRecord, AgentQualityFilters,
     AgentQualityRankingEntry, AgentQualityRankingResponse, AgentQualityRollupReport,
-    AgentQualitySummary, AnalyticsCounterSnapshot, AnalyticsEventRecord, AnalyticsFilters,
-    AnalyticsResponse, InvariantAnalyticsFilters, InvariantAnalyticsResponse,
-    InvariantViolationCount, InvariantViolationRecord, QUALITY_SAMPLE_GUARD, QualityRankingMetric,
-    QualityRankingWindow, runtime,
+    AgentQualitySummary, QUALITY_SAMPLE_GUARD, QualityRankingMetric, QualityRankingWindow,
 };
-
-pub async fn query_analytics(
-    pg_pool: Option<&PgPool>,
-    filters: &AnalyticsFilters,
-) -> Result<AnalyticsResponse> {
-    let event_limit = normalized_event_limit(filters.event_limit);
-    let counter_limit = normalized_counter_limit(filters.counter_limit);
-    let live_counter_rows = snapshot_rows(&runtime(), Some(filters))
-        .into_iter()
-        .take(counter_limit)
-        .collect::<Vec<_>>();
-    let mut counters = live_counter_rows
-        .into_iter()
-        .map(|row| {
-            counter_snapshot_from_values(
-                &row.provider,
-                &row.channel_id,
-                row.values,
-                "live",
-                now_kst(),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let persisted_counters = query_counter_snapshots_db(pg_pool, filters, counter_limit).await?;
-    let mut seen = counters
-        .iter()
-        .map(|snapshot| (snapshot.provider.clone(), snapshot.channel_id.clone()))
-        .collect::<HashSet<_>>();
-    for snapshot in persisted_counters {
-        if seen.insert((snapshot.provider.clone(), snapshot.channel_id.clone())) {
-            counters.push(snapshot);
-        }
-    }
-    counters.truncate(counter_limit);
-
-    let events = query_events_db(pg_pool, filters, event_limit).await?;
-    Ok(AnalyticsResponse {
-        generated_at: now_kst(),
-        counters,
-        events,
-    })
-}
 
 pub async fn query_agent_quality_events(
     pg_pool: Option<&PgPool>,
@@ -235,64 +183,4 @@ pub async fn query_agent_quality_ranking_with(
         min_sample_size,
         agents: filtered,
     })
-}
-
-pub async fn query_invariant_analytics(
-    pg_pool: Option<&PgPool>,
-    filters: &InvariantAnalyticsFilters,
-) -> Result<InvariantAnalyticsResponse> {
-    let limit = normalized_invariant_limit(filters.limit);
-    let counts = query_invariant_counts_db(pg_pool, filters).await?;
-    let total_violations = counts.iter().map(|count| count.count).sum();
-    let recent = query_invariant_events_db(pg_pool, filters, limit).await?;
-
-    Ok(InvariantAnalyticsResponse {
-        generated_at: now_kst(),
-        total_violations,
-        counts,
-        recent,
-    })
-}
-
-async fn query_invariant_counts_db(
-    pg_pool: Option<&PgPool>,
-    filters: &InvariantAnalyticsFilters,
-) -> Result<Vec<InvariantViolationCount>> {
-    let Some(pool) = pg_pool else {
-        return Err(anyhow!("postgres pool unavailable for invariant counts"));
-    };
-    query_invariant_counts_pg(pool, filters).await
-}
-
-async fn query_invariant_events_db(
-    pg_pool: Option<&PgPool>,
-    filters: &InvariantAnalyticsFilters,
-    limit: usize,
-) -> Result<Vec<InvariantViolationRecord>> {
-    let Some(pool) = pg_pool else {
-        return Err(anyhow!("postgres pool unavailable for invariant events"));
-    };
-    query_invariant_events_pg(pool, filters, limit).await
-}
-
-async fn query_events_db(
-    pg_pool: Option<&PgPool>,
-    filters: &AnalyticsFilters,
-    limit: usize,
-) -> Result<Vec<AnalyticsEventRecord>> {
-    let Some(pool) = pg_pool else {
-        return Ok(Vec::new());
-    };
-    query_events_pg(pool, filters, limit).await
-}
-
-async fn query_counter_snapshots_db(
-    pg_pool: Option<&PgPool>,
-    filters: &AnalyticsFilters,
-    limit: usize,
-) -> Result<Vec<AnalyticsCounterSnapshot>> {
-    let Some(pool) = pg_pool else {
-        return Ok(Vec::new());
-    };
-    query_counter_snapshots_pg(pool, filters, limit).await
 }

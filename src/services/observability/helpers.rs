@@ -3,15 +3,14 @@
 //! no I/O. All call sites import via `super::*` re-export, so external
 //! consumers see no API change.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{
     AGENT_QUALITY_EVENT_TYPES, AnalyticsCounterSnapshot, AnalyticsFilters, CounterValues,
     DEFAULT_COUNTER_LIMIT, DEFAULT_EVENT_LIMIT, DEFAULT_INVARIANT_LIMIT,
     DEFAULT_QUALITY_DAILY_LIMIT, DEFAULT_QUALITY_DAYS, DEFAULT_QUALITY_LIMIT,
-    DEFAULT_QUALITY_RANKING_LIMIT, InvariantViolationRecord, MAX_COUNTER_LIMIT, MAX_EVENT_LIMIT,
-    MAX_INVARIANT_LIMIT, MAX_QUALITY_DAILY_LIMIT, MAX_QUALITY_DAYS, MAX_QUALITY_LIMIT,
-    MAX_QUALITY_RANKING_LIMIT,
+    DEFAULT_QUALITY_RANKING_LIMIT, MAX_COUNTER_LIMIT, MAX_EVENT_LIMIT, MAX_INVARIANT_LIMIT,
+    MAX_QUALITY_DAILY_LIMIT, MAX_QUALITY_DAYS, MAX_QUALITY_LIMIT, MAX_QUALITY_RANKING_LIMIT,
 };
 
 pub(super) fn counter_snapshot_from_values(
@@ -99,35 +98,6 @@ pub(super) fn value_as_string(value: &Value) -> Option<String> {
         .as_str()
         .map(str::to_string)
         .filter(|value| !value.trim().is_empty())
-}
-
-pub(super) fn invariant_record_from_parts(
-    id: i64,
-    invariant: String,
-    provider: Option<String>,
-    channel_id: Option<String>,
-    dispatch_id: Option<String>,
-    session_key: Option<String>,
-    turn_id: Option<String>,
-    payload: Value,
-    created_at: String,
-) -> InvariantViolationRecord {
-    let message = payload.get("message").and_then(value_as_string);
-    let code_location = payload.get("code_location").and_then(value_as_string);
-    let details = payload.get("details").cloned().unwrap_or_else(|| json!({}));
-    InvariantViolationRecord {
-        id,
-        invariant,
-        provider,
-        channel_id,
-        dispatch_id,
-        session_key,
-        turn_id,
-        message,
-        code_location,
-        details,
-        created_at,
-    }
 }
 
 pub(super) fn normalized_event_limit(limit: usize) -> usize {
