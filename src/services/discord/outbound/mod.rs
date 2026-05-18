@@ -17,6 +17,8 @@
 //! production callsites move to `outbound::delivery::deliver_outbound` with
 //! v3 envelopes one producer at a time.
 
+use std::sync::OnceLock;
+
 pub(crate) mod decision;
 pub(crate) mod delivery;
 mod legacy;
@@ -37,3 +39,14 @@ pub(crate) use legacy::{
     OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait, OutboundDeduper, SkipReason,
     SplitStrategy, ThreadFallback, deliver_outbound, outbound_fingerprint,
 };
+
+/// Process-wide in-memory outbound deduper shared by every Discord producer.
+///
+/// This is the last guard around actual Discord sends. Durable SQL outbox
+/// uniqueness still belongs to the `message_outbox` enqueue/claim pipeline;
+/// this helper only suppresses duplicate sends once a producer has built an
+/// outbound delivery key in-process.
+pub(crate) fn shared_outbound_deduper() -> &'static OutboundDeduper {
+    static DEDUPER: OnceLock<OutboundDeduper> = OnceLock::new();
+    DEDUPER.get_or_init(OutboundDeduper::new)
+}

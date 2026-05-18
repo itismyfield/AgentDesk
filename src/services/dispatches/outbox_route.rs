@@ -391,6 +391,7 @@ async fn post_dispatch_completion_summary(
     use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
     use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
     use crate::services::discord::outbound::result::DeliveryResult;
+    use crate::services::discord::outbound::shared_outbound_deduper;
     use poise::serenity_prelude::ChannelId;
 
     let Some(token) = config.notify_bot_token.as_deref() else {
@@ -416,7 +417,7 @@ async fn post_dispatch_completion_summary(
 
     match deliver_outbound(
         &outbound_client,
-        dispatch_completion_summary_deduper(),
+        shared_outbound_deduper(),
         outbound_msg,
         None,
     )
@@ -430,13 +431,6 @@ async fn post_dispatch_completion_summary(
             "failed to post dispatch summary for {dispatch_id}: {reason}"
         )),
     }
-}
-
-fn dispatch_completion_summary_deduper()
--> &'static crate::services::discord::outbound::OutboundDeduper {
-    static DEDUPER: std::sync::OnceLock<crate::services::discord::outbound::OutboundDeduper> =
-        std::sync::OnceLock::new();
-    DEDUPER.get_or_init(crate::services::discord::outbound::OutboundDeduper::new)
 }
 
 async fn archive_dispatch_thread(
