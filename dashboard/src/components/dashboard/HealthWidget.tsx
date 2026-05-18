@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { getCachedHealth, getHealth, type HealthResponse } from "../../api";
 import TooltipLabel from "../common/TooltipLabel";
@@ -362,7 +362,7 @@ function buildSummary(data: HealthResponse, t: TFunction): string {
   });
 }
 
-export default function HealthWidget({ t }: HealthWidgetProps) {
+function HealthWidgetImpl({ t }: HealthWidgetProps) {
   const [data, setData] = useState<HealthResponse | null>(
     () => getCachedHealth()?.data ?? null,
   );
@@ -616,3 +616,14 @@ export default function HealthWidget({ t }: HealthWidgetProps) {
     </div>
   );
 }
+
+/**
+ * Memoized so that unrelated parent re-renders (sibling widget state,
+ * WS-driven context updates) don't force the 30s-polling Health card to
+ * recompute its metric breakdowns. Parent passes a stable `t` via
+ * useCallback so referential equality holds.
+ */
+const HealthWidget = memo(HealthWidgetImpl);
+HealthWidget.displayName = "HealthWidget";
+
+export default HealthWidget;

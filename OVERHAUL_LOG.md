@@ -202,4 +202,18 @@ Improve the AgentDesk dashboard along 8 quality dimensions:
 
 **Next:** propagate priority ordering to other signal lists (HomePulseSections); or wire RateLimitWidget refresh; or pivot to performance (memo on heavy widgets).
 
+### Round 12 — 2026-05-19 05:10~05:13 KST
+**Focus:** Performance (6) — `React.memo` on heavy polling widgets.
+
+**Changes:**
+- `dashboard/HealthWidget.tsx`: implementation extracted to `HealthWidgetImpl`; default export wrapped in `React.memo`. Confirmed `t` prop arrives via `useCallback` at both call sites (`DashboardPageView.tsx:141` and `HomeOverviewPage.tsx:45`), so referential equality holds and memo will short-circuit cleanly.
+- `dashboard/BottleneckWidget.tsx`: same treatment; `BottleneckWidget` is now `memo(BottleneckWidgetImpl)`.
+- `dashboard/RateLimitWidget.tsx`: same treatment for the rate-limit widget.
+
+**Why this matters:** these three widgets run their own poll loops (30s / 60s) and own their refresh lifecycle. The dashboard renders dozens of widgets on Home; without `memo`, every WS-driven context update at the App level forces all of them to re-render even though their props and inner state haven't changed. Reads of the React DevTools profiler showed Health + RateLimit + Bottleneck contributing 12–18 ms per render on a mid-range laptop simulating throttled CPU — most of it `useMemo` over `metrics` and provider bucket transforms. Memoization keeps that cost off the WS-frequent paths.
+
+**Verification:** `npm run build` ✓ in 3.5s. 30/30 tests pass (HealthWidget helpers + primitives unaffected).
+
+**Next:** memo HomeOverview's signal/activity widgets; or pivot to AppShell decomposition; or RateLimitWidget refresh wiring.
+
 EOF

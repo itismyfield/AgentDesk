@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import TooltipLabel from "../common/TooltipLabel";
 import type { TFunction } from "./model";
 import {
@@ -159,7 +159,7 @@ interface RateLimitWidgetProps {
   onOpenSettings?: () => void;
 }
 
-export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetProps) {
+function RateLimitWidgetImpl({ t, onOpenSettings }: RateLimitWidgetProps) {
   const [data, setData] = useState<RateLimitData | null>(null);
   const [thresholds, setThresholds] = useState({ warning: 80, danger: 95 });
   const [error, setError] = useState<string | null>(null);
@@ -492,3 +492,13 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
     </SurfaceSection>
   );
 }
+
+/**
+ * Memoized so WS-driven sibling re-renders don't force the rate-limit
+ * widget — which already manages its own 30s poll + abort lifecycle — to
+ * recompute provider/bucket transforms.
+ */
+const RateLimitWidget = memo(RateLimitWidgetImpl);
+RateLimitWidget.displayName = "RateLimitWidget";
+
+export default RateLimitWidget;

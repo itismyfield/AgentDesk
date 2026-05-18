@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 
 import * as api from "../../api/client";
@@ -62,7 +62,7 @@ interface BottleneckWidgetProps {
   t: TFunction;
 }
 
-export function BottleneckWidget({ t }: BottleneckWidgetProps) {
+function BottleneckWidgetImpl({ t }: BottleneckWidgetProps) {
   const [cards, setCards] = useState<api.KanbanCard[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -358,6 +358,14 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
     </div>
   );
 }
+
+/**
+ * Memoized so the 60s-polling bottleneck card doesn't recompute alert
+ * groupings every time an unrelated parent state changes (kanban WS event,
+ * sidebar toggle, etc.). Parent passes a stable `t` via useCallback.
+ */
+export const BottleneckWidget = memo(BottleneckWidgetImpl);
+BottleneckWidget.displayName = "BottleneckWidget";
 
 function BottleneckColumn({
   title,
