@@ -408,7 +408,7 @@ export default function OfficeManagerView({
                         <button
                           key={color}
                           type="button"
-                          aria-label={`Color ${color}`}
+                          aria-label={tr(`색상 ${color}`, `Color ${color}`)}
                           aria-pressed={draft.color === color}
                           onClick={() => setDraft((prev) => ({ ...prev, color }))}
                           className="h-9 w-9 rounded-full border-2 transition-transform hover:scale-105"

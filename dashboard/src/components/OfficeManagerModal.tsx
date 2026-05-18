@@ -343,7 +343,7 @@ export default function OfficeManagerModal({
                         <button
                           key={c}
                           type="button"
-                          aria-label={`Color ${c}`}
+                          aria-label={tr(`색상 ${c}`, `Color ${c}`)}
                           aria-pressed={draft.color === c}
                           onClick={() => setDraft((prev) => ({ ...prev, color: c }))}
                           className={`w-7 h-7 rounded-full transition-all ${
