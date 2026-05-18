@@ -119,7 +119,6 @@ async fn finalize_work_dispatch_from_stream(
     );
     if completed {
         let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
-            None::<&crate::db::Db>,
             request.pg_pool,
             request.dispatch_id,
             followup_source,

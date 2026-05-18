@@ -1286,12 +1286,11 @@ async fn requeue_dispatch_notify_pg_inserts_and_rearms_notify_row() {
 
 #[tokio::test]
 async fn queue_dispatch_followup_sync_prefers_postgres_when_available() {
-    let sqlite = test_db();
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
 
-    queue_dispatch_followup_sync(&sqlite, Some(&pool), "dispatch-sync-followup");
-    queue_dispatch_followup_sync(&sqlite, Some(&pool), "dispatch-sync-followup");
+    queue_dispatch_followup_sync(Some(&pool), "dispatch-sync-followup");
+    queue_dispatch_followup_sync(Some(&pool), "dispatch-sync-followup");
 
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)
