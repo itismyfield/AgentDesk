@@ -65,6 +65,8 @@ pub struct TurnCancellationDetails {
     pub queue_depth: Option<usize>,
     pub queue_preserved: bool,
     pub termination_recorded: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub emitted_no_op: bool,
 }
 
 impl TurnCancellationDetails {
@@ -79,6 +81,31 @@ impl TurnCancellationDetails {
         queue_preserved: bool,
         termination_recorded: bool,
     ) -> Self {
+        Self::new_with_no_op(
+            reason,
+            surface,
+            lifecycle_path,
+            tmux_killed,
+            inflight_cleared,
+            queue_depth,
+            queue_preserved,
+            termination_recorded,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_no_op(
+        reason: &str,
+        surface: &str,
+        lifecycle_path: &str,
+        tmux_killed: bool,
+        inflight_cleared: bool,
+        queue_depth: Option<usize>,
+        queue_preserved: bool,
+        termination_recorded: bool,
+        emitted_no_op: bool,
+    ) -> Self {
         Self {
             reason: non_empty_or(reason, "unspecified").to_string(),
             surface: normalize_label(surface, "unknown"),
@@ -88,6 +115,7 @@ impl TurnCancellationDetails {
             queue_depth,
             queue_preserved,
             termination_recorded,
+            emitted_no_op,
         }
     }
 }
@@ -279,6 +307,10 @@ fn normalize_label(value: &str, fallback: &str) -> String {
         .collect::<Vec<_>>()
         .join("_");
     non_empty_or(&normalized, fallback).to_string()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

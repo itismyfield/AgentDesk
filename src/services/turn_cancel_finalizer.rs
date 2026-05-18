@@ -102,7 +102,7 @@ pub(crate) struct FinalizedTurnCancel {
 }
 
 pub(crate) fn finalize_turn_cancel(request: FinalizeTurnCancelRequest) -> FinalizedTurnCancel {
-    let details = TurnCancellationDetails::new(
+    let details = TurnCancellationDetails::new_with_no_op(
         &request.reason,
         &request.surface,
         &request.lifecycle_path,
@@ -111,6 +111,7 @@ pub(crate) fn finalize_turn_cancel(request: FinalizeTurnCancelRequest) -> Finali
         request.queue_depth,
         request.queue_preserved,
         request.termination_recorded,
+        is_no_op_cancel_attempt(&request),
     );
 
     crate::services::observability::emit_turn_cancelled(
@@ -135,6 +136,14 @@ pub(crate) fn finalize_turn_cancel(request: FinalizeTurnCancelRequest) -> Finali
         details,
         correlation: request.correlation,
     }
+}
+
+fn is_no_op_cancel_attempt(request: &FinalizeTurnCancelRequest) -> bool {
+    request.lifecycle_path == "direct-fallback"
+        && !request.tmux_killed
+        && !request.inflight_cleared
+        && request.queue_depth.is_none()
+        && !request.termination_recorded
 }
 
 #[cfg(test)]
@@ -233,6 +242,57 @@ mod tests {
         assert!(stop.details.termination_recorded);
         assert_eq!(cc_stop.details.surface, "text_cc_stop");
         assert!(!cc_stop.details.termination_recorded);
+    }
+
+    #[tokio::test]
+    async fn finalizer_marks_session_key_noop_direct_fallback_cancel_attempt() {
+        let _guard = crate::services::observability::test_runtime_lock();
+        crate::services::observability::reset_for_tests();
+        crate::services::observability::init_observability(None);
+
+        let lifecycle = TurnLifecycleStopResult {
+            lifecycle_path: "direct-fallback",
+            tmux_killed: false,
+            inflight_cleared: false,
+            queue_depth: None,
+            queue_preserved: true,
+            termination_recorded: false,
+            tmux_session_observed: Some("malformed-session-key".to_string()),
+            queue_depth_before: None,
+            queue_depth_after: None,
+            queue_disk_present_before: false,
+            queue_disk_present_after: false,
+        };
+
+        let finalized = finalize_turn_cancel(FinalizeTurnCancelRequest::from_lifecycle_result(
+            TurnCancelCorrelation {
+                provider: Some(ProviderKind::Codex),
+                channel_id: None,
+                dispatch_id: None,
+                session_key: Some("malformed-session-key".to_string()),
+                turn_id: None,
+            },
+            "queue-api cancel_turn (preserve)",
+            "queue_cancel_preserve",
+            &lifecycle,
+        ));
+
+        assert!(finalized.details.emitted_no_op);
+        assert_eq!(
+            finalized.correlation.session_key.as_deref(),
+            Some("malformed-session-key")
+        );
+
+        let event = crate::services::observability::events::recent(10)
+            .into_iter()
+            .find(|event| event.event_type == "turn_cancelled")
+            .expect("no-op direct-fallback cancel attempt should be recorded");
+        assert_eq!(event.channel_id, None);
+        assert_eq!(event.provider.as_deref(), Some("codex"));
+        assert_eq!(event.payload["lifecyclePath"], "direct-fallback");
+        assert_eq!(event.payload["emittedNoOp"], true);
+        assert_eq!(event.payload["session_key"], "malformed-session-key");
+        assert!(event.payload["dispatch_id"].is_null());
     }
 
     #[tokio::test]

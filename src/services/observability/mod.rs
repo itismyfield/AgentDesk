@@ -600,6 +600,7 @@ mod cancellation_observability_tests {
         assert_eq!(event.payload["lifecyclePath"], "mailbox_canonical");
         assert_eq!(event.payload["queueDepth"], 2);
         assert_eq!(event.payload["queuePreserved"], true);
+        assert!(event.payload.get("emittedNoOp").is_none());
         assert_eq!(event.payload["dispatch_id"], "dispatch-1");
         assert_eq!(event.payload["session_key"], "session-1");
         assert_eq!(event.payload["turn_id"], "turn-1");

@@ -316,7 +316,7 @@ async fn stop_turn_with_policy(
         queue_disk_present_after: post_snapshot.as_ref().is_some_and(|s| s.disk_present),
     };
 
-    if emit_cancel_observability && should_emit_cancel_observability(target, &result) {
+    if emit_cancel_observability {
         crate::services::turn_cancel_finalizer::finalize_turn_cancel(
             crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_lifecycle_result(
                 crate::services::turn_cancel_finalizer::TurnCancelCorrelation {
@@ -334,18 +334,6 @@ async fn stop_turn_with_policy(
     }
 
     result
-}
-
-fn should_emit_cancel_observability(
-    target: &TurnLifecycleTarget,
-    result: &TurnLifecycleStopResult,
-) -> bool {
-    target.channel_id.is_some()
-        || result.lifecycle_path != DIRECT_FALLBACK_PATH
-        || result.tmux_killed
-        || result.inflight_cleared
-        || result.queue_depth.is_some()
-        || result.termination_recorded
 }
 
 pub(crate) fn cleanup_policy_observability_surface(
@@ -386,44 +374,42 @@ mod policy_observability_tests {
         );
     }
 
-    #[test]
-    fn cancel_observability_skips_only_unknown_noop_fallback() {
+    #[tokio::test]
+    async fn cancel_observability_emits_unknown_noop_direct_fallback() {
+        let _guard = crate::services::observability::test_runtime_lock();
+        crate::services::observability::reset_for_tests();
+        crate::services::observability::init_observability(None);
+
         let target = super::TurnLifecycleTarget {
-            provider: None,
+            provider: Some(crate::services::provider::ProviderKind::Codex),
             channel_id: None,
-            tmux_name: "missing-session".to_string(),
+            tmux_name: format!(
+                "AgentDesk-missing-noop-cancel-observability-{}",
+                std::process::id()
+            ),
         };
-        let noop = super::TurnLifecycleStopResult {
-            lifecycle_path: super::DIRECT_FALLBACK_PATH,
-            tmux_killed: false,
-            inflight_cleared: false,
-            queue_depth: None,
-            queue_preserved: true,
-            termination_recorded: false,
-            tmux_session_observed: None,
-            queue_depth_before: None,
-            queue_depth_after: None,
-            queue_disk_present_before: false,
-            queue_disk_present_after: false,
-        };
-        assert!(!super::should_emit_cancel_observability(&target, &noop));
+        let result =
+            super::stop_turn_preserving_queue(None, &target, "queue-api cancel_turn (preserve)")
+                .await;
+        assert_eq!(result.lifecycle_path, super::DIRECT_FALLBACK_PATH);
+        assert!(!result.tmux_killed);
+        assert!(!result.inflight_cleared);
+        assert_eq!(result.queue_depth, None);
+        assert!(!result.termination_recorded);
 
-        let mut mailbox_cleanup = noop.clone();
-        mailbox_cleanup.lifecycle_path = "mailbox_canonical";
-        assert!(super::should_emit_cancel_observability(
-            &target,
-            &mailbox_cleanup
-        ));
-
-        let channel_scoped_target = super::TurnLifecycleTarget {
-            provider: None,
-            channel_id: Some(poise::serenity_prelude::ChannelId::new(42)),
-            tmux_name: "missing-session".to_string(),
-        };
-        assert!(super::should_emit_cancel_observability(
-            &channel_scoped_target,
-            &noop
-        ));
+        let event = crate::services::observability::events::recent(10)
+            .into_iter()
+            .find(|event| event.event_type == "turn_cancelled")
+            .expect("no-op direct-fallback cancel attempt should be recorded");
+        assert_eq!(event.channel_id, None);
+        assert_eq!(event.provider.as_deref(), Some("codex"));
+        assert_eq!(event.payload["reason"], "queue-api cancel_turn (preserve)");
+        assert_eq!(event.payload["surface"], "queue_cancel_preserve");
+        assert_eq!(event.payload["lifecyclePath"], super::DIRECT_FALLBACK_PATH);
+        assert_eq!(event.payload["emittedNoOp"], true);
+        assert!(event.payload["dispatch_id"].is_null());
+        assert!(event.payload["session_key"].is_null());
+        assert!(event.payload["turn_id"].is_null());
     }
 
     /// #1672: the queue-preservation invariant must be derived from

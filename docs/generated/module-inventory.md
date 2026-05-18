@@ -549,7 +549,7 @@
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 503 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 474 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 806 |  |
-| `services::observability` | `src/services/observability/mod.rs` | 1158 | giant-file |
+| `services::observability` | `src/services/observability/mod.rs` | 1159 | giant-file |
 | `services::observability::emit` | `src/services/observability/emit.rs` | 667 |  |
 | `services::observability::events` | `src/services/observability/events.rs` | 410 |  |
 | `services::observability::helpers` | `src/services/observability/helpers.rs` | 188 |  |
@@ -560,7 +560,7 @@
 | `services::observability::recovery_audit` | `src/services/observability/recovery_audit.rs` | 536 |  |
 | `services::observability::retention` | `src/services/observability/retention.rs` | 99 |  |
 | `services::observability::session_inventory` | `src/services/observability/session_inventory.rs` | 308 |  |
-| `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 925 |  |
+| `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 957 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 447 |  |
 | `services::observability::worker` | `src/services/observability/worker.rs` | 289 |  |
 | `services::onboarding` | `src/services/onboarding/mod.rs` | 4946 | giant-file |
@@ -619,8 +619,8 @@
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
 | `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 780 |  |
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 282 |  |
-| `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 409 |  |
-| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 782 |  |
+| `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 469 |  |
+| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 768 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 3336 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 868 |  |
 | `ui` | `src/ui/mod.rs` | 1 |  |
