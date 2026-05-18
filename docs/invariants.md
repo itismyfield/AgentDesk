@@ -69,8 +69,8 @@ a row is picked up again at that count.
 - Emit invariant violations through `record_invariant_check` at `src/services/observability.rs:461`.
 - Store the invariant key in `observability_events.status` with payload fields
   `invariant`, `code_location`, `message`, and `details`.
-- Query counts and recent events through `query_invariant_analytics` at
-  `src/services/observability.rs:884`.
+- Query counts through `query_invariants_pg` at
+  `src/services/analytics/queue_metrics.rs`.
 - Expose the API via `GET /api/analytics/invariants` at
   `src/server/routes/analytics.rs:125`.
 

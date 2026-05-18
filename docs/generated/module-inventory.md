@@ -293,7 +293,7 @@
 | `services::analytics::api_usage` | `src/services/analytics/api_usage.rs` | 198 |  |
 | `services::analytics::dispatch_metrics` | `src/services/analytics/dispatch_metrics.rs` | 258 |  |
 | `services::analytics::dto` | `src/services/analytics/dto.rs` | 116 |  |
-| `services::analytics::queue_metrics` | `src/services/analytics/queue_metrics.rs` | 512 |  |
+| `services::analytics::queue_metrics` | `src/services/analytics/queue_metrics.rs` | 516 |  |
 | `services::analytics::session_metrics` | `src/services/analytics/session_metrics.rs` | 115 |  |
 | `services::api_friction` | `src/services/api_friction/mod.rs` | 33 |  |
 | `services::api_friction::core` | `src/services/api_friction/core.rs` | 52 |  |
@@ -550,14 +550,14 @@
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 503 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 474 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 806 |  |
-| `services::observability` | `src/services/observability/mod.rs` | 1159 | giant-file |
+| `services::observability` | `src/services/observability/mod.rs` | 1149 | giant-file |
 | `services::observability::emit` | `src/services/observability/emit.rs` | 667 |  |
 | `services::observability::events` | `src/services/observability/events.rs` | 410 |  |
-| `services::observability::helpers` | `src/services/observability/helpers.rs` | 188 |  |
+| `services::observability::helpers` | `src/services/observability/helpers.rs` | 158 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
-| `services::observability::pg_io` | `src/services/observability/pg_io.rs` | 1312 | giant-file |
+| `services::observability::pg_io` | `src/services/observability/pg_io.rs` | 1047 | giant-file |
 | `services::observability::quality_alert` | `src/services/observability/quality_alert.rs` | 291 |  |
-| `services::observability::queries` | `src/services/observability/queries.rs` | 298 |  |
+| `services::observability::queries` | `src/services/observability/queries.rs` | 186 |  |
 | `services::observability::recovery_audit` | `src/services/observability/recovery_audit.rs` | 536 |  |
 | `services::observability::retention` | `src/services/observability/retention.rs` | 99 |  |
 | `services::observability::session_inventory` | `src/services/observability/session_inventory.rs` | 308 |  |

@@ -46,8 +46,7 @@ pub use emit::{
 #[allow(unused_imports)]
 pub use queries::{
     query_agent_quality_events, query_agent_quality_ranking, query_agent_quality_ranking_with,
-    query_agent_quality_summary, query_analytics, query_invariant_analytics,
-    run_agent_quality_rollup_pg,
+    query_agent_quality_summary, run_agent_quality_rollup_pg,
 };
 
 pub(super) const EVENT_BATCH_SIZE: usize = 64;
@@ -94,6 +93,27 @@ pub(super) const AGENT_QUALITY_EVENT_TYPES: &[&str] = &[
     "ci_check_red",
     "queue_stuck",
 ];
+
+pub(crate) fn live_analytics_counter_values(
+    filters: &AnalyticsFilters,
+    counter_limit: usize,
+) -> Vec<Value> {
+    let limit = helpers::normalized_counter_limit(counter_limit);
+    worker::snapshot_rows(&runtime(), Some(filters))
+        .into_iter()
+        .take(limit)
+        .filter_map(|row| {
+            let snapshot = helpers::counter_snapshot_from_values(
+                &row.provider,
+                &row.channel_id,
+                row.values,
+                "live",
+                helpers::now_kst(),
+            );
+            serde_json::to_value(snapshot).ok()
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct CounterKey {
@@ -647,22 +667,20 @@ mod tests {
         );
         flush_for_tests().await;
 
-        let response = query_analytics(
-            None,
+        let counters = live_analytics_counter_values(
             &AnalyticsFilters {
                 provider: Some("codex".to_string()),
                 channel_id: Some("42".to_string()),
                 ..AnalyticsFilters::default()
             },
-        )
-        .await
-        .expect("query analytics");
+            200,
+        );
 
-        assert_eq!(response.counters.len(), 1);
-        assert_eq!(response.counters[0].turn_attempts, 1);
-        assert_eq!(response.counters[0].guard_fires, 1);
-        assert_eq!(response.counters[0].turn_successes, 1);
-        assert!(response.events.is_empty());
+        assert_eq!(counters.len(), 1);
+        assert_eq!(counters[0]["turn_attempts"], json!(1));
+        assert_eq!(counters[0]["guard_fires"], json!(1));
+        assert_eq!(counters[0]["turn_successes"], json!(1));
+        assert_eq!(counters[0]["source"], json!("live"));
     }
 
     #[tokio::test]
@@ -689,19 +707,6 @@ mod tests {
             },
         ));
         flush_for_tests().await;
-
-        let error = query_invariant_analytics(
-            None,
-            &InvariantAnalyticsFilters {
-                provider: Some("codex".to_string()),
-                channel_id: Some("7".to_string()),
-                invariant: Some("response_sent_offset_monotonic".to_string()),
-                limit: 10,
-            },
-        )
-        .await
-        .expect_err("invariant analytics requires postgres");
-        assert!(error.to_string().contains("postgres pool unavailable"));
     }
 
     #[tokio::test]
@@ -727,19 +732,6 @@ mod tests {
             },
         ));
         flush_for_tests().await;
-
-        let error = query_invariant_analytics(
-            None,
-            &InvariantAnalyticsFilters {
-                provider: Some("claude".to_string()),
-                channel_id: Some("42".to_string()),
-                invariant: Some("inflight_tmux_one_to_one".to_string()),
-                limit: 10,
-            },
-        )
-        .await
-        .expect_err("invariant analytics requires postgres");
-        assert!(error.to_string().contains("postgres pool unavailable"));
     }
 
     #[tokio::test]
@@ -840,18 +832,16 @@ mod tests {
         }
         flush_for_tests().await;
 
-        let response = query_analytics(
-            None,
+        let counters = live_analytics_counter_values(
             &AnalyticsFilters {
                 provider: Some("claude".to_string()),
                 channel_id: Some("99".to_string()),
                 ..AnalyticsFilters::default()
             },
-        )
-        .await
-        .expect("query analytics");
+            200,
+        );
 
-        assert_eq!(response.counters[0].turn_attempts, (iterations * 8) as u64);
+        assert_eq!(counters[0]["turn_attempts"], json!((iterations * 8) as u64));
     }
 
     #[tokio::test(flavor = "current_thread")]
