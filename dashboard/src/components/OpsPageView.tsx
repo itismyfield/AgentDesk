@@ -21,19 +21,20 @@ import {
   WS_REFRESH_DEBOUNCE_MS,
   buildBottlenecks,
   buildSignalCards,
-  chipClassFromTone,
   errorMessage,
   formatBottleneckLabel,
   formatBytes,
   formatDurationCompact,
   formatNumber,
-  formatUpdatedAt,
+  opsToneToHealth,
   resolveSeverity,
   surfaceStyleForSeverity,
   toneForSeverity,
   translateStatus,
   type RuntimeSignalRow,
 } from "./OpsPageModel";
+import { StatusBadge } from "./common/StatusBadge";
+import { FreshnessIndicator } from "./common/FreshnessIndicator";
 
 
 interface OpsPageViewProps {
@@ -57,15 +58,31 @@ export default function OpsPageView({
   const [failureCount, setFailureCount] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const refreshInFlightRef = useRef(false);
+  // Track mount status so async refresh callbacks that resolve after the Ops
+  // route is unmounted don't write to state and leak warnings.
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const refreshHealth = useCallback(async () => {
     if (refreshInFlightRef.current) return;
+    if (!mountedRef.current) return;
     refreshInFlightRef.current = true;
     setIsRefreshing(true);
     const [healthResult, retentionResult] = await Promise.allSettled([
       getHealth(),
       getPromptManifestRetention(),
     ]);
+
+    if (!mountedRef.current) {
+      refreshInFlightRef.current = false;
+      return;
+    }
 
     if (retentionResult.status === "fulfilled") {
       setPromptRetention(retentionResult.value);
@@ -162,7 +179,6 @@ export default function OpsPageView({
   const stale = lastSuccessAt != null && now - lastSuccessAt > STALE_AFTER_MS;
   const providerCount = health?.providers?.length ?? 0;
   const connectedProviders = (health?.providers ?? []).filter((provider) => provider.connected).length;
-  const lastUpdatedLabel = formatUpdatedAt(lastSuccessAt, localeTag);
   const restartPendingProviders = (health?.providers ?? []).filter((provider) => provider.restart_pending).length;
   const disconnectedProviders = (health?.providers ?? []).filter((provider) => !provider.connected).length;
   const runtimeSignals = useMemo<RuntimeSignalRow[]>(
@@ -280,11 +296,19 @@ export default function OpsPageView({
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <span className={chipClassFromTone(wsConnected ? "success" : "danger")}>
-              <span className={wsConnected ? "dot pulse" : "dot"} />
+            <StatusBadge
+              tone={wsConnected ? "healthy" : "critical"}
+              size="sm"
+              pulse={wsConnected}
+              title={wsConnected ? tr("실시간 WS 연결", "Live WS connection") : tr("WS 끊김", "WS disconnected")}
+            >
               {wsConnected ? "LIVE" : "DISCONNECTED"}
-            </span>
-            {stale ? <span className="chip warn">STALE</span> : null}
+            </StatusBadge>
+            {stale ? (
+              <StatusBadge tone="warning" size="sm" title={tr("최근 health 데이터가 stale 임계값을 초과했습니다", "Health data exceeded the stale threshold")}>
+                STALE
+              </StatusBadge>
+            ) : null}
             <button className="btn sm" type="button" onClick={() => void refreshHealth()} disabled={isRefreshing}>
               <RefreshCw size={12} className={isRefreshing ? "animate-spin" : undefined} />
               {isRefreshing ? tr("동기화 중", "Refreshing") : tr("새로고침", "Refresh")}
@@ -293,17 +317,23 @@ export default function OpsPageView({
         </div>
 
         <div className="mb-4 flex flex-wrap items-center gap-2">
-          <span className={chipClassFromTone(statusTone)}>
+          <StatusBadge tone={opsToneToHealth(statusTone)} size="sm">
             {health ? translateStatus(health.status, isKo) : tr("대기 중", "Pending")}
-          </span>
-          <span className="chip">{tr(`업데이트 ${lastUpdatedLabel}`, `Updated ${lastUpdatedLabel}`)}</span>
+          </StatusBadge>
+          <FreshnessIndicator
+            timestamp={lastSuccessAt}
+            label={tr("업데이트", "Updated")}
+            staleAfterSeconds={STALE_AFTER_MS / 1000}
+            criticalAfterSeconds={(STALE_AFTER_MS * 3) / 1000}
+          />
           {recoverySignal ? (
-            <span
-              className={chipClassFromTone(toneForSeverity(recoverySignal.severity))}
-              data-testid="ops-signal-recovery_seconds"
+            <StatusBadge
+              tone={opsToneToHealth(toneForSeverity(recoverySignal.severity))}
+              size="sm"
+              title={`recovery_seconds: ${recoverySignal.value}`}
             >
               {tr(`복구 ${recoverySignal.value}`, `Recovery ${recoverySignal.value}`)}
-            </span>
+            </StatusBadge>
           ) : null}
         </div>
 
@@ -438,13 +468,13 @@ export default function OpsPageView({
             <div className="card-body">
               <div className="flex flex-wrap gap-2">
                 {recoverySignal ? (
-                  <span className={chipClassFromTone(toneForSeverity(recoverySignal.severity))}>
+                  <StatusBadge tone={opsToneToHealth(toneForSeverity(recoverySignal.severity))} size="sm">
                     {tr(`복구 ${recoverySignal.value}`, `Recovery ${recoverySignal.value}`)}
-                  </span>
+                  </StatusBadge>
                 ) : null}
-                <span className={chipClassFromTone(wsConnected ? "success" : "danger")}>
+                <StatusBadge tone={wsConnected ? "healthy" : "critical"} size="sm">
                   {tr(`provider ${connectedProviders}/${providerCount}`, `providers ${connectedProviders}/${providerCount}`)}
-                </span>
+                </StatusBadge>
               </div>
               <div className="mt-4 min-h-[220px]">
                 <SurfaceEmptyState className="grid min-h-[220px] place-items-center py-10">
@@ -494,9 +524,9 @@ export default function OpsPageView({
                           <div className="text-sm font-semibold" style={{ color: "var(--th-text-primary)" }}>
                             {formatBottleneckLabel(row.kind)}
                           </div>
-                          <span className={chipClassFromTone(toneForSeverity(row.severity))}>
+                          <StatusBadge tone={opsToneToHealth(toneForSeverity(row.severity))} size="xs">
                             {row.severity.toUpperCase()}
-                          </span>
+                          </StatusBadge>
                         </div>
                         <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
                           {row.detail}
@@ -526,6 +556,7 @@ export default function OpsPageView({
 
           <OpsConnectionPanel
             wsConnected={wsConnected}
+            lastHealthAt={lastSuccessAt}
             health={health}
             connectedProviders={connectedProviders}
             providerCount={providerCount}

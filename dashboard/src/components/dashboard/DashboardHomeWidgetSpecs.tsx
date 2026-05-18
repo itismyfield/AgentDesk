@@ -48,6 +48,14 @@ interface BuildDashboardHomeWidgetSpecsArgs {
   meetingSummary: { activeCount: number; unresolvedCount: number };
   meetings: RoundTableMeeting[];
   homeAgents: HomeAgentRow[];
+  /**
+   * Pre-sliced first-5 of `homeAgents`. Required because `homeAgents.slice(0, 5)`
+   * inline at the call site creates a fresh reference every render and would
+   * defeat the React.memo wrappers on the roster/office widgets.
+   */
+  topRosterAgents: HomeAgentRow[];
+  /** Pre-sliced first-8 of `homeAgents` — same memo-safety reason. */
+  topOfficeAgents: HomeAgentRow[];
   language: CompanySettings["language"];
   onSelectAgent?: (agent: Agent) => void;
   focusSignals: HomeSignalRow[];
@@ -55,6 +63,8 @@ interface BuildDashboardHomeWidgetSpecsArgs {
   localeTag: string;
   homeActivityItems: HomeActivityItem[];
   onSelectTab: (tab: "achievements" | "meetings") => void;
+  /** Stable callback for the roster widget's "Open Achievements" affordance. */
+  onOpenAchievements: () => void;
 }
 
 export function buildDashboardHomeWidgetSpecs({
@@ -66,6 +76,8 @@ export function buildDashboardHomeWidgetSpecs({
   meetingSummary,
   meetings,
   homeAgents,
+  topRosterAgents,
+  topOfficeAgents,
   language,
   onSelectAgent,
   focusSignals,
@@ -73,7 +85,12 @@ export function buildDashboardHomeWidgetSpecs({
   localeTag,
   homeActivityItems,
   onSelectTab,
+  onOpenAchievements,
 }: BuildDashboardHomeWidgetSpecsArgs): Record<HomeWidgetId, { className: string; render: () => ReactNode }> {
+  // `homeAgents` is referenced by `onSelectAgent` consumers elsewhere; keep
+  // the param so the function signature stays stable while the slices are
+  // explicit and stable.
+  void homeAgents;
   return {
     metric_agents: {
       className: "col-span-12 sm:col-span-6 xl:col-span-3",
@@ -140,7 +157,7 @@ export function buildDashboardHomeWidgetSpecs({
       className: "col-span-12 xl:col-span-8",
       render: () => (
         <DashboardHomeOfficeWidget
-          rows={homeAgents.slice(0, 8)}
+          rows={topOfficeAgents}
           stats={dashboardStats}
           language={language}
           t={t}
@@ -173,11 +190,11 @@ export function buildDashboardHomeWidgetSpecs({
       className: "col-span-12 xl:col-span-7",
       render: () => (
         <DashboardHomeRosterWidget
-          rows={homeAgents.slice(0, 5)}
+          rows={topRosterAgents}
           t={t}
           numberFormatter={numberFormatter}
           onSelectAgent={onSelectAgent}
-          onOpenAchievements={() => onSelectTab("achievements")}
+          onOpenAchievements={onOpenAchievements}
         />
       ),
     },

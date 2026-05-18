@@ -1,13 +1,14 @@
-import { useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import TooltipLabel from "../common/TooltipLabel";
 import type { TFunction } from "./model";
 import {
   SurfaceActionButton,
   SurfaceCard,
-  SurfaceEmptyState,
-  SurfaceNotice,
   SurfaceSection,
 } from "../common/SurfacePrimitives";
+import { StatusBadge } from "../common/StatusBadge";
+import { WidgetState } from "../common/WidgetState";
 import {
   getProviderLevelColors,
   getProviderMeta,
@@ -84,46 +85,69 @@ export function transformRawData(
   warningPct: number,
   dangerPct: number,
 ): RateLimitData {
-  return {
-    providers: raw.providers
-      .filter((rp) => !HIDDEN_PROVIDERS.has(rp.provider.toLowerCase()))
-      .flatMap((rp) => {
-        const buckets = rp.buckets
-          .filter((b) => !HIDDEN_BUCKETS.has(b.name))
-          .map((b) => {
-            const utilization =
-              b.limit > 0 && b.used >= 0 && b.remaining >= 0
-                ? Math.round((b.used / b.limit) * 100)
-                : null;
-            const level: "normal" | "warning" | "danger" =
-              utilization !== null && utilization >= dangerPct
-                ? "danger"
-                : utilization !== null && utilization >= warningPct
-                  ? "warning"
-                  : "normal";
-            return {
-              id: b.name,
-              label: b.name,
-              utilization,
-              resets_at: b.reset > 0 ? new Date(b.reset * 1000).toISOString() : null,
-              level,
-            };
-          });
-        if (rp.unsupported && buckets.length === 0) {
-          return [];
-        }
-        return [
-          {
-            provider: normalizeRateLimitProviderLabel(rp.provider),
-            fetched_at: rp.fetched_at,
-            stale: rp.stale,
-            unsupported: Boolean(rp.unsupported),
-            reason: typeof rp.reason === "string" ? rp.reason : null,
-            buckets,
-          },
-        ];
-      }),
-  };
+  // Build rows first, then coalesce by normalized provider name so the
+  // upstream API emitting two entries for the same provider (e.g. one
+  // unsupported placeholder + one with measurable buckets) cannot produce
+  // duplicate React keys downstream. When merging, prefer the row that has
+  // measurable buckets so we never overwrite real telemetry with a
+  // "no telemetry" placeholder.
+  const rows = raw.providers
+    .filter((rp) => !HIDDEN_PROVIDERS.has(rp.provider.toLowerCase()))
+    .map((rp) => {
+      const buckets = rp.buckets
+        .filter((b) => !HIDDEN_BUCKETS.has(b.name))
+        .map((b) => {
+          const utilization =
+            b.limit > 0 && b.used >= 0 && b.remaining >= 0
+              ? Math.round((b.used / b.limit) * 100)
+              : null;
+          const level: "normal" | "warning" | "danger" =
+            utilization !== null && utilization >= dangerPct
+              ? "danger"
+              : utilization !== null && utilization >= warningPct
+                ? "warning"
+                : "normal";
+          return {
+            id: b.name,
+            label: b.name,
+            utilization,
+            resets_at: b.reset > 0 ? new Date(b.reset * 1000).toISOString() : null,
+            level,
+          };
+        });
+      return {
+        provider: normalizeRateLimitProviderLabel(rp.provider),
+        fetched_at: rp.fetched_at,
+        stale: rp.stale,
+        unsupported: Boolean(rp.unsupported),
+        reason: typeof rp.reason === "string" ? rp.reason : null,
+        buckets,
+      };
+    });
+
+  const seen = new Map<string, number>();
+  const merged: RateLimitProvider[] = [];
+  for (const row of rows) {
+    const existingIndex = seen.get(row.provider);
+    if (existingIndex === undefined) {
+      seen.set(row.provider, merged.length);
+      merged.push(row);
+      continue;
+    }
+    const existing = merged[existingIndex];
+    // Prefer the row with measurable buckets; if both empty, keep the
+    // newer fetched_at + carry the latest reason.
+    if (row.buckets.length > 0 && existing.buckets.length === 0) {
+      merged[existingIndex] = { ...row, reason: row.reason ?? existing.reason };
+    } else if (row.buckets.length === 0 && existing.buckets.length > 0) {
+      merged[existingIndex] = { ...existing, reason: existing.reason ?? row.reason };
+    } else {
+      // Both have buckets, or both empty — keep the freshest by fetched_at.
+      const newer = row.fetched_at >= existing.fetched_at ? row : existing;
+      merged[existingIndex] = { ...newer, reason: newer.reason ?? existing.reason ?? row.reason };
+    }
+  }
+  return { providers: merged };
 }
 
 const PROVIDER_ICONS: Record<string, string> = {
@@ -159,11 +183,17 @@ interface RateLimitWidgetProps {
   onOpenSettings?: () => void;
 }
 
-export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetProps) {
+function RateLimitWidgetImpl({ t, onOpenSettings }: RateLimitWidgetProps) {
   const [data, setData] = useState<RateLimitData | null>(null);
   const [thresholds, setThresholds] = useState({ warning: 80, danger: 95 });
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(true);
+  // Bumped by the manual refresh button so the existing poll-driven effect
+  // re-runs on demand without forking the abort/cleanup logic.
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const requestRefresh = useCallback(() => {
+    setRefreshNonce((current) => current + 1);
+  }, []);
   const title = t({
     ko: "프로바이더 상태",
     en: "Provider Status",
@@ -240,25 +270,53 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
       activeController?.abort();
       window.clearInterval(timer);
     };
-  }, [thresholds]);
+  }, [thresholds, refreshNonce]);
 
-  const sectionActions = onOpenSettings ? (
+  const refreshButton = (
+    <button
+      type="button"
+      onClick={requestRefresh}
+      disabled={isRefreshing}
+      aria-label={t({
+        ko: "프로바이더 상태 새로고침",
+        en: "Refresh provider status",
+        ja: "プロバイダー状態を更新",
+        zh: "刷新 provider 状态",
+      })}
+      title={t({
+        ko: "지금 새로고침",
+        en: "Refresh now",
+        ja: "今すぐ更新",
+        zh: "立即刷新",
+      })}
+      className="inline-flex h-7 w-7 items-center justify-center rounded-full"
+      style={{
+        border: "1px solid rgba(148,163,184,0.22)",
+        background: "rgba(148,163,184,0.14)",
+        color: "var(--th-text)",
+        cursor: isRefreshing ? "wait" : "pointer",
+        opacity: isRefreshing ? 0.6 : 1,
+        transition: "opacity 120ms ease",
+      }}
+    >
+      <RefreshCw size={12} className={isRefreshing ? "animate-spin" : undefined} aria-hidden />
+    </button>
+  );
+
+  const sectionActions = (
     <>
       <TooltipLabel
         text={t({ ko: "설명", en: "About", ja: "説明", zh: "说明" })}
         tooltip={tooltip}
         className="max-w-fit text-sm"
       />
-      <SurfaceActionButton onClick={onOpenSettings} tone="info" compact>
-        {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
-      </SurfaceActionButton>
+      {refreshButton}
+      {onOpenSettings ? (
+        <SurfaceActionButton onClick={onOpenSettings} tone="info" compact>
+          {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
+        </SurfaceActionButton>
+      ) : null}
     </>
-  ) : (
-    <TooltipLabel
-      text={t({ ko: "설명", en: "About", ja: "説明", zh: "说明" })}
-      tooltip={tooltip}
-      className="max-w-fit text-sm"
-    />
   );
   const providers = data?.providers ?? [];
   const hasProviders = providers.length > 0;
@@ -276,39 +334,56 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
       actions={sectionActions}
     >
       {error && hasProviders ? (
-        <SurfaceNotice className="mt-4" compact tone="warn">
-          {t({
-            ko: `최근 정상 데이터를 유지 중이며 새 동기화에 실패했습니다. (${error})`,
-            en: `Keeping the last good snapshot because the latest refresh failed. (${error})`,
-            ja: `直近の正常データを維持しつつ、最新の再同期に失敗しました。(${error})`,
-            zh: `正在保留最近一次正常数据，最新刷新失败。(${error})`,
-          })}
-        </SurfaceNotice>
+        <div className="mt-4">
+          <WidgetState
+            kind="stale"
+            compact
+            title={t({
+              ko: "최근 정상 데이터 유지 중",
+              en: "Showing the last successful snapshot",
+              ja: "直近の正常データを維持中",
+              zh: "正在保留最近一次正常数据",
+            })}
+            description={error}
+          />
+        </div>
       ) : null}
 
       {!hasProviders ? (
-        <SurfaceEmptyState className="mt-4 rounded-3xl p-4 text-sm leading-6">
-          {isRefreshing
-            ? t({
-                ko: "프로바이더 상태를 불러오는 중입니다.",
-                en: "Loading provider status.",
-                ja: "プロバイダー状態を読み込み中です。",
-                zh: "正在加载 provider 状态。",
-              })
-            : error
-              ? t({
-                  ko: `프로바이더 상태를 불러오지 못했습니다. ${error}`,
-                  en: `Unable to load provider status. ${error}`,
-                  ja: `プロバイダー状態を読み込めませんでした。${error}`,
-                  zh: `无法加载 provider 状态。${error}`,
-                })
-              : t({
-                  ko: "표시할 프로바이더 상태가 없습니다.",
-                  en: "No provider status is available yet.",
-                  ja: "表示できるプロバイダー状態がまだありません。",
-                  zh: "暂无可显示的 provider 状态。",
-                })}
-        </SurfaceEmptyState>
+        <div className="mt-4">
+          {isRefreshing ? (
+            <WidgetState
+              kind="loading"
+              title={t({
+                ko: "프로바이더 상태 동기화 중",
+                en: "Loading provider status",
+                ja: "プロバイダー状態を読み込み中",
+                zh: "正在加载 provider 状态",
+              })}
+            />
+          ) : error ? (
+            <WidgetState
+              kind="error"
+              title={t({
+                ko: "프로바이더 상태를 불러오지 못했습니다",
+                en: "Unable to load provider status",
+                ja: "プロバイダー状態を読み込めませんでした",
+                zh: "无法加载 provider 状态",
+              })}
+              description={error}
+            />
+          ) : (
+            <WidgetState
+              kind="empty"
+              title={t({
+                ko: "표시할 프로바이더 상태가 없습니다",
+                en: "No provider status available yet",
+                ja: "表示できるプロバイダー状態がまだありません",
+                zh: "暂无可显示的 provider 状态",
+              })}
+            />
+          )}
+        </div>
       ) : (
         <div className="mt-4 grid gap-4 xl:grid-cols-3">
           {providers.map((provider) => {
@@ -360,30 +435,14 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                             })}
                     </div>
                   </div>
-                  <span
-                    className="rounded-full px-2 py-1 text-[10px] font-medium"
-                    style={{
-                      color: provider.unsupported
-                        ? "var(--fg-dim)"
-                        : provider.stale
-                          ? "var(--warn)"
-                          : accent,
-                      border: `1px solid ${
-                        provider.unsupported
-                          ? "color-mix(in oklch, var(--fg-faint) 24%, var(--line) 76%)"
-                          : provider.stale
-                            ? "color-mix(in oklch, var(--warn) 28%, var(--line) 72%)"
-                            : providerMeta.border
-                      }`,
-                      background: provider.unsupported
-                        ? "color-mix(in oklch, var(--fg-faint) 10%, var(--bg-2) 90%)"
-                        : provider.stale
-                          ? "color-mix(in oklch, var(--warn) 12%, var(--bg-2) 88%)"
-                          : providerMeta.bg,
-                    }}
+                  <StatusBadge
+                    tone={provider.unsupported ? "idle" : provider.stale ? "warning" : "healthy"}
+                    size="xs"
+                    pulse={!provider.unsupported && !provider.stale}
+                    title={statusLabel}
                   >
                     {statusLabel}
-                  </span>
+                  </StatusBadge>
                 </div>
 
                 {provider.unsupported || provider.buckets.length === 0 ? (
@@ -491,3 +550,13 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
     </SurfaceSection>
   );
 }
+
+/**
+ * Memoized so WS-driven sibling re-renders don't force the rate-limit
+ * widget — which already manages its own 30s poll + abort lifecycle — to
+ * recompute provider/bucket transforms.
+ */
+const RateLimitWidget = memo(RateLimitWidgetImpl);
+RateLimitWidget.displayName = "RateLimitWidget";
+
+export default RateLimitWidget;

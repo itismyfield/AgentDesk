@@ -15,11 +15,14 @@ import { formatRelativeTime, notificationColor } from "./shellFormatting";
 import { areStringArraysEqual, HOME_DEFAULT_WIDGETS, HOME_PRIMARY_WIDGET_SET, HOME_SUPPORT_WIDGET_SET, normalizeHomeWidgetOrder } from "./HomeOverviewConfig";
 import { HomeSortableWidget } from "./HomeOverviewWidgets";
 import { buildHomeWidgetSpecs } from "./HomeWidgetSpecs";
+import { StatusBadge } from "../components/common/StatusBadge";
+import { FreshnessIndicator } from "../components/common/FreshnessIndicator";
 
 export default function HomeOverviewPage({
   isMobileViewport,
   isKo,
   wsConnected,
+  wsLastEventTs,
   currentOfficeLabel,
   stats,
   agents,
@@ -30,6 +33,8 @@ export default function HomeOverviewPage({
   isMobileViewport: boolean;
   isKo: boolean;
   wsConnected: boolean;
+  /** Required — null only until the first WS event arrives. */
+  wsLastEventTs: number | null;
   currentOfficeLabel: string;
   stats: DashboardStats | null;
   agents: Agent[];
@@ -446,10 +451,23 @@ export default function HomeOverviewPage({
           <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
             <span>{todayLabel}</span>
             <span className="h-1 w-1 rounded-full" style={{ background: "var(--th-text-muted)" }} />
-            <span className="inline-flex items-center gap-1.5" style={{ color: wsConnected ? "var(--th-accent-primary)" : "var(--th-accent-danger)" }}>
-              <span className="h-2 w-2 rounded-full" style={{ background: wsConnected ? "var(--th-accent-primary)" : "var(--th-accent-danger)" }} />
-              {wsConnected ? "all systems normal" : tr("연결 상태 확인 필요", "connection degraded")}
-            </span>
+            <StatusBadge
+              tone={wsConnected ? "healthy" : "critical"}
+              size="xs"
+              pulse={wsConnected}
+              title={wsConnected ? tr("실시간 연결 정상", "Live connection healthy") : tr("WebSocket 끊김 — 페이지를 새로고침해 보세요", "WebSocket disconnected — refresh the page")}
+            >
+              {wsConnected ? tr("연결됨", "all systems normal") : tr("연결 끊김", "connection degraded")}
+            </StatusBadge>
+            {wsConnected ? (
+              <FreshnessIndicator
+                timestamp={wsLastEventTs ?? null}
+                compact
+                label={tr("업데이트", "updated")}
+                staleAfterSeconds={45}
+                criticalAfterSeconds={180}
+              />
+            ) : null}
           </div>
           <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl" style={{ color: "var(--th-text-heading)" }}>
             {tr("오늘의 AgentDesk", "Today's AgentDesk")}

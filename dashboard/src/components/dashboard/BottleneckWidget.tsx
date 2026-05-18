@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw } from "lucide-react";
 
 import * as api from "../../api/client";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
@@ -16,6 +17,8 @@ import {
   type BottleneckRow,
   type BottleneckThresholds,
 } from "./dashboardInsights";
+import { StatusBadge } from "../common/StatusBadge";
+import { WidgetState } from "../common/WidgetState";
 
 const BOTTLE_NECK_THRESHOLDS_STORAGE_KEY = STORAGE_KEYS.dashboardBottleneckThresholds;
 
@@ -59,7 +62,7 @@ interface BottleneckWidgetProps {
   t: TFunction;
 }
 
-export function BottleneckWidget({ t }: BottleneckWidgetProps) {
+function BottleneckWidgetImpl({ t }: BottleneckWidgetProps) {
   const [cards, setCards] = useState<api.KanbanCard[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -70,31 +73,39 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
     persistBottleneckThresholds(thresholds);
   }, [thresholds]);
 
+  // Share mount + in-flight guards between the auto-poll and the new manual
+  // refresh button so a button press during a poll doesn't fire a duplicate
+  // fetch.
+  const mountedRef = useRef(true);
+  const inflightRef = useRef(false);
+
+  const loadCards = useCallback(async () => {
+    if (inflightRef.current) return;
+    inflightRef.current = true;
+    if (mountedRef.current) setLoading(true);
+    try {
+      const next = await api.getKanbanCards();
+      if (!mountedRef.current) return;
+      setCards(next);
+      setError(null);
+    } catch (nextError) {
+      if (!mountedRef.current) return;
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      inflightRef.current = false;
+      if (mountedRef.current) setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    let mounted = true;
-
-    const load = async () => {
-      if (mounted) setLoading(true);
-      try {
-        const next = await api.getKanbanCards();
-        if (!mounted) return;
-        setCards(next);
-        setError(null);
-      } catch (nextError) {
-        if (!mounted) return;
-        setError(nextError instanceof Error ? nextError.message : String(nextError));
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    };
-
-    void load();
-    const timer = setInterval(() => void load(), 60_000);
+    mountedRef.current = true;
+    void loadCards();
+    const timer = setInterval(() => void loadCards(), 60_000);
     return () => {
-      mounted = false;
+      mountedRef.current = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [loadCards]);
 
   const groups = useMemo(() => buildBottleneckGroups(cards, Date.now(), thresholds), [cards, thresholds]);
   const totalAlerts = useMemo(() => {
@@ -143,6 +154,34 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={() => void loadCards()}
+            disabled={loading}
+            aria-label={t({
+              ko: "병목 데이터 새로고침",
+              en: "Refresh bottleneck data",
+              ja: "ボトルネックデータを更新",
+              zh: "刷新瓶颈数据",
+            })}
+            title={t({
+              ko: "지금 새로고침",
+              en: "Refresh now",
+              ja: "今すぐ更新",
+              zh: "立即刷新",
+            })}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-full"
+            style={{
+              border: "1px solid rgba(148,163,184,0.2)",
+              background: "rgba(148,163,184,0.14)",
+              color: "var(--th-text)",
+              cursor: loading ? "wait" : "pointer",
+              opacity: loading ? 0.6 : 1,
+              transition: "opacity 120ms ease",
+            }}
+          >
+            <RefreshCw size={12} className={loading ? "animate-spin" : undefined} aria-hidden />
+          </button>
+          <button
+            type="button"
             className="rounded-full px-3 py-1 text-[11px] font-semibold"
             style={{
               color: "var(--th-text)",
@@ -155,12 +194,13 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
               ? t({ ko: "기준 닫기", en: "Hide thresholds", ja: "基準を閉じる", zh: "收起阈值" })
               : t({ ko: "기준 조정", en: "Tune thresholds", ja: "基準調整", zh: "调整阈值" })}
           </button>
-          <span
-            className="rounded-full px-3 py-1 text-xs font-semibold"
-            style={{ color: "#fca5a5", background: "rgba(239,68,68,0.14)" }}
+          <StatusBadge
+            tone={totalAlerts === 0 ? "healthy" : totalAlerts >= 5 ? "critical" : "warning"}
+            size="sm"
+            pulse={totalAlerts >= 5}
           >
             {totalAlerts} {t({ ko: "경고", en: "alerts", ja: "警告", zh: "警报" })}
-          </span>
+          </StatusBadge>
         </div>
       </div>
 
@@ -211,30 +251,83 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
         </div>
       ) : null}
 
-      {error ? (
-        <div className="mt-4 rounded-2xl border px-3 py-2 text-xs" style={{ borderColor: "rgba(251,191,36,0.28)", background: "rgba(251,191,36,0.12)", color: "#fde68a" }}>
-          {cards.length > 0
-            ? t({
-                ko: `최근 카드 스냅샷을 유지 중이며 새 동기화에 실패했습니다. (${error})`,
-                en: `Keeping the last card snapshot because refresh failed. (${error})`,
-                ja: `最新同期に失敗したため、直近のカードスナップショットを維持しています。(${error})`,
-                zh: `最新同步失败，正在保留最近一次卡片快照。(${error})`,
-              })
-            : t({
-                ko: `칸반 카드를 불러오지 못했습니다. (${error})`,
-                en: `Unable to load kanban cards. (${error})`,
-                ja: `kanban カードを読み込めませんでした。(${error})`,
-                zh: `无法加载 kanban 卡片。(${error})`,
-              })}
+      {/*
+        State branches are exclusive:
+          - error + no cards   → error (no columns; nothing to show)
+          - error + cards      → stale banner + columns (operator still wants
+                                 to see the last snapshot)
+          - !error + loading + no cards → loading
+          - !error + no cards          → empty
+          - !error + cards             → columns
+      */}
+      {error && cards.length === 0 ? (
+        <div className="mt-4">
+          <WidgetState
+            kind="error"
+            compact
+            title={t({
+              ko: "칸반 카드를 불러오지 못했습니다",
+              en: "Unable to load kanban cards",
+              ja: "kanban カードを読み込めませんでした",
+              zh: "无法加载 kanban 卡片",
+            })}
+            description={error}
+          />
         </div>
-      ) : null}
-
-      {loading && totalAlerts === 0 ? (
-        <div className="py-10 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
-          {t({ ko: "운영 병목을 확인하는 중입니다", en: "Scanning bottlenecks", ja: "ボトルネックを確認中", zh: "正在扫描瓶颈" })}
+      ) : loading && cards.length === 0 ? (
+        <div className="mt-4">
+          <WidgetState
+            kind="loading"
+            title={t({
+              ko: "운영 병목을 확인하는 중",
+              en: "Scanning bottlenecks",
+              ja: "ボトルネックを確認中",
+              zh: "正在扫描瓶颈",
+            })}
+            description={t({
+              ko: "review/rework/blocked 카드 스냅샷을 가져오고 있습니다.",
+              en: "Pulling review/rework/blocked card snapshots.",
+              ja: "review/rework/blocked カードを取得中。",
+              zh: "正在获取 review/rework/blocked 卡片快照。",
+            })}
+          />
+        </div>
+      ) : !loading && cards.length === 0 ? (
+        <div className="mt-4">
+          <WidgetState
+            kind="empty"
+            title={t({
+              ko: "칸반 카드 데이터가 없습니다",
+              en: "No kanban cards in scope",
+              ja: "kanban カードがありません",
+              zh: "暂无 kanban 卡片",
+            })}
+            description={t({
+              ko: "선택된 오피스에서 카드가 만들어지면 병목 검사가 활성화됩니다.",
+              en: "Bottleneck analysis activates once cards exist in the selected office.",
+              ja: "選択中のオフィスにカードが作成されると分析が有効化されます。",
+              zh: "在所选 office 中创建卡片后，瓶颈分析将被激活。",
+            })}
+          />
         </div>
       ) : (
-        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <>
+          {error ? (
+            <div className="mt-4">
+              <WidgetState
+                kind="stale"
+                compact
+                title={t({
+                  ko: "최근 카드 스냅샷을 유지 중",
+                  en: "Showing the last successful snapshot",
+                  ja: "直近のスナップショットを維持中",
+                  zh: "显示最近一次成功的快照",
+                })}
+                description={error}
+              />
+            </div>
+          ) : null}
+          <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
           <BottleneckColumn
             title={t({ ko: "리뷰 지연", en: "Review Delay", ja: "レビュー遅延", zh: "审查延迟" })}
             hint={t({
@@ -274,11 +367,20 @@ export function BottleneckWidget({ t }: BottleneckWidgetProps) {
             accent="#f87171"
             t={t}
           />
-        </div>
+          </div>
+        </>
       )}
     </div>
   );
 }
+
+/**
+ * Memoized so the 60s-polling bottleneck card doesn't recompute alert
+ * groupings every time an unrelated parent state changes (kanban WS event,
+ * sidebar toggle, etc.). Parent passes a stable `t` via useCallback.
+ */
+export const BottleneckWidget = memo(BottleneckWidgetImpl);
+BottleneckWidget.displayName = "BottleneckWidget";
 
 function BottleneckColumn({
   title,

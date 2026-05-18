@@ -4,6 +4,58 @@ export interface StatusTone {
   text: string;
 }
 
+/**
+ * Semantic system-health tones. Used by generic surfaces (StatusBadge,
+ * HealthDot, FreshnessIndicator) so the dashboard speaks one visual language
+ * for "healthy / warning / critical / idle / info / unknown" regardless of
+ * which domain the value comes from (WS health, agent status, queue health…).
+ *
+ * Color values are kept literal here on purpose so consumers can `style={{}}`
+ * inline without depending on the global theme cascade. If the theme grows
+ * `--th-status-*` CSS custom properties later, switch these to `var()` calls.
+ */
+export const SYSTEM_HEALTH_TONES = {
+  healthy: {
+    accent: "#22c55e",
+    bg: "rgba(34,197,94,0.16)",
+    text: "#4ade80",
+  },
+  warning: {
+    accent: "#f59e0b",
+    bg: "rgba(245,158,11,0.18)",
+    text: "#fbbf24",
+  },
+  critical: {
+    accent: "#ef4444",
+    bg: "rgba(239,68,68,0.18)",
+    text: "#f87171",
+  },
+  idle: {
+    accent: "#64748b",
+    bg: "rgba(100,116,139,0.18)",
+    text: "#94a3b8",
+  },
+  info: {
+    accent: "#0ea5e9",
+    bg: "rgba(14,165,233,0.18)",
+    text: "#38bdf8",
+  },
+  unknown: {
+    accent: "#6b7280",
+    bg: "rgba(107,114,128,0.18)",
+    text: "#9ca3af",
+  },
+} satisfies Record<string, StatusTone>;
+
+export type SystemHealthTone = keyof typeof SYSTEM_HEALTH_TONES;
+
+export function getSystemHealthTone(tone: SystemHealthTone | string): StatusTone {
+  return (
+    (SYSTEM_HEALTH_TONES as Record<string, StatusTone>)[tone] ??
+    SYSTEM_HEALTH_TONES.unknown
+  );
+}
+
 export const KANBAN_STATUS_TONES = {
   backlog: {
     accent: "#64748b",

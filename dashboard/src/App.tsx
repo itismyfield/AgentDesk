@@ -51,7 +51,7 @@ export default function App() {
     }
   };
 
-  const { wsConnected } = useDashboardSocket(handleWsEvent);
+  const { wsConnected, lastEventTs } = useDashboardSocket(handleWsEvent);
   const { t } = useI18n();
   const data = bootstrapQuery.data;
 
@@ -99,6 +99,7 @@ export default function App() {
         >
           <AppShell
             wsConnected={wsConnected}
+            wsLastEventTs={lastEventTs}
             notifications={notifications}
             pushNotification={pushNotification}
             updateNotification={updateNotification}
