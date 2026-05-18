@@ -267,7 +267,7 @@
 | `GET` | `/api/streaks` | `analytics::streaks` | `src/server/routes/analytics.rs:416` | `src/server/routes/domains/admin.rs:77` |
 | `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:249` | `src/server/routes/domains/admin.rs:84` |
 | `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:166` | `src/server/routes/domains/ops.rs:311` |
-| `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:261` | `src/server/routes/domains/ops.rs:312` |
+| `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:262` | `src/server/routes/domains/ops.rs:312` |
 | `GET` | `/api/voice/config` | `voice_config::get_voice_config` | `src/server/routes/voice_config.rs:109` | `src/server/routes/domains/admin.rs:64` |
 | `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:117` | `src/server/routes/domains/admin.rs:64` |
 | `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:161` | `src/server/mod.rs:380` |

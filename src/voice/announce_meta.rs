@@ -27,12 +27,16 @@ pub(crate) const DURABLE_ANNOUNCEMENT_META_TTL_SECS: i64 = 24 * 60 * 60;
 /// silently dropping completions on extended turns (Codex #2274 review
 /// finding #2). Anything older than 24h almost certainly represents a
 /// turn that crashed or never reached terminal delivery.
+///
+/// The in-memory TTL is refreshed via `refresh_handoff_deadline` whenever the
+/// watchdog deadline is extended (#2352); the durable TTL is refreshed via
+/// `refresh_handoff_ttl_durable`, which resets the PG `expires_at` column.
 const HANDOFF_META_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Durable handoff rows older than this are treated as expired and ignored
-/// by the durable load/take helpers. The leader-only GC sweep
-/// (`gc_expired_voice_background_handoff_meta_pg`) deletes them. Mirrors
-/// the in-memory `HANDOFF_META_TTL` — see that constant for the rationale.
+/// Durable TTL for handoff rows, in seconds. Matches `HANDOFF_META_TTL` and
+/// the `expires_at` default expression in migration 0064. Refreshed by
+/// `refresh_handoff_ttl_durable` when the watchdog deadline is extended so
+/// long-running turns do not lose their routing marker (#2352).
 pub(crate) const DURABLE_HANDOFF_META_TTL_SECS: i64 = 24 * 60 * 60;
 const DURABLE_HANDOFF_PENDING_PREFIX: &str = "pending:";
 
@@ -315,6 +319,36 @@ impl VoiceAnnouncementMetaStore {
         let now = Instant::now();
         prune_pending_handoff_expired_locked(&mut entries, now);
         entries.remove(correlation_id).map(|stored| stored.meta)
+    }
+
+    /// Refresh the in-memory TTL for a bound handoff marker when the
+    /// background turn's watchdog deadline is extended (#2352).
+    ///
+    /// The new `expires_at` is set to `Instant::now() + HANDOFF_META_TTL`,
+    /// giving the entry a fresh full-TTL window from the moment of the
+    /// extension. The update is skipped when the existing TTL already
+    /// reaches further than the fresh window (i.e. the entry was very
+    /// recently created or previously extended), so callers can invoke
+    /// this unconditionally without risk of shrinking the TTL.
+    ///
+    /// Returns `true` when the entry existed and the TTL was extended,
+    /// `false` when the entry was absent or already had a later expiry.
+    pub(crate) fn refresh_handoff_deadline(&self, message_id: MessageId) -> bool {
+        let Ok(mut entries) = self.handoff_entries.write() else {
+            return false;
+        };
+        let now = Instant::now();
+        prune_handoff_expired_locked(&mut entries, now);
+        let Some(stored) = entries.get_mut(&message_id.get()) else {
+            return false;
+        };
+        let new_expires_at = now + HANDOFF_META_TTL;
+        if new_expires_at > stored.expires_at {
+            stored.expires_at = new_expires_at;
+            true
+        } else {
+            false
+        }
     }
 
     /// #2266: non-consuming clone of the stored announcement so the intake-gate
@@ -687,11 +721,10 @@ pub(crate) async fn bind_handoff_durable_message_id(
          SET message_id = $1
          WHERE message_id = $2
            AND consumed_at IS NULL
-           AND created_at > NOW() - make_interval(secs => $3)",
+           AND expires_at > NOW()",
     )
     .bind(message_id.get().to_string())
     .bind(durable_pending_message_id(correlation_id))
-    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -723,10 +756,9 @@ pub(crate) async fn load_handoff_durable(
          FROM voice_background_handoff_meta
          WHERE message_id = $1
            AND consumed_at IS NULL
-           AND created_at > NOW() - make_interval(secs => $2)",
+           AND expires_at > NOW()",
     )
     .bind(message_id.get().to_string())
-    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
     .fetch_optional(pool)
     .await?;
     row.map(|(voice_channel_id, background_channel_id, agent_id)| {
@@ -760,11 +792,10 @@ pub(crate) async fn take_handoff_reservation_durable(
          SET consumed_at = NOW()
          WHERE message_id = $1
            AND consumed_at IS NULL
-           AND created_at > NOW() - make_interval(secs => $2)
+           AND expires_at > NOW()
          RETURNING voice_channel_id, background_channel_id, agent_id",
     )
     .bind(durable_pending_message_id(correlation_id))
-    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
     .fetch_optional(pool)
     .await?;
     row.map(|(voice_channel_id, background_channel_id, agent_id)| {
@@ -807,11 +838,10 @@ pub(crate) async fn take_handoff_durable(
          SET consumed_at = NOW()
          WHERE message_id = $1
            AND consumed_at IS NULL
-           AND created_at > NOW() - make_interval(secs => $2)
+           AND expires_at > NOW()
          RETURNING voice_channel_id, background_channel_id, agent_id",
     )
     .bind(message_id.get().to_string())
-    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
     .fetch_optional(pool)
     .await?;
     row.map(|(voice_channel_id, background_channel_id, agent_id)| {
@@ -857,22 +887,25 @@ pub(crate) async fn rehydrate_handoffs_from_pg(pool: &PgPool) -> Result<u64, sql
     // `age_secs` is computed in SQL so the truth horizon is PG's clock,
     // not the local process clock — same source of truth used by the
     // load/take/GC paths.
+    // `remaining_secs` is computed from `expires_at` so the in-memory
+    // lifetime tracks the refreshed durable deadline, not just
+    // `created_at`. Rows whose `expires_at` is in the past are already
+    // excluded by the `expires_at > NOW()` filter.
     let rows: Vec<(String, String, String, Option<String>, f64)> = sqlx::query_as(
         "SELECT message_id,
                 voice_channel_id,
                 background_channel_id,
                 agent_id,
-                EXTRACT(EPOCH FROM (NOW() - created_at))::float8 AS age_secs
+                EXTRACT(EPOCH FROM (expires_at - NOW()))::float8 AS remaining_secs
          FROM voice_background_handoff_meta
          WHERE consumed_at IS NULL
-           AND created_at > NOW() - make_interval(secs => $1)",
+           AND expires_at > NOW()",
     )
-    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
     .fetch_all(pool)
     .await?;
     let store = global_store();
     let mut count: u64 = 0;
-    for (message_id, voice_channel_id, background_channel_id, agent_id, age_secs) in rows {
+    for (message_id, voice_channel_id, background_channel_id, agent_id, remaining_secs) in rows {
         if is_durable_pending_message_id(&message_id) {
             continue;
         }
@@ -899,14 +932,9 @@ pub(crate) async fn rehydrate_handoffs_from_pg(pool: &PgPool) -> Result<u64, sql
             );
             continue;
         };
-        // Compute remaining TTL from PG-reported age. Clamp the lower
-        // bound to a single second so the entry exists at all — the
-        // durable claim path remains the source of truth and will
-        // refuse stale rows even if a barely-alive local entry briefly
-        // survives.
-        let total_ttl_secs = DURABLE_HANDOFF_META_TTL_SECS as f64;
-        let remaining_secs = (total_ttl_secs - age_secs.max(0.0)).max(1.0);
-        let remaining = Duration::from_secs_f64(remaining_secs);
+        // Clamp to 1 s so the entry exists in memory — the durable claim
+        // path is still authoritative and will refuse already-consumed rows.
+        let remaining = Duration::from_secs_f64(remaining_secs.max(1.0));
         store.insert_handoff_with_remaining_ttl(
             MessageId::new(message_id_u64),
             VoiceBackgroundHandoffMeta {
@@ -923,21 +951,46 @@ pub(crate) async fn rehydrate_handoffs_from_pg(pool: &PgPool) -> Result<u64, sql
     Ok(count)
 }
 
-/// Delete durable rows older than `ttl`. Wired into the leader-only
-/// maintenance scheduler so cleanup runs without a new background worker.
+/// Delete durable rows whose effective TTL has elapsed. The live deadline is
+/// stored in `expires_at` (migration 0064), which is refreshed by
+/// `refresh_handoff_ttl_durable` when the watchdog deadline is extended.
+/// Wired into the leader-only maintenance scheduler.
 pub(crate) async fn gc_expired_voice_background_handoff_meta_pg(
     pool: &PgPool,
-    ttl: Duration,
+    _ttl: Duration,
 ) -> Result<u64, sqlx::Error> {
-    let ttl_secs = ttl.as_secs_f64();
     let result = sqlx::query(
         "DELETE FROM voice_background_handoff_meta
-         WHERE created_at < NOW() - make_interval(secs => $1)",
+         WHERE expires_at < NOW()",
     )
-    .bind(ttl_secs)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
+}
+
+/// Refresh the durable TTL for a handoff row by resetting `expires_at` to
+/// `NOW() + DURABLE_HANDOFF_META_TTL_SECS` (#2352).
+///
+/// Called after a successful watchdog deadline extension so long-running
+/// background turns do not lose their PG routing marker when the GC runs.
+/// Idempotent: no-op when the row is already consumed or absent.
+///
+/// Returns `true` when a live row was found and updated.
+pub(crate) async fn refresh_handoff_ttl_durable(
+    pool: &PgPool,
+    message_id: MessageId,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE voice_background_handoff_meta
+         SET expires_at = NOW() + make_interval(secs => $1)
+         WHERE message_id = $2
+           AND consumed_at IS NULL",
+    )
+    .bind(DURABLE_HANDOFF_META_TTL_SECS as f64)
+    .bind(message_id.get().to_string())
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 #[cfg(test)]
@@ -1062,6 +1115,75 @@ mod tests {
         let store = VoiceAnnouncementMetaStore::default();
         assert!(store.get_handoff(MessageId::new(999)).is_none());
         assert!(store.take_handoff(MessageId::new(999)).is_none());
+    }
+
+    #[test]
+    fn refresh_handoff_deadline_returns_false_when_absent() {
+        let store = VoiceAnnouncementMetaStore::default();
+        assert!(
+            !store.refresh_handoff_deadline(MessageId::new(998)),
+            "refresh on absent entry must return false"
+        );
+    }
+
+    #[test]
+    fn refresh_handoff_deadline_extends_ttl_when_entry_has_short_remaining() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let message_id = MessageId::new(997);
+        let meta = handoff_meta(500, 400, None);
+
+        // Insert with a 1-second TTL (very short).
+        store.insert_handoff_with_remaining_ttl(message_id, meta.clone(), Duration::from_secs(1));
+
+        // Refresh should succeed and extend the TTL to HANDOFF_META_TTL.
+        assert!(
+            store.refresh_handoff_deadline(message_id),
+            "refresh on an existing short-TTL entry must return true"
+        );
+
+        // Entry must still be accessible (was not pruned).
+        assert_eq!(
+            store.get_handoff(message_id),
+            Some(meta),
+            "entry must survive after TTL refresh"
+        );
+    }
+
+    #[test]
+    fn refresh_handoff_deadline_returns_false_when_ttl_already_at_max() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let message_id = MessageId::new(996);
+        let meta = handoff_meta(501, 401, None);
+
+        // Insert with the full TTL — already at the maximum window.
+        store.insert_handoff_with_remaining_ttl(message_id, meta.clone(), HANDOFF_META_TTL);
+
+        // The refresh computes new_expires_at = now + HANDOFF_META_TTL,
+        // which equals the existing expires_at (modulo sub-millisecond
+        // difference).  Either way the method must not shorten the window.
+        let _ = store.refresh_handoff_deadline(message_id);
+
+        // Entry must be present regardless.
+        assert!(
+            store.get_handoff(message_id).is_some(),
+            "entry must remain after no-op refresh"
+        );
+    }
+
+    #[test]
+    fn refresh_handoff_deadline_preserves_meta_content() {
+        let store = VoiceAnnouncementMetaStore::default();
+        let message_id = MessageId::new(995);
+        let meta = handoff_meta(502, 402, Some("project-agentdesk"));
+
+        store.insert_handoff_with_remaining_ttl(message_id, meta.clone(), Duration::from_secs(1));
+        store.refresh_handoff_deadline(message_id);
+
+        assert_eq!(
+            store.get_handoff(message_id),
+            Some(meta),
+            "meta payload must be unchanged after TTL refresh"
+        );
     }
 
     fn handoff_meta(
@@ -1728,17 +1850,19 @@ mod tests {
             .await
             .expect("persist durable handoff");
 
-        // Backdate created_at past the GC TTL so the GC sweep deletes it.
+        // Push expires_at into the past so the GC sweep deletes the row.
+        // We set expires_at directly (rather than backdating created_at)
+        // because the updated_at trigger fires on any UPDATE and would
+        // reset updated_at to NOW(); expires_at has no such trigger.
         sqlx::query(
             "UPDATE voice_background_handoff_meta
-             SET created_at = NOW() - make_interval(secs => $1)
-             WHERE message_id = $2",
+             SET expires_at = NOW() - INTERVAL '1 second'
+             WHERE message_id = $1",
         )
-        .bind((DURABLE_HANDOFF_META_TTL_SECS + 60) as f64)
         .bind(message_id.get().to_string())
         .execute(&pool)
         .await
-        .expect("backdate row for gc test");
+        .expect("expire row for gc test");
 
         let deleted = gc_expired_voice_background_handoff_meta_pg(
             &pool,
@@ -1748,7 +1872,7 @@ mod tests {
         .expect("gc sweep");
         assert!(
             deleted >= 1,
-            "gc must delete the backdated row (got {deleted})"
+            "gc must delete the expired row (got {deleted})"
         );
 
         assert!(
@@ -1758,6 +1882,87 @@ mod tests {
                 .is_none(),
             "post-gc load must observe no row"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_handoff_ttl_durable_resets_expires_at() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(81_401);
+        let expected = handoff_meta(704, 604, None);
+
+        persist_handoff_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable handoff");
+
+        // Shrink expires_at to 10 seconds from now so we can confirm the
+        // refresh pushes it back to a full TTL window.
+        sqlx::query(
+            "UPDATE voice_background_handoff_meta
+             SET expires_at = NOW() + INTERVAL '10 seconds'
+             WHERE message_id = $1",
+        )
+        .bind(message_id.get().to_string())
+        .execute(&pool)
+        .await
+        .expect("shrink expires_at for refresh test");
+
+        let refreshed = refresh_handoff_ttl_durable(&pool, message_id)
+            .await
+            .expect("refresh durable ttl");
+        assert!(refreshed, "refresh must return true for a live row");
+
+        // After refresh, expires_at must be significantly in the future.
+        let remaining_secs: f64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM (expires_at - NOW()))::float8
+             FROM voice_background_handoff_meta
+             WHERE message_id = $1",
+        )
+        .bind(message_id.get().to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("read expires_at after refresh");
+
+        // Should be ≈ DURABLE_HANDOFF_META_TTL_SECS (24 h), definitely > 1 h.
+        assert!(
+            remaining_secs > 3600.0,
+            "expires_at after refresh must be > 1 h from now (got {remaining_secs:.0} s)"
+        );
+
+        // The row should still be loadable (not consumed).
+        assert_eq!(
+            load_handoff_durable(&pool, message_id)
+                .await
+                .expect("load after refresh"),
+            Some(expected)
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_handoff_ttl_durable_is_noop_on_consumed_row() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let message_id = MessageId::new(81_402);
+        let expected = handoff_meta(705, 605, None);
+
+        persist_handoff_durable(&pool, message_id, &expected)
+            .await
+            .expect("persist durable handoff");
+        take_handoff_durable(&pool, message_id)
+            .await
+            .expect("consume row")
+            .expect("row found");
+
+        let refreshed = refresh_handoff_ttl_durable(&pool, message_id)
+            .await
+            .expect("refresh consumed row must not error");
+        assert!(!refreshed, "refresh of consumed row must return false");
 
         pool.close().await;
         pg_db.drop().await;

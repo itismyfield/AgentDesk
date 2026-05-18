@@ -542,10 +542,19 @@ pub(super) fn turn_watchdog_timeout() -> Duration {
     })
 }
 
-/// Extend the watchdog deadline for a channel and move the per-turn max cap with it.
+/// Extend the watchdog deadline for a channel and move the per-turn max cap
+/// with it.  Also refreshes the in-memory voice-background handoff marker
+/// TTL (if one exists for the active turn) so extended turns do not lose
+/// their routing metadata (#2352).
+///
+/// When `pg_pool` is `Some`, the durable PG row's `expires_at` is refreshed
+/// as well via `voice::announce_meta::refresh_handoff_ttl_durable`.  Durable
+/// refresh errors are logged and ignored so a PG hiccup cannot break the
+/// deadline extension.
 pub async fn extend_watchdog_deadline(
     channel_id: u64,
     extend_by_secs: u64,
+    pg_pool: Option<&sqlx::PgPool>,
 ) -> Result<
     crate::services::turn_orchestrator::WatchdogDeadlineExtension,
     crate::services::turn_orchestrator::WatchdogDeadlineExtensionError,
@@ -555,7 +564,29 @@ pub async fn extend_watchdog_deadline(
             crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::MailboxUnavailable,
         );
     };
-    handle.extend_timeout(extend_by_secs).await
+    let extension = handle.extend_timeout(extend_by_secs).await?;
+
+    // Refresh the handoff marker TTL so a long-running turn does not lose
+    // its voice routing metadata (#2352).
+    let snapshot = handle.snapshot().await;
+    if let Some(message_id) = snapshot.active_user_message_id {
+        crate::voice::announce_meta::global_store().refresh_handoff_deadline(message_id);
+
+        if let Some(pool) = pg_pool {
+            if let Err(error) =
+                crate::voice::announce_meta::refresh_handoff_ttl_durable(pool, message_id).await
+            {
+                tracing::warn!(
+                    channel_id,
+                    message_id = message_id.get(),
+                    %error,
+                    "failed to refresh durable handoff TTL after watchdog extension"
+                );
+            }
+        }
+    }
+
+    Ok(extension)
 }
 
 /// Read and consume the deadline override for a channel (if any).

@@ -257,7 +257,7 @@
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 670 |  |
 | `server::routes::prompt_manifest_retention` | `src/server/routes/prompt_manifest_retention.rs` | 57 |  |
 | `server::routes::provider_cli_api` | `src/server/routes/provider_cli_api.rs` | 847 |  |
-| `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 391 |  |
+| `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 474 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 343 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 19 |  |
@@ -362,7 +362,7 @@
 | `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 1653 | giant-file |
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 3373 | giant-file |
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 326 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 6508 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 6539 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 910 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 413 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1366 | giant-file |
@@ -635,7 +635,7 @@
 | `utils::loopback_url` | `src/utils/loopback_url.rs` | 58 |  |
 | `utils::wip_detect` | `src/utils/wip_detect.rs` | 244 |  |
 | `voice` | `src/voice/mod.rs` | 17 |  |
-| `voice::announce_meta` | `src/voice/announce_meta.rs` | 1765 | giant-file |
+| `voice::announce_meta` | `src/voice/announce_meta.rs` | 1970 | giant-file |
 | `voice::barge_in` | `src/voice/barge_in.rs` | 925 |  |
 | `voice::cancel_tombstone` | `src/voice/cancel_tombstone.rs` | 201 |  |
 | `voice::commands` | `src/voice/commands.rs` | 835 |  |
