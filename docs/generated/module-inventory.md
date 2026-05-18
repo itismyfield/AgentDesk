@@ -340,7 +340,7 @@
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 6 |  |
 | `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1164 | giant-file |
 | `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 427 |  |
-| `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 528 |  |
+| `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 569 |  |
 | `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 1064 | giant-file |
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 275 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 295 |  |
@@ -359,7 +359,7 @@
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 744 |  |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 3 |  |
-| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 1088 | giant-file |
+| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 1334 | giant-file |
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 2968 | giant-file |
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 326 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 6504 | giant-file |
