@@ -558,9 +558,8 @@ fn envelope_dedup_globally_enabled() -> bool {
 /// The hash is byte-hash of the rendered system_prompt — if anything in the
 /// prompt drift (role binding, SAK, peer agents) the hash changes and we go
 /// back to a full re-inject, so correctness never regresses.
-fn dev_instruction_registry() -> &'static std::sync::Mutex<
-    std::collections::HashSet<(ProviderKind, String, u64)>,
-> {
+fn dev_instruction_registry()
+-> &'static std::sync::Mutex<std::collections::HashSet<(ProviderKind, String, u64)>> {
     static CELL: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashSet<(ProviderKind, String, u64)>>,
     > = std::sync::OnceLock::new();
@@ -587,10 +586,7 @@ pub fn note_dev_role_instructions_sent(
     role_id: Option<&str>,
     system_prompt: &str,
 ) -> bool {
-    let Some(role_id) = role_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(role_id) = role_id.map(str::trim).filter(|value| !value.is_empty()) else {
         // No role binding → we cannot dedupe safely.
         return false;
     };
