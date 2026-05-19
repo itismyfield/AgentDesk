@@ -1,0 +1,17 @@
+id: E-7
+title: Codex /compact 직후 새 입력 readiness (#2695)
+channel: cdx
+isolation: required
+steps:
+  - send_prompt: "before-compact (E-7)"
+  - wait_for_discord_text: "before-compact"
+    timeout_s: 120
+  - wait_idle_s: 3
+  - send_prompt: "/compact"
+  - wait_idle_s: 15
+  - send_prompt: "after-compact-codex (E-7)"
+  - wait_for_discord_text: "after-compact-codex"
+    timeout_s: 120
+assertions:
+  - no_duplicate_content: true
+  - text_present: "after-compact-codex"

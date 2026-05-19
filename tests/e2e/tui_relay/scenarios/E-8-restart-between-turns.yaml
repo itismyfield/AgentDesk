@@ -1,0 +1,19 @@
+id: E-8
+title: 응답 완료 → dcserver dev restart → 새 프롬프트 → 새 응답만 emit
+channel: both
+isolation: required
+destructive: true
+steps:
+  - send_prompt: "pre-restart (E-8)"
+  - wait_for_discord_text: "pre-restart"
+    timeout_s: 90
+  - wait_idle_s: 3
+  - restart_dcserver:
+      target: dev
+  - wait_idle_s: 15
+  - send_prompt: "post-restart (E-8)"
+  - wait_for_discord_text: "post-restart"
+    timeout_s: 120
+assertions:
+  - no_duplicate_content: true
+  - text_present: "post-restart"

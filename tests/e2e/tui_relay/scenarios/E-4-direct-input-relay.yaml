@@ -1,0 +1,17 @@
+id: E-4
+title: SSH/direct TUI 입력 시 프롬프트 알림 + 응답 1회 relay (#2697/#2683/#2669 positive)
+channel: both
+isolation: required
+notes: |
+  Setup phase relies on the operator (or a future driver step) to inject a
+  prompt directly into the TUI pane via tmux send-keys outside the Discord
+  message path. Driver here only verifies the Discord side: a prompt
+  notification message appears, followed by the actual response.
+steps:
+  - send_prompt: "direct-input-echo (E-4) — please reply with the literal string DIRECT_E4_OK"
+  - wait_for_discord_text: "DIRECT_E4_OK"
+    timeout_s: 120
+assertions:
+  - text_present: "DIRECT_E4_OK"
+  - no_duplicate_content: true
+  - no_control_chars: true

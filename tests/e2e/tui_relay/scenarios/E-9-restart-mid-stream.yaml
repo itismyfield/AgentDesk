@@ -1,0 +1,20 @@
+id: E-9
+title: 스트리밍 중 dev 재기동 — sentinel marker 후 restart, 청크 이어 emit, 중복 0
+channel: both
+isolation: required
+destructive: true
+sentinel:
+  marker: "[E2E:E9:STREAM_OK]"
+steps:
+  - send_prompt: |
+      응답 첫 줄에 정확히 "[E2E:E9:STREAM_OK]"를 출력한 뒤,
+      이어서 약 30줄짜리 짧은 시를 작성해줘 (E-9).
+  - wait_for_discord_text: "[E2E:E9:STREAM_OK]"
+    timeout_s: 60
+  - restart_dcserver:
+      target: dev
+  - wait_for_discord_text: "E-9"
+    timeout_s: 180
+assertions:
+  - no_duplicate_content: true
+  - text_present: "[E2E:E9:STREAM_OK]"

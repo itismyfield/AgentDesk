@@ -1,0 +1,14 @@
+id: E-1
+title: 짧은 단일 프롬프트 → 응답 1회 relay
+channel: both
+isolation: required
+steps:
+  - send_prompt: "ping (E-1 single)"
+  - wait_for_discord_text: "ping"
+    timeout_s: 90
+assertions:
+  - message_count_between_markers:
+      min: 1
+      max: 6
+  - no_duplicate_content: true
+  - no_control_chars: true

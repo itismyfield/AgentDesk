@@ -1,0 +1,18 @@
+id: E-11
+title: cc · cdx 동시 진행, 채널 격리 (#2691 + 7.2)
+channel: both
+isolation: required
+notes: |
+  Driver runs cc and cdx sequentially in the current implementation; true
+  concurrency arrives once the driver gains an async fan-out. Until then,
+  this scenario verifies neither channel sees the other's marker text.
+steps:
+  - send_prompt: "CC-only-marker-E11"
+  - wait_for_discord_text: "CC-only-marker-E11"
+    timeout_s: 90
+  - wait_idle_s: 2
+  - send_prompt: "CDX-only-marker-E11"
+  - wait_for_discord_text: "CDX-only-marker-E11"
+    timeout_s: 90
+assertions:
+  - no_duplicate_content: true

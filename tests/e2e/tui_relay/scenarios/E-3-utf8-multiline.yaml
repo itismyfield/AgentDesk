@@ -1,0 +1,19 @@
+id: E-3
+title: 멀티라인 + 이모지 / 한글 / 코드블록 입력 echo
+channel: both
+isolation: required
+steps:
+  - send_prompt: |
+      안녕👋 다음 코드를 그대로 답장에 echo해줘 (E-3):
+      ```rust
+      fn main() {
+          println!("e2e-utf8");
+      }
+      ```
+  - wait_for_discord_text: "e2e-utf8"
+    timeout_s: 120
+assertions:
+  - no_duplicate_content: true
+  - text_present: "안녕"
+  - text_present: "e2e-utf8"
+  - no_control_chars: true

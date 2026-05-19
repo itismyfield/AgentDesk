@@ -1,0 +1,16 @@
+id: E-5
+title: 응답 직후 새 프롬프트 → 새 턴 헤더 분리 + inflight cleanup 관측 (#2625)
+channel: both
+isolation: required
+steps:
+  - send_prompt: "turn-A (E-5)"
+  - wait_for_discord_text: "turn-A"
+    timeout_s: 90
+  - wait_idle_s: 1
+  - send_prompt: "turn-B (E-5)"
+  - wait_for_discord_text: "turn-B"
+    timeout_s: 90
+assertions:
+  - no_duplicate_content: true
+  - text_present: "turn-A"
+  - text_present: "turn-B"

@@ -1,0 +1,21 @@
+id: E-12
+title: 진행 중 tmux kill-pane → "세션 종료" 1회 알림, hang 0 (9.1)
+channel: both
+isolation: required
+destructive: true
+notes: |
+  pre-flight: list-panes 결과로 pane_id/PID/cwd가 e2e 채널에 묶인 세션과
+  일치하는지 재검증 후에만 kill-pane을 수행한다.
+steps:
+  - send_prompt: |
+      응답 첫 줄에 "[E2E:E12:OK]"를 출력하고
+      30줄짜리 짧은 시를 작성해줘 (E-12).
+  - wait_for_discord_text: "[E2E:E12:OK]"
+    timeout_s: 60
+  - kill_pane:
+      reverify_session_name_substring: "adk-dash"
+  - wait_for_discord_text: "session ended"
+    timeout_s: 60
+assertions:
+  - text_present: "[E2E:E12:OK]"
+  - no_duplicate_content: true
