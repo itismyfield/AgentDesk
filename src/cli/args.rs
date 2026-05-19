@@ -380,6 +380,29 @@ pub(crate) enum Commands {
     },
     /// Show auto-queue status with thread links
     Queue,
+    /// Unified queue + dispatch + phase-gate inspection (issue #2651).
+    ///
+    /// First-class replacement for the ad-hoc `curl /api/queue/status |
+    /// python -c '...'` polling pattern. Aggregates the queue run state,
+    /// pending dispatches, and phase-gate snapshot into one structured
+    /// response. Pass `--json` for machine-readable output.
+    Query {
+        #[command(subcommand)]
+        action: Option<QueryAction>,
+        /// Emit machine-readable JSON instead of the text summary.
+        #[arg(long, global = true)]
+        json: bool,
+        /// Filter result rows. Repeatable. Format: `key:value`
+        /// (e.g. `--filter status:pending`, `--filter dispatch_type:review`).
+        #[arg(long = "filter", global = true)]
+        filters: Vec<String>,
+        /// Restrict to a specific agent_id when applicable.
+        #[arg(long, global = true)]
+        agent: Option<String>,
+        /// Maximum rows to render per section (0 = unlimited).
+        #[arg(long, global = true, default_value_t = 0)]
+        limit: usize,
+    },
     /// Build + deploy dev + promote to release
     Deploy,
     /// List agents and their status
@@ -454,6 +477,24 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: ShowAction,
     },
+}
+
+/// Subcommands for `adk query` (issue #2651).
+///
+/// Each variant aggregates one logical slice of runtime state. `All` (the
+/// default when no subcommand is given) fetches every slice in parallel for
+/// a single-shot snapshot — that is the curl-replacement happy path.
+#[derive(Subcommand)]
+pub(crate) enum QueryAction {
+    /// Auto-queue run + entries snapshot (calls `/api/queue/status`).
+    Queue,
+    /// Pending dispatches across all agents (calls `/api/dispatches/pending`).
+    Dispatches,
+    /// Phase-gate catalog + active gate state (calls
+    /// `/api/queue/phase-gates/catalog`).
+    PhaseGate,
+    /// All sections in one shot (default).
+    All,
 }
 
 #[derive(Subcommand)]
