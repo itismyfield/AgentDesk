@@ -268,6 +268,7 @@ src/
 │   │   ├── offices.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
+│   │   ├── pr_summary.rs
 │   │   ├── prompt_manifest_retention.rs
 │   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
@@ -656,6 +657,7 @@ src/
 │   ├── opencode.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs
+│   ├── pr_summary.rs
 │   ├── process.rs
 │   ├── provider.rs
 │   ├── provider_exec.rs

@@ -42,6 +42,7 @@ pub mod opencode;
 pub mod pipeline_override;
 pub mod pipeline_routes;
 pub mod platform;
+pub mod pr_summary;
 pub mod process;
 pub mod provider;
 pub mod provider_cli;
