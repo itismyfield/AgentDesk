@@ -584,7 +584,7 @@
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 959 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 |  |
 | `services::process` | `src/services/process.rs` | 1407 | giant-file |
-| `services::provider` | `src/services/provider.rs` | 3009 | giant-file |
+| `services::provider` | `src/services/provider.rs` | 3352 | giant-file |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 240 |  |
 | `services::provider_cli::context` | `src/services/provider_cli/context.rs` | 74 |  |
