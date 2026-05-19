@@ -11,6 +11,15 @@ use std::{
 
 const RECALL_DEDUP_WINDOW: Duration = Duration::from_secs(60);
 const REMEMBER_DEDUP_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// #2660 — TTL for the static-slice tracker that records when the
+/// `Ranked context from Memento` + `Core memory from Memento` blob was last
+/// emitted to a given (workspace, agent, session, mode) lane. Within this
+/// window, follow-up turns reuse the prior emission (via a one-line pointer)
+/// instead of re-dumping multi-KB literals each turn. The 10-minute value is
+/// a balance: long enough to dedupe a multi-turn user task, short enough that
+/// fresh ranked-context revisions land within the same coffee break.
+const STATIC_SLICE_WINDOW: Duration = Duration::from_secs(10 * 60);
+const MAX_STATIC_SLICE_ENTRIES: usize = 4_096;
 const MAX_METRIC_RETENTION_HOURS: i64 = 7 * 24;
 const KST_OFFSET_SECONDS: i32 = 9 * 60 * 60;
 /// #2655: window for the forget:recall flood monitor. Sliding-window counts of
@@ -52,6 +61,15 @@ struct CachedRecallEntry {
 #[derive(Clone, Debug)]
 struct CachedRememberEntry {
     importance: Option<f64>,
+    expires_at: Instant,
+}
+
+/// #2660 — tracker entry for the static-slice cache. `digest` is a stable
+/// 64-bit fingerprint of the emitted static-section text, used to detect
+/// content drift so a *changed* ranked-context revision is still re-emitted.
+#[derive(Clone, Debug)]
+struct StaticSliceEntry {
+    digest: u64,
     expires_at: Instant,
 }
 
@@ -135,6 +153,11 @@ struct HourBucket {
 struct MementoThrottleState {
     recall_cache: HashMap<String, CachedRecallEntry>,
     remember_cache: HashMap<String, CachedRememberEntry>,
+    /// #2660 — per-(workspace,agent,session,mode) tracker that records when
+    /// the static Memento dump (Ranked context + Core memory) was last
+    /// emitted. Keyed independently from `recall_cache` so per-turn `user_text`
+    /// variation no longer forces a multi-KB re-emit.
+    static_slice_cache: HashMap<String, StaticSliceEntry>,
     metrics: VecDeque<MementoMetricEvent>,
     feedback_triggers: VecDeque<MementoFeedbackTriggerEvent>,
     /// #2049 Finding 15: last prune wall-clock. Used to throttle the O(N)
@@ -154,6 +177,7 @@ impl Default for MementoThrottleState {
         Self {
             recall_cache: HashMap::new(),
             remember_cache: HashMap::new(),
+            static_slice_cache: HashMap::new(),
             metrics: VecDeque::new(),
             feedback_triggers: VecDeque::new(),
             last_prune_at: Instant::now(),
@@ -172,6 +196,8 @@ impl MementoThrottleState {
         let now = Instant::now();
         self.recall_cache.retain(|_, entry| entry.expires_at > now);
         self.remember_cache
+            .retain(|_, entry| entry.expires_at > now);
+        self.static_slice_cache
             .retain(|_, entry| entry.expires_at > now);
 
         let cutoff = Utc::now() - ChronoDuration::hours(MAX_METRIC_RETENTION_HOURS);
@@ -256,6 +282,25 @@ impl MementoThrottleState {
         let drop = self.remember_cache.len() - MAX_REMEMBER_CACHE_ENTRIES;
         for (key, _) in by_expiry.into_iter().take(drop) {
             self.remember_cache.remove(&key);
+        }
+    }
+
+    /// #2660 — cap enforcement for the static-slice tracker. Mirrors the
+    /// recall/remember LRU-ish drop strategy: when over the cap, evict the
+    /// oldest-expiring entries first.
+    fn enforce_static_slice_cap(&mut self) {
+        if self.static_slice_cache.len() <= MAX_STATIC_SLICE_ENTRIES {
+            return;
+        }
+        let mut by_expiry: Vec<(String, Instant)> = self
+            .static_slice_cache
+            .iter()
+            .map(|(k, v)| (k.clone(), v.expires_at))
+            .collect();
+        by_expiry.sort_by_key(|(_, t)| *t);
+        let drop = self.static_slice_cache.len() - MAX_STATIC_SLICE_ENTRIES;
+        for (key, _) in by_expiry.into_iter().take(drop) {
+            self.static_slice_cache.remove(&key);
         }
     }
 
@@ -506,6 +551,58 @@ pub(crate) fn store_remember_fingerprint(key: String, importance: Option<f64>) {
         );
         state.enforce_remember_cache_cap();
     });
+}
+
+/// #2660 — record/lookup helper for the static-slice tracker. Returns:
+/// - `Some(true)`  → the same digest was emitted within the TTL window; the
+///   caller SHOULD elide the static dump and emit a one-line pointer instead.
+/// - `Some(false)` → a different digest is on file (content drifted) and the
+///   caller SHOULD emit the fresh dump. The tracker is updated.
+/// - `None`        → no record on file; the caller SHOULD emit the dump and
+///   the tracker is updated.
+///
+/// Either way the entry is refreshed on call so an active multi-turn task
+/// keeps benefiting from the cache.
+pub(crate) fn record_static_slice_emission(key: &str, digest: u64) -> Option<bool> {
+    with_state(|state| {
+        let now = Instant::now();
+        let result = state
+            .static_slice_cache
+            .get(key)
+            .filter(|entry| entry.expires_at > now)
+            .map(|entry| entry.digest == digest);
+        state.static_slice_cache.insert(
+            key.to_string(),
+            StaticSliceEntry {
+                digest,
+                expires_at: now + STATIC_SLICE_WINDOW,
+            },
+        );
+        state.enforce_static_slice_cap();
+        result
+    })
+}
+
+/// #2660 — test-only helper to inspect the static-slice cache without
+/// touching the private state. Returns the cached digest if present and
+/// not expired.
+#[cfg(test)]
+pub(crate) fn peek_static_slice_digest(key: &str) -> Option<u64> {
+    with_state(|state| {
+        let now = Instant::now();
+        state
+            .static_slice_cache
+            .get(key)
+            .filter(|entry| entry.expires_at > now)
+            .map(|entry| entry.digest)
+    })
+}
+
+/// #2660 — test-only helper to clear the tracker (so unit tests don't
+/// leak state across runs in the same process).
+#[cfg(test)]
+pub(crate) fn clear_static_slice_cache() {
+    with_state(|state| state.static_slice_cache.clear());
 }
 
 pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
