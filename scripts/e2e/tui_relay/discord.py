@@ -64,15 +64,34 @@ class DiscordClient:
         after_id: str | None = None,
         timeout_s: float = 120.0,
         poll_interval_s: float = 5.0,
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Poll until *predicate* returns truthy.
+
+        Returns ``(found, observed)`` where *observed* is every message
+        encountered during polling (in arrival order). The caller is expected
+        to feed *observed* into its assertion window so we never lose
+        duplicate / chrome signal that occurred while we were waiting for the
+        target match.
+        """
+
         deadline = time.monotonic() + timeout_s
         last_id = after_id
-        while time.monotonic() < deadline:
+        observed: list[dict[str, Any]] = []
+        observed_ids: set[str] = set()
+        found: dict[str, Any] | None = None
+        while time.monotonic() < deadline and found is None:
             messages = self.fetch_messages(channel_id, after_id=last_id)
             messages = sorted(messages, key=lambda m: int(m.get("id", "0")))
             for message in messages:
+                mid = str(message.get("id") or "")
+                if mid and mid not in observed_ids:
+                    observed.append(message)
+                    observed_ids.add(mid)
                 if predicate(message):
-                    return message
-                last_id = message.get("id") or last_id
-            time.sleep(poll_interval_s)
-        return None
+                    found = message
+                    break
+                if mid:
+                    last_id = mid
+            if found is None:
+                time.sleep(poll_interval_s)
+        return found, observed
