@@ -549,16 +549,32 @@ pub(super) fn resolve_worktree_isolation_policy(
     })
 }
 
-/// Resolve the prompt-cache TTL bucket (#1088) for a Discord channel based on
-/// the configured `cache_ttl_minutes` field on its `AgentChannelConfig`.
-/// Returns the normalized minutes value (5 or 60) or `None` for the default.
+/// Resolve the prompt-cache TTL bucket (#1088, extended in #2661) for a
+/// Discord channel.
+///
+/// Order of precedence:
+/// 1. The channel's own `AgentChannelConfig.cache_ttl_minutes` field, if set
+///    to a normalized bucket (5 or 60).
+/// 2. The process-wide default declared via
+///    `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` (#2661). This is the lever
+///    used to lift every channel to the 60m bucket without editing each
+///    channel's YAML.
+/// 3. `None` — preserves the pre-#1088 5-minute default.
+///
+/// The two-tier fallback keeps per-channel overrides authoritative while
+/// letting an operator opt in process-wide for the developer-role 6KB+
+/// prompt prefix cache (issue #2661).
 pub(crate) fn resolve_cache_ttl_minutes(
     channel_id: ChannelId,
     channel_name: Option<&str>,
 ) -> Option<u32> {
-    let config = load_agentdesk_config()?;
-    let (_agent, _provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
-    channel.cache_ttl_minutes()
+    let channel_override = load_agentdesk_config()
+        .and_then(|config| {
+            find_channel_binding(&config, channel_id, channel_name)
+                .map(|(_, _, channel)| channel.cache_ttl_minutes())
+        })
+        .flatten();
+    channel_override.or_else(crate::config::default_cache_ttl_minutes_from_env)
 }
 
 pub(crate) fn resolve_dispatch_profile(
