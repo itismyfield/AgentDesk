@@ -84,6 +84,18 @@ def parse_args() -> argparse.Namespace:
         help="Skip the cdx half of a 'both' scenario if no codex tmux session is "
         "ready, instead of failing the whole scenario.",
     )
+    parser.add_argument(
+        "--handoff-to-agent",
+        default="adk-dashboard-e2e",
+        help="Agent id whose channel bindings receive send-to-agent prompts. "
+        "Sending through agentdesk send-to-agent auto-spawns the target tmux "
+        "session for both cc and cdx (works around issue #2705).",
+    )
+    parser.add_argument(
+        "--handoff-from-agent",
+        default="adk-dashboard",
+        help="Source agent id stamped in the send-to-agent envelope.",
+    )
     return parser.parse_args()
 
 
@@ -339,7 +351,15 @@ def run_one_channel(
         if not isinstance(step, dict):
             continue
         if "send_prompt" in step:
-            client.send(channel_id, step["send_prompt"])
+            # Use send-to-agent (when handoff configured) so dispatch
+            # auto-spawns the target tmux session — plain /api/discord/send
+            # records the message but does not trigger dispatch for newly
+            # active agent channels (issue #2705).
+            client.send_prompt(
+                channel_id,
+                step["send_prompt"],
+                channel_kind=channel_kind,
+            )
             # The TUI relay batches keystrokes; give the pane time to flush
             # one prompt before we send the next.
             time.sleep(3)
@@ -481,7 +501,11 @@ def main() -> int:
         scenarios = [s for s in scenarios if str(s.get("id")) in wanted]
     print(f"[e2e] loaded {len(scenarios)} scenarios")
 
-    client = discord.DiscordClient(base_url=args.base_url)
+    client = discord.DiscordClient(
+        base_url=args.base_url,
+        handoff_to_agent=args.handoff_to_agent,
+        handoff_from_agent=args.handoff_from_agent,
+    )
 
     with lease.acquire(run_id) if not args.dry_run else _null_lease(run_id):
         results: list[dict[str, Any]] = []

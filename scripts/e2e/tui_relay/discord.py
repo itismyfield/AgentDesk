@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -18,6 +20,14 @@ from typing import Any
 class DiscordClient:
     base_url: str
     timeout_s: float = 30.0
+    # When set, prompts are sent via `agentdesk send-to-agent` instead of the
+    # plain `POST /api/discord/send`. send-to-agent goes through the announce
+    # bot's handoff path which causes dcserver to auto-spawn the target
+    # agent's tmux session for both cc and cdx providers (issue #2705). The
+    # plain send endpoint records the message but does not trigger dispatch
+    # for newly-active channels, which is why baseline runs starved.
+    handoff_to_agent: str | None = None
+    handoff_from_agent: str | None = None
 
     def send(self, channel_id: int | str, content: str) -> dict[str, Any]:
         body = json.dumps({"channel_id": str(channel_id), "content": content}).encode("utf-8")
@@ -32,6 +42,53 @@ class DiscordClient:
         if not payload:
             return {}
         return json.loads(payload)
+
+    def send_prompt(
+        self,
+        channel_id: int | str,
+        content: str,
+        *,
+        channel_kind: str,
+    ) -> dict[str, Any]:
+        """Send a prompt that needs to land in the target agent's TUI.
+
+        Routes through `agentdesk send-to-agent --no-prefix` when a handoff
+        identity is configured, so dcserver's dispatch path auto-spawns the
+        agent's tmux session (cc *and* cdx). Falls back to `send()` otherwise.
+        """
+
+        if not self.handoff_to_agent or not self.handoff_from_agent:
+            return self.send(channel_id, content)
+
+        if channel_kind not in ("cc", "cdx"):
+            raise ValueError(f"channel_kind must be 'cc' or 'cdx', got {channel_kind!r}")
+
+        cli = shutil.which("agentdesk") or "agentdesk"
+        cmd = [
+            cli,
+            "send-to-agent",
+            "--from",
+            self.handoff_from_agent,
+            "--to",
+            self.handoff_to_agent,
+            "--message",
+            content,
+            "--channel-kind",
+            channel_kind,
+            "--no-prefix",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_s)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"send-to-agent exit={proc.returncode}: stdout={proc.stdout!r} stderr={proc.stderr!r}"
+            )
+        stdout = proc.stdout.strip()
+        if not stdout:
+            return {}
+        try:
+            return json.loads(stdout)
+        except json.JSONDecodeError:
+            return {"raw": stdout}
 
     def fetch_messages(
         self,
