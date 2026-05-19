@@ -1786,6 +1786,7 @@ agents:
     // U-11 If the transcript file does not exist yet at rehydrate time,
     // start_offset is 0 — a new file will then be tailed from the
     // beginning when it appears.
+    #[cfg(unix)]
     #[test]
     fn claude_rehydrate_start_offset_returns_zero_for_missing_transcript() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -1853,6 +1854,7 @@ agents:
         assert!(offset.suppress_prompt.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn claude_rehydrate_start_offset_uses_last_recent_user_prompt() {
         let dir = tempfile::tempdir().expect("temp dir");
