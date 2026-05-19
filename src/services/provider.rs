@@ -546,6 +546,79 @@ fn envelope_dedup_globally_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// #2668: process-local registry of (provider, role_id, system_prompt_hash)
+/// tuples that have already received their full dev-role instructions in this
+/// dcserver lifetime. The first time we see a (role, hash) combo we include
+/// the full system_prompt; on subsequent fresh forks of the same role with
+/// the same hash we emit the same compact marker the resume path uses, since
+/// the prior session is already past the instruction step in the same
+/// provider process anyway (Codex CLI is sticky-launched per role on this
+/// host).
+///
+/// The hash is byte-hash of the rendered system_prompt — if anything in the
+/// prompt drift (role binding, SAK, peer agents) the hash changes and we go
+/// back to a full re-inject, so correctness never regresses.
+fn dev_instruction_registry() -> &'static std::sync::Mutex<
+    std::collections::HashSet<(ProviderKind, String, u64)>,
+> {
+    static CELL: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(ProviderKind, String, u64)>>,
+    > = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn hash_system_prompt(system_prompt: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    system_prompt.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// #2668: returns `true` if the provider+role_id combo has already received
+/// the rendered system_prompt at least once in this process. The very first
+/// call registers the (provider, role_id, hash) and returns `false`, so the
+/// caller knows it must still inject the full instructions on this turn.
+///
+/// Used by the Codex launch path to drop the ~1KB `<permissions instructions>`
+/// + dev-role text on every fresh fork after the first one inside the same
+/// dcserver lifetime, while still re-injecting on actual prompt drift.
+pub fn note_dev_role_instructions_sent(
+    provider: &ProviderKind,
+    role_id: Option<&str>,
+    system_prompt: &str,
+) -> bool {
+    let Some(role_id) = role_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        // No role binding → we cannot dedupe safely.
+        return false;
+    };
+    if !matches!(provider, ProviderKind::Codex) {
+        // Only Codex pays the dev-role re-injection cost flagged by #2668.
+        return false;
+    }
+    let hash = hash_system_prompt(system_prompt);
+    let key = (provider.clone(), role_id.to_string(), hash);
+    let mut guard = dev_instruction_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // `insert` returns true when the value was *newly* inserted → that's our
+    // signal that the dev instructions had not been sent before.
+    let newly_inserted = guard.insert(key);
+    // We "already-sent" iff the entry was NOT newly inserted.
+    !newly_inserted
+}
+
+/// #2668: test-only helper to drain the dev-role registry between cases.
+#[cfg(test)]
+pub fn reset_dev_role_instruction_registry_for_tests() {
+    let mut guard = dev_instruction_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.clear();
+}
+
 /// Returns `Some(prompt)` if the caller should include the system prompt
 /// in this turn, or `None` if it can be safely omitted. The omission
 /// decision considers, in order:
@@ -622,6 +695,45 @@ fn dedup_session_key(provider: &ProviderKind, session_id: Option<&str>) -> Optio
     Some(format!("{kind}::{sid}"))
 }
 
+/// #2668: same contract as [`system_prompt_for_provider_turn`] but additionally
+/// short-circuits when the rendered system_prompt has already been delivered to
+/// the same `(provider, role_id)` fork inside this dcserver lifetime. The
+/// caller is the Codex spawn path, which can then emit the same short
+/// `[Provider Session Reuse]` marker the resume path uses, instead of the
+/// full ~1KB dev-role text.
+///
+/// `force_full_inject` is reserved for callers that must defeat the dedupe
+/// (e.g. operator forced a fresh codex fork because the previous one wedged);
+/// when set, the function behaves exactly like the original helper.
+pub fn system_prompt_for_provider_turn_with_dev_role_dedup<'a>(
+    provider: &ProviderKind,
+    session_id: Option<&str>,
+    role_id: Option<&str>,
+    system_prompt: &'a str,
+    force_full_inject: bool,
+) -> Option<&'a str> {
+    let base = system_prompt_for_provider_turn(provider, session_id, system_prompt);
+    if force_full_inject {
+        return base;
+    }
+    let Some(prompt) = base else {
+        return None;
+    };
+    // The dedupe only fires for genuinely fresh codex forks (no session_id).
+    // Resumes are already handled by `should_omit_repeated_system_prompt`.
+    if session_id
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Some(prompt);
+    }
+    if note_dev_role_instructions_sent(provider, role_id, prompt) {
+        None
+    } else {
+        Some(prompt)
+    }
+}
+
 pub fn compact_resumed_provider_turn_prompt(
     provider: &ProviderKind,
     session_id: Option<&str>,
@@ -639,6 +751,32 @@ pub fn compact_resumed_provider_turn_prompt(
     )
 }
 
+/// #2668: companion to [`compact_resumed_provider_turn_prompt`] for fresh
+/// forks. Emits the same compact reuse marker when the dev-role dedup
+/// registry has seen this `(provider, role_id, system_prompt_hash)`
+/// combination before in this dcserver lifetime; otherwise returns the
+/// prompt unchanged so the caller still inlines the full instructions on
+/// the first fork.
+pub fn compact_fresh_codex_fork_prompt_when_dev_role_sent(
+    provider: &ProviderKind,
+    role_id: Option<&str>,
+    system_prompt: &str,
+    prompt: String,
+) -> String {
+    if !matches!(provider, ProviderKind::Codex) {
+        return prompt;
+    }
+    if !note_dev_role_instructions_sent(provider, role_id, system_prompt) {
+        return prompt;
+    }
+    format!(
+        "[Provider Session Reuse]\n\
+         The prior authoritative Discord, role, and tool instructions already issued to this \
+         role in the current dcserver lifetime still apply. Treat only this turn's user request, \
+         reply context, uploaded files, and memory recall below as new actionable input.\n\n{prompt}"
+    )
+}
+
 pub fn is_readonly_tool_policy(allowed_tools: Option<&[String]>) -> bool {
     let Some(allowed_tools) = allowed_tools.filter(|tools| !tools.is_empty()) else {
         return false;
@@ -650,6 +788,215 @@ pub fn is_readonly_tool_policy(allowed_tools: Option<&[String]>) -> bool {
             "read" | "grep" | "glob"
         )
     })
+}
+
+#[cfg(test)]
+mod dev_role_dedup_tests {
+    use super::*;
+
+    /// All four tests share global state through `dev_instruction_registry`,
+    /// so serialise them under one mutex to keep them deterministic across
+    /// `cargo test --test-threads=N` runs. The registry's reset helper is
+    /// called at the start of each test under this guard.
+    fn lock_test_state() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn first_fresh_fork_inlines_full_dev_instructions() {
+        let _guard = lock_test_state();
+        reset_dev_role_instruction_registry_for_tests();
+        let sp = "[Authoritative Instructions]\nRole=ch-td\nrules…";
+        let result = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            Some("ch-td"),
+            sp,
+            false,
+        );
+        assert_eq!(result, Some(sp));
+    }
+
+    #[test]
+    fn second_fresh_fork_with_same_hash_omits_dev_instructions() {
+        let _guard = lock_test_state();
+        reset_dev_role_instruction_registry_for_tests();
+        let sp = "[Authoritative Instructions]\nRole=ch-td\nrules…";
+        // First call registers the (provider, role, hash) tuple.
+        let _ = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            Some("ch-td"),
+            sp,
+            false,
+        );
+        // Second fresh fork should now omit.
+        let result = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            Some("ch-td"),
+            sp,
+            false,
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn force_full_inject_defeats_dedup() {
+        let _guard = lock_test_state();
+        reset_dev_role_instruction_registry_for_tests();
+        let sp = "[Authoritative Instructions]\nRole=ch-td\nrules…";
+        let _ = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            Some("ch-td"),
+            sp,
+            false,
+        );
+        let result = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            Some("ch-td"),
+            sp,
+            true,
+        );
+        assert_eq!(result, Some(sp));
+    }
+
+    #[test]
+    fn prompt_drift_reinjects_full_instructions() {
+        let _guard = lock_test_state();
+        reset_dev_role_instruction_registry_for_tests();
+        let sp1 = "[Authoritative Instructions]\nRole=ch-td\nrules v1";
+        let sp2 = "[Authoritative Instructions]\nRole=ch-td\nrules v2";
+        let _ = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            Some("ch-td"),
+            sp1,
+            false,
+        );
+        // Same role, different prompt content → different hash → full inject.
+        let result = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            Some("ch-td"),
+            sp2,
+            false,
+        );
+        assert_eq!(result, Some(sp2));
+    }
+
+    #[test]
+    fn role_id_isolation_between_agents() {
+        let _guard = lock_test_state();
+        reset_dev_role_instruction_registry_for_tests();
+        let sp = "[Authoritative Instructions]\nshared body";
+        let _ = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            Some("ch-td"),
+            sp,
+            false,
+        );
+        let result_pd = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            Some("ch-pd"),
+            sp,
+            false,
+        );
+        // Different role_id with identical prompt body still gets full inject —
+        // a different agent has its own dev role on the Codex side.
+        assert_eq!(result_pd, Some(sp));
+    }
+
+    #[test]
+    fn non_codex_providers_are_not_affected() {
+        let _guard = lock_test_state();
+        reset_dev_role_instruction_registry_for_tests();
+        let sp = "[Authoritative Instructions]\nbody";
+        // Two calls in a row for Claude → must always return the prompt.
+        let _ = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Claude,
+            None,
+            Some("ch-td"),
+            sp,
+            false,
+        );
+        let result = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Claude,
+            None,
+            Some("ch-td"),
+            sp,
+            false,
+        );
+        assert_eq!(result, Some(sp));
+    }
+
+    #[test]
+    fn missing_role_id_disables_dedup() {
+        let _guard = lock_test_state();
+        reset_dev_role_instruction_registry_for_tests();
+        let sp = "[Authoritative Instructions]\nbody";
+        let _ = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            None,
+            sp,
+            false,
+        );
+        let result = system_prompt_for_provider_turn_with_dev_role_dedup(
+            &ProviderKind::Codex,
+            None,
+            None,
+            sp,
+            false,
+        );
+        // No role_id → we cannot dedupe safely, full inject every time.
+        assert_eq!(result, Some(sp));
+    }
+
+    #[test]
+    fn compact_fresh_codex_fork_emits_marker_after_first_fork() {
+        let _guard = lock_test_state();
+        reset_dev_role_instruction_registry_for_tests();
+        let sp = "[Authoritative Instructions]\nbody";
+        let user_prompt = "do the thing".to_string();
+        let first = compact_fresh_codex_fork_prompt_when_dev_role_sent(
+            &ProviderKind::Codex,
+            Some("ch-td"),
+            sp,
+            user_prompt.clone(),
+        );
+        assert_eq!(first, user_prompt);
+        let second = compact_fresh_codex_fork_prompt_when_dev_role_sent(
+            &ProviderKind::Codex,
+            Some("ch-td"),
+            sp,
+            user_prompt.clone(),
+        );
+        assert!(second.starts_with("[Provider Session Reuse]"));
+        assert!(second.contains(&user_prompt));
+    }
+
+    #[test]
+    fn compact_fresh_codex_fork_does_not_alter_non_codex_prompts() {
+        let _guard = lock_test_state();
+        reset_dev_role_instruction_registry_for_tests();
+        let sp = "[Authoritative Instructions]\nbody";
+        let user_prompt = "do the thing".to_string();
+        let result = compact_fresh_codex_fork_prompt_when_dev_role_sent(
+            &ProviderKind::Claude,
+            Some("ch-td"),
+            sp,
+            user_prompt.clone(),
+        );
+        assert_eq!(result, user_prompt);
+    }
 }
 
 #[cfg(test)]
