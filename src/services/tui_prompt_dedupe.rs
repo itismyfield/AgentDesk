@@ -416,6 +416,21 @@ pub fn extract_codex_rollout_user_prompt(json: &Value) -> Option<String> {
     extract_message_content_text(payload)
 }
 
+pub fn extract_claude_transcript_user_prompt(json: &Value) -> Option<String> {
+    if json.get("type").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    let message = json.get("message")?;
+    if message
+        .get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role != "user")
+    {
+        return None;
+    }
+    extract_message_content_text(message)
+}
+
 pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
     if json.get("type").and_then(Value::as_str) != Some("user") {
         return None;
@@ -500,12 +515,7 @@ pub(crate) fn prompts_match(expected: &str, observed: &str) -> bool {
     if expected_fuzzy == observed_fuzzy {
         return true;
     }
-    let shorter = expected_fuzzy.len().min(observed_fuzzy.len());
-    let longer = expected_fuzzy.len().max(observed_fuzzy.len());
-    shorter >= 32
-        && longer > 0
-        && shorter * 100 / longer >= 85
-        && (expected_fuzzy.contains(&observed_fuzzy) || observed_fuzzy.contains(&expected_fuzzy))
+    false
 }
 
 fn normalize_line_endings(value: &str) -> String {
@@ -866,6 +876,22 @@ mod tests {
     }
 
     #[test]
+    fn merged_draft_does_not_suppress_pending_discord_prompt() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        record_discord_originated_prompt("codex", "tmux-b", "[TUI-REL-OLD] respond with marker");
+
+        assert_eq!(
+            observe_prompt_by_tmux(
+                "codex",
+                "tmux-b",
+                "[TUI-REL-OLD] respond with marker [TUI-REL-NEW] respond with marker",
+            ),
+            PromptObservation::PublishedSshDirect
+        );
+    }
+
+    #[test]
     fn expired_pending_prompt_publishes_as_direct_input() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();
@@ -957,6 +983,26 @@ mod tests {
 
         assert_eq!(
             extract_codex_rollout_user_prompt(&json).as_deref(),
+            Some("hello\nworld")
+        );
+    }
+
+    #[test]
+    fn extracts_claude_transcript_user_message_text() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "hello" },
+                    { "type": "text", "text": "world" }
+                ]
+            },
+            "sessionId": "sess-tui",
+        });
+
+        assert_eq!(
+            extract_claude_transcript_user_prompt(&json).as_deref(),
             Some("hello\nworld")
         );
     }

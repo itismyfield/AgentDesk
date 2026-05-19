@@ -22,6 +22,7 @@ const CODEX_IDLE_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CODEX_IDLE_PROMPT_ANCHOR_WAIT: Duration = Duration::from_secs(2);
 const CODEX_IDLE_PROMPT_ANCHOR_POLL: Duration = Duration::from_millis(100);
 static CODEX_IDLE_ROLLOUT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
+static CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
 static CLAUDE_IDLE_RESPONSE_TAILS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -29,6 +30,10 @@ pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: Provider
     #[cfg(unix)]
     if matches!(provider, ProviderKind::Codex) {
         spawn_codex_idle_rollout_relay(shared.clone());
+    }
+    #[cfg(unix)]
+    if matches!(provider, ProviderKind::Claude) {
+        spawn_claude_idle_transcript_relay(shared.clone());
     }
 
     tokio::spawn(async move {
@@ -189,18 +194,32 @@ async fn maybe_spawn_claude_idle_response_tail(
         return;
     }
 
+    spawn_claude_idle_response_tail_once(
+        shared,
+        prompt.tmux_session_name.clone(),
+        channel_id,
+        PathBuf::from(&binding.output_path),
+        binding.last_offset,
+    );
+}
+
+#[cfg(unix)]
+fn spawn_claude_idle_response_tail_once(
+    shared: Arc<SharedData>,
+    tmux_session_name: String,
+    channel_id: ChannelId,
+    transcript_path: PathBuf,
+    start_offset: u64,
+) -> bool {
     {
         let mut active = CLAUDE_IDLE_RESPONSE_TAILS
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if !active.insert(prompt.tmux_session_name.clone()) {
-            return;
+        if !active.insert(tmux_session_name.clone()) {
+            return false;
         }
     }
 
-    let tmux_session_name = prompt.tmux_session_name.clone();
-    let transcript_path = PathBuf::from(&binding.output_path);
-    let start_offset = binding.last_offset;
     tokio::spawn(async move {
         run_claude_idle_response_tail(
             shared,
@@ -214,6 +233,106 @@ async fn maybe_spawn_claude_idle_response_tail(
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&tmux_session_name);
+    });
+    true
+}
+
+#[cfg(unix)]
+fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
+    if CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            for (tmux_session_name, binding) in
+                crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(
+                    RuntimeHandoffKind::ClaudeTui,
+                )
+            {
+                if shared
+                    .tmux_watchers
+                    .tmux_session_is_stale(&tmux_session_name)
+                    .is_some_and(|stale| !stale)
+                {
+                    continue;
+                }
+                let Some(channel_id) = owner_channel_for_tmux_session(&shared, &tmux_session_name)
+                else {
+                    continue;
+                };
+                if super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
+                    .is_some()
+                {
+                    continue;
+                }
+
+                let transcript_path = PathBuf::from(&binding.output_path);
+                let scan = match scan_claude_idle_transcript_for_prompt(
+                    &transcript_path,
+                    binding.last_offset,
+                ) {
+                    Ok(scan) => scan,
+                    Err(error) => {
+                        tracing::debug!(
+                            tmux_session_name = %tmux_session_name,
+                            transcript_path = %transcript_path.display(),
+                            error = %error,
+                            "Claude idle transcript relay scan skipped"
+                        );
+                        continue;
+                    }
+                };
+
+                match scan {
+                    ClaudeIdleTranscriptScan::NoPrompt { offset } => {
+                        if offset != binding.last_offset {
+                            crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+                                &tmux_session_name,
+                                &binding.output_path,
+                                offset,
+                            );
+                        }
+                    }
+                    ClaudeIdleTranscriptScan::Prompt {
+                        prompt,
+                        line_end_offset,
+                    } => {
+                        let observation =
+                            crate::services::tui_prompt_dedupe::observe_prompt_by_tmux(
+                                ProviderKind::Claude.as_str(),
+                                &tmux_session_name,
+                                &prompt,
+                            );
+                        tracing::info!(
+                            tmux_session_name = %tmux_session_name,
+                            channel_id = channel_id.get(),
+                            observation = ?observation,
+                            "Claude idle transcript relay observed prompt"
+                        );
+                        crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+                            &tmux_session_name,
+                            &binding.output_path,
+                            line_end_offset,
+                        );
+                        if matches!(
+                            observation,
+                            crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
+                                | crate::services::tui_prompt_dedupe::PromptObservation::SuppressedDiscordDuplicate
+                        ) {
+                            spawn_claude_idle_response_tail_once(
+                                shared.clone(),
+                                tmux_session_name.clone(),
+                                channel_id,
+                                transcript_path,
+                                line_end_offset,
+                            );
+                        }
+                    }
+                }
+            }
+
+            tokio::time::sleep(CODEX_IDLE_ROLLOUT_POLL_INTERVAL).await;
+        }
     });
 }
 
@@ -292,7 +411,7 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                         );
                         if matches!(
                             observation,
-                            crate::services::tui_prompt_dedupe::PromptObservation::SuppressedDiscordDuplicate
+                            crate::services::tui_prompt_dedupe::PromptObservation::SuppressedRecentDuplicate
                                 | crate::services::tui_prompt_dedupe::PromptObservation::Ignored
                         ) {
                             crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
@@ -340,6 +459,82 @@ enum CodexIdleRolloutScan {
         prompt: String,
         line_end_offset: u64,
     },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClaudeIdleTranscriptScan {
+    NoPrompt {
+        offset: u64,
+    },
+    Prompt {
+        prompt: String,
+        line_end_offset: u64,
+    },
+}
+
+fn scan_claude_idle_transcript_for_prompt(
+    transcript_path: &Path,
+    start_offset: u64,
+) -> Result<ClaudeIdleTranscriptScan, String> {
+    let mut file = std::fs::File::open(transcript_path).map_err(|error| {
+        format!(
+            "open Claude transcript {}: {error}",
+            transcript_path.display()
+        )
+    })?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| {
+            format!(
+                "stat Claude transcript {}: {error}",
+                transcript_path.display()
+            )
+        })?
+        .len();
+    let mut offset = if start_offset > file_len {
+        0
+    } else {
+        start_offset
+    };
+    file.seek(SeekFrom::Start(offset)).map_err(|error| {
+        format!(
+            "seek Claude transcript {}: {error}",
+            transcript_path.display()
+        )
+    })?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let line_start_offset = offset;
+        let bytes_read = reader.read_line(&mut line).map_err(|error| {
+            format!(
+                "read Claude transcript {}: {error}",
+                transcript_path.display()
+            )
+        })?;
+        if bytes_read == 0 {
+            return Ok(ClaudeIdleTranscriptScan::NoPrompt { offset });
+        }
+        offset = offset.saturating_add(bytes_read as u64);
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            if !line.ends_with('\n') {
+                return Ok(ClaudeIdleTranscriptScan::NoPrompt {
+                    offset: line_start_offset,
+                });
+            }
+            continue;
+        };
+        if let Some(prompt) =
+            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt(&json)
+        {
+            return Ok(ClaudeIdleTranscriptScan::Prompt {
+                prompt,
+                line_end_offset: offset,
+            });
+        }
+    }
 }
 
 fn scan_codex_idle_rollout_for_prompt(
@@ -870,6 +1065,50 @@ mod tests {
             CodexIdleRolloutScan::Prompt {
                 prompt: "after shrink".to_string(),
                 line_end_offset: prompt.len() as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn claude_idle_transcript_scan_finds_user_prompt_and_stops_at_prompt_end() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let before = "{\"type\":\"system\",\"subtype\":\"init\",\"sessionId\":\"s1\"}\n";
+        let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"direct claude prompt\"}]},\"sessionId\":\"s1\"}\n";
+        let after = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"sessionId\":\"s1\"}\n";
+        std::fs::write(&transcript, format!("{before}{prompt}{after}")).expect("write transcript");
+
+        assert_eq!(
+            scan_claude_idle_transcript_for_prompt(&transcript, 0).expect("scan"),
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt: "direct claude prompt".to_string(),
+                line_end_offset: (before.len() + prompt.len()) as u64,
+            }
+        );
+        assert_eq!(
+            scan_claude_idle_transcript_for_prompt(
+                &transcript,
+                (before.len() + prompt.len()) as u64,
+            )
+            .expect("scan after prompt"),
+            ClaudeIdleTranscriptScan::NoPrompt {
+                offset: (before.len() + prompt.len() + after.len()) as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn claude_idle_transcript_scan_preserves_partial_trailing_jsonl() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let complete = "{\"type\":\"system\",\"subtype\":\"init\",\"sessionId\":\"s1\"}\n";
+        let partial = "{\"type\":\"user\",\"message\":{\"role\":\"user\"";
+        std::fs::write(&transcript, format!("{complete}{partial}")).expect("write transcript");
+
+        assert_eq!(
+            scan_claude_idle_transcript_for_prompt(&transcript, 0).expect("scan partial"),
+            ClaudeIdleTranscriptScan::NoPrompt {
+                offset: complete.len() as u64,
             }
         );
     }

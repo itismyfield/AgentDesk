@@ -164,6 +164,25 @@ impl PromptReadinessKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptDraftPolicy {
+    RejectDraft,
+    AcceptDraftForClear,
+}
+
+impl PromptDraftPolicy {
+    fn accepts(self, snapshot: &PromptReadinessSnapshot) -> bool {
+        snapshot.composer_marker_detected
+            && (matches!(self, Self::AcceptDraftForClear) || !snapshot.prompt_draft_detected)
+    }
+
+    fn should_block_rollout_ready(self, snapshot: &PromptReadinessSnapshot) -> bool {
+        matches!(self, Self::RejectDraft)
+            && snapshot.capture_available
+            && snapshot.prompt_draft_detected
+    }
+}
+
 /// Outcome of the provider hook-event fast path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HookFastPathOutcome {
@@ -232,6 +251,7 @@ fn rollout_composer_ready_notify() -> Arc<Notify> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptReadinessSnapshot {
     pub composer_marker_detected: bool,
+    pub prompt_draft_detected: bool,
     pub tmux_pane_alive: bool,
     pub capture_available: bool,
     pub pane_tail: String,
@@ -327,12 +347,14 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
     let composer_marker_detected = pane
         .as_deref()
         .is_some_and(pane_looks_ready_for_codex_prompt);
+    let prompt_draft_detected = pane.as_deref().is_some_and(pane_has_codex_prompt_draft);
     let pane_tail = pane
         .as_deref()
         .map(prompt_ready_debug_tail)
         .unwrap_or_else(|| "<capture unavailable>".to_string());
     PromptReadinessSnapshot {
         composer_marker_detected,
+        prompt_draft_detected,
         tmux_pane_alive: crate::services::tmux_diagnostics::tmux_session_has_live_pane(
             session_name,
         ),
@@ -366,6 +388,33 @@ pub fn wait_until_codex_tui_input_ready(
     session_name: &str,
     readiness: PromptReadinessKind,
     cancel_token: Option<&Arc<CancelToken>>,
+) -> Result<(), String> {
+    wait_until_codex_tui_input_ready_with_policy(
+        session_name,
+        readiness,
+        cancel_token,
+        PromptDraftPolicy::RejectDraft,
+    )
+}
+
+fn wait_until_codex_tui_input_visible_for_clear(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+    cancel_token: Option<&Arc<CancelToken>>,
+) -> Result<(), String> {
+    wait_until_codex_tui_input_ready_with_policy(
+        session_name,
+        readiness,
+        cancel_token,
+        PromptDraftPolicy::AcceptDraftForClear,
+    )
+}
+
+fn wait_until_codex_tui_input_ready_with_policy(
+    session_name: &str,
+    readiness: PromptReadinessKind,
+    cancel_token: Option<&Arc<CancelToken>>,
+    draft_policy: PromptDraftPolicy,
 ) -> Result<(), String> {
     let timeout = readiness.timeout();
     let start = Instant::now();
@@ -406,6 +455,7 @@ pub fn wait_until_codex_tui_input_ready(
         readiness.event_budget(),
         deadline,
         cancel_token.cloned(),
+        draft_policy,
     );
 
     match fast_path {
@@ -417,13 +467,25 @@ pub fn wait_until_codex_tui_input_ready(
                 let snapshot = prompt_readiness_snapshot(session_name);
                 return Err(timeout_error(&snapshot));
             }
-            tracing::debug!(
-                tmux_session_name = session_name,
-                readiness = readiness.label(),
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "codex_tui prompt ready via rollout composer_ready envelope"
-            );
-            return Ok(());
+            let snapshot = prompt_readiness_snapshot(session_name);
+            if draft_policy.should_block_rollout_ready(&snapshot) {
+                tracing::warn!(
+                    tmux_session_name = session_name,
+                    readiness = readiness.label(),
+                    pane_tail = %snapshot.pane_tail,
+                    "codex_tui rollout composer_ready ignored because a prompt draft is visible"
+                );
+            } else if snapshot.capture_available && !snapshot.tmux_pane_alive {
+                return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
+            } else {
+                tracing::debug!(
+                    tmux_session_name = session_name,
+                    readiness = readiness.label(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "codex_tui prompt ready via rollout composer_ready envelope"
+                );
+                return Ok(());
+            }
         }
         HookFastPathOutcome::PreSnapshotReady => {
             if let Some(err) = cancel_check() {
@@ -459,7 +521,7 @@ pub fn wait_until_codex_tui_input_ready(
         return Err(err);
     }
     if let Some(snapshot) = post_event_snapshot {
-        if snapshot.composer_marker_detected {
+        if draft_policy.accepts(&snapshot) {
             if let Some(err) = cancel_check() {
                 return Err(err);
             }
@@ -500,13 +562,25 @@ pub fn wait_until_codex_tui_input_ready(
             return Err(err);
         }
         if rollout_composer_ready_observed(session_name) {
-            tracing::debug!(
-                tmux_session_name = session_name,
-                readiness = readiness.label(),
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "codex_tui prompt ready via rollout composer_ready envelope during fallback loop"
-            );
-            return Ok(());
+            let snapshot = prompt_readiness_snapshot(session_name);
+            if draft_policy.should_block_rollout_ready(&snapshot) {
+                tracing::warn!(
+                    tmux_session_name = session_name,
+                    readiness = readiness.label(),
+                    pane_tail = %snapshot.pane_tail,
+                    "codex_tui fallback rollout composer_ready ignored because a prompt draft is visible"
+                );
+            } else if snapshot.capture_available && !snapshot.tmux_pane_alive {
+                return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
+            } else {
+                tracing::debug!(
+                    tmux_session_name = session_name,
+                    readiness = readiness.label(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "codex_tui prompt ready via rollout composer_ready envelope during fallback loop"
+                );
+                return Ok(());
+            }
         }
         // #2399 HIGH 1: deadline check BEFORE the capture so an
         // already-elapsed budget cannot waste another ~tmux capture-pane
@@ -531,7 +605,7 @@ pub fn wait_until_codex_tui_input_ready(
         if Instant::now() >= deadline {
             return Err(timeout_error(&snapshot));
         }
-        if snapshot.composer_marker_detected {
+        if draft_policy.accepts(&snapshot) {
             return Ok(());
         }
         if !snapshot.tmux_pane_alive {
@@ -567,6 +641,7 @@ fn run_prompt_ready_fast_path(
     budget: Duration,
     deadline: Instant,
     cancel_token: Option<Arc<CancelToken>>,
+    draft_policy: PromptDraftPolicy,
 ) -> (HookFastPathOutcome, Option<PromptReadinessSnapshot>) {
     let fut = async move {
         let rollout_ready_notify = rollout_composer_ready_notify();
@@ -588,7 +663,7 @@ fn run_prompt_ready_fast_path(
         if cancel_requested(cancel_token.as_deref()) {
             return (HookFastPathOutcome::Cancelled, None);
         }
-        if pre_snapshot.composer_marker_detected {
+        if draft_policy.accepts(&pre_snapshot) {
             return (HookFastPathOutcome::PreSnapshotReady, None);
         }
         if !pre_snapshot.tmux_pane_alive {
@@ -715,6 +790,8 @@ fn send_prompt_with_readiness(
     cancel_token: Option<&Arc<CancelToken>>,
 ) -> Result<(), String> {
     let actions = plan_prompt_submit(prompt)?;
+    wait_until_codex_tui_input_visible_for_clear(session_name, readiness, cancel_token)?;
+    clear_codex_tui_prompt_draft_if_present(session_name, cancel_token.map(Arc::as_ref))?;
     wait_until_codex_tui_input_ready(session_name, readiness, cancel_token)?;
     mark_rollout_composer_busy(session_name);
     if cancel_requested(cancel_token.map(Arc::as_ref)) {
@@ -736,6 +813,74 @@ fn send_prompt_with_readiness(
             Err(error)
         }
     }
+}
+
+fn clear_codex_tui_prompt_draft_if_present(
+    session_name: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<(), String> {
+    let mut snapshot = prompt_readiness_snapshot(session_name);
+    if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
+        return Ok(());
+    }
+
+    let clear_key_plans: [&[&str]; 4] = [
+        &["Escape", "Escape"],
+        &["C-e", "C-u"],
+        &["C-a", "C-k"],
+        &["C-u"],
+    ];
+    for attempt in 1..=2 {
+        check_prompt_cancel(cancel_token)?;
+        for keys in clear_key_plans {
+            let output = crate::services::platform::tmux::send_keys(session_name, keys)?;
+            ensure_tmux_key_success(output, "clear-draft")?;
+            std::thread::sleep(Duration::from_millis(240));
+            check_prompt_cancel(cancel_token)?;
+            snapshot = prompt_readiness_snapshot(session_name);
+            if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
+                tracing::info!(
+                    tmux_session_name = session_name,
+                    attempt,
+                    "codex_tui prompt draft cleared before submit"
+                );
+                return Ok(());
+            }
+        }
+        if let Some(backspace_count) = codex_visible_prompt_draft_backspace_budget(&snapshot) {
+            let mut backspace_keys = Vec::with_capacity(backspace_count + 1);
+            backspace_keys.push("C-e");
+            backspace_keys.extend(std::iter::repeat_n("BSpace", backspace_count));
+            let output = crate::services::platform::tmux::send_keys(session_name, &backspace_keys)?;
+            ensure_tmux_key_success(output, "clear-draft-backspace")?;
+            std::thread::sleep(Duration::from_millis(240));
+            check_prompt_cancel(cancel_token)?;
+            snapshot = prompt_readiness_snapshot(session_name);
+            if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
+                tracing::info!(
+                    tmux_session_name = session_name,
+                    attempt,
+                    backspace_count,
+                    "codex_tui prompt draft cleared by backspace sweep before submit"
+                );
+                return Ok(());
+            }
+        }
+        tracing::warn!(
+            tmux_session_name = session_name,
+            attempt,
+            composer_marker_detected = snapshot.composer_marker_detected,
+            prompt_draft_detected = snapshot.prompt_draft_detected,
+            tmux_pane_alive = snapshot.tmux_pane_alive,
+            capture_available = snapshot.capture_available,
+            pane_tail = %snapshot.pane_tail,
+            "codex_tui prompt draft still present after clear attempt"
+        );
+    }
+    Err(format!(
+        "codex tui prompt draft could not be cleared before prompt submit (tmux_session_name={session_name} pane_tail={})",
+        snapshot.pane_tail
+    ))
 }
 
 pub fn send_cancel(session_name: &str) -> Result<(), String> {
@@ -839,6 +984,18 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
     }
 }
 
+fn ensure_tmux_key_success(output: Output, action_name: &str) -> Result<(), String> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Err(format!("tmux send {action_name} failed: {}", output.status))
+    } else {
+        Err(format!("tmux send {action_name} failed: {stderr}"))
+    }
+}
+
 /// Pane-capture classifier: returns true when the recent tail looks
 /// like the Codex composer waiting for input.
 ///
@@ -900,6 +1057,97 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
     // of each other. This is the actual gate — the bottom windows are
     // just outer search bounds.
     e - f <= COMPOSER_FOOTER_ADJACENCY_LINES
+}
+
+fn pane_has_codex_prompt_draft(pane: &str) -> bool {
+    let recent: Vec<&str> = pane
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(PROMPT_READY_SCAN_LINES)
+        .collect();
+    if recent
+        .iter()
+        .take(FOOTER_HINT_BOTTOM_WINDOW + COMPOSER_FOOTER_ADJACENCY_LINES)
+        .any(|line| codex_prompt_marker_line_has_draft(line))
+    {
+        return true;
+    }
+
+    let has_footer = recent
+        .iter()
+        .take(FOOTER_HINT_BOTTOM_WINDOW)
+        .any(|line| line_is_codex_footer_hint(line));
+    has_footer
+        && recent
+            .iter()
+            .take(COMPOSER_EDGE_BOTTOM_WINDOW + COMPOSER_FOOTER_ADJACENCY_LINES + 1)
+            .any(|line| codex_composer_body_line_has_draft(line))
+}
+
+fn codex_visible_prompt_draft_backspace_budget(
+    snapshot: &PromptReadinessSnapshot,
+) -> Option<usize> {
+    if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
+        return None;
+    }
+    let visible_chars = snapshot
+        .pane_tail
+        .lines()
+        .filter_map(codex_visible_prompt_draft_text)
+        .map(|text| text.chars().count())
+        .sum::<usize>();
+    (visible_chars > 0).then_some(visible_chars.saturating_add(16).min(512))
+}
+
+fn codex_visible_prompt_draft_text(line: &str) -> Option<&str> {
+    let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+    if let Some(rest) = trimmed.strip_prefix('›') {
+        let text = rest.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+        return (!text.is_empty()).then_some(text);
+    }
+    codex_composer_body_draft_text(line)
+}
+
+fn codex_prompt_marker_line_has_draft(line: &str) -> bool {
+    codex_visible_prompt_draft_text(line).is_some()
+}
+
+fn codex_composer_body_line_has_draft(line: &str) -> bool {
+    codex_composer_body_draft_text(line).is_some()
+}
+
+fn codex_composer_body_draft_text(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if !(trimmed.starts_with('│') && trimmed.ends_with('│')) {
+        return None;
+    }
+    let inner = trimmed
+        .trim_matches('│')
+        .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+    let Some(cursor_index) = inner.rfind('▌') else {
+        return None;
+    };
+    let before_cursor =
+        inner[..cursor_index].trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+    if before_cursor.is_empty() || codex_composer_placeholder_text(before_cursor) {
+        None
+    } else {
+        Some(before_cursor)
+    }
+}
+
+fn codex_composer_placeholder_text(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "send a message"
+            | "send a message..."
+            | "send a message…"
+            | "type / for commands"
+            | "type a message"
+            | "message"
+    )
 }
 
 /// Codex TUI footer hints printed below the composer box. Matching any
@@ -964,6 +1212,7 @@ fn log_prompt_ready_timeout(
         readiness = readiness.label(),
         timeout_secs = timeout.as_secs(),
         composer_marker_detected = snapshot.composer_marker_detected,
+        prompt_draft_detected = snapshot.prompt_draft_detected,
         previous_tui_turn_still_running =
             snapshot.tmux_pane_alive && !snapshot.composer_marker_detected,
         tmux_pane_alive = snapshot.tmux_pane_alive,
@@ -1263,6 +1512,57 @@ more output\n\
     #[test]
     fn codex_pane_with_composer_and_footer_is_ready() {
         assert!(pane_looks_ready_for_codex_prompt(CODEX_TUI_READY_PANE));
+        assert!(!pane_has_codex_prompt_draft(CODEX_TUI_READY_PANE));
+    }
+
+    #[test]
+    fn codex_prompt_marker_with_text_is_detected_as_draft() {
+        let pane = "\
+• previous response
+
+› Run /review on my current changes
+
+  gpt-5.5 · gpt-5.5 xhigh · ~/.adk/release/workspaces/agentdesk";
+
+        assert!(pane_has_codex_prompt_draft(pane));
+    }
+
+    #[test]
+    fn codex_box_composer_with_text_is_detected_as_draft() {
+        let pane = "\
+╭──────────────────────────────────────────────────────────────╮
+│ hello world ▌                                                │
+╰──────────────────────────────────────────────────────────────╯
+  Esc to interrupt   Ctrl+J newline   ⏎ send";
+
+        assert!(pane_has_codex_prompt_draft(pane));
+    }
+
+    #[test]
+    fn codex_box_placeholder_is_not_detected_as_draft() {
+        let pane = "\
+╭──────────────────────────────────────────────────────────────╮
+│ Send a message… ▌                                            │
+╰──────────────────────────────────────────────────────────────╯
+  Esc to interrupt   Ctrl+J newline   ⏎ send";
+
+        assert!(!pane_has_codex_prompt_draft(pane));
+    }
+
+    #[test]
+    fn codex_visible_draft_backspace_budget_counts_prompt_text() {
+        let snapshot = PromptReadinessSnapshot {
+            composer_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "› abc".to_string(),
+        };
+
+        assert_eq!(
+            codex_visible_prompt_draft_backspace_budget(&snapshot),
+            Some(19)
+        );
     }
 
     #[test]
