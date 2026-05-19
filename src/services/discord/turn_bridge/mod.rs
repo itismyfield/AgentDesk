@@ -1862,8 +1862,16 @@ mod thinking_redaction_tests {
 
         assert_eq!(event.kind, SessionTranscriptEventKind::Thinking);
         assert!(event.tool_name.is_none());
-        assert!(event.summary.is_none(), "summary leaked: {:?}", event.summary);
-        assert!(event.content.is_empty(), "content leaked: {:?}", event.content);
+        assert!(
+            event.summary.is_none(),
+            "summary leaked: {:?}",
+            event.summary
+        );
+        assert!(
+            event.content.is_empty(),
+            "content leaked: {:?}",
+            event.content
+        );
         assert_eq!(event.status.as_deref(), Some("info"));
         assert!(!event.is_error);
     }

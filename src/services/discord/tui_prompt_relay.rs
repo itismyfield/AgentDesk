@@ -1818,8 +1818,7 @@ agents:
         let file_len = std::fs::metadata(&transcript).expect("metadata").len();
 
         // Backdate mtime well outside the grace window (≥ 30 min ago).
-        let stale_when =
-            std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 60);
+        let stale_when = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 60);
         let stale_seconds = stale_when
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
@@ -1838,13 +1837,10 @@ agents:
             .expect("path cstring");
         // SAFETY: utimensat with a known-valid CString path; the timespec
         // array is fully initialized above.
-        let result = unsafe {
-            libc::utimensat(libc::AT_FDCWD, path_cstring.as_ptr(), times.as_ptr(), 0)
-        };
+        let result =
+            unsafe { libc::utimensat(libc::AT_FDCWD, path_cstring.as_ptr(), times.as_ptr(), 0) };
         assert_eq!(result, 0, "utimensat failed");
-        let _ = std::fs::metadata(&transcript)
-            .expect("metadata")
-            .mtime();
+        let _ = std::fs::metadata(&transcript).expect("metadata").mtime();
 
         let relay_started_at = std::time::SystemTime::now();
         let offset = claude_tui_rehydrate_start_offset(

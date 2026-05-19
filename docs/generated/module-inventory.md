@@ -336,13 +336,13 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 |  |
-| `services::claude` | `src/services/claude.rs` | 4451 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4464 | giant-file |
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 7 |  |
-| `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1184 | giant-file |
+| `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1211 | giant-file |
 | `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 477 |  |
 | `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 569 |  |
-| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 1266 | giant-file |
-| `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 275 |  |
+| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 1351 | giant-file |
+| `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 284 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 301 |  |
 | `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 395 |  |
 | `services::cluster` | `src/services/cluster/mod.rs` | 20 |  |
@@ -360,8 +360,8 @@
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 744 |  |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 3 |  |
-| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2038 | giant-file |
-| `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 3373 | giant-file |
+| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2121 | giant-file |
+| `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 3500 | giant-file |
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 421 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 6537 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 910 |  |
@@ -490,8 +490,8 @@
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 597 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
 | `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 4835 | giant-file |
-| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 2042 | giant-file |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 7610 | giant-file |
+| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 2155 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 7677 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2449 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 88 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 194 |  |
@@ -618,8 +618,8 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 385 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 727 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
-| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 1093 | giant-file |
-| `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 500 |  |
+| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 1238 | giant-file |
+| `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 565 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 469 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 768 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 3605 | giant-file |

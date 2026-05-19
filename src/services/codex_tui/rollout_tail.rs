@@ -1769,9 +1769,7 @@ mod tests {
     #[test]
     fn maps_five_tool_call_result_pairs_in_order() {
         let mut body = String::new();
-        body.push_str(
-            r#"{"type":"session_meta","payload":{"id":"five-tools","cwd":"/tmp/repo"}}"#,
-        );
+        body.push_str(r#"{"type":"session_meta","payload":{"id":"five-tools","cwd":"/tmp/repo"}}"#);
         body.push('\n');
         for index in 0..5 {
             body.push_str(&format!(

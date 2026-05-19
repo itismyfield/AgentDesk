@@ -1305,9 +1305,9 @@ line 13";
     #[test]
     fn prompt_rejects_bare_escape_and_bell() {
         for prompt in [
-            "hello\u{1b}stop",  // bare ESC
-            "ring\u{07}bell",   // BEL
-            "form\u{0c}feed",   // FF
+            "hello\u{1b}stop", // bare ESC
+            "ring\u{07}bell",  // BEL
+            "form\u{0c}feed",  // FF
         ] {
             let error = plan_prompt_submit(prompt).unwrap_err();
 
