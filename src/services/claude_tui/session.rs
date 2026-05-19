@@ -120,6 +120,7 @@ fn write_launch_script(
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
+         export CLAUDE_CODE_RESUME_PROMPT=\"\"\n\
          exec {claude_bin} {args}\n",
         cwd = shell_escape(&config.working_dir.display().to_string()),
         claude_bin = shell_escape(&config.claude_bin.display().to_string()),
@@ -216,6 +217,14 @@ mod tests {
         assert!(settings.contains("claude-hook-relay"));
         assert!(script.contains("exec '/usr/local/bin/claude'"));
         assert!(!script.contains(" -p "));
+        // Neutralize Claude Code CLI's auto-resume prompt
+        // (PY6 = "Continue from where you left off.") so it does not
+        // re-prepend a meta user message every time the TUI deserializes
+        // its transcript at turn start.
+        assert!(
+            script.contains("export CLAUDE_CODE_RESUME_PROMPT=\"\""),
+            "launch script must export CLAUDE_CODE_RESUME_PROMPT empty"
+        );
     }
 
     #[test]
