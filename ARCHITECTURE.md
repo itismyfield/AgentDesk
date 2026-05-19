@@ -44,6 +44,7 @@ src/
 │   ├── migrate.rs
 │   ├── mod.rs
 │   ├── monitoring.rs
+│   ├── query.rs
 │   ├── run.rs
 │   └── utils.rs
 ├── compat/

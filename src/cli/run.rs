@@ -3,7 +3,7 @@ use anyhow::Result;
 use super::args::{
     AgentHandoffChannelKindArg, AutoQueueAction, CardAction, Commands, ConfigAction,
     DispatchAction, DoctorProfileArg, IntakeOutboxAction, MigrateAction, MonitoringAction,
-    ReportProvider, ShowAction,
+    QueryAction, ReportProvider, ShowAction,
 };
 
 fn agent_handoff_channel_kind(
@@ -414,6 +414,30 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             exit_for_cli(super::client::cmd_advance(&issue_number))
         }
         Commands::Queue => exit_for_cli(super::client::cmd_queue()),
+        Commands::Query {
+            action,
+            json,
+            filters,
+            agent,
+            limit,
+        } => {
+            let section = match action {
+                Some(QueryAction::Queue) => super::query::QuerySection::Queue,
+                Some(QueryAction::Dispatches) => super::query::QuerySection::Dispatches,
+                Some(QueryAction::PhaseGate) => super::query::QuerySection::PhaseGate,
+                Some(QueryAction::All) | None => super::query::QuerySection::All,
+            };
+            let opts_result = super::query::QueryOptions::from_raw(json, filters, agent, limit);
+            let invoke = match opts_result {
+                Ok(opts) => super::query::cmd_query(section, opts),
+                Err(err) => Err(err),
+            };
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
         Commands::Deploy => exit_for_cli(super::client::cmd_deploy()),
         Commands::Config { action } => exit_for_cli(match action {
             ConfigAction::Get => super::client::cmd_config_get(),
