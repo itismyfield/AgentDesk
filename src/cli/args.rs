@@ -477,6 +477,21 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: ShowAction,
     },
+    /// Show consolidated health snapshot of the current node (server status,
+    /// dcserver pid, last deploy time, queue lag, Discord/disk/outbox).
+    Health {
+        /// Emit machine-readable JSON instead of a text table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare release/main/dev state across every registered worker node
+    /// (`mac-mini`, `mac-book`, …). Renders a side-by-side table with
+    /// dcserver pid, last deploy, queue lag, and a `diff` column.
+    MachineCompare {
+        /// Emit machine-readable JSON instead of a text table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Subcommands for `adk query` (issue #2651).
