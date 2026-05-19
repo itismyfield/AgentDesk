@@ -70,7 +70,7 @@
 | `compat` | `src/compat/mod.rs` | 185 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 23 |  |
-| `config` | `src/config.rs` | 3093 | giant-file |
+| `config` | `src/config.rs` | 3154 | giant-file |
 | `crate` | `src/main.rs` | 49 |  |
 | `credential` | `src/credential.rs` | 180 |  |
 | `db` | `src/db/mod.rs` | 345 |  |
@@ -369,7 +369,7 @@
 | `services::discord` | `src/services/discord/mod.rs` | 6537 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 910 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 413 |  |
-| `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1366 | giant-file |
+| `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1382 | giant-file |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 108 |  |
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 553 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1900 | giant-file |
