@@ -3,14 +3,14 @@ title: 응답 직후 새 프롬프트 → 새 턴 헤더 분리 + inflight clean
 channel: both
 isolation: required
 steps:
-  - send_prompt: "turn-A (E-5)"
-  - wait_for_discord_text: "turn-A"
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E5:TURN-A] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E5:TURN-A]"
     timeout_s: 240
   - wait_idle_s: 1
-  - send_prompt: "turn-B (E-5)"
-  - wait_for_discord_text: "turn-B"
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E5:TURN-B] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E5:TURN-B]"
     timeout_s: 240
 assertions:
   - no_duplicate_content: true
-  - text_present: "turn-A"
-  - text_present: "turn-B"
+  - text_present: "[E2E:E5:TURN-A]"
+  - text_present: "[E2E:E5:TURN-B]"

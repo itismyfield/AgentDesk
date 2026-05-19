@@ -3,15 +3,15 @@ title: /compact 후 memory recap이 사용자 메시지로 오인되지 않음 (
 channel: cc
 isolation: required
 steps:
-  - send_prompt: "before-compact (E-6)"
-  - wait_for_discord_text: "before-compact"
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E6:BEFORE] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E6:BEFORE]"
     timeout_s: 240
   - wait_idle_s: 3
   - send_prompt: "/compact"
   - wait_idle_s: 15
-  - send_prompt: "after-compact (E-6)"
-  - wait_for_discord_text: "after-compact"
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E6:AFTER] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E6:AFTER]"
     timeout_s: 240
 assertions:
   - no_duplicate_content: true
-  - text_present: "after-compact"
+  - text_present: "[E2E:E6:AFTER]"

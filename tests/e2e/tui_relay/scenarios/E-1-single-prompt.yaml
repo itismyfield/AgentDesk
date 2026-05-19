@@ -3,8 +3,8 @@ title: 짧은 단일 프롬프트 → 응답 1회 relay
 channel: both
 isolation: required
 steps:
-  - send_prompt: "ping (E-1 single)"
-  - wait_for_discord_text: "ping"
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E1:OK] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E1:OK]"
     timeout_s: 240
 assertions:
   - message_count_between_markers:
