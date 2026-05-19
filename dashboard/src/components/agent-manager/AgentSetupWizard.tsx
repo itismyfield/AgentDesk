@@ -111,7 +111,7 @@ export default function AgentSetupWizard({
                 : tr("에이전트 생성", "Create Agent")}
             </h3>
           </div>
-          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-10 w-10" style={{ padding: 0 }} aria-label="Close">
+          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-10 w-10" style={{ padding: 0 }} aria-label={tr("닫기", "Close")}>
             x
           </SurfaceActionButton>
         </div>

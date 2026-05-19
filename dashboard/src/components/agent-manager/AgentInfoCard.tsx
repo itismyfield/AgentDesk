@@ -429,7 +429,7 @@ export default function AgentInfoCard({
             title={primaryName}
             description={primaryName !== secondaryName && secondaryName ? secondaryName : undefined}
             actions={(
-              <SurfaceActionButton onClick={onClose} tone="neutral" aria-label="Close">
+              <SurfaceActionButton onClick={onClose} tone="neutral" aria-label={tr("닫기", "Close")}>
                 {tr("닫기", "Close")}
               </SurfaceActionButton>
             )}
