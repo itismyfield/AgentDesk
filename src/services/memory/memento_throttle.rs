@@ -372,12 +372,12 @@ pub(crate) fn observe_memento_forget_recall(
             entry.pop_front();
         }
 
-        let (forget_count, recall_count) = entry
-            .iter()
-            .fold((0u64, 0u64), |(f, r), obs| match obs.kind {
-                ForgetRatioObservationKind::Forget => (f.saturating_add(1), r),
-                ForgetRatioObservationKind::Recall => (f, r.saturating_add(1)),
-            });
+        let (forget_count, recall_count) = entry.iter().fold((0u64, 0u64), |(f, r), obs| match obs
+            .kind
+        {
+            ForgetRatioObservationKind::Forget => (f.saturating_add(1), r),
+            ForgetRatioObservationKind::Recall => (f, r.saturating_add(1)),
+        });
         let ratio = if recall_count == 0 {
             // Treat zero recalls as forget_count itself when forget_count
             // crosses the minimum. This is the worst-case ratio.
@@ -385,8 +385,8 @@ pub(crate) fn observe_memento_forget_recall(
         } else {
             forget_count as f64 / recall_count as f64
         };
-        let exceeds_threshold = ratio >= FORGET_RATIO_ALARM_THRESHOLD
-            && forget_count >= FORGET_RATIO_MIN_FORGET_COUNT;
+        let exceeds_threshold =
+            ratio >= FORGET_RATIO_ALARM_THRESHOLD && forget_count >= FORGET_RATIO_MIN_FORGET_COUNT;
         let decision = if !exceeds_threshold {
             ForgetRatioAlarmDecision::NoAlarm
         } else {
@@ -397,9 +397,7 @@ pub(crate) fn observe_memento_forget_recall(
                     ForgetRatioAlarmDecision::AlarmSuppressedByCooldown
                 }
                 _ => {
-                    state
-                        .forget_ratio_last_alarm
-                        .insert(scope_key.clone(), now);
+                    state.forget_ratio_last_alarm.insert(scope_key.clone(), now);
                     ForgetRatioAlarmDecision::Alarm
                 }
             }
@@ -417,8 +415,7 @@ pub(crate) fn observe_memento_forget_recall(
 /// `tracing::warn!` when the decision is `Alarm`. Returns the snapshot so
 /// callers can take additional action (e.g. publish to telemetry).
 pub(crate) fn note_memento_forget_call(scope_key: &str) -> ForgetRatioSnapshot {
-    let snapshot =
-        observe_memento_forget_recall(scope_key, ForgetRatioObservationKind::Forget);
+    let snapshot = observe_memento_forget_recall(scope_key, ForgetRatioObservationKind::Forget);
     if matches!(snapshot.decision, ForgetRatioAlarmDecision::Alarm) {
         tracing::warn!(
             scope = scope_key,

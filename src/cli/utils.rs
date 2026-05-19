@@ -239,9 +239,8 @@ pub fn handle_install_memento_session_hook(
         if raw.trim().is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_str(&raw).map_err(|e| {
-                format!("parse {}: {e}", settings_path.display())
-            })?
+            serde_json::from_str(&raw)
+                .map_err(|e| format!("parse {}: {e}", settings_path.display()))?
         }
     } else {
         serde_json::json!({})
@@ -253,8 +252,8 @@ pub fn handle_install_memento_session_hook(
         upsert_memento_session_hook(existing)
     };
 
-    let pretty = serde_json::to_string_pretty(&updated)
-        .map_err(|e| format!("serialize settings: {e}"))?;
+    let pretty =
+        serde_json::to_string_pretty(&updated).map_err(|e| format!("serialize settings: {e}"))?;
     if dry_run {
         println!("{}", pretty);
         return Ok(());
@@ -575,9 +574,7 @@ mod memento_hook_install_tests {
             .filter(|m| matcher_block_contains_marker(m))
             .collect();
         assert_eq!(memento_entries.len(), 1);
-        let cmd = memento_entries[0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap();
+        let cmd = memento_entries[0]["hooks"][0]["command"].as_str().unwrap();
         assert!(!cmd.contains("old payload"));
         assert!(cmd.contains("mcp__memento__context"));
     }
