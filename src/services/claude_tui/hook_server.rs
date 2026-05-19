@@ -358,8 +358,11 @@ async fn receive_hook(
     // * Every other event kind with `is_informational_empty_payload(payload) == true`
     //   is dropped at the broadcast boundary. The HTTP response stays 202
     //   so the relay CLI cannot tell — that contract is one-way fire-and-forget.
-    let should_drop_broadcast =
-        payload_is_noise && !matches!(event.kind, HookEventKind::Stop | HookEventKind::SubagentStop);
+    let should_drop_broadcast = payload_is_noise
+        && !matches!(
+            event.kind,
+            HookEventKind::Stop | HookEventKind::SubagentStop
+        );
     if should_drop_broadcast {
         tracing::debug!(
             provider,
@@ -702,9 +705,9 @@ mod tests {
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
                 panic!("unexpected lag — channel saw events before close: {result:?}")
             }
-            Ok(Ok(event)) => panic!(
-                "empty UserPromptSubmit must be dropped, but broadcast received: {event:?}"
-            ),
+            Ok(Ok(event)) => {
+                panic!("empty UserPromptSubmit must be dropped, but broadcast received: {event:?}")
+            }
         }
     }
 

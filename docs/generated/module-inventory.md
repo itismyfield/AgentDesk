@@ -343,7 +343,7 @@
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 7 |  |
 | `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1184 | giant-file |
 | `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 477 |  |
-| `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 698 |  |
+| `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 978 |  |
 | `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 1266 | giant-file |
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 275 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 301 |  |
