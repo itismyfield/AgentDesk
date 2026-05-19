@@ -667,9 +667,9 @@ fn parse_window_anchor(
         return Err("activity window: empty timestamp".to_string());
     }
     if let Some(sha) = trimmed.strip_prefix("since:") {
-        let output = std::process::Command::new("git")
+        let output = crate::services::git::GitCommand::new()
             .args(["show", "-s", "--format=%cI", sha.trim()])
-            .output()
+            .run_output()
             .map_err(|err| format!("git show {sha}: {err}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -728,7 +728,7 @@ fn collect_git_commits(
     let since_arg = format!("--since={}", since.to_rfc3339());
     let until_arg = format!("--until={}", until.to_rfc3339());
     let pretty = "--pretty=format:%H\x1f%cI\x1f%an\x1f%s".to_string();
-    let output = std::process::Command::new("git")
+    let output = crate::services::git::GitCommand::new()
         .args([
             "log",
             "--no-merges",
@@ -736,7 +736,7 @@ fn collect_git_commits(
             until_arg.as_str(),
             pretty.as_str(),
         ])
-        .output()
+        .run_output()
         .map_err(|err| format!("git log: {err}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
