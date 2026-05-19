@@ -57,12 +57,14 @@ Each row is a (vector × action × job) tuple. If a vector is not in this table,
 | PG `agent_quality_event`                  | 90 days                                     | Monthly aggregate insert into summary table, then `DELETE`   | `storage.db_retention`            | Weekly   |
 | PG `session_transcripts`                  | 90 days                                     | Copy to archive table, then `DELETE`                         | `storage.db_retention`            | Weekly   |
 | PG `task_dispatches`                      | 90 days                                     | Monthly aggregate insert, then `DELETE`                      | `storage.db_retention`            | Weekly   |
+| PG `prompt_manifest_layers`               | 30 days                                     | `UPDATE full_content = NULL, is_truncated = TRUE` (preserves hashes) | `storage.prompt_manifest_retention`| Daily    |
 | PG `kanban_cards`                         | **Forever**                                 | None — intentional permanent history                         | —                                 | —        |
 | `dcserver.stdout.log` / `dcserver.stderr.log` | TBD                                     | Deferred to a follow-up PR (requires `tracing-appender::rolling`) | *(not yet registered)*            | —        |
 
 Job source locations under `src/services/maintenance/jobs/`:
 `target_sweep.rs`, `worktree_orphan_sweep.rs`, `hang_dump_cleanup.rs`,
 `db_retention.rs`, `mod.rs::spawn_storage_maintenance_jobs`.
+Also `src/server/routes/prompt_manifest_retention.rs` and `src/db/prompt_manifests/retention.rs` for `prompt_manifest_retention`.
 
 Config knobs (all live in `Config::default_runtime()` per job):
 
@@ -70,6 +72,7 @@ Config knobs (all live in `Config::default_runtime()` per job):
 - `target_sweep.disk_threshold_bytes` — default 50 GB.
 - `hang_dump_cleanup.max_age` — default 14 days.
 - `worktree_orphan_sweep.dry_run` — default false in production, true in tests.
+- `prompt_manifest_retention.full_content_days` — default 30 days.
 
 ---
 
