@@ -410,9 +410,7 @@ pub(in crate::services::discord) fn render_peer_agent_guidance(
             guard.fingerprint = Some(fingerprint);
             guard.entries.clear();
         }
-        guard
-            .entries
-            .insert(current_role_id.to_string(), None);
+        guard.entries.insert(current_role_id.to_string(), None);
         return None;
     }
 
