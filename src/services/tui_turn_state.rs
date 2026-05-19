@@ -62,16 +62,34 @@ pub(crate) fn observe_provider_jsonl_turn_state(
 }
 
 pub(crate) fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
-    observe_jsonl_turn_state(path, claude_envelope_turn_state)
+    observe_jsonl_turn_state(
+        path,
+        claude_envelope_turn_state,
+        claude_partial_turn_state,
+        MalformedJsonlLinePolicy::FallbackToPrevious,
+    )
 }
 
 pub(crate) fn observe_codex_jsonl_turn_state(path: &Path) -> TuiTurnState {
-    observe_jsonl_turn_state(path, codex_envelope_turn_state)
+    observe_jsonl_turn_state(
+        path,
+        codex_envelope_turn_state,
+        |_| None,
+        MalformedJsonlLinePolicy::ReturnUnknown,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MalformedJsonlLinePolicy {
+    FallbackToPrevious,
+    ReturnUnknown,
 }
 
 fn observe_jsonl_turn_state(
     path: &Path,
     classify: fn(&Value) -> Option<TuiTurnState>,
+    classify_partial: fn(&str) -> Option<TuiTurnState>,
+    malformed_policy: MalformedJsonlLinePolicy,
 ) -> TuiTurnState {
     let Ok(lines) = read_recent_jsonl_lines(path) else {
         return TuiTurnState::Unknown;
@@ -84,8 +102,17 @@ fn observe_jsonl_turn_state(
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(json) = serde_json::from_str::<Value>(trimmed) else {
-            return TuiTurnState::Unknown;
+        let json = match serde_json::from_str::<Value>(trimmed) {
+            Ok(json) => json,
+            Err(_) => {
+                if let Some(state) = classify_partial(trimmed) {
+                    return state;
+                }
+                if malformed_policy == MalformedJsonlLinePolicy::FallbackToPrevious {
+                    continue;
+                }
+                return TuiTurnState::Unknown;
+            }
         };
         if let Some(state) = classify(&json) {
             return state;
@@ -125,6 +152,95 @@ fn claude_envelope_turn_state(json: &Value) -> Option<TuiTurnState> {
         },
         _ => None,
     }
+}
+
+fn claude_partial_turn_state(line: &str) -> Option<TuiTurnState> {
+    if !line.trim_start().starts_with('{') {
+        return None;
+    }
+    match top_level_string_field_fragment(line, "type")?.as_str() {
+        "assistant" => Some(TuiTurnState::Streaming),
+        "user" => Some(TuiTurnState::UserSubmitted),
+        "result" => Some(TuiTurnState::Idle),
+        "system" => match top_level_string_field_fragment(line, "subtype")?.as_str() {
+            "turn_duration" | "stop_hook_summary" | "init" => Some(TuiTurnState::Idle),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn top_level_string_field_fragment(line: &str, expected_key: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut depth = 0i32;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' | b'[' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                index += 1;
+            }
+            b'"' if depth == 1 => {
+                let (key, next_index, complete_key) = parse_json_string_fragment(bytes, index + 1);
+                if !complete_key {
+                    return None;
+                }
+                index = skip_json_whitespace(bytes, next_index);
+                if bytes.get(index) != Some(&b':') {
+                    continue;
+                }
+                index = skip_json_whitespace(bytes, index + 1);
+                if key == expected_key {
+                    if bytes.get(index) != Some(&b'"') {
+                        return None;
+                    }
+                    let (value, _, complete_value) = parse_json_string_fragment(bytes, index + 1);
+                    return complete_value.then_some(value);
+                }
+            }
+            b'"' => {
+                let (_, next_index, _) = parse_json_string_fragment(bytes, index + 1);
+                index = next_index;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    None
+}
+
+fn skip_json_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while matches!(bytes.get(index), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+        index += 1;
+    }
+    index
+}
+
+fn parse_json_string_fragment(bytes: &[u8], mut index: usize) -> (String, usize, bool) {
+    let mut value = String::new();
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => {
+                if let Some(next) = bytes.get(index + 1) {
+                    value.push(*next as char);
+                    index += 2;
+                } else {
+                    return (value, bytes.len(), false);
+                }
+            }
+            b'"' => return (value, index + 1, true),
+            byte => {
+                value.push(byte as char);
+                index += 1;
+            }
+        }
+    }
+    (value, index, false)
 }
 
 fn codex_envelope_turn_state(json: &Value) -> Option<TuiTurnState> {
@@ -271,11 +387,73 @@ mod tests {
     }
 
     #[test]
-    fn malformed_latest_line_is_unknown() {
+    fn claude_malformed_latest_line_falls_back_to_previous_envelope() {
         let file = write_jsonl(&[r#"{"type":"result"}"#, "{not-json"]);
 
         assert_eq!(
             observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
+        );
+    }
+
+    #[test]
+    fn claude_partial_user_latest_line_marks_user_submitted() {
+        let file = write_jsonl(&[
+            r#"{"type":"result"}"#,
+            r#"{"type":"user","message":{"content":"hello""#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::UserSubmitted
+        );
+    }
+
+    #[test]
+    fn claude_partial_assistant_latest_line_marks_streaming() {
+        let file = write_jsonl(&[
+            r#"{"type":"result"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text""#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Streaming
+        );
+    }
+
+    #[test]
+    fn claude_partial_user_content_type_text_does_not_override_envelope_type() {
+        let file = write_jsonl(&[
+            r#"{"type":"result"}"#,
+            r#"{"type":"user","message":{"content":"why does this say \"type\":\"assistant\"""#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::UserSubmitted
+        );
+    }
+
+    #[test]
+    fn claude_only_unclassified_malformed_lines_are_unknown() {
+        let file = write_jsonl(&["{not-json"]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Unknown
+        );
+    }
+
+    #[test]
+    fn codex_malformed_latest_line_stays_unknown() {
+        let file = write_jsonl(&[
+            r#"{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":3}}"#,
+            r#"{"type":"response_item","payload":{"type":"message""#,
+        ]);
+
+        assert_eq!(
+            observe_codex_jsonl_turn_state(file.path()),
             TuiTurnState::Unknown
         );
     }

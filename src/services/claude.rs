@@ -1567,15 +1567,43 @@ fn claude_tui_followup_busy_before_submit(
 }
 
 #[cfg(unix)]
-fn claude_tui_followup_has_stranded_prompt_draft(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaudeTuiStrandedPromptDraftState {
+    IdleTranscript,
+    UnknownTranscript,
+}
+
+#[cfg(unix)]
+impl ClaudeTuiStrandedPromptDraftState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::IdleTranscript => "idle",
+            Self::UnknownTranscript => "unknown",
+        }
+    }
+}
+
+#[cfg(unix)]
+fn claude_tui_followup_stranded_prompt_draft_state(
     snapshot: &crate::services::claude_tui::input::PromptReadinessSnapshot,
     transcript_path: &std::path::Path,
-) -> bool {
-    snapshot.tmux_pane_alive
-        && snapshot.prompt_draft_detected
-        && crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
+) -> Option<ClaudeTuiStrandedPromptDraftState> {
+    let transcript_turn_state =
+        crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
             transcript_path,
-        ) == crate::services::tui_turn_state::TuiTurnState::Idle
+        );
+    if !snapshot.tmux_pane_alive || !snapshot.prompt_draft_detected {
+        return None;
+    }
+    match transcript_turn_state {
+        crate::services::tui_turn_state::TuiTurnState::Idle => {
+            Some(ClaudeTuiStrandedPromptDraftState::IdleTranscript)
+        }
+        crate::services::tui_turn_state::TuiTurnState::Unknown => {
+            Some(ClaudeTuiStrandedPromptDraftState::UnknownTranscript)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(unix)]
@@ -1636,6 +1664,46 @@ fn clear_claude_tui_stranded_prompt_draft(
             capture_available = snapshot.capture_available,
             pane_tail = %snapshot.pane_tail,
             "claude_tui stranded prompt draft still present after clear attempt"
+        );
+    }
+
+    Ok(snapshot)
+}
+
+#[cfg(unix)]
+fn gently_clear_claude_tui_prompt_draft(
+    tmux_session_name: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<crate::services::claude_tui::input::PromptReadinessSnapshot, String> {
+    let mut snapshot =
+        crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name);
+    if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
+        return Ok(snapshot);
+    }
+
+    for attempt in 1..=CLAUDE_TUI_STRANDED_DRAFT_CLEAR_ATTEMPTS {
+        if cancel_requested(cancel_token) {
+            return Err(
+                crate::services::claude_tui::input::PROMPT_READY_CANCELLED_ERROR.to_string(),
+            );
+        }
+        let output =
+            crate::services::platform::tmux::send_keys(tmux_session_name, &["C-e", "C-u"])?;
+        ensure_tmux_key_send_success(output, "gentle-clear-draft")?;
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        snapshot = crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name);
+        if !snapshot.prompt_draft_detected || !snapshot.tmux_pane_alive {
+            return Ok(snapshot);
+        }
+        tracing::warn!(
+            tmux_session_name,
+            attempt,
+            prompt_marker_detected = snapshot.prompt_marker_detected,
+            prompt_draft_detected = snapshot.prompt_draft_detected,
+            tmux_pane_alive = snapshot.tmux_pane_alive,
+            capture_available = snapshot.capture_available,
+            pane_tail = %snapshot.pane_tail,
+            "claude_tui prompt draft still present after gentle clear attempt"
         );
     }
 
@@ -1817,34 +1885,51 @@ fn execute_streaming_local_tui_tmux(
         // bytes as new-turn output).
         let mut busy_waited = false;
         let mut recreate_before_submit = false;
+        let mut prompt_draft_cleared_before_submit = false;
         if let Some(snapshot) =
             claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
         {
-            if claude_tui_followup_has_stranded_prompt_draft(&snapshot, &transcript_path) {
+            if let Some(draft_state) =
+                claude_tui_followup_stranded_prompt_draft_state(&snapshot, &transcript_path)
+            {
+                let allow_recreate = matches!(
+                    draft_state,
+                    ClaudeTuiStrandedPromptDraftState::IdleTranscript
+                );
                 tracing::warn!(
                     tmux_session_name,
                     transcript_path = %transcript_path_string,
+                    transcript_turn_state = draft_state.as_str(),
                     prompt_marker_detected = snapshot.prompt_marker_detected,
                     prompt_draft_detected = snapshot.prompt_draft_detected,
                     capture_available = snapshot.capture_available,
                     pane_tail = %snapshot.pane_tail,
-                    "claude_tui follow-up found idle transcript with stranded composer draft; attempting draft clear"
+                    "claude_tui follow-up found non-busy transcript with stranded composer draft; attempting draft clear"
                 );
                 debug_log(&format!(
-                    "Claude TUI follow-up: idle transcript has stranded prompt draft, attempting clear (session={}, transcript={})",
-                    tmux_session_name, transcript_path_string
-                ));
-                match clear_claude_tui_stranded_prompt_draft(
+                    "Claude TUI follow-up: {} transcript has stranded prompt draft, attempting clear (session={}, transcript={})",
+                    draft_state.as_str(),
                     tmux_session_name,
-                    cancel_token.as_deref(),
-                ) {
+                    transcript_path_string
+                ));
+                let clear_result = if allow_recreate {
+                    clear_claude_tui_stranded_prompt_draft(
+                        tmux_session_name,
+                        cancel_token.as_deref(),
+                    )
+                } else {
+                    gently_clear_claude_tui_prompt_draft(tmux_session_name, cancel_token.as_deref())
+                };
+                match clear_result {
                     Ok(post_clear_snapshot)
                         if post_clear_snapshot.tmux_pane_alive
                             && !post_clear_snapshot.prompt_draft_detected =>
                     {
                         busy_waited = true;
+                        prompt_draft_cleared_before_submit = true;
                         tracing::info!(
                             tmux_session_name,
+                            transcript_turn_state = draft_state.as_str(),
                             prompt_marker_detected = post_clear_snapshot.prompt_marker_detected,
                             capture_available = post_clear_snapshot.capture_available,
                             "claude_tui stranded prompt draft cleared before follow-up submit"
@@ -1862,30 +1947,50 @@ fn execute_streaming_local_tui_tmux(
                         } else {
                             "claude tui pane died while clearing stranded prompt draft"
                         };
-                        tracing::warn!(
-                            tmux_session_name,
-                            prompt_marker_detected = post_clear_snapshot.prompt_marker_detected,
-                            prompt_draft_detected = post_clear_snapshot.prompt_draft_detected,
-                            tmux_pane_alive = post_clear_snapshot.tmux_pane_alive,
-                            capture_available = post_clear_snapshot.capture_available,
-                            pane_tail = %post_clear_snapshot.pane_tail,
-                            "claude_tui stranded prompt draft recovery will recreate hosted session"
-                        );
-                        debug_log(&format!(
-                            "Claude TUI follow-up: {} (session={})",
-                            reason, tmux_session_name
-                        ));
-                        crate::services::termination_audit::record_termination_for_tmux(
-                            tmux_session_name,
-                            None,
-                            "claude_tui_provider",
-                            "stranded_prompt_draft_recreate",
-                            Some(reason),
-                            None,
-                        );
-                        record_tmux_exit_reason(tmux_session_name, reason);
-                        crate::services::platform::tmux::kill_session(tmux_session_name, reason);
-                        recreate_before_submit = true;
+                        if !allow_recreate {
+                            tracing::warn!(
+                                tmux_session_name,
+                                transcript_turn_state = draft_state.as_str(),
+                                prompt_marker_detected = post_clear_snapshot.prompt_marker_detected,
+                                prompt_draft_detected = post_clear_snapshot.prompt_draft_detected,
+                                tmux_pane_alive = post_clear_snapshot.tmux_pane_alive,
+                                capture_available = post_clear_snapshot.capture_available,
+                                pane_tail = %post_clear_snapshot.pane_tail,
+                                "claude_tui unknown-transcript draft recovery did not clear draft; falling back to busy wait"
+                            );
+                            debug_log(&format!(
+                                "Claude TUI follow-up: {} under unknown transcript; falling back to busy wait (session={})",
+                                reason, tmux_session_name
+                            ));
+                        } else {
+                            tracing::warn!(
+                                tmux_session_name,
+                                prompt_marker_detected = post_clear_snapshot.prompt_marker_detected,
+                                prompt_draft_detected = post_clear_snapshot.prompt_draft_detected,
+                                tmux_pane_alive = post_clear_snapshot.tmux_pane_alive,
+                                capture_available = post_clear_snapshot.capture_available,
+                                pane_tail = %post_clear_snapshot.pane_tail,
+                                "claude_tui stranded prompt draft recovery will recreate hosted session"
+                            );
+                            debug_log(&format!(
+                                "Claude TUI follow-up: {} (session={})",
+                                reason, tmux_session_name
+                            ));
+                            crate::services::termination_audit::record_termination_for_tmux(
+                                tmux_session_name,
+                                None,
+                                "claude_tui_provider",
+                                "stranded_prompt_draft_recreate",
+                                Some(reason),
+                                None,
+                            );
+                            record_tmux_exit_reason(tmux_session_name, reason);
+                            crate::services::platform::tmux::kill_session(
+                                tmux_session_name,
+                                reason,
+                            );
+                            recreate_before_submit = true;
+                        }
                     }
                     Err(error)
                         if crate::services::claude_tui::input::is_prompt_ready_cancelled_error(
@@ -1909,36 +2014,54 @@ fn execute_streaming_local_tui_tmux(
                         return Ok(());
                     }
                     Err(error) => {
-                        tracing::warn!(
-                            tmux_session_name,
-                            error = %error,
-                            "claude_tui stranded prompt draft clear failed; recreating hosted session"
-                        );
-                        crate::services::termination_audit::record_termination_for_tmux(
-                            tmux_session_name,
-                            None,
-                            "claude_tui_provider",
-                            "stranded_prompt_draft_clear_failed_recreate",
-                            Some(&format!(
-                                "claude tui stranded prompt draft clear failed: {}",
-                                error
-                            )),
-                            None,
-                        );
-                        record_tmux_exit_reason(
-                            tmux_session_name,
-                            &format!("claude tui stranded prompt draft clear failed: {}", error),
-                        );
-                        crate::services::platform::tmux::kill_session(
-                            tmux_session_name,
-                            &format!("claude tui stranded prompt draft clear failed: {}", error),
-                        );
-                        recreate_before_submit = true;
+                        if !allow_recreate {
+                            tracing::warn!(
+                                tmux_session_name,
+                                error = %error,
+                                "claude_tui unknown-transcript draft clear failed; falling back to busy wait"
+                            );
+                            debug_log(&format!(
+                                "Claude TUI follow-up: unknown-transcript draft clear failed, falling back to busy wait (session={} error={})",
+                                tmux_session_name, error
+                            ));
+                        } else {
+                            tracing::warn!(
+                                tmux_session_name,
+                                error = %error,
+                                "claude_tui stranded prompt draft clear failed; recreating hosted session"
+                            );
+                            crate::services::termination_audit::record_termination_for_tmux(
+                                tmux_session_name,
+                                None,
+                                "claude_tui_provider",
+                                "stranded_prompt_draft_clear_failed_recreate",
+                                Some(&format!(
+                                    "claude tui stranded prompt draft clear failed: {}",
+                                    error
+                                )),
+                                None,
+                            );
+                            record_tmux_exit_reason(
+                                tmux_session_name,
+                                &format!(
+                                    "claude tui stranded prompt draft clear failed: {}",
+                                    error
+                                ),
+                            );
+                            crate::services::platform::tmux::kill_session(
+                                tmux_session_name,
+                                &format!(
+                                    "claude tui stranded prompt draft clear failed: {}",
+                                    error
+                                ),
+                            );
+                            recreate_before_submit = true;
+                        }
                     }
                 }
             }
         }
-        if !recreate_before_submit {
+        if !recreate_before_submit && !prompt_draft_cleared_before_submit {
             if let Some(snapshot) =
                 claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
             {
@@ -3623,7 +3746,7 @@ mod claude_tui_session_resolution_tests {
     }
 
     #[test]
-    fn detects_idle_transcript_with_stranded_prompt_draft() {
+    fn detects_non_busy_transcript_with_stranded_prompt_draft() {
         let transcript_dir = tempfile::tempdir().unwrap();
         let transcript_path = transcript_dir.path().join("session.jsonl");
         std::fs::write(
@@ -3639,19 +3762,37 @@ mod claude_tui_session_resolution_tests {
             pane_tail: "draft".to_string(),
         };
 
-        assert!(claude_tui_followup_has_stranded_prompt_draft(
-            &snapshot,
-            &transcript_path
-        ));
+        assert_eq!(
+            claude_tui_followup_stranded_prompt_draft_state(&snapshot, &transcript_path),
+            Some(ClaudeTuiStrandedPromptDraftState::IdleTranscript)
+        );
+
+        let unknown_transcript_path = transcript_dir.path().join("unknown.jsonl");
+        std::fs::write(&unknown_transcript_path, "not json").unwrap();
+        assert_eq!(
+            claude_tui_followup_stranded_prompt_draft_state(&snapshot, &unknown_transcript_path),
+            Some(ClaudeTuiStrandedPromptDraftState::UnknownTranscript)
+        );
+
+        let busy_transcript_path = transcript_dir.path().join("busy.jsonl");
+        std::fs::write(
+            &busy_transcript_path,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"streaming"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_tui_followup_stranded_prompt_draft_state(&snapshot, &busy_transcript_path),
+            None
+        );
 
         let no_draft = crate::services::claude_tui::input::PromptReadinessSnapshot {
             prompt_draft_detected: false,
             ..snapshot
         };
-        assert!(!claude_tui_followup_has_stranded_prompt_draft(
-            &no_draft,
-            &transcript_path
-        ));
+        assert_eq!(
+            claude_tui_followup_stranded_prompt_draft_state(&no_draft, &transcript_path),
+            None
+        );
     }
 }
 

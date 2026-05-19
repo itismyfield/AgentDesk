@@ -159,6 +159,14 @@ fn classify_claude_tui_followup_submission(
     if transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Idle {
         return None;
     }
+    if snapshot.tmux_pane_alive
+        && snapshot.prompt_draft_detected
+        && transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Unknown
+        && watcher_state == "missing"
+        && inflight_state == "missing"
+    {
+        return None;
+    }
     if snapshot.prompt_marker_detected || !snapshot.tmux_pane_alive {
         if !transcript_turn_state.is_busy() {
             return None;
@@ -7950,6 +7958,68 @@ mod session_strategy_lifecycle_tests {
             )
             .is_none(),
             "idle transcript plus draft is a provider recovery case, not a router busy block"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_tui_unknown_transcript_with_prompt_draft_reaches_provider_recovery() {
+        let snapshot = HostedTuiPromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "❯ [TUI-REL-F815-CC-5] stranded draft".to_string(),
+        };
+
+        assert!(
+            classify_claude_tui_followup_submission(
+                &snapshot,
+                "missing",
+                None,
+                "missing",
+                crate::services::tui_turn_state::TuiTurnState::Unknown,
+                "AgentDesk-claude-ready",
+            )
+            .is_none(),
+            "unknown transcript plus draft is a provider recovery case, not a router busy block"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_tui_unknown_transcript_with_active_evidence_still_blocks() {
+        let snapshot = HostedTuiPromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "❯ possible redraw".to_string(),
+        };
+
+        assert!(
+            classify_claude_tui_followup_submission(
+                &snapshot,
+                "attached",
+                Some(1),
+                "missing",
+                crate::services::tui_turn_state::TuiTurnState::Unknown,
+                "AgentDesk-claude-active",
+            )
+            .is_some(),
+            "active watcher evidence keeps unknown transcript conservative"
+        );
+        assert!(
+            classify_claude_tui_followup_submission(
+                &snapshot,
+                "missing",
+                None,
+                "present",
+                crate::services::tui_turn_state::TuiTurnState::Unknown,
+                "AgentDesk-claude-active",
+            )
+            .is_some(),
+            "active inflight evidence keeps unknown transcript conservative"
         );
     }
 
