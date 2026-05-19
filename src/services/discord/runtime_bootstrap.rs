@@ -826,7 +826,35 @@ async fn run_startup_diagnostic_after_reconcile_barrier(
 
     if health_registry.registered_provider_count().await == 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!("  [{ts}] ⏭ startup_doctor skipped — no provider runtimes registered");
+        let startup_doctor = tokio::task::spawn_blocking(|| {
+            crate::cli::doctor::startup::record_startup_diagnostic_skipped(
+                "no_provider_runtimes_registered",
+            )
+        })
+        .await;
+        match startup_doctor {
+            Ok(Ok(Some(path))) => {
+                tracing::info!(
+                    "  [{ts}] ⏭ startup_doctor skipped — no provider runtimes registered; wrote {}",
+                    path.display()
+                );
+            }
+            Ok(Ok(None)) => {
+                tracing::info!(
+                    "  [{ts}] ⏭ startup_doctor skipped — no provider runtimes registered; already recorded for this boot"
+                );
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "  [{ts}] ⚠ startup_doctor skipped but artifact write failed: {error}"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "  [{ts}] ⚠ startup_doctor skipped but artifact task failed: {error}"
+                );
+            }
+        }
         return;
     }
 

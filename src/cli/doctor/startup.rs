@@ -157,17 +157,28 @@ fn followup_context() -> &'static str {
 fn startup_doctor_summary_json(path: &PathBuf, report: &Value, detailed: bool) -> Value {
     let failed_count = summary_count(report, "failed", "fail");
     let warned_count = summary_count(report, "warned", "warn");
+    let skipped = report
+        .get("skipped")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let doctor_status = if skipped {
+        "skipped"
+    } else {
+        startup_doctor_status(failed_count, warned_count)
+    };
     // Use "doctor_status" (not "status") to avoid conflicting with the top-level
     // "status" field in /api/health when the no-jq regex fallback takes the first match.
     let mut summary = json!({
         "available": true,
-        "doctor_status": startup_doctor_status(failed_count, warned_count),
+        "doctor_status": doctor_status,
         "started_at": report.get("started_at").cloned().unwrap_or(Value::Null),
         "completed_at": report.get("completed_at").cloned().unwrap_or(Value::Null),
         "summary": report.get("summary").cloned().unwrap_or(Value::Null),
         "failed_count": failed_count,
         "warned_count": warned_count,
         "detail_endpoint": LATEST_STARTUP_DOCTOR_ENDPOINT,
+        "skipped": skipped,
+        "skipped_reason": report.get("skipped_reason").cloned().unwrap_or(Value::Null),
     });
 
     if detailed {
@@ -273,6 +284,17 @@ pub(crate) fn latest_startup_doctor_response_json() -> Value {
 }
 
 pub(crate) fn run_startup_diagnostic_once() -> Result<Option<PathBuf>, String> {
+    write_startup_doctor_artifact(None)
+}
+
+/// Record an intentional startup doctor skip as the final artifact for the
+/// current boot. This is terminal for the boot because the artifact path is
+/// keyed by pid+pidfile mtime and all writers are idempotent.
+pub(crate) fn record_startup_diagnostic_skipped(reason: &str) -> Result<Option<PathBuf>, String> {
+    write_startup_doctor_artifact(Some(reason))
+}
+
+fn write_startup_doctor_artifact(skipped_reason: Option<&str>) -> Result<Option<PathBuf>, String> {
     let artifact_root = startup_artifact_root()
         .ok_or_else(|| "AGENTDESK runtime root is not resolvable".to_string())?;
     fs::create_dir_all(&artifact_root).map_err(|error| {
@@ -313,44 +335,90 @@ pub(crate) fn run_startup_diagnostic_once() -> Result<Option<PathBuf>, String> {
 
     let started_at = chrono::Local::now().to_rfc3339();
     let _ = writeln!(lock, "started_at={started_at}");
-
-    let options = super::DoctorOptions {
-        fix: true,
-        json: true,
-        allow_restart: false,
-        repair_sqlite_cache: false,
-        allow_remote: false,
-        profile: None,
-        run_context: super::contract::RunContext::StartupOnce,
-        artifact_path: Some(artifact_path.clone()),
-    };
-
-    let result = super::run_doctor_report(options);
-    let completed_at = chrono::Local::now().to_rfc3339();
-    let payload = match result {
-        Ok(report) => serde_json::to_value(report)
-            .map(|mut value| {
-                value["schema_version"] = json!(1);
-                value["boot_id"] = json!(boot_id);
-                value["started_at"] = json!(started_at);
-                value["completed_at"] = json!(completed_at);
-                value["non_fatal"] = json!(true);
-                value
-            })
-            .map_err(|error| format!("serialize startup doctor report: {error}"))?,
-        Err(error) => json!({
+    let payload = if let Some(reason) = skipped_reason {
+        let completed_at = chrono::Local::now().to_rfc3339();
+        json!({
             "schema_version": 1,
+            "version": "doctor/v1",
+            "ok": true,
             "boot_id": boot_id,
             "started_at": started_at,
             "completed_at": completed_at,
             "run_context": "startup_once",
+            "artifact_path": artifact_path.display().to_string(),
+            "profile": Value::Null,
+            "fix_requested": false,
             "fix_applied": false,
             "auto_fixes": [],
-            "summary": {"passed": 0, "warned": 0, "failed": 1, "total": 1},
-            "checks": [],
-            "error": error,
+            "fixes": [],
+            "summary": {"passed": 1, "warned": 0, "failed": 0, "total": 1},
+            "checks": [{
+                "id": "startup_doctor_skipped",
+                "group": "server",
+                "name": "Startup doctor skipped",
+                "status": "pass",
+                "severity": "info",
+                "subsystem": "startup",
+                "ok": true,
+                "detail": format!("startup doctor skipped: {reason}"),
+                "guidance": Value::Null,
+                "path": Value::Null,
+                "expected": Value::Null,
+                "actual": Value::Null,
+                "next_steps": [],
+                "evidence": {"reason": reason},
+                "fix_safety": "read_only",
+                "security_exposure": "none"
+            }],
+            "skipped": true,
+            "skipped_reason": reason,
             "non_fatal": true
-        }),
+        })
+    } else {
+        let options = super::DoctorOptions {
+            fix: true,
+            json: true,
+            allow_restart: false,
+            repair_sqlite_cache: false,
+            allow_remote: false,
+            profile: None,
+            run_context: super::contract::RunContext::StartupOnce,
+            artifact_path: Some(artifact_path.clone()),
+        };
+
+        let result = super::run_doctor_report(options);
+        let completed_at = chrono::Local::now().to_rfc3339();
+        match result {
+            Ok(report) => serde_json::to_value(report)
+                .map(|mut value| {
+                    value["schema_version"] = json!(1);
+                    value["boot_id"] = json!(boot_id);
+                    value["started_at"] = json!(started_at);
+                    value["completed_at"] = json!(completed_at);
+                    value["non_fatal"] = json!(true);
+                    value
+                })
+                .map_err(|error| format!("serialize startup doctor report: {error}"))?,
+            Err(error) => json!({
+                "schema_version": 1,
+                "boot_id": boot_id,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "run_context": "startup_once",
+                "version": "doctor/v1",
+                "ok": false,
+                "artifact_path": artifact_path.display().to_string(),
+                "profile": Value::Null,
+                "fix_requested": true,
+                "fix_applied": false,
+                "auto_fixes": [],
+                "fixes": [],
+                "summary": {"passed": 0, "warned": 0, "failed": 1, "total": 1},
+                "checks": [],
+                "error": error,
+                "non_fatal": true
+            }),
+        }
     };
 
     let tmp_path = artifact_root.join(format!(
@@ -372,4 +440,76 @@ pub(crate) fn run_startup_diagnostic_once() -> Result<Option<PathBuf>, String> {
         )
     })?;
     Ok(Some(artifact_path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn skipped_startup_doctor_writes_current_boot_artifact() {
+        let _env_lock = env_lock();
+        let runtime_root = tempfile::tempdir().unwrap();
+        let _root_guard = EnvVarGuard::set_path(AGENTDESK_ROOT_DIR_ENV, runtime_root.path());
+        let runtime_dir = runtime_root.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(runtime_dir.join("dcserver.pid"), "12345\n").unwrap();
+
+        let artifact_path = record_startup_diagnostic_skipped("no_provider_runtimes_registered")
+            .unwrap()
+            .expect("first skip should write artifact");
+        let content = std::fs::read_to_string(&artifact_path).unwrap();
+        let json: Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(artifact_path, latest_startup_artifact_path().unwrap());
+        assert_eq!(json["skipped"], true);
+        assert_eq!(json["skipped_reason"], "no_provider_runtimes_registered");
+        assert_eq!(json["summary"]["failed"], 0);
+        assert_eq!(json["summary"]["passed"], 1);
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["version"], "doctor/v1");
+        assert_eq!(
+            latest_startup_doctor_health_json(true)["doctor_status"],
+            "skipped"
+        );
+        assert_eq!(latest_startup_doctor_health_json(true)["skipped"], true);
+        assert!(
+            record_startup_diagnostic_skipped("no_provider_runtimes_registered")
+                .unwrap()
+                .is_none(),
+            "second skip for the same boot is idempotent"
+        );
+    }
 }
