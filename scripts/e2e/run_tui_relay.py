@@ -332,7 +332,13 @@ def run_one_channel(
         return record
 
     setup_resp = client.send(channel_id, setup_marker)
-    after_id = str(setup_resp.get("id") or "")
+    # POST /api/discord/send returns {"message_id": "..."}, not {"id": "..."}.
+    # Falling back to "id" leaves after_id empty, which causes wait_for_message
+    # to keep refetching the channel head and bleed earlier scenarios into the
+    # current window (false duplicate / timeout failures).
+    after_id = str(
+        setup_resp.get("message_id") or setup_resp.get("id") or ""
+    )
     window = assertions.Window(setup_marker_id=after_id)
     # Brief settle so the SETUP marker is observable before any wait/poll.
     time.sleep(1.0)
