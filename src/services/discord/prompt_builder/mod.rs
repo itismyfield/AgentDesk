@@ -124,6 +124,13 @@ pub(super) fn build_system_prompt_with_manifest(
     turn_id: Option<&str>,
 ) -> BuiltSystemPrompt {
     let mut prompt_manifest_layers = Vec::new();
+    // Issue #2659: track per-build appendages so identical large content
+    // (SAK / longterm_catalog / future skill listings) is never pushed
+    // twice into the same system prompt. Static prelude blocks (the
+    // "You are chatting..." preamble, Discord rules, etc.) are *not*
+    // routed through the tracker because they are unique by construction
+    // and don't benefit from a hash check.
+    let mut dedupe_tracker = section_dedupe::PromptSectionTracker::new();
     let mut system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
          {}\n\
@@ -243,8 +250,16 @@ pub(super) fn build_system_prompt_with_manifest(
 
         // SAK before LTM: placed here for cache prefix stability — SAK and
         // everything above it rarely changes, maximising Anthropic prefix cache hits.
+        //
+        // Issue #2659: route every large externally-sourced section through
+        // `dedupe_tracker.record(...)` so the same SHA-256-identical block
+        // is never appended twice in one build. Behavior is preserved on
+        // the happy path (first-time appendage always records); duplicate
+        // attempts only trip a WARN log and skip the push.
         if profile != DispatchProfile::Lite {
-            if let Some(sak) = shared_knowledge {
+            if let Some(sak) = shared_knowledge
+                && dedupe_tracker.record("shared_knowledge", sak)
+            {
                 system_prompt_owned.push_str("\n\n");
                 system_prompt_owned.push_str(sak);
             }
@@ -252,12 +267,14 @@ pub(super) fn build_system_prompt_with_manifest(
 
         // ReviewLite/Lite: skip long-term memory and peer agents to save tokens
         if profile == DispatchProfile::Full {
-            if let Some(catalog) = longterm_catalog {
+            if let Some(catalog) = longterm_catalog
+                && dedupe_tracker.record("longterm_catalog", catalog)
+            {
                 system_prompt_owned.push_str(
                     "\n\n[Long-term Memory]\n\
                      Available memory files for this agent. Use the Read tool to load full content when needed:\n",
                 );
-                system_prompt_owned.push_str(&catalog);
+                system_prompt_owned.push_str(catalog);
             }
 
             if binding.peer_agents_enabled {
@@ -268,7 +285,9 @@ pub(super) fn build_system_prompt_with_manifest(
             }
         }
     } else if profile != DispatchProfile::Lite {
-        if let Some(sak) = shared_knowledge {
+        if let Some(sak) = shared_knowledge
+            && dedupe_tracker.record("shared_knowledge", sak)
+        {
             // No role binding — still inject SAK (no LTM/peer agents to worry about)
             system_prompt_owned.push_str("\n\n");
             system_prompt_owned.push_str(sak);
@@ -341,6 +360,17 @@ pub(super) fn build_system_prompt_with_manifest(
             channel_id.get()
         );
     }
+    // Issue #2659: always-on structured telemetry — captures the final
+    // build size + dedup tracker's accounting so log scrapers can spot a
+    // regression where the prompt grew by ~25KB unexpectedly.
+    tracing::debug!(
+        target: "agentdesk.prompt_section_dedupe",
+        profile = ?profile,
+        channel_id = channel_id.get(),
+        prompt_bytes = system_prompt_owned.len(),
+        tracked_section_bytes = dedupe_tracker.appended_bytes(),
+        "prompt build complete"
+    );
 
     let manifest = build_prompt_manifest(
         turn_id,
@@ -364,6 +394,8 @@ pub(super) fn build_system_prompt_with_manifest(
         manifest,
     }
 }
+
+mod section_dedupe;
 
 #[cfg(test)]
 mod dispatch_contract_tests;
