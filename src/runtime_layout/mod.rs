@@ -621,8 +621,11 @@ fn copy_path_resolving_symlinks(src: &Path, dest: &Path) -> Result<(), String> {
 }
 
 fn remove_link_or_path(path: &Path) -> Result<(), String> {
-    let meta = fs::symlink_metadata(path)
-        .map_err(|e| format!("Failed to stat '{}': {e}", path.display()))?;
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Failed to stat '{}': {error}", path.display())),
+    };
     if meta.file_type().is_symlink() {
         #[cfg(windows)]
         {
@@ -630,23 +633,27 @@ fn remove_link_or_path(path: &Path) -> Result<(), String> {
                 .map(|target| target.is_dir())
                 .unwrap_or(false)
             {
-                return fs::remove_dir(path)
-                    .map_err(|e| format!("Failed to remove '{}': {e}", path.display()));
+                return remove_dir_idempotent(path);
             }
         }
-        return fs::remove_file(path)
-            .map_err(|e| format!("Failed to remove '{}': {e}", path.display()));
+        return remove_file_idempotent(path);
     }
 
     if meta.is_dir() {
-        fs::remove_dir_all(path).map_err(|e| format!("Failed to remove '{}': {e}", path.display()))
+        remove_dir_all_idempotent(path)
     } else {
         #[cfg(windows)]
         {
             match fs::remove_file(path) {
                 Ok(()) => Ok(()),
+                Err(file_err) if file_err.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(file_err) if meta.file_type().is_symlink() => {
-                    fs::remove_dir(path).map_err(|dir_err| {
+                    fs::remove_dir(path).or_else(|dir_err| {
+                        if dir_err.kind() == std::io::ErrorKind::NotFound {
+                            return Ok(());
+                        }
+                        Err(dir_err)
+                    }).map_err(|dir_err| {
                         format!(
                             "Failed to remove '{}': {file_err}; fallback remove_dir also failed: {dir_err}",
                             path.display()
@@ -660,8 +667,32 @@ fn remove_link_or_path(path: &Path) -> Result<(), String> {
         }
         #[cfg(not(windows))]
         {
-            fs::remove_file(path).map_err(|e| format!("Failed to remove '{}': {e}", path.display()))
+            remove_file_idempotent(path)
         }
+    }
+}
+
+fn remove_file_idempotent(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Failed to remove '{}': {error}", path.display())),
+    }
+}
+
+fn remove_dir_idempotent(path: &Path) -> Result<(), String> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Failed to remove '{}': {error}", path.display())),
+    }
+}
+
+fn remove_dir_all_idempotent(path: &Path) -> Result<(), String> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Failed to remove '{}': {error}", path.display())),
     }
 }
 
@@ -777,6 +808,12 @@ mod tests {
 
         assert!(error.contains("Failed to create symlink"));
         assert!(same_canonical_path(&link, &other));
+    }
+
+    #[test]
+    fn remove_link_or_path_ignores_missing_path() {
+        let temp = tempfile::tempdir().unwrap();
+        remove_link_or_path(&temp.path().join("missing")).unwrap();
     }
 
     #[test]
