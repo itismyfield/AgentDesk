@@ -160,7 +160,10 @@ async fn unpin_placeholder_safe(
     }
     let channel = serenity::ChannelId::new(channel_id);
     let message = serenity::MessageId::new(message_id);
-    match channel.unpin(http, message).await {
+    // `Manage Messages` lives on the announce bot in this deployment;
+    // route the unpin there to avoid a 403 storm.
+    let unpin_http = super::gateway::manage_messages_http(shared, http).await;
+    match channel.unpin(unpin_http.as_ref(), message).await {
         Ok(()) => {
             shared
                 .placeholder_controller

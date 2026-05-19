@@ -25,6 +25,25 @@ use formatting::ReplaceLongMessageOutcome;
 
 pub(super) type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Resolve the HTTP client that should be used for channel-mod operations
+/// that require `Manage Messages` (pin/unpin, in particular).
+///
+/// In this deployment the `Manage Messages` permission is concentrated on
+/// the announce bot, so pin/unpin lifecycle code prefers it over the
+/// per-provider bot http to avoid the Missing-Permissions 403 storm we
+/// otherwise see on terminal-relay placeholder cleanup.
+pub(super) async fn manage_messages_http(
+    shared: &SharedData,
+    fallback: &Arc<serenity::Http>,
+) -> Arc<serenity::Http> {
+    if let Some(registry) = shared.health_registry()
+        && let Some(http) = registry.announce_http_clone().await
+    {
+        return http;
+    }
+    fallback.clone()
+}
+
 pub(super) trait TurnGateway: Send + Sync {
     fn send_message<'a>(
         &'a self,
@@ -497,16 +516,23 @@ impl TurnGateway for DiscordGateway {
         message_id: MessageId,
     ) -> GatewayFuture<'a, Result<bool, String>> {
         Box::pin(async move {
-            if self.cache_confirms_missing_manage_messages(channel_id) {
+            // Prefer the announce bot for pin/unpin: in this deployment the
+            // `Manage Messages` permission is concentrated on the announce
+            // bot, so the provider bot's http would 403 here. Falls back to
+            // the provider http when the announce bot isn't registered.
+            let http = manage_messages_http(&self.shared, &self.http).await;
+            if Arc::ptr_eq(&http, &self.http)
+                && self.cache_confirms_missing_manage_messages(channel_id)
+            {
                 tracing::debug!(
                     channel_id = channel_id.get(),
                     message_id = message_id.get(),
-                    "[discord] skipping placeholder pin because bot lacks Manage Messages"
+                    "[discord] skipping placeholder pin because bot lacks Manage Messages and announce bot unavailable"
                 );
                 return Ok(false);
             }
             channel_id
-                .pin(&self.http, message_id)
+                .pin(http.as_ref(), message_id)
                 .await
                 .map(|_| true)
                 .map_err(|error| error.to_string())
@@ -519,16 +545,19 @@ impl TurnGateway for DiscordGateway {
         message_id: MessageId,
     ) -> GatewayFuture<'a, Result<bool, String>> {
         Box::pin(async move {
-            if self.cache_confirms_missing_manage_messages(channel_id) {
+            let http = manage_messages_http(&self.shared, &self.http).await;
+            if Arc::ptr_eq(&http, &self.http)
+                && self.cache_confirms_missing_manage_messages(channel_id)
+            {
                 tracing::debug!(
                     channel_id = channel_id.get(),
                     message_id = message_id.get(),
-                    "[discord] skipping placeholder unpin because bot lacks Manage Messages"
+                    "[discord] skipping placeholder unpin because bot lacks Manage Messages and announce bot unavailable"
                 );
                 return Ok(false);
             }
             channel_id
-                .unpin(&self.http, message_id)
+                .unpin(http.as_ref(), message_id)
                 .await
                 .map(|_| true)
                 .map_err(|error| error.to_string())

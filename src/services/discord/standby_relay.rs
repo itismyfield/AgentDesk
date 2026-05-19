@@ -552,7 +552,11 @@ async fn deliver_response(
             match outcome {
                 Ok(ReplaceLongMessageOutcome::EditedOriginal)
                 | Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }) => {
-                    match channel_id.unpin(http, msg_id).await {
+                    // `Manage Messages` lives on the announce bot in this
+                    // deployment; route the unpin there to avoid 403.
+                    let unpin_http =
+                        super::gateway::manage_messages_http(shared, http).await;
+                    match channel_id.unpin(unpin_http.as_ref(), msg_id).await {
                         Ok(()) => shared
                             .placeholder_controller
                             .forget_placeholder_pin(provider, channel_id, msg_id),

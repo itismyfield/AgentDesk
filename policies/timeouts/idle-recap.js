@@ -27,19 +27,16 @@ module.exports = function attachIdleRecap(timeouts, helpers) {
       var mainChannelSqlGuard =
         "AND thread_channel_id IS NULL " +
         "AND session_key !~ '-t[0-9]{15,}(-dev)?$' ";
-      // Note: `tokens` and the future `tokens_updated_at` (migration 0054,
-      // tracked by PR #2086) are deliberately *not* read here. The renderer
-      // lives in a follow-up PR and will pull them at posting time so this
-      // first cut stays runnable even before 0054 is applied.
+      // Cadence: fire at most once per idle period. We treat a recap as
+      // "still current" when it was posted *after* the most recent user
+      // activity (last_heartbeat), and only re-arm once the user actually
+      // comes back — at which point dispatch bumps last_heartbeat past
+      // idle_recap_posted_at, making the next idle period eligible again.
       //
-      // Cadence: we want a refresh roughly every 5 minutes. The dcserver API
-      // stamps `idle_recap_posted_at = NOW()` *after* the SELECT runs, so a
-      // tight `< NOW() - INTERVAL '5 minutes'` predicate skips the next
-      // cycle (stamp ends up slightly in the future relative to that cycle's
-      // SELECT timestamp). Allow a 10-second slack on the dedupe predicate
-      // so the genuine 5-minute beat fires; the heartbeat predicate keeps
-      // the strict 5-minute floor so we never recap sessions that just went
-      // idle.
+      // Why: the original design re-posted every 5 min (deleting the
+      // previous card), which felt like a recurring notification to the
+      // user even though only one card was visible at a time. A single
+      // recap per idle period is the desired UX.
       var candidates = agentdesk.db.query(
         "SELECT session_key, provider, thread_channel_id, last_heartbeat, " +
         "idle_recap_message_id, idle_recap_posted_at " +
@@ -49,11 +46,14 @@ module.exports = function attachIdleRecap(timeouts, helpers) {
         "AND active_dispatch_id IS NULL " +
         mainChannelSqlGuard +
         "AND COALESCE(last_heartbeat, created_at) <= NOW() - INTERVAL '5 minutes' " +
-        // The dcserver handler enforces a per-cycle dedupe via
-        // idle_recap_posted_at, but we trim obvious dupes here to spare
-        // the API call. 10s slack matches API write latency.
+        // Re-arm only after the user has been active since the last recap.
+        // last_heartbeat advances on every dispatch (see dispatch_cancel /
+        // dispatch_status / lifecycle watchers), so once the user sends a
+        // turn, heartbeat > idle_recap_posted_at and the next idle period
+        // becomes eligible. Until then, the existing card is treated as
+        // still serving its purpose.
         "AND (idle_recap_posted_at IS NULL " +
-        "     OR idle_recap_posted_at <= NOW() - INTERVAL '4 minutes 50 seconds') " +
+        "     OR idle_recap_posted_at < COALESCE(last_heartbeat, created_at)) " +
         "ORDER BY COALESCE(last_heartbeat, created_at) ASC LIMIT 50"
       );
 

@@ -106,6 +106,15 @@ impl HealthRegistry {
         self.notify_http.lock().await.clone()
     }
 
+    /// Snapshot the announce-bot HTTP client. The announce bot is where
+    /// `Manage Messages` (and other channel-mod) permissions are concentrated
+    /// in this deployment, so pin/unpin lifecycle code prefers it over the
+    /// per-provider bot http to avoid the `Missing Permissions` 403 storm we
+    /// otherwise see on terminal-relay placeholder cleanup.
+    pub(crate) async fn announce_http_clone(&self) -> Option<Arc<serenity::Http>> {
+        self.announce_http.lock().await.clone()
+    }
+
     pub(super) async fn register(&self, name: String, shared: Arc<SharedData>) {
         let mut providers = self.providers.lock().await;
         if providers.iter().any(|entry| entry.name == name) {

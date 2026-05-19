@@ -4250,7 +4250,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 !state.rebind_origin && state.channel_id != 0 && state.current_msg_id != 0
             }) {
                 let message_id = serenity::MessageId::new(state.current_msg_id);
-                match channel_id.unpin(&http, message_id).await {
+                // `Manage Messages` lives on the announce bot in this deployment;
+                // route the unpin there to avoid a 403 storm. See
+                // `crate::services::discord::gateway::manage_messages_http`.
+                let unpin_http =
+                    crate::services::discord::gateway::manage_messages_http(&shared, &http).await;
+                match channel_id.unpin(unpin_http.as_ref(), message_id).await {
                     Ok(()) => {
                         shared.placeholder_controller.forget_placeholder_pin(
                             &provider_kind,
