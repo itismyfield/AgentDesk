@@ -446,6 +446,7 @@ src/
 │   │   │   ├── manifest.rs
 │   │   │   ├── memory_guidance.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── section_dedupe.rs
 │   │   │   └── tests.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── mod.rs
