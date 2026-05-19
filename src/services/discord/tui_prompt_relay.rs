@@ -962,6 +962,7 @@ pub(super) fn format_ssh_direct_prompt_notification(
         other if !other.is_empty() => other.to_string(),
         _ => "TUI".to_string(),
     };
+    let prompt = strip_terminal_controls(prompt);
     let preview =
         truncate_chars(prompt.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT).replace("```", "` ` `");
     format!(
@@ -973,6 +974,29 @@ pub(super) fn format_ssh_direct_prompt_notification(
 
 fn sanitize_inline_code(value: &str) -> String {
     value.replace('`', "'")
+}
+
+fn strip_terminal_controls(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if chars.peek().copied() == Some('[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t' {
+            continue;
+        }
+        output.push(ch);
+    }
+    output
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
@@ -1014,6 +1038,19 @@ mod tests {
 
         assert!(output.contains("`tmux'name`"));
         assert!(output.contains("a ` ` ` fence"));
+    }
+
+    #[test]
+    fn formats_ssh_direct_prompt_notification_strips_terminal_controls() {
+        let output = format_ssh_direct_prompt_notification(
+            "claude",
+            "AgentDesk-claude-a",
+            "\u{15}\u{1b}[31mhello\u{1b}[0m\n\tworld",
+        );
+
+        assert!(output.contains("hello\n\tworld"));
+        assert!(!output.contains('\u{15}'));
+        assert!(!output.contains('\u{1b}'));
     }
 
     #[test]
