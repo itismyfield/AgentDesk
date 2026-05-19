@@ -145,6 +145,54 @@ pub(crate) fn register_tmux_runtime_binding(tmux_session_name: &str, binding: Tu
     );
 }
 
+pub(crate) fn register_rehydrated_tmux_runtime_binding(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    binding: TuiRuntimeBinding,
+) {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty()
+        || tmux_session_name.is_empty()
+        || channel_id == 0
+        || binding.output_path.trim().is_empty()
+        || binding.relay_output_path().trim().is_empty()
+    {
+        return;
+    }
+    let session_id = binding.session_id.clone();
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    state.runtime_by_tmux.insert(
+        tmux_session_name.to_string(),
+        TimedValue {
+            value: binding,
+            recorded_at: Instant::now(),
+        },
+    );
+    state.channel_by_tmux.insert(
+        tmux_session_name.to_string(),
+        TimedValue {
+            value: channel_id,
+            recorded_at: Instant::now(),
+        },
+    );
+    if let Some(session_id) = session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        state.tmux_by_provider_session.insert(
+            PromptKey::new(&provider, session_id),
+            TimedValue {
+                value: tmux_session_name.to_string(),
+                recorded_at: Instant::now(),
+            },
+        );
+    }
+}
+
 pub fn owner_channel_for_tmux_session(tmux_session_name: &str) -> Option<u64> {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
