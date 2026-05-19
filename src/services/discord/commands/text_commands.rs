@@ -1148,13 +1148,15 @@ Any other message is sent to {p}.
         // top of this function so by the time we reach this arm the caller
         // is already owner + high_risk_enabled.
         "!deadlock-recover" | "!machine-flip" | "!stuck-pr-rebase" => {
-            use super::recovery_ops::{
-                RecoveryKind, build_recovery_script, validate_safe_token,
-            };
+            use super::recovery_ops::{RecoveryKind, build_recovery_script, validate_safe_token};
             let arg = arg1.trim();
             let kind = match cmd {
                 "!deadlock-recover" => {
-                    let env = if arg.is_empty() { "release".to_string() } else { arg.to_string() };
+                    let env = if arg.is_empty() {
+                        "release".to_string()
+                    } else {
+                        arg.to_string()
+                    };
                     if let Err(e) = validate_safe_token(&env) {
                         let _ = msg.reply(&ctx.http, e.user_message("env")).await;
                         return Ok(true);
@@ -1176,7 +1178,9 @@ Any other message is sent to {p}.
                         let _ = msg.reply(&ctx.http, e.user_message("peer")).await;
                         return Ok(true);
                     }
-                    RecoveryKind::MachineFlip { peer: arg.to_string() }
+                    RecoveryKind::MachineFlip {
+                        peer: arg.to_string(),
+                    }
                 }
                 "!stuck-pr-rebase" => {
                     let label = if arg.is_empty() {
@@ -1204,8 +1208,7 @@ Any other message is sent to {p}.
                 .map(|h| h.display().to_string())
                 .unwrap_or_else(|| "/".to_string());
             let result = tokio::task::spawn_blocking(move || {
-                let mut builder =
-                    crate::services::platform::shell::shell_command_builder(&script);
+                let mut builder = crate::services::platform::shell::shell_command_builder(&script);
                 builder
                     .current_dir(&working_dir)
                     .stdin(std::process::Stdio::null())

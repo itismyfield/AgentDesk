@@ -411,10 +411,7 @@ mod tests {
             "PR.42",
             "v1.2.3-rc1",
         ] {
-            assert!(
-                validate_safe_token(good).is_ok(),
-                "must accept {good:?}",
-            );
+            assert!(validate_safe_token(good).is_ok(), "must accept {good:?}",);
         }
     }
 
@@ -475,40 +472,23 @@ mod tests {
     #[test]
     fn recovery_kind_name_matches_command_surface() {
         assert_eq!(
-            RecoveryKind::Deadlock {
-                env: "r".into()
-            }
-            .name(),
+            RecoveryKind::Deadlock { env: "r".into() }.name(),
             "!deadlock-recover"
         );
         assert_eq!(
-            RecoveryKind::MachineFlip {
-                peer: "p".into()
-            }
-            .name(),
+            RecoveryKind::MachineFlip { peer: "p".into() }.name(),
             "!machine-flip"
         );
         assert_eq!(
-            RecoveryKind::StuckPrRebase {
-                label: "l".into()
-            }
-            .name(),
+            RecoveryKind::StuckPrRebase { label: "l".into() }.name(),
             "!stuck-pr-rebase"
         );
     }
 
     #[test]
     fn token_error_messages_mention_field_name() {
-        assert!(
-            TokenError::Empty
-                .user_message("peer")
-                .contains("peer")
-        );
-        assert!(
-            TokenError::TooLong
-                .user_message("env")
-                .contains("env")
-        );
+        assert!(TokenError::Empty.user_message("peer").contains("peer"));
+        assert!(TokenError::TooLong.user_message("env").contains("env"));
         assert!(
             TokenError::InvalidChar(';')
                 .user_message("label")

@@ -408,6 +408,7 @@ src/
 │   │   │   ├── model_picker.rs
 │   │   │   ├── model_ui.rs
 │   │   │   ├── receipt.rs
+│   │   │   ├── recovery_ops.rs
 │   │   │   ├── restart.rs
 │   │   │   ├── session.rs
 │   │   │   ├── skill.rs

@@ -174,11 +174,9 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
         // RCE-equivalent surface.
         // `/deadlock-recover`, `/machine-flip`, and `/stuck-pr-rebase` (issue
         // #2653) run launchctl/ssh/git pipelines — owner-only + opt-in.
-        "/shell"
-        | "/allowed"
-        | "/deadlock-recover"
-        | "/machine-flip"
-        | "/stuck-pr-rebase" => CommandRisk::ShellOrToolGrant,
+        "/shell" | "/allowed" | "/deadlock-recover" | "/machine-flip" | "/stuck-pr-rebase" => {
+            CommandRisk::ShellOrToolGrant
+        }
 
         // Credential / user-management surface.
         "/allowall" | "/adduser" | "/removeuser" | "/escalation" => CommandRisk::CredentialSystem,
