@@ -87,10 +87,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hard-reset-session-each",
         action="store_true",
-        default=True,
-        help="Kill the per-channel TUI tmux session and archive the heavy on-disk "
-        "claude jsonl before each scenario, so the next scenario starts on a "
-        "fresh provider session (avoids cc TUI 100%%-context starvation).",
+        default=False,
+        help="Kill the per-channel TUI tmux session before each scenario so the "
+        "next scenario starts on a fresh provider session. Defaults OFF.",
     )
     parser.add_argument(
         "--handoff-to-agent",
