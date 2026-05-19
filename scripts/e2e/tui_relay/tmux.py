@@ -19,6 +19,17 @@ def _have_tmux() -> bool:
     return shutil.which("tmux") is not None
 
 
+def has_session(session_name: str) -> bool:
+    if not _have_tmux():
+        return False
+    proc = subprocess.run(
+        ["tmux", "has-session", "-t", session_name],
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
 def list_panes(session_name: str) -> list[PaneInfo]:
     if not _have_tmux():
         return []
