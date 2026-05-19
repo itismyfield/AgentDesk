@@ -3,7 +3,7 @@ use anyhow::Result;
 use super::args::{
     AgentHandoffChannelKindArg, AutoQueueAction, CardAction, Commands, ConfigAction,
     DispatchAction, DoctorProfileArg, IntakeOutboxAction, MigrateAction, MonitoringAction,
-    ReportProvider, ShowAction,
+    PhaseAction, QueryAction, ReportProvider, ShowAction,
 };
 
 fn agent_handoff_channel_kind(
@@ -381,6 +381,16 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             super::utils::handle_addmcptool(&tools);
             Ok(())
         }
+        Commands::InstallMementoSessionHook {
+            settings_path,
+            dry_run,
+            uninstall,
+        } => super::utils::handle_install_memento_session_hook(
+            settings_path.as_deref(),
+            dry_run,
+            uninstall,
+        )
+        .map_err(anyhow::Error::msg),
         Commands::Status => exit_for_cli(super::client::cmd_status()),
         Commands::Cards { status } => exit_for_cli(super::client::cmd_cards(status.as_deref())),
         Commands::Dispatch(args) => exit_for_cli(match args.action {
@@ -414,6 +424,46 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             exit_for_cli(super::client::cmd_advance(&issue_number))
         }
         Commands::Queue => exit_for_cli(super::client::cmd_queue()),
+        Commands::Query {
+            action,
+            json,
+            filters,
+            agent,
+            limit,
+        } => {
+            let section = match action {
+                Some(QueryAction::Queue) => super::query::QuerySection::Queue,
+                Some(QueryAction::Dispatches) => super::query::QuerySection::Dispatches,
+                Some(QueryAction::PhaseGate) => super::query::QuerySection::PhaseGate,
+                Some(QueryAction::All) | None => super::query::QuerySection::All,
+            };
+            let opts_result = super::query::QueryOptions::from_raw(json, filters, agent, limit);
+            let invoke = match opts_result {
+                Ok(opts) => super::query::cmd_query(section, opts),
+                Err(err) => Err(err),
+            };
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
+        Commands::Phase {
+            action,
+            json,
+            detailed,
+        } => {
+            // Default + explicit `status` are identical for now; PhaseAction
+            // is left as a Subcommand so future verbs (`watch`, `clear`) can
+            // attach without breaking call sites.
+            let _ = action.unwrap_or(PhaseAction::Status);
+            let invoke = super::client::cmd_phase_status(json, detailed);
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
         Commands::Deploy => exit_for_cli(super::client::cmd_deploy()),
         Commands::Config { action } => exit_for_cli(match action {
             ConfigAction::Get => super::client::cmd_config_get(),
@@ -478,6 +528,21 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         }),
         Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
         Commands::Show { action } => exit_for_cli(handle_show(action)),
+        Commands::Health { json } => exit_for_cli(super::client::cmd_health(json)),
+        Commands::MachineCompare { json } => exit_for_cli(super::client::cmd_machine_compare(json)),
+        Commands::Activity {
+            since,
+            until,
+            repo,
+            json,
+            no_agentdesk,
+        } => exit_for_cli(super::client::cmd_activity(
+            &since,
+            until.as_deref(),
+            repo.as_deref(),
+            json,
+            no_agentdesk,
+        )),
     }
 }
 

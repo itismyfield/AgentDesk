@@ -1140,6 +1140,118 @@ Any other message is sent to {p}.
             return Ok(true);
         }
 
+        // Issue #2653: text-command surface for the three recovery
+        // pipelines. The slash-command equivalents (registered in
+        // runtime_bootstrap) carry the user-facing rendering; here we
+        // re-use the pure `build_recovery_script` helper so both surfaces
+        // produce byte-identical bash payloads. Risk-tier gate ran at the
+        // top of this function so by the time we reach this arm the caller
+        // is already owner + high_risk_enabled.
+        "!deadlock-recover" | "!machine-flip" | "!stuck-pr-rebase" => {
+            use super::recovery_ops::{RecoveryKind, build_recovery_script, validate_safe_token};
+            let arg = arg1.trim();
+            let kind = match cmd {
+                "!deadlock-recover" => {
+                    let env = if arg.is_empty() {
+                        "release".to_string()
+                    } else {
+                        arg.to_string()
+                    };
+                    if let Err(e) = validate_safe_token(&env) {
+                        let _ = msg.reply(&ctx.http, e.user_message("env")).await;
+                        return Ok(true);
+                    }
+                    RecoveryKind::Deadlock { env }
+                }
+                "!machine-flip" => {
+                    if arg.is_empty() {
+                        let _ = msg
+                            .reply(
+                                &ctx.http,
+                                "Usage: `!machine-flip <peer-ssh-host>` \
+                                 (e.g. `!machine-flip mac-book`)",
+                            )
+                            .await;
+                        return Ok(true);
+                    }
+                    if let Err(e) = validate_safe_token(arg) {
+                        let _ = msg.reply(&ctx.http, e.user_message("peer")).await;
+                        return Ok(true);
+                    }
+                    RecoveryKind::MachineFlip {
+                        peer: arg.to_string(),
+                    }
+                }
+                "!stuck-pr-rebase" => {
+                    let label = if arg.is_empty() {
+                        "audit:2026-05-19".to_string()
+                    } else {
+                        arg.to_string()
+                    };
+                    if let Err(e) = validate_safe_token(&label) {
+                        let _ = msg.reply(&ctx.http, e.user_message("label")).await;
+                        return Ok(true);
+                    }
+                    RecoveryKind::StuckPrRebase { label }
+                }
+                _ => unreachable!("outer match arm guards command name"),
+            };
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ◀ [{}] {} (kind={})",
+                msg.author.name,
+                cmd,
+                kind.name()
+            );
+            let script = build_recovery_script(&kind);
+            let working_dir = dirs::home_dir()
+                .map(|h| h.display().to_string())
+                .unwrap_or_else(|| "/".to_string());
+            let result = tokio::task::spawn_blocking(move || {
+                let mut builder = crate::services::platform::shell::shell_command_builder(&script);
+                builder
+                    .current_dir(&working_dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                crate::services::process::configure_child_process_group(&mut builder);
+                match builder.spawn() {
+                    Ok(child) => crate::services::shell_guard::wait_with_no_output_timeout(
+                        child,
+                        crate::services::shell_guard::DEFAULT_NO_OUTPUT_TIMEOUT,
+                        crate::services::shell_guard::DEFAULT_TOTAL_TIMEOUT,
+                    ),
+                    Err(e) => Err(format!("spawn failed: {}", e)),
+                }
+            })
+            .await;
+            let response = match result {
+                Ok(Ok(outcome)) => {
+                    let stdout = String::from_utf8_lossy(&outcome.stdout);
+                    let stderr = String::from_utf8_lossy(&outcome.stderr);
+                    let mut parts = Vec::new();
+                    if !stdout.is_empty() {
+                        parts.push(format!("```\n{}\n```", stdout.trim_end()));
+                    }
+                    if !stderr.is_empty() {
+                        parts.push(format!("stderr:\n```\n{}\n```", stderr.trim_end()));
+                    }
+                    if let Some(cause) = outcome.timed_out {
+                        parts.push(format!("killed by shell guard ({})", cause.as_str()));
+                    } else if parts.is_empty() {
+                        parts.push(format!("(exit code: {})", outcome.exit_code));
+                    } else if outcome.exit_code != 0 {
+                        parts.push(format!("(exit code: {})", outcome.exit_code));
+                    }
+                    parts.join("\n")
+                }
+                Ok(Err(e)) => format!("Failed to execute: {}", e),
+                Err(e) => format!("Task error: {}", e),
+            };
+            send_long_message_raw(&ctx.http, channel_id, &response, &data.shared).await?;
+            return Ok(true);
+        }
+
         "!cc" => {
             let skill = arg1.to_string();
             let args_str = text

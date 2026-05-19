@@ -1,5 +1,6 @@
 mod local;
 mod memento;
+mod memento_instructions_cache;
 mod memento_throttle;
 mod runtime_state;
 
@@ -19,9 +20,16 @@ pub(crate) use memento::{
     MementoBackend, MementoRememberRequest, MementoToolFeedbackRequest, resolve_memento_agent_id,
     resolve_memento_workspace, sanitize_memento_workspace_segment,
 };
-pub(crate) use memento_throttle::{
-    RecallSizeBucket, memento_call_metrics_snapshot, note_recall_context_size,
+pub(crate) use memento_instructions_cache::{
+    InstructionsDelta, instructions_cache_stats, record_instructions,
 };
+pub(crate) use memento_throttle::{
+    ForgetRatioAlarmDecision, RecallSizeBucket, memento_call_metrics_snapshot,
+    note_memento_forget_call, note_memento_recall_call, note_recall_context_size,
+};
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use memento_throttle::{ForgetRatioSnapshot, observe_memento_forget_recall};
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) use memento_throttle::{
     note_memento_dedup_hit, note_memento_remote_call, note_memento_tool_feedback_trigger,

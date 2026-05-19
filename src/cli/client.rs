@@ -639,6 +639,1195 @@ pub fn cmd_status() -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// `agentdesk activity --since … [--until …]`  (issue #2658)
+//
+// Time-windowed activity report that fuses four data sources:
+//   1. git log         — commits landed on the local default branch
+//   2. gh issue list   — issues closed inside the window
+//   3. gh pr list      — PRs merged inside the window
+//   4. AgentDesk API   — deploys (worker_node started_at) + recent incidents
+//                        (high_risk_recovery / manual_intervention events)
+//
+// Sources 1–3 are always available; source 4 is best-effort and silently
+// skipped when the local API is unreachable (or when `--no-agentdesk` is set).
+// ---------------------------------------------------------------------------
+/// Parse `--since` / `--until` into RFC3339 timestamps.
+///
+/// Accepted forms:
+///   * RFC3339 (`2026-05-19T23:10:00+09:00`)
+///   * Duration suffix relative to `now()` — `12h`, `90m`, `7d`, `3600s`
+///   * `since:<short-sha>` — anchors on a commit's author time
+fn parse_window_anchor(
+    raw: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("activity window: empty timestamp".to_string());
+    }
+    if let Some(sha) = trimmed.strip_prefix("since:") {
+        let output = std::process::Command::new("git")
+            .args(["show", "-s", "--format=%cI", sha.trim()])
+            .output()
+            .map_err(|err| format!("git show {sha}: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git show {sha} exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let ts = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return chrono::DateTime::parse_from_rfc3339(&ts)
+            .map(|parsed| parsed.with_timezone(&chrono::Utc))
+            .map_err(|err| format!("git anchor decode: {err}"));
+    }
+    if let Some(secs) = parse_duration_suffix(trimmed) {
+        return Ok(now - chrono::Duration::seconds(secs as i64));
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed)
+        .map(|parsed| parsed.with_timezone(&chrono::Utc))
+        .map_err(|err| format!("activity window: cannot parse '{trimmed}' ({err})"))
+}
+/// Accepts `123s`, `45m`, `12h`, `7d` (single-unit suffix only). Returns `None`
+/// for anything that doesn't look like a bare duration — the caller then falls
+/// back to RFC3339 parsing, so misclassification is benign.
+fn parse_duration_suffix(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let last = raw.chars().last()?;
+    let (num, multiplier) = match last {
+        's' => (&raw[..raw.len() - 1], 1u64),
+        'm' => (&raw[..raw.len() - 1], 60),
+        'h' => (&raw[..raw.len() - 1], 60 * 60),
+        'd' => (&raw[..raw.len() - 1], 60 * 60 * 24),
+        _ => return None,
+    };
+    let value: u64 = num.trim().parse().ok()?;
+    value.checked_mul(multiplier)
+}
+#[derive(Debug, Clone)]
+struct ActivityEntry {
+    kind: &'static str, // "commit" | "issue" | "pr" | "deploy" | "incident"
+    timestamp: chrono::DateTime<chrono::Utc>,
+    ref_label: String, // e.g. "abc1234", "#2658", "PR #1234"
+    summary: String,
+    actor: String,
+}
+fn shell_quote_simple(value: &str) -> String {
+    // Used for human-readable log output only — not for shell-out.
+    value.replace('\n', " ").replace('\r', " ")
+}
+fn collect_git_commits(
+    since: chrono::DateTime<chrono::Utc>,
+    until: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<ActivityEntry>, String> {
+    let since_arg = format!("--since={}", since.to_rfc3339());
+    let until_arg = format!("--until={}", until.to_rfc3339());
+    let pretty = "--pretty=format:%H\x1f%cI\x1f%an\x1f%s".to_string();
+    let output = std::process::Command::new("git")
+        .args([
+            "log",
+            "--no-merges",
+            since_arg.as_str(),
+            until_arg.as_str(),
+            pretty.as_str(),
+        ])
+        .output()
+        .map_err(|err| format!("git log: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "git log exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(4, '\x1f').collect();
+        if parts.len() != 4 {
+            continue;
+        }
+        let Ok(ts) = chrono::DateTime::parse_from_rfc3339(parts[1]) else {
+            continue;
+        };
+        let sha_short = parts[0].chars().take(7).collect::<String>();
+        entries.push(ActivityEntry {
+            kind: "commit",
+            timestamp: ts.with_timezone(&chrono::Utc),
+            ref_label: sha_short,
+            summary: shell_quote_simple(parts[3]),
+            actor: parts[2].to_string(),
+        });
+    }
+    Ok(entries)
+}
+fn run_gh_capture(args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("gh")
+        .args(args)
+        .output()
+        .map_err(|err| format!("gh CLI failed to execute: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "gh exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|err| format!("gh stdout decode: {err}"))
+}
+fn collect_closed_issues(
+    repo: &str,
+    since: chrono::DateTime<chrono::Utc>,
+    until: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<ActivityEntry>, String> {
+    // `gh issue list --search closed:>=…` is the documented way to filter on
+    // close time. We rely on JSON output so we don't have to scrape pretty
+    // formatting.
+    let search = format!(
+        "is:issue closed:{}..{} sort:closed-desc",
+        since.format("%Y-%m-%dT%H:%M:%S%z"),
+        until.format("%Y-%m-%dT%H:%M:%S%z"),
+    );
+    let raw = run_gh_capture(&[
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "closed",
+        "--limit",
+        "200",
+        "--search",
+        search.as_str(),
+        "--json",
+        "number,title,closedAt,author",
+    ])?;
+    let value: Value = serde_json::from_str(&raw).map_err(|err| format!("gh issue json: {err}"))?;
+    let arr = value.as_array().cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for item in arr {
+        let number = item.get("number").and_then(Value::as_i64).unwrap_or(0);
+        let title = item
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let closed = item
+            .get("closedAt")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|ts| ts.with_timezone(&chrono::Utc));
+        let Some(closed) = closed else { continue };
+        if closed < since || closed >= until {
+            // gh search rounds to date-precision — re-filter precisely.
+            continue;
+        }
+        let actor = item
+            .get("author")
+            .and_then(|a| a.get("login"))
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+            .to_string();
+        out.push(ActivityEntry {
+            kind: "issue",
+            timestamp: closed,
+            ref_label: format!("#{number}"),
+            summary: shell_quote_simple(&title),
+            actor,
+        });
+    }
+    Ok(out)
+}
+fn collect_merged_prs(
+    repo: &str,
+    since: chrono::DateTime<chrono::Utc>,
+    until: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<ActivityEntry>, String> {
+    let search = format!(
+        "is:pr is:merged merged:{}..{} sort:updated-desc",
+        since.format("%Y-%m-%dT%H:%M:%S%z"),
+        until.format("%Y-%m-%dT%H:%M:%S%z"),
+    );
+    let raw = run_gh_capture(&[
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "merged",
+        "--limit",
+        "200",
+        "--search",
+        search.as_str(),
+        "--json",
+        "number,title,mergedAt,author",
+    ])?;
+    let value: Value = serde_json::from_str(&raw).map_err(|err| format!("gh pr json: {err}"))?;
+    let arr = value.as_array().cloned().unwrap_or_default();
+    let mut out = Vec::new();
+    for item in arr {
+        let number = item.get("number").and_then(Value::as_i64).unwrap_or(0);
+        let title = item
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let merged = item
+            .get("mergedAt")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|ts| ts.with_timezone(&chrono::Utc));
+        let Some(merged) = merged else { continue };
+        if merged < since || merged >= until {
+            continue;
+        }
+        let actor = item
+            .get("author")
+            .and_then(|a| a.get("login"))
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+            .to_string();
+        out.push(ActivityEntry {
+            kind: "pr",
+            timestamp: merged,
+            ref_label: format!("PR #{number}"),
+            summary: shell_quote_simple(&title),
+            actor,
+        });
+    }
+    Ok(out)
+}
+fn collect_agentdesk_events(
+    since: chrono::DateTime<chrono::Utc>,
+    until: chrono::DateTime<chrono::Utc>,
+) -> Vec<ActivityEntry> {
+    let mut out = Vec::new();
+    // Deploys: worker_node started_at falling inside the window is, in the
+    // current ops model, the closest stable signal of "node was redeployed".
+    // The cluster endpoint may be missing (PG offline / cluster disabled),
+    // in which case we silently skip the section rather than crashing the
+    // whole activity report.
+    if let Ok(cluster) = get_json("/api/cluster/nodes") {
+        if let Some(nodes) = cluster.get("nodes").and_then(Value::as_array) {
+            for node in nodes {
+                let Some(started_at_str) = node.get("started_at").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(started_at_str) else {
+                    continue;
+                };
+                let started = parsed.with_timezone(&chrono::Utc);
+                if started < since || started >= until {
+                    continue;
+                }
+                let instance = node
+                    .get("instance_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+                    .to_string();
+                let role = node
+                    .get("effective_role")
+                    .and_then(Value::as_str)
+                    .or_else(|| node.get("role").and_then(Value::as_str))
+                    .unwrap_or("-")
+                    .to_string();
+                out.push(ActivityEntry {
+                    kind: "deploy",
+                    timestamp: started,
+                    ref_label: instance.clone(),
+                    summary: format!("worker node restarted (role={role})"),
+                    actor: instance,
+                });
+            }
+        }
+    }
+    // Incidents: failed dispatch outbox rows. Each row carries a
+    // last_error_at / last_error / target tuple — we surface anything that
+    // failed within the window so deploy postmortems land in the same view
+    // as the deploy itself.
+    if let Ok(failures) = get_json("/api/dispatch-outbox/failures") {
+        if let Some(rows) = failures.get("rows").and_then(Value::as_array) {
+            for row in rows {
+                let Some(ts_str) = row
+                    .get("last_error_at")
+                    .and_then(Value::as_str)
+                    .or_else(|| row.get("updated_at").and_then(Value::as_str))
+                else {
+                    continue;
+                };
+                let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(ts_str) else {
+                    continue;
+                };
+                let when = parsed.with_timezone(&chrono::Utc);
+                if when < since || when >= until {
+                    continue;
+                }
+                let label = row
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| id.chars().take(8).collect::<String>())
+                    .unwrap_or_else(|| "-".to_string());
+                let target = row
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+                    .to_string();
+                let detail = row
+                    .get("last_error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("dispatch_outbox failure");
+                out.push(ActivityEntry {
+                    kind: "incident",
+                    timestamp: when,
+                    ref_label: label,
+                    summary: format!("{} → {}", target, shell_quote_simple(detail)),
+                    actor: "dispatch_outbox".to_string(),
+                });
+            }
+        }
+    }
+    out
+}
+fn render_activity_table(entries: &[ActivityEntry]) -> String {
+    if entries.is_empty() {
+        return "(no activity in the requested window)\n".to_string();
+    }
+    let rows: Vec<[String; 5]> = entries
+        .iter()
+        .map(|entry| {
+            [
+                entry.kind.to_string(),
+                entry.timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                entry.ref_label.clone(),
+                entry.actor.clone(),
+                entry.summary.clone(),
+            ]
+        })
+        .collect();
+    let kind_w = rows
+        .iter()
+        .map(|r| r[0].chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let ts_w = rows
+        .iter()
+        .map(|r| r[1].chars().count())
+        .max()
+        .unwrap_or(16)
+        .max(16);
+    let ref_w = rows
+        .iter()
+        .map(|r| r[2].chars().count())
+        .max()
+        .unwrap_or(8)
+        .clamp(8, 18);
+    let actor_w = rows
+        .iter()
+        .map(|r| r[3].chars().count())
+        .max()
+        .unwrap_or(6)
+        .clamp(6, 24);
+    let summary_w = 80usize;
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{}  {}  {}  {}  {}\n",
+        pad_to("kind", kind_w),
+        pad_to("when (UTC)", ts_w),
+        pad_to("ref", ref_w),
+        pad_to("actor", actor_w),
+        "summary",
+    ));
+    out.push_str(&format!(
+        "{}  {}  {}  {}  {}\n",
+        "-".repeat(kind_w),
+        "-".repeat(ts_w),
+        "-".repeat(ref_w),
+        "-".repeat(actor_w),
+        "-".repeat(summary_w.min(40)),
+    ));
+    for row in &rows {
+        let summary = truncate_cell(&row[4], summary_w);
+        out.push_str(&format!(
+            "{}  {}  {}  {}  {}\n",
+            pad_to(&row[0], kind_w),
+            pad_to(&row[1], ts_w),
+            pad_to(&row[2], ref_w),
+            pad_to(&row[3], actor_w),
+            summary,
+        ));
+    }
+    out
+}
+/// `agentdesk activity --since … [--until …] [--repo …] [--json]`
+pub fn cmd_activity(
+    since_raw: &str,
+    until_raw: Option<&str>,
+    repo: Option<&str>,
+    json_output: bool,
+    no_agentdesk: bool,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    let since = parse_window_anchor(since_raw, now)?;
+    let until = match until_raw {
+        Some(raw) => parse_window_anchor(raw, now)?,
+        None => now,
+    };
+    if until <= since {
+        return Err(format!(
+            "activity: --until ({}) must be strictly after --since ({})",
+            until.to_rfc3339(),
+            since.to_rfc3339()
+        ));
+    }
+    let repo_full = repo
+        .map(str::to_string)
+        .or_else(|| infer_dispatch_repo(None))
+        .ok_or_else(|| "activity: --repo required (no origin remote detected)".to_string())?;
+    let mut warnings: Vec<String> = Vec::new();
+    let mut entries: Vec<ActivityEntry> = Vec::new();
+    match collect_git_commits(since, until) {
+        Ok(mut commits) => entries.append(&mut commits),
+        Err(err) => warnings.push(format!("git log failed: {err}")),
+    }
+    match collect_closed_issues(&repo_full, since, until) {
+        Ok(mut issues) => entries.append(&mut issues),
+        Err(err) => warnings.push(format!("gh issue list failed: {err}")),
+    }
+    match collect_merged_prs(&repo_full, since, until) {
+        Ok(mut prs) => entries.append(&mut prs),
+        Err(err) => warnings.push(format!("gh pr list failed: {err}")),
+    }
+    if !no_agentdesk {
+        let mut adk = collect_agentdesk_events(since, until);
+        entries.append(&mut adk);
+    }
+    // Sort most-recent first so eyeballing the table during an outage
+    // surfaces fresh signals at the top.
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    if json_output {
+        let payload = serde_json::json!({
+            "since": since.to_rfc3339(),
+            "until": until.to_rfc3339(),
+            "repo": repo_full,
+            "warnings": warnings,
+            "counts": activity_counts(&entries),
+            "entries": entries.iter().map(activity_entry_to_json).collect::<Vec<_>>(),
+        });
+        print_json(&payload);
+        return Ok(());
+    }
+    println!(
+        "AgentDesk Activity  {since} → {until}  ({repo})",
+        since = since.to_rfc3339(),
+        until = until.to_rfc3339(),
+        repo = repo_full,
+    );
+    let counts = activity_counts(&entries);
+    println!(
+        "  totals: commits={} issues={} prs={} deploys={} incidents={}",
+        counts.get("commit").copied().unwrap_or(0),
+        counts.get("issue").copied().unwrap_or(0),
+        counts.get("pr").copied().unwrap_or(0),
+        counts.get("deploy").copied().unwrap_or(0),
+        counts.get("incident").copied().unwrap_or(0),
+    );
+    for warning in &warnings {
+        println!("  warning: {warning}");
+    }
+    print!("{}", render_activity_table(&entries));
+    Ok(())
+}
+fn activity_counts(entries: &[ActivityEntry]) -> std::collections::HashMap<&'static str, u64> {
+    let mut counts: std::collections::HashMap<&'static str, u64> = std::collections::HashMap::new();
+    for entry in entries {
+        *counts.entry(entry.kind).or_insert(0) += 1;
+    }
+    counts
+}
+fn activity_entry_to_json(entry: &ActivityEntry) -> Value {
+    serde_json::json!({
+        "kind": entry.kind,
+        "timestamp": entry.timestamp.to_rfc3339(),
+        "ref": entry.ref_label,
+        "actor": entry.actor,
+        "summary": entry.summary,
+    })
+}
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+    #[test]
+    fn parse_duration_suffix_handles_each_unit() {
+        assert_eq!(parse_duration_suffix("10s"), Some(10));
+        assert_eq!(parse_duration_suffix("3m"), Some(180));
+        assert_eq!(parse_duration_suffix("2h"), Some(7_200));
+        assert_eq!(parse_duration_suffix("1d"), Some(86_400));
+        assert_eq!(parse_duration_suffix(""), None);
+        assert_eq!(parse_duration_suffix("abc"), None);
+        // Bare integers are not a duration — caller falls back to RFC3339.
+        assert_eq!(parse_duration_suffix("3600"), None);
+    }
+    #[test]
+    fn parse_window_anchor_rejects_garbage() {
+        let now = chrono::Utc::now();
+        let err = parse_window_anchor("not-a-time", now).unwrap_err();
+        assert!(err.contains("cannot parse"));
+    }
+    #[test]
+    fn parse_window_anchor_handles_duration_against_now() {
+        let now = chrono::Utc::now();
+        let parsed = parse_window_anchor("1h", now).unwrap();
+        let diff = (now - parsed).num_seconds();
+        assert!((3599..=3601).contains(&diff), "diff was {diff}");
+    }
+    #[test]
+    fn parse_window_anchor_accepts_rfc3339() {
+        let now = chrono::Utc::now();
+        let parsed = parse_window_anchor("2026-05-19T23:10:00+09:00", now).unwrap();
+        assert_eq!(
+            parsed.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-05-19 14:10"
+        );
+    }
+    #[test]
+    fn activity_counts_buckets_by_kind() {
+        let now = chrono::Utc::now();
+        let entries = vec![
+            ActivityEntry {
+                kind: "commit",
+                timestamp: now,
+                ref_label: "abc".into(),
+                summary: "x".into(),
+                actor: "y".into(),
+            },
+            ActivityEntry {
+                kind: "commit",
+                timestamp: now,
+                ref_label: "def".into(),
+                summary: "x".into(),
+                actor: "y".into(),
+            },
+            ActivityEntry {
+                kind: "pr",
+                timestamp: now,
+                ref_label: "PR #1".into(),
+                summary: "x".into(),
+                actor: "y".into(),
+            },
+        ];
+        let counts = activity_counts(&entries);
+        assert_eq!(counts.get("commit").copied(), Some(2));
+        assert_eq!(counts.get("pr").copied(), Some(1));
+        assert_eq!(counts.get("issue").copied(), None);
+    }
+    #[test]
+    fn render_activity_table_handles_empty_window() {
+        let table = render_activity_table(&[]);
+        assert!(table.contains("no activity"));
+    }
+    #[test]
+    fn render_activity_table_contains_kind_and_ref() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-19T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let entries = vec![ActivityEntry {
+            kind: "pr",
+            timestamp: now,
+            ref_label: "PR #42".into(),
+            summary: "ship it".into(),
+            actor: "alice".into(),
+        }];
+        let table = render_activity_table(&entries);
+        assert!(table.contains("PR #42"));
+        assert!(table.contains("ship it"));
+        assert!(table.contains("alice"));
+        assert!(table.contains("2026-05-19 12:00"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `agentdesk health` / `agentdesk machine-compare`  (issue #2656)
+//
+// These commands replace the recurring "ssh + mtime + 자연어 보고" loop that
+// every deploy / outage triggers. They are intentionally read-only and run
+// against the local API only — cross-machine state is obtained through the
+// existing `worker_nodes` cluster heartbeat table (no SSH, no shell-out).
+// ---------------------------------------------------------------------------
+
+/// Resolve a `cluster.lease_ttl_secs`-shaped staleness budget for treating a
+/// worker_node row as offline. Falls back to the `/api/cluster/nodes`
+/// response, then to a conservative 60 s default.
+fn cluster_lease_ttl_secs(cluster_meta: Option<&Value>) -> u64 {
+    cluster_meta
+        .and_then(|meta| meta.get("lease_ttl_secs"))
+        .and_then(Value::as_u64)
+        .filter(|secs| *secs > 0)
+        .unwrap_or(60)
+}
+
+fn human_age_seconds(secs: i64) -> String {
+    if secs < 0 {
+        return "future".to_string();
+    }
+    let secs = secs as u64;
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let minutes = secs / 60;
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    let hours = minutes / 60;
+    if hours < 48 {
+        let leftover_min = minutes % 60;
+        if leftover_min == 0 {
+            return format!("{hours}h");
+        }
+        return format!("{hours}h{leftover_min}m");
+    }
+    let days = hours / 24;
+    format!("{days}d")
+}
+
+fn iso_age(timestamp: Option<&str>) -> String {
+    let Some(ts) = timestamp else {
+        return "-".to_string();
+    };
+    let parsed = chrono::DateTime::parse_from_rfc3339(ts);
+    match parsed {
+        Ok(parsed) => {
+            let now = chrono::Utc::now();
+            let secs = now
+                .signed_duration_since(parsed.with_timezone(&chrono::Utc))
+                .num_seconds();
+            human_age_seconds(secs)
+        }
+        Err(_) => "-".to_string(),
+    }
+}
+
+fn cmd_health_collect() -> Result<Value, String> {
+    let health = get_json("/api/health")?;
+    let queue = get_json("/api/queue/status")?;
+    // Best-effort: cluster endpoint may be unavailable when PG is offline;
+    // we surface that as a warning rather than aborting the whole command.
+    let cluster = get_json("/api/cluster/nodes").ok();
+
+    let queue_entries = queue
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let queue_run = queue.get("run").cloned();
+    let pending = queue_entries
+        .iter()
+        .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("queued"))
+        .count();
+    let failed = queue_entries
+        .iter()
+        .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("failed"))
+        .count();
+    let oldest_queued_age_secs = queue_entries
+        .iter()
+        .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("queued"))
+        .filter_map(|entry| entry.get("queued_at").and_then(Value::as_str))
+        .filter_map(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .map(|ts| {
+            chrono::Utc::now()
+                .signed_duration_since(ts.with_timezone(&chrono::Utc))
+                .num_seconds()
+                .max(0)
+        })
+        .max()
+        .unwrap_or(0);
+
+    // Pick out the local node from cluster — best effort match on hostname.
+    let local_node = cluster
+        .as_ref()
+        .and_then(|value| value.get("nodes"))
+        .and_then(Value::as_array)
+        .and_then(|nodes| {
+            let host = crate::services::platform::hostname_short();
+            nodes
+                .iter()
+                .find(|node| node.get("hostname").and_then(Value::as_str) == Some(host.as_str()))
+                .cloned()
+        });
+
+    Ok(serde_json::json!({
+        "health": health,
+        "queue": {
+            "summary": queue_run,
+            "pending": pending,
+            "failed": failed,
+            "oldest_queued_age_secs": oldest_queued_age_secs,
+        },
+        "local_node": local_node,
+    }))
+}
+
+/// `agentdesk health [--json]`
+///
+/// Compact, consolidated health snapshot for the *current* node — server
+/// status, dcserver pid, last deploy time (process start), queue lag, Discord
+/// providers, and the disk/outbox warnings already surfaced by /api/health.
+pub fn cmd_health(json_output: bool) -> Result<(), String> {
+    let snapshot = cmd_health_collect()?;
+    if json_output {
+        print_json(&snapshot);
+        return Ok(());
+    }
+
+    let health = snapshot.get("health").cloned().unwrap_or(Value::Null);
+    let queue = snapshot.get("queue").cloned().unwrap_or(Value::Null);
+    let local = snapshot.get("local_node").cloned().unwrap_or(Value::Null);
+
+    let version = health
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let status = health
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            if health.get("ok").and_then(Value::as_bool) == Some(true) {
+                "healthy"
+            } else {
+                "unknown"
+            }
+        });
+    let fully_recovered = health
+        .get("fully_recovered")
+        .and_then(Value::as_bool)
+        .map(|b| if b { "yes" } else { "no" })
+        .unwrap_or("?");
+    let degraded_reasons: Vec<String> = health
+        .get("degraded_reasons")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect();
+
+    let pid = local
+        .get("process_id")
+        .and_then(Value::as_i64)
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let started_at = local.get("started_at").and_then(Value::as_str);
+    let last_heartbeat_at = local.get("last_heartbeat_at").and_then(Value::as_str);
+    let instance_id = local
+        .get("instance_id")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let role = local
+        .get("effective_role")
+        .and_then(Value::as_str)
+        .or_else(|| local.get("role").and_then(Value::as_str))
+        .unwrap_or("-");
+    let active_dispatches = local
+        .get("active_dispatch_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+
+    let pending = queue.get("pending").and_then(Value::as_i64).unwrap_or(0);
+    let failed = queue.get("failed").and_then(Value::as_i64).unwrap_or(0);
+    let oldest_lag = queue
+        .get("oldest_queued_age_secs")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let queue_run = queue.get("summary").cloned().unwrap_or(Value::Null);
+    let queue_state = queue_run
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("idle");
+
+    println!("AgentDesk Health");
+    println!("  Base URL    : {}", api_base());
+    println!("  Server      : {status} (v{version})  fully_recovered={fully_recovered}");
+    if !degraded_reasons.is_empty() {
+        println!("  Degraded    : {}", degraded_reasons.join(", "));
+    }
+    println!("  Discord     : {}", summarize_discord_health(&health));
+    println!(
+        "  Cluster node: {instance_id}  role={role}  pid={pid}  active_dispatch={active_dispatches}"
+    );
+    println!(
+        "  Started     : {}  ({} ago)",
+        started_at.unwrap_or("-"),
+        iso_age(started_at)
+    );
+    println!(
+        "  Heartbeat   : {}  ({} ago)",
+        last_heartbeat_at.unwrap_or("-"),
+        iso_age(last_heartbeat_at)
+    );
+    println!(
+        "  Queue       : {queue_state}  pending={pending}  failed={failed}  oldest_lag={}",
+        human_age_seconds(oldest_lag)
+    );
+    if local.is_null() {
+        println!(
+            "  Note        : local worker_node row not found — cluster heartbeat may be disabled."
+        );
+    }
+    Ok(())
+}
+
+/// Per-machine row used by `cmd_machine_compare`.
+#[derive(Debug, Clone, Default)]
+struct MachineRow {
+    label: String,
+    hostname: String,
+    instance_id: String,
+    role: String,
+    status: String,
+    pid: String,
+    version: String,
+    started_at: Option<String>,
+    last_heartbeat_at: Option<String>,
+    active_dispatches: i64,
+}
+
+fn classify_machine_label(node: &Value) -> String {
+    let labels = node
+        .get("labels")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for label in &labels {
+        if let Some(text) = label.as_str() {
+            let lower = text.to_ascii_lowercase();
+            if lower.contains("mac-mini") || lower.contains("mac_mini") {
+                return "mac-mini".to_string();
+            }
+            if lower.contains("mac-book") || lower.contains("macbook") {
+                return "mac-book".to_string();
+            }
+        }
+    }
+    if let Some(host) = node.get("hostname").and_then(Value::as_str) {
+        let lower = host.to_ascii_lowercase();
+        if lower.contains("mac-mini") || lower.contains("macmini") {
+            return "mac-mini".to_string();
+        }
+        if lower.contains("mac-book") || lower.contains("macbook") {
+            return "mac-book".to_string();
+        }
+        return host.to_string();
+    }
+    node.get("instance_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn machine_row_from_node(node: &Value) -> MachineRow {
+    MachineRow {
+        label: classify_machine_label(node),
+        hostname: node
+            .get("hostname")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+            .to_string(),
+        instance_id: node
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+            .to_string(),
+        role: node
+            .get("effective_role")
+            .and_then(Value::as_str)
+            .or_else(|| node.get("role").and_then(Value::as_str))
+            .unwrap_or("-")
+            .to_string(),
+        status: node
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+            .to_string(),
+        pid: node
+            .get("process_id")
+            .and_then(Value::as_i64)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        version: node
+            .get("capabilities")
+            .and_then(|cap| cap.get("version"))
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+            .to_string(),
+        started_at: node
+            .get("started_at")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        last_heartbeat_at: node
+            .get("last_heartbeat_at")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        active_dispatches: node
+            .get("active_dispatch_count")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+    }
+}
+
+fn pad_to(value: &str, width: usize) -> String {
+    let count = value.chars().count();
+    if count >= width {
+        value.to_string()
+    } else {
+        let mut padded = String::with_capacity(value.len() + (width - count));
+        padded.push_str(value);
+        for _ in 0..(width - count) {
+            padded.push(' ');
+        }
+        padded
+    }
+}
+
+fn diff_marker(left: &str, right: &str) -> &'static str {
+    if left == "-" && right == "-" {
+        return "";
+    }
+    if left == right { "" } else { "!=" }
+}
+
+fn render_machine_compare_table(rows: &[MachineRow]) -> String {
+    // Build a transposed table: each row is a metric, columns are machines.
+    // Always present at least two slots (mac-mini left, mac-book right) even
+    // if one side has no live heartbeat, so the diff column stays meaningful.
+    let mut left = rows
+        .iter()
+        .find(|row| row.label == "mac-mini")
+        .cloned()
+        .unwrap_or_else(|| MachineRow {
+            label: "mac-mini".to_string(),
+            hostname: "-".to_string(),
+            instance_id: "(no heartbeat)".to_string(),
+            role: "-".to_string(),
+            status: "offline".to_string(),
+            pid: "-".to_string(),
+            version: "-".to_string(),
+            started_at: None,
+            last_heartbeat_at: None,
+            active_dispatches: 0,
+        });
+    let mut right = rows
+        .iter()
+        .find(|row| row.label == "mac-book")
+        .cloned()
+        .unwrap_or_else(|| MachineRow {
+            label: "mac-book".to_string(),
+            hostname: "-".to_string(),
+            instance_id: "(no heartbeat)".to_string(),
+            role: "-".to_string(),
+            status: "offline".to_string(),
+            pid: "-".to_string(),
+            version: "-".to_string(),
+            started_at: None,
+            last_heartbeat_at: None,
+            active_dispatches: 0,
+        });
+    // Normalise empty markers for clarity.
+    if left.hostname.is_empty() {
+        left.hostname = "-".to_string();
+    }
+    if right.hostname.is_empty() {
+        right.hostname = "-".to_string();
+    }
+
+    let left_started = left.started_at.clone().unwrap_or_else(|| "-".to_string());
+    let right_started = right.started_at.clone().unwrap_or_else(|| "-".to_string());
+    let left_started_age = iso_age(left.started_at.as_deref());
+    let right_started_age = iso_age(right.started_at.as_deref());
+    let left_hb_age = iso_age(left.last_heartbeat_at.as_deref());
+    let right_hb_age = iso_age(right.last_heartbeat_at.as_deref());
+
+    let metric_rows: Vec<[String; 4]> = vec![
+        [
+            "hostname".to_string(),
+            left.hostname.clone(),
+            right.hostname.clone(),
+            diff_marker(&left.hostname, &right.hostname).to_string(),
+        ],
+        [
+            "instance_id".to_string(),
+            left.instance_id.clone(),
+            right.instance_id.clone(),
+            diff_marker(&left.instance_id, &right.instance_id).to_string(),
+        ],
+        [
+            "role".to_string(),
+            left.role.clone(),
+            right.role.clone(),
+            diff_marker(&left.role, &right.role).to_string(),
+        ],
+        [
+            "status".to_string(),
+            left.status.clone(),
+            right.status.clone(),
+            diff_marker(&left.status, &right.status).to_string(),
+        ],
+        [
+            "pid".to_string(),
+            left.pid.clone(),
+            right.pid.clone(),
+            String::new(),
+        ],
+        [
+            "version".to_string(),
+            left.version.clone(),
+            right.version.clone(),
+            diff_marker(&left.version, &right.version).to_string(),
+        ],
+        [
+            "started_at".to_string(),
+            format!("{left_started} ({left_started_age})"),
+            format!("{right_started} ({right_started_age})"),
+            String::new(),
+        ],
+        [
+            "heartbeat_age".to_string(),
+            left_hb_age,
+            right_hb_age,
+            String::new(),
+        ],
+        [
+            "active_dispatch".to_string(),
+            left.active_dispatches.to_string(),
+            right.active_dispatches.to_string(),
+            String::new(),
+        ],
+    ];
+
+    let metric_w = metric_rows
+        .iter()
+        .map(|row| row[0].chars().count())
+        .max()
+        .unwrap_or(8)
+        .max(10);
+    let left_w = metric_rows
+        .iter()
+        .map(|row| row[1].chars().count())
+        .max()
+        .unwrap_or(8)
+        .clamp(10, 80);
+    let right_w = metric_rows
+        .iter()
+        .map(|row| row[2].chars().count())
+        .max()
+        .unwrap_or(8)
+        .clamp(10, 80);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{}  {}  {}  diff\n",
+        pad_to("metric", metric_w),
+        pad_to("mac-mini", left_w),
+        pad_to("mac-book", right_w),
+    ));
+    out.push_str(&format!(
+        "{}  {}  {}  ----\n",
+        "-".repeat(metric_w),
+        "-".repeat(left_w),
+        "-".repeat(right_w),
+    ));
+    for row in &metric_rows {
+        out.push_str(&format!(
+            "{}  {}  {}  {}\n",
+            pad_to(&row[0], metric_w),
+            pad_to(&row[1], left_w),
+            pad_to(&row[2], right_w),
+            row[3],
+        ));
+    }
+    // Report any other registered nodes that didn't fit mac-mini / mac-book.
+    let extras: Vec<&MachineRow> = rows
+        .iter()
+        .filter(|row| row.label != "mac-mini" && row.label != "mac-book")
+        .collect();
+    if !extras.is_empty() {
+        out.push_str("\nOther nodes:\n");
+        for extra in extras {
+            out.push_str(&format!(
+                "  - {label} (host={host}, instance={id}, role={role}, status={status}, pid={pid}, hb_age={hb})\n",
+                label = extra.label,
+                host = extra.hostname,
+                id = extra.instance_id,
+                role = extra.role,
+                status = extra.status,
+                pid = extra.pid,
+                hb = iso_age(extra.last_heartbeat_at.as_deref()),
+            ));
+        }
+    }
+    out
+}
+
+/// `agentdesk machine-compare [--json]`
+///
+/// Side-by-side health/state table for every registered worker node. Built
+/// from `/api/cluster/nodes` — no SSH, no shell-out, no `ssh user@host mtime`.
+pub fn cmd_machine_compare(json_output: bool) -> Result<(), String> {
+    let cluster = get_json("/api/cluster/nodes")?;
+    let nodes = cluster
+        .get("nodes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let lease_ttl_secs = cluster_lease_ttl_secs(cluster.get("cluster"));
+    let rows: Vec<MachineRow> = nodes.iter().map(machine_row_from_node).collect();
+
+    if json_output {
+        // Emit a stable JSON shape: { cluster: {…}, rows: [ MachineRow… ] }
+        let rows_json: Vec<Value> = rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "label": row.label,
+                    "hostname": row.hostname,
+                    "instance_id": row.instance_id,
+                    "role": row.role,
+                    "status": row.status,
+                    "pid": row.pid,
+                    "version": row.version,
+                    "started_at": row.started_at,
+                    "last_heartbeat_at": row.last_heartbeat_at,
+                    "active_dispatch_count": row.active_dispatches,
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "cluster": cluster.get("cluster").cloned().unwrap_or(Value::Null),
+            "lease_ttl_secs": lease_ttl_secs,
+            "rows": rows_json,
+        });
+        print_json(&payload);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("No worker_node rows registered.");
+        println!("(cluster.enabled may be false, or Postgres is unavailable.)");
+        return Ok(());
+    }
+
+    println!("AgentDesk Machine Compare  (lease_ttl_secs={lease_ttl_secs})");
+    print!("{}", render_machine_compare_table(&rows));
+    Ok(())
+}
+
 /// `agentdesk cards [--status <STATUS>]`
 pub fn cmd_cards(status: Option<&str>) -> Result<(), String> {
     let path = match status {
@@ -1108,6 +2297,69 @@ pub fn cmd_queue() -> Result<(), String> {
     Ok(())
 }
 
+/// `agentdesk phase status` — phase-gate violation snapshot (issue #2657).
+///
+/// Read-only call against `/api/queue/phase-gates/violations`. Empty
+/// `violations` is the clean state; partial DB failure surfaces as a
+/// non-zero exit via the `error` field.
+pub fn cmd_phase_status(json: bool, detailed: bool) -> Result<(), String> {
+    let raw = get_json("/api/queue/phase-gates/violations")?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&raw).unwrap_or_else(|_| raw.to_string())
+        );
+        return Ok(());
+    }
+
+    let empty: Vec<Value> = Vec::new();
+    let violations = raw
+        .get("violations")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let runs_scanned = raw.get("runs_scanned").and_then(Value::as_i64).unwrap_or(0);
+    let complete = raw
+        .get("complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if violations.is_empty() {
+        println!("phase-gate: clean (runs scanned: {runs_scanned}, complete: {complete})");
+        return Ok(());
+    }
+
+    println!(
+        "phase-gate violations: {} (runs scanned: {runs_scanned})",
+        violations.len()
+    );
+    for v in violations {
+        if detailed {
+            let run_id = v.get("run_id").and_then(Value::as_str).unwrap_or("-");
+            let entry_id = v.get("entry_id").and_then(Value::as_str).unwrap_or("-");
+            let card_id = v
+                .get("kanban_card_id")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let entry_phase = v
+                .get("entry_batch_phase")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let current_phase = v
+                .get("current_batch_phase")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let dispatch_id = v.get("dispatch_id").and_then(Value::as_str).unwrap_or("-");
+            println!(
+                "- run={run_id} entry={entry_id} card={card_id} phase={entry_phase}>current={current_phase} dispatch={dispatch_id}"
+            );
+        } else {
+            let summary = v.get("summary").and_then(Value::as_str).unwrap_or("");
+            println!("- {summary}");
+        }
+    }
+    Ok(())
+}
+
 /// `agentdesk deploy`
 ///
 /// Build the workspace for release and promote directly to release.
@@ -1238,6 +2490,101 @@ pub fn cmd_terminations(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod health_compare_tests {
+    //! Unit tests for `cmd_health` / `cmd_machine_compare` helpers (issue
+    //! #2656). These intentionally avoid touching the live HTTP API or
+    //! `legacy-sqlite-tests` feature so they run in the default test profile.
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn human_age_seconds_buckets_match_expected_units() {
+        assert_eq!(human_age_seconds(-5), "future");
+        assert_eq!(human_age_seconds(0), "0s");
+        assert_eq!(human_age_seconds(45), "45s");
+        assert_eq!(human_age_seconds(60), "1m");
+        assert_eq!(human_age_seconds(3_599), "59m");
+        assert_eq!(human_age_seconds(3_600), "1h");
+        assert_eq!(human_age_seconds(3_660), "1h1m");
+        // > 48h flips to days.
+        assert_eq!(human_age_seconds(60 * 60 * 49), "2d");
+    }
+
+    #[test]
+    fn diff_marker_only_fires_on_real_mismatch() {
+        assert_eq!(diff_marker("a", "a"), "");
+        assert_eq!(diff_marker("-", "-"), "");
+        assert_eq!(diff_marker("a", "b"), "!=");
+        // A missing left side counts as a real diff — operators need to see it.
+        assert_eq!(diff_marker("-", "b"), "!=");
+    }
+
+    #[test]
+    fn classify_machine_label_prefers_explicit_labels() {
+        let node = json!({
+            "labels": ["mac-mini", "release"],
+            "hostname": "mac-book.local",
+        });
+        assert_eq!(classify_machine_label(&node), "mac-mini");
+    }
+
+    #[test]
+    fn classify_machine_label_falls_back_to_hostname() {
+        let node = json!({"hostname": "mac-book"});
+        assert_eq!(classify_machine_label(&node), "mac-book");
+    }
+
+    #[test]
+    fn classify_machine_label_falls_back_to_instance_id_for_unknown_hosts() {
+        let node = json!({"instance_id": "worker-x", "hostname": "linux-build-01"});
+        // hostname doesn't match either alias, but isn't empty — we expose
+        // it so operators can still see the row.
+        assert_eq!(classify_machine_label(&node), "linux-build-01");
+        let node = json!({"instance_id": "worker-x"});
+        assert_eq!(classify_machine_label(&node), "worker-x");
+    }
+
+    #[test]
+    fn render_machine_compare_table_synthesises_offline_columns() {
+        // Only one machine has a live heartbeat — the other side should be
+        // rendered as `(no heartbeat)` so the diff column is meaningful.
+        let rows = vec![MachineRow {
+            label: "mac-mini".to_string(),
+            hostname: "mac-mini.local".to_string(),
+            instance_id: "mac-mini-rel-1".to_string(),
+            role: "leader".to_string(),
+            status: "online".to_string(),
+            pid: "1234".to_string(),
+            version: "0.1.2".to_string(),
+            started_at: Some("2026-05-19T00:00:00Z".to_string()),
+            last_heartbeat_at: Some("2026-05-19T00:00:00Z".to_string()),
+            active_dispatches: 3,
+        }];
+        let table = render_machine_compare_table(&rows);
+        assert!(table.contains("mac-mini"));
+        assert!(table.contains("mac-book"));
+        assert!(table.contains("(no heartbeat)"));
+        // The single-side row must still surface its pid so operators can
+        // distinguish leader-only deployments from full clusters.
+        assert!(table.contains("1234"));
+    }
+
+    #[test]
+    fn cluster_lease_ttl_secs_handles_missing_and_zero_values() {
+        assert_eq!(cluster_lease_ttl_secs(None), 60);
+        assert_eq!(
+            cluster_lease_ttl_secs(Some(&json!({"lease_ttl_secs": 0}))),
+            60
+        );
+        assert_eq!(
+            cluster_lease_ttl_secs(Some(&json!({"lease_ttl_secs": 42}))),
+            42
+        );
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

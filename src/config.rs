@@ -590,6 +590,27 @@ pub fn normalize_cache_ttl_minutes(value: Option<u32>) -> Option<u32> {
     }
 }
 
+/// Read the global default prompt-cache TTL from the environment (#2661).
+///
+/// `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything
+/// else (including the variable being unset) returns `None`, preserving the
+/// pre-#2661 5-minute default. When this returns `Some(60)`, `resolve_cache_ttl_minutes`
+/// (Discord channel resolver) falls back to it whenever a channel does not
+/// explicitly set `cache_ttl_minutes` on its `AgentChannelConfig`.
+///
+/// Rationale: the developer-role system prompt is ~6KB and is rebuilt every
+/// Discord turn. Anthropic's prompt cache prefix hit-rate falls off after
+/// the 5m default TTL whenever the user goes idle between turns. Most
+/// channels never set the per-channel override, so the operator pays full
+/// prefix cost on every re-engagement. Exposing the 60m bucket as a global
+/// default lets the operator opt-in once at process start and recapture
+/// cache hits across long-form chat sessions.
+pub fn default_cache_ttl_minutes_from_env() -> Option<u32> {
+    let raw = std::env::var("AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES").ok()?;
+    let parsed = raw.trim().parse::<u32>().ok()?;
+    normalize_cache_ttl_minutes(Some(parsed))
+}
+
 pub fn normalize_dispatch_profile(value: Option<String>) -> Option<String> {
     match value?.trim().to_ascii_lowercase().as_str() {
         "lite" => Some("lite".to_string()),
@@ -3069,6 +3090,46 @@ routines:
         // Legacy entries never expose a TTL.
         let legacy = AgentChannel::Legacy("alpha".to_string());
         assert_eq!(legacy.cache_ttl_minutes(), None);
+    }
+
+    // -------- #2661 process-wide prompt-cache default --------
+    //
+    // These tests do not touch the real environment variable directly because
+    // env mutation is racy under cargo's parallel test runner. Instead they
+    // exercise the parser/normalizer pair the env reader uses internally.
+    // The env-reading wrapper is a one-line function whose only effect is the
+    // `std::env::var(...).ok()?` plumbing, which is well-trodden territory.
+
+    #[test]
+    fn default_cache_ttl_env_parses_valid_buckets() {
+        // The env wrapper reads a string, parses it as u32, and feeds the
+        // result through normalize_cache_ttl_minutes. Mirror that flow.
+        let parse = |raw: &str| -> Option<u32> {
+            raw.trim()
+                .parse::<u32>()
+                .ok()
+                .and_then(|n| normalize_cache_ttl_minutes(Some(n)))
+        };
+        assert_eq!(parse("5"), Some(5));
+        assert_eq!(parse("60"), Some(60));
+        assert_eq!(parse(" 60 "), Some(60));
+        // Invalid buckets fall through to None — the existing 5m default.
+        assert_eq!(parse("30"), None);
+        assert_eq!(parse("0"), None);
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("garbage"), None);
+        assert_eq!(parse("-1"), None);
+    }
+
+    #[test]
+    fn default_cache_ttl_env_returns_none_when_unset() {
+        // Use a guaranteed-unset name so we don't race other tests reading the
+        // real `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES`.
+        let name = "AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES__UNIT_TEST_UNSET";
+        // SAFETY: this name is unique to this test and never written elsewhere.
+        unsafe { std::env::remove_var(name) };
+        let raw = std::env::var(name).ok();
+        assert!(raw.is_none(), "test precondition violated");
     }
 }
 

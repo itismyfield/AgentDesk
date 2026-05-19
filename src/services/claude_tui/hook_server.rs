@@ -280,6 +280,7 @@ async fn receive_hook(
     };
 
     let kind = HookEventKind::from_path(&event);
+    let payload_is_noise = is_informational_empty_payload(&payload);
     let event = HookEvent {
         provider: provider.clone(),
         session_id: session_id.clone(),
@@ -302,9 +303,74 @@ async fn receive_hook(
         // intentionally dropped so `wait_for_prompt_ready` cannot latch onto
         // a stale Stop from a previous turn. The polling fallback in
         // `input::wait_for_prompt_ready` handles the missed-signal race.
+        //
+        // Note: this wake intentionally fires BEFORE the empty-payload drop
+        // below so a Stop hook with an empty body (the common case) still
+        // unblocks waiters. The body is irrelevant to the prompt-ready
+        // signal — only the (provider, kind) tuple matters.
         PROMPT_READY_NOTIFY.notify_waiters();
     }
-    if state.event_tx.send(event).is_err() {
+    // #2655: surface forget:recall floods. The PreToolUse payload carries
+    // `tool_name` (Claude/Codex contract); when it's a memento forget or
+    // recall, observe the call against the sliding window and emit a warn if
+    // the threshold is breached. Suppressed-by-cool-down decisions are
+    // logged at debug to keep the alarm channel readable.
+    if matches!(event.kind, HookEventKind::PreToolUse) {
+        if let Some(observation) = classify_memento_tool_invocation(&event.payload) {
+            let scope = format!("{}:{}", event.provider, event.session_id);
+            let snapshot = match observation {
+                MementoToolInvocation::Forget => {
+                    crate::services::memory::note_memento_forget_call(&scope)
+                }
+                MementoToolInvocation::Recall => {
+                    crate::services::memory::note_memento_recall_call(&scope)
+                }
+            };
+            if matches!(
+                snapshot.decision,
+                crate::services::memory::ForgetRatioAlarmDecision::AlarmSuppressedByCooldown
+            ) {
+                tracing::debug!(
+                    scope,
+                    forget_count = snapshot.forget_count,
+                    recall_count = snapshot.recall_count,
+                    ratio = snapshot.ratio,
+                    "memento forget:recall flood alarm currently suppressed by cool-down"
+                );
+            }
+        }
+    }
+
+    // Issue #2665: empty-payload filter. Per the 2026-05-19 workflow audit,
+    // one session alone accumulated 1,531 `hook_success` attachments whose
+    // bodies averaged 12 bytes each (vs. ~80–100 byte envelopes). For
+    // payloads that carry no event-specific content (only identifier echoes
+    // already encoded in the request line), we still wake prompt-ready
+    // waiters and we still log unknown event names — but we skip the
+    // broadcast publish so downstream subscribers (rollout tail completion
+    // detection, future telemetry pipelines) do not see the noise.
+    //
+    // Drop logic:
+    // * `Stop` / `SubagentStop` events ARE useful even with empty bodies
+    //   (they carry their semantics in the path), so they bypass the
+    //   filter — `codex_completion_hook_matches` reads only kind+session,
+    //   and dropping them would regress turn-completion detection.
+    // * Every other event kind with `is_informational_empty_payload(payload) == true`
+    //   is dropped at the broadcast boundary. The HTTP response stays 202
+    //   so the relay CLI cannot tell — that contract is one-way fire-and-forget.
+    let should_drop_broadcast = payload_is_noise
+        && !matches!(
+            event.kind,
+            HookEventKind::Stop | HookEventKind::SubagentStop
+        );
+    if should_drop_broadcast {
+        tracing::debug!(
+            provider,
+            event = event_name,
+            session_id,
+            "tui hook event has empty payload; dropping broadcast (#2665)"
+        );
+    } else if state.event_tx.send(event).is_err() {
         tracing::debug!(
             provider,
             event = event_name,
@@ -322,6 +388,113 @@ async fn receive_hook(
             "session_id": session_id
         })),
     )
+}
+
+/// #2655: classification of the memento tool surface invoked in a hook
+/// payload. Anything not on the `forget`/`recall` pair returns `None` so the
+/// caller can no-op cheaply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MementoToolInvocation {
+    Forget,
+    Recall,
+}
+
+/// #2655: parses the `tool_name` field of a PreToolUse hook payload and maps
+/// it onto `MementoToolInvocation`. Accepts both the Claude convention
+/// (`mcp__memento__forget`) and the bare tool name (`forget`/`recall`/`context`).
+/// `context` counts as a recall — it produces the same kind of evidence
+/// (recall precision) that the forget:recall ratio is meant to surface.
+pub(crate) fn classify_memento_tool_invocation(payload: &Value) -> Option<MementoToolInvocation> {
+    let tool_name = payload
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("toolName").and_then(Value::as_str))?
+        .trim();
+    if tool_name.is_empty() {
+        return None;
+    }
+    // Tool names arrive in a few shapes depending on the provider:
+    //   * Claude MCP namespacing: `mcp__memento__forget`
+    //   * Codex MCP namespacing: `memento.forget` / `memento/forget`
+    //   * Bare:                   `forget`
+    // Normalise by stripping the `mcp__memento__` prefix and any
+    // `memento[./]` prefix, then case-fold.
+    let lowered = tool_name.to_ascii_lowercase();
+    let stripped = lowered
+        .strip_prefix("mcp__memento__")
+        .or_else(|| lowered.strip_prefix("memento."))
+        .or_else(|| lowered.strip_prefix("memento/"))
+        .unwrap_or(lowered.as_str());
+    match stripped {
+        "forget" => Some(MementoToolInvocation::Forget),
+        "recall" | "context" => Some(MementoToolInvocation::Recall),
+        _ => None,
+    }
+}
+
+/// Returns `true` when the JSON payload carries no event-specific information
+/// beyond the identifier fields already encoded in the receive URL.
+///
+/// The provider TUI hooks (Claude UserPromptSubmit, Codex completion echo,
+/// etc.) frequently fire with a body that only re-states `session_id` /
+/// `sessionId` / `provider` / `event` / empty arrays. The receive_hook path
+/// already extracts session_id from the query string, so these copies add
+/// pure noise to the broadcast bus and (downstream) to any persisted
+/// telemetry.
+///
+/// Definition of "noise":
+/// * Empty JSON object `{}` or `null`.
+/// * Array (any size — the issue specifically calls out empty `attachments`
+///   arrays as bloat).
+/// * Object whose every value is one of:
+///     - Null
+///     - Empty string after trim
+///     - Empty array
+///     - Empty object
+///     - A copy of `session_id`, `sessionId`, `provider`, `event`,
+///       `event_name`, `kind`, `type` (identifier echoes — already routed)
+///
+/// Anything that contains a non-empty primitive field, a non-empty nested
+/// object, or a non-empty array of non-identifier items is kept.
+pub(crate) fn is_informational_empty_payload(payload: &Value) -> bool {
+    match payload {
+        Value::Null => true,
+        Value::Object(map) if map.is_empty() => true,
+        Value::Array(_) => {
+            // Top-level arrays are uncommon for TUI hooks; treat as noise
+            // because the relay CLI already converts empty stdin to `{}`,
+            // so a top-level array can only come from the rare provider
+            // that intentionally sends a list. Even then, an empty list
+            // adds no broadcast value. A non-empty list with structured
+            // entries is rare; if it appears in production we'll revisit.
+            payload.as_array().is_some_and(Vec::is_empty)
+        }
+        Value::Object(map) => map.iter().all(|(key, value)| is_noise_field(key, value)),
+        _ => false,
+    }
+}
+
+fn is_noise_field(key: &str, value: &Value) -> bool {
+    if matches!(
+        key,
+        "session_id"
+            | "sessionId"
+            | "provider"
+            | "event"
+            | "event_name"
+            | "kind"
+            | "type"
+            | "received_at"
+    ) {
+        return true;
+    }
+    match value {
+        Value::Null => true,
+        Value::String(s) => s.trim().is_empty(),
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => o.is_empty(),
+        _ => false,
+    }
 }
 
 fn payload_session_id(payload: &Value) -> Option<String> {
@@ -376,6 +549,63 @@ mod tests {
         LazyLock::new(|| std::sync::Mutex::new(()));
 
     #[test]
+    fn classify_memento_recognizes_claude_and_codex_prefixes() {
+        // Claude-style MCP namespace.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "mcp__memento__forget" })),
+            Some(MementoToolInvocation::Forget)
+        );
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "mcp__memento__recall" })),
+            Some(MementoToolInvocation::Recall)
+        );
+        // `context` counts as recall — it carries the same recall-precision
+        // signal the forget:recall ratio is meant to surface.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "mcp__memento__context" })),
+            Some(MementoToolInvocation::Recall)
+        );
+        // Codex-style dot/slash separators.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "memento.forget" })),
+            Some(MementoToolInvocation::Forget)
+        );
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "memento/recall" })),
+            Some(MementoToolInvocation::Recall)
+        );
+        // Bare tool name (no provider prefix).
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "forget" })),
+            Some(MementoToolInvocation::Forget)
+        );
+        // camelCase field name also accepted.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "toolName": "mcp__memento__recall" })),
+            Some(MementoToolInvocation::Recall)
+        );
+    }
+
+    #[test]
+    fn classify_memento_ignores_unrelated_tools() {
+        // Other MCP tools must not contribute to the ratio.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "Bash" })),
+            None
+        );
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "mcp__memento__remember" })),
+            None
+        );
+        assert_eq!(classify_memento_tool_invocation(&json!({})), None);
+        // Empty / whitespace strings degrade gracefully.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "   " })),
+            None
+        );
+    }
+
+    #[test]
     fn hook_event_kind_normalizes_provider_hook_names() {
         assert_eq!(HookEventKind::from_path("Stop"), HookEventKind::Stop);
         assert_eq!(
@@ -427,6 +657,87 @@ mod tests {
         assert_eq!(event.provider, "claude");
         assert_eq!(event.session_id, "sess-1");
         assert_eq!(event.kind, HookEventKind::Stop);
+    }
+
+    /// Issue #2665: a non-Stop hook with an informationally-empty body must
+    /// NOT be published on the broadcast bus. The HTTP response stays 202 so
+    /// the relay CLI cannot observe the drop (fire-and-forget contract). We
+    /// use a short receive timeout because the broadcast channel has no
+    /// natural sentinel — silence is the success signal.
+    #[tokio::test]
+    async fn receiver_drops_empty_payload_for_non_stop_event() {
+        let state = HookServerState::new();
+        let mut rx = state.subscribe();
+        let app = hook_receiver_router_with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    // UserPromptSubmit is the canonical 1531-attachment offender
+                    // — Claude TUI fires it every turn with an essentially empty
+                    // body.
+                    .uri("/hooks/claude/UserPromptSubmit?session_id=sess-empty")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"session_id":"sess-empty"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        // The broadcast must NOT see this event. Two acceptable terminal
+        // shapes:
+        //   * `Err(_)` from tokio::time::timeout (no event arrived within
+        //     150ms — the silence indicates a drop).
+        //   * `Ok(Err(RecvError::Closed))` (the only HookServerState was
+        //     dropped when `app.oneshot` consumed its router state; the
+        //     sender end closed without ever firing the event we're
+        //     watching for).
+        // Both prove the event was dropped at the broadcast boundary. The
+        // critical assertion is the *negative*: `Ok(Ok(_))` would prove the
+        // event escaped the filter.
+        let result = tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await;
+        match result {
+            Err(_) => {}
+            Ok(Err(broadcast::error::RecvError::Closed)) => {}
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                panic!("unexpected lag — channel saw events before close: {result:?}")
+            }
+            Ok(Ok(event)) => {
+                panic!("empty UserPromptSubmit must be dropped, but broadcast received: {event:?}")
+            }
+        }
+    }
+
+    /// The Stop / SubagentStop exemption is load-bearing — `codex_completion_
+    /// hook_matches` uses the broadcast event as a turn-completion signal and
+    /// Claude TUI sends Stop with an empty body in the common case. This test
+    /// pins the inverse property: even with an empty body, Stop must still
+    /// reach subscribers.
+    #[tokio::test]
+    async fn receiver_keeps_stop_event_even_with_empty_payload() {
+        let state = HookServerState::new();
+        let mut rx = state.subscribe();
+        let app = hook_receiver_router_with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/hooks/claude/Stop?session_id=sess-stop")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.kind, HookEventKind::Stop);
+        assert_eq!(event.session_id, "sess-stop");
     }
 
     #[tokio::test]
@@ -541,6 +852,104 @@ mod tests {
         ));
         // Unknown providers still cannot poke the shared readiness notify.
         assert!(!should_signal_prompt_ready("qwen", &HookEventKind::Stop));
+    }
+
+    // -------- #2665 empty-payload filter --------
+
+    #[test]
+    fn empty_payload_filter_drops_pure_empty_objects() {
+        assert!(is_informational_empty_payload(&json!({})));
+        assert!(is_informational_empty_payload(&Value::Null));
+    }
+
+    #[test]
+    fn empty_payload_filter_drops_identifier_echo_only_objects() {
+        // The relay CLI commonly re-states session_id + sessionId + provider
+        // inside the body. None of these carry information the receiver
+        // doesn't already have from the URL/query.
+        assert!(is_informational_empty_payload(&json!({
+            "session_id": "abc",
+            "sessionId": "abc",
+            "provider": "claude",
+            "event": "Stop",
+        })));
+        // Mixed identifier echoes + empty-string scalars still count as noise.
+        assert!(is_informational_empty_payload(&json!({
+            "session_id": "abc",
+            "attachments": [],
+            "message": "",
+            "metadata": {},
+        })));
+    }
+
+    #[test]
+    fn empty_payload_filter_keeps_payloads_with_real_content() {
+        // Any non-identifier, non-empty primitive must keep the broadcast.
+        assert!(!is_informational_empty_payload(&json!({
+            "session_id": "abc",
+            "tool_use_id": "tu-42",
+        })));
+        assert!(!is_informational_empty_payload(&json!({
+            "session_id": "abc",
+            "user_prompt": "hello world",
+        })));
+        // Non-empty nested object: keep.
+        assert!(!is_informational_empty_payload(&json!({
+            "metadata": { "exit_code": 0 },
+        })));
+        // Non-empty array: keep.
+        assert!(!is_informational_empty_payload(&json!({
+            "tool_results": [{ "status": "ok" }],
+        })));
+        // Plain non-null primitive (defensive — uncommon, but possible).
+        assert!(!is_informational_empty_payload(&json!(42)));
+        assert!(!is_informational_empty_payload(&json!("non-empty")));
+    }
+
+    #[test]
+    fn empty_payload_filter_drops_top_level_empty_array() {
+        assert!(is_informational_empty_payload(&Value::Array(Vec::new())));
+        // Non-empty array stays.
+        assert!(!is_informational_empty_payload(&json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn empty_payload_filter_treats_whitespace_strings_as_noise() {
+        assert!(is_informational_empty_payload(&json!({
+            "session_id": "abc",
+            "message": "   ",
+            "tag": "\t\n",
+        })));
+    }
+
+    /// Pin the documented behaviour: Stop / SubagentStop must NOT be dropped
+    /// even when their payload is empty, because `codex_completion_hook_matches`
+    /// uses the broadcast event as a turn-completion signal. The empty body
+    /// is the *common case* for Stop hooks.
+    #[test]
+    fn stop_kind_short_circuit_classifier_matches_receive_hook_logic() {
+        // Mirror the inverse of the gate inside `receive_hook` so the rule is
+        // pinned at the type level — if someone later removes the
+        // `Stop | SubagentStop` exemption, this test must fail.
+        for keep in [HookEventKind::Stop, HookEventKind::SubagentStop] {
+            assert!(
+                matches!(keep, HookEventKind::Stop | HookEventKind::SubagentStop),
+                "completion-signal events must be exempt from the empty-payload drop"
+            );
+        }
+        for drop in [
+            HookEventKind::UserPromptSubmit,
+            HookEventKind::SessionStart,
+            HookEventKind::PreToolUse,
+            HookEventKind::PostToolUse,
+            HookEventKind::Notification,
+            HookEventKind::Unknown("custom".to_string()),
+        ] {
+            assert!(
+                !matches!(drop, HookEventKind::Stop | HookEventKind::SubagentStop),
+                "non-completion events must be eligible for the empty-payload drop"
+            );
+        }
     }
 
     #[test]

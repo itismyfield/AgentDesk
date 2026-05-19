@@ -13,8 +13,9 @@ use super::{
     extract_token_usage,
     memento_throttle::{
         cached_recall_response, note_memento_dedup_hit, note_memento_remote_call,
-        note_memento_tool_feedback_trigger, note_memento_tool_request, should_dedup_remember,
-        store_recall_response, store_remember_fingerprint,
+        note_memento_tool_feedback_trigger, note_memento_tool_request,
+        record_static_slice_emission, should_dedup_remember, store_recall_response,
+        store_remember_fingerprint,
     },
 };
 use crate::runtime_layout;
@@ -275,6 +276,43 @@ impl MementoBackend {
             ));
         }
 
+        // #2664: dedup Memento server `instructions` across re-inits.
+        // The Memento server re-emits the same `# Memento MCP Server …`
+        // block on every re-authentication. We capture it once into a
+        // process-wide hash cache and surface a structured delta so:
+        //   * downstream observability can count "wasted" re-injections,
+        //   * any future AgentDesk-owned system-prompt path can skip the
+        //     prepend when the hash matches the previously-observed one.
+        let instructions = payload
+            .pointer("/result/instructions")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let delta = super::record_instructions(instructions.as_deref());
+        match delta {
+            super::InstructionsDelta::FirstSeen => {
+                tracing::info!(
+                    "[memento] captured server instructions ({} bytes) — first observation; will dedup on re-init",
+                    instructions.as_deref().map(str::len).unwrap_or(0)
+                );
+            }
+            super::InstructionsDelta::Unchanged => {
+                tracing::debug!(
+                    "[memento] re-init returned unchanged instructions block; system prompt re-injection is unnecessary"
+                );
+            }
+            super::InstructionsDelta::Changed => {
+                tracing::info!(
+                    "[memento] server instructions changed ({} bytes); downstream prompt caches must refresh",
+                    instructions.as_deref().map(str::len).unwrap_or(0)
+                );
+            }
+            super::InstructionsDelta::Missing => {
+                tracing::debug!(
+                    "[memento] initialize response omitted result.instructions — keeping previously-cached hash"
+                );
+            }
+        }
+
         session_id.ok_or_else(|| {
             let safe = redact_memento_secret(&text, &config.access_key);
             format!("memento initialize succeeded without MCP-Session-Id header; body={safe}")
@@ -378,7 +416,19 @@ impl MementoBackend {
         // #1083: Different formatter per mode — `Full` keeps every section,
         // `IdentityOnly` strips down to the identity + current session lines.
         let external_recall = match request.mode {
-            RecallMode::Full => format_context_payload_for_external_recall(&result.payload),
+            RecallMode::Full => {
+                // #2660 — collapse repeat emissions of the static slice
+                // (Ranked context / Core memory / Anchored fallback) within
+                // the per-(workspace, agent, session, mode) TTL.
+                let rendered = format_context_payload_for_external_recall(&result.payload);
+                let slice_key = build_static_slice_cache_key(
+                    workspace,
+                    &agent_id,
+                    &request.session_id,
+                    request.mode,
+                );
+                elide_static_slice_if_recent(rendered, &slice_key)
+            }
             RecallMode::IdentityOnly => format_context_payload_for_identity_only(&result.payload),
         };
         Ok(ContextFetchResult {
@@ -692,6 +742,25 @@ fn mcp_url(endpoint: &str) -> String {
         normalize_memento_endpoint(endpoint),
         MEMENTO_MCP_PATH
     )
+}
+
+/// #2660 — cache key for the static-slice tracker. Crucially excludes
+/// `user_text` and `dispatch_profile`: the static slice (Ranked context +
+/// Core memory + Anchored fallback) is a workspace/agent/session-scoped
+/// blob, not a per-turn artifact. Including `user_text` (as
+/// `build_recall_dedup_key` does for the response cache) would defeat the
+/// dedupe because the per-turn user message is part of the recall key.
+fn build_static_slice_cache_key(
+    workspace: &str,
+    agent_id: &str,
+    session_id: &str,
+    mode: RecallMode,
+) -> String {
+    let mode = match mode {
+        RecallMode::Full => "full",
+        RecallMode::IdentityOnly => "identity_only",
+    };
+    [workspace.trim(), agent_id.trim(), session_id.trim(), mode].join("\u{1f}")
 }
 
 fn build_recall_dedup_key(
@@ -1504,6 +1573,119 @@ fn format_context_payload_for_external_recall(payload: &Value) -> Option<String>
         }
         Some(guarded.text)
     }
+}
+
+/// #2660 — drop the static `Ranked context` / `Core memory` (and anchor
+/// fallback) sections from `external_recall` when they were already emitted
+/// to the same (workspace, agent, session, mode) lane within the tracker
+/// TTL. The caller passes in the cache `key`; we fingerprint just the
+/// static-slice text (not the whole recall envelope) so dynamic sections
+/// like `Active working memory` or `Skip list warnings` always re-emit.
+///
+/// When elision triggers, a single `Static memory: see prior turn (digest
+/// {hex})` pointer line is inserted so the model knows the slice has not
+/// been forgotten — just not redundantly re-rendered. Returns the
+/// possibly-shrunken text.
+fn elide_static_slice_if_recent(rendered: Option<String>, key: &str) -> Option<String> {
+    let text = rendered?;
+    let (static_slice, remaining) = split_static_slice_sections(&text);
+    let trimmed_slice = static_slice.trim();
+    if trimmed_slice.is_empty() {
+        return Some(text);
+    }
+    let digest = fingerprint_static_slice(trimmed_slice);
+    let already_emitted = record_static_slice_emission(key, digest);
+    match already_emitted {
+        // Same digest within the TTL window — elide and leave a pointer line.
+        Some(true) => {
+            let pointer =
+                format!("Static memory from Memento: see prior turn (digest {digest:016x})");
+            let mut sections = remaining;
+            // Place the pointer just after the `[External Recall]` header so
+            // the model still sees a clear signal that static context exists.
+            insert_pointer_after_header(&mut sections, &pointer);
+            if sections.is_empty() {
+                None
+            } else {
+                Some(sections.join("\n"))
+            }
+        }
+        // First emission OR fresh digest after content drift → emit in full.
+        _ => Some(text),
+    }
+}
+
+/// Split the rendered recall text into (static_slice, remaining) where the
+/// static_slice contains contiguous Ranked / Core / Anchored memory sections
+/// and `remaining` keeps everything else in original order.
+///
+/// `format_context_payload_for_external_recall` joins sections with a single
+/// `\n` and each section itself contains `\n` between header and bullets, so
+/// we cannot split on `\n\n`. Instead we walk lines and treat any known
+/// section header line as the start of a new chunk.
+fn split_static_slice_sections(text: &str) -> (String, Vec<String>) {
+    let mut sections: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line_starts_new_section(line) || sections.is_empty() {
+            sections.push(line.to_string());
+        } else {
+            let last = sections.last_mut().expect("non-empty by construction");
+            last.push('\n');
+            last.push_str(line);
+        }
+    }
+    let mut static_chunks = Vec::new();
+    let mut remaining = Vec::new();
+    for section in sections {
+        if section_is_static_slice(&section) {
+            static_chunks.push(section);
+        } else {
+            remaining.push(section);
+        }
+    }
+    (static_chunks.join("\n"), remaining)
+}
+
+/// Heuristic: a "new section" header line is either the bracketed banner
+/// (`[External Recall]`, `[External Recall — Identity Lite]`) or one of the
+/// known `<label>: ` colon-terminated headers emitted by the formatter.
+fn line_starts_new_section(line: &str) -> bool {
+    if line.starts_with('[') && line.ends_with(']') {
+        return true;
+    }
+    if line.starts_with("- ") {
+        return false;
+    }
+    // The formatter emits `"<Label>:\n- bullet"` so the header line is the
+    // literal `"<Label>:"` (no bullets). Anything else that looks like a
+    // header has a trailing colon.
+    line.ends_with(':') && !line.contains("- ")
+}
+
+fn section_is_static_slice(section: &str) -> bool {
+    section.starts_with("Ranked context from Memento:")
+        || section.starts_with("Core memory from Memento:")
+        || section.starts_with("Anchored memory from Memento:")
+}
+
+fn insert_pointer_after_header(sections: &mut Vec<String>, pointer: &str) {
+    if sections
+        .first()
+        .map(|s| s.starts_with("[External Recall"))
+        .unwrap_or(false)
+    {
+        sections.insert(1, pointer.to_string());
+    } else {
+        sections.insert(0, pointer.to_string());
+    }
+}
+
+fn fingerprint_static_slice(text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn search_event_feedback_hint(payload: &Value) -> Option<String> {
@@ -2949,5 +3131,191 @@ mod tests {
             result.warnings,
             vec!["memento capture skipped because user and assistant text are empty".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod static_slice_cache_tests {
+    use super::*;
+    use serde_json::json;
+
+    // #2660 — static-slice cache behaviour
+    #[test]
+    fn static_slice_split_separates_ranked_and_core_from_dynamic() {
+        let payload = json!({
+            "identity": "alice@example.com",
+            "working_memory": {
+                "items": [
+                    {"title": "draft PR for feature X", "category": "task"}
+                ]
+            },
+            "rankedInjection": {
+                "items": [
+                    {"content": "prefer pnpm over npm", "type": "preference"}
+                ]
+            },
+            "core": {
+                "preferences": [
+                    {"content": "use TypeScript strict mode"}
+                ]
+            }
+        });
+        let rendered = format_context_payload_for_external_recall(&payload).expect("rendered");
+        let (static_slice, remaining) = split_static_slice_sections(&rendered);
+        assert!(
+            static_slice.contains("Ranked context from Memento:"),
+            "static slice should capture Ranked block, got: {static_slice}"
+        );
+        assert!(
+            static_slice.contains("Core memory from Memento:"),
+            "static slice should capture Core block, got: {static_slice}"
+        );
+        let rejoined = remaining.join("\n");
+        assert!(
+            rejoined.contains("Identity from Memento"),
+            "identity should stay in remaining, got: {rejoined}"
+        );
+        assert!(
+            rejoined.contains("Active working memory from Memento"),
+            "working memory should stay in remaining, got: {rejoined}"
+        );
+    }
+
+    #[test]
+    fn elide_static_slice_first_call_keeps_full_text() {
+        crate::services::memory::memento_throttle::clear_static_slice_cache();
+        let payload = json!({
+            "rankedInjection": {
+                "items": [
+                    {"content": "first round content", "type": "preference"}
+                ]
+            }
+        });
+        let rendered = format_context_payload_for_external_recall(&payload);
+        let key = "test-key-first-call";
+        let result = elide_static_slice_if_recent(rendered, key).expect("text");
+        assert!(result.contains("Ranked context from Memento:"));
+        assert!(result.contains("first round content"));
+    }
+
+    #[test]
+    fn elide_static_slice_second_call_replaces_with_pointer_when_unchanged() {
+        crate::services::memory::memento_throttle::clear_static_slice_cache();
+        let payload = json!({
+            "rankedInjection": {
+                "items": [
+                    {"content": "stable content", "type": "preference"}
+                ]
+            },
+            "core": {
+                "preferences": [
+                    {"content": "use rust 2024"}
+                ]
+            }
+        });
+        let key = "test-key-second-call";
+        let first =
+            elide_static_slice_if_recent(format_context_payload_for_external_recall(&payload), key)
+                .expect("first");
+        assert!(first.contains("Ranked context from Memento:"));
+        let second =
+            elide_static_slice_if_recent(format_context_payload_for_external_recall(&payload), key)
+                .expect("second");
+        assert!(
+            !second.contains("Ranked context from Memento:"),
+            "second emission should elide ranked block, got: {second}"
+        );
+        assert!(
+            !second.contains("Core memory from Memento:"),
+            "second emission should elide core block, got: {second}"
+        );
+        assert!(
+            second.contains("Static memory from Memento: see prior turn"),
+            "pointer line must replace the static slice, got: {second}"
+        );
+        // The pointer must come right after the [External Recall] banner so
+        // the model still sees a stable signal that static context exists.
+        let banner_idx = second.find("[External Recall]").expect("banner");
+        let pointer_idx = second.find("Static memory from Memento").expect("pointer");
+        assert!(pointer_idx > banner_idx);
+    }
+
+    #[test]
+    fn elide_static_slice_re_emits_when_content_drifts() {
+        crate::services::memory::memento_throttle::clear_static_slice_cache();
+        let key = "test-key-drift";
+        let payload_v1 = json!({
+            "rankedInjection": {
+                "items": [{"content": "old rule", "type": "preference"}]
+            }
+        });
+        let _ = elide_static_slice_if_recent(
+            format_context_payload_for_external_recall(&payload_v1),
+            key,
+        );
+        let payload_v2 = json!({
+            "rankedInjection": {
+                "items": [{"content": "new rule", "type": "preference"}]
+            }
+        });
+        let result = elide_static_slice_if_recent(
+            format_context_payload_for_external_recall(&payload_v2),
+            key,
+        )
+        .expect("second");
+        assert!(
+            result.contains("Ranked context from Memento:"),
+            "content drift must trigger fresh emission, got: {result}"
+        );
+        assert!(result.contains("new rule"));
+        // Tracker now holds the v2 digest.
+        let digest = crate::services::memory::memento_throttle::peek_static_slice_digest(key)
+            .expect("digest after drift");
+        // Sanity: re-running with the v2 payload elides.
+        let rerun = elide_static_slice_if_recent(
+            format_context_payload_for_external_recall(&payload_v2),
+            key,
+        )
+        .expect("rerun");
+        assert!(!rerun.contains("Ranked context from Memento:"));
+        // Verify the digest is stable across the re-run.
+        assert_eq!(
+            digest,
+            crate::services::memory::memento_throttle::peek_static_slice_digest(key)
+                .expect("digest after rerun")
+        );
+    }
+
+    #[test]
+    fn build_static_slice_cache_key_omits_user_text_and_dispatch_profile() {
+        // The whole point of #2660 — user-text variance per turn MUST NOT
+        // bust the static-slice cache.
+        let key_a = build_static_slice_cache_key("ws", "agent", "sess", RecallMode::Full);
+        let key_b = build_static_slice_cache_key("ws", "agent", "sess", RecallMode::Full);
+        assert_eq!(key_a, key_b);
+        let key_other_mode =
+            build_static_slice_cache_key("ws", "agent", "sess", RecallMode::IdentityOnly);
+        assert_ne!(key_a, key_other_mode);
+        let key_other_session =
+            build_static_slice_cache_key("ws", "agent", "other-sess", RecallMode::Full);
+        assert_ne!(key_a, key_other_session);
+    }
+
+    #[test]
+    fn elide_static_slice_keeps_banner_when_only_static_sections_present() {
+        crate::services::memory::memento_throttle::clear_static_slice_cache();
+        let payload = json!({
+            "rankedInjection": {
+                "items": [{"content": "only static", "type": "preference"}]
+            }
+        });
+        let key = "test-key-static-only";
+        let _ =
+            elide_static_slice_if_recent(format_context_payload_for_external_recall(&payload), key);
+        let second =
+            elide_static_slice_if_recent(format_context_payload_for_external_recall(&payload), key)
+                .expect("second");
+        assert!(second.contains("[External Recall]"));
+        assert!(second.contains("Static memory from Memento: see prior turn"));
     }
 }

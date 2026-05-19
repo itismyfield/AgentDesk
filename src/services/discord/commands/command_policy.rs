@@ -75,7 +75,13 @@ pub(in crate::services::discord) fn command_risk(cmd: &str, _arg1: &str) -> Comm
         | "!deletesession" | "!stop" | "!restart" | "!debug" => CommandRisk::Mutating,
 
         // Shell execution and tool allowlist mutation — equivalent to RCE.
-        "!shell" | "!allowed" => CommandRisk::ShellOrToolGrant,
+        // Issue #2653 recovery commands also run curated bash pipelines
+        // (launchctl + ssh + git push --force-with-lease) so they share the
+        // same tier: owner-only AND default-disabled behind
+        // AGENTDESK_DISCORD_HIGH_RISK_ENABLED.
+        "!shell" | "!allowed" | "!deadlock-recover" | "!machine-flip" | "!stuck-pr-rebase" => {
+            CommandRisk::ShellOrToolGrant
+        }
 
         // User/credential/system surface — owner-only, always.
         "!allowall" | "!adduser" | "!removeuser" | "!escalation" => CommandRisk::CredentialSystem,
@@ -166,7 +172,11 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
         | "/deletesession" | "/stop" | "/restart" | "/debug" => CommandRisk::Mutating,
 
         // RCE-equivalent surface.
-        "/shell" | "/allowed" => CommandRisk::ShellOrToolGrant,
+        // `/deadlock-recover`, `/machine-flip`, and `/stuck-pr-rebase` (issue
+        // #2653) run launchctl/ssh/git pipelines — owner-only + opt-in.
+        "/shell" | "/allowed" | "/deadlock-recover" | "/machine-flip" | "/stuck-pr-rebase" => {
+            CommandRisk::ShellOrToolGrant
+        }
 
         // Credential / user-management surface.
         "/allowall" | "/adduser" | "/removeuser" | "/escalation" => CommandRisk::CredentialSystem,
@@ -474,6 +484,28 @@ mod tests {
                 command_risk(text_cmd, ""),
                 slash_command_risk(slash_cmd),
                 "tier mismatch between {text_cmd} and {slash_cmd}",
+            );
+        }
+    }
+
+    /// Issue #2653: recovery commands run launchctl/ssh/git push pipelines
+    /// and must classify as `ShellOrToolGrant` on both text and slash
+    /// surfaces so they are owner-only AND default-disabled behind
+    /// `AGENTDESK_DISCORD_HIGH_RISK_ENABLED=1`.
+    #[test]
+    fn recovery_commands_are_shell_or_tool_grant() {
+        for cmd in ["!deadlock-recover", "!machine-flip", "!stuck-pr-rebase"] {
+            assert_eq!(
+                command_risk(cmd, ""),
+                CommandRisk::ShellOrToolGrant,
+                "{cmd} must be ShellOrToolGrant",
+            );
+        }
+        for slash in ["/deadlock-recover", "/machine-flip", "/stuck-pr-rebase"] {
+            assert_eq!(
+                slash_command_risk(slash),
+                CommandRisk::ShellOrToolGrant,
+                "{slash} must be ShellOrToolGrant",
             );
         }
     }

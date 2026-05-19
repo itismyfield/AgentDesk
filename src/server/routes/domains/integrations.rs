@@ -4,7 +4,7 @@ use axum::{
 };
 
 use super::super::{
-    ApiRouter, AppState, discord, dm_reply, github, github_dashboard, meetings,
+    ApiRouter, AppState, discord, dm_reply, github, github_dashboard, meetings, pr_summary,
     protected_api_domain,
 };
 
@@ -19,6 +19,11 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(github::list_repos).post(github::register_repo),
             )
             .route("/github/repos/{owner}/{repo}/sync", post(github::sync_repo))
+            .route("/github/pr-summary", get(pr_summary::get_pr_summary))
+            .route(
+                "/github/pr-summary/invalidate",
+                post(pr_summary::invalidate_pr_summary),
+            )
             .route("/github-repos", get(github_dashboard::list_repos))
             .route("/github-issues", get(github_dashboard::list_issues))
             .route(

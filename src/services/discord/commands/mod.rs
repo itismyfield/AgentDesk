@@ -10,6 +10,7 @@ mod meeting_cmd;
 mod model_picker;
 mod model_ui;
 mod receipt;
+mod recovery_ops;
 mod restart;
 mod session;
 mod skill;
@@ -43,8 +44,8 @@ pub(in crate::services::discord) use diagnostics::{
     build_health_report, build_inflight_report, build_queue_report, build_status_report,
 };
 pub(super) use diagnostics::{
-    cmd_debug, cmd_deletesession, cmd_health, cmd_inflight, cmd_metrics, cmd_queue, cmd_sessions,
-    cmd_status,
+    cmd_adk_phase, cmd_debug, cmd_deletesession, cmd_health, cmd_inflight, cmd_metrics, cmd_queue,
+    cmd_sessions, cmd_status,
 };
 pub(super) use fast_mode::cmd_fast;
 pub(super) use goals::cmd_goals;
@@ -53,6 +54,7 @@ pub(super) use inspect::cmd_adk;
 pub(super) use meeting_cmd::cmd_meeting;
 pub(super) use model_picker::cmd_model;
 pub(super) use receipt::cmd_receipt;
+pub(super) use recovery_ops::{cmd_deadlock_recover, cmd_machine_flip, cmd_stuck_pr_rebase};
 pub(super) use restart::cmd_restart;
 pub(super) use session::{cmd_pwd, cmd_start};
 pub(in crate::services::discord) use skill::build_provider_skill_prompt;

@@ -352,6 +352,22 @@ pub(crate) enum Commands {
         #[arg(required = true)]
         tools: Vec<String>,
     },
+    /// #2655: install (or refresh) the Memento `context()` SessionStart hook
+    /// and a UserPromptSubmit token-pressure reminder into a Claude Code
+    /// settings file. Idempotent — running twice produces the same file.
+    InstallMementoSessionHook {
+        /// Path to the settings.json to mutate. Defaults to
+        /// `~/.claude/settings.json` when omitted.
+        #[arg(long)]
+        settings_path: Option<String>,
+        /// Skip writing and instead print the rendered settings to stdout.
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove the AgentDesk-managed memento hook entries instead of
+        /// installing them. Useful when an operator wants to revert.
+        #[arg(long, conflicts_with = "dry_run")]
+        uninstall: bool,
+    },
     /// Show server health, active sessions, and auto-queue status
     Status,
     /// List kanban cards
@@ -380,6 +396,44 @@ pub(crate) enum Commands {
     },
     /// Show auto-queue status with thread links
     Queue,
+    /// Unified queue + dispatch + phase-gate inspection (issue #2651).
+    ///
+    /// First-class replacement for the ad-hoc `curl /api/queue/status |
+    /// python -c '...'` polling pattern. Aggregates the queue run state,
+    /// pending dispatches, and phase-gate snapshot into one structured
+    /// response. Pass `--json` for machine-readable output.
+    Query {
+        #[command(subcommand)]
+        action: Option<QueryAction>,
+        /// Emit machine-readable JSON instead of the text summary.
+        #[arg(long, global = true)]
+        json: bool,
+        /// Filter result rows. Repeatable. Format: `key:value`
+        /// (e.g. `--filter status:pending`, `--filter dispatch_type:review`).
+        #[arg(long = "filter", global = true)]
+        filters: Vec<String>,
+        /// Restrict to a specific agent_id when applicable.
+        #[arg(long, global = true)]
+        agent: Option<String>,
+        /// Maximum rows to render per section (0 = unlimited).
+        #[arg(long, global = true, default_value_t = 0)]
+        limit: usize,
+    },
+    /// Phase-gate violation snapshot (issue #2657).
+    ///
+    /// Read-only inspector that flags auto-queue entries dispatched at a
+    /// higher `batch_phase` than the run's live phase pointer. Mirrors the
+    /// `/adk-phase` Discord slash command.
+    Phase {
+        #[command(subcommand)]
+        action: Option<PhaseAction>,
+        /// Emit machine-readable JSON instead of text.
+        #[arg(long, global = true)]
+        json: bool,
+        /// Show full per-entry detail.
+        #[arg(long, global = true)]
+        detailed: bool,
+    },
     /// Build + deploy dev + promote to release
     Deploy,
     /// List agents and their status
@@ -454,6 +508,69 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: ShowAction,
     },
+    /// Show consolidated health snapshot of the current node (server status,
+    /// dcserver pid, last deploy time, queue lag, Discord/disk/outbox).
+    Health {
+        /// Emit machine-readable JSON instead of a text table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare release/main/dev state across every registered worker node
+    /// (`mac-mini`, `mac-book`, …). Renders a side-by-side table with
+    /// dcserver pid, last deploy, queue lag, and a `diff` column.
+    MachineCompare {
+        /// Emit machine-readable JSON instead of a text table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Time-windowed activity report: commits / closed issues / merged PRs /
+    /// deploys / incidents in a single table. Uses gh + git + AgentDesk API.
+    Activity {
+        /// Window start. Accepts RFC3339 (`2026-05-19T23:10:00+09:00`),
+        /// duration suffix (`24h`, `90m`, `7d`), or `since:<sha>` to anchor
+        /// on a commit (commit time becomes the start).
+        #[arg(long)]
+        since: String,
+        /// Optional window end (RFC3339). Defaults to `now` when omitted.
+        #[arg(long)]
+        until: Option<String>,
+        /// Repository in owner/repo form. Defaults to the current
+        /// repo's `origin` remote when omitted.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Emit machine-readable JSON instead of a text table.
+        #[arg(long)]
+        json: bool,
+        /// Skip the AgentDesk-side deploy / incident lookup (useful when
+        /// the local API is offline). Pure git + gh report.
+        #[arg(long = "no-agentdesk")]
+        no_agentdesk: bool,
+    },
+}
+
+/// Subcommands for `adk query` (issue #2651).
+///
+/// Each variant aggregates one logical slice of runtime state. `All` (the
+/// default when no subcommand is given) fetches every slice in parallel for
+/// a single-shot snapshot — that is the curl-replacement happy path.
+#[derive(Subcommand)]
+pub(crate) enum QueryAction {
+    /// Auto-queue run + entries snapshot (calls `/api/queue/status`).
+    Queue,
+    /// Pending dispatches across all agents (calls `/api/dispatches/pending`).
+    Dispatches,
+    /// Phase-gate catalog + active gate state (calls
+    /// `/api/queue/phase-gates/catalog`).
+    PhaseGate,
+    /// All sections in one shot (default).
+    All,
+}
+
+/// Subcommands for `adk phase` (issue #2657).
+#[derive(Subcommand)]
+pub(crate) enum PhaseAction {
+    /// Show current violations (default).
+    Status,
 }
 
 #[derive(Subcommand)]

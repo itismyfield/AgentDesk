@@ -44,6 +44,7 @@ src/
 │   ├── migrate.rs
 │   ├── mod.rs
 │   ├── monitoring.rs
+│   ├── query.rs
 │   ├── run.rs
 │   └── utils.rs
 ├── compat/
@@ -268,6 +269,7 @@ src/
 │   │   ├── offices.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
+│   │   ├── pr_summary.rs
 │   │   ├── prompt_manifest_retention.rs
 │   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
@@ -342,6 +344,7 @@ src/
 │   │   ├── order_routes.rs
 │   │   ├── phase_gate.rs
 │   │   ├── phase_gate_catalog.rs
+│   │   ├── phase_gate_violations.rs
 │   │   ├── planning.rs
 │   │   ├── query.rs
 │   │   ├── route.rs
@@ -406,6 +409,7 @@ src/
 │   │   │   ├── model_picker.rs
 │   │   │   ├── model_ui.rs
 │   │   │   ├── receipt.rs
+│   │   │   ├── recovery_ops.rs
 │   │   │   ├── restart.rs
 │   │   │   ├── session.rs
 │   │   │   ├── skill.rs
@@ -442,6 +446,7 @@ src/
 │   │   │   ├── manifest.rs
 │   │   │   ├── memory_guidance.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── section_dedupe.rs
 │   │   │   └── tests.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── mod.rs
@@ -577,6 +582,7 @@ src/
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
+│   │   ├── memento_instructions_cache.rs
 │   │   ├── memento_throttle.rs
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs
@@ -646,6 +652,7 @@ src/
 │   ├── dispatch_watchdog.rs
 │   ├── dispatched_sessions.rs
 │   ├── dispatches_followup.rs
+│   ├── envelope_dedup.rs
 │   ├── gemini.rs
 │   ├── issue_announcements.rs
 │   ├── kanban.rs
@@ -656,6 +663,7 @@ src/
 │   ├── opencode.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs
+│   ├── pr_summary.rs
 │   ├── process.rs
 │   ├── provider.rs
 │   ├── provider_exec.rs
