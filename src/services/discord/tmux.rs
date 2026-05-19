@@ -228,10 +228,9 @@ fn watcher_stream_seed(restored_turn: Option<RestoredWatcherTurn>) -> WatcherStr
 
 fn should_discard_restored_seed_for_idle_direct_prompt(
     restored_turn_present: bool,
-    inflight_missing: bool,
     prompt_anchor_present: bool,
 ) -> bool {
-    restored_turn_present && inflight_missing && prompt_anchor_present
+    restored_turn_present && prompt_anchor_present
 }
 
 fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
@@ -5821,18 +5820,15 @@ mod tests {
     }
 
     #[test]
-    fn idle_direct_prompt_discards_restored_seed_only_with_anchor_and_no_inflight() {
+    fn idle_direct_prompt_discards_restored_seed_only_with_anchor() {
         assert!(should_discard_restored_seed_for_idle_direct_prompt(
-            true, true, true
+            true, true
         ));
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            true, false, true
+            true, false
         ));
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            true, true, false
-        ));
-        assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            false, true, true
+            false, true
         ));
     }
 
