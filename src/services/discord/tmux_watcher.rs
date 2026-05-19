@@ -1642,11 +1642,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let restored_turn_seed = restored_turn.take();
         let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
             restored_turn_seed.is_some(),
-            crate::services::discord::inflight::load_inflight_state(
-                &watcher_provider,
-                channel_id.get(),
-            )
-            .is_none(),
             crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                 watcher_provider.as_str(),
                 &tmux_session_name,
