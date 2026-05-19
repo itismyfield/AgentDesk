@@ -524,6 +524,120 @@ pub fn fetch_issue_comments(repo: &str, issue_number: i64) -> Result<IssueCommen
     fetch_issue_comments_with(adapter(), repo, issue_number)
 }
 
+/// JSON payload returned by `gh pr view --json` for the fields used by the
+/// `pr_summary` cache. We deserialize loosely so future GitHub API additions
+/// do not break parsing.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct PrView {
+    pub number: i64,
+    pub state: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub url: String,
+    #[serde(default, rename = "isDraft")]
+    pub is_draft: bool,
+    #[serde(default, rename = "headRefOid")]
+    pub head_ref_oid: Option<String>,
+    #[serde(default, rename = "headRefName")]
+    pub head_ref_name: Option<String>,
+    #[serde(default, rename = "baseRefName")]
+    pub base_ref_name: Option<String>,
+    #[serde(default, rename = "mergeable")]
+    pub mergeable: Option<String>,
+    #[serde(default, rename = "mergeStateStatus")]
+    pub merge_state_status: Option<String>,
+    #[serde(default)]
+    pub author: Option<serde_json::Value>,
+    #[serde(default)]
+    pub labels: Vec<sync::GhLabel>,
+    #[serde(default)]
+    pub files: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub reviews: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub comments: Vec<serde_json::Value>,
+    #[serde(default, rename = "statusCheckRollup")]
+    pub status_check_rollup: Vec<serde_json::Value>,
+    #[serde(default, rename = "createdAt")]
+    pub created_at: Option<String>,
+    #[serde(default, rename = "updatedAt")]
+    pub updated_at: Option<String>,
+    #[serde(default, rename = "mergedAt")]
+    pub merged_at: Option<String>,
+    #[serde(default, rename = "closedAt")]
+    pub closed_at: Option<String>,
+    #[serde(default)]
+    pub additions: Option<i64>,
+    #[serde(default)]
+    pub deletions: Option<i64>,
+    #[serde(default, rename = "changedFiles")]
+    pub changed_files: Option<i64>,
+}
+
+const PR_VIEW_JSON_FIELDS: &str = "number,state,title,body,url,isDraft,headRefOid,headRefName,baseRefName,mergeable,mergeStateStatus,author,labels,files,reviews,comments,statusCheckRollup,createdAt,updatedAt,mergedAt,closedAt,additions,deletions,changedFiles";
+
+fn fetch_pr_view_with(
+    adapter: &dyn GitHubAdapter,
+    repo: &str,
+    pr_number: i64,
+) -> Result<PrView, String> {
+    let number = pr_number.to_string();
+    let output = adapter.run(&[
+        "pr",
+        "view",
+        &number,
+        "--repo",
+        repo,
+        "--json",
+        PR_VIEW_JSON_FIELDS,
+    ])?;
+    serde_json::from_str(&output).map_err(|e| format!("parse gh pr view output: {e}"))
+}
+
+/// Fetch a full PR view from GitHub. This is the network-bound call wrapped by
+/// the [`crate::services::pr_summary`] cache; production callers should
+/// prefer the cache rather than invoking this directly.
+pub fn fetch_pr_view(repo: &str, pr_number: i64) -> Result<PrView, String> {
+    fetch_pr_view_with(adapter(), repo, pr_number)
+}
+
+/// Fetch only the head SHA + state of a PR. Used by the cache to cheaply
+/// validate freshness — if the SHA matches the cached entry we can serve a
+/// stale body without paying for the full payload.
+pub fn fetch_pr_head_state(repo: &str, pr_number: i64) -> Result<(Option<String>, String), String> {
+    fetch_pr_head_state_with(adapter(), repo, pr_number)
+}
+
+fn fetch_pr_head_state_with(
+    adapter: &dyn GitHubAdapter,
+    repo: &str,
+    pr_number: i64,
+) -> Result<(Option<String>, String), String> {
+    let number = pr_number.to_string();
+    let output = adapter.run(&[
+        "pr",
+        "view",
+        &number,
+        "--repo",
+        repo,
+        "--json",
+        "headRefOid,state",
+    ])?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&output).map_err(|e| format!("parse gh pr head state: {e}"))?;
+    let head = parsed
+        .get("headRefOid")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let state = parsed
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNKNOWN")
+        .to_string();
+    Ok((head, state))
+}
+
 /// Reopen a GitHub issue given its full URL (e.g. https://github.com/owner/repo/issues/42).
 pub async fn reopen_issue_by_url(url: &str) -> Result<(), String> {
     reopen_issue_by_url_with(adapter(), url).await

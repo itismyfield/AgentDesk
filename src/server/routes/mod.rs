@@ -17,6 +17,7 @@ mod domains;
 pub mod escalation;
 pub mod github;
 pub mod github_dashboard;
+pub mod pr_summary;
 pub mod health_api;
 pub mod home_metrics;
 pub mod hooks;

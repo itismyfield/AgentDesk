@@ -40,6 +40,7 @@ pub mod observability;
 pub mod onboarding;
 pub mod opencode;
 pub mod pipeline_override;
+pub mod pr_summary;
 pub mod pipeline_routes;
 pub mod platform;
 pub mod process;
