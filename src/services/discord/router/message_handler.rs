@@ -76,6 +76,7 @@ fn parse_watchdog_alert_channel_id(raw: &str) -> Option<serenity::ChannelId> {
 struct ClaudeTuiBusyFollowupDiagnostic {
     tmux_session_name: String,
     prompt_marker_detected: bool,
+    prompt_draft_detected: bool,
     previous_tui_turn_still_running: bool,
     tmux_pane_alive: bool,
     capture_available: bool,
@@ -92,6 +93,7 @@ impl ClaudeTuiBusyFollowupDiagnostic {
         serde_json::json!({
             "tmux_session_name": self.tmux_session_name,
             "prompt_marker_detected": self.prompt_marker_detected,
+            "prompt_draft_detected": self.prompt_draft_detected,
             "previous_tui_turn_still_running": self.previous_tui_turn_still_running,
             "tmux_pane_alive": self.tmux_pane_alive,
             "capture_available": self.capture_available,
@@ -139,6 +141,7 @@ fn classify_inflight_diagnostic_state(inflight: Option<&InflightTurnState>) -> &
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HostedTuiPromptReadinessSnapshot {
     prompt_marker_detected: bool,
+    prompt_draft_detected: bool,
     tmux_pane_alive: bool,
     capture_available: bool,
     pane_tail: String,
@@ -164,6 +167,7 @@ fn classify_claude_tui_followup_submission(
     Some(ClaudeTuiBusyFollowupDiagnostic {
         tmux_session_name: tmux_session_name.to_string(),
         prompt_marker_detected: snapshot.prompt_marker_detected,
+        prompt_draft_detected: snapshot.prompt_draft_detected,
         previous_tui_turn_still_running: true,
         tmux_pane_alive: snapshot.tmux_pane_alive,
         capture_available: snapshot.capture_available,
@@ -359,6 +363,7 @@ fn tui_busy_followup_diagnostic(
                 crate::services::codex_tui::input::prompt_readiness_snapshot(tmux_session_name);
             HostedTuiPromptReadinessSnapshot {
                 prompt_marker_detected: snapshot.composer_marker_detected,
+                prompt_draft_detected: false,
                 tmux_pane_alive: snapshot.tmux_pane_alive,
                 capture_available: snapshot.capture_available,
                 pane_tail: snapshot.pane_tail,
@@ -369,6 +374,7 @@ fn tui_busy_followup_diagnostic(
                 crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name);
             HostedTuiPromptReadinessSnapshot {
                 prompt_marker_detected: snapshot.prompt_marker_detected,
+                prompt_draft_detected: snapshot.prompt_draft_detected,
                 tmux_pane_alive: snapshot.tmux_pane_alive,
                 capture_available: snapshot.capture_available,
                 pane_tail: snapshot.pane_tail,
@@ -7830,6 +7836,7 @@ mod session_strategy_lifecycle_tests {
     fn claude_tui_direct_busy_followup_blocks_before_prompt_submit() {
         let snapshot = HostedTuiPromptReadinessSnapshot {
             prompt_marker_detected: false,
+            prompt_draft_detected: false,
             tmux_pane_alive: true,
             capture_available: true,
             pane_tail: "Thinking...\nRunning tool".to_string(),
@@ -7860,6 +7867,7 @@ mod session_strategy_lifecycle_tests {
     fn claude_tui_ready_or_dead_pane_does_not_busy_block_followup() {
         let ready = HostedTuiPromptReadinessSnapshot {
             prompt_marker_detected: true,
+            prompt_draft_detected: false,
             tmux_pane_alive: true,
             capture_available: true,
             pane_tail: ">".to_string(),
@@ -7878,6 +7886,7 @@ mod session_strategy_lifecycle_tests {
 
         let dead = HostedTuiPromptReadinessSnapshot {
             prompt_marker_detected: false,
+            prompt_draft_detected: false,
             tmux_pane_alive: false,
             capture_available: false,
             pane_tail: "<capture unavailable>".to_string(),
@@ -7900,6 +7909,7 @@ mod session_strategy_lifecycle_tests {
     fn claude_tui_transcript_idle_overrides_busy_pane_scrape() {
         let snapshot = HostedTuiPromptReadinessSnapshot {
             prompt_marker_detected: false,
+            prompt_draft_detected: false,
             tmux_pane_alive: true,
             capture_available: true,
             pane_tail: "old assistant output with no visible prompt marker".to_string(),
@@ -7920,9 +7930,35 @@ mod session_strategy_lifecycle_tests {
 
     #[cfg(unix)]
     #[test]
+    fn claude_tui_transcript_idle_with_prompt_draft_reaches_provider_recovery() {
+        let snapshot = HostedTuiPromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "❯ [TUI-REL-F815-CC-5] stranded draft".to_string(),
+        };
+
+        assert!(
+            classify_claude_tui_followup_submission(
+                &snapshot,
+                "attached",
+                Some(1),
+                "missing",
+                crate::services::tui_turn_state::TuiTurnState::Idle,
+                "AgentDesk-claude-ready",
+            )
+            .is_none(),
+            "idle transcript plus draft is a provider recovery case, not a router busy block"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn claude_tui_transcript_busy_can_block_even_if_prompt_marker_is_visible() {
         let snapshot = HostedTuiPromptReadinessSnapshot {
             prompt_marker_detected: true,
+            prompt_draft_detected: false,
             tmux_pane_alive: true,
             capture_available: true,
             pane_tail: "Ready for input (type message + Enter)".to_string(),
@@ -8071,6 +8107,7 @@ mod session_strategy_lifecycle_tests {
         // signals UserSubmitted (user message written but agent not yet streaming).
         let snapshot = HostedTuiPromptReadinessSnapshot {
             prompt_marker_detected: false,
+            prompt_draft_detected: false,
             tmux_pane_alive: true,
             capture_available: true,
             pane_tail: String::new(),

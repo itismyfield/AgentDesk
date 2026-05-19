@@ -534,22 +534,75 @@ _resolve_deploy_peers() {
     printf ''
 }
 
+_deploy_peer_env_prelude() {
+    printf 'AGENTDESK_DEPLOY_PEER_INVOCATION=1'
+    local name value
+    for name in \
+        AGENTDESK_CODESIGN_IDENTITY \
+        AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN \
+        AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE \
+        AGENTDESK_CODESIGN_KEYCHAIN_NAME \
+        AGENTDESK_DEPLOY_ALL_NODES \
+        AGENTDESK_DEPLOY_BINARY \
+        AGENTDESK_DEPLOY_DELAY_SECS \
+        AGENTDESK_DEPLOY_HEALTH_DELAY_SECS \
+        AGENTDESK_DEPLOY_HEALTH_RETRIES \
+        AGENTDESK_DEPLOY_LOCK_FILE \
+        AGENTDESK_DEPLOY_PEERS \
+        AGENTDESK_DEPLOY_PEERS_FILE \
+        AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP \
+        AGENTDESK_DEPLOY_SKIP_FRESHNESS \
+        AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS \
+        AGENTDESK_DEPLOY_TEST_MODE \
+        AGENTDESK_REL_PORT \
+        AGENTDESK_REPORT_CHANNEL_ID \
+        AGENTDESK_REPORT_PROVIDER \
+        AGENTDESK_SKIP_TURN_DRAIN \
+        AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS \
+        AGENTDESK_BUNDLE_ID \
+        AGENTDESK_DCSERVER_LABEL \
+        AGENTDESK_PLIST_REL \
+        OBSIDIAN_VAULT_ROOT \
+        AGENTDESK_OBSIDIAN_AGENTS_SRC
+    do
+        value="${!name:-}"
+        [ -n "$value" ] || continue
+        printf ' %s=%q' "$name" "$value"
+    done
+}
+
 _deploy_to_one_peer() {
     local peer="$1"
-    local repo_remote="${AGENTDESK_PEER_REPO_DIR:-\$HOME/.adk/release/workspaces/agentdesk}"
-
-    echo "▸ [peer:$peer] Pre-syncing repo (fast-forward only)..."
-    if ! ssh "$peer" "bash -lc 'set -e
-cd \"$repo_remote\"
+    shift
+    local quoted_args=""
+    local env_prelude
+    local remote_cd_command
+    local remote_deploy_command
+    local remote_presync_command
+    env_prelude="$(_deploy_peer_env_prelude)"
+    if [ "$#" -gt 0 ]; then
+        quoted_args=$(printf ' %q' "$@")
+    fi
+    if [ -n "${AGENTDESK_PEER_REPO_DIR:-}" ]; then
+        remote_cd_command="cd $(printf '%q' "$AGENTDESK_PEER_REPO_DIR")"
+    else
+        remote_cd_command='cd "$HOME/.adk/release/workspaces/agentdesk"'
+    fi
+    remote_presync_command="set -e
+${remote_cd_command}
 git fetch --quiet origin main
 git checkout --quiet main
-git merge --quiet --ff-only origin/main'"; then
+git merge --quiet --ff-only origin/main"
+    remote_deploy_command="${remote_cd_command} && ${env_prelude} bash scripts/deploy-release.sh${quoted_args}"
+
+    echo "▸ [peer:$peer] Pre-syncing repo (fast-forward only)..."
+    if ! ssh "$peer" "bash -lc $(printf '%q' "$remote_presync_command")"; then
         echo "✗ [peer:$peer] Pre-sync failed (diverged or fetch error). Resolve on the peer and retry."
         return 1
     fi
 
     echo "▸ [peer:$peer] Running deploy-release.sh..."
-    if ! ssh "$peer" "bash -lc 'cd \"$repo_remote\" && AGENTDESK_DEPLOY_PEER_INVOCATION=1 bash scripts/deploy-release.sh'"; then
+    if ! ssh "$peer" "bash -lc $(printf '%q' "$remote_deploy_command")"; then
         echo "✗ [peer:$peer] deploy-release.sh failed"
         return 1
     fi
@@ -579,7 +632,7 @@ _deploy_to_all_peers() {
     local failures=0
     while IFS= read -r peer; do
         [ -n "$peer" ] || continue
-        if ! _deploy_to_one_peer "$peer"; then
+        if ! _deploy_to_one_peer "$peer" "$@"; then
             failures=$((failures + 1))
         fi
     done <<<"$peers"
@@ -1114,5 +1167,5 @@ _write_release_source_manifest
 echo "═══ Deploy Complete ═══"
 
 if [ "$DEPLOY_ALL_NODES" = "1" ]; then
-    _deploy_to_all_peers
+    _deploy_to_all_peers "$@"
 fi
