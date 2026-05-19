@@ -434,6 +434,11 @@ pub(crate) async fn run(
     if _claude_tui_hook_endpoint.is_some() {
         app = app.merge(crate::services::claude_tui::hook_server::hook_receiver_router());
     }
+    // `tui_relay` exposes the `claude_tui_send` / `claude_tui_wait` MCP
+    // primitives (see audit issue #2652). It is always mounted because the
+    // event-driven wait path is useful even when the hook receiver
+    // endpoint has not been published yet (e.g. early-boot Codex calls).
+    app = app.merge(crate::services::claude_tui::tui_relay::router());
     let app = app.fallback_service(dashboard_service);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);

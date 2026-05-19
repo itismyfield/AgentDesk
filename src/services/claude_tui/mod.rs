@@ -4,3 +4,4 @@ pub mod hook_server;
 pub mod input;
 pub mod session;
 pub mod transcript_tail;
+pub mod tui_relay;
