@@ -760,13 +760,7 @@ fn build_static_slice_cache_key(
         RecallMode::Full => "full",
         RecallMode::IdentityOnly => "identity_only",
     };
-    [
-        workspace.trim(),
-        agent_id.trim(),
-        session_id.trim(),
-        mode,
-    ]
-    .join("\u{1f}")
+    [workspace.trim(), agent_id.trim(), session_id.trim(), mode].join("\u{1f}")
 }
 
 fn build_recall_dedup_key(
@@ -1604,9 +1598,8 @@ fn elide_static_slice_if_recent(rendered: Option<String>, key: &str) -> Option<S
     match already_emitted {
         // Same digest within the TTL window — elide and leave a pointer line.
         Some(true) => {
-            let pointer = format!(
-                "Static memory from Memento: see prior turn (digest {digest:016x})"
-            );
+            let pointer =
+                format!("Static memory from Memento: see prior turn (digest {digest:016x})");
             let mut sections = remaining;
             // Place the pointer just after the `[External Recall]` header so
             // the model still sees a clear signal that static context exists.
@@ -2550,7 +2543,6 @@ mod tests {
         assert!(format_context_payload_for_identity_only(&payload).is_none());
     }
 
-
     #[tokio::test]
     async fn test_memento_reflect_calls_reflect_tool_over_mcp() {
         let reflect_content = serde_json::to_string(&json!({
@@ -3222,17 +3214,13 @@ mod static_slice_cache_tests {
             }
         });
         let key = "test-key-second-call";
-        let first = elide_static_slice_if_recent(
-            format_context_payload_for_external_recall(&payload),
-            key,
-        )
-        .expect("first");
+        let first =
+            elide_static_slice_if_recent(format_context_payload_for_external_recall(&payload), key)
+                .expect("first");
         assert!(first.contains("Ranked context from Memento:"));
-        let second = elide_static_slice_if_recent(
-            format_context_payload_for_external_recall(&payload),
-            key,
-        )
-        .expect("second");
+        let second =
+            elide_static_slice_if_recent(format_context_payload_for_external_recall(&payload), key)
+                .expect("second");
         assert!(
             !second.contains("Ranked context from Memento:"),
             "second emission should elide ranked block, got: {second}"
@@ -3322,15 +3310,11 @@ mod static_slice_cache_tests {
             }
         });
         let key = "test-key-static-only";
-        let _ = elide_static_slice_if_recent(
-            format_context_payload_for_external_recall(&payload),
-            key,
-        );
-        let second = elide_static_slice_if_recent(
-            format_context_payload_for_external_recall(&payload),
-            key,
-        )
-        .expect("second");
+        let _ =
+            elide_static_slice_if_recent(format_context_payload_for_external_recall(&payload), key);
+        let second =
+            elide_static_slice_if_recent(format_context_payload_for_external_recall(&payload), key)
+                .expect("second");
         assert!(second.contains("[External Recall]"));
         assert!(second.contains("Static memory from Memento: see prior turn"));
     }

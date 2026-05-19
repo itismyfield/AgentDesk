@@ -551,9 +551,9 @@
 | `services::mcp_config` | `src/services/mcp_config.rs` | 1532 | giant-file |
 | `services::memory` | `src/services/memory/mod.rs` | 381 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 116 |  |
-| `services::memory::memento` | `src/services/memory/memento.rs` | 2990 | giant-file |
+| `services::memory::memento` | `src/services/memory/memento.rs` | 3321 | giant-file |
 | `services::memory::memento_instructions_cache` | `src/services/memory/memento_instructions_cache.rs` | 241 |  |
-| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 751 |  |
+| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 848 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 474 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 806 |  |
 | `services::observability` | `src/services/observability/mod.rs` | 1149 | giant-file |
