@@ -97,7 +97,9 @@ impl EnvelopeDedupStore {
             envelope_hash: *envelope_hash,
         };
         match self.inner.entries.get(&key) {
-            Some(entry) => Instant::now().saturating_duration_since(entry.first_seen_at) < self.inner.ttl,
+            Some(entry) => {
+                Instant::now().saturating_duration_since(entry.first_seen_at) < self.inner.ttl
+            }
             None => false,
         }
     }
