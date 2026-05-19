@@ -168,23 +168,44 @@ mod tests {
         let _g = lock();
         reset_for_tests();
         let first = "instructions-v1";
-        assert_eq!(record_instructions(Some(first)), InstructionsDelta::FirstSeen);
-        assert_eq!(record_instructions(Some(first)), InstructionsDelta::Unchanged);
-        assert_eq!(record_instructions(Some(first)), InstructionsDelta::Unchanged);
+        assert_eq!(
+            record_instructions(Some(first)),
+            InstructionsDelta::FirstSeen
+        );
+        assert_eq!(
+            record_instructions(Some(first)),
+            InstructionsDelta::Unchanged
+        );
+        assert_eq!(
+            record_instructions(Some(first)),
+            InstructionsDelta::Unchanged
+        );
         let second = "instructions-v2";
-        assert_eq!(record_instructions(Some(second)), InstructionsDelta::Changed);
-        assert_eq!(record_instructions(Some(second)), InstructionsDelta::Unchanged);
+        assert_eq!(
+            record_instructions(Some(second)),
+            InstructionsDelta::Changed
+        );
+        assert_eq!(
+            record_instructions(Some(second)),
+            InstructionsDelta::Unchanged
+        );
     }
 
     #[test]
     fn missing_does_not_invalidate_previous_hash() {
         let _g = lock();
         reset_for_tests();
-        assert_eq!(record_instructions(Some("v1")), InstructionsDelta::FirstSeen);
+        assert_eq!(
+            record_instructions(Some("v1")),
+            InstructionsDelta::FirstSeen
+        );
         assert_eq!(record_instructions(None), InstructionsDelta::Missing);
         // After a Missing, re-receiving the same text must still report as
         // Unchanged — operators expect the cache to be sticky.
-        assert_eq!(record_instructions(Some("v1")), InstructionsDelta::Unchanged);
+        assert_eq!(
+            record_instructions(Some("v1")),
+            InstructionsDelta::Unchanged
+        );
     }
 
     #[test]
@@ -195,7 +216,10 @@ mod tests {
         let _g = lock();
         reset_for_tests();
         assert_eq!(record_instructions(None), InstructionsDelta::Missing);
-        assert_eq!(record_instructions(Some("v1")), InstructionsDelta::FirstSeen);
+        assert_eq!(
+            record_instructions(Some("v1")),
+            InstructionsDelta::FirstSeen
+        );
     }
 
     #[test]
