@@ -430,6 +430,36 @@ fn direct_tui_material_fallback_reason(options: &CodexLaunchOptions) -> Option<&
     None
 }
 
+fn register_codex_tui_idle_relay_binding(
+    tmux_session_name: &str,
+    tail_result: &crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
+) {
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        tmux_session_name,
+        codex_tui_idle_relay_binding(tmux_session_name, tail_result),
+    );
+}
+
+fn codex_tui_idle_relay_binding(
+    tmux_session_name: &str,
+    tail_result: &crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
+) -> crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+    let relay_output_path =
+        crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
+    let relay_last_offset = std::fs::metadata(&relay_output_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        output_path: tail_result.rollout_path.display().to_string(),
+        relay_output_path: Some(relay_output_path),
+        input_fifo_path: None,
+        session_id: tail_result.session_id.clone(),
+        last_offset: tail_result.final_offset,
+        relay_last_offset: Some(relay_last_offset),
+    }
+}
+
 fn render_codex_tui_tmux_script(env_lines: &str, codex_bin: &str, args: &[String]) -> String {
     let rendered_args = args
         .iter()
@@ -1607,6 +1637,13 @@ fn execute_streaming_local_tui_tmux(
             session_id: None,
         });
     } else {
+        // The Discord turn bridge only needs RuntimeReady when the TUI is
+        // actually ready for another routed turn. The idle SSH-direct relay is
+        // different: it scans Codex's rollout after the bridge has gone idle,
+        // so it still needs the rollout binding even when RuntimeReady is
+        // suppressed by the post-turn readiness guard.
+        register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result);
+
         // #2325: gate the RuntimeReady handoff on the Codex TUI composer
         // actually being ready for input. RuntimeReady is the signal the
         // turn-bridge uses to publish CodexTui handoff state that
@@ -1643,23 +1680,6 @@ fn execute_streaming_local_tui_tmux(
             cancel_token_for_post_tail.as_ref(),
         ) {
             Ok(()) => {
-                let relay_output_path =
-                    crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
-                let relay_last_offset = std::fs::metadata(&relay_output_path)
-                    .map(|metadata| metadata.len())
-                    .unwrap_or(0);
-                crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
-                    tmux_session_name,
-                    crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
-                        output_path: tail_result.rollout_path.display().to_string(),
-                        relay_output_path: Some(relay_output_path),
-                        input_fifo_path: None,
-                        session_id: tail_result.session_id.clone(),
-                        last_offset: tail_result.final_offset,
-                        relay_last_offset: Some(relay_last_offset),
-                    },
-                );
                 let _ = sender.send(StreamMessage::RuntimeReady {
                     handoff: RuntimeHandoff::CodexTui {
                         rollout_path: tail_result.rollout_path.display().to_string(),
@@ -2503,8 +2523,9 @@ fn handle_codex_json_line(
 mod tui_hosting_tests {
     use super::{
         CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides, base_tui_args,
-        build_codex_tui_args, build_tmux_launch_env_lines, direct_tui_material_fallback_reason,
-        render_codex_tui_tmux_script, render_codex_wrapper_tmux_script,
+        build_codex_tui_args, build_tmux_launch_env_lines, codex_tui_idle_relay_binding,
+        direct_tui_material_fallback_reason, render_codex_tui_tmux_script,
+        render_codex_wrapper_tmux_script,
     };
     #[cfg(unix)]
     use super::{
@@ -2515,6 +2536,7 @@ mod tui_hosting_tests {
         RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
     };
     use crate::services::provider::ProviderKind;
+    use crate::services::provider::ReadOutputResult;
 
     #[test]
     fn codex_tui_tmux_script_launches_codex_directly_without_wrapper() {
@@ -2626,6 +2648,31 @@ mod tui_hosting_tests {
             .with_add_dirs(&["/work/shared"]);
 
         assert_eq!(direct_tui_material_fallback_reason(&options), None);
+    }
+
+    #[test]
+    fn codex_tui_idle_relay_binding_is_buildable_without_runtime_ready() {
+        let tmux_session_name = format!("AgentDesk-codex-idle-binding-test-{}", std::process::id());
+        let rollout_path = std::env::temp_dir().join(format!(
+            "agentdesk-codex-idle-binding-test-{}.jsonl",
+            std::process::id()
+        ));
+        let tail_result = crate::services::codex_tui::rollout_tail::CodexTuiTailResult {
+            read_result: ReadOutputResult::Completed { offset: 321 },
+            rollout_path: rollout_path.clone(),
+            final_offset: 321,
+            session_id: Some("thread-xyz".to_string()),
+        };
+
+        let binding = codex_tui_idle_relay_binding(&tmux_session_name, &tail_result);
+        assert_eq!(
+            binding.runtime_kind,
+            crate::services::agent_protocol::RuntimeHandoffKind::CodexTui
+        );
+        assert_eq!(binding.output_path, rollout_path.display().to_string());
+        assert_eq!(binding.session_id.as_deref(), Some("thread-xyz"));
+        assert_eq!(binding.last_offset, 321);
+        assert_eq!(binding.relay_last_offset, Some(0));
     }
 
     #[test]

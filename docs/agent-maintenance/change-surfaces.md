@@ -117,6 +117,12 @@
     dead-code sweep; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires; split loop helpers
     further before adding behavior).
+  - `src/services/discord/tui_prompt_relay.rs` (1155 lines; SSH-direct TUI
+    prompt notification plus Codex rollout response relay surface, bugfix only
+    outside an extraction plan).
+  - `src/services/tui_prompt_dedupe.rs` (1045 lines; shared TUI prompt
+    fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
+    outside an extraction plan).
   - `src/services/discord/recovery_engine.rs` (4842 lines).
   - `src/services/discord/health.rs` (4880 lines after #1879 snapshot/mailbox
     extraction).
