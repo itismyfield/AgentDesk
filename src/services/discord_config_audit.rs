@@ -81,6 +81,12 @@ struct ComparableAgent {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DbAgentDrift {
+    storage: ConfigAuditDbSummary,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct LegacyBotEntry {
     hash_key: String,
     token: Option<String>,
@@ -693,12 +699,78 @@ fn audit_db_agents(
         .map(|agent| (agent.id.clone(), ComparableAgent::from_yaml(agent)))
         .collect::<BTreeMap<_, _>>();
 
-    for (agent_id, yaml_agent) in &yaml_agents {
+    let pre_sync_drift = compute_db_agent_drift(&yaml_agents, &db_agents, yaml_present);
+
+    if dry_run || !yaml_present {
+        apply_db_agent_drift(report, pre_sync_drift);
+        return Ok(());
+    }
+
+    match sync_db_agents_pg(config, &config.agents) {
+        Ok(Some(count)) => {
+            report.storage.synced_agents = Some(count);
+            report.actions.push(format!(
+                "synced {} agent definitions from agentdesk.yaml into the PostgreSQL agents table",
+                count
+            ));
+            match load_db_agents_pg(config) {
+                Ok(Some(post_sync_agents)) => {
+                    let post_sync_drift =
+                        compute_db_agent_drift(&yaml_agents, &post_sync_agents, yaml_present);
+                    apply_db_agent_drift(report, post_sync_drift);
+                }
+                Ok(None) => {
+                    apply_db_agent_drift(report, pre_sync_drift.without_warnings());
+                    report.warnings.push(
+                        "Unable to verify PostgreSQL agents after config sync because no database pool was returned"
+                            .to_string(),
+                    );
+                }
+                Err(error) => {
+                    apply_db_agent_drift(report, pre_sync_drift.without_warnings());
+                    report.warnings.push(format!(
+                        "Failed to verify PostgreSQL agents after config sync: {error}"
+                    ));
+                }
+            }
+            return Ok(());
+        }
+        Ok(None) => {
+            apply_db_agent_drift(report, pre_sync_drift);
+        }
+        Err(error) => {
+            apply_db_agent_drift(report, pre_sync_drift);
+            report.warnings.push(format!(
+                "Failed to sync agents from agentdesk.yaml into PostgreSQL: {error}; legacy fallback disabled"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+impl DbAgentDrift {
+    fn without_warnings(self) -> Self {
+        Self {
+            warnings: Vec::new(),
+            ..self
+        }
+    }
+}
+
+fn compute_db_agent_drift(
+    yaml_agents: &BTreeMap<String, ComparableAgent>,
+    db_agents: &BTreeMap<String, ComparableAgent>,
+    yaml_present: bool,
+) -> DbAgentDrift {
+    let mut drift = DbAgentDrift::default();
+
+    for (agent_id, yaml_agent) in yaml_agents {
         match db_agents.get(agent_id) {
             None => {
-                report.storage.missing_agents.push(agent_id.clone());
+                drift.storage.missing_agents.push(agent_id.clone());
                 if yaml_present {
-                    report.warnings.push(format!(
+                    drift.warnings.push(format!(
                         "DB is missing agent '{}' from agentdesk.yaml; agentdesk.yaml will restore it",
                         agent_id
                     ));
@@ -707,8 +779,8 @@ fn audit_db_agents(
             Some(db_agent) => {
                 let differing_fields = compare_comparable_agents(yaml_agent, db_agent);
                 if !differing_fields.is_empty() {
-                    report.storage.mismatched_agents.push(agent_id.clone());
-                    report.warnings.push(format!(
+                    drift.storage.mismatched_agents.push(agent_id.clone());
+                    drift.warnings.push(format!(
                         "DB agent '{}' differs from agentdesk.yaml on {}; agentdesk.yaml wins",
                         agent_id,
                         differing_fields.join(", ")
@@ -723,38 +795,25 @@ fn audit_db_agents(
             continue;
         }
         if yaml_present {
-            report.storage.extra_agents.push(agent_id.clone());
-            report.warnings.push(format!(
+            drift.storage.extra_agents.push(agent_id.clone());
+            drift.warnings.push(format!(
                 "DB contains extra agent '{}' not present in agentdesk.yaml; agentdesk.yaml will remove it",
                 agent_id
             ));
         }
     }
 
-    report.storage.missing_agents.sort();
-    report.storage.extra_agents.sort();
-    report.storage.mismatched_agents.sort();
+    drift.storage.missing_agents.sort();
+    drift.storage.extra_agents.sort();
+    drift.storage.mismatched_agents.sort();
+    drift
+}
 
-    if dry_run || !yaml_present {
-        return Ok(());
-    }
-
-    match sync_db_agents_pg(config, &config.agents) {
-        Ok(Some(count)) => {
-            report.storage.synced_agents = Some(count);
-            report.actions.push(format!(
-                "synced {} agent definitions from agentdesk.yaml into the PostgreSQL agents table",
-                count
-            ));
-            return Ok(());
-        }
-        Ok(None) => {}
-        Err(error) => report.warnings.push(format!(
-            "Failed to sync agents from agentdesk.yaml into PostgreSQL: {error}; legacy fallback disabled"
-        )),
-    }
-
-    Ok(())
+fn apply_db_agent_drift(report: &mut ConfigAuditReport, drift: DbAgentDrift) {
+    report.storage.missing_agents = drift.storage.missing_agents;
+    report.storage.extra_agents = drift.storage.extra_agents;
+    report.storage.mismatched_agents = drift.storage.mismatched_agents;
+    report.warnings.extend(drift.warnings);
 }
 
 fn sync_db_agents_pg(config: &Config, agents: &[AgentDef]) -> Result<Option<usize>, String> {
@@ -1240,6 +1299,108 @@ fn normalized_u64s(values: &[u64]) -> Vec<u64> {
 
 fn dry_run_action_prefix(dry_run: bool) -> &'static str {
     if dry_run { "would migrate" } else { "migrated" }
+}
+
+#[cfg(test)]
+mod db_agent_drift_tests {
+    use super::*;
+
+    fn agent(id: &str, provider: &str, cc: Option<&str>, cdx: Option<&str>) -> ComparableAgent {
+        ComparableAgent {
+            id: id.to_string(),
+            provider: provider.to_string(),
+            discord_channel_id: cc.map(str::to_string),
+            discord_channel_alt: cdx.map(str::to_string),
+            discord_channel_cc: cc.map(str::to_string),
+            discord_channel_cdx: cdx.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn db_agent_drift_reports_mismatch_before_sync() {
+        let yaml_agents = BTreeMap::from([(
+            "chef-goat".to_string(),
+            agent("chef-goat", "claude", Some("1503373026060800081"), None),
+        )]);
+        let db_agents = BTreeMap::from([(
+            "chef-goat".to_string(),
+            agent("chef-goat", "claude", Some("old-channel"), None),
+        )]);
+
+        let drift = compute_db_agent_drift(&yaml_agents, &db_agents, true);
+
+        assert_eq!(
+            drift.storage.mismatched_agents,
+            vec!["chef-goat".to_string()]
+        );
+        assert_eq!(drift.warnings.len(), 1);
+        assert!(
+            drift.warnings[0].contains("discord_channel_id, discord_channel_cc"),
+            "warning should name the differing channel fields: {:?}",
+            drift.warnings
+        );
+    }
+
+    #[test]
+    fn post_sync_clean_drift_does_not_persist_pre_sync_warning() {
+        let yaml_agents = BTreeMap::from([(
+            "chef-goat".to_string(),
+            agent("chef-goat", "claude", Some("1503373026060800081"), None),
+        )]);
+        let pre_sync_agents = BTreeMap::from([(
+            "chef-goat".to_string(),
+            agent("chef-goat", "claude", Some("old-channel"), None),
+        )]);
+        let post_sync_agents = yaml_agents.clone();
+        let pre_sync_drift = compute_db_agent_drift(&yaml_agents, &pre_sync_agents, true);
+        assert!(
+            !pre_sync_drift.warnings.is_empty(),
+            "precondition: initial DB state must have drift"
+        );
+
+        let post_sync_drift = compute_db_agent_drift(&yaml_agents, &post_sync_agents, true);
+        let mut report = ConfigAuditReport::default();
+        report.storage.synced_agents = Some(1);
+        apply_db_agent_drift(&mut report, post_sync_drift);
+        report.finalize();
+
+        assert_eq!(report.status, "ok");
+        assert!(report.warnings.is_empty());
+        assert!(report.storage.mismatched_agents.is_empty());
+        assert_eq!(report.storage.synced_agents, Some(1));
+    }
+
+    #[test]
+    fn post_sync_verification_failure_keeps_storage_without_stale_advisory() {
+        let pre_sync_drift = DbAgentDrift {
+            storage: ConfigAuditDbSummary {
+                mismatched_agents: vec!["chef-goat".to_string()],
+                ..ConfigAuditDbSummary::default()
+            },
+            warnings: vec![
+                "DB agent 'chef-goat' differs from agentdesk.yaml on discord_channel_id, discord_channel_cc; agentdesk.yaml wins"
+                    .to_string(),
+            ],
+        };
+        let mut report = ConfigAuditReport::default();
+        report.storage.synced_agents = Some(1);
+        apply_db_agent_drift(&mut report, pre_sync_drift.without_warnings());
+        report
+            .warnings
+            .push("Failed to verify PostgreSQL agents after config sync: boom".to_string());
+        report.finalize();
+
+        assert_eq!(report.status, "warn");
+        assert_eq!(
+            report.storage.mismatched_agents,
+            vec!["chef-goat".to_string()]
+        );
+        assert_eq!(report.storage.synced_agents, Some(1));
+        assert_eq!(
+            report.warnings,
+            vec!["Failed to verify PostgreSQL agents after config sync: boom".to_string()]
+        );
+    }
 }
 
 #[cfg(test)]
