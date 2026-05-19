@@ -381,6 +381,16 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             super::utils::handle_addmcptool(&tools);
             Ok(())
         }
+        Commands::InstallMementoSessionHook {
+            settings_path,
+            dry_run,
+            uninstall,
+        } => super::utils::handle_install_memento_session_hook(
+            settings_path.as_deref(),
+            dry_run,
+            uninstall,
+        )
+        .map_err(anyhow::Error::msg),
         Commands::Status => exit_for_cli(super::client::cmd_status()),
         Commands::Cards { status } => exit_for_cli(super::client::cmd_cards(status.as_deref())),
         Commands::Dispatch(args) => exit_for_cli(match args.action {

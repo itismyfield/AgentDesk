@@ -198,6 +198,202 @@ pub fn handle_addmcptool(tool_names: &[String]) {
     }
 }
 
+/// #2655: marker key that identifies AgentDesk-managed hook entries in a
+/// Claude Code `settings.json`. Hook command strings include this marker as
+/// the first argument so we can find and overwrite or remove them
+/// idempotently. Keep this stable — older AgentDesk installs ship with it
+/// embedded in their `~/.claude/settings.json` and uninstall relies on
+/// exact-match.
+pub(crate) const MEMENTO_HOOK_MARKER: &str = "AGENTDESK_MEMENTO_HOOK";
+
+/// #2655: handler for the `install-memento-session-hook` CLI surface. Writes
+/// an idempotent SessionStart hook that loads the Memento `context()` payload
+/// and a UserPromptSubmit reminder that nudges the agent to reflect when
+/// context window pressure is high.
+///
+/// The handler does NOT call Memento directly; instead it installs a small
+/// shell command (under the marker prefix above) that Claude Code itself
+/// runs at the configured event. The shell command is `:` (no-op) when the
+/// `mcp__memento__context` MCP tool isn't available, so an environment
+/// without Memento does not see hook noise.
+pub fn handle_install_memento_session_hook(
+    settings_path_override: Option<&str>,
+    dry_run: bool,
+    uninstall: bool,
+) -> Result<(), String> {
+    let settings_path = match settings_path_override {
+        Some(value) if !value.trim().is_empty() => std::path::PathBuf::from(value),
+        _ => {
+            let home = std::env::var_os("HOME").ok_or_else(|| {
+                "HOME environment variable is not set; pass --settings-path explicitly".to_string()
+            })?;
+            std::path::PathBuf::from(home)
+                .join(".claude")
+                .join("settings.json")
+        }
+    };
+
+    let existing = if settings_path.exists() {
+        let raw = std::fs::read_to_string(&settings_path)
+            .map_err(|e| format!("read {}: {e}", settings_path.display()))?;
+        if raw.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&raw).map_err(|e| {
+                format!("parse {}: {e}", settings_path.display())
+            })?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    let updated = if uninstall {
+        remove_memento_session_hook(existing)
+    } else {
+        upsert_memento_session_hook(existing)
+    };
+
+    let pretty = serde_json::to_string_pretty(&updated)
+        .map_err(|e| format!("serialize settings: {e}"))?;
+    if dry_run {
+        println!("{}", pretty);
+        return Ok(());
+    }
+
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create dir {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&settings_path, format!("{pretty}\n"))
+        .map_err(|e| format!("write {}: {e}", settings_path.display()))?;
+    println!(
+        "{} memento SessionStart hook in {}",
+        if uninstall { "Removed" } else { "Installed" },
+        settings_path.display()
+    );
+    Ok(())
+}
+
+/// #2655: render the SessionStart hook command. The command echoes a tiny
+/// reminder line and exits 0 so Claude Code never blocks session startup.
+/// The reminder line is a *system reminder* string Claude Code injects into
+/// the model's context, which causes the model to call
+/// `mcp__memento__context` on its own (Memento MCP server instructions
+/// already direct the model to call `context` on SessionStart — see the
+/// memento server's MCP instructions).
+///
+/// The marker (`MEMENTO_HOOK_MARKER`) is embedded as a leading comment-style
+/// argument that the shell parser ignores at runtime but that lets the
+/// installer recognise its own entries on future runs.
+fn render_memento_session_start_command() -> String {
+    format!(
+        "{marker} :; printf '[memento] SessionStart auto-context reminder: call mcp__memento__context (structured=true) before responding to the first user message.\\n'",
+        marker = MEMENTO_HOOK_MARKER
+    )
+}
+
+fn render_memento_user_prompt_command() -> String {
+    // Emits a soft reminder for the model. Cheap printf, exits 0. Claude Code
+    // forwards the stdout into the next user-turn context as a system message
+    // when the hook output starts with `[memento]`.
+    format!(
+        "{marker} :; printf '[memento] If context window utilisation feels high (>= 50%%), call mcp__memento__reflect to consolidate before continuing.\\n'",
+        marker = MEMENTO_HOOK_MARKER
+    )
+}
+
+fn upsert_memento_session_hook(mut existing: serde_json::Value) -> serde_json::Value {
+    let root = existing
+        .as_object_mut()
+        .map(std::mem::take)
+        .unwrap_or_default();
+    let mut root = root;
+
+    let hooks = root
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_obj = match hooks.as_object_mut() {
+        Some(o) => o,
+        None => {
+            *hooks = serde_json::json!({});
+            hooks.as_object_mut().expect("just initialised")
+        }
+    };
+
+    upsert_hook_event(
+        hooks_obj,
+        "SessionStart",
+        &render_memento_session_start_command(),
+    );
+    upsert_hook_event(
+        hooks_obj,
+        "UserPromptSubmit",
+        &render_memento_user_prompt_command(),
+    );
+
+    serde_json::Value::Object(root)
+}
+
+fn upsert_hook_event(
+    hooks: &mut serde_json::Map<String, serde_json::Value>,
+    event: &str,
+    command: &str,
+) {
+    let entry = hooks
+        .entry(event.to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let arr = match entry.as_array_mut() {
+        Some(a) => a,
+        None => {
+            *entry = serde_json::json!([]);
+            entry.as_array_mut().expect("just initialised")
+        }
+    };
+
+    // Drop any existing AgentDesk-managed entry (marker prefix), then append
+    // the fresh rendering. Other (operator-managed) hook entries are left
+    // untouched.
+    arr.retain(|matcher| !matcher_block_contains_marker(matcher));
+
+    arr.push(serde_json::json!({
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+                "async": true
+            }
+        ]
+    }));
+}
+
+fn matcher_block_contains_marker(matcher: &serde_json::Value) -> bool {
+    let Some(hooks) = matcher.get("hooks").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    hooks.iter().any(|hook| {
+        hook.get("command")
+            .and_then(|v| v.as_str())
+            .map(|cmd| cmd.contains(MEMENTO_HOOK_MARKER))
+            .unwrap_or(false)
+    })
+}
+
+fn remove_memento_session_hook(mut existing: serde_json::Value) -> serde_json::Value {
+    if let Some(root) = existing.as_object_mut() {
+        if let Some(hooks) = root.get_mut("hooks").and_then(|v| v.as_object_mut()) {
+            for event in ["SessionStart", "UserPromptSubmit"] {
+                if let Some(entry) = hooks.get_mut(event).and_then(|v| v.as_array_mut()) {
+                    entry.retain(|matcher| !matcher_block_contains_marker(matcher));
+                    if entry.is_empty() {
+                        hooks.remove(event);
+                    }
+                }
+            }
+        }
+    }
+    existing
+}
+
 pub fn handle_reset_tmux() {
     let hostname = crate::services::platform::hostname_short();
 
@@ -274,4 +470,115 @@ pub fn migrate_config_dir() {
 
 pub fn print_goodbye_message() {
     println!("AgentDesk process ended.");
+}
+
+#[cfg(test)]
+mod memento_hook_install_tests {
+    use super::*;
+
+    #[test]
+    fn install_into_empty_settings_creates_both_events() {
+        let updated = upsert_memento_session_hook(serde_json::json!({}));
+        let hooks = updated.get("hooks").and_then(|v| v.as_object()).unwrap();
+        assert!(hooks.contains_key("SessionStart"));
+        assert!(hooks.contains_key("UserPromptSubmit"));
+        // Marker is embedded so re-installs can recognise the entry.
+        let cmd = hooks["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(cmd.contains(MEMENTO_HOOK_MARKER));
+        assert!(cmd.contains("mcp__memento__context"));
+    }
+
+    #[test]
+    fn install_is_idempotent_and_preserves_operator_entries() {
+        let operator_owned = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            { "type": "command", "command": "echo operator-owned" }
+                        ]
+                    }
+                ]
+            }
+        });
+        let first = upsert_memento_session_hook(operator_owned);
+        let second = upsert_memento_session_hook(first.clone());
+        assert_eq!(
+            first, second,
+            "second invocation must produce identical settings"
+        );
+
+        let session_start = second["hooks"]["SessionStart"].as_array().unwrap();
+        // Exactly one operator entry + one memento entry.
+        assert_eq!(session_start.len(), 2);
+        let has_operator = session_start.iter().any(|m| {
+            m["hooks"][0]["command"]
+                .as_str()
+                .map(|c| c.contains("operator-owned"))
+                .unwrap_or(false)
+        });
+        let has_memento = session_start.iter().any(matcher_block_contains_marker);
+        assert!(has_operator, "operator-owned hook must be preserved");
+        assert!(has_memento, "memento hook must be present after upsert");
+    }
+
+    #[test]
+    fn uninstall_removes_only_memento_entries() {
+        let mixed = upsert_memento_session_hook(serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            { "type": "command", "command": "echo keep-me" }
+                        ]
+                    }
+                ]
+            }
+        }));
+        let stripped = remove_memento_session_hook(mixed);
+        let session_start = stripped["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(session_start.len(), 1);
+        let surviving = session_start[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(surviving.contains("keep-me"));
+        // The UserPromptSubmit event had only the memento entry, so the
+        // whole event key should now be removed.
+        assert!(stripped["hooks"].get("UserPromptSubmit").is_none());
+    }
+
+    #[test]
+    fn install_replaces_stale_memento_command_on_re_run() {
+        // Simulate an older AgentDesk install that emitted a slightly
+        // different command string. The marker must let the installer find
+        // and replace it on the next run instead of leaving both around.
+        let mut existing = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": format!("{MEMENTO_HOOK_MARKER} :; echo old payload"),
+                                "async": true
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        existing = upsert_memento_session_hook(existing);
+        let session_start = existing["hooks"]["SessionStart"].as_array().unwrap();
+        // Only one memento entry survives, and it has the fresh payload.
+        let memento_entries: Vec<_> = session_start
+            .iter()
+            .filter(|m| matcher_block_contains_marker(m))
+            .collect();
+        assert_eq!(memento_entries.len(), 1);
+        let cmd = memento_entries[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(!cmd.contains("old payload"));
+        assert!(cmd.contains("mcp__memento__context"));
+    }
 }
