@@ -362,7 +362,8 @@ src/
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── session.rs
-│   │   └── transcript_tail.rs
+│   │   ├── transcript_tail.rs
+│   │   └── tui_relay.rs
 │   ├── cluster/
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs

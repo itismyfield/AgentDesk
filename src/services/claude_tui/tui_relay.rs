@@ -31,9 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
-use crate::services::claude_tui::hook_server::{
-    HookEvent, HookEventKind, subscribe_hook_events,
-};
+use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind, subscribe_hook_events};
 use crate::services::platform::tmux;
 
 /// Hard ceiling on `claude_tui_wait` timeout so a misbehaving caller cannot
@@ -270,9 +268,7 @@ fn event_matches(
     token: Option<&str>,
 ) -> bool {
     if let Some(provider) = want_provider {
-        if !provider.trim().is_empty()
-            && !event.provider.eq_ignore_ascii_case(provider.trim())
-        {
+        if !provider.trim().is_empty() && !event.provider.eq_ignore_ascii_case(provider.trim()) {
             return false;
         }
     }
@@ -366,7 +362,13 @@ mod tests {
             HookEventKind::UserPromptSubmit,
             json!({ "transcript": { "tail": "ready: marker-XYZ here" } }),
         );
-        assert!(event_matches(&event, None, None, "token", Some("marker-XYZ")));
+        assert!(event_matches(
+            &event,
+            None,
+            None,
+            "token",
+            Some("marker-XYZ")
+        ));
         assert!(!event_matches(&event, None, None, "token", Some("absent")));
     }
 
