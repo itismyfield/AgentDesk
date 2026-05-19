@@ -40,13 +40,19 @@
 //!    model-rendered table several screens up still has glyphs in
 //!    the scan tail.
 //!
-//! 4. **Adjacency.** The footer hint and the composer edge must
+//! 4. **Compact prompt marker.** After context compaction or hook-review
+//!    prompts, Codex may draw the prompt as `› ...` plus a model/status
+//!    footer instead of the rounded box. That compact marker is treated as
+//!    ready only when it is bottom-anchored and paired with the status line
+//!    beneath it.
+//!
+//! 5. **Adjacency.** The footer hint and the composer edge must
 //!    co-occur within [`COMPOSER_FOOTER_ADJACENCY_LINES`] of each
 //!    other. A copied UI frame in assistant prose will not satisfy
 //!    this because it lacks the live footer underneath, and a real
 //!    footer never lives more than a few rows below the composer.
 //!
-//! 5. **Live pane fallback gate.** When no rollout composer-ready envelope
+//! 6. **Live pane fallback gate.** When no rollout composer-ready envelope
 //!    is available, a dead pane cannot be ready; the capture fallback fails
 //!    fast with a structured error instead of waiting out the full timeout,
 //!    so the caller can decide to recreate the session.
@@ -103,6 +109,8 @@ const COMPOSER_EDGE_BOTTOM_WINDOW: usize = 6;
 /// Codex TUI prints `Esc to interrupt` etc. immediately under the
 /// composer; in practice it sits in the last 1–3 visible rows.
 const FOOTER_HINT_BOTTOM_WINDOW: usize = 5;
+/// Compact Codex prompt (`› ...`) must be very near the pane bottom.
+const COMPACT_PROMPT_BOTTOM_WINDOW: usize = 4;
 /// Composer edge and footer hint must co-occur within this many lines
 /// of each other so a screenshot of the TUI in assistant prose cannot
 /// pair with a real footer further down the buffer.
@@ -1035,6 +1043,10 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
         return false;
     }
 
+    if recent_has_codex_compact_prompt(&recent) {
+        return true;
+    }
+
     let footer_idx = recent
         .iter()
         .take(FOOTER_HINT_BOTTOM_WINDOW)
@@ -1057,6 +1069,17 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
     // of each other. This is the actual gate — the bottom windows are
     // just outer search bounds.
     e - f <= COMPOSER_FOOTER_ADJACENCY_LINES
+}
+
+fn recent_has_codex_compact_prompt(recent: &[&str]) -> bool {
+    let Some(prompt_idx) = recent
+        .iter()
+        .take(COMPACT_PROMPT_BOTTOM_WINDOW)
+        .position(|line| line_is_codex_compact_prompt_marker(line))
+    else {
+        return false;
+    };
+    prompt_idx == 1 && line_is_codex_compact_status_line(recent[0])
 }
 
 fn pane_has_codex_prompt_draft(pane: &str) -> bool {
@@ -1108,6 +1131,30 @@ fn codex_visible_prompt_draft_text(line: &str) -> Option<&str> {
         return (!text.is_empty()).then_some(text);
     }
     codex_composer_body_draft_text(line)
+}
+
+fn line_is_codex_compact_prompt_marker(line: &str) -> bool {
+    let trimmed = line.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+    trimmed == "›" || trimmed.starts_with("› ")
+}
+
+fn line_is_codex_compact_status_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let parts: Vec<&str> = trimmed.split('·').map(str::trim).collect();
+    if parts.len() < 4 || !parts[0].starts_with("gpt-") || !parts[1].starts_with("gpt-") {
+        return false;
+    }
+    let has_effort = parts[1].split_whitespace().any(|word| {
+        matches!(
+            word,
+            "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        )
+    });
+    let has_path = parts
+        .iter()
+        .skip(2)
+        .any(|part| part.starts_with("~/") || part.starts_with('/'));
+    has_effort && has_path
 }
 
 fn codex_prompt_marker_line_has_draft(line: &str) -> bool {
@@ -1522,9 +1569,47 @@ more output\n\
 
 › Run /review on my current changes
 
-  gpt-5.5 · gpt-5.5 xhigh · ~/.adk/release/workspaces/agentdesk";
+  gpt-5.5 · gpt-5.5 xhigh · ~/.adk/release/workspaces/agentdesk · agentdesk · main";
 
+        assert!(pane_looks_ready_for_codex_prompt(pane));
         assert!(pane_has_codex_prompt_draft(pane));
+    }
+
+    #[test]
+    fn codex_compact_prompt_marker_without_text_is_ready() {
+        let pane = "\
+• previous response
+
+›
+
+  gpt-5.5 · gpt-5.5 xhigh · ~/.adk/release/workspaces/agentdesk · agentdesk · main";
+
+        assert!(pane_looks_ready_for_codex_prompt(pane));
+        assert!(!pane_has_codex_prompt_draft(pane));
+    }
+
+    #[test]
+    fn quoted_compact_prompt_without_status_is_not_ready() {
+        let pane = "\
+The documentation example ends with:
+
+› Run /review on my current changes";
+
+        assert!(!pane_looks_ready_for_codex_prompt(pane));
+        assert!(pane_has_codex_prompt_draft(pane));
+    }
+
+    #[test]
+    fn quoted_compact_prompt_with_status_footer_is_not_ready() {
+        let pane = "\
+The documentation example ends with:
+
+> › Run /review on my current changes
+
+  gpt-5.5 · gpt-5.5 xhigh · ~/.adk/release/workspaces/agentdesk · agentdesk · main";
+
+        assert!(!pane_looks_ready_for_codex_prompt(pane));
+        assert!(!pane_has_codex_prompt_draft(pane));
     }
 
     #[test]

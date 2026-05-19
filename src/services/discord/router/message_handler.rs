@@ -188,6 +188,17 @@ fn classify_claude_tui_followup_submission(
 }
 
 #[cfg(unix)]
+fn hosted_tui_draft_should_enter_provider_recovery(
+    provider: &ProviderKind,
+    snapshot: &HostedTuiPromptReadinessSnapshot,
+) -> bool {
+    matches!(provider, ProviderKind::Codex)
+        && snapshot.tmux_pane_alive
+        && snapshot.prompt_marker_detected
+        && snapshot.prompt_draft_detected
+}
+
+#[cfg(unix)]
 fn observe_claude_tui_transcript_state_for_session(
     current_path: Option<&str>,
     session_id: Option<&str>,
@@ -371,7 +382,7 @@ fn tui_busy_followup_diagnostic(
                 crate::services::codex_tui::input::prompt_readiness_snapshot(tmux_session_name);
             HostedTuiPromptReadinessSnapshot {
                 prompt_marker_detected: snapshot.composer_marker_detected,
-                prompt_draft_detected: false,
+                prompt_draft_detected: snapshot.prompt_draft_detected,
                 tmux_pane_alive: snapshot.tmux_pane_alive,
                 capture_available: snapshot.capture_available,
                 pane_tail: snapshot.pane_tail,
@@ -389,6 +400,9 @@ fn tui_busy_followup_diagnostic(
             }
         }
     };
+    if hosted_tui_draft_should_enter_provider_recovery(provider, &snapshot) {
+        return None;
+    }
     let watcher_entry = shared
         .tmux_watchers
         .iter()
@@ -7983,6 +7997,27 @@ mod session_strategy_lifecycle_tests {
             )
             .is_none(),
             "unknown transcript plus draft is a provider recovery case, not a router busy block"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_tui_visible_prompt_draft_reaches_provider_recovery() {
+        let snapshot = HostedTuiPromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "› Run /review on my current changes\n\n  gpt-5.5 · gpt-5.5 xhigh · ~/repo · repo · main".to_string(),
+        };
+
+        assert!(hosted_tui_draft_should_enter_provider_recovery(
+            &ProviderKind::Codex,
+            &snapshot
+        ));
+        assert!(
+            !hosted_tui_draft_should_enter_provider_recovery(&ProviderKind::Claude, &snapshot),
+            "Claude keeps transcript-busy authority; only Codex compact drafts bypass router busy preflight"
         );
     }
 
