@@ -604,7 +604,7 @@ fn deploy_skill_link(
             link_path.parent().unwrap_or(target_dir),
             &source_path.canonicalize().unwrap_or(source_path.clone()),
         );
-        if existing_target == desired {
+        if existing_target == desired || same_canonical_path(&link_path, &source_path) {
             return Ok(LinkState::Unchanged);
         }
         remove_link_or_path(&link_path)?;

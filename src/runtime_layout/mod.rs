@@ -460,25 +460,46 @@ fn create_symlink_entry(source: &Path, link_path: &Path, is_dir_link: bool) -> R
     {
         let _ = is_dir_link;
         use std::os::unix::fs::symlink;
-        symlink(&target, link_path)
-            .map_err(|e| format!("Failed to create symlink '{}': {e}", link_path.display()))
+        match symlink(&target, link_path) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    && same_canonical_path(link_path, source) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(format!(
+                "Failed to create symlink '{}': {error}",
+                link_path.display()
+            )),
+        }
     }
     #[cfg(windows)]
     {
-        if is_dir_link {
-            std::os::windows::fs::symlink_dir(&target, link_path).map_err(|e| {
-                format!(
-                    "Failed to create dir symlink '{}': {e}",
-                    link_path.display()
-                )
-            })
+        let result = if is_dir_link {
+            std::os::windows::fs::symlink_dir(&target, link_path)
         } else {
-            std::os::windows::fs::symlink_file(&target, link_path).map_err(|e| {
-                format!(
-                    "Failed to create file symlink '{}': {e}",
+            std::os::windows::fs::symlink_file(&target, link_path)
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    && same_canonical_path(link_path, source) =>
+            {
+                Ok(())
+            }
+            Err(error) => {
+                let kind = if is_dir_link {
+                    "dir symlink"
+                } else {
+                    "file symlink"
+                };
+                Err(format!(
+                    "Failed to create {kind} '{}': {error}",
                     link_path.display()
-                )
-            })
+                ))
+            }
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -725,6 +746,37 @@ mod tests {
                 None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
             }
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn create_symlink_entry_accepts_existing_equivalent_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let link = temp.path().join("link.md");
+        write_text(&source, "body");
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+
+        create_symlink_entry(&source, &link, false).unwrap();
+
+        assert!(same_canonical_path(&link, &source));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn create_symlink_entry_rejects_existing_different_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let other = temp.path().join("other.md");
+        let link = temp.path().join("link.md");
+        write_text(&source, "body");
+        write_text(&other, "other");
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+
+        let error = create_symlink_entry(&source, &link, false).unwrap_err();
+
+        assert!(error.contains("Failed to create symlink"));
+        assert!(same_canonical_path(&link, &other));
     }
 
     #[test]
@@ -1118,6 +1170,26 @@ agents: []
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sync_managed_skills_accepts_existing_absolute_claude_link_to_same_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let home = temp.path().join("home");
+        let _home_guard = TestHomeGuard::install(&home, root);
+        let skill_md = root.join("skills").join("archimate").join("SKILL.md");
+        let claude_link = home.join(".claude").join("commands").join("archimate.md");
+        write_text(&skill_md, "# archimate\nbody");
+        fs::create_dir_all(claude_link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&skill_md, &claude_link).unwrap();
+        ensure_managed_skills_manifest(root).unwrap();
+
+        let report = sync_managed_skills(root).unwrap();
+
+        assert_eq!(report.updated_links, 0);
+        assert!(same_canonical_path(&claude_link, &skill_md));
     }
 
     #[test]
