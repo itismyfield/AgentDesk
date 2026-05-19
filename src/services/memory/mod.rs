@@ -1,5 +1,6 @@
 mod local;
 mod memento;
+mod memento_instructions_cache;
 mod memento_throttle;
 mod runtime_state;
 
@@ -18,6 +19,9 @@ pub(crate) use local::LocalMemoryBackend;
 pub(crate) use memento::{
     MementoBackend, MementoRememberRequest, MementoToolFeedbackRequest, resolve_memento_agent_id,
     resolve_memento_workspace, sanitize_memento_workspace_segment,
+};
+pub(crate) use memento_instructions_cache::{
+    InstructionsDelta, instructions_cache_stats, record_instructions,
 };
 pub(crate) use memento_throttle::{
     ForgetRatioAlarmDecision, RecallSizeBucket, memento_call_metrics_snapshot,
