@@ -275,6 +275,43 @@ impl MementoBackend {
             ));
         }
 
+        // #2664: dedup Memento server `instructions` across re-inits.
+        // The Memento server re-emits the same `# Memento MCP Server …`
+        // block on every re-authentication. We capture it once into a
+        // process-wide hash cache and surface a structured delta so:
+        //   * downstream observability can count "wasted" re-injections,
+        //   * any future AgentDesk-owned system-prompt path can skip the
+        //     prepend when the hash matches the previously-observed one.
+        let instructions = payload
+            .pointer("/result/instructions")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let delta = super::record_instructions(instructions.as_deref());
+        match delta {
+            super::InstructionsDelta::FirstSeen => {
+                tracing::info!(
+                    "[memento] captured server instructions ({} bytes) — first observation; will dedup on re-init",
+                    instructions.as_deref().map(str::len).unwrap_or(0)
+                );
+            }
+            super::InstructionsDelta::Unchanged => {
+                tracing::debug!(
+                    "[memento] re-init returned unchanged instructions block; system prompt re-injection is unnecessary"
+                );
+            }
+            super::InstructionsDelta::Changed => {
+                tracing::info!(
+                    "[memento] server instructions changed ({} bytes); downstream prompt caches must refresh",
+                    instructions.as_deref().map(str::len).unwrap_or(0)
+                );
+            }
+            super::InstructionsDelta::Missing => {
+                tracing::debug!(
+                    "[memento] initialize response omitted result.instructions — keeping previously-cached hash"
+                );
+            }
+        }
+
         session_id.ok_or_else(|| {
             let safe = redact_memento_secret(&text, &config.access_key);
             format!("memento initialize succeeded without MCP-Session-Id header; body={safe}")

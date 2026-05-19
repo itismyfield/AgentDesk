@@ -524,7 +524,24 @@ pub async fn get_memento_stats(
     let hours = params.hours.unwrap_or(24).clamp(1, 24 * 7);
     let mut snapshot = crate::services::memory::memento_call_metrics_snapshot(hours);
     append_memento_feedback_stats(&mut snapshot, &state).await;
+    append_memento_instructions_delta(&mut snapshot);
     (StatusCode::OK, Json(snapshot))
+}
+
+/// #2664: surface the process-wide Memento instructions dedup counters so
+/// operators can verify the re-init dedup is actually saving tokens.
+fn append_memento_instructions_delta(snapshot: &mut serde_json::Value) {
+    let stats = crate::services::memory::instructions_cache_stats();
+    let payload = json!({
+        "observations": stats.observations,
+        "unchanged_count": stats.unchanged_count,
+        "changed_count": stats.changed_count,
+        "missing_count": stats.missing_count,
+        "has_cached_hash": stats.cached_hash.is_some(),
+    });
+    if let Some(obj) = snapshot.as_object_mut() {
+        obj.insert("instructions_delta".to_string(), payload);
+    }
 }
 
 async fn append_memento_feedback_stats(snapshot: &mut serde_json::Value, state: &AppState) {
