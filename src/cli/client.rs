@@ -691,7 +691,9 @@ fn iso_age(timestamp: Option<&str>) -> String {
     match parsed {
         Ok(parsed) => {
             let now = chrono::Utc::now();
-            let secs = now.signed_duration_since(parsed.with_timezone(&chrono::Utc)).num_seconds();
+            let secs = now
+                .signed_duration_since(parsed.with_timezone(&chrono::Utc))
+                .num_seconds();
             human_age_seconds(secs)
         }
         Err(_) => "-".to_string(),
@@ -823,14 +825,8 @@ pub fn cmd_health(json_output: bool) -> Result<(), String> {
         .and_then(Value::as_i64)
         .unwrap_or(0);
 
-    let pending = queue
-        .get("pending")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let failed = queue
-        .get("failed")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
+    let pending = queue.get("pending").and_then(Value::as_i64).unwrap_or(0);
+    let failed = queue.get("failed").and_then(Value::as_i64).unwrap_or(0);
     let oldest_lag = queue
         .get("oldest_queued_age_secs")
         .and_then(Value::as_i64)
@@ -989,11 +985,7 @@ fn diff_marker(left: &str, right: &str) -> &'static str {
     if left == "-" && right == "-" {
         return "";
     }
-    if left == right {
-        ""
-    } else {
-        "!="
-    }
+    if left == right { "" } else { "!=" }
 }
 
 fn render_machine_compare_table(rows: &[MachineRow]) -> String {
@@ -1907,8 +1899,14 @@ mod health_compare_tests {
     #[test]
     fn cluster_lease_ttl_secs_handles_missing_and_zero_values() {
         assert_eq!(cluster_lease_ttl_secs(None), 60);
-        assert_eq!(cluster_lease_ttl_secs(Some(&json!({"lease_ttl_secs": 0}))), 60);
-        assert_eq!(cluster_lease_ttl_secs(Some(&json!({"lease_ttl_secs": 42}))), 42);
+        assert_eq!(
+            cluster_lease_ttl_secs(Some(&json!({"lease_ttl_secs": 0}))),
+            60
+        );
+        assert_eq!(
+            cluster_lease_ttl_secs(Some(&json!({"lease_ttl_secs": 42}))),
+            42
+        );
     }
 }
 

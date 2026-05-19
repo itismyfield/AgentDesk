@@ -503,9 +503,7 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
         Commands::Show { action } => exit_for_cli(handle_show(action)),
         Commands::Health { json } => exit_for_cli(super::client::cmd_health(json)),
-        Commands::MachineCompare { json } => {
-            exit_for_cli(super::client::cmd_machine_compare(json))
-        }
+        Commands::MachineCompare { json } => exit_for_cli(super::client::cmd_machine_compare(json)),
     }
 }
 
