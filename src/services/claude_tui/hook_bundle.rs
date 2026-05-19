@@ -143,6 +143,7 @@ fn hook_relay_command(config: &HookBundleConfig, event: &str) -> String {
 }
 
 fn codex_hook_relay_command(config: &HookBundleConfig, event: &str) -> String {
+    let session_id = codex_hook_command_session_id(config);
     [
         shell_quote(&config.agentdesk_exe),
         "codex-hook-relay".to_string(),
@@ -153,9 +154,17 @@ fn codex_hook_relay_command(config: &HookBundleConfig, event: &str) -> String {
         "--event".to_string(),
         shell_quote(event),
         "--session-id".to_string(),
-        shell_quote(&config.session_id),
+        shell_quote(session_id),
     ]
     .join(" ")
+}
+
+fn codex_hook_command_session_id(config: &HookBundleConfig) -> &str {
+    if config.provider.trim().eq_ignore_ascii_case("codex") {
+        "agentdesk-codex-hook-relay"
+    } else {
+        config.session_id.as_str()
+    }
 }
 
 /// Returns the matcher group list for a given Codex hook event.
@@ -943,6 +952,17 @@ mod tests {
     }
 
     #[test]
+    fn codex_hook_command_uses_stable_session_id_for_trust_identity() {
+        let mut config = sample_config();
+        config.provider = "codex".to_string();
+
+        let command = codex_hook_relay_command(&config, "UserPromptSubmit");
+
+        assert!(command.contains("--session-id agentdesk-codex-hook-relay"));
+        assert!(!command.contains("01234567-89ab-cdef-0123-456789abcdef"));
+    }
+
+    #[test]
     fn hook_command_shell_quotes_executable_with_spaces() {
         let settings = render_claude_hook_settings(&sample_config());
         let command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
@@ -975,7 +995,7 @@ mod tests {
         config.session_id.push_str("-new");
         let second = codex_hook_trust_hash(&config, "Stop");
 
-        assert_ne!(first, second);
+        assert_eq!(first, second);
         assert!(first.starts_with("sha256:"));
         assert!(second.starts_with("sha256:"));
     }

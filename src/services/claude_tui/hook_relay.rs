@@ -52,19 +52,44 @@ fn run_cli_with_name(
         serde_json::from_str(&stdin).map_err(|error| format!("parse hook stdin JSON: {error}"))?
     };
 
-    if let Err(error) = relay_hook_event(endpoint, provider, event, session_id, payload) {
+    let effective_session_id = relay_event_session_id(provider, session_id, &payload);
+    if let Err(error) = relay_hook_event(endpoint, provider, event, &effective_session_id, payload)
+    {
         // Provider TUI hooks must not become turn blockers. The receiver path
         // is a boundary signal optimization; provider output capture remains
         // the source of output truth.
         eprintln!("agentdesk {relay_name} warning: {error}");
         if let Err(marker_error) =
-            record_hook_relay_failure(endpoint, provider, event, session_id, &error)
+            record_hook_relay_failure(endpoint, provider, event, &effective_session_id, &error)
         {
             eprintln!("agentdesk {relay_name} marker warning: {marker_error}");
         }
     }
     println!("{}", hook_success_stdout(provider));
     Ok(())
+}
+
+fn relay_event_session_id(provider: &str, command_session_id: &str, payload: &Value) -> String {
+    if provider.trim().eq_ignore_ascii_case("codex")
+        && let Some(payload_session_id) = payload_session_id(payload)
+    {
+        return payload_session_id;
+    }
+    command_session_id.to_string()
+}
+
+fn payload_session_id(payload: &Value) -> Option<String> {
+    for key in ["session_id", "sessionId", "sessionID"] {
+        if let Some(session_id) = payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(session_id.to_string());
+        }
+    }
+    payload.get("payload").and_then(payload_session_id)
 }
 
 fn relay_cli_name(provider: &str) -> &'static str {
@@ -337,6 +362,31 @@ mod tests {
     fn hook_success_stdout_is_provider_scoped() {
         assert_eq!(hook_success_stdout("claude"), r#"{"suppressOutput":true}"#);
         assert_eq!(hook_success_stdout("codex"), "{}");
+    }
+
+    #[test]
+    fn codex_relay_uses_payload_session_id_over_stable_command_identity() {
+        let payload = serde_json::json!({
+            "session_id": "actual-codex-session",
+            "transcript_path": "/tmp/ignored"
+        });
+
+        assert_eq!(
+            relay_event_session_id("codex", "agentdesk-codex-hook-relay", &payload),
+            "actual-codex-session"
+        );
+    }
+
+    #[test]
+    fn claude_relay_keeps_command_session_id_even_when_payload_has_session() {
+        let payload = serde_json::json!({
+            "session_id": "payload-session"
+        });
+
+        assert_eq!(
+            relay_event_session_id("claude", "command-session", &payload),
+            "command-session"
+        );
     }
 
     #[test]
