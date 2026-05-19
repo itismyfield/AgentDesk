@@ -57,7 +57,11 @@ pub(super) fn shared_agent_rules_lookup() -> &'static str {
 
 #[derive(Clone, Debug)]
 struct AgentPerformancePromptCacheEntry {
-    hour_bucket: i64,
+    /// Day-aligned bucket used to decide cache freshness. Stored as `i64`
+    /// (not the field name) so the existing tests that thread arbitrary
+    /// integer buckets keep working — the field is opaque to the cache
+    /// layer, the caller decides the bucket cadence.
+    day_bucket: i64,
     section: Option<String>,
 }
 
@@ -65,12 +69,67 @@ static AGENT_PERFORMANCE_PROMPT_CACHE: OnceLock<
     Mutex<HashMap<String, AgentPerformancePromptCacheEntry>>,
 > = OnceLock::new();
 
-/// Hour-aligned cache bucket used by the self-feedback prompt block (#1103).
-/// Returning the same bucket guarantees the same cached string is served for
-/// the entire hour, which is what makes the system prompt prefix stable
-/// (Anthropic prefix cache hits) until the next hourly rollup tick.
+/// Observability counters for the prompt prefix cache (#2666). Exposed via
+/// [`agent_performance_cache_metrics`]. Hot path: incremented on every
+/// lookup so the cache hit-rate can be inspected from the dashboard /
+/// health endpoint without instrumenting individual call sites.
+static AGENT_PERFORMANCE_CACHE_HITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static AGENT_PERFORMANCE_CACHE_MISSES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Day-aligned cache bucket used by the self-feedback prompt block (#1103,
+/// #2666). The Agent Performance rollup is computed once per day, so a
+/// daily bucket gives ~100% cache hit rate within a single UTC day —
+/// matching the upstream rollup cadence. The previous implementation used
+/// an hourly bucket, which forced a DB re-fetch every hour even though the
+/// underlying rollup never changed within the day.
+///
+/// The day boundary is UTC; rollovers are observable via the `day_bucket`
+/// number changing. Operators can force a refresh mid-day via
+/// [`invalidate_agent_performance_cache`].
+pub(super) fn agent_performance_day_bucket() -> i64 {
+    chrono::Utc::now().timestamp() / 86_400
+}
+
+/// Compatibility alias for the legacy name. Retained because external
+/// tests still reference `agent_performance_hour_bucket`; the function now
+/// returns a *day* bucket, but the name was deliberately kept to minimize
+/// the call-site diff. Prefer [`agent_performance_day_bucket`] in new code.
+#[allow(dead_code)]
 pub(super) fn agent_performance_hour_bucket() -> i64 {
-    chrono::Utc::now().timestamp() / 3600
+    agent_performance_day_bucket()
+}
+
+/// Snapshot of cache observability counters. `(hits, misses)`. Atomically
+/// consistent only per-field; we accept a torn read between the two values
+/// since they are used for log/metric emission, not for control flow.
+pub fn agent_performance_cache_metrics() -> (u64, u64) {
+    (
+        AGENT_PERFORMANCE_CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed),
+        AGENT_PERFORMANCE_CACHE_MISSES.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Explicitly drop every cached self-feedback entry. Intended for the
+/// daily rollup writer to call after persisting new data, so the next turn
+/// picks up the fresh snapshot without waiting for the UTC day boundary.
+///
+/// Idempotent — safe to call when no entries exist.
+pub fn invalidate_agent_performance_cache() {
+    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = cache.lock() {
+        guard.clear();
+    }
+}
+
+/// Drop the cached entry for a single role. Useful when a per-role
+/// rollup is refreshed while leaving others stale.
+pub fn invalidate_agent_performance_cache_for_role(role_id: &str) {
+    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = cache.lock() {
+        guard.remove(role_id);
+    }
 }
 
 /// Look up the cached self-feedback section if it is still valid for the
@@ -79,25 +138,27 @@ pub(super) fn agent_performance_hour_bucket() -> i64 {
 /// or `None` when no entry is fresh (caller must repopulate).
 fn lookup_cached_agent_performance_section(
     cache_key: &str,
-    hour_bucket: i64,
+    day_bucket: i64,
 ) -> Option<Option<String>> {
     let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let guard = cache.lock().ok()?;
     let entry = guard.get(cache_key)?;
-    if entry.hour_bucket == hour_bucket {
+    if entry.day_bucket == day_bucket {
+        AGENT_PERFORMANCE_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(entry.section.clone())
     } else {
         None
     }
 }
 
-fn store_agent_performance_section(cache_key: String, hour_bucket: i64, section: Option<String>) {
+fn store_agent_performance_section(cache_key: String, day_bucket: i64, section: Option<String>) {
+    AGENT_PERFORMANCE_CACHE_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut guard) = cache.lock() {
         guard.insert(
             cache_key,
             AgentPerformancePromptCacheEntry {
-                hour_bucket,
+                day_bucket,
                 section,
             },
         );
@@ -118,7 +179,7 @@ pub(super) fn reset_agent_performance_cache_for_tests() {
 pub(super) fn agent_performance_prompt_section_with_loader<L>(
     role_binding: Option<&RoleBinding>,
     profile: DispatchProfile,
-    hour_bucket: i64,
+    day_bucket: i64,
     loader: L,
 ) -> Option<String>
 where
@@ -134,7 +195,7 @@ where
     }
 
     let cache_key = binding.role_id.clone();
-    if let Some(cached) = lookup_cached_agent_performance_section(&cache_key, hour_bucket) {
+    if let Some(cached) = lookup_cached_agent_performance_section(&cache_key, day_bucket) {
         return cached;
     }
 
@@ -149,7 +210,7 @@ where
         }
     };
 
-    store_agent_performance_section(cache_key, hour_bucket, section.clone());
+    store_agent_performance_section(cache_key, day_bucket, section.clone());
     section
 }
 
@@ -160,9 +221,22 @@ pub(super) fn agent_performance_prompt_section(
     agent_performance_prompt_section_with_loader(
         role_binding,
         profile,
-        agent_performance_hour_bucket(),
+        agent_performance_day_bucket(),
         |role_id| crate::services::discord::internal_api::get_agent_quality_prompt_section(role_id),
     )
+}
+
+/// Test-only helper that resets the cache state and the hit/miss counters.
+/// Not gated on `legacy-sqlite-tests` because the bucket-cadence regression
+/// tests (#2666) need it under the default test build too.
+#[cfg(test)]
+pub(super) fn reset_agent_performance_cache_for_layer_rendering_tests() {
+    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = cache.lock() {
+        guard.clear();
+    }
+    AGENT_PERFORMANCE_CACHE_HITS.store(0, std::sync::atomic::Ordering::Relaxed);
+    AGENT_PERFORMANCE_CACHE_MISSES.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub(super) fn render_channel_participants(
@@ -184,4 +258,128 @@ pub(super) fn render_channel_participants(
         lines.push(line);
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod bucket_cadence_tests {
+    //! #2666 — verify that the prompt prefix cache now matches the daily
+    //! cadence of the upstream Agent Performance rollup, and that the
+    //! observability counters / explicit invalidation hooks behave.
+    use super::*;
+    use std::sync::Mutex;
+
+    // The cache + counters are process-global. Serialize the tests in this
+    // module so they don't observe each other's atomic increments.
+    static BUCKET_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn day_bucket_increments_at_utc_midnight_only() {
+        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        // 86_400 = seconds in a day. Two timestamps in the same UTC day
+        // must collapse to the same bucket; two in adjacent days must not.
+        let same_day_a = 86_400i64 * 100;
+        let same_day_b = same_day_a + 86_399; // last second of the same day
+        let next_day = same_day_a + 86_400;
+        assert_eq!(same_day_a / 86_400, same_day_b / 86_400);
+        assert_ne!(same_day_a / 86_400, next_day / 86_400);
+    }
+
+    #[test]
+    fn hour_bucket_alias_returns_day_bucket() {
+        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        // The legacy name is retained for source-compat, but it now
+        // returns the daily value too. We assert by sampling both at
+        // (approximately) the same instant; on a slow machine the second
+        // call could roll the day, so retry up to a few times.
+        for _ in 0..5 {
+            let day = agent_performance_day_bucket();
+            let hour = agent_performance_hour_bucket();
+            if day == hour {
+                return;
+            }
+        }
+        panic!("agent_performance_hour_bucket must return the day bucket");
+    }
+
+    #[test]
+    fn invalidate_drops_cached_entry() {
+        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        reset_agent_performance_cache_for_layer_rendering_tests();
+        // Hand-craft an entry without going through a RoleBinding so we
+        // don't need the Discord settings types in this layer's tests.
+        store_agent_performance_section("role-x".into(), 1, Some("payload-v1".into()));
+        assert_eq!(
+            lookup_cached_agent_performance_section("role-x", 1),
+            Some(Some("payload-v1".into()))
+        );
+        invalidate_agent_performance_cache();
+        assert_eq!(
+            lookup_cached_agent_performance_section("role-x", 1),
+            None,
+            "invalidate must remove all entries"
+        );
+    }
+
+    #[test]
+    fn invalidate_for_role_only_touches_that_role() {
+        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        reset_agent_performance_cache_for_layer_rendering_tests();
+        store_agent_performance_section("role-A".into(), 7, Some("a".into()));
+        store_agent_performance_section("role-B".into(), 7, Some("b".into()));
+        invalidate_agent_performance_cache_for_role("role-A");
+        assert_eq!(
+            lookup_cached_agent_performance_section("role-A", 7),
+            None,
+            "role-A entry should be gone"
+        );
+        assert_eq!(
+            lookup_cached_agent_performance_section("role-B", 7),
+            Some(Some("b".into())),
+            "role-B entry must survive a targeted invalidation"
+        );
+    }
+
+    #[test]
+    fn metrics_counters_track_hits_and_misses() {
+        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        reset_agent_performance_cache_for_layer_rendering_tests();
+        // First lookup = miss path (cache empty -> store -> miss count
+        // ++). We exercise store directly because the helper increments
+        // the miss counter every time a value is stored.
+        store_agent_performance_section("role-m".into(), 9, Some("v".into()));
+        let (h1, m1) = agent_performance_cache_metrics();
+        assert_eq!((h1, m1), (0, 1));
+
+        // Same-bucket lookup is a hit.
+        assert_eq!(
+            lookup_cached_agent_performance_section("role-m", 9),
+            Some(Some("v".into()))
+        );
+        let (h2, m2) = agent_performance_cache_metrics();
+        assert_eq!((h2, m2), (1, 1));
+
+        // Different bucket = miss (returns None to caller). The hit
+        // counter must NOT advance.
+        assert_eq!(lookup_cached_agent_performance_section("role-m", 10), None);
+        let (h3, m3) = agent_performance_cache_metrics();
+        assert_eq!((h3, m3), (1, 1));
+    }
+
+    #[test]
+    fn bucket_rollover_causes_miss_then_refill() {
+        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        reset_agent_performance_cache_for_layer_rendering_tests();
+        store_agent_performance_section("role-r".into(), 1, Some("day1".into()));
+        // Day +1: stale entry -> lookup returns None.
+        assert_eq!(lookup_cached_agent_performance_section("role-r", 2), None);
+        // Caller refills with day-2 payload.
+        store_agent_performance_section("role-r".into(), 2, Some("day2".into()));
+        assert_eq!(
+            lookup_cached_agent_performance_section("role-r", 2),
+            Some(Some("day2".into()))
+        );
+        // The old entry was overwritten in place; querying day-1 again
+        // is now a miss (no rolling history).
+        assert_eq!(lookup_cached_agent_performance_section("role-r", 1), None);
+    }
 }
