@@ -2052,6 +2052,67 @@ agents:
         });
     }
 
+    /// #2663: the rendered peer agent directory is cached process-locally and
+    /// keyed on the input config files' mtimes; the cache must (1) reuse the
+    /// previous rendering when source files are unchanged, and (2) invalidate
+    /// when the role_map source file changes.
+    #[test]
+    fn test_render_peer_agent_guidance_cache_reuses_and_invalidates() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            super::content::invalidate_peer_guidance_cache_for_tests();
+
+            let json_initial = serde_json::json!({
+                "meeting": {
+                    "available_agents": [
+                        { "role_id": "ch-td", "display_name": "TD" },
+                        { "role_id": "ch-pd", "display_name": "PD" }
+                    ]
+                }
+            });
+            fs::write(
+                settings_dir.join("role_map.json"),
+                serde_json::to_string_pretty(&json_initial).unwrap(),
+            )
+            .unwrap();
+
+            let first = render_peer_agent_guidance("ch-pd").unwrap();
+            assert!(first.contains("ch-td"));
+            // Second invocation for the same role with unchanged source must
+            // produce byte-identical output (cache hit).
+            let second = render_peer_agent_guidance("ch-pd").unwrap();
+            assert_eq!(first, second);
+
+            // Rewrite the role_map to a different shape and bump the mtime
+            // explicitly so the mtime-based fingerprint definitely shifts.
+            let json_updated = serde_json::json!({
+                "meeting": {
+                    "available_agents": [
+                        { "role_id": "ch-td", "display_name": "TD" },
+                        { "role_id": "ch-pd", "display_name": "PD" },
+                        { "role_id": "ch-qa", "display_name": "QA" }
+                    ]
+                }
+            });
+            // Sleep across the FS mtime resolution boundary (most FS report
+            // mtime at 1ms or 1s precision) before the second write so we are
+            // sure the mtime fingerprint actually shifts.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            fs::write(
+                settings_dir.join("role_map.json"),
+                serde_json::to_string_pretty(&json_updated).unwrap(),
+            )
+            .unwrap();
+
+            let third = render_peer_agent_guidance("ch-pd").unwrap();
+            assert!(
+                third.contains("ch-qa"),
+                "cache must invalidate on source file mtime change: got {third}"
+            );
+        });
+    }
+
     // ── P0 tests ─────────────────────────────────────────────────────────
 
     #[test]

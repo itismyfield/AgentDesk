@@ -474,13 +474,13 @@
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 185 |  |
 | `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 579 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1841 | giant-file |
-| `services::discord::settings` | `src/services/discord/settings.rs` | 2418 | giant-file |
-| `services::discord::settings::content` | `src/services/discord/settings/content.rs` | 422 |  |
+| `services::discord::settings` | `src/services/discord/settings.rs` | 2479 | giant-file |
+| `services::discord::settings::content` | `src/services/discord/settings/content.rs` | 520 |  |
 | `services::discord::settings::memory` | `src/services/discord/settings/memory.rs` | 127 |  |
 | `services::discord::settings::read` | `src/services/discord/settings/read.rs` | 522 |  |
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 230 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 392 |  |
-| `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
+| `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 169 |  |
 | `services::discord::stall_recovery` | `src/services/discord/stall_recovery.rs` | 119 |  |
 | `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 968 |  |
 | `services::discord::streaming_finalizer` | `src/services/discord/streaming_finalizer.rs` | 251 |  |
