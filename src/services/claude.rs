@@ -1545,15 +1545,29 @@ fn claude_tui_followup_busy_before_submit(
     transcript_path: Option<&std::path::Path>,
 ) -> Option<crate::services::claude_tui::input::PromptReadinessSnapshot> {
     let snapshot = crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name);
-    if let Some(transcript_path) = transcript_path {
-        match crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
-            transcript_path,
-        ) {
+    let transcript_turn_state = transcript_path.map(|transcript_path| {
+        crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(transcript_path)
+    });
+    claude_tui_followup_busy_before_submit_from_snapshot(snapshot, transcript_turn_state)
+}
+
+#[cfg(unix)]
+fn claude_tui_followup_busy_before_submit_from_snapshot(
+    snapshot: crate::services::claude_tui::input::PromptReadinessSnapshot,
+    transcript_turn_state: Option<crate::services::tui_turn_state::TuiTurnState>,
+) -> Option<crate::services::claude_tui::input::PromptReadinessSnapshot> {
+    if let Some(transcript_turn_state) = transcript_turn_state {
+        match transcript_turn_state {
             crate::services::tui_turn_state::TuiTurnState::Idle => {
                 if snapshot.tmux_pane_alive && snapshot.prompt_draft_detected {
                     return Some(snapshot);
                 }
                 return None;
+            }
+            crate::services::tui_turn_state::TuiTurnState::Unknown
+                if snapshot.tmux_pane_alive && snapshot.prompt_draft_detected =>
+            {
+                return Some(snapshot);
             }
             state if state.is_busy() && snapshot.tmux_pane_alive => return Some(snapshot),
             _ => {}
@@ -3793,6 +3807,24 @@ mod claude_tui_session_resolution_tests {
             claude_tui_followup_stranded_prompt_draft_state(&no_draft, &transcript_path),
             None
         );
+    }
+
+    #[test]
+    fn unknown_transcript_with_prompt_marker_and_draft_reaches_recovery() {
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "❯ stale draft".to_string(),
+        };
+
+        let result = claude_tui_followup_busy_before_submit_from_snapshot(
+            snapshot,
+            Some(crate::services::tui_turn_state::TuiTurnState::Unknown),
+        );
+
+        assert!(result.is_some());
     }
 }
 
