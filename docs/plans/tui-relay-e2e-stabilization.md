@@ -39,7 +39,7 @@
 
 ## 2. 두 개 트랙
 
-### 트랙 A — Rust 단위/통합 (18케이스, 우선)
+### 트랙 A — Rust 단위/통합 (helper-level subset, 우선)
 **위치**: 기존 컨벤션(`#[cfg(test)] mod tests` inline)을 따라 **대상 함수와 같은 모듈에 inline**으로 추가. 신규 디렉터리 `tests/unit_tui/`는 만들지 않음.
 **Private 함수 접근**: `claude_tui_rehydrate_start_offset`, `read_persisted_claude_tui_relay_offset` 등이 `pub(super)`라 같은 부모 모듈의 inline test에서 호출 가능. 외부 `tests/` 통합테스트가 필요한 경우만 `pub(crate)` 승격 검토.
 **원칙**: 외부 의존(Discord, tmux, launchctl) 없이 fixture jsonl + 함수 단위 호출.
@@ -48,7 +48,16 @@
 **위치**: `tests/e2e/tui_relay/scenarios/*.yaml`, `scripts/e2e/run_tui_relay.py`.
 **원칙**: dev(8799)+전용 채널에서만 실행, 한 바퀴 관통 검증 + soak 별도 측정.
 
-## 3. 트랙 A — Rust Unit/Integration (18케이스)
+## 3. 트랙 A — Rust Unit/Integration (helper-level subset of U-1~U-19)
+
+**커버 범위 (helper/pure-function level)**: U-1, U-2, U-3, U-4, U-5, U-6 (helper), U-7, U-8 (parser-level fixture), U-10 (advance offset), U-11 (offset edge cases), U-12 (binding accessors), U-13 (classifier negative), U-14 (provider isolation), U-17 (Claude shrink), U-19 (hook hash identity).
+
+**트랙 B로 이동**:
+- U-6 dispatch-level "marker 최대 1개" 검증 (process-wide async dispatch 의존)
+- U-9 idle-dedupe end-to-end (기존 inline 다수 케이스로 helper-level은 이미 cover)
+- U-15 multi-binder runtime overlap (실제 1초 race 재현 필요)
+- U-16 partial-line race in tail loop (기존 `claude_partial_*`로 helper level은 이미 cover, race 시점 재현은 트랙 B)
+- U-18 envelope→Discord 1:1 mapping (실제 emit 경로 의존)
 
 | ID | 회귀 PR / 의도 | 대상 함수 | Fixture | Assert |
 |---|---|---|---|---|
@@ -153,7 +162,7 @@ teardown:
 
 - 이 문서 (`docs/plans/tui-relay-e2e-stabilization.md`)
 - **신규** `docs/tui-thinking-policy.md` — 정책 본문 (raw thinking은 Discord 노출 금지, 중립 marker 1개, turn-completion 산정 제외, transcript event content blank)
-- 기존 모듈 inline `#[cfg(test)] mod tests` 확장으로 U-1 ~ U-19 추가 (신규 디렉터리 없음)
+- 기존 모듈 inline `#[cfg(test)] mod tests` 확장으로 트랙 A helper-level subset(위 §3 명시) 추가. 신규 디렉터리 없음.
 - `tests/e2e/tui_relay/scenarios/E-*.yaml` 12파일
 - `scripts/e2e/run_tui_relay.py` + `scripts/e2e/tui_relay/{discord,jsonl,tmux,launchctl,assertions,lease}.py`
 - `out/e2e/tui_relay/<run_id>/{report.json, artifacts/}`
@@ -173,7 +182,7 @@ teardown:
 ## 10. 실행 순서
 
 1. `docs/tui-thinking-policy.md` 초안 작성 (정책 합의 → 잠금)
-2. 트랙 A: U-1 ~ U-19 Rust test 추가 → grade(50회 flaky 0) → PR
+2. 트랙 A: helper-level subset(§3 명시) inline test 추가 → grade(50회 flaky 0) → PR
 3. dev(8799) 전용 dash 채널 존재 확인 또는 생성
 4. 트랙 B: 드라이버 + 12 YAML 작성 → baseline 1회 → fix loop → grade
 5. soak: 9.2, 6.3 별도 측정

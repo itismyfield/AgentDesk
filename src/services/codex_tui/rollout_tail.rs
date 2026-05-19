@@ -1790,34 +1790,35 @@ mod tests {
 
         let messages = collect_rollout(&body, 0);
 
-        let mut tool_use_names = Vec::new();
-        let mut tool_result_outputs = Vec::new();
-        let mut text_count = 0usize;
+        // Strict ordered pair-interleave check: capture only the ToolUse,
+        // ToolResult, and Text events in arrival order. The parser must
+        // emit ToolUse(tool_i) immediately followed by ToolResult(out-i)
+        // for each i in 0..5, with the assistant Text once at the end.
+        // If a regression batches the 5 ToolUse before the 5 ToolResult
+        // (or drops/duplicates pairs), this sequence comparison fails.
+        let mut sequence: Vec<(&'static str, String)> = Vec::new();
         for message in &messages {
             match message {
-                StreamMessage::ToolUse { name, .. } => tool_use_names.push(name.clone()),
+                StreamMessage::ToolUse { name, .. } => sequence.push(("use", name.clone())),
                 StreamMessage::ToolResult { content, .. } => {
-                    tool_result_outputs.push(content.clone())
+                    sequence.push(("result", content.clone()))
                 }
-                StreamMessage::Text { content } => {
-                    text_count += 1;
-                    assert_eq!(content, "summary");
-                }
+                StreamMessage::Text { content } => sequence.push(("text", content.clone())),
                 _ => {}
             }
         }
 
+        let mut expected: Vec<(&'static str, String)> = Vec::new();
+        for i in 0..5 {
+            expected.push(("use", format!("tool_{i}")));
+            expected.push(("result", format!("out-{i}")));
+        }
+        expected.push(("text", "summary".to_string()));
+
         assert_eq!(
-            tool_use_names,
-            (0..5).map(|i| format!("tool_{i}")).collect::<Vec<_>>(),
-            "expected ToolUse emit in order tool_0..tool_4"
+            sequence, expected,
+            "tool_use/tool_result/text emit order regression"
         );
-        assert_eq!(
-            tool_result_outputs,
-            (0..5).map(|i| format!("out-{i}")).collect::<Vec<_>>(),
-            "expected ToolResult emit in order out-0..out-4"
-        );
-        assert_eq!(text_count, 1, "expected exactly one assistant Text emit");
     }
 
     #[test]
