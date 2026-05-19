@@ -136,6 +136,14 @@ impl ClusterRuntime {
     }
 }
 
+fn auto_node_can_attempt_leadership(config: &Config) -> bool {
+    config.discord.bots.values().any(|bot| {
+        bot.token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
+    })
+}
+
 pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> ClusterRuntime {
     if !config.cluster.enabled {
         tracing::info!("[cluster] disabled; running in single-node leader-compatible mode");
@@ -156,8 +164,17 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
     let _ = SELF_INSTANCE_ID.set(instance_id.clone());
     let hostname = crate::services::platform::hostname_short();
     let configured_role = ClusterRole::parse(&config.cluster.role);
+    let auto_leader_eligible =
+        configured_role != ClusterRole::Auto || auto_node_can_attempt_leadership(config);
     let mut leader_lease = match configured_role {
         ClusterRole::Worker => None,
+        ClusterRole::Auto if !auto_leader_eligible => {
+            tracing::info!(
+                instance_id,
+                "[cluster] auto node has no configured Discord gateway token; registering as worker standby"
+            );
+            None
+        }
         ClusterRole::Leader | ClusterRole::Auto => {
             match AdvisoryLockLease::try_acquire(
                 &pool,
@@ -238,6 +255,7 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
         config.cluster.lease_ttl_secs,
         leader_active.clone(),
         leader_lease.take(),
+        auto_leader_eligible,
     );
 
     let runtime = ClusterRuntime {
@@ -268,10 +286,12 @@ fn spawn_heartbeat_loop(
     lease_ttl_secs: u64,
     leader_active: Arc<AtomicBool>,
     mut leader_lease: Option<AdvisoryLockLease>,
+    leader_eligible: bool,
 ) {
     let interval_secs = heartbeat_interval_secs.max(1);
     let stale_threshold_secs = lease_ttl_secs.max(interval_secs * 3);
-    let leader_eligible = matches!(configured_role, ClusterRole::Leader | ClusterRole::Auto);
+    let leader_eligible =
+        leader_eligible && matches!(configured_role, ClusterRole::Leader | ClusterRole::Auto);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.tick().await;
@@ -959,10 +979,10 @@ fn parse_last_heartbeat(node: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClusterRole, ClusterRuntime, explain_capability_match, resolve_instance_id,
-        select_capability_route, should_wake_wait_queue_after_node_join,
+        ClusterRole, ClusterRuntime, auto_node_can_attempt_leadership, explain_capability_match,
+        resolve_instance_id, select_capability_route, should_wake_wait_queue_after_node_join,
     };
-    use crate::config::ClusterConfig;
+    use crate::config::{ClusterConfig, Config};
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -991,6 +1011,29 @@ mod tests {
 
         leader.store(false, Ordering::Release);
         assert!(!should_wake_wait_queue_after_node_join(&leader));
+    }
+
+    #[test]
+    fn auto_node_leadership_requires_configured_gateway_token() {
+        let mut config = Config::default();
+        config.cluster.enabled = true;
+        config.cluster.role = "auto".to_string();
+        config.discord.bots.clear();
+
+        assert!(!auto_node_can_attempt_leadership(&config));
+
+        config.discord.bots.insert(
+            "codex".to_string(),
+            crate::config::BotConfig {
+                token: Some("   ".to_string()),
+                provider: Some("codex".to_string()),
+                ..crate::config::BotConfig::default()
+            },
+        );
+        assert!(!auto_node_can_attempt_leadership(&config));
+
+        config.discord.bots.get_mut("codex").unwrap().token = Some("token".to_string());
+        assert!(auto_node_can_attempt_leadership(&config));
     }
 
     #[tokio::test]
