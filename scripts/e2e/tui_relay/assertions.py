@@ -31,9 +31,16 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^✅"),
     re.compile(r"^🔴"),
     re.compile(r"^⏸"),
+    re.compile(r"^📋"),
+    re.compile(r"^📦"),
+    re.compile(r"^🔚"),
+    re.compile(r"^▶️"),
+    re.compile(r"^⚠️"),
     re.compile(r"진행 중"),
     re.compile(r"응답 완료"),
-    re.compile(r"세션 종료"),
+    re.compile(r"세션 복원"),
+    re.compile(r"세션 초기화"),
+    re.compile(r"\[Stopped\]"),
 )
 
 

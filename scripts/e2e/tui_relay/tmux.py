@@ -88,3 +88,25 @@ def kill_pane(pane_id: str) -> bool:
         check=False,
     )
     return proc.returncode == 0
+
+
+def kill_session(session_name: str, *, reverify_substring: str = "e2e") -> bool:
+    """Kill a tmux session — refuses if the name does not contain the verify token.
+
+    Used between scenarios so the next prompt starts on a fresh TUI session
+    (avoids 100%-context starvation that bricked baseline-grade-1 after
+    a few turns).
+    """
+
+    if not _have_tmux():
+        return False
+    if reverify_substring and reverify_substring not in session_name:
+        return False
+    if not has_session(session_name):
+        return False
+    proc = subprocess.run(
+        ["tmux", "kill-session", "-t", session_name],
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode == 0

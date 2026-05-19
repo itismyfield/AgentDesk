@@ -85,6 +85,14 @@ def parse_args() -> argparse.Namespace:
         "ready, instead of failing the whole scenario.",
     )
     parser.add_argument(
+        "--hard-reset-session-each",
+        action="store_true",
+        default=True,
+        help="Kill the per-channel TUI tmux session and archive the heavy on-disk "
+        "claude jsonl before each scenario, so the next scenario starts on a "
+        "fresh provider session (avoids cc TUI 100%%-context starvation).",
+    )
+    parser.add_argument(
         "--handoff-to-agent",
         default="adk-dashboard-e2e",
         help="Agent id whose channel bindings receive send-to-agent prompts. "
@@ -137,6 +145,74 @@ def _truncate_queue_file(path: Path) -> None:
         path.write_text("[]")
     except OSError:
         pass
+
+
+def hard_reset_provider_session(
+    *,
+    channel_kind: str,
+    scenario: dict[str, Any],
+    runtime_root: Path,
+) -> dict[str, Any]:
+    """Burn the per-channel TUI session so the next prompt starts fresh.
+
+    The cc TUI saturates at 100% context after a handful of scenario turns,
+    which silently starves later prompts (TUI accepts setup but refuses the
+    real prompt — see baseline-grade-1 E-10/E-11/E-12 timeouts). To keep a
+    full run finishable we kill the tmux session, drop the runtime session
+    artefacts, and archive the on-disk claude jsonl so `--resume` cannot
+    bring back a 100% history.
+    """
+
+    session_name = scenario_session_name(scenario, channel_kind)
+    summary: dict[str, Any] = {
+        "channel_kind": channel_kind,
+        "session_name": session_name,
+        "actions": [],
+    }
+    if tmux.kill_session(session_name, reverify_substring="adk-dash"):
+        summary["actions"].append("tmux_session_killed")
+    sessions_root = runtime_root / "sessions"
+    if sessions_root.is_dir():
+        removed: list[str] = []
+        for artefact in sessions_root.glob(f"*{session_name}*"):
+            try:
+                artefact.unlink()
+                removed.append(artefact.name)
+            except OSError:
+                pass
+        if removed:
+            summary["actions"].append({"runtime_session_files_removed": removed})
+    # Drop inflight for the matching provider as well.
+    inflight_dir = runtime_root / "discord_inflight"
+    provider = "claude" if channel_kind == "cc" else "codex"
+    suffix = "claude" if channel_kind == "cc" else "codex"
+    summary["__suffix__"] = suffix
+    channel_id_field = scenario.get("__channel_id__")
+    if channel_id_field:
+        inflight_path = inflight_dir / provider / f"{channel_id_field}.json"
+        try:
+            if inflight_path.exists():
+                inflight_path.unlink()
+                summary["actions"].append("inflight_cleared")
+        except OSError:
+            pass
+    # Archive heavy on-disk claude jsonl so `--resume <missing-uuid>` cannot
+    # bring back a 100% context tail.
+    if channel_kind == "cc":
+        archived: list[str] = []
+        for workspace in Path.home().joinpath(".claude/projects").glob(
+            "*adk-dash-cc-e2e*"
+        ):
+            for jsonl in workspace.glob("*.jsonl"):
+                try:
+                    target = Path("/tmp") / f"archived-{jsonl.name}-{int(time.time())}"
+                    jsonl.rename(target)
+                    archived.append(str(target))
+                except OSError:
+                    pass
+        if archived:
+            summary["actions"].append({"claude_jsonl_archived": archived})
+    return summary
 
 
 def reset_channel_state(
@@ -278,6 +354,21 @@ def run_scenario(
                     provider=provider,
                 )
             )
+        # Burn the TUI tmux session so the next scenario starts on a fresh
+        # provider session — without this the cc TUI hits 100% context in
+        # ~3 scenarios and silently starves later prompts.
+        if args.hard_reset_session_each:
+            result.setdefault("hard_resets", [])
+            for kind, channel_id in channel_targets:
+                scenario_with_chan = dict(scenario)
+                scenario_with_chan["__channel_id__"] = str(channel_id)
+                result["hard_resets"].append(
+                    hard_reset_provider_session(
+                        channel_kind=kind,
+                        scenario=scenario_with_chan,
+                        runtime_root=runtime_root,
+                    )
+                )
         # Give the runtime a beat to settle after the cancel/truncate combo.
         time.sleep(2.0)
 
@@ -336,12 +427,20 @@ def run_one_channel(
     # Falling back to "id" leaves after_id empty, which causes wait_for_message
     # to keep refetching the channel head and bleed earlier scenarios into the
     # current window (false duplicate / timeout failures).
-    after_id = str(
+    setup_marker_id = str(
         setup_resp.get("message_id") or setup_resp.get("id") or ""
     )
-    window = assertions.Window(setup_marker_id=after_id)
-    # Brief settle so the SETUP marker is observable before any wait/poll.
-    time.sleep(1.0)
+    # The setup marker is dispatched through the TUI relay (#명령봇 messages
+    # auto-trigger the user's TUI). The model often echoes its prior turn's
+    # response when given a SETUP cue (e.g. emits a stale `[E2E:E1:OK]`),
+    # which would later collide with the real prompt's response and trip
+    # `no_duplicate_content`. We absorb that setup-induced noise by holding
+    # the assertion window's start *after* the setup response settles.
+    after_id = setup_marker_id
+    window = assertions.Window(setup_marker_id=setup_marker_id)
+    # Wait longer so the LLM has time to respond to the setup marker before
+    # we start the real prompt window. 8s covers status-panel + response.
+    time.sleep(8.0)
 
     def _ingest_observed(messages: list[dict[str, Any]]) -> None:
         # Discord returns messages in DESC (most-recent-first); ingest in
@@ -353,10 +452,33 @@ def run_one_channel(
                 continue
             window.add(message)
 
+    first_send_done = False
+
+    def _advance_window_past_setup_echo() -> None:
+        """Move the assertion window past the setup-marker echo.
+
+        Called exactly once before the first `send_prompt`. The current
+        channel head becomes the new `after_id`, and the relay-response
+        accumulator is reset, so the setup-induced echo cannot collide with
+        the real prompt response on `no_duplicate_content`.
+        """
+
+        nonlocal after_id
+        tail = client.fetch_messages(channel_id, after_id=after_id, limit=100)
+        if not tail:
+            return
+        latest = max(int(m.get("id", "0")) for m in tail)
+        after_id = str(latest)
+        window.raw_messages = []
+        window.messages = []
+
     for step in scenario.get("steps") or []:
         if not isinstance(step, dict):
             continue
         if "send_prompt" in step:
+            if not first_send_done:
+                _advance_window_past_setup_echo()
+                first_send_done = True
             # Use send-to-agent (when handoff configured) so dispatch
             # auto-spawns the target tmux session — plain /api/discord/send
             # records the message but does not trigger dispatch for newly
