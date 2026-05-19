@@ -375,7 +375,7 @@ fn wait_for_prompt_ready_inner(
 
     check_prompt_cancel(cancel_token)?;
     if let Some(snapshot) = post_event_snapshot {
-        if snapshot.prompt_marker_detected {
+        if prompt_marker_confirms_prompt_ready(&snapshot) {
             check_prompt_cancel(cancel_token)?;
             tracing::debug!(
                 tmux_session_name = session_name,
@@ -470,7 +470,7 @@ fn run_prompt_ready_fast_path(
         notified.as_mut().enable();
 
         let pre_snapshot = prompt_readiness_snapshot(&session_name);
-        if pre_snapshot.prompt_marker_detected {
+        if prompt_marker_confirms_prompt_ready(&pre_snapshot) {
             return (HookFastPathOutcome::PreSnapshotReady, None);
         }
         if !pre_snapshot.tmux_pane_alive {
@@ -593,7 +593,7 @@ fn wait_for_prompt_ready_polling(
         check_prompt_cancel(cancel_token)?;
         let snapshot = prompt_readiness_snapshot(session_name);
         check_prompt_cancel(cancel_token)?;
-        if snapshot.prompt_marker_detected {
+        if prompt_marker_confirms_prompt_ready(&snapshot) {
             return Ok(());
         }
         if transcript_idle_confirms_prompt_ready(&snapshot, transcript_path) {
@@ -627,6 +627,10 @@ fn wait_for_prompt_ready_polling(
 
 fn pane_looks_ready_for_prompt(pane: &str) -> bool {
     crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(pane)
+}
+
+fn prompt_marker_confirms_prompt_ready(snapshot: &PromptReadinessSnapshot) -> bool {
+    snapshot.prompt_marker_detected && !snapshot.prompt_draft_detected
 }
 
 fn transcript_idle_confirms_prompt_ready(
@@ -779,6 +783,19 @@ mod tests {
         let pane = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
 
         assert!(pane_looks_ready_for_prompt(pane));
+    }
+
+    #[test]
+    fn prompt_marker_does_not_confirm_readiness_when_draft_is_present() {
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\u{276f} stale draft".to_string(),
+        };
+
+        assert!(!prompt_marker_confirms_prompt_ready(&snapshot));
     }
 
     #[test]
