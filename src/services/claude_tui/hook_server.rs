@@ -304,6 +304,36 @@ async fn receive_hook(
         // `input::wait_for_prompt_ready` handles the missed-signal race.
         PROMPT_READY_NOTIFY.notify_waiters();
     }
+    // #2655: surface forget:recall floods. The PreToolUse payload carries
+    // `tool_name` (Claude/Codex contract); when it's a memento forget or
+    // recall, observe the call against the sliding window and emit a warn if
+    // the threshold is breached. Suppressed-by-cool-down decisions are
+    // logged at debug to keep the alarm channel readable.
+    if matches!(event.kind, HookEventKind::PreToolUse) {
+        if let Some(observation) = classify_memento_tool_invocation(&event.payload) {
+            let scope = format!("{}:{}", event.provider, event.session_id);
+            let snapshot = match observation {
+                MementoToolInvocation::Forget => {
+                    crate::services::memory::note_memento_forget_call(&scope)
+                }
+                MementoToolInvocation::Recall => {
+                    crate::services::memory::note_memento_recall_call(&scope)
+                }
+            };
+            if matches!(
+                snapshot.decision,
+                crate::services::memory::ForgetRatioAlarmDecision::AlarmSuppressedByCooldown
+            ) {
+                tracing::debug!(
+                    scope,
+                    forget_count = snapshot.forget_count,
+                    recall_count = snapshot.recall_count,
+                    ratio = snapshot.ratio,
+                    "memento forget:recall flood alarm currently suppressed by cool-down"
+                );
+            }
+        }
+    }
     if state.event_tx.send(event).is_err() {
         tracing::debug!(
             provider,
@@ -322,6 +352,48 @@ async fn receive_hook(
             "session_id": session_id
         })),
     )
+}
+
+/// #2655: classification of the memento tool surface invoked in a hook
+/// payload. Anything not on the `forget`/`recall` pair returns `None` so the
+/// caller can no-op cheaply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MementoToolInvocation {
+    Forget,
+    Recall,
+}
+
+/// #2655: parses the `tool_name` field of a PreToolUse hook payload and maps
+/// it onto `MementoToolInvocation`. Accepts both the Claude convention
+/// (`mcp__memento__forget`) and the bare tool name (`forget`/`recall`/`context`).
+/// `context` counts as a recall — it produces the same kind of evidence
+/// (recall precision) that the forget:recall ratio is meant to surface.
+pub(crate) fn classify_memento_tool_invocation(payload: &Value) -> Option<MementoToolInvocation> {
+    let tool_name = payload
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("toolName").and_then(Value::as_str))?
+        .trim();
+    if tool_name.is_empty() {
+        return None;
+    }
+    // Tool names arrive in a few shapes depending on the provider:
+    //   * Claude MCP namespacing: `mcp__memento__forget`
+    //   * Codex MCP namespacing: `memento.forget` / `memento/forget`
+    //   * Bare:                   `forget`
+    // Normalise by stripping the `mcp__memento__` prefix and any
+    // `memento[./]` prefix, then case-fold.
+    let lowered = tool_name.to_ascii_lowercase();
+    let stripped = lowered
+        .strip_prefix("mcp__memento__")
+        .or_else(|| lowered.strip_prefix("memento."))
+        .or_else(|| lowered.strip_prefix("memento/"))
+        .unwrap_or(lowered.as_str());
+    match stripped {
+        "forget" => Some(MementoToolInvocation::Forget),
+        "recall" | "context" => Some(MementoToolInvocation::Recall),
+        _ => None,
+    }
 }
 
 fn payload_session_id(payload: &Value) -> Option<String> {
@@ -374,6 +446,63 @@ mod tests {
 
     static ENDPOINT_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
         LazyLock::new(|| std::sync::Mutex::new(()));
+
+    #[test]
+    fn classify_memento_recognizes_claude_and_codex_prefixes() {
+        // Claude-style MCP namespace.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "mcp__memento__forget" })),
+            Some(MementoToolInvocation::Forget)
+        );
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "mcp__memento__recall" })),
+            Some(MementoToolInvocation::Recall)
+        );
+        // `context` counts as recall — it carries the same recall-precision
+        // signal the forget:recall ratio is meant to surface.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "mcp__memento__context" })),
+            Some(MementoToolInvocation::Recall)
+        );
+        // Codex-style dot/slash separators.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "memento.forget" })),
+            Some(MementoToolInvocation::Forget)
+        );
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "memento/recall" })),
+            Some(MementoToolInvocation::Recall)
+        );
+        // Bare tool name (no provider prefix).
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "forget" })),
+            Some(MementoToolInvocation::Forget)
+        );
+        // camelCase field name also accepted.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "toolName": "mcp__memento__recall" })),
+            Some(MementoToolInvocation::Recall)
+        );
+    }
+
+    #[test]
+    fn classify_memento_ignores_unrelated_tools() {
+        // Other MCP tools must not contribute to the ratio.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "Bash" })),
+            None
+        );
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "mcp__memento__remember" })),
+            None
+        );
+        assert_eq!(classify_memento_tool_invocation(&json!({})), None);
+        // Empty / whitespace strings degrade gracefully.
+        assert_eq!(
+            classify_memento_tool_invocation(&json!({ "tool_name": "   " })),
+            None
+        );
+    }
 
     #[test]
     fn hook_event_kind_normalizes_provider_hook_names() {

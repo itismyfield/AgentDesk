@@ -352,6 +352,22 @@ pub(crate) enum Commands {
         #[arg(required = true)]
         tools: Vec<String>,
     },
+    /// #2655: install (or refresh) the Memento `context()` SessionStart hook
+    /// and a UserPromptSubmit token-pressure reminder into a Claude Code
+    /// settings file. Idempotent — running twice produces the same file.
+    InstallMementoSessionHook {
+        /// Path to the settings.json to mutate. Defaults to
+        /// `~/.claude/settings.json` when omitted.
+        #[arg(long)]
+        settings_path: Option<String>,
+        /// Skip writing and instead print the rendered settings to stdout.
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove the AgentDesk-managed memento hook entries instead of
+        /// installing them. Useful when an operator wants to revert.
+        #[arg(long, conflicts_with = "dry_run")]
+        uninstall: bool,
+    },
     /// Show server health, active sessions, and auto-queue status
     Status,
     /// List kanban cards

@@ -46,7 +46,7 @@
 | --- | --- | ---: | --- |
 | `bootstrap` | `src/bootstrap.rs` | 93 |  |
 | `cli` | `src/cli/mod.rs` | 21 |  |
-| `cli::args` | `src/cli/args.rs` | 1099 | giant-file |
+| `cli::args` | `src/cli/args.rs` | 1115 | giant-file |
 | `cli::client` | `src/cli/client.rs` | 2497 | giant-file |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1526 | giant-file |
 | `cli::direct` | `src/cli/direct.rs` | 1635 | giant-file |
@@ -65,8 +65,8 @@
 | `cli::monitoring` | `src/cli/monitoring.rs` | 141 |  |
 | `cli::provider_cli` | `src/cli/provider_cli/mod.rs` | 1701 | giant-file |
 | `cli::query` | `src/cli/query.rs` | 462 |  |
-| `cli::run` | `src/cli/run.rs` | 596 |  |
-| `cli::utils` | `src/cli/utils.rs` | 277 |  |
+| `cli::run` | `src/cli/run.rs` | 606 |  |
+| `cli::utils` | `src/cli/utils.rs` | 581 |  |
 | `compat` | `src/compat/mod.rs` | 185 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 23 |  |
@@ -342,7 +342,7 @@
 | `services::claude_tui` | `src/services/claude_tui/mod.rs` | 7 |  |
 | `services::claude_tui::hook_bundle` | `src/services/claude_tui/hook_bundle.rs` | 1184 | giant-file |
 | `services::claude_tui::hook_relay` | `src/services/claude_tui/hook_relay.rs` | 477 |  |
-| `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 569 |  |
+| `services::claude_tui::hook_server` | `src/services/claude_tui/hook_server.rs` | 698 |  |
 | `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 1266 | giant-file |
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 275 |  |
 | `services::claude_tui::transcript_tail` | `src/services/claude_tui/transcript_tail.rs` | 301 |  |
@@ -547,10 +547,10 @@
 | `services::maintenance::jobs::target_sweep` | `src/services/maintenance/jobs/target_sweep.rs` | 248 |  |
 | `services::maintenance::jobs::worktree_orphan_sweep` | `src/services/maintenance/jobs/worktree_orphan_sweep.rs` | 279 |  |
 | `services::mcp_config` | `src/services/mcp_config.rs` | 1532 | giant-file |
-| `services::memory` | `src/services/memory/mod.rs` | 373 |  |
+| `services::memory` | `src/services/memory/mod.rs` | 377 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 116 |  |
 | `services::memory::memento` | `src/services/memory/memento.rs` | 2953 | giant-file |
-| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 474 |  |
+| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 751 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 474 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 806 |  |
 | `services::observability` | `src/services/observability/mod.rs` | 1149 | giant-file |
