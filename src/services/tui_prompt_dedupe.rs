@@ -255,6 +255,19 @@ pub(crate) fn runtime_binding_for_tmux_session(
         .map(|entry| entry.value.clone())
 }
 
+pub(crate) fn runtime_bindings_for_kind(
+    runtime_kind: RuntimeHandoffKind,
+) -> Vec<(String, TuiRuntimeBinding)> {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    state
+        .runtime_by_tmux
+        .iter()
+        .filter(|(_, entry)| entry.value.runtime_kind == runtime_kind)
+        .map(|(tmux_session_name, entry)| (tmux_session_name.clone(), entry.value.clone()))
+        .collect()
+}
+
 pub(crate) fn advance_tmux_runtime_binding_offset(
     tmux_session_name: &str,
     output_path: &str,
@@ -636,6 +649,53 @@ mod tests {
                 last_offset: 77,
                 relay_last_offset: None,
             })
+        );
+    }
+
+    #[test]
+    fn lists_runtime_bindings_by_kind() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        register_tmux_runtime_binding(
+            "tmux-codex",
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::CodexTui,
+                output_path: "/tmp/codex-rollout.jsonl".to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("thread-123".to_string()),
+                last_offset: 77,
+                relay_last_offset: None,
+            },
+        );
+        register_tmux_runtime_binding(
+            "tmux-claude",
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: "/tmp/claude-transcript.jsonl".to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: None,
+                last_offset: 88,
+                relay_last_offset: None,
+            },
+        );
+
+        assert_eq!(
+            runtime_bindings_for_kind(RuntimeHandoffKind::CodexTui),
+            vec![(
+                "tmux-codex".to_string(),
+                TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::CodexTui,
+                    output_path: "/tmp/codex-rollout.jsonl".to_string(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: Some("thread-123".to_string()),
+                    last_offset: 77,
+                    relay_last_offset: None,
+                },
+            )]
         );
     }
 
