@@ -83,9 +83,7 @@ fn parse_filters(raw: &[String]) -> Result<Vec<(String, String)>, String> {
             continue;
         }
         // Support both `key:value` and `key=value` for ergonomics.
-        let split = trimmed
-            .split_once(':')
-            .or_else(|| trimmed.split_once('='));
+        let split = trimmed.split_once(':').or_else(|| trimmed.split_once('='));
         let Some((k, v)) = split else {
             return Err(format!(
                 "invalid --filter '{trimmed}': expected key:value (e.g. status:pending)"
@@ -308,9 +306,7 @@ fn render_queue(value: &Value) {
         .and_then(|r| r.get("max_concurrent_threads"))
         .and_then(Value::as_i64)
         .unwrap_or(1);
-    println!(
-        "  Run: {status} | agent={agent} | unified={unified} | max_threads={max_threads}"
-    );
+    println!("  Run: {status} | agent={agent} | unified={unified} | max_threads={max_threads}");
 
     let empty: Vec<Value> = Vec::new();
     let entries = value
@@ -388,25 +384,15 @@ mod tests {
 
     #[test]
     fn parses_colon_filter() {
-        let opts = QueryOptions::from_raw(
-            false,
-            vec!["status:pending".to_string()],
-            None,
-            0,
-        )
-        .unwrap();
+        let opts =
+            QueryOptions::from_raw(false, vec!["status:pending".to_string()], None, 0).unwrap();
         assert_eq!(opts.filters, vec![("status".into(), "pending".into())]);
     }
 
     #[test]
     fn parses_equals_filter() {
-        let opts = QueryOptions::from_raw(
-            false,
-            vec!["status=running".to_string()],
-            None,
-            0,
-        )
-        .unwrap();
+        let opts =
+            QueryOptions::from_raw(false, vec!["status=running".to_string()], None, 0).unwrap();
         assert_eq!(opts.filters, vec![("status".into(), "running".into())]);
     }
 

@@ -427,8 +427,7 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 Some(QueryAction::PhaseGate) => super::query::QuerySection::PhaseGate,
                 Some(QueryAction::All) | None => super::query::QuerySection::All,
             };
-            let opts_result =
-                super::query::QueryOptions::from_raw(json, filters, agent, limit);
+            let opts_result = super::query::QueryOptions::from_raw(json, filters, agent, limit);
             let invoke = match opts_result {
                 Ok(opts) => super::query::cmd_query(section, opts),
                 Err(err) => Err(err),
