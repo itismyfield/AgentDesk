@@ -1639,7 +1639,34 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let turn_data_start_offset = all_data_start_offset;
         let mut session_bound_relay_turn_fully_mirrored = all_data_fully_mirrored_to_session_relay;
         let mut state = StreamLineState::new();
-        let stream_seed = watcher_stream_seed(restored_turn.take());
+        let restored_turn_seed = restored_turn.take();
+        let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
+            restored_turn_seed.is_some(),
+            crate::services::discord::inflight::load_inflight_state(
+                &watcher_provider,
+                channel_id.get(),
+            )
+            .is_none(),
+            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id.get(),
+            )
+            .is_some(),
+        );
+        if discard_restored_seed {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 👁 watcher: discarding restored stream seed for idle SSH-direct prompt on channel {} (tmux={})",
+                channel_id.get(),
+                tmux_session_name
+            );
+        }
+        let stream_seed = watcher_stream_seed(if discard_restored_seed {
+            None
+        } else {
+            restored_turn_seed
+        });
         let restored_assistant_text_seen = !stream_seed.full_response.trim().is_empty();
         if restored_assistant_text_seen {
             // The restored response prefix came from watcher state, not from
