@@ -127,22 +127,31 @@ async fn handle_send(Json(req): Json<SendRequest>) -> Json<Value> {
             "tmux session not found: {session_name}"
         )));
     }
-    if req.text.is_empty() {
-        return Json(error_json("text must not be empty"));
+    if req.text.is_empty() && !req.submit {
+        // Empty text + no submit would be a no-op. Surface this as a 400 so
+        // upstream bugs do not silently swallow attempted relays.
+        return Json(error_json(
+            "text must not be empty when submit=false (call would be a no-op)",
+        ));
     }
 
-    let buffer_name = allocate_buffer_name();
-    if let Err(error) = tmux::load_buffer(&buffer_name, &req.text) {
-        return Json(error_json(&format!("tmux load-buffer failed: {error}")));
-    }
+    let bytes = req.text.len();
+    if !req.text.is_empty() {
+        let buffer_name = allocate_buffer_name();
+        if let Err(error) = tmux::load_buffer(&buffer_name, &req.text) {
+            return Json(error_json(&format!("tmux load-buffer failed: {error}")));
+        }
 
-    // `paste-buffer -p -r -d` pastes in bracketed-paste mode (so the TUI
-    // recognises it as a paste, not many tiny keystrokes), preserves LF (so
-    // it does NOT get auto-Enter'd by tmux), and deletes the buffer after
-    // pasting.
-    let paste_result = tmux::paste_buffer(&session_name, &buffer_name, true);
-    if let Err(error) = paste_result {
-        return Json(error_json(&format!("tmux paste-buffer failed: {error}")));
+        // `paste-buffer -p -r -d` pastes in bracketed-paste mode (so the TUI
+        // recognises it as a paste, not many tiny keystrokes), preserves LF
+        // (so it does NOT get auto-Enter'd by tmux), and deletes the buffer
+        // after pasting.
+        if let Err(error) = tmux::paste_buffer(&session_name, &buffer_name, true) {
+            // Best-effort cleanup of the orphan buffer is fine to skip:
+            // tmux removes buffers when the server exits and we never reuse
+            // the UUID-suffixed name.
+            return Json(error_json(&format!("tmux paste-buffer failed: {error}")));
+        }
     }
 
     let mut submitted = false;
@@ -155,7 +164,6 @@ async fn handle_send(Json(req): Json<SendRequest>) -> Json<Value> {
         }
     }
 
-    let bytes = req.text.len();
     let resp = SendResponse {
         ok: true,
         session_name,
@@ -183,6 +191,12 @@ async fn handle_wait(Json(req): Json<WaitRequest>) -> Json<Value> {
         .map(str::trim)
         .map(str::to_ascii_lowercase)
         .unwrap_or_else(|| "stop".to_string());
+
+    if until_mode != "stop" && until_mode != "token" {
+        return Json(error_json(&format!(
+            "unknown until mode: {until_mode} (expected 'stop' or 'token')"
+        )));
+    }
 
     let token = req.token.as_deref().map(str::trim).map(str::to_string);
     if until_mode == "token" && token.as_deref().map(str::is_empty).unwrap_or(true) {
