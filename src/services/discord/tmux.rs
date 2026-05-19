@@ -226,6 +226,14 @@ fn watcher_stream_seed(restored_turn: Option<RestoredWatcherTurn>) -> WatcherStr
     }
 }
 
+fn should_discard_restored_seed_for_idle_direct_prompt(
+    restored_turn_present: bool,
+    inflight_missing: bool,
+    prompt_anchor_present: bool,
+) -> bool {
+    restored_turn_present && inflight_missing && prompt_anchor_present
+}
+
 fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
     let lower = reason.to_ascii_lowercase();
     if tmux_exit_reason_is_normal_completion(reason) {
@@ -2375,6 +2383,7 @@ mod tests {
         reset_stale_local_relay_offset_if_output_regressed,
         reset_stale_relay_watermark_if_output_regressed, restored_watcher_turn_from_inflight,
         rollback_enqueued_offset_for_reconciled_failures,
+        should_discard_restored_seed_for_idle_direct_prompt,
         should_flush_post_terminal_success_continuation, should_suppress_relay_before_emit,
         should_suppress_streaming_placeholder_after_recent_stop,
         should_suppress_terminal_output_after_recent_stop, start_monitor_auto_turn_when_available,
@@ -5809,6 +5818,22 @@ mod tests {
         assert!(seed.last_edit_text.is_empty());
         assert_eq!(seed.task_notification_kind, None);
         assert!(!seed.finish_mailbox_on_completion);
+    }
+
+    #[test]
+    fn idle_direct_prompt_discards_restored_seed_only_with_anchor_and_no_inflight() {
+        assert!(should_discard_restored_seed_for_idle_direct_prompt(
+            true, true, true
+        ));
+        assert!(!should_discard_restored_seed_for_idle_direct_prompt(
+            true, false, true
+        ));
+        assert!(!should_discard_restored_seed_for_idle_direct_prompt(
+            true, true, false
+        ));
+        assert!(!should_discard_restored_seed_for_idle_direct_prompt(
+            false, true, true
+        ));
     }
 
     #[test]
