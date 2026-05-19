@@ -39,6 +39,8 @@ mod order_routes;
 mod phase_gate;
 #[path = "phase_gate_catalog.rs"]
 mod phase_gate_catalog;
+#[path = "phase_gate_violations.rs"]
+pub mod phase_gate_violations;
 #[path = "planning.rs"]
 mod planning;
 #[path = "query.rs"]
@@ -63,6 +65,7 @@ pub use control_routes::{
 };
 pub use order_routes::{OrderBody, submit_order};
 pub use phase_gate_catalog::{DEFAULT_PHASE_GATE_KIND, catalog as phase_gate_catalog};
+pub use phase_gate_violations::violations_route;
 pub use route_generate::generate;
 pub use route_request_generate::request_generate;
 pub use route_types::{

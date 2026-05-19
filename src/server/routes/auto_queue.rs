@@ -168,6 +168,18 @@ pub async fn phase_gate_catalog(state: State<AppState>) -> (StatusCode, Json<ser
     route::phase_gate_catalog(state).await
 }
 
+/// GET /api/queue/phase-gates/violations (#2657)
+///
+/// Reports any auto-queue entry whose `batch_phase` exceeds the run's
+/// current phase pointer while still being pending or actively dispatched.
+/// Read-only — does not block dispatches. Surfaced via the `/adk-phase`
+/// Discord slash command and `agentdesk phase status` CLI.
+pub async fn phase_gate_violations(
+    state: State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    route::violations_route(state).await
+}
+
 /// POST /api/queue/request-generate (#2126)
 ///
 /// Dashboard-facing: send a standardized "build a queue from these issues"

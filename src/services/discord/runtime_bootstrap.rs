@@ -1337,6 +1337,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         commands::cmd_deadlock_recover(),
         commands::cmd_machine_flip(),
         commands::cmd_stuck_pr_rebase(),
+        commands::cmd_adk_phase(),
     ]);
 
     let framework = poise::Framework::builder()

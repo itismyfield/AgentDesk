@@ -419,6 +419,21 @@ pub(crate) enum Commands {
         #[arg(long, global = true, default_value_t = 0)]
         limit: usize,
     },
+    /// Phase-gate violation snapshot (issue #2657).
+    ///
+    /// Read-only inspector that flags auto-queue entries dispatched at a
+    /// higher `batch_phase` than the run's live phase pointer. Mirrors the
+    /// `/adk-phase` Discord slash command.
+    Phase {
+        #[command(subcommand)]
+        action: Option<PhaseAction>,
+        /// Emit machine-readable JSON instead of text.
+        #[arg(long, global = true)]
+        json: bool,
+        /// Show full per-entry detail.
+        #[arg(long, global = true)]
+        detailed: bool,
+    },
     /// Build + deploy dev + promote to release
     Deploy,
     /// List agents and their status
@@ -526,6 +541,13 @@ pub(crate) enum QueryAction {
     PhaseGate,
     /// All sections in one shot (default).
     All,
+}
+
+/// Subcommands for `adk phase` (issue #2657).
+#[derive(Subcommand)]
+pub(crate) enum PhaseAction {
+    /// Show current violations (default).
+    Status,
 }
 
 #[derive(Subcommand)]

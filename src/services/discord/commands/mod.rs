@@ -44,8 +44,8 @@ pub(in crate::services::discord) use diagnostics::{
     build_health_report, build_inflight_report, build_queue_report, build_status_report,
 };
 pub(super) use diagnostics::{
-    cmd_debug, cmd_deletesession, cmd_health, cmd_inflight, cmd_metrics, cmd_queue, cmd_sessions,
-    cmd_status,
+    cmd_adk_phase, cmd_debug, cmd_deletesession, cmd_health, cmd_inflight, cmd_metrics, cmd_queue,
+    cmd_sessions, cmd_status,
 };
 pub(super) use fast_mode::cmd_fast;
 pub(super) use goals::cmd_goals;

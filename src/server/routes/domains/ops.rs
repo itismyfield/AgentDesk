@@ -254,6 +254,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/queue/phase-gates/catalog",
                 get(auto_queue::phase_gate_catalog),
             )
+            .route(
+                "/queue/phase-gates/violations",
+                get(auto_queue::phase_gate_violations),
+            )
             .route("/queue/dispatch-next", post(auto_queue::activate))
             .route("/queue/status", get(auto_queue::status))
             .route("/queue/history", get(auto_queue::history))

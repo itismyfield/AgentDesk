@@ -1683,6 +1683,71 @@ pub fn cmd_queue() -> Result<(), String> {
     Ok(())
 }
 
+/// `agentdesk phase status` — phase-gate violation snapshot (issue #2657).
+///
+/// Read-only call against `/api/queue/phase-gates/violations`. Empty
+/// `violations` is the clean state; partial DB failure surfaces as a
+/// non-zero exit via the `error` field.
+pub fn cmd_phase_status(json: bool, detailed: bool) -> Result<(), String> {
+    let raw = get_json("/api/queue/phase-gates/violations")?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&raw).unwrap_or_else(|_| raw.to_string())
+        );
+        return Ok(());
+    }
+
+    let empty: Vec<Value> = Vec::new();
+    let violations = raw
+        .get("violations")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let runs_scanned = raw.get("runs_scanned").and_then(Value::as_i64).unwrap_or(0);
+    let complete = raw
+        .get("complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if violations.is_empty() {
+        println!(
+            "phase-gate: clean (runs scanned: {runs_scanned}, complete: {complete})"
+        );
+        return Ok(());
+    }
+
+    println!(
+        "phase-gate violations: {} (runs scanned: {runs_scanned})",
+        violations.len()
+    );
+    for v in violations {
+        if detailed {
+            let run_id = v.get("run_id").and_then(Value::as_str).unwrap_or("-");
+            let entry_id = v.get("entry_id").and_then(Value::as_str).unwrap_or("-");
+            let card_id = v
+                .get("kanban_card_id")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let entry_phase = v
+                .get("entry_batch_phase")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let current_phase = v
+                .get("current_batch_phase")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let dispatch_id = v.get("dispatch_id").and_then(Value::as_str).unwrap_or("-");
+            println!(
+                "- run={run_id} entry={entry_id} card={card_id} phase={entry_phase}>current={current_phase} dispatch={dispatch_id}"
+            );
+        } else {
+            let summary = v.get("summary").and_then(Value::as_str).unwrap_or("");
+            println!("- {summary}");
+        }
+    }
+    Ok(())
+}
+
 /// `agentdesk deploy`
 ///
 /// Build the workspace for release and promote directly to release.

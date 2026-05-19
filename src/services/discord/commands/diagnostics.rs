@@ -955,6 +955,76 @@ pub(in crate::services::discord) async fn cmd_queue(
     Ok(())
 }
 
+/// /adk-phase — Show phase-gate violations + run pointers (issue #2657).
+///
+/// Read-only snapshot via the in-process Postgres pool. No HTTP hop, so the
+/// command remains responsive even when the auth-token guarded `/api/queue/*`
+/// path is restricted to localhost. Defaults to a one-screen summary; the
+/// optional `details` boolean expands each violation with run/dispatch ids.
+#[poise::command(slash_command, rename = "adk-phase")]
+pub(in crate::services::discord) async fn cmd_adk_phase(
+    ctx: Context<'_>,
+    #[description = "Show full per-entry details (default: compact)"] details: Option<bool>,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /adk-phase");
+
+    let detailed = details.unwrap_or(false);
+    let text = build_adk_phase_report(&ctx.data().shared, detailed).await;
+    send_long_message_ctx(ctx, &text).await?;
+    Ok(())
+}
+
+async fn build_adk_phase_report(shared: &Arc<SharedData>, detailed: bool) -> String {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return "phase-gate snapshot unavailable: postgres pool not configured".to_string();
+    };
+    // Direct scanner call — bypasses the AppState route wrapper because
+    // slash commands run inside the Discord runtime (no axum extractor).
+    let snapshot =
+        match crate::services::auto_queue::route::phase_gate_violations::scan_violations_pg(pool)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => return format!("phase-gate scan failed: {e}"),
+        };
+
+    if snapshot.violations.is_empty() {
+        return format!(
+            "phase-gate: clean (runs scanned: {}, complete: {})",
+            snapshot.runs_scanned, snapshot.complete
+        );
+    }
+
+    let mut lines = vec![format!(
+        "phase-gate violations: {} (runs scanned: {})",
+        snapshot.violations.len(),
+        snapshot.runs_scanned
+    )];
+    for v in &snapshot.violations {
+        if detailed {
+            lines.push(format!(
+                "- run={} entry={} card={} phase={}>current={} dispatch={}",
+                v.run_id,
+                v.entry_id,
+                v.kanban_card_id.as_deref().unwrap_or("-"),
+                v.entry_batch_phase,
+                v.current_batch_phase,
+                v.dispatch_id.as_deref().unwrap_or("-"),
+            ));
+        } else {
+            lines.push(format!("- {}", v.summary));
+        }
+    }
+    lines.join("\n")
+}
+
 /// /debug — Toggle debug logging at runtime
 #[poise::command(slash_command, rename = "debug")]
 pub(in crate::services::discord) async fn cmd_debug(ctx: Context<'_>) -> Result<(), Error> {

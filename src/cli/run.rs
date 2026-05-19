@@ -3,7 +3,7 @@ use anyhow::Result;
 use super::args::{
     AgentHandoffChannelKindArg, AutoQueueAction, CardAction, Commands, ConfigAction,
     DispatchAction, DoctorProfileArg, IntakeOutboxAction, MigrateAction, MonitoringAction,
-    QueryAction, ReportProvider, ShowAction,
+    PhaseAction, QueryAction, ReportProvider, ShowAction,
 };
 
 fn agent_handoff_channel_kind(
@@ -442,6 +442,22 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 Ok(opts) => super::query::cmd_query(section, opts),
                 Err(err) => Err(err),
             };
+            if json {
+                exit_for_json_cli(invoke)
+            } else {
+                exit_for_cli(invoke)
+            }
+        }
+        Commands::Phase {
+            action,
+            json,
+            detailed,
+        } => {
+            // Default + explicit `status` are identical for now; PhaseAction
+            // is left as a Subcommand so future verbs (`watch`, `clear`) can
+            // attach without breaking call sites.
+            let _ = action.unwrap_or(PhaseAction::Status);
+            let invoke = super::client::cmd_phase_status(json, detailed);
             if json {
                 exit_for_json_cli(invoke)
             } else {
