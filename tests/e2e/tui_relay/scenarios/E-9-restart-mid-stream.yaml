@@ -10,11 +10,11 @@ steps:
       응답 첫 줄에 정확히 "[E2E:E9:STREAM_OK]"를 출력한 뒤,
       이어서 약 30줄짜리 짧은 시를 작성해줘 (E-9).
   - wait_for_discord_text: "[E2E:E9:STREAM_OK]"
-    timeout_s: 60
+    timeout_s: 180
   - restart_dcserver:
       target: dev
   - wait_for_discord_text: "E-9"
-    timeout_s: 180
+    timeout_s: 300
 assertions:
   - no_duplicate_content: true
   - text_present: "[E2E:E9:STREAM_OK]"

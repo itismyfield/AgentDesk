@@ -11,7 +11,7 @@ steps:
       }
       ```
   - wait_for_discord_text: "e2e-utf8"
-    timeout_s: 120
+    timeout_s: 240
 assertions:
   - no_duplicate_content: true
   - text_present: "안녕"

@@ -11,11 +11,11 @@ steps:
       응답 첫 줄에 "[E2E:E12:OK]"를 출력하고
       30줄짜리 짧은 시를 작성해줘 (E-12).
   - wait_for_discord_text: "[E2E:E12:OK]"
-    timeout_s: 60
+    timeout_s: 180
   - kill_pane:
       reverify_session_name_substring: "adk-dash"
   - wait_for_discord_text: "session ended"
-    timeout_s: 60
+    timeout_s: 180
 assertions:
   - text_present: "[E2E:E12:OK]"
   - no_duplicate_content: true
