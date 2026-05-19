@@ -116,9 +116,13 @@ def production_rust_files() -> list[Path]:
     )
 
 
+def is_inventory_ignored(path: Path) -> bool:
+    return path.name == "__pycache__" or path.name.startswith(".")
+
+
 def top_level_src_entries() -> list[Path]:
     return sorted(
-        (path for path in SRC_ROOT.iterdir() if path.name != "__pycache__"),
+        (path for path in SRC_ROOT.iterdir() if not is_inventory_ignored(path)),
         key=lambda child: (child.is_file(), child.name),
     )
 
@@ -676,7 +680,7 @@ def render_ascii_tree(root: Path) -> list[str]:
 
     def walk(directory: Path, prefix: str) -> None:
         children = sorted(
-            directory.iterdir(),
+            (child for child in directory.iterdir() if not is_inventory_ignored(child)),
             key=lambda child: (child.is_file(), child.name),
         )
         for index, child in enumerate(children):

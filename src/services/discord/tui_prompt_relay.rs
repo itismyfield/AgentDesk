@@ -409,11 +409,7 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                             observation = ?observation,
                             "codex idle rollout relay observed prompt"
                         );
-                        if matches!(
-                            observation,
-                            crate::services::tui_prompt_dedupe::PromptObservation::SuppressedRecentDuplicate
-                                | crate::services::tui_prompt_dedupe::PromptObservation::Ignored
-                        ) {
+                        if !codex_idle_prompt_observation_should_tail_response(observation) {
                             crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
                                 &tmux_session_name,
                                 &binding.output_path,
@@ -448,6 +444,15 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
             tokio::time::sleep(CODEX_IDLE_ROLLOUT_POLL_INTERVAL).await;
         }
     });
+}
+
+fn codex_idle_prompt_observation_should_tail_response(
+    observation: crate::services::tui_prompt_dedupe::PromptObservation,
+) -> bool {
+    !matches!(
+        observation,
+        crate::services::tui_prompt_dedupe::PromptObservation::Ignored
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1067,6 +1072,22 @@ mod tests {
                 line_end_offset: prompt.len() as u64,
             }
         );
+    }
+
+    #[test]
+    fn codex_idle_prompt_recent_duplicate_still_tails_response() {
+        assert!(codex_idle_prompt_observation_should_tail_response(
+            crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
+        ));
+        assert!(codex_idle_prompt_observation_should_tail_response(
+            crate::services::tui_prompt_dedupe::PromptObservation::SuppressedDiscordDuplicate
+        ));
+        assert!(codex_idle_prompt_observation_should_tail_response(
+            crate::services::tui_prompt_dedupe::PromptObservation::SuppressedRecentDuplicate
+        ));
+        assert!(!codex_idle_prompt_observation_should_tail_response(
+            crate::services::tui_prompt_dedupe::PromptObservation::Ignored
+        ));
     }
 
     #[test]
