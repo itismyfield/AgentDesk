@@ -14,11 +14,15 @@
 ## Closes
 <!-- e.g. Closes #1234 -->
 
-## Boundary fingerprint
+## WorkFingerprint
 
 - Agent:
 - Boundary:
 - Primary files:
+- Verification commands and results:
+- Skipped checks with reasons:
+- Risk:
+- Rollback notes:
 - Queue hygiene invariant:
 - Related PRs/issues checked:
 - Why this is non-overlapping:
