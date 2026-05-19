@@ -1536,21 +1536,15 @@ fn owner_channel_for_tmux_session(
 }
 
 pub(super) fn format_ssh_direct_prompt_notification(
-    provider: &str,
+    _provider: &str,
     tmux_session_name: &str,
     prompt: &str,
 ) -> String {
-    let provider_label = match provider.trim().to_ascii_lowercase().as_str() {
-        "claude" => "Claude".to_string(),
-        "codex" => "Codex".to_string(),
-        other if !other.is_empty() => other.to_string(),
-        _ => "TUI".to_string(),
-    };
     let prompt = strip_terminal_controls(prompt);
     let preview =
         truncate_chars(prompt.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT).replace("```", "` ` `");
     format!(
-        "SSH direct input relayed from {provider_label} TUI (`{}`):\n```text\n{}\n```",
+        "터미에 직접 주입된 입력 (tmux : `{}`):\n```text\n{}\n```",
         sanitize_inline_code(tmux_session_name),
         preview,
     )
@@ -1601,8 +1595,8 @@ mod tests {
     fn formats_ssh_direct_prompt_notification() {
         let output = format_ssh_direct_prompt_notification("claude", "AgentDesk-claude-a", "hi");
 
-        assert!(output.contains("SSH direct input relayed from Claude TUI"));
-        assert!(output.contains("`AgentDesk-claude-a`"));
+        assert!(output.contains("터미에 직접 주입된 입력"));
+        assert!(output.contains("(tmux : `AgentDesk-claude-a`)"));
         assert!(output.contains("```text\nhi\n```"));
     }
 
@@ -1611,7 +1605,8 @@ mod tests {
         let prompt = "x".repeat(SSH_DIRECT_PROMPT_PREVIEW_LIMIT + 20);
         let output = format_ssh_direct_prompt_notification("codex", "AgentDesk-codex-a", &prompt);
 
-        assert!(output.contains("SSH direct input relayed from Codex TUI"));
+        assert!(output.contains("터미에 직접 주입된 입력"));
+        assert!(output.contains("(tmux : `AgentDesk-codex-a`)"));
         assert!(output.contains("..."));
         assert!(output.len() < prompt.len() + 120);
     }
@@ -1620,7 +1615,7 @@ mod tests {
     fn formats_ssh_direct_prompt_notification_escapes_code_fence() {
         let output = format_ssh_direct_prompt_notification("codex", "tmux`name", "a ``` fence");
 
-        assert!(output.contains("`tmux'name`"));
+        assert!(output.contains("(tmux : `tmux'name`)"));
         assert!(output.contains("a ` ` ` fence"));
     }
 
