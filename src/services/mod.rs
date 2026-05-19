@@ -23,6 +23,7 @@ pub mod discord_config_audit;
 pub(crate) use dispatches::discord_delivery;
 pub mod discord_dm_reply_store;
 pub mod disk_monitor;
+pub mod envelope_dedup;
 pub mod dispatch_watchdog;
 pub mod dispatched_sessions;
 pub mod dispatches;

@@ -527,17 +527,99 @@ pub fn should_omit_repeated_system_prompt(
             .is_some_and(|value| !value.is_empty())
 }
 
+/// Env flag that, when set to `1`/`true`/`yes`/`all`, extends envelope
+/// dedup to every provider — not just Codex+resumed. We default to OFF so
+/// the existing Codex-only behavior is preserved bit-for-bit; operators
+/// flip the flag once they've verified each provider correctly retains the
+/// system prompt across resumed turns.
+///
+/// See #2662 for the audit measurement (~200KB/session of repeated envelope).
+const ENVELOPE_DEDUP_FEATURE_ENV: &str = "AGENTDESK_ENVELOPE_DEDUP";
+
+fn envelope_dedup_globally_enabled() -> bool {
+    std::env::var(ENVELOPE_DEDUP_FEATURE_ENV)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "all")
+        })
+        .unwrap_or(false)
+}
+
+/// Returns `Some(prompt)` if the caller should include the system prompt
+/// in this turn, or `None` if it can be safely omitted. The omission
+/// decision considers, in order:
+///
+/// 1. Empty system prompts (always omitted — nothing to send).
+/// 2. The legacy Codex+resumed-session rule
+///    ([`should_omit_repeated_system_prompt`]).
+/// 3. (Opt-in via `AGENTDESK_ENVELOPE_DEDUP=all`) a content-hash dedup
+///    against [`crate::services::envelope_dedup`]: if a session has
+///    already received this exact envelope, omit it.
+///
+/// Callers are responsible for **recording** the envelope after they've
+/// successfully sent the turn (via
+/// [`record_envelope_after_send`]). We separate lookup and
+/// record so a transient send failure does not poison the dedup state.
 pub fn system_prompt_for_provider_turn<'a>(
     provider: &ProviderKind,
     session_id: Option<&str>,
     system_prompt: &'a str,
 ) -> Option<&'a str> {
     let trimmed = system_prompt.trim();
-    if trimmed.is_empty() || should_omit_repeated_system_prompt(provider, session_id) {
-        None
-    } else {
-        Some(system_prompt)
+    if trimmed.is_empty() {
+        return None;
     }
+    if should_omit_repeated_system_prompt(provider, session_id) {
+        return None;
+    }
+    if envelope_dedup_globally_enabled() {
+        if let Some(key) = dedup_session_key(provider, session_id) {
+            if crate::services::envelope_dedup::envelope_already_sent(&key, trimmed) {
+                return None;
+            }
+        }
+    }
+    Some(system_prompt)
+}
+
+/// Caller-side hook: after a turn has actually been dispatched, record
+/// that the envelope was sent so the next turn can skip it. No-op when the
+/// global dedup feature flag is off, when the session_id is missing, or
+/// when `system_prompt` is empty.
+pub fn record_envelope_after_send(
+    provider: &ProviderKind,
+    session_id: Option<&str>,
+    system_prompt: &str,
+) {
+    if !envelope_dedup_globally_enabled() {
+        return;
+    }
+    let trimmed = system_prompt.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if let Some(key) = dedup_session_key(provider, session_id) {
+        crate::services::envelope_dedup::record_envelope_sent(&key, trimmed);
+    }
+}
+
+/// Build a stable dedup-store key for `(provider, session_id)`. Sessions
+/// without an `id` cannot be deduped — there is no continuity for the
+/// dedup store to attach to — so we return `None` and the caller falls
+/// back to the legacy behavior. Provider is mixed in so a Claude session
+/// and a Codex session that happen to share an id do not collide.
+fn dedup_session_key(provider: &ProviderKind, session_id: Option<&str>) -> Option<String> {
+    let sid = session_id.map(str::trim).filter(|s| !s.is_empty())?;
+    let kind = match provider {
+        ProviderKind::Claude => "claude",
+        ProviderKind::Codex => "codex",
+        ProviderKind::Gemini => "gemini",
+        ProviderKind::OpenCode => "opencode",
+        ProviderKind::Qwen => "qwen",
+        ProviderKind::Unsupported(_) => "unsupported",
+    };
+    Some(format!("{kind}::{sid}"))
 }
 
 pub fn compact_resumed_provider_turn_prompt(
@@ -623,6 +705,165 @@ mod prompt_reuse_tests {
                 "full Discord prompt"
             ),
             Some("full Discord prompt")
+        );
+    }
+
+    // #2662: feature-flagged envelope dedup must not affect legacy callers
+    // when the env flag is off, and must dedup correctly when it is on.
+    // We use a per-test mutex because env mutation is process-global.
+    use super::{
+        ENVELOPE_DEDUP_FEATURE_ENV, envelope_dedup_globally_enabled, record_envelope_after_send,
+    };
+    use std::sync::Mutex;
+    static ENV_DEDUP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvelopeDedupEnvGuard {
+        previous: Option<String>,
+    }
+    impl EnvelopeDedupEnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let previous = std::env::var(ENVELOPE_DEDUP_FEATURE_ENV).ok();
+            match value {
+                Some(v) => unsafe { std::env::set_var(ENVELOPE_DEDUP_FEATURE_ENV, v) },
+                None => unsafe { std::env::remove_var(ENVELOPE_DEDUP_FEATURE_ENV) },
+            }
+            Self { previous }
+        }
+    }
+    impl Drop for EnvelopeDedupEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => unsafe { std::env::set_var(ENVELOPE_DEDUP_FEATURE_ENV, v) },
+                None => unsafe { std::env::remove_var(ENVELOPE_DEDUP_FEATURE_ENV) },
+            }
+        }
+    }
+
+    #[test]
+    fn envelope_dedup_disabled_by_default() {
+        let _guard = ENV_DEDUP_TEST_LOCK.lock().unwrap();
+        let _env = EnvelopeDedupEnvGuard::set(None);
+        assert!(!envelope_dedup_globally_enabled());
+    }
+
+    #[test]
+    fn envelope_dedup_env_flag_truthy_values() {
+        let _guard = ENV_DEDUP_TEST_LOCK.lock().unwrap();
+        for v in ["1", "true", "TRUE", "yes", "Yes", "all", "ALL", "  all  "] {
+            let _env = EnvelopeDedupEnvGuard::set(Some(v));
+            assert!(
+                envelope_dedup_globally_enabled(),
+                "expected truthy for {v:?}"
+            );
+        }
+        for v in ["0", "false", "off", "", " ", "no", "maybe"] {
+            let _env = EnvelopeDedupEnvGuard::set(Some(v));
+            assert!(
+                !envelope_dedup_globally_enabled(),
+                "expected falsy for {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_dedup_no_effect_when_flag_off() {
+        let _guard = ENV_DEDUP_TEST_LOCK.lock().unwrap();
+        let _env = EnvelopeDedupEnvGuard::set(None);
+        // Two consecutive lookups for Claude+session must both yield the
+        // system prompt — feature is off so dedup must not kick in.
+        let prompt = "full Discord prompt";
+        let first = system_prompt_for_provider_turn(
+            &ProviderKind::Claude,
+            Some("session-flagoff-1"),
+            prompt,
+        );
+        record_envelope_after_send(&ProviderKind::Claude, Some("session-flagoff-1"), prompt);
+        let second = system_prompt_for_provider_turn(
+            &ProviderKind::Claude,
+            Some("session-flagoff-1"),
+            prompt,
+        );
+        assert_eq!(first, Some(prompt));
+        assert_eq!(second, Some(prompt));
+    }
+
+    #[test]
+    fn envelope_dedup_suppresses_after_record_when_flag_on() {
+        let _guard = ENV_DEDUP_TEST_LOCK.lock().unwrap();
+        let _env = EnvelopeDedupEnvGuard::set(Some("all"));
+        let session = "session-flagon-suppress-xyz";
+        let prompt = "[Authoritative Instructions]\nrole: PMD";
+        // First turn — envelope must be returned.
+        let first = system_prompt_for_provider_turn(&ProviderKind::Claude, Some(session), prompt);
+        assert_eq!(first, Some(prompt));
+        record_envelope_after_send(&ProviderKind::Claude, Some(session), prompt);
+        // Second turn — dedup kicks in.
+        let second = system_prompt_for_provider_turn(&ProviderKind::Claude, Some(session), prompt);
+        assert_eq!(second, None);
+        // Cleanup so we don't pollute other tests.
+        crate::services::envelope_dedup::shared().forget_session(&format!("claude::{session}"));
+    }
+
+    #[test]
+    fn envelope_dedup_isolates_distinct_envelopes() {
+        let _guard = ENV_DEDUP_TEST_LOCK.lock().unwrap();
+        let _env = EnvelopeDedupEnvGuard::set(Some("all"));
+        let session = "session-flagon-distinct-envs";
+        let env_a = "[Authoritative Instructions]\nA";
+        let env_b = "[Authoritative Instructions]\nB";
+        let _ = system_prompt_for_provider_turn(&ProviderKind::Claude, Some(session), env_a);
+        record_envelope_after_send(&ProviderKind::Claude, Some(session), env_a);
+        // A is now deduped; B must still pass through unchanged.
+        assert_eq!(
+            system_prompt_for_provider_turn(&ProviderKind::Claude, Some(session), env_a),
+            None
+        );
+        assert_eq!(
+            system_prompt_for_provider_turn(&ProviderKind::Claude, Some(session), env_b),
+            Some(env_b)
+        );
+        crate::services::envelope_dedup::shared().forget_session(&format!("claude::{session}"));
+    }
+
+    #[test]
+    fn envelope_dedup_provider_isolation() {
+        let _guard = ENV_DEDUP_TEST_LOCK.lock().unwrap();
+        let _env = EnvelopeDedupEnvGuard::set(Some("all"));
+        // Same session-id text on different providers must NOT collide —
+        // the key includes the provider kind.
+        let id = "collision-test-12345";
+        let prompt = "[Authoritative Instructions]\nshared content";
+        record_envelope_after_send(&ProviderKind::Claude, Some(id), prompt);
+        // Codex with the same id text + resumed session still hits the
+        // legacy Codex omission path (returns None), so use Gemini for
+        // the cross-provider check.
+        assert_eq!(
+            system_prompt_for_provider_turn(&ProviderKind::Claude, Some(id), prompt),
+            None
+        );
+        assert_eq!(
+            system_prompt_for_provider_turn(&ProviderKind::Gemini, Some(id), prompt),
+            Some(prompt)
+        );
+        crate::services::envelope_dedup::shared().forget_session(&format!("claude::{id}"));
+    }
+
+    #[test]
+    fn envelope_dedup_no_session_id_falls_back_to_legacy() {
+        let _guard = ENV_DEDUP_TEST_LOCK.lock().unwrap();
+        let _env = EnvelopeDedupEnvGuard::set(Some("all"));
+        // Without a session id there is no continuity to dedup against —
+        // every turn must return the full envelope.
+        let prompt = "[Authoritative Instructions]\nno session";
+        assert_eq!(
+            system_prompt_for_provider_turn(&ProviderKind::Claude, None, prompt),
+            Some(prompt)
+        );
+        // Recording with no session id is a no-op.
+        record_envelope_after_send(&ProviderKind::Claude, None, prompt);
+        assert_eq!(
+            system_prompt_for_provider_turn(&ProviderKind::Claude, None, prompt),
+            Some(prompt)
         );
     }
 
