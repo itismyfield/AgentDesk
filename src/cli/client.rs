@@ -1710,9 +1710,7 @@ pub fn cmd_phase_status(json: bool, detailed: bool) -> Result<(), String> {
         .unwrap_or(false);
 
     if violations.is_empty() {
-        println!(
-            "phase-gate: clean (runs scanned: {runs_scanned}, complete: {complete})"
-        );
+        println!("phase-gate: clean (runs scanned: {runs_scanned}, complete: {complete})");
         return Ok(());
     }
 

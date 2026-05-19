@@ -94,15 +94,12 @@ pub async fn scan_violations_pg(pool: &PgPool) -> Result<PhaseGateSnapshot, Stri
 
         // Use the canonical phase-pointer query. None ⇒ run is fully done;
         // no point checking for misfires above an undefined floor.
-        let current = match crate::db::auto_queue::phase_gates::current_batch_phase_pg(
-            pool, &run_id,
-        )
-        .await
-        {
-            Ok(Some(phase)) => phase,
-            Ok(None) => continue,
-            Err(e) => return Err(format!("current_batch_phase_pg for run {run_id}: {e}")),
-        };
+        let current =
+            match crate::db::auto_queue::phase_gates::current_batch_phase_pg(pool, &run_id).await {
+                Ok(Some(phase)) => phase,
+                Ok(None) => continue,
+                Err(e) => return Err(format!("current_batch_phase_pg for run {run_id}: {e}")),
+            };
 
         let entry_rows = sqlx::query(
             "SELECT e.id            AS entry_id,
@@ -135,8 +132,10 @@ pub async fn scan_violations_pg(pool: &PgPool) -> Result<PhaseGateSnapshot, Stri
                 .map_err(|e| format!("decode batch_phase: {e}"))?
                 .unwrap_or(0);
             let dispatch_id: Option<String> = ev.try_get("dispatch_id").ok();
-            let github_issue_number: Option<i64> =
-                ev.try_get::<Option<i64>, _>("github_issue_number").ok().flatten();
+            let github_issue_number: Option<i64> = ev
+                .try_get::<Option<i64>, _>("github_issue_number")
+                .ok()
+                .flatten();
 
             // Filter: only count rows that actually have an active dispatch
             // OR are pending in a later phase (latter still indicates the
@@ -204,10 +203,7 @@ pub async fn violations_route(
                 Json(json!({"error": format!("serialize snapshot: {e}")})),
             ),
         },
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e})),
-        ),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     }
 }
 
@@ -239,8 +235,7 @@ mod tests {
             dispatch_id: Some("d1".into()),
             entry_batch_phase: 1,
             current_batch_phase: 0,
-            summary: "run r1: #1234 dispatched at phase 1 while current=0 (dispatch d1)"
-                .into(),
+            summary: "run r1: #1234 dispatched at phase 1 while current=0 (dispatch d1)".into(),
         };
         assert!(v.summary.contains("#1234"));
         assert!(v.summary.contains("phase 1"));

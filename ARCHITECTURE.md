@@ -344,6 +344,7 @@ src/
 │   │   ├── order_routes.rs
 │   │   ├── phase_gate.rs
 │   │   ├── phase_gate_catalog.rs
+│   │   ├── phase_gate_violations.rs
 │   │   ├── planning.rs
 │   │   ├── query.rs
 │   │   ├── route.rs
