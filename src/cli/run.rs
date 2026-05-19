@@ -530,6 +530,19 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         Commands::Show { action } => exit_for_cli(handle_show(action)),
         Commands::Health { json } => exit_for_cli(super::client::cmd_health(json)),
         Commands::MachineCompare { json } => exit_for_cli(super::client::cmd_machine_compare(json)),
+        Commands::Activity {
+            since,
+            until,
+            repo,
+            json,
+            no_agentdesk,
+        } => exit_for_cli(super::client::cmd_activity(
+            &since,
+            until.as_deref(),
+            repo.as_deref(),
+            json,
+            no_agentdesk,
+        )),
     }
 }
 

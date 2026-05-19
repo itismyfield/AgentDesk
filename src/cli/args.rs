@@ -523,6 +523,29 @@ pub(crate) enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Time-windowed activity report: commits / closed issues / merged PRs /
+    /// deploys / incidents in a single table. Uses gh + git + AgentDesk API.
+    Activity {
+        /// Window start. Accepts RFC3339 (`2026-05-19T23:10:00+09:00`),
+        /// duration suffix (`24h`, `90m`, `7d`), or `since:<sha>` to anchor
+        /// on a commit (commit time becomes the start).
+        #[arg(long)]
+        since: String,
+        /// Optional window end (RFC3339). Defaults to `now` when omitted.
+        #[arg(long)]
+        until: Option<String>,
+        /// Repository in owner/repo form. Defaults to the current
+        /// repo's `origin` remote when omitted.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Emit machine-readable JSON instead of a text table.
+        #[arg(long)]
+        json: bool,
+        /// Skip the AgentDesk-side deploy / incident lookup (useful when
+        /// the local API is offline). Pure git + gh report.
+        #[arg(long = "no-agentdesk")]
+        no_agentdesk: bool,
+    },
 }
 
 /// Subcommands for `adk query` (issue #2651).
