@@ -4473,9 +4473,16 @@ pub(in crate::services::discord) async fn handle_text_message(
             super::super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳')
                 .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
+            // #2728: log which refusal branch fired so race-loss dedup
+            // incidents can be classified without re-reading code.
+            let refusal_str = enqueue_outcome
+                .refusal_reason
+                .map(|r| r.as_str())
+                .unwrap_or("unknown");
             tracing::info!(
-                "  [{ts}] 🔁 RACE: race-lost intervention dedup-merged into existing queue entry (channel {}); skipping placeholder POST",
-                channel_id
+                "  [{ts}] 🔁 RACE: race-lost intervention refused by mailbox (channel {}, refusal_reason={}); skipping placeholder POST",
+                channel_id,
+                refusal_str,
             );
             return Ok(());
         }
@@ -5856,6 +5863,16 @@ pub(in crate::services::discord) async fn handle_text_message(
                 "queued_card_rendered".to_string(),
                 serde_json::json!(queued_card_rendered),
             );
+            // #2728: when `enqueued == false` we previously had no signal in
+            // the producer-exit diagnostic to distinguish dup-guard / dedup /
+            // actor-unreachable refusals. Surface the refusal kind so the
+            // next adk-cc-style incident can be classified from the log.
+            if let Some(reason) = enqueue_outcome.refusal_reason {
+                object.insert(
+                    "enqueue_refusal_reason".to_string(),
+                    serde_json::json!(reason.as_str()),
+                );
+            }
         }
         tracing::warn!(
             channel_id = channel_id.get(),

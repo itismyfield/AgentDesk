@@ -2526,6 +2526,10 @@ async fn mailbox_clear_recovery_marker(shared: &SharedData, channel_id: ChannelI
 pub(super) struct MailboxEnqueueOutcome {
     pub(super) enqueued: bool,
     pub(super) merged: bool,
+    /// #2728: present iff `enqueued == false`. Identifies which guard
+    /// (source-id dedup / last-item dedup / actor unreachable) produced the
+    /// refusal so callers can surface it in producer-exit diagnostics.
+    pub(super) refusal_reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
 }
 
 async fn mailbox_enqueue_intervention(
@@ -2545,6 +2549,7 @@ async fn mailbox_enqueue_intervention(
     MailboxEnqueueOutcome {
         enqueued: result.enqueued,
         merged: result.merged,
+        refusal_reason: result.refusal_reason,
     }
 }
 

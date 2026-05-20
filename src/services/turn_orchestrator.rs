@@ -141,6 +141,7 @@ pub(crate) fn enqueue_intervention(
         return EnqueueInterventionResult {
             enqueued: false,
             merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
             queue_exit_events,
         };
     }
@@ -155,6 +156,7 @@ pub(crate) fn enqueue_intervention(
             return EnqueueInterventionResult {
                 enqueued: false,
                 merged: false,
+                refusal_reason: Some(EnqueueRefusalReason::LastItemDedup),
                 queue_exit_events,
             };
         }
@@ -181,6 +183,7 @@ pub(crate) fn enqueue_intervention(
             return EnqueueInterventionResult {
                 enqueued: true,
                 merged: true,
+                refusal_reason: None,
                 queue_exit_events,
             };
         }
@@ -198,6 +201,7 @@ pub(crate) fn enqueue_intervention(
     EnqueueInterventionResult {
         enqueued: true,
         merged: false,
+        refusal_reason: None,
         queue_exit_events,
     }
 }
@@ -884,6 +888,35 @@ pub(crate) struct RestartDrainResult {
     pub(crate) queued_count: usize,
 }
 
+/// #2728: identifies which guard in `enqueue_intervention` produced an
+/// `enqueued = false` outcome. Callers surface this through the producer-exit
+/// diagnostic JSON so the next adk-cc-style incident is one log line away from
+/// path A / B / C classification instead of code-only inference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EnqueueRefusalReason {
+    /// The incoming `message_id` is already present in some queued entry's
+    /// `source_message_ids` — duplicate insert from a re-entry or rehydrated
+    /// queue.
+    SourceIdAlreadyQueued,
+    /// The queue's last entry matches the incoming intervention on
+    /// `(author_id, text, reply_context, has_reply_boundary)` within
+    /// `INTERVENTION_DEDUP_WINDOW` — rapid-resend dedup.
+    LastItemDedup,
+    /// The `ChannelMailboxHandle` could not reach the mailbox actor (mpsc
+    /// closed or oneshot dropped). Surfaced only at the handle layer.
+    ActorUnreachable,
+}
+
+impl EnqueueRefusalReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
+            EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
+            EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
+        }
+    }
+}
+
 pub(crate) struct EnqueueInterventionResult {
     pub(crate) enqueued: bool,
     /// True when the incoming intervention was folded into the previous queue
@@ -891,6 +924,10 @@ pub(crate) struct EnqueueInterventionResult {
     /// accumulated). Callers use this to surface a different reaction emoji
     /// for merged messages so users can tell merged from standalone entries.
     pub(crate) merged: bool,
+    /// #2728: present iff `enqueued == false`. Identifies which guard in
+    /// `enqueue_intervention` (or the handle-layer actor fallback) produced
+    /// the refusal.
+    pub(crate) refusal_reason: Option<EnqueueRefusalReason>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
 }
 
@@ -1139,6 +1176,7 @@ impl ChannelMailboxHandle {
             EnqueueInterventionResult {
                 enqueued: false,
                 merged: false,
+                refusal_reason: Some(EnqueueRefusalReason::ActorUnreachable),
                 queue_exit_events: Vec::new(),
             },
         )
@@ -2847,6 +2885,66 @@ mod actor_hydrate_regression_tests {
             !result.already_stopping,
             "no-active-turn case must not report already_stopping"
         );
+    }
+}
+
+// #2728 — verify the refusal_reason field correctly tags each of the
+// three false-return paths in `enqueue_intervention` / the handle layer.
+// Without this signal callers could only infer the path from code
+// archaeology (cf. the adk-cc 07:27 KST 2026-05-20 incident).
+#[cfg(test)]
+mod enqueue_refusal_reason_tests {
+    use super::*;
+
+    fn intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
+        Intervention {
+            author_id: UserId::new(1),
+            message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at,
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            voice_announcement: None,
+        }
+    }
+
+    #[test]
+    fn source_id_already_queued_is_tagged() {
+        let now = Instant::now();
+        let mut queue = vec![intervention(1, "hello", now)];
+        let incoming = intervention(1, "hello again", now);
+        let result = enqueue_intervention(&mut queue, incoming);
+        assert!(!result.enqueued);
+        assert_eq!(
+            result.refusal_reason,
+            Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+        );
+    }
+
+    #[test]
+    fn last_item_dedup_is_tagged() {
+        let now = Instant::now();
+        let mut queue = vec![intervention(1, "same text", now)];
+        let incoming = intervention(2, "same text", now);
+        let result = enqueue_intervention(&mut queue, incoming);
+        assert!(!result.enqueued);
+        assert_eq!(
+            result.refusal_reason,
+            Some(EnqueueRefusalReason::LastItemDedup),
+        );
+    }
+
+    #[test]
+    fn refusal_reason_absent_on_success() {
+        let now = Instant::now();
+        let mut queue: Vec<Intervention> = Vec::new();
+        let incoming = intervention(1, "first", now);
+        let result = enqueue_intervention(&mut queue, incoming);
+        assert!(result.enqueued);
+        assert_eq!(result.refusal_reason, None);
     }
 }
 
