@@ -146,6 +146,15 @@ fn claude_envelope_turn_state(json: &Value) -> Option<TuiTurnState> {
         "result" => Some(TuiTurnState::Idle),
         "assistant" => Some(TuiTurnState::Streaming),
         "user" => Some(TuiTurnState::UserSubmitted),
+        // `permission-mode` envelopes (e.g. `bypassPermissions` adoption after
+        // a fresh session start triggered by hard_reset or `/compact`) are not
+        // turn-state signals. If we returned `None` here, the tail walker
+        // would skip them and fall back to the previous turn's `result`
+        // envelope — declaring the new turn already idle and tearing the
+        // watcher down before the first assistant line gets written
+        // (#2712, #2716). Map them to `Unknown` so the gate keeps waiting
+        // for a real turn-state envelope.
+        "permission-mode" => Some(TuiTurnState::Unknown),
         "system" => match json.get("subtype").and_then(Value::as_str) {
             Some("turn_duration" | "stop_hook_summary" | "init") => Some(TuiTurnState::Idle),
             _ => None,
@@ -162,6 +171,9 @@ fn claude_partial_turn_state(line: &str) -> Option<TuiTurnState> {
         "assistant" => Some(TuiTurnState::Streaming),
         "user" => Some(TuiTurnState::UserSubmitted),
         "result" => Some(TuiTurnState::Idle),
+        // Mirror the full-envelope classifier: do not fall back through
+        // permission-mode lines (#2712, #2716).
+        "permission-mode" => Some(TuiTurnState::Unknown),
         "system" => match top_level_string_field_fragment(line, "subtype")?.as_str() {
             "turn_duration" | "stop_hook_summary" | "init" => Some(TuiTurnState::Idle),
             _ => None,
@@ -347,6 +359,58 @@ mod tests {
         assert_eq!(
             observe_claude_jsonl_turn_state(file.path()),
             TuiTurnState::Streaming
+        );
+    }
+
+    // #2712 / #2716: a trailing `permission-mode` envelope from a freshly
+    // spawned Claude session must NOT cause the classifier to fall back to
+    // the previous turn's `result` and report Idle. Otherwise the watcher
+    // tears down before the new turn's assistant output is written.
+    #[test]
+    fn claude_permission_mode_trailing_does_not_fall_back_to_previous_result() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"content":"prev"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"old"}]}}"#,
+            r#"{"type":"result","result":"done","session_id":"s-prev"}"#,
+            r#"{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"s-new"}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Unknown
+        );
+    }
+
+    // #2712 / #2716: once the new turn actually begins (a `user` envelope
+    // follows the permission-mode marker) the classifier should reflect that
+    // — the permission-mode line stays a no-op but the user envelope wins.
+    #[test]
+    fn claude_user_after_permission_mode_is_user_submitted() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","result":"done","session_id":"s-prev"}"#,
+            r#"{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"s-new"}"#,
+            r#"{"type":"user","message":{"content":"new prompt"}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::UserSubmitted
+        );
+    }
+
+    // Partial / unterminated JSON line for the same permission-mode envelope
+    // (writer crashed mid-flush) is treated the same way — Unknown, never a
+    // fallback to the previous result.
+    #[test]
+    fn claude_permission_mode_partial_line_classified_as_unknown() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","result":"done","session_id":"s-prev"}"#,
+            r#"{"type":"permission-mode","permissionMode":"bypassPermissions","sessionI"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Unknown
         );
     }
 
