@@ -214,6 +214,19 @@ pub fn send_cancel(session_name: &str) -> Result<(), String> {
     run_actions(session_name, &plan_cancel(), None)
 }
 
+/// #2730: settle delay between a PasteBuffer action and any follow-up
+/// (typically `Enter`). Claude TUI 2.1.x parses bracketed-paste sequences
+/// byte-by-byte from the pane; without a brief settle window the Enter sent
+/// immediately after `tmux paste-buffer -p -r` can race the paste-end marker.
+/// When that happens Claude TUI commits the pre-paste input state (often a
+/// single-space placeholder) as a standalone user turn, then submits the
+/// actual paste content as a separate turn — which the Anthropic API rejects
+/// with `400 messages: text content blocks must contain non-whitespace text`
+/// because one of the blocks is whitespace-only. A short post-paste settle
+/// eliminates the race in practice; the cost is one settle per multi-line
+/// turn.
+const POST_PASTE_BUFFER_SETTLE: Duration = Duration::from_millis(200);
+
 fn run_actions(
     session_name: &str,
     actions: &[TuiInputAction],
@@ -230,7 +243,16 @@ fn run_actions(
                 let load_output = crate::services::platform::tmux::load_buffer(&buffer_name, text)?;
                 ensure_tmux_success(load_output, action)?;
                 check_prompt_cancel(cancel_token)?;
-                crate::services::platform::tmux::paste_buffer(session_name, &buffer_name, true)?
+                let paste_output = crate::services::platform::tmux::paste_buffer(
+                    session_name,
+                    &buffer_name,
+                    true,
+                )?;
+                ensure_tmux_success(paste_output, action)?;
+                // #2730 settle: see POST_PASTE_BUFFER_SETTLE rationale above.
+                std::thread::sleep(POST_PASTE_BUFFER_SETTLE);
+                check_prompt_cancel(cancel_token)?;
+                continue;
             }
             TuiInputAction::Enter => {
                 crate::services::platform::tmux::send_keys(session_name, &["Enter"])?
