@@ -1306,6 +1306,7 @@ pub fn handle_dcserver(token: Option<String>) {
                 std::process::exit(1);
             }
         };
+        crate::services::provider_hosting::install_provider_hosting_config(&ad_config);
         crate::services::termination_audit::init_audit_db(Some(discord_pg_pool.clone()));
 
         // Start axum HTTP server (background task) — now serves all API
