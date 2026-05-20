@@ -216,15 +216,10 @@ fn agent_channel_for_provider<'a>(
 
 fn resolve_configured_path(runtime_root: &FsPath, raw: &str) -> PathBuf {
     let trimmed = raw.trim();
-    if let Some(stripped) = trimmed.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(stripped);
-    }
-    if trimmed == "~"
-        && let Some(home) = dirs::home_dir()
-    {
-        return home;
+    if trimmed == "~" || trimmed.starts_with("~/") {
+        if let Some(expanded) = crate::runtime_layout::expand_user_path(trimmed) {
+            return expanded;
+        }
     }
     let path = PathBuf::from(trimmed);
     if path.is_absolute() {

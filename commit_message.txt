@@ -1,0 +1,34 @@
+Refiner: reuse expand_user_path in agents API routes
+
+What changed:
+Replaced the custom string-based tilde expansion in `src/server/routes/agents_crud.rs` (`resolve_configured_path`) and `src/server/routes/agents_setup.rs` (`expand_tilde`) with the standardized `crate::runtime_layout::expand_user_path` helper.
+
+Why:
+To reduce local complexity, avoid duplicating path expansion behaviors across modules, and rely on the centralized layout utilities. The refactor maintains exact byte-for-byte fallback behavior for paths that don't start with `~` or `~/` by validating the prefix explicitly before calling the helper.
+
+WorkFingerprint:
+- Agent: Refiner
+- Category boundary: Rust routing module (`src/server/routes/agents_crud.rs` and `src/server/routes/agents_setup.rs`)
+- Primary files: `src/server/routes/agents_crud.rs`, `src/server/routes/agents_setup.rs`
+- Invariant protected: Tilde path expansion behavior and fallback execution path.
+- Public API impact: None
+- Docs impact: None
+- Verification plan: Check for overlapping PRs, compile check (`cargo check`), module level test targeting (`cargo test --bin agentdesk server::routes::agents_setup`), and visual verification (`git diff`).
+- Related PRs/issues: None
+
+Duplicate/overlap check:
+Executed `git branch -r | grep jules/refiner/reuse-expand-user-path`. No conflicting overlap with `agents_crud.rs` or `agents_setup.rs` found in active branches.
+
+Verification commands and results:
+- `git diff --check`: Clean output.
+- `cargo check`: Finished `dev` profile [unoptimized + debuginfo] target(s) successfully.
+- `cargo test --bin agentdesk server::routes::agents_setup`: OOM error encountered (signal 9) for test harness compilation, falling back to successful `cargo check`.
+
+Skipped checks with reasons:
+- `cargo check --all-targets` and `cargo test`: Skipped due to OOM limit in the remote container during the build phase of testing macros/libraries. `cargo check` verified correctness at the syntax and type level.
+
+Risk:
+Low. The logic wraps the exact string conditions previously used before calling the layout helper, and preserves original pathing if the layout helper fails to fetch the home directory.
+
+Rollback notes:
+`git revert` the target commit. The changes are strictly localized to API route utilities and don't involve state machines or database records.
