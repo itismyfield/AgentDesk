@@ -156,38 +156,47 @@ class DiscordClient:
         import os as _os
 
         debug_enabled = bool(_os.environ.get("AGENTDESK_E2E_WAIT_DEBUG"))
+        # Keep the *caller-supplied* `after_id` fixed across polls instead of
+        # advancing it to the max fetched id. Discord / dcserver can return
+        # a partial snapshot under race — the assistant reply marker may
+        # not yet be visible on the first poll right after a send_prompt,
+        # only the user message that arrived after the marker can show up
+        # later — and once `last_id` slides past the marker's id we would
+        # never query for it again. `observed_ids` keeps duplicate handling
+        # cheap so re-fetching the same window every poll is safe.
+        # See #2718 driver follow-up.
         deadline = time.monotonic() + timeout_s
-        last_id = after_id
         observed: list[dict[str, Any]] = []
         observed_ids: set[str] = set()
         found: dict[str, Any] | None = None
         poll = 0
         while time.monotonic() < deadline and found is None:
             poll += 1
-            messages = self.fetch_messages(channel_id, after_id=last_id)
+            messages = self.fetch_messages(channel_id, after_id=after_id, limit=100)
             messages = sorted(messages, key=lambda m: int(m.get("id", "0")))
+            new_messages = [
+                m for m in messages if str(m.get("id") or "") not in observed_ids
+            ]
             if debug_enabled:
                 print(
                     f"[wait_for_message] poll={poll} label={debug_label!r} "
-                    f"after_id={last_id!r} fetched={len(messages)} "
-                    f"observed_so_far={len(observed)}"
+                    f"after_id={after_id!r} fetched={len(messages)} "
+                    f"new={len(new_messages)} observed_so_far={len(observed)}"
                 )
-            for message in messages:
+            for message in new_messages:
                 mid = str(message.get("id") or "")
-                if mid and mid not in observed_ids:
+                if mid:
                     observed.append(message)
                     observed_ids.add(mid)
                 if predicate(message):
                     found = message
                     break
-                if mid:
-                    last_id = mid
             if found is None:
                 time.sleep(poll_interval_s)
         if debug_enabled and found is None:
             print(
                 f"[wait_for_message] timeout after {poll} polls "
-                f"label={debug_label!r} last_id={last_id!r} "
+                f"label={debug_label!r} after_id={after_id!r} "
                 f"observed_total={len(observed)}"
             )
         return found, observed
