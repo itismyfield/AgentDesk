@@ -387,17 +387,24 @@ pub(in crate::services::discord) fn process_watcher_lines(
                     // Use result text when streaming didn't capture the final response:
                     // 1. full_response is empty — no text was streamed at all
                     // 2. tools were used but no text was streamed after the last tool
-                    //    (accumulated text is stale pre-tool narration)
+                    //    — append result_str so earlier narration is preserved (#2749)
                     if !outcome.is_prompt_too_long
                         && !outcome.is_auth_error
                         && !outcome.is_provider_overloaded
                         && !result_str.is_empty()
                     {
-                        if full_response.is_empty()
-                            || (tool_state.any_tool_used && !tool_state.has_post_tool_text)
-                        {
-                            full_response.clear();
+                        if full_response.is_empty() {
                             full_response.push_str(&result_str);
+                        } else if tool_state.any_tool_used && !tool_state.has_post_tool_text {
+                            let trimmed_result = result_str.trim();
+                            if !trimmed_result.is_empty()
+                                && !full_response.trim_end().ends_with(trimmed_result)
+                            {
+                                if !full_response.ends_with('\n') {
+                                    full_response.push('\n');
+                                }
+                                full_response.push_str(&result_str);
+                            }
                         }
                     }
                     // #1918: for providers that emit per-message `usage` (Claude),
