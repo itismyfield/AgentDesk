@@ -266,10 +266,20 @@ pub(super) async fn start_restart_handoff_from_state(
     best_response: &str,
 ) -> bool {
     let stale_text = super::turn_bridge::stale_inflight_message(best_response);
+    // #2749: serenity::MessageId::new panics on 0. Guard before calling so that an
+    // inflight state with no bound message id falls through gracefully instead of
+    // crashing the worker thread.
+    let Some(nz_msg_id) = std::num::NonZeroU64::new(state.current_msg_id) else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher death recovery: skipped handoff for channel {channel_id} (current_msg_id=0) — preserving inflight for retry"
+        );
+        return false;
+    };
     let relay_ok = super::formatting::replace_long_message_raw(
         http,
         channel_id,
-        serenity::MessageId::new(state.current_msg_id),
+        serenity::MessageId::from(nz_msg_id),
         &stale_text,
         shared,
     )
