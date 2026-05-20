@@ -29,6 +29,14 @@ pub(super) fn should_skip_for_missing_required_mention(
         && !content_has_explicit_user_mention(content, bot_user_id)
 }
 
+pub(in crate::services::discord) fn bot_author_allowed_for_live_intake(
+    allowed_bot_ids: &[u64],
+    announce_bot_id: Option<u64>,
+    author_id: u64,
+) -> bool {
+    allowed_bot_ids.contains(&author_id) || announce_bot_id.is_some_and(|id| id == author_id)
+}
+
 fn session_has_usable_path(session: Option<&DiscordSession>) -> bool {
     session
         .and_then(|session| session.current_path.as_deref())
@@ -1278,16 +1286,21 @@ pub(in crate::services::discord) async fn handle_event(
                 return Ok(());
             }
 
-            // Ignore bot messages, unless the bot is in the allowed_bot_ids list.
-            // Some utility bot deliveries are identified by explicit author ID even
-            // when Discord does not mark the sender as `bot`, so a second text-level
-            // gate runs later once we have the full message content.
+            let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
+
+            // Ignore bot messages, unless they are allowed bot traffic or the
+            // announce bot used by agent handoffs. Some utility bot deliveries
+            // are identified by explicit author ID even when Discord does not
+            // mark the sender as `bot`, so a second text-level gate runs later
+            // once we have the full message content.
             if new_message.author.bot {
                 let allowed = {
                     let settings = data.shared.settings.read().await;
-                    settings
-                        .allowed_bot_ids
-                        .contains(&new_message.author.id.get())
+                    bot_author_allowed_for_live_intake(
+                        &settings.allowed_bot_ids,
+                        announce_bot_id,
+                        new_message.author.id.get(),
+                    )
                 };
                 if !allowed {
                     return Ok(());
@@ -1330,7 +1343,6 @@ pub(in crate::services::discord) async fn handle_event(
                 .map(|(parent_id, _)| parent_id)
                 .unwrap_or(channel_id);
             let settings_snapshot = { data.shared.settings.read().await.clone() };
-            let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
             // #2266: resolve the voice-transcript payload ONCE at the
             // intake-gate so we can both (a) cheaply classify the message and
             // (b) embed the full announcement in any queued Intervention we
@@ -1442,8 +1454,11 @@ pub(in crate::services::discord) async fn handle_event(
                 super::super::strip_monitor_auto_turn_origin(raw_text);
             let text = sanitized_text.trim();
 
-            let is_allowed_bot_sender = settings_snapshot.allowed_bot_ids.contains(&user_id.get())
-                || announce_bot_id.is_some_and(|id| id == user_id.get());
+            let is_allowed_bot_sender = bot_author_allowed_for_live_intake(
+                &settings_snapshot.allowed_bot_ids,
+                announce_bot_id,
+                user_id.get(),
+            );
             if is_allowed_bot_sender
                 && !super::super::is_allowed_turn_sender(
                     &settings_snapshot.allowed_bot_ids,

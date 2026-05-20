@@ -279,7 +279,17 @@ fn append_codex_config_overrides(
     args: &mut Vec<String>,
     overrides: impl IntoIterator<Item = String>,
 ) {
-    let insert_at = match args.iter().position(|arg| arg == "--") {
+    let insert_at = codex_option_insert_index(args);
+    let mut override_args = Vec::new();
+    for override_value in overrides {
+        override_args.push("-c".to_string());
+        override_args.push(override_value);
+    }
+    args.splice(insert_at..insert_at, override_args);
+}
+
+fn codex_option_insert_index(args: &[String]) -> usize {
+    match args.iter().position(|arg| arg == "--") {
         Some(delimiter_index)
             if args.first().map(String::as_str) == Some("resume") && delimiter_index > 0 =>
         {
@@ -287,13 +297,33 @@ fn append_codex_config_overrides(
         }
         Some(delimiter_index) => delimiter_index,
         None => args.len(),
-    };
-    let mut override_args = Vec::new();
-    for override_value in overrides {
-        override_args.push("-c".to_string());
-        override_args.push(override_value);
     }
-    args.splice(insert_at..insert_at, override_args);
+}
+
+fn append_codex_hook_trust_bypass_arg(args: &mut Vec<String>) {
+    const FLAG: &str = "--dangerously-bypass-hook-trust";
+    if args.iter().any(|arg| arg == FLAG) {
+        return;
+    }
+    let insert_at = if args.first().map(String::as_str) == Some("resume") {
+        1
+    } else {
+        0
+    };
+    args.insert(insert_at, FLAG.to_string());
+}
+
+fn codex_tui_hook_overrides_enabled_from_env(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn codex_tui_hook_overrides_enabled() -> bool {
+    codex_tui_hook_overrides_enabled_from_env(
+        std::env::var("AGENTDESK_CODEX_TUI_HOOKS").ok().as_deref(),
+    )
 }
 
 fn codex_config_overrides(options: &CodexLaunchOptions) -> Vec<String> {
@@ -1418,14 +1448,24 @@ fn execute_streaming_local_tui_tmux(
         report_provider,
     );
     let mut args = build_codex_tui_args(&launch_options);
-    let codex_hook_overrides = prepare_codex_tui_hook_overrides(
-        tmux_session_name,
-        session_id,
-        &codex_bin,
-        resolution.exec_path.as_deref(),
-    );
+    let codex_hook_overrides = if codex_tui_hook_overrides_enabled() {
+        prepare_codex_tui_hook_overrides(
+            tmux_session_name,
+            session_id,
+            &codex_bin,
+            resolution.exec_path.as_deref(),
+        )
+    } else {
+        tracing::info!(
+            provider = "codex",
+            tmux_session_name,
+            "Codex TUI hook relays are disabled by default; using rollout transcript tail for Discord turns"
+        );
+        Vec::new()
+    };
     if !codex_hook_overrides.is_empty() {
         append_codex_config_overrides(&mut args, codex_hook_overrides);
+        append_codex_hook_trust_bypass_arg(&mut args);
     }
     let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
     let rollout_modified_since = std::time::SystemTime::now();
@@ -2502,9 +2542,11 @@ fn handle_codex_json_line(
 #[cfg(test)]
 mod tui_hosting_tests {
     use super::{
-        CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides, base_tui_args,
-        build_codex_tui_args, build_tmux_launch_env_lines, direct_tui_material_fallback_reason,
-        render_codex_tui_tmux_script, render_codex_wrapper_tmux_script,
+        CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides,
+        append_codex_hook_trust_bypass_arg, base_tui_args, build_codex_tui_args,
+        build_tmux_launch_env_lines, codex_tui_hook_overrides_enabled_from_env,
+        direct_tui_material_fallback_reason, render_codex_tui_tmux_script,
+        render_codex_wrapper_tmux_script,
     };
     #[cfg(unix)]
     use super::{
@@ -2664,7 +2706,7 @@ mod tui_hosting_tests {
             None,
             "hello from tui",
             Some("gpt-5-codex"),
-            None,
+            Some("high"),
             false,
             None,
             None,
@@ -2689,7 +2731,7 @@ mod tui_hosting_tests {
             Some("session-123"),
             "resume prompt",
             Some("gpt-5-codex"),
-            None,
+            Some("high"),
             false,
             None,
             None,
@@ -2707,6 +2749,92 @@ mod tui_hosting_tests {
                 .windows(2)
                 .any(|pair| pair[0] == "-c" && pair[1] == "features.hooks=true")
         );
+    }
+
+    #[test]
+    fn codex_tui_hook_trust_bypass_is_inserted_before_fresh_prompt() {
+        let mut args = base_tui_args(
+            None,
+            "hello from tui",
+            Some("gpt-5-codex"),
+            Some("high"),
+            false,
+            None,
+            None,
+        );
+
+        append_codex_hook_trust_bypass_arg(&mut args);
+
+        let bypass_index = args
+            .iter()
+            .position(|arg| arg == "--dangerously-bypass-hook-trust")
+            .expect("expected hook trust bypass flag");
+        let config_index = args
+            .iter()
+            .position(|arg| arg == "-c")
+            .expect("expected config override");
+        let delimiter_index = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("expected prompt delimiter");
+        assert_eq!(bypass_index, 0);
+        assert!(bypass_index < config_index);
+        assert!(bypass_index < delimiter_index);
+    }
+
+    #[test]
+    fn codex_tui_hook_trust_bypass_preserves_resume_session_position() {
+        let mut args = base_tui_args(
+            Some("session-123"),
+            "resume prompt",
+            Some("gpt-5-codex"),
+            Some("high"),
+            false,
+            None,
+            None,
+        );
+
+        append_codex_hook_trust_bypass_arg(&mut args);
+        append_codex_hook_trust_bypass_arg(&mut args);
+
+        let delimiter_index = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("expected prompt delimiter");
+        let config_index = args
+            .iter()
+            .position(|arg| arg == "-c")
+            .expect("expected config override");
+        let bypass_index = args
+            .iter()
+            .position(|arg| arg == "--dangerously-bypass-hook-trust")
+            .expect("expected hook trust bypass flag");
+        assert_eq!(args[0], "resume");
+        assert_eq!(bypass_index, 1);
+        assert!(bypass_index < config_index);
+        assert_eq!(args[delimiter_index - 1], "session-123");
+        assert!(
+            args[..delimiter_index - 1]
+                .iter()
+                .any(|arg| arg == "--dangerously-bypass-hook-trust")
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--dangerously-bypass-hook-trust")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn codex_tui_hook_overrides_are_opt_in_by_env() {
+        assert!(!codex_tui_hook_overrides_enabled_from_env(None));
+        assert!(!codex_tui_hook_overrides_enabled_from_env(Some("")));
+        assert!(!codex_tui_hook_overrides_enabled_from_env(Some("false")));
+        assert!(codex_tui_hook_overrides_enabled_from_env(Some("1")));
+        assert!(codex_tui_hook_overrides_enabled_from_env(Some("true")));
+        assert!(codex_tui_hook_overrides_enabled_from_env(Some(" YES ")));
+        assert!(codex_tui_hook_overrides_enabled_from_env(Some("on")));
     }
 
     #[test]

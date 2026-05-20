@@ -41,6 +41,9 @@ pub(super) fn detect_provider_overload_message(text: &str) -> Option<String> {
         || (lower.contains("at capacity") && lower.contains("model"))
         || lower.contains("try a different model")
         || lower.contains("rate limit")
+        || lower.contains("hit your limit")
+        || lower.contains("usage limit")
+        || lower.contains("limit to reset")
         || lower.contains("too many requests")
         || lower.contains("provider overloaded")
         || lower.contains("server overloaded")
@@ -120,6 +123,12 @@ mod tests {
     fn overload_detects_rate_limit_text() {
         assert!(detect_provider_overload_message("Rate limit exceeded").is_some());
         assert!(detect_provider_overload_message("rate limit reached for model").is_some());
+        assert!(
+            detect_provider_overload_message("You've hit your limit · resets 11:40am (Asia/Seoul)")
+                .is_some()
+        );
+        assert!(detect_provider_overload_message("Stop and wait for limit to reset").is_some());
+        assert!(detect_provider_overload_message("Usage limit reached").is_some());
     }
 
     #[test]
