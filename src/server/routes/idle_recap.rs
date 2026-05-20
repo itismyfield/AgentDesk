@@ -42,21 +42,15 @@ pub async fn post_idle_recap(
         return error(StatusCode::INTERNAL_SERVER_ERROR, "pg pool unavailable");
     };
 
-    // Always stamp `idle_recap_posted_at` first so the policy dedupes this
-    // cycle even if the renderer below decides to skip (no channel binding,
-    // notify bot offline, …). Without this, a transient renderer failure
-    // would cause the policy to retry on every tick. SQL lives in the
-    // service module to keep this route handler SRP-clean (no raw `sqlx::query`
-    // alongside the `json!` response shaping).
-    if let Err(e) = idle_recap::stamp_recap_cycle(&pool, &session_key).await {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("stamp: {e}"));
-    }
-
     let snapshot = match idle_recap::load_recap_snapshot(&pool, &session_key).await {
         Ok(Some(snap)) => snap,
         Ok(None) => return error(StatusCode::NOT_FOUND, "session not found"),
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("load: {e}")),
     };
+
+    if !snapshot.has_resumable_provider_session() {
+        return skip("no resumable provider session");
+    }
 
     let Some(channel_id) = idle_recap::resolve_post_channel(&snapshot) else {
         return skip("no discord channel bound to agent");
@@ -81,6 +75,13 @@ pub async fn post_idle_recap(
         Ok(http) => http,
         Err(_) => return skip("provider bot not registered for recap interaction"),
     };
+
+    // Stamp only after the recap is known to be meaningful and postable. No
+    // resumable-session skips should stay eligible until a real session id is
+    // recorded; transient delivery skips still dedupe this idle cycle.
+    if let Err(e) = idle_recap::stamp_recap_cycle(&pool, &session_key).await {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("stamp: {e}"));
+    }
 
     let session_key_for_job = session_key.clone();
     tokio::spawn(async move {

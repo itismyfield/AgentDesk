@@ -1,10 +1,10 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::services::agent_protocol::{RuntimeHandoff, StreamMessage};
 use crate::services::claude;
@@ -294,6 +294,95 @@ fn append_codex_config_overrides(
         override_args.push(override_value);
     }
     args.splice(insert_at..insert_at, override_args);
+}
+
+fn insert_codex_option_before_prompt_delimiter(args: &mut Vec<String>, option: &str) {
+    let insert_at = match args.iter().position(|arg| arg == "--") {
+        Some(delimiter_index)
+            if args.first().map(String::as_str) == Some("resume") && delimiter_index > 0 =>
+        {
+            delimiter_index - 1
+        }
+        Some(delimiter_index) => delimiter_index,
+        None => args.len(),
+    };
+    args.insert(insert_at, option.to_string());
+}
+
+fn insert_codex_resume_option_before_other_options(args: &mut Vec<String>, option: &str) {
+    args.insert(0, option.to_string());
+}
+
+fn codex_resume_help_mentions_hook_trust_bypass(help_text: &str) -> bool {
+    help_text.contains("--dangerously-bypass-hook-trust")
+}
+
+fn codex_resume_supports_hook_trust_bypass(
+    codex_bin: &str,
+    resolution: &crate::services::platform::BinaryResolution,
+) -> bool {
+    let mut command = Command::new(codex_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, resolution);
+    command
+        .args(["resume", "--help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    match command.spawn() {
+        Ok(mut child) => {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            tracing::warn!(
+                                codex_bin,
+                                "timed out inspecting Codex resume help for hook trust bypass support"
+                            );
+                            return false;
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        tracing::warn!(
+                            codex_bin,
+                            error = %error,
+                            "could not wait for Codex resume help probe"
+                        );
+                        return false;
+                    }
+                }
+            };
+            let mut help_text = String::new();
+            if let Some(mut stdout) = child.stdout.take() {
+                let _ = stdout.read_to_string(&mut help_text);
+            }
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut help_text);
+            }
+            status.success() && codex_resume_help_mentions_hook_trust_bypass(&help_text)
+        }
+        Err(error) => {
+            tracing::warn!(
+                codex_bin,
+                error = %error,
+                "could not inspect Codex resume help for hook trust bypass support"
+            );
+            false
+        }
+    }
+}
+
+fn codex_direct_tui_hook_overrides_enabled() -> bool {
+    std::env::var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 fn codex_config_overrides(options: &CodexLaunchOptions) -> Vec<String> {
@@ -1449,14 +1538,33 @@ fn execute_streaming_local_tui_tmux(
         report_provider,
     );
     let mut args = build_codex_tui_args(&launch_options);
-    let codex_hook_overrides = prepare_codex_tui_hook_overrides(
-        tmux_session_name,
-        session_id,
-        &codex_bin,
-        resolution.exec_path.as_deref(),
-    );
+    let codex_hook_overrides = if codex_direct_tui_hook_overrides_enabled() {
+        prepare_codex_tui_hook_overrides(
+            tmux_session_name,
+            session_id,
+            &codex_bin,
+            resolution.exec_path.as_deref(),
+        )
+    } else {
+        tracing::info!(
+            tmux_session_name,
+            "Codex direct TUI session hook overrides disabled; using rollout transcript tail for relay"
+        );
+        Vec::new()
+    };
     if !codex_hook_overrides.is_empty() {
         append_codex_config_overrides(&mut args, codex_hook_overrides);
+        if codex_resume_supports_hook_trust_bypass(&codex_bin, &resolution) {
+            insert_codex_resume_option_before_other_options(
+                &mut args,
+                "--dangerously-bypass-hook-trust",
+            );
+        } else {
+            tracing::warn!(
+                codex_bin,
+                "Codex resume does not advertise --dangerously-bypass-hook-trust; relying on session hook trust hashes"
+            );
+        }
     }
     let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
     let rollout_modified_since = std::time::SystemTime::now();
@@ -2524,9 +2632,10 @@ fn handle_codex_json_line(
 mod tui_hosting_tests {
     use super::{
         CodexLaunchOptions, CodexRuntimeKind, append_codex_config_overrides, base_tui_args,
-        build_codex_tui_args, build_tmux_launch_env_lines, codex_tui_idle_relay_binding,
-        direct_tui_material_fallback_reason, render_codex_tui_tmux_script,
-        render_codex_wrapper_tmux_script,
+        build_codex_tui_args, build_tmux_launch_env_lines,
+        codex_resume_help_mentions_hook_trust_bypass, codex_tui_idle_relay_binding,
+        direct_tui_material_fallback_reason, insert_codex_resume_option_before_other_options,
+        render_codex_tui_tmux_script, render_codex_wrapper_tmux_script,
     };
     #[cfg(unix)]
     use super::{
@@ -2755,6 +2864,48 @@ mod tui_hosting_tests {
                 .windows(2)
                 .any(|pair| pair[0] == "-c" && pair[1] == "features.hooks=true")
         );
+    }
+
+    #[test]
+    fn codex_tui_hook_trust_bypass_is_inserted_before_resume_session_id() {
+        let mut args = base_tui_args(
+            Some("session-123"),
+            "resume prompt",
+            Some("gpt-5-codex"),
+            None,
+            false,
+            None,
+            None,
+        );
+
+        insert_codex_resume_option_before_other_options(
+            &mut args,
+            "--dangerously-bypass-hook-trust",
+        );
+
+        let delimiter_index = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("expected prompt delimiter");
+        let bypass_index = args
+            .iter()
+            .position(|arg| arg == "--dangerously-bypass-hook-trust")
+            .expect("expected hook trust bypass flag");
+        assert_eq!(args[1], "resume");
+        assert!(bypass_index < delimiter_index);
+        assert!(bypass_index < delimiter_index - 1);
+        assert_eq!(bypass_index, 0);
+        assert_eq!(args[delimiter_index - 1], "session-123");
+    }
+
+    #[test]
+    fn codex_tui_hook_trust_bypass_support_is_detected_from_resume_help() {
+        assert!(codex_resume_help_mentions_hook_trust_bypass(
+            "Usage: codex resume [OPTIONS]\n      --dangerously-bypass-hook-trust\n"
+        ));
+        assert!(!codex_resume_help_mentions_hook_trust_bypass(
+            "Usage: codex resume [OPTIONS]\n      --dangerously-bypass-approvals-and-sandbox\n"
+        ));
     }
 
     #[test]

@@ -60,12 +60,28 @@ pub(crate) struct RecapSnapshot {
     pub(crate) provider: String,
     pub(crate) tokens: Option<i64>,
     pub(crate) last_heartbeat: Option<DateTime<Utc>>,
+    pub(crate) claude_session_id: Option<String>,
+    pub(crate) raw_provider_session_id: Option<String>,
     pub(crate) previous_message_id: Option<i64>,
     pub(crate) previous_channel_id: Option<i64>,
     pub(crate) discord_channel_id: Option<String>,
     pub(crate) discord_channel_cc: Option<String>,
     pub(crate) discord_channel_cdx: Option<String>,
     pub(crate) discord_channel_alt: Option<String>,
+}
+
+impl RecapSnapshot {
+    pub(crate) fn has_resumable_provider_session(&self) -> bool {
+        self.claude_session_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+            || self
+                .raw_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+    }
 }
 
 /// Load everything the renderer needs in one SQL hit.
@@ -77,6 +93,8 @@ pub(crate) async fn load_recap_snapshot(
         "SELECT s.provider,
                 s.tokens,
                 s.last_heartbeat,
+                s.claude_session_id,
+                s.raw_provider_session_id,
                 s.idle_recap_message_id,
                 s.idle_recap_channel_id,
                 a.discord_channel_id,
@@ -98,6 +116,8 @@ struct RecapSnapshotRow {
     provider: String,
     tokens: Option<i64>,
     last_heartbeat: Option<DateTime<Utc>>,
+    claude_session_id: Option<String>,
+    raw_provider_session_id: Option<String>,
     idle_recap_message_id: Option<i64>,
     idle_recap_channel_id: Option<i64>,
     discord_channel_id: Option<String>,
@@ -112,6 +132,8 @@ impl RecapSnapshotRow {
             provider: self.provider,
             tokens: self.tokens,
             last_heartbeat: self.last_heartbeat,
+            claude_session_id: self.claude_session_id,
+            raw_provider_session_id: self.raw_provider_session_id,
             previous_message_id: self.idle_recap_message_id,
             previous_channel_id: self.idle_recap_channel_id,
             discord_channel_id: self.discord_channel_id,
@@ -420,7 +442,7 @@ pub(crate) async fn clear_recap_pointer(
     pool: &PgPool,
     session_key: &str,
     expected_message_id: u64,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     sqlx::query(
         "UPDATE sessions
          SET idle_recap_message_id = NULL,
@@ -432,7 +454,7 @@ pub(crate) async fn clear_recap_pointer(
     .bind(expected_message_id as i64)
     .execute(pool)
     .await
-    .map(|_| ())
+    .map(|result| result.rows_affected() > 0)
 }
 
 /// Lookup the active recap pointer for a Discord channel id so the
@@ -462,4 +484,36 @@ pub(crate) fn tmux_session_name_from_key(session_key: &str) -> Option<&str> {
         .rsplit_once(':')
         .map(|(_, name)| name)
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot_with_sessions(
+        claude_session_id: Option<&str>,
+        raw_provider_session_id: Option<&str>,
+    ) -> RecapSnapshot {
+        RecapSnapshot {
+            provider: "codex".to_string(),
+            tokens: None,
+            last_heartbeat: None,
+            claude_session_id: claude_session_id.map(str::to_string),
+            raw_provider_session_id: raw_provider_session_id.map(str::to_string),
+            previous_message_id: None,
+            previous_channel_id: None,
+            discord_channel_id: None,
+            discord_channel_cc: None,
+            discord_channel_cdx: Some("1506295335096549406".to_string()),
+            discord_channel_alt: None,
+        }
+    }
+
+    #[test]
+    fn recap_requires_resumable_provider_session_id() {
+        assert!(!snapshot_with_sessions(None, None).has_resumable_provider_session());
+        assert!(!snapshot_with_sessions(Some("  "), Some("")).has_resumable_provider_session());
+        assert!(snapshot_with_sessions(Some("session-1"), None).has_resumable_provider_session());
+        assert!(snapshot_with_sessions(None, Some("raw-1")).has_resumable_provider_session());
+    }
 }
