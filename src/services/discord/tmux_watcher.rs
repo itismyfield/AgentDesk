@@ -1690,6 +1690,35 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "  [{ts}] 👁 post-terminal-success continuation: new output arrived for {tmux_session_name} after terminal success (offset {data_start_offset} -> {new_offset}); watcher staying alive"
             );
         }
+        if should_suppress_post_terminal_output_without_inflight(
+            turn_result_relayed,
+            crate::services::discord::inflight::load_inflight_state(
+                &watcher_provider,
+                channel_id.get(),
+            )
+            .is_none(),
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] 🛑 watcher: suppressed post-terminal output without inflight for channel {} (tmux={}, range {}..{})",
+                channel_id.get(),
+                tmux_session_name,
+                data_start_offset,
+                current_offset
+            );
+            last_relayed_offset = Some(current_offset);
+            last_observed_generation_mtime_ns =
+                Some(read_generation_file_mtime_ns(&tmux_session_name));
+            advance_watcher_confirmed_end(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                current_offset,
+                "src/services/discord/tmux.rs:post_terminal_no_inflight_suppressed_output",
+            );
+            continue;
+        }
         maybe_refresh_watcher_activity_heartbeat(
             None::<&crate::db::Db>,
             shared.pg_pool.as_ref(),
@@ -1886,6 +1915,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let mut streaming_suppressed_by_recent_stop = false;
 
             while !found_result && turn_start.elapsed() < turn_timeout {
+                // The inner loop can wait for minutes while a long tool/test
+                // produces no provider JSONL result. Keep the registry
+                // heartbeat fresh so the heartbeat sweeper does not mistake a
+                // healthy streaming watcher for a dead task and cancel relay.
+                last_heartbeat_ts_ms.store(
+                    crate::services::discord::tmux_watcher_now_ms(),
+                    std::sync::atomic::Ordering::Release,
+                );
                 if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
                     break;
                 }
