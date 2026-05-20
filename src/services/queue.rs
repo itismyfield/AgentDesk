@@ -49,6 +49,35 @@ async fn schedule_post_cancel_queue_drain(
     Some(outcome.queue_depth_after)
 }
 
+/// #2706: force-path queue purge. Empties the in-memory channel mailbox
+/// atomically via `ChannelMailboxHandle::clear`, persisting an empty queue
+/// to disk in the same actor step. Returns the number of intervention
+/// entries that were dropped (best-effort — `None` when the mailbox handle
+/// or persistence context cannot be assembled).
+///
+/// The default preserve path uses `schedule_post_cancel_queue_drain` which
+/// *hydrates* the disk-backed queue back into the mailbox. That is the
+/// opposite of what `force=true` callers want — they reach for force
+/// specifically to clear stale drafts so the next dispatch is not blocked
+/// by a 45s `wait_for_prompt_ready` timeout.
+async fn force_purge_channel_mailbox(
+    target: &TurnLifecycleTarget,
+    session_key: Option<&str>,
+) -> Option<usize> {
+    let provider = target.provider.as_ref()?;
+    let channel_id = target.channel_id?;
+    let session_key = session_key?;
+    let identity = crate::services::discord::session_identity::SessionIdentity::parse(session_key)?;
+    let token_hash = identity.token_hash.as_deref()?;
+    let handle =
+        crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel_id)?;
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        provider, token_hash, None,
+    );
+    let result = handle.clear(persistence).await;
+    Some(result.queue_exit_events.len())
+}
+
 #[derive(Clone)]
 pub struct QueueService {
     pg_pool: Option<PgPool>,
@@ -548,10 +577,21 @@ impl QueueService {
         // channel. Use the post-hydrate depth from the drain helper
         // instead so `queued_remaining` matches what the next
         // intervention sees.
+        // #2706: force=true must also purge the in-memory channel mailbox so
+        // the next dispatch is not stuck behind stale queued drafts. The
+        // default preserve branch re-hydrates the disk queue back into the
+        // mailbox; force is the opposite operation.
+        let queue_purged_count = if force {
+            force_purge_channel_mailbox(&target, session_key.as_deref()).await
+        } else {
+            None
+        };
         let queued_remaining = if !force {
             schedule_post_cancel_queue_drain(health_registry, &target, "queue_api_cancel_turn")
                 .await
                 .or(lifecycle_queued_remaining)
+        } else if queue_purged_count.is_some() {
+            Some(0)
         } else {
             lifecycle_queued_remaining
         };
@@ -586,6 +626,7 @@ impl QueueService {
             "lifecycle_path": lifecycle.lifecycle_path,
             "queued_remaining": queued_remaining,
             "queued_before": lifecycle.queue_depth_before,
+            "queue_purged": queue_purged_count,
             "queue_preserved": lifecycle.queue_preserved,
             "queue_disk_present_before": lifecycle.queue_disk_present_before,
             "queue_disk_present_after": lifecycle.queue_disk_present_after,

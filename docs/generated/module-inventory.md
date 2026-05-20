@@ -601,7 +601,7 @@
 | `services::provider_exec` | `src/services/provider_exec.rs` | 506 |  |
 | `services::provider_hosting` | `src/services/provider_hosting.rs` | 318 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
-| `services::queue` | `src/services/queue.rs` | 782 |  |
+| `services::queue` | `src/services/queue.rs` | 823 |  |
 | `services::qwen` | `src/services/qwen.rs` | 2702 | giant-file |
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1286 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
