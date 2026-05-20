@@ -44,6 +44,18 @@ LOCAL_PID_FILE="$LOCAL_ROOT/runtime/dcserver.pid"
 LOCAL_HEALTH_URL="http://127.0.0.1:8791/api/health"
 PLIST_REL="com.agentdesk.release"
 
+launchd_domain() {
+  local uid domain
+  uid="$(id -u 2>/dev/null)" || return 1
+  for domain in "gui/$uid" "user/$uid"; do
+    if launchctl print "$domain" >/dev/null 2>&1; then
+      printf '%s\n' "$domain"
+      return 0
+    fi
+  done
+  printf 'gui/%s\n' "$uid"
+}
+
 STAGED="$(mktemp "$LOCAL_ROOT/bin/agentdesk.recover.XXXXXX")"
 trap 'rm -f "$STAGED"' EXIT
 
@@ -68,7 +80,8 @@ if [ -f "$LOCAL_PID_FILE" ]; then
 fi
 
 echo "▸ Stopping local dcserver..."
-launchctl bootout "gui/$(id -u)/$PLIST_REL" 2>/dev/null || true
+LAUNCHD_DOMAIN="$(launchd_domain)"
+launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true
 if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
   echo "  waiting for PID $OLD_PID to exit..."
   WAIT=0
@@ -91,7 +104,7 @@ chmod +x "$LOCAL_BIN"
 chflags uchg "$LOCAL_BIN"
 
 echo "▸ Starting local dcserver..."
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>&1 | head -3 || true
+launchctl bootstrap "$LAUNCHD_DOMAIN" "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>&1 | head -3 || true
 
 echo "▸ Waiting for $LOCAL_HEALTH_URL..."
 for i in $(seq 1 60); do

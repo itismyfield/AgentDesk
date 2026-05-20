@@ -53,6 +53,18 @@ ok()    { echo -e "${GREEN}✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 fail()  { echo -e "${RED}✗${NC} $1"; exit 1; }
 
+launchd_domain() {
+  local uid domain
+  uid="$(id -u 2>/dev/null)" || return 1
+  for domain in "gui/$uid" "user/$uid"; do
+    if launchctl print "$domain" >/dev/null 2>&1; then
+      printf '%s\n' "$domain"
+      return 0
+    fi
+  done
+  printf 'gui/%s\n' "$uid"
+}
+
 print_native_runtime_help() {
   local os="$1"
   local docs_url="https://github.com/$REPO#windows-and-linux-native-runtime"
@@ -328,16 +340,17 @@ ok "Launchd plist: $PLIST_PATH"
 
 # ── Start dcserver ────────────────────────────────────────────────────────────
 info "Starting AgentDesk..."
+LAUNCHD_DOMAIN="$(launchd_domain)"
 
 # Stop existing instance if running
-launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+launchctl bootout "$LAUNCHD_DOMAIN/$LAUNCHD_LABEL" 2>/dev/null || true
 sleep 1
 
 # Remove quarantine flag if present
 xattr -d com.apple.quarantine "$PLIST_PATH" 2>/dev/null || true
 
 # Start
-if launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null; then
+if launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST_PATH" 2>/dev/null; then
   sleep 3
 
   # Health check
@@ -348,7 +361,7 @@ if launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null; then
   fi
 else
   warn "launchd bootstrap failed. Try manually:"
-  echo "  launchctl bootstrap gui/\$(id -u) $PLIST_PATH"
+  echo "  launchctl bootstrap $LAUNCHD_DOMAIN $PLIST_PATH"
 fi
 
 # ── Open browser ──────────────────────────────────────────────────────────────

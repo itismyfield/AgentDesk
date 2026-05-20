@@ -133,7 +133,13 @@ impl Default for RolloutTailOptions {
 #[derive(Debug, Default)]
 struct RolloutParseState {
     session_id: Option<String>,
+    /// Text that is safe to use as the terminal `Done.result`.
+    /// Codex TUI can emit `response_item/message` records with
+    /// `phase:"commentary"` while the turn is still actively planning or
+    /// about to run tools. Those are relayed as live progress, but they must
+    /// not make the EOF drain think the turn is complete.
     final_text: String,
+    /// Any assistant-visible text, including non-terminal commentary.
     saw_assistant_text: bool,
     lines_read: usize,
     bytes_read: u64,
@@ -898,7 +904,7 @@ fn tail_rollout_file_until_assistant_response(
                         _ => terminal_drain,
                     }
                 };
-                if state.saw_assistant_text && !state.has_pending_tool_call() {
+                if !state.final_text.is_empty() && !state.has_pending_tool_call() {
                     if effective_drain.is_zero()
                         || last_output_at.is_some_and(|at| at.elapsed() >= effective_drain)
                     {
@@ -1207,7 +1213,10 @@ fn explicit_finalize_path(
     }
 
     if state.hook_completion_seen && state.saw_assistant_text {
-        return Some(RolloutFinalizePath::Hook);
+        maybe_promote_task_complete_fallback(state);
+        if !state.final_text.is_empty() {
+            return Some(RolloutFinalizePath::Hook);
+        }
     }
 
     let envelope_completion_seen = state.explicit_composer_ready_seen
@@ -1219,20 +1228,12 @@ fn explicit_finalize_path(
     // Recover the assistant text from `last_agent_message` when the turn
     // produced no `response_item/message` (tool-only turns or rollouts where
     // the assistant text is only carried on `task_complete`).
-    if !state.saw_assistant_text
-        && let Some(text) = state.task_complete_fallback_text.take()
-    {
-        if !state.final_text.is_empty() {
-            state.final_text.push_str("\n\n");
-        }
-        state.final_text.push_str(&text);
-        state.saw_assistant_text = true;
-    }
+    maybe_promote_task_complete_fallback(state);
 
     // Schema-drift guard: an explicit terminal signal without any assistant
     // text is not enough to emit an empty Done. Fall through to the heuristic
     // fallback so any subsequent assistant text still has a chance to arrive.
-    if !state.saw_assistant_text {
+    if state.final_text.is_empty() {
         if !state.explicit_completion_missing_text_warned {
             tracing::warn!(
                 hook_completion_seen = state.hook_completion_seen,
@@ -1246,6 +1247,17 @@ fn explicit_finalize_path(
     }
 
     Some(RolloutFinalizePath::Envelope)
+}
+
+fn maybe_promote_task_complete_fallback(state: &mut RolloutParseState) {
+    if !state.final_text.is_empty() {
+        return;
+    }
+    let Some(text) = state.task_complete_fallback_text.take() else {
+        return;
+    };
+    state.final_text.push_str(&text);
+    state.saw_assistant_text = true;
 }
 
 fn emit_done(
@@ -1448,6 +1460,7 @@ fn response_message_items(payload: &Value, state: &mut RolloutParseState) -> Vec
     if payload.get("role").and_then(Value::as_str) != Some("assistant") {
         return Vec::new();
     }
+    let terminal_candidate = payload.get("phase").and_then(Value::as_str) != Some("commentary");
     let Some(content) = payload.get("content").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -1463,10 +1476,12 @@ fn response_message_items(payload: &Value, state: &mut RolloutParseState) -> Vec
                 return None;
             }
             state.saw_assistant_text = true;
-            if !state.final_text.is_empty() {
-                state.final_text.push_str("\n\n");
+            if terminal_candidate {
+                if !state.final_text.is_empty() {
+                    state.final_text.push_str("\n\n");
+                }
+                state.final_text.push_str(&text);
             }
-            state.final_text.push_str(&text);
             Some(StreamMessage::Text { content: text })
         })
         .collect()
@@ -2564,6 +2579,99 @@ mod tests {
             messages.last(),
             Some(StreamMessage::Done { result, .. })
                 if result.contains("segment1") && result.contains("segment2")
+        ));
+    }
+
+    #[test]
+    fn commentary_phase_does_not_heuristically_complete_before_later_tool() {
+        // Codex TUI emits `phase:"commentary"` assistant messages as live
+        // progress. They can be followed by several seconds of reasoning and
+        // then tool calls, so the EOF drain must not treat commentary as a
+        // terminal answer.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let prefix = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"commentary-turn\",\"cwd\":\"{}\"}}}}\n",
+            cwd.path().display()
+        );
+        let rollout = dir.path().join("rollout-commentary-turn.jsonl");
+        std::fs::write(&rollout, &prefix).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"I will check the workspace first."}]}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1,"output_tokens":1}}}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (tx, rx) = mpsc::channel();
+        let tail_path = rollout.clone();
+        let handle = std::thread::spawn(move || {
+            tail_rollout_file_until_assistant_response(
+                &tail_path,
+                0,
+                None,
+                &tx,
+                None,
+                || true,
+                Duration::from_millis(150),
+                Some(Duration::from_secs(10)),
+                None,
+                true,
+                None,
+                true,
+                None,
+                None,
+            )
+        });
+
+        std::thread::sleep(Duration::from_millis(450));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}","call_id":"call-1"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"Process exited with code 0\nOutput:\n/tmp/repo"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Finished after checking the workspace."}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"Finished after checking the workspace."}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let (result, _outcome) = handle.join().unwrap().unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        let tool_idx = messages.iter().position(
+            |m| matches!(m, StreamMessage::ToolUse { name, .. } if name == "exec_command"),
+        );
+        let done_idx = messages
+            .iter()
+            .position(|m| matches!(m, StreamMessage::Done { .. }));
+        assert!(
+            tool_idx.is_some(),
+            "tool call after commentary must be relayed; got {:?}",
+            messages
+        );
+        assert!(
+            done_idx.is_some(),
+            "Done must be emitted; got {:?}",
+            messages
+        );
+        assert!(
+            tool_idx.unwrap() < done_idx.unwrap(),
+            "commentary must not emit Done before later tools; got {:?}",
+            messages
+        );
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, .. })
+                if result == "Finished after checking the workspace."
         ));
     }
 

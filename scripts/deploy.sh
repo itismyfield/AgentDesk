@@ -524,7 +524,7 @@ install_launchd() {
   # Migrate: remove legacy com.agentdesk plist if present
   local LEGACY_PLIST="$HOME/Library/LaunchAgents/com.agentdesk.plist"
   if [ -f "$LEGACY_PLIST" ]; then
-    launchctl bootout "gui/$(id -u)/com.agentdesk" 2>/dev/null || true
+    launchctl bootout "$(_launchd_domain)/com.agentdesk" 2>/dev/null || true
     rm -f "$LEGACY_PLIST"
     info "Removed legacy plist: $LEGACY_PLIST"
   fi
@@ -587,13 +587,13 @@ restart_launchd() {
   fi
 
   # Unload (ignore errors if not loaded)
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  launchctl bootout "$(_launchd_domain)/$LABEL" 2>/dev/null || true
   sleep 1
 
   # Load with retry because launchd can briefly report
   # "operation already in progress" immediately after bootout.
   for attempt in $(seq 1 "$max_attempts"); do
-    if launchctl bootstrap "gui/$(id -u)" "$PLIST" >/dev/null 2>&1; then
+    if launchctl bootstrap "$(_launchd_domain)" "$PLIST" >/dev/null 2>&1; then
       _kickstart_launchd_job_if_needed "$LABEL" || true
       ok "Service restarted via launchd"
       return
@@ -604,7 +604,7 @@ restart_launchd() {
   done
 
   # Surface the real launchctl error on the final attempt.
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  launchctl bootstrap "$(_launchd_domain)" "$PLIST"
   ok "Service restarted via launchd"
 }
 

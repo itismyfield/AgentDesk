@@ -13,7 +13,10 @@ use crate::services;
 
 use super::VERSION;
 pub(crate) const AGENTDESK_DCSERVER_LAUNCHD_LABEL: &str = "com.agentdesk.release";
+pub(crate) const AGENTDESK_DCSERVER_TMUX_FALLBACK_SESSION: &str =
+    "AgentDesk-dcserver-release-manual";
 const AGENTDESK_DCSERVER_LABEL_ENV: &str = "AGENTDESK_DCSERVER_LABEL";
+const AGENTDESK_RELEASE_TMUX_SESSION_ENV: &str = "AGENTDESK_RELEASE_TMUX_SESSION";
 const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 
 #[cfg(target_os = "macos")]
@@ -26,7 +29,17 @@ pub fn current_launchd_domain() -> Option<String> {
     if uid.is_empty() {
         return None;
     }
-    Some(format!("gui/{}", uid))
+    let gui_domain = format!("gui/{uid}");
+    if launchd_domain_available(&gui_domain) {
+        return Some(gui_domain);
+    }
+
+    let user_domain = format!("user/{uid}");
+    if launchd_domain_available(&user_domain) {
+        return Some(user_domain);
+    }
+
+    Some(format!("gui/{uid}"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -36,6 +49,20 @@ pub fn current_launchd_domain() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 pub fn is_launchd_job_loaded(label: &str) -> bool {
+    if let Some(domain) = current_launchd_domain() {
+        let target = format!("{domain}/{label}");
+        if std::process::Command::new("launchctl")
+            .args(["print", &target])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
     let output = match std::process::Command::new("launchctl").arg("list").output() {
         Ok(output) if output.status.success() => output,
         _ => return false,
@@ -46,9 +73,32 @@ pub fn is_launchd_job_loaded(label: &str) -> bool {
         .any(|line| line.split_whitespace().last() == Some(label))
 }
 
+#[cfg(target_os = "macos")]
+fn launchd_domain_available(domain: &str) -> bool {
+    std::process::Command::new("launchctl")
+        .args(["print", domain])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn is_launchd_job_loaded(_label: &str) -> bool {
     false
+}
+
+pub(crate) fn current_dcserver_tmux_fallback_session() -> String {
+    env::var(AGENTDESK_RELEASE_TMUX_SESSION_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| AGENTDESK_DCSERVER_TMUX_FALLBACK_SESSION.to_string())
+}
+
+pub(crate) fn is_tmux_fallback_session_loaded(session_name: &str) -> bool {
+    crate::services::platform::tmux::has_session(session_name)
 }
 
 #[cfg(target_os = "macos")]

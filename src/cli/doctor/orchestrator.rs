@@ -3006,6 +3006,20 @@ fn check_service_manager() -> Check {
         )
         .with_expected_actual("launchd job loaded", format!("{label} loaded"))
     } else {
+        let fallback_session = dcserver::current_dcserver_tmux_fallback_session();
+        if dcserver::is_tmux_fallback_session_loaded(&fallback_session) {
+            return Check::ok(
+                "service_manager",
+                CheckGroup::Core,
+                "Service Manager",
+                format!("tmux fallback — {fallback_session} active"),
+            )
+            .with_expected_actual(
+                "launchd job loaded or tmux fallback active",
+                format!("{fallback_session} active"),
+            );
+        }
+
         Check::warn(
             "service_manager",
             CheckGroup::Core,
@@ -3013,9 +3027,16 @@ fn check_service_manager() -> Check {
             format!("launchd — {label} not loaded"),
             "launchd로 운영 중이면 plist 로드 상태를 확인하세요. 수동 실행 환경이면 무시해도 됩니다.",
         )
-        .with_expected_actual("launchd job loaded", format!("{label} not loaded"))
+        .with_expected_actual(
+            "launchd job loaded or tmux fallback active",
+            format!("{label} not loaded; {fallback_session} inactive"),
+        )
         .with_next_steps(vec![
-            format!("launchctl print gui/$(id -u)/{label}"),
+            format!(
+                "launchctl print {}/{label}",
+                dcserver::current_launchd_domain().unwrap_or_else(|| "gui/$(id -u)".to_string())
+            ),
+            format!("tmux has-session -t ={fallback_session}:"),
             "agentdesk doctor --fix".to_string(),
         ])
     }

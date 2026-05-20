@@ -877,6 +877,9 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
     if recent.is_empty() {
         return false;
     }
+    if pane_has_legacy_codex_prompt(&recent) {
+        return true;
+    }
 
     let footer_idx = recent
         .iter()
@@ -900,6 +903,42 @@ pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
     // of each other. This is the actual gate — the bottom windows are
     // just outer search bounds.
     e - f <= COMPOSER_FOOTER_ADJACENCY_LINES
+}
+
+fn pane_has_legacy_codex_prompt(recent_bottom_up: &[&str]) -> bool {
+    const LEGACY_PROMPT_BOTTOM_WINDOW: usize = 4;
+    const LEGACY_STATUS_BOTTOM_WINDOW: usize = 3;
+
+    let prompt_idx = recent_bottom_up
+        .iter()
+        .take(LEGACY_PROMPT_BOTTOM_WINDOW)
+        .position(|line| line_is_legacy_codex_prompt(line));
+    let status_idx = recent_bottom_up
+        .iter()
+        .take(LEGACY_STATUS_BOTTOM_WINDOW)
+        .position(|line| line_is_legacy_codex_status(line));
+    let (Some(prompt_idx), Some(status_idx)) = (prompt_idx, status_idx) else {
+        return false;
+    };
+
+    // The compact Codex TUI prompt renders the model/status line below the
+    // `›` prompt. With bottom-up indexing that means the status row must have
+    // a smaller index than the prompt row.
+    status_idx < prompt_idx
+}
+
+fn line_is_legacy_codex_prompt(line: &str) -> bool {
+    let trimmed = line.trim();
+    let Some(rest) = trimmed.strip_prefix('›') else {
+        return false;
+    };
+    let rest = rest.trim();
+    rest.is_empty() || rest == "Explain this codebase"
+}
+
+fn line_is_legacy_codex_status(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.contains("gpt-") && trimmed.contains('·')
 }
 
 /// Codex TUI footer hints printed below the composer box. Matching any
@@ -1263,6 +1302,28 @@ more output\n\
     #[test]
     fn codex_pane_with_composer_and_footer_is_ready() {
         assert!(pane_looks_ready_for_codex_prompt(CODEX_TUI_READY_PANE));
+    }
+
+    #[test]
+    fn compact_codex_placeholder_prompt_is_ready() {
+        let pane = "\
+─ Worked for 4m 03s ────────────────────────────────────────────\n\
+\n\
+› Explain this codebase\n\
+\n\
+  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
+        assert!(pane_looks_ready_for_codex_prompt(pane));
+    }
+
+    #[test]
+    fn compact_codex_prompt_with_user_draft_is_not_ready() {
+        let pane = "\
+─ Worked for 4m 03s ────────────────────────────────────────────\n\
+\n\
+› run the pending draft\n\
+\n\
+  gpt-5.5 xhigh · ~/.adk/release/workspaces/baby";
+        assert!(!pane_looks_ready_for_codex_prompt(pane));
     }
 
     #[test]

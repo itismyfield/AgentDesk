@@ -210,6 +210,14 @@ sign_binary_with_fallback() {
     fi
 }
 
+start_release_tmux_fallback() {
+    local session="${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}"
+    echo "▸ Starting release via tmux fallback: $session"
+    tmux kill-session -t "$session" 2>/dev/null || true
+    tmux new-session -d -s "$session" -c "$ADK_REL" \
+        "ulimit -n 4096; set -a; [ -f '$REL_LAUNCHD_ENV_FILE' ] && . '$REL_LAUNCHD_ENV_FILE'; set +a; export AGENTDESK_ROOT_DIR='$ADK_REL'; echo '[agentdesk-tmux-fallback] ulimit -n='\"\$(ulimit -n)\" >&2; exec '$ADK_REL/bin/agentdesk' dcserver"
+}
+
 _staged_deploy_binary_path() {
     mktemp "$ADK_REL/bin/agentdesk.deploy.XXXXXX"
 }
@@ -1033,7 +1041,8 @@ OLD_PID=""
 if [ -f "$LOCK_FILE" ]; then
     OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
 fi
-launchctl bootout "gui/$(id -u)/$PLIST_REL" 2>/dev/null || true
+LAUNCHD_DOMAIN="$(_launchd_domain)"
+launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true
 if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
     echo "  waiting for PID $OLD_PID to exit..."
     WAIT_SECS=0
@@ -1138,7 +1147,11 @@ fi
 # Start release
 echo "▸ Starting release..."
 xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"
+LAUNCHD_DOMAIN="$(_launchd_domain)"
+if ! launchctl bootstrap "$LAUNCHD_DOMAIN" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"; then
+    echo "⚠ launchd bootstrap failed for $LAUNCHD_DOMAIN/$PLIST_REL — using tmux fallback"
+    start_release_tmux_fallback
+fi
 
 # Health check (server health + dashboard availability)
 REL_PORT="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"

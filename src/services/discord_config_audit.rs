@@ -1236,12 +1236,26 @@ impl ComparableAgent {
             .as_ref()
             .and_then(AgentChannel::target);
         let discord_channel_cdx = agent.channels.codex.as_ref().and_then(AgentChannel::target);
+        let provider_primary = match agent.provider.as_str() {
+            "gemini" => agent
+                .channels
+                .gemini
+                .as_ref()
+                .and_then(AgentChannel::target),
+            "opencode" => agent
+                .channels
+                .opencode
+                .as_ref()
+                .and_then(AgentChannel::target),
+            "qwen" => agent.channels.qwen.as_ref().and_then(AgentChannel::target),
+            _ => None,
+        };
 
         Self {
             id: agent.id.clone(),
             provider: normalize_provider(Some(agent.provider.as_str()))
                 .unwrap_or_else(|| "claude".to_string()),
-            discord_channel_id: discord_channel_cc.clone(),
+            discord_channel_id: provider_primary.or_else(|| discord_channel_cc.clone()),
             discord_channel_alt: discord_channel_cdx.clone(),
             discord_channel_cc,
             discord_channel_cdx,
@@ -1304,6 +1318,7 @@ fn dry_run_action_prefix(dry_run: bool) -> &'static str {
 #[cfg(test)]
 mod db_agent_drift_tests {
     use super::*;
+    use crate::config::AgentChannels;
 
     fn agent(id: &str, provider: &str, cc: Option<&str>, cdx: Option<&str>) -> ComparableAgent {
         ComparableAgent {
@@ -1313,6 +1328,47 @@ mod db_agent_drift_tests {
             discord_channel_alt: cdx.map(str::to_string),
             discord_channel_cc: cc.map(str::to_string),
             discord_channel_cdx: cdx.map(str::to_string),
+        }
+    }
+
+    fn agent_with_primary(
+        id: &str,
+        provider: &str,
+        primary: Option<&str>,
+        cc: Option<&str>,
+        cdx: Option<&str>,
+    ) -> ComparableAgent {
+        ComparableAgent {
+            id: id.to_string(),
+            provider: provider.to_string(),
+            discord_channel_id: primary.map(str::to_string),
+            discord_channel_alt: cdx.map(str::to_string),
+            discord_channel_cc: cc.map(str::to_string),
+            discord_channel_cdx: cdx.map(str::to_string),
+        }
+    }
+
+    fn yaml_agent_with_provider_channel(provider: &str, provider_channel: &str) -> AgentDef {
+        AgentDef {
+            id: provider.to_string(),
+            name: provider.to_string(),
+            name_ko: None,
+            aliases: Vec::new(),
+            wake_word: None,
+            voice_enabled: true,
+            sensitivity_mode: None,
+            voice: Default::default(),
+            provider: provider.to_string(),
+            channels: AgentChannels {
+                claude: Some(AgentChannel::from("claude-channel")),
+                codex: Some(AgentChannel::from("codex-channel")),
+                gemini: (provider == "gemini").then(|| AgentChannel::from(provider_channel)),
+                opencode: (provider == "opencode").then(|| AgentChannel::from(provider_channel)),
+                qwen: (provider == "qwen").then(|| AgentChannel::from(provider_channel)),
+            },
+            keywords: Vec::new(),
+            department: None,
+            avatar_emoji: None,
         }
     }
 
@@ -1368,6 +1424,32 @@ mod db_agent_drift_tests {
         assert!(report.warnings.is_empty());
         assert!(report.storage.mismatched_agents.is_empty());
         assert_eq!(report.storage.synced_agents, Some(1));
+    }
+
+    #[test]
+    fn provider_specific_primary_channel_matches_post_sync_db_shape() {
+        let yaml_agent = yaml_agent_with_provider_channel("qwen", "qwen-channel");
+        let yaml_agents =
+            BTreeMap::from([("qwen".to_string(), ComparableAgent::from_yaml(&yaml_agent))]);
+        let post_sync_agents = BTreeMap::from([(
+            "qwen".to_string(),
+            agent_with_primary(
+                "qwen",
+                "qwen",
+                Some("qwen-channel"),
+                Some("claude-channel"),
+                Some("codex-channel"),
+            ),
+        )]);
+
+        let drift = compute_db_agent_drift(&yaml_agents, &post_sync_agents, true);
+
+        assert!(
+            drift.storage.mismatched_agents.is_empty(),
+            "provider-specific channel should not remain drift after DB sync: {:?}",
+            drift
+        );
+        assert!(drift.warnings.is_empty());
     }
 
     #[test]

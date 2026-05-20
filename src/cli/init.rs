@@ -1479,14 +1479,14 @@ fn install_service(home: &Path, agentdesk_bin: &Path, reconfigure: bool) -> Resu
     let load_answer = prompt_line("\ndcserver를 지금 시작할까요? (Y/n): ");
     if load_answer.is_empty() || load_answer.to_lowercase().starts_with('y') {
         let label = dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL;
-        let uid = get_uid().map_err(|e| {
-            format!("UID를 가져올 수 없습니다: {e} — 수동으로 launchctl을 실행하세요")
+        let domain = dcserver::current_launchd_domain().ok_or_else(|| {
+            "launchd domain을 확인할 수 없습니다 — 수동으로 launchctl을 실행하세요".to_string()
         })?;
         if dcserver::is_launchd_job_loaded(label) {
             let _ = std::process::Command::new("launchctl")
                 .args([
                     "bootout",
-                    &format!("gui/{}", uid),
+                    &domain,
                     &plist_path.to_string_lossy().to_string(),
                 ])
                 .status();
@@ -1494,14 +1494,15 @@ fn install_service(home: &Path, agentdesk_bin: &Path, reconfigure: bool) -> Resu
         let status = std::process::Command::new("launchctl")
             .args([
                 "bootstrap",
-                &format!("gui/{}", uid),
+                &domain,
                 &plist_path.to_string_lossy().to_string(),
             ])
             .status();
         match status {
             Ok(s) if s.success() => println!("  [OK] dcserver 시작됨"),
             _ => println!(
-                "  [WARN] launchd 등록 실패 — 수동으로 실행: launchctl bootstrap gui/$(id -u) {}",
+                "  [WARN] launchd 등록 실패 — 수동으로 실행: launchctl bootstrap {} {}",
+                domain,
                 plist_path.display()
             ),
         }
@@ -1659,13 +1660,4 @@ fn write_with_backup(path: &Path, content: &str, reconfigure: bool) -> Result<()
         }
     }
     fs::write(path, content)
-}
-
-#[cfg(target_os = "macos")]
-fn get_uid() -> Result<String, String> {
-    let output = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .map_err(|e| format!("failed to get uid: {e}"))?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

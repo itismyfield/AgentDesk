@@ -136,9 +136,30 @@ _apply_launchd_env_file_to_shell() {
   done < "$env_file"
 }
 
+_launchd_domain() {
+  local uid domain
+  uid="$(id -u 2>/dev/null)" || return 1
+  for domain in "gui/$uid" "user/$uid"; do
+    if launchctl print "$domain" >/dev/null 2>&1; then
+      printf '%s\n' "$domain"
+      return 0
+    fi
+  done
+  printf 'gui/%s\n' "$uid"
+}
+
+_launchd_service_target() {
+  local label="$1"
+  local domain
+  domain="$(_launchd_domain)" || return 1
+  printf '%s/%s\n' "$domain" "$label"
+}
+
 _launchd_job_state() {
   local label="$1"
-  launchctl print "gui/$(id -u)/$label" 2>/dev/null \
+  local target
+  target="$(_launchd_service_target "$label")" || return 0
+  launchctl print "$target" 2>/dev/null \
     | sed -n 's/^[[:space:]]*state = //p' \
     | head -n 1
 }
@@ -149,7 +170,7 @@ _kickstart_launchd_job_if_needed() {
   state=$(_launchd_job_state "$label")
   if [ "$state" = "not running" ]; then
     echo "  ▸ launchd reports $label not running — kickstart"
-    launchctl kickstart -k "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+    launchctl kickstart -k "$(_launchd_service_target "$label")" >/dev/null 2>&1 || true
     return 0
   fi
   return 1
