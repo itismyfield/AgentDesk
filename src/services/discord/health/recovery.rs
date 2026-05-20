@@ -40,11 +40,18 @@ fn decrement_counter(counter: &AtomicUsize) {
     });
 }
 
+/// Resolve the runtime that owns `channel_id` for `provider`. Channel-aware
+/// so multi-bot deployments (several runtimes under one provider name) stop,
+/// drain, and snapshot the runtime that actually handles the channel rather
+/// than whichever registered first. Single-bot deployments are unaffected.
 async fn shared_for_provider(
     registry: &HealthRegistry,
     provider: &ProviderKind,
+    channel_id: ChannelId,
 ) -> Option<Arc<SharedData>> {
-    registry.shared_for_provider(provider).await
+    registry
+        .shared_for_provider_on_channel(provider, channel_id)
+        .await
 }
 
 async fn wait_for_turn_end(
@@ -92,7 +99,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
     cleanup_policy: discord::TmuxCleanupPolicy,
 ) -> Option<RuntimeTurnStopResult> {
     let provider = ProviderKind::from_str(provider_name)?;
-    let shared = shared_for_provider(registry, &provider).await?;
+    let shared = shared_for_provider(registry, &provider, channel_id).await?;
     let cleanup_requested = cleanup_policy.should_cleanup_tmux();
     let should_clear_persistent_inflight = cleanup_policy.should_clear_inflight();
     let persistent_inflight_was_present = should_clear_persistent_inflight
@@ -211,7 +218,7 @@ pub async fn snapshot_pending_queue_state(
     channel_id: ChannelId,
 ) -> Option<PendingQueueSnapshot> {
     let provider = ProviderKind::from_str(provider_name)?;
-    let shared = shared_for_provider(registry, &provider).await?;
+    let shared = shared_for_provider(registry, &provider, channel_id).await?;
     Some(snapshot_pending_queue_state_for_shared(&shared, &provider, channel_id).await)
 }
 
@@ -274,7 +281,7 @@ pub async fn schedule_pending_queue_drain_after_cancel(
     let Some(provider) = ProviderKind::from_str(provider_name) else {
         return PostCancelDrainOutcome::skipped();
     };
-    let Some(shared) = shared_for_provider(registry, &provider).await else {
+    let Some(shared) = shared_for_provider(registry, &provider, channel_id).await else {
         return PostCancelDrainOutcome::skipped();
     };
     let snapshot = snapshot_pending_queue_state_for_shared(&shared, &provider, channel_id).await;
@@ -368,7 +375,7 @@ pub async fn resolve_tmux_session_for_cancel(
     channel_id: ChannelId,
 ) -> Option<String> {
     let provider = ProviderKind::from_str(provider_name)?;
-    let shared = shared_for_provider(registry, &provider).await?;
+    let shared = shared_for_provider(registry, &provider, channel_id).await?;
     if let Some(binding) = shared.tmux_watchers.channel_binding(&channel_id) {
         return Some(binding.tmux_session_name);
     }
@@ -555,8 +562,8 @@ pub async fn clear_idle_tmux_stale_turn(
         return None;
     }
 
-    let shared = shared_for_provider(registry, &provider).await?;
     let channel_id = ChannelId::new(channel_id);
+    let shared = shared_for_provider(registry, &provider, channel_id).await?;
     let finish = discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
     let runtime_session_cleared =
         apply_runtime_hard_stop_cleanup(&shared, &provider, channel_id, &finish, stop_source, true)
@@ -577,8 +584,9 @@ pub async fn provider_channel_mailbox_state(
     channel_id: u64,
 ) -> Option<ProviderMailboxState> {
     let provider = ProviderKind::from_str(provider_name)?;
-    let shared = shared_for_provider(registry, &provider).await?;
-    let snapshot = shared.mailbox(ChannelId::new(channel_id)).snapshot().await;
+    let channel = ChannelId::new(channel_id);
+    let shared = shared_for_provider(registry, &provider, channel).await?;
+    let snapshot = shared.mailbox(channel).snapshot().await;
     Some(ProviderMailboxState {
         channel_id,
         has_cancel_token: snapshot.cancel_token.is_some(),
@@ -1112,31 +1120,46 @@ pub(crate) async fn run_stall_watchdog_pass(
     registry: &HealthRegistry,
     provider: &ProviderKind,
 ) -> usize {
-    let Some(shared) = shared_for_provider(registry, provider).await else {
+    // Multi-bot deployments register several runtimes under one provider
+    // name. Sweep *every* runtime's watcher channels (a name-only lookup
+    // would only ever visit the first-registered runtime, so the second
+    // bot's stalled turns would never be force-cleaned -- turn looks cut
+    // off, progress stops updating). Keep the runtime that exposed each
+    // watcher so the snapshot/cleanup below targets the same mailbox and
+    // relay coordinates.
+    let runtimes = registry.all_shared_for_provider(provider).await;
+    if runtimes.is_empty() {
         return 0;
-    };
-    let candidate_channels: Vec<ChannelId> = shared
-        .tmux_watchers
-        .iter()
-        .filter_map(|entry| {
-            shared
-                .tmux_watchers
-                .owner_channel_for_tmux_session(entry.key())
-        })
-        .collect();
+    }
+    let mut candidate_channels: Vec<(ChannelId, Arc<SharedData>)> = Vec::new();
+    let mut seen: std::collections::HashSet<ChannelId> = std::collections::HashSet::new();
+    for runtime in &runtimes {
+        let runtime_channels: Vec<ChannelId> = runtime
+            .tmux_watchers
+            .iter()
+            .filter_map(|entry| {
+                runtime
+                    .tmux_watchers
+                    .owner_channel_for_tmux_session(entry.key())
+            })
+            .collect();
+        for channel_id in runtime_channels {
+            if seen.insert(channel_id) {
+                candidate_channels.push((channel_id, runtime.clone()));
+            }
+        }
+    }
     if candidate_channels.is_empty() {
         return 0;
     }
     let now_unix_secs = chrono::Utc::now().timestamp();
     let mut cleaned = 0usize;
-    for channel_id in candidate_channels {
-        // #1446 codex review iter-2 P2 — use the provider-scoped snapshot
-        // helper. The unscoped variant returns the FIRST registered
-        // provider that knows the channel, so in a multi-provider
-        // deployment that shares a Discord channel the later provider's
-        // watchdog pass would never see its own state.
+    for (channel_id, shared) in candidate_channels {
+        // Use the already-selected runtime. A provider-name scan can be
+        // fooled by provider+channel inflight JSON and inspect the first
+        // same-provider runtime instead of the bot that owns this watcher.
         let snapshot = match registry
-            .snapshot_watcher_state_for_provider(provider, channel_id.get())
+            .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
             .await
         {
             Some(snapshot) => snapshot,

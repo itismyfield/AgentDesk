@@ -1361,7 +1361,6 @@ fn check_provider_bindings(cfg: &config::Config, snapshot: &HealthSnapshot) -> C
     disconnected.sort();
     disconnected.dedup();
 
-    let has_duplicate_providers = !duplicate_providers.is_empty();
     let has_binding_issues = !disconnected.is_empty()
         || !missing_channels.is_empty()
         || !missing_runtime_providers.is_empty()
@@ -1384,20 +1383,7 @@ fn check_provider_bindings(cfg: &config::Config, snapshot: &HealthSnapshot) -> C
         "missing_auth_hints": missing_auth_hints,
     });
 
-    if has_duplicate_providers {
-        Check::fail(
-            "provider_bindings",
-            CheckGroup::ProviderRuntime,
-            "Provider Bindings",
-            detail.clone(),
-            "health registry에 duplicate provider entry가 있습니다. registration deduplication과 runtime bootstrap 로그를 확인하세요.",
-        )
-        .with_subsystem("provider_binding")
-        .with_severity(Severity::Error)
-        .with_security_exposure(SecurityExposure::OperationalMetadata)
-        .with_evidence(evidence)
-        .with_expected_actual("unique provider health entries", detail)
-    } else if !has_binding_issues {
+    if !has_binding_issues {
         Check::ok(
             "provider_bindings",
             CheckGroup::ProviderRuntime,
@@ -4734,7 +4720,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_binding_check_reports_duplicate_entries_as_error() {
+    fn provider_binding_check_allows_same_provider_channel_runtimes() {
         let cfg = crate::config::Config::default();
         let snapshot = HealthSnapshot {
             base: test_base_url(),
@@ -4748,7 +4734,7 @@ mod tests {
         };
 
         let check = check_provider_bindings(&cfg, &snapshot);
-        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(check.status, CheckStatus::Pass);
         assert_eq!(check.subsystem, "provider_binding");
         assert!(
             check

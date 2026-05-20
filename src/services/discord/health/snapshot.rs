@@ -337,7 +337,29 @@ impl HealthRegistry {
         provider: &ProviderKind,
         channel_id: u64,
     ) -> Option<WatcherStateSnapshot> {
+        let channel = ChannelId::new(channel_id);
+        if let Some(shared) = self.shared_for_provider_on_channel(provider, channel).await {
+            return watcher_state_snapshot_for_shared(provider.as_str(), shared, channel).await;
+        }
+
         self.snapshot_watcher_state_filtered(channel_id, Some(provider))
+            .await
+    }
+
+    /// Snapshot a channel against a specific runtime.
+    ///
+    /// Multi-bot deployments can register several runtimes under the same
+    /// provider name. Callers that have already resolved the owning
+    /// `SharedData` must not go back through provider-name scanning, because
+    /// persisted inflight state is keyed by provider+channel and can make the
+    /// first registered runtime look like it owns another bot's channel.
+    pub(crate) async fn snapshot_watcher_state_for_shared(
+        &self,
+        provider: &ProviderKind,
+        shared: std::sync::Arc<SharedData>,
+        channel_id: u64,
+    ) -> Option<WatcherStateSnapshot> {
+        watcher_state_snapshot_for_shared(provider.as_str(), shared, ChannelId::new(channel_id))
             .await
     }
 
@@ -354,93 +376,111 @@ impl HealthRegistry {
             {
                 continue;
             }
-            let shared = entry.shared.clone();
             let provider_kind = ProviderKind::from_str(&entry.name);
-            let session = SessionEnrichment::load(&shared, provider_kind.as_ref(), channel).await;
-            let mailbox_snapshot = discord::mailbox_snapshot(&shared, channel).await;
-            let mailbox_has_cancel_token = mailbox_snapshot.cancel_token.is_some();
-            let mailbox_active_user_msg_id =
-                redaction::visible_serenity_message_id(mailbox_snapshot.active_user_message_id);
-            let has_pending_queue = !mailbox_snapshot.intervention_queue.is_empty();
-            let mailbox_engaged = mailbox_active_user_msg_id.is_some() || has_pending_queue;
-            let has_thread_proof = shared.dispatch_thread_parents.contains_key(&channel)
-                || shared
-                    .dispatch_thread_parents
-                    .iter()
-                    .any(|entry| *entry.value() == channel);
-            if !session.attached
-                && !session.has_relay_coord
-                && !session.inflight_state_present
-                && !mailbox_engaged
-                && !has_thread_proof
-            {
-                continue;
-            }
-            let tmux_session_alive = session.tmux_session_alive().await;
-            let desynced = session.desynced(tmux_session_alive == Some(true), session.attached);
-            let active_turn = relay_active_turn_from_inflight(
-                mailbox_has_cancel_token,
-                session.inflight.as_ref(),
-            );
-            let relay_thread_proof = relay_thread_proof_for_channel(
-                &shared,
-                provider_kind.as_ref(),
+            if let Some(snapshot) = watcher_state_snapshot_for_shared(
+                provider_kind
+                    .as_ref()
+                    .map(ProviderKind::as_str)
+                    .unwrap_or(entry.name.as_str()),
+                entry.shared.clone(),
                 channel,
-                mailbox_has_cancel_token || session.inflight_state_present || session.attached,
             )
-            .await;
-            let relay_health = build_relay_health_snapshot(RelayHealthBuildInput {
-                provider: entry.name.clone(),
-                channel_id,
-                mailbox_has_cancel_token,
-                mailbox_active_user_msg_id,
-                queue_depth: mailbox_snapshot.intervention_queue.len(),
-                watcher_attached: session.attached,
-                watcher_owner_channel_id: session.watcher_owner_channel_id,
-                tmux_session: session.tmux_session.clone(),
-                tmux_alive: tmux_session_alive,
-                bridge_inflight_present: session.inflight_state_present,
-                bridge_current_msg_id: session.inflight_current_msg_id(),
-                watcher_owns_live_relay: session.watcher_owns_live_relay(),
-                last_relay_ts_ms: session.last_relay_ts_ms,
-                last_relay_offset: session.last_relay_offset,
-                last_capture_offset: session.last_capture_offset,
-                unread_bytes: session.unread_bytes,
-                desynced,
-                thread_proof: relay_thread_proof,
-                active_turn,
-                last_outbound_activity_ms: last_outbound_activity_ms(
-                    session.last_relay_ts_ms,
-                    session.inflight.as_ref(),
-                ),
-            });
-            let relay_stall_state = RelayStallClassifier::classify(&relay_health);
-            trace_relay_health_classification(&relay_health, relay_stall_state);
-            return Some(WatcherStateSnapshot {
-                provider: entry.name.clone(),
-                attached: session.attached,
-                tmux_session: session.tmux_session.clone(),
-                watcher_owner_channel_id: session.watcher_owner_channel_id,
-                last_relay_offset: session.last_relay_offset,
-                inflight_state_present: session.inflight_state_present,
-                last_relay_ts_ms: session.last_relay_ts_ms,
-                last_capture_offset: session.last_capture_offset,
-                unread_bytes: session.unread_bytes,
-                desynced,
-                reconnect_count: session.reconnect_count,
-                inflight_started_at: session.inflight_started_at(),
-                inflight_updated_at: session.inflight_updated_at(),
-                inflight_user_msg_id: session.inflight_user_msg_id(),
-                inflight_current_msg_id: session.inflight_current_msg_id(),
-                tmux_session_alive,
-                has_pending_queue,
-                mailbox_active_user_msg_id,
-                relay_stall_state,
-                relay_health,
-            });
+            .await
+            {
+                return Some(snapshot);
+            }
         }
         None
     }
+}
+
+async fn watcher_state_snapshot_for_shared(
+    provider_name: &str,
+    shared: std::sync::Arc<SharedData>,
+    channel: ChannelId,
+) -> Option<WatcherStateSnapshot> {
+    let provider_kind = ProviderKind::from_str(provider_name);
+    let session = SessionEnrichment::load(&shared, provider_kind.as_ref(), channel).await;
+    let mailbox_snapshot = discord::mailbox_snapshot(&shared, channel).await;
+    let mailbox_has_cancel_token = mailbox_snapshot.cancel_token.is_some();
+    let mailbox_active_user_msg_id =
+        redaction::visible_serenity_message_id(mailbox_snapshot.active_user_message_id);
+    let has_pending_queue = !mailbox_snapshot.intervention_queue.is_empty();
+    let mailbox_engaged = mailbox_active_user_msg_id.is_some() || has_pending_queue;
+    let has_thread_proof = shared.dispatch_thread_parents.contains_key(&channel)
+        || shared
+            .dispatch_thread_parents
+            .iter()
+            .any(|entry| *entry.value() == channel);
+    if !session.attached
+        && !session.has_relay_coord
+        && !session.inflight_state_present
+        && !mailbox_engaged
+        && !has_thread_proof
+    {
+        return None;
+    }
+
+    let tmux_session_alive = session.tmux_session_alive().await;
+    let desynced = session.desynced(tmux_session_alive == Some(true), session.attached);
+    let active_turn =
+        relay_active_turn_from_inflight(mailbox_has_cancel_token, session.inflight.as_ref());
+    let relay_thread_proof = relay_thread_proof_for_channel(
+        &shared,
+        provider_kind.as_ref(),
+        channel,
+        mailbox_has_cancel_token || session.inflight_state_present || session.attached,
+    )
+    .await;
+    let relay_health = build_relay_health_snapshot(RelayHealthBuildInput {
+        provider: provider_name.to_string(),
+        channel_id: channel.get(),
+        mailbox_has_cancel_token,
+        mailbox_active_user_msg_id,
+        queue_depth: mailbox_snapshot.intervention_queue.len(),
+        watcher_attached: session.attached,
+        watcher_owner_channel_id: session.watcher_owner_channel_id,
+        tmux_session: session.tmux_session.clone(),
+        tmux_alive: tmux_session_alive,
+        bridge_inflight_present: session.inflight_state_present,
+        bridge_current_msg_id: session.inflight_current_msg_id(),
+        watcher_owns_live_relay: session.watcher_owns_live_relay(),
+        last_relay_ts_ms: session.last_relay_ts_ms,
+        last_relay_offset: session.last_relay_offset,
+        last_capture_offset: session.last_capture_offset,
+        unread_bytes: session.unread_bytes,
+        desynced,
+        thread_proof: relay_thread_proof,
+        active_turn,
+        last_outbound_activity_ms: last_outbound_activity_ms(
+            session.last_relay_ts_ms,
+            session.inflight.as_ref(),
+        ),
+    });
+    let relay_stall_state = RelayStallClassifier::classify(&relay_health);
+    trace_relay_health_classification(&relay_health, relay_stall_state);
+    Some(WatcherStateSnapshot {
+        provider: provider_name.to_string(),
+        attached: session.attached,
+        tmux_session: session.tmux_session.clone(),
+        watcher_owner_channel_id: session.watcher_owner_channel_id,
+        last_relay_offset: session.last_relay_offset,
+        inflight_state_present: session.inflight_state_present,
+        last_relay_ts_ms: session.last_relay_ts_ms,
+        last_capture_offset: session.last_capture_offset,
+        unread_bytes: session.unread_bytes,
+        desynced,
+        reconnect_count: session.reconnect_count,
+        inflight_started_at: session.inflight_started_at(),
+        inflight_updated_at: session.inflight_updated_at(),
+        inflight_user_msg_id: session.inflight_user_msg_id(),
+        inflight_current_msg_id: session.inflight_current_msg_id(),
+        tmux_session_alive,
+        has_pending_queue,
+        mailbox_active_user_msg_id,
+        relay_stall_state,
+        relay_health,
+    })
 }
 
 pub async fn active_request_owner_for_channel(

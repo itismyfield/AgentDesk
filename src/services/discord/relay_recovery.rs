@@ -432,8 +432,11 @@ pub(in crate::services::discord) async fn run_relay_recovery(
 
     let provider = ProviderKind::from_str(&decision.provider)
         .ok_or_else(|| RelayRecoveryError::InvalidProvider(decision.provider.clone()))?;
+    // Channel-aware: multi-bot deployments register several runtimes per
+    // provider, so a name-only lookup would auto-heal the wrong runtime's
+    // relay state for this channel.
     let shared = registry
-        .shared_for_provider(&provider)
+        .shared_for_provider_on_channel(&provider, ChannelId::new(decision.channel_id))
         .await
         .ok_or_else(|| RelayRecoveryError::ProviderUnavailable(decision.provider.clone()))?;
     let key = auto_heal_key(&decision.provider, decision.channel_id, decision.action);

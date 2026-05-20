@@ -103,9 +103,12 @@ impl SessionBoundDiscordRelaySink {
     async fn deliver_response(&self, delivery: SessionRelayDelivery) -> Result<(), RelaySinkError> {
         let channel_id = delivery.channel_id;
         let provider = delivery.provider;
+        // Channel-aware: with multi-bot deployments a name-only lookup would
+        // deliver this session relay frame through the wrong runtime, so the
+        // owning bot's turn never visibly progresses.
         let shared = self
             .health_registry
-            .shared_for_provider(&provider)
+            .shared_for_provider_on_channel(&provider, ChannelId::new(channel_id))
             .await
             .ok_or_else(|| {
                 RelaySinkError::Transient(format!(

@@ -108,13 +108,23 @@ impl HealthRegistry {
 
     pub(super) async fn register(&self, name: String, shared: Arc<SharedData>) {
         let mut providers = self.providers.lock().await;
-        if providers.iter().any(|entry| entry.name == name) {
+        if providers
+            .iter()
+            .any(|entry| std::sync::Arc::ptr_eq(&entry.shared, &shared))
+        {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
-                "  [{ts}] ⚠ duplicate health provider registration ignored: {}",
+                "  [{ts}] ⚠ duplicate health runtime registration ignored: {}",
                 name
             );
             return;
+        }
+        if providers.iter().any(|entry| entry.name == name) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 🩺 registering additional health runtime for provider: {}",
+                name
+            );
         }
         providers.push(ProviderEntry { name, shared });
     }
@@ -133,6 +143,53 @@ impl HealthRegistry {
             .iter()
             .find(|entry| entry.name.eq_ignore_ascii_case(provider.as_str()))
             .map(|entry| entry.shared.clone())
+    }
+
+    /// Channel-aware variant of [`Self::shared_for_provider`].
+    ///
+    /// Once `register` stopped deduping by provider name (multi-bot
+    /// deployments register several runtimes under the same provider),
+    /// the name-only lookup above resolves whichever runtime registered
+    /// first. Recovery/relay paths that are scoped to a single channel
+    /// would then stop, drain, or relay against the *wrong* runtime's
+    /// mailbox/inflight for that channel — the turn looks cut off and
+    /// progress stops updating for the other bot.
+    ///
+    /// This disambiguates by the runtime's allowed/live channel set via
+    /// the same selection logic `resolve_direct_meeting_shared` uses. For
+    /// a single registered runtime it returns that runtime regardless of
+    /// channel, so single-bot deployments behave exactly as before.
+    pub(in crate::services::discord) async fn shared_for_provider_on_channel(
+        &self,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+    ) -> Option<Arc<SharedData>> {
+        resolve_direct_meeting_shared(self, channel_id, provider)
+            .await
+            .ok()
+    }
+
+    /// Every runtime registered under `provider`'s name.
+    ///
+    /// `shared_for_provider` returns only the first-registered runtime,
+    /// which is correct for channel-scoped lookups (paired with
+    /// `shared_for_provider_on_channel`) but wrong for provider-global
+    /// sweeps like the stall watchdog: in a multi-bot deployment the
+    /// later-registered runtime's channels would never be visited, so its
+    /// stalled turns would never be force-cleaned (turn looks cut off,
+    /// progress stops updating). Callers that must touch every runtime use
+    /// this and then resolve the owning runtime per channel.
+    pub(in crate::services::discord) async fn all_shared_for_provider(
+        &self,
+        provider: &ProviderKind,
+    ) -> Vec<Arc<SharedData>> {
+        self.providers
+            .lock()
+            .await
+            .iter()
+            .filter(|entry| entry.name.eq_ignore_ascii_case(provider.as_str()))
+            .map(|entry| entry.shared.clone())
+            .collect()
     }
 
     pub(super) async fn register_http(&self, provider: String, http: Arc<serenity::Http>) {
@@ -157,21 +214,18 @@ impl HealthRegistry {
         tmux_override: Option<String>,
     ) -> Option<Result<super::recovery_engine::RebindOutcome, super::recovery_engine::RebindError>>
     {
-        let provider_name = provider.as_str().to_string();
-        let shared = self
-            .providers
-            .lock()
-            .await
-            .iter()
-            .find(|entry| entry.name == provider_name)
-            .map(|entry| entry.shared.clone())?;
-        let http = self
-            .discord_http
-            .lock()
-            .await
-            .iter()
-            .find(|(name, _)| name == &provider_name)
-            .map(|(_, http)| http.clone())?;
+        // Channel-aware: multi-bot deployments register several runtimes
+        // under one provider name, so a first-match-by-name lookup would
+        // rebind whichever runtime registered first instead of the one
+        // that actually owns `channel_id`, leaving the real runtime's
+        // orphan inflight untouched (turn stuck, no progress). This reuses
+        // the same selection logic as the direct-meeting resolver and
+        // falls back to the single registered runtime when only one
+        // exists, so single-bot behaviour is unchanged.
+        let (http, shared) =
+            resolve_direct_meeting_runtime(self, ChannelId::new(channel_id), provider)
+                .await
+                .ok()?;
         Some(
             super::recovery_engine::rebind_inflight_for_channel(
                 &http,
@@ -1636,6 +1690,7 @@ impl SendCallerClass {
             "routine-runtime",
             "headless_turn",
             "slo_alerter",
+            "quality_regression_alerter",
             "auto-queue-monitor",
             "inventory",
             "voice",
@@ -1678,6 +1733,7 @@ mod send_source_tests {
         assert!(is_allowed_send_source("lifecycle_notifier"));
         assert!(is_allowed_send_source("routine-runtime"));
         assert!(is_allowed_send_source("slo_alerter"));
+        assert!(is_allowed_send_source("quality_regression_alerter"));
         assert!(is_allowed_send_source("auto-queue-monitor"));
         assert!(is_allowed_send_source("inventory"));
         assert!(is_allowed_send_source("voice"));
@@ -3418,6 +3474,7 @@ mod tests {
         assert!(is_allowed_send_source("lifecycle_notifier"));
         assert!(is_allowed_send_source("routine-runtime"));
         assert!(is_allowed_send_source("slo_alerter"));
+        assert!(is_allowed_send_source("quality_regression_alerter"));
         assert!(is_allowed_send_source("auto-queue-monitor"));
         assert!(is_allowed_send_source("inventory"));
         assert!(!is_allowed_send_source("not-a-real-source"));
@@ -4738,6 +4795,146 @@ mod tests {
             claude_started,
             "a different provider/channel mailbox should not be blocked by the first turn"
         );
+    }
+
+    #[tokio::test]
+    async fn health_registry_allows_multiple_runtimes_for_same_provider() {
+        let registry = Arc::new(HealthRegistry::new());
+        let codex_a = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let codex_b = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let codex_a_shared = codex_a.shared();
+        let codex_b_shared = codex_b.shared();
+        let codex_a_channel = ChannelId::new(777_000_000_000_000_201);
+        let codex_b_channel = ChannelId::new(777_000_000_000_000_202);
+
+        {
+            let mut settings = codex_a_shared.settings.write().await;
+            settings.allowed_channel_ids = vec![codex_a_channel.get()];
+        }
+        {
+            let mut settings = codex_b_shared.settings.write().await;
+            settings.allowed_channel_ids = vec![codex_b_channel.get()];
+        }
+
+        registry
+            .register(
+                ProviderKind::Codex.as_str().to_string(),
+                codex_a_shared.clone(),
+            )
+            .await;
+        registry
+            .register(
+                ProviderKind::Codex.as_str().to_string(),
+                codex_b_shared.clone(),
+            )
+            .await;
+
+        assert_eq!(registry.registered_provider_count().await, 2);
+        let resolved_a =
+            resolve_direct_meeting_shared(registry.as_ref(), codex_a_channel, &ProviderKind::Codex)
+                .await
+                .expect("first codex runtime should resolve by channel");
+        let resolved_b =
+            resolve_direct_meeting_shared(registry.as_ref(), codex_b_channel, &ProviderKind::Codex)
+                .await
+                .expect("second codex runtime should resolve by channel");
+
+        assert!(Arc::ptr_eq(&resolved_a, &codex_a_shared));
+        assert!(Arc::ptr_eq(&resolved_b, &codex_b_shared));
+    }
+
+    #[tokio::test]
+    async fn snapshot_for_provider_uses_channel_runtime_for_same_provider() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(temp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let registry = Arc::new(HealthRegistry::new());
+        let codex_a = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let codex_b = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let codex_a_shared = codex_a.shared();
+        let codex_b_shared = codex_b.shared();
+        let codex_a_channel = ChannelId::new(777_000_000_000_000_211);
+        let codex_b_channel = ChannelId::new(777_000_000_000_000_212);
+        let active_user_message_id = 9_212;
+
+        {
+            let mut settings = codex_a_shared.settings.write().await;
+            settings.allowed_channel_ids = vec![codex_a_channel.get()];
+        }
+        {
+            let mut settings = codex_b_shared.settings.write().await;
+            settings.allowed_channel_ids = vec![codex_b_channel.get()];
+        }
+
+        registry
+            .register(
+                ProviderKind::Codex.as_str().to_string(),
+                codex_a_shared.clone(),
+            )
+            .await;
+        registry
+            .register(
+                ProviderKind::Codex.as_str().to_string(),
+                codex_b_shared.clone(),
+            )
+            .await;
+
+        codex_b
+            .seed_active_turn(codex_b_channel.get(), 42, active_user_message_id)
+            .await;
+        let inflight = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            codex_b_channel.get(),
+            Some("same-provider-runtime-b".to_string()),
+            42,
+            active_user_message_id,
+            active_user_message_id + 1,
+            String::new(),
+            Some("session-runtime-b".to_string()),
+            Some("tmux-runtime-b".to_string()),
+            None,
+            None,
+            0,
+        );
+        super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
+
+        let snapshot = registry
+            .snapshot_watcher_state_for_provider(&ProviderKind::Codex, codex_b_channel.get())
+            .await
+            .expect("runtime B channel should produce a watcher snapshot");
+
+        assert_eq!(
+            snapshot.mailbox_active_user_msg_id,
+            Some(active_user_message_id),
+            "snapshot must read runtime B's mailbox, not runtime A plus shared inflight JSON"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_registry_ignores_same_runtime_duplicate_registration() {
+        let registry = Arc::new(HealthRegistry::new());
+        let codex = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let codex_shared = codex.shared();
+
+        registry
+            .register(
+                ProviderKind::Codex.as_str().to_string(),
+                codex_shared.clone(),
+            )
+            .await;
+        registry
+            .register(ProviderKind::Codex.as_str().to_string(), codex_shared)
+            .await;
+
+        assert_eq!(registry.registered_provider_count().await, 1);
     }
 
     #[tokio::test]
