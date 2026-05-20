@@ -231,11 +231,17 @@ def reset_channel_state(
 
     summary: dict[str, Any] = {"channel_id": channel_id, "actions": []}
     # 1. Cancel turn (force) — best-effort.
+    # The cancel endpoint (`CancelTurnQuery`) reads `force` from the URL
+    # *query string*, not the JSON body. Sending it in the body left the
+    # query parameter at its default (`false`), which silently bypassed
+    # the force-only `force_purge_channel_mailbox` path added in #2706
+    # (PR #2715). Encode it on the URL so the in-memory channel mailbox
+    # is actually purged here.
     try:
-        body = json.dumps({"force": True}).encode("utf-8")
+        url = f"{base_url}/api/turns/{channel_id}/cancel?force=true"
         req = urllib.request.Request(
-            f"{base_url}/api/turns/{channel_id}/cancel",
-            data=body,
+            url,
+            data=b"",
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -246,6 +252,7 @@ def reset_channel_state(
                 "cancel_turn": {
                     "ok": payload.get("ok"),
                     "queued_remaining": payload.get("queued_remaining"),
+                    "queue_purged": payload.get("queue_purged"),
                     "tmux_killed": payload.get("tmux_killed"),
                     "lifecycle_path": payload.get("lifecycle_path"),
                 }
@@ -508,6 +515,7 @@ def run_one_channel(
                 predicate=predicate,
                 after_id=after_id,
                 timeout_s=float(step.get("timeout_s", 240)),
+                debug_label=f"{scenario.get('id')}::{channel_kind}::wait_for_text:{needle[:32]}",
             )
             _ingest_observed(observed)
             if not found:
