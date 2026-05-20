@@ -398,6 +398,22 @@ mod tests {
         );
     }
 
+    // #2712 / #2716: once the new turn actually streams, the assistant
+    // envelope wins over the earlier permission-mode marker.
+    #[test]
+    fn claude_assistant_after_permission_mode_is_streaming() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","result":"done","session_id":"s-prev"}"#,
+            r#"{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"s-new"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Streaming
+        );
+    }
+
     // Partial / unterminated JSON line for the same permission-mode envelope
     // (writer crashed mid-flush) is treated the same way — Unknown, never a
     // fallback to the previous result.
