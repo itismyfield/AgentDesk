@@ -243,8 +243,11 @@ fn run_actions(
                 let load_output = crate::services::platform::tmux::load_buffer(&buffer_name, text)?;
                 ensure_tmux_success(load_output, action)?;
                 check_prompt_cancel(cancel_token)?;
-                let paste_output =
-                    crate::services::platform::tmux::paste_buffer(session_name, &buffer_name, true)?;
+                let paste_output = crate::services::platform::tmux::paste_buffer(
+                    session_name,
+                    &buffer_name,
+                    true,
+                )?;
                 ensure_tmux_success(paste_output, action)?;
                 // #2730 settle: see POST_PASTE_BUFFER_SETTLE rationale above.
                 std::thread::sleep(POST_PASTE_BUFFER_SETTLE);
