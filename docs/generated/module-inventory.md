@@ -70,7 +70,7 @@
 | `compat` | `src/compat/mod.rs` | 185 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 23 |  |
-| `config` | `src/config.rs` | 3154 | giant-file |
+| `config` | `src/config.rs` | 3151 | giant-file |
 | `crate` | `src/main.rs` | 49 |  |
 | `credential` | `src/credential.rs` | 180 |  |
 | `db` | `src/db/mod.rs` | 345 |  |
@@ -465,10 +465,10 @@
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 231 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2833 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 10810 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 10817 | giant-file |
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 354 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 124 |  |
-| `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 410 |  |
+| `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 418 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 3290 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 375 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 185 |  |
@@ -599,7 +599,7 @@
 | `services::provider_cli::snapshot` | `src/services/provider_cli/snapshot.rs` | 123 |  |
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 929 |  |
 | `services::provider_exec` | `src/services/provider_exec.rs` | 506 |  |
-| `services::provider_hosting` | `src/services/provider_hosting.rs` | 318 |  |
+| `services::provider_hosting` | `src/services/provider_hosting.rs` | 338 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
 | `services::queue` | `src/services/queue.rs` | 823 |  |
 | `services::qwen` | `src/services/qwen.rs` | 2702 | giant-file |

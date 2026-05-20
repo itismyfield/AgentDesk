@@ -180,11 +180,11 @@ mod tests {
     static TEST_CONFIG_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
-    fn defaults_request_tui_for_claude_and_codex_only() {
+    fn defaults_request_tui_for_claude_only() {
         let config = Config::default();
 
         assert!(config.provider_tui_hosting_enabled("claude"));
-        assert!(config.provider_tui_hosting_enabled("codex"));
+        assert!(!config.provider_tui_hosting_enabled("codex"));
         assert!(!config.provider_tui_hosting_enabled("qwen"));
         assert!(!config.provider_tui_hosting_enabled("gemini"));
         assert!(!config.provider_tui_hosting_enabled("opencode"));
@@ -227,12 +227,32 @@ mod tests {
     #[test]
     fn requested_tui_selects_codex_driver_when_available() {
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
-        install_provider_hosting_config(&Config::default());
+        let mut config = Config::default();
+        config.providers.insert(
+            "codex".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+                ..ProviderConfig::default()
+            },
+        );
+        install_provider_hosting_config(&config);
 
         let selection = resolve_provider_session_selection(&ProviderKind::Codex);
 
         assert!(selection.requested_tui_hosting);
         assert_eq!(selection.driver, ProviderSessionDriver::TuiHosting);
+        assert_eq!(selection.fallback_reason, None);
+    }
+
+    #[test]
+    fn codex_defaults_to_legacy_prompt_driver() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        install_provider_hosting_config(&Config::default());
+
+        let selection = resolve_provider_session_selection(&ProviderKind::Codex);
+
+        assert!(!selection.requested_tui_hosting);
+        assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
         assert_eq!(selection.fallback_reason, None);
     }
 

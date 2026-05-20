@@ -165,10 +165,7 @@ pub struct ProviderConfig {
 }
 
 pub fn default_provider_tui_hosting(provider: &str) -> bool {
-    matches!(
-        provider.trim().to_ascii_lowercase().as_str(),
-        "claude" | "codex"
-    )
+    matches!(provider.trim().to_ascii_lowercase().as_str(), "claude")
 }
 
 impl Config {

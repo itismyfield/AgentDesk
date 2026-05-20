@@ -408,3 +408,11 @@ pub(in crate::services::discord) async fn release_mailbox_after_placeholder_post
         false
     }
 }
+
+pub(in crate::services::discord) async fn release_mailbox_after_hosted_tui_busy_pre_submit(
+    shared: &Arc<SharedData>,
+    provider: &super::super::ProviderKind,
+    channel_id: ChannelId,
+) {
+    let _ = super::super::mailbox_finish_turn(shared, provider, channel_id).await;
+}
