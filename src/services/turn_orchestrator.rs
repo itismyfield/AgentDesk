@@ -1252,6 +1252,18 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    /// #2706: queue-only purge. Drains the intervention queue without
+    /// touching the active `cancel_token`, so a turn that entered the
+    /// mailbox between a sibling force-kill and this call is not
+    /// collaterally cancelled.
+    pub(crate) async fn purge_queue(&self, persistence: QueuePersistenceContext) -> usize {
+        self.request(
+            |reply| ChannelMailboxMsg::PurgeQueue { persistence, reply },
+            0,
+        )
+        .await
+    }
+
     pub(crate) async fn replace_queue(
         &self,
         queue: Vec<Intervention>,
@@ -1697,6 +1709,14 @@ enum ChannelMailboxMsg {
     Clear {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<ClearChannelResult>,
+    },
+    /// #2706: drain the intervention queue without touching the active
+    /// `cancel_token`. Used by `cancel_turn(force=true)` so the in-memory
+    /// channel mailbox is emptied even if a fresh turn entered the actor
+    /// between `force_kill_turn_without_cancel_event` and this purge.
+    PurgeQueue {
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<usize>,
     },
     ReplaceQueue {
         queue: Vec<Intervention>,
@@ -2277,6 +2297,17 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         queue_exit_events,
                     });
                     mark_turn_finished_signal_done(channel_id);
+                }
+                ChannelMailboxMsg::PurgeQueue { persistence, reply } => {
+                    // #2706: queue-only purge. Leaves `cancel_token`,
+                    // `active_request_owner`, `active_user_message_id`
+                    // untouched so a turn that entered the actor in
+                    // between force-kill and purge is not collaterally
+                    // cancelled.
+                    state.last_persistence = Some(persistence.clone());
+                    let drained = state.intervention_queue.drain(..).count();
+                    persist_queue(channel_id, &state.intervention_queue, &persistence);
+                    let _ = reply.send(drained);
                 }
                 ChannelMailboxMsg::ReplaceQueue {
                     queue,
@@ -3543,6 +3574,96 @@ mod tests {
         assert!(handle.extend_timeout(15).await.is_ok());
         handle.clear_timeout_override().await;
         assert_eq!(handle.take_timeout_override().await, None);
+    }
+}
+
+// #2706: PurgeQueue regression guards. Kept in a plain `#[cfg(test)]` module so
+// they run under the default `cargo test` invocation — the legacy-sqlite-tests
+// feature is *not* enabled in CI by default, so the regression coverage for
+// queue-only purge cannot live next to the rest of the mailbox tests.
+#[cfg(test)]
+mod purge_queue_tests {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+
+    use crate::services::provider::ProviderKind;
+    use crate::services::turn_orchestrator::{
+        CancelToken, ChannelMailboxRegistry, Intervention, InterventionMode,
+        QueuePersistenceContext,
+    };
+
+    fn make_intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
+        Intervention {
+            author_id: UserId::new(1),
+            message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at,
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            voice_announcement: None,
+        }
+    }
+
+    // PurgeQueue empties the intervention queue without touching the
+    // active cancel_token, so a turn that entered the mailbox between
+    // force-kill and the purge survives.
+    #[tokio::test]
+    async fn purge_queue_drains_queue_without_disturbing_active_turn() {
+        let provider = ProviderKind::Claude;
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(2706);
+        let handle = registry.handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, "mailbox-purge-2706", None);
+        let now = Instant::now();
+
+        handle
+            .replace_queue(
+                vec![
+                    make_intervention(20, "first", now),
+                    make_intervention(21, "second", now),
+                    make_intervention(22, "third", now),
+                ],
+                persistence.clone(),
+            )
+            .await;
+
+        let active_token = Arc::new(CancelToken::new());
+        handle
+            .restore_active_turn(active_token.clone(), UserId::new(7), MessageId::new(70))
+            .await;
+
+        let drained = handle.purge_queue(persistence).await;
+        assert_eq!(drained, 3);
+
+        let snapshot = handle.snapshot().await;
+        assert!(snapshot.intervention_queue.is_empty());
+
+        // Active turn (its token and ownership) must survive the queue purge.
+        let surviving = handle.cancel_token().await;
+        assert!(surviving.is_some());
+        assert!(Arc::ptr_eq(&surviving.unwrap(), &active_token));
+    }
+
+    // purge_queue is a no-op on an empty mailbox.
+    #[tokio::test]
+    async fn purge_queue_is_idempotent_on_empty_mailbox() {
+        let provider = ProviderKind::Claude;
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(2707);
+        let handle = registry.handle(channel_id);
+        let persistence =
+            QueuePersistenceContext::new(&provider, "mailbox-purge-idempotent-2706", None);
+
+        let drained_first = handle.purge_queue(persistence.clone()).await;
+        let drained_second = handle.purge_queue(persistence).await;
+        assert_eq!(drained_first, 0);
+        assert_eq!(drained_second, 0);
+        assert!(handle.snapshot().await.intervention_queue.is_empty());
     }
 }
 
