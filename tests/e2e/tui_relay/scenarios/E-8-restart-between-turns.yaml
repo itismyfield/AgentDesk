@@ -17,3 +17,4 @@ steps:
 assertions:
   - no_duplicate_content: true
   - text_present: "[E2E:E8:POST]"
+  - no_resume_prompt_chrome: true

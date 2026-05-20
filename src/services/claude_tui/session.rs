@@ -130,6 +130,11 @@ fn write_launch_script(
     // " " (rendered invisibly by the TUI) instead of a full chat-style
     // \"Continue from where you left off.\" prompt that would steer the
     // assistant.
+    //
+    // TODO(#2718-upstream): if the Claude CLI moves PY6 from `||` to
+    // nullish coalescing (`??`) or an explicit empty-check, this
+    // placeholder semantics will need to be revisited. Track upstream
+    // PY6 changes and reflect them in this comment + the unit test.
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
