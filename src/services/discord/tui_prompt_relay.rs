@@ -1544,7 +1544,7 @@ pub(super) fn format_ssh_direct_prompt_notification(
     let preview =
         truncate_chars(prompt.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT).replace("```", "` ` `");
     format!(
-        "터미에 직접 주입된 입력 (tmux : `{}`):\n```text\n{}\n```",
+        "터미널에 직접 주입된 입력 (tmux : `{}`):\n```text\n{}\n```",
         sanitize_inline_code(tmux_session_name),
         preview,
     )
@@ -1595,7 +1595,7 @@ mod tests {
     fn formats_ssh_direct_prompt_notification() {
         let output = format_ssh_direct_prompt_notification("claude", "AgentDesk-claude-a", "hi");
 
-        assert!(output.contains("터미에 직접 주입된 입력"));
+        assert!(output.contains("터미널에 직접 주입된 입력"));
         assert!(output.contains("(tmux : `AgentDesk-claude-a`)"));
         assert!(output.contains("```text\nhi\n```"));
     }
@@ -1605,7 +1605,7 @@ mod tests {
         let prompt = "x".repeat(SSH_DIRECT_PROMPT_PREVIEW_LIMIT + 20);
         let output = format_ssh_direct_prompt_notification("codex", "AgentDesk-codex-a", &prompt);
 
-        assert!(output.contains("터미에 직접 주입된 입력"));
+        assert!(output.contains("터미널에 직접 주입된 입력"));
         assert!(output.contains("(tmux : `AgentDesk-codex-a`)"));
         assert!(output.contains("..."));
         assert!(output.len() < prompt.len() + 120);
