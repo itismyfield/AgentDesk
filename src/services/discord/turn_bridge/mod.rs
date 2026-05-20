@@ -2085,6 +2085,61 @@ fn response_portion_after_offset(full_response: &str, response_sent_offset: usiz
     full_response.get(response_sent_offset..).unwrap_or("")
 }
 
+fn build_turn_bridge_streaming_edit_text(
+    status_panel_v2_enabled: bool,
+    current_portion: &str,
+    status_block: &str,
+    provider: &ProviderKind,
+) -> String {
+    if status_panel_v2_enabled && !current_portion.is_empty() {
+        super::formatting::format_for_discord_with_status_panel(current_portion, provider)
+    } else {
+        super::formatting::build_streaming_placeholder_text(current_portion, status_block)
+    }
+}
+
+#[cfg(test)]
+mod streaming_edit_text_tests {
+    use super::*;
+
+    #[test]
+    fn status_panel_v2_streaming_edit_omits_processing_footer_once_text_exists() {
+        let rendered = build_turn_bridge_streaming_edit_text(
+            true,
+            "E2E-CODEX-1-OK\n- Working on the backend now",
+            "⠙ Processing...",
+            &ProviderKind::Codex,
+        );
+
+        assert_eq!(rendered, "E2E-CODEX-1-OK\n- Working on the backend now");
+        assert!(!rendered.contains("Processing"));
+    }
+
+    #[test]
+    fn legacy_streaming_edit_keeps_processing_footer() {
+        let rendered = build_turn_bridge_streaming_edit_text(
+            false,
+            "Partial answer",
+            "⠙ Processing...",
+            &ProviderKind::Codex,
+        );
+
+        assert_eq!(rendered, "Partial answer\n\n⠙ Processing...");
+    }
+
+    #[test]
+    fn status_panel_v2_empty_streaming_edit_keeps_placeholder() {
+        let rendered = build_turn_bridge_streaming_edit_text(
+            true,
+            "",
+            "⠙ Processing...",
+            &ProviderKind::Codex,
+        );
+
+        assert_eq!(rendered, "⠙ Processing...");
+    }
+}
+
 fn bridge_pre_submission_tui_prompt_error(provider: &ProviderKind, full_response: &str) -> bool {
     let Some(error_text) = full_response
         .trim_start()
@@ -5046,8 +5101,12 @@ pub(super) fn spawn_turn_bridge(
                         &full_response,
                     )
                 };
-                let stable_display_text =
-                    super::formatting::build_streaming_placeholder_text(current_portion, &status_block);
+                let stable_display_text = build_turn_bridge_streaming_edit_text(
+                    shared_owned.status_panel_v2_enabled,
+                    current_portion,
+                    &status_block,
+                    &provider,
+                );
 
                 // #1255 codex round-1 P2: while a long-running placeholder owns
                 // `current_msg_id`, the controller is the sole writer. Skipping the

@@ -473,9 +473,13 @@ fn render_status_panel(
         cluster_enabled,
         local_instance_id.as_deref(),
     );
-    let recent_section = live_block
-        .filter(|block| !block.trim().is_empty())
-        .map(|block| format!("{recent_header}\n{block}"));
+    let recent_section = if matches!(header_status, DerivedStatus::Completed { .. }) {
+        None
+    } else {
+        live_block
+            .filter(|block| !block.trim().is_empty())
+            .map(|block| format!("{recent_header}\n{block}"))
+    };
 
     if let Some(recent) = recent_section.as_ref() {
         let mut with_recent = sections.clone();

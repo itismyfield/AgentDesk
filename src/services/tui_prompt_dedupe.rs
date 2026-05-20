@@ -468,6 +468,13 @@ pub fn extract_claude_transcript_user_prompt(json: &Value) -> Option<String> {
     if json.get("type").and_then(Value::as_str) != Some("user") {
         return None;
     }
+    if json
+        .get("isMeta")
+        .and_then(Value::as_bool)
+        .is_some_and(|is_meta| is_meta)
+    {
+        return None;
+    }
     let message = json.get("message")?;
     if message
         .get("role")
@@ -1198,6 +1205,23 @@ mod tests {
             extract_claude_transcript_user_prompt(&json).as_deref(),
             Some("hello\nworld")
         );
+    }
+
+    #[test]
+    fn ignores_claude_transcript_meta_user_message_text() {
+        let json = serde_json::json!({
+            "type": "user",
+            "isMeta": true,
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "_" }
+                ]
+            },
+            "sessionId": "sess-tui",
+        });
+
+        assert_eq!(extract_claude_transcript_user_prompt(&json), None);
     }
 
     #[test]

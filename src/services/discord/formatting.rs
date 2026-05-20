@@ -2142,24 +2142,136 @@ mod status_panel_v2_formatter_tests {
         let output = format_for_discord(input);
         assert_eq!(output, "first paragraph\n\nsecond paragraph");
     }
+
+    #[test]
+    fn format_for_discord_removes_trailing_streaming_status_footer() {
+        let input = "Final answer\n\n⠋ Processing...";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
+
+    #[test]
+    fn format_for_discord_keeps_non_trailing_spinner_text() {
+        let input = "⠋ Processing...\nFinal answer";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn format_for_discord_removes_stacked_streaming_status_footers() {
+        let input = "Final answer\n\n⠋ Processing...\n⠙ Working...";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
+
+    #[test]
+    fn format_for_discord_removes_placeholder_waiting_before_streaming_footer() {
+        let input = "Final answer\n⏳ 대기 중...\n\n⠋ Processing...";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
+
+    #[test]
+    fn format_for_discord_keeps_trailing_spinner_without_known_status_shape() {
+        let input = "Final answer\n\n⠋ note";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn format_for_discord_removes_ascii_spinner_status_footer() {
+        let input = "Final answer\n\n| Processing...";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
+
+    #[test]
+    fn format_for_discord_keeps_trailing_ascii_bullet_status_text() {
+        let input = "Final answer\n- Working on the backend now";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn format_for_discord_keeps_trailing_ascii_table_row() {
+        let input = "Final answer\n| Processing fee | 3% |";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn format_for_discord_preserves_trailing_blank_without_footer() {
+        let input = "Final answer\n\n";
+        let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
+        assert_eq!(output, "Final answer");
+    }
 }
 
 /// Remove ephemeral placeholder lines (e.g. "⏳ 대기 중...") from the final
 /// delivered response.  These lines are useful during streaming but should not
 /// persist in the channel.
 fn strip_placeholder_lines(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut lines = Vec::new();
     for line in s.lines() {
         let t = line.trim();
         if t.starts_with("⏳") && t.contains("대기") {
             continue;
         }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(line);
+        lines.push(line);
     }
-    out
+    strip_trailing_streaming_status_footer(&mut lines);
+    lines.join("\n")
+}
+
+fn strip_trailing_streaming_status_footer(lines: &mut Vec<&str>) {
+    loop {
+        let Some(last_nonblank) = lines.iter().rposition(|line| !line.trim().is_empty()) else {
+            break;
+        };
+        if !is_streaming_placeholder_status_line(lines[last_nonblank].trim()) {
+            break;
+        }
+        lines.truncate(last_nonblank);
+    }
+}
+
+fn is_streaming_placeholder_status_line(line: &str) -> bool {
+    const SPINNER_FRAMES: &[char] = &[
+        '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '|', '/', '-', '\\', '◐', '◓', '◑', '◒',
+        '⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷',
+    ];
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !SPINNER_FRAMES.contains(&first) || !chars.next().is_some_and(char::is_whitespace) {
+        return false;
+    }
+    let status = chars.as_str().trim();
+    let ascii_spinner = matches!(first, '|' | '/' | '-' | '\\');
+    if ascii_spinner {
+        return matches!(
+            status,
+            "Processing..."
+                | "Processing…"
+                | "Thinking..."
+                | "Thinking…"
+                | "Generating..."
+                | "Generating…"
+                | "Working..."
+                | "Working…"
+        );
+    }
+    status.starts_with("Processing")
+        || status.starts_with("Thinking")
+        || status.starts_with("Generating")
+        || status.starts_with("Working")
+        || status.starts_with("응답")
+        || status.starts_with("처리")
+        || status.starts_with('⚙')
+        || status.starts_with('⚠')
+        || status.starts_with('⏱')
+        || status.starts_with('💭')
 }
 
 /// Mechanical formatting for Discord readability.

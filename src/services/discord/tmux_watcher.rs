@@ -629,6 +629,19 @@ fn jsonl_terminal_can_confirm_completion(
             state.effective_relay_owner_kind(),
             crate::services::discord::inflight::RelayOwnerKind::Watcher
         ) && !state.rebind_origin;
+        let managed_terminal_runtime_turn = matches!(
+            state.runtime_kind,
+            Some(
+                crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+                    | crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend,
+            )
+        ) && !state.rebind_origin
+            && state.user_msg_id != 0
+            && state.current_msg_id != 0
+            && state
+                .turn_start_offset
+                .map(|start| state.last_offset > start)
+                .unwrap_or(false);
         let legacy_terminal_shortcut = if state.rebind_origin {
             adopted_session_turn
         } else {
@@ -637,7 +650,8 @@ fn jsonl_terminal_can_confirm_completion(
 
         has_session_binding
             && ((state.status_message_id.is_none() && legacy_terminal_shortcut)
-                || watcher_owned_session_bound_turn)
+                || watcher_owned_session_bound_turn
+                || managed_terminal_runtime_turn)
     })
 }
 
@@ -797,33 +811,94 @@ mod matched_session_jsonl_gate_tests {
     }
 
     #[test]
-    fn jsonl_terminal_completion_keeps_bridge_owned_placeholder_on_legacy_path() {
+    fn jsonl_terminal_completion_accepts_managed_claude_tui_bridge_owned_placeholder() {
         let mut state = state_for_matched_session(
             ProviderKind::Claude,
             "AgentDesk-claude-bridge-owned",
             "/tmp/bridge-owned.jsonl",
         );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
         state.current_msg_id = state.user_msg_id + 1;
         state.status_message_id = Some(state.current_msg_id + 1);
+        state.turn_start_offset = Some(10);
+        state.last_offset = 42;
 
         assert!(
-            !jsonl_terminal_can_confirm_completion(Some(&state)),
-            "bridge-owned placeholder inflights must still rely on the legacy pane/timer gate"
+            jsonl_terminal_can_confirm_completion(Some(&state)),
+            "matched ClaudeTui terminal JSONL should release bridge-owned placeholders instead of waiting forever on pane prompt detection"
         );
 
         state
             .set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::StandbyRelay);
         assert!(
-            !jsonl_terminal_can_confirm_completion(Some(&state)),
-            "standby relay ownership is not the watcher-owned completion shortcut"
+            jsonl_terminal_can_confirm_completion(Some(&state)),
+            "managed ClaudeTui terminal JSONL remains authoritative even if a relay-owner label is stale"
         );
 
         state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::None);
-        state.current_msg_id = state.user_msg_id;
+        state.turn_start_offset = Some(42);
+        state.last_offset = 42;
         assert!(
             !jsonl_terminal_can_confirm_completion(Some(&state)),
-            "bridge-owned status-panel rows keep the existing status-panel restriction"
+            "a stale prior terminal envelope must not unlock a fresh turn that has not advanced the output offset"
         );
+
+        state.turn_start_offset = None;
+        state.last_offset = 99;
+        state.full_response = "prior response".to_string();
+        assert!(
+            !jsonl_terminal_can_confirm_completion(Some(&state)),
+            "without a current turn_start_offset anchor, non-empty full_response is not enough to unlock cleanup"
+        );
+    }
+
+    #[test]
+    fn jsonl_terminal_completion_accepts_managed_process_backend_bridge_owned_placeholder() {
+        let mut state = state_for_matched_session(
+            ProviderKind::Codex,
+            "AgentDesk-codex-process-backend",
+            "/tmp/process-backend.jsonl",
+        );
+        state.runtime_kind =
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend);
+        state.current_msg_id = state.user_msg_id + 1;
+        state.status_message_id = Some(state.current_msg_id + 1);
+        state.turn_start_offset = Some(100);
+        state.last_offset = 150;
+
+        assert!(
+            jsonl_terminal_can_confirm_completion(Some(&state)),
+            "process backend terminal JSONL should also release bridge-owned live placeholders"
+        );
+    }
+
+    #[test]
+    fn jsonl_terminal_completion_rejects_unanchored_managed_runtime_shapes() {
+        let mut state = state_for_matched_session(
+            ProviderKind::Claude,
+            "AgentDesk-claude-guarded",
+            "/tmp/guarded.jsonl",
+        );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.current_msg_id = state.user_msg_id + 1;
+        state.turn_start_offset = Some(1);
+        state.last_offset = 2;
+        assert!(jsonl_terminal_can_confirm_completion(Some(&state)));
+
+        state.runtime_kind = None;
+        assert!(!jsonl_terminal_can_confirm_completion(Some(&state)));
+
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.user_msg_id = 0;
+        assert!(!jsonl_terminal_can_confirm_completion(Some(&state)));
+
+        state.user_msg_id = 9001;
+        state.current_msg_id = 0;
+        assert!(!jsonl_terminal_can_confirm_completion(Some(&state)));
+
+        state.current_msg_id = 9002;
+        state.rebind_origin = true;
+        assert!(!jsonl_terminal_can_confirm_completion(Some(&state)));
     }
 
     #[test]

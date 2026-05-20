@@ -203,6 +203,38 @@ fn status_panel_turn_completed_renders_foreground_completion() {
 }
 
 #[test]
+fn status_panel_turn_completed_drops_recent_live_block() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(174);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Bash",
+            &json!({"command": "printf E2E_TOOL_OK"}).to_string(),
+        ),
+    );
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use(
+            "Bash",
+            &json!({"command": "printf E2E_TOOL_OK"}).to_string(),
+        )
+        .unwrap(),
+    );
+
+    let active = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(active.contains("🖥️ Recent"));
+    assert!(active.contains("[Bash]"));
+
+    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
+
+    let completed = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(completed.starts_with("✅ **응답 완료** — claude"));
+    assert!(!completed.contains("🖥️ Recent"));
+    assert!(!completed.contains("[Bash]"));
+}
+
+#[test]
 fn status_panel_turn_completed_after_monitor_wait_renders_background_completion() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(172);

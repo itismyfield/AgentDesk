@@ -29,6 +29,10 @@ static CODEX_IDLE_ROLLOUT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
 static CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
 static CLAUDE_IDLE_RESPONSE_TAILS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+const TUI_IDLE_RESPONSE_CHROME_PREFIXES: &[&str] = &[
+    "No response requested.",
+    "Continue from where you left off.",
+];
 
 pub(super) fn spawn_tui_prompt_relay(shared: Arc<SharedData>, provider: ProviderKind) {
     #[cfg(unix)]
@@ -1030,9 +1034,13 @@ fn codex_idle_prompt_observation_should_tail_response(
 fn claude_idle_prompt_observation_should_tail_response(
     observation: crate::services::tui_prompt_dedupe::PromptObservation,
 ) -> bool {
-    !matches!(
+    // The turn bridge owns Discord-originated prompts. Claude's idle tail is
+    // only a recovery path for operator text typed directly into the TUI; if
+    // we tail suppressed Discord/recent duplicates here, the bridge-delivered
+    // answer is posted a second time after inflight clears.
+    matches!(
         observation,
-        crate::services::tui_prompt_dedupe::PromptObservation::Ignored
+        crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
     )
 }
 
@@ -1411,6 +1419,7 @@ fn compose_tui_idle_response(
         .or(error_result)
         .filter(|text| !text.trim().is_empty())
         .unwrap_or(streamed);
+    let body = strip_leading_tui_idle_response_chrome(&body);
     let sideband = sideband
         .into_iter()
         .filter(|line| !line.trim().is_empty())
@@ -1422,6 +1431,39 @@ fn compose_tui_idle_response(
     } else {
         format!("{}\n\n{}", sideband.join("\n"), body)
     }
+}
+
+#[cfg(unix)]
+fn strip_leading_tui_idle_response_chrome(body: &str) -> String {
+    let mut stripped = body;
+    let mut changed = false;
+    loop {
+        let trimmed = stripped.trim_start();
+        if let Some(prefix) = TUI_IDLE_RESPONSE_CHROME_PREFIXES
+            .iter()
+            .find(|prefix| leading_chrome_prefix_matches(trimmed, prefix))
+        {
+            changed = true;
+            stripped = &trimmed[prefix.len()..];
+            continue;
+        }
+        return if changed {
+            trimmed.to_string()
+        } else {
+            body.to_string()
+        };
+    }
+}
+
+#[cfg(unix)]
+fn leading_chrome_prefix_matches(trimmed: &str, prefix: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.is_empty()
+        || rest.starts_with('\n')
+        || rest.starts_with('\r')
+        || rest.chars().next().is_some_and(|ch| !ch.is_whitespace())
 }
 
 #[cfg(unix)]
@@ -2076,14 +2118,14 @@ agents:
     }
 
     #[test]
-    fn claude_idle_prompt_recent_duplicate_still_tails_response() {
+    fn claude_idle_prompt_tails_only_new_ssh_direct_prompt() {
         assert!(claude_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
         ));
-        assert!(claude_idle_prompt_observation_should_tail_response(
+        assert!(!claude_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::SuppressedDiscordDuplicate
         ));
-        assert!(claude_idle_prompt_observation_should_tail_response(
+        assert!(!claude_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::SuppressedRecentDuplicate
         ));
         assert!(!claude_idle_prompt_observation_should_tail_response(
@@ -2121,6 +2163,26 @@ agents:
     }
 
     #[test]
+    fn claude_idle_transcript_scan_ignores_meta_user_prompt() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let meta = "{\"type\":\"user\",\"isMeta\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"_\"}]},\"sessionId\":\"s1\"}\n";
+        let synthetic = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"No response requested.\"}]},\"sessionId\":\"s1\"}\n";
+        let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"real prompt\"}]},\"sessionId\":\"s1\"}\n";
+        std::fs::write(&transcript, format!("{meta}{synthetic}{prompt}"))
+            .expect("write transcript");
+
+        assert_eq!(
+            scan_claude_idle_transcript_for_prompt(&transcript, 0).expect("scan"),
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt: "real prompt".to_string(),
+                prompt_start_offset: (meta.len() + synthetic.len()) as u64,
+                line_end_offset: (meta.len() + synthetic.len() + prompt.len()) as u64,
+            }
+        );
+    }
+
+    #[test]
     fn claude_idle_transcript_scan_preserves_partial_trailing_jsonl() {
         let dir = tempfile::tempdir().expect("temp dir");
         let transcript = dir.path().join("transcript.jsonl");
@@ -2153,5 +2215,89 @@ agents:
             output,
             "[started] subagent launched\n[completed] monitor finished\n\nfinal answer"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_strips_leading_resume_prompt_chrome() {
+        let output = compose_tui_idle_response(
+            Some("No response requested.fix2_3".to_string()),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(output, "fix2_3");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_preserves_legitimate_no_response_sentence() {
+        let output = compose_tui_idle_response(
+            Some("No response requested. But here is the explanation.".to_string()),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            output,
+            "No response requested. But here is the explanation."
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_preserves_middle_resume_prompt_chrome_text() {
+        let output = compose_tui_idle_response(
+            Some("Hello\nNo response requested. trailing".to_string()),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(output, "Hello\nNo response requested. trailing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_returns_empty_when_body_is_only_resume_prompt_chrome() {
+        let output = compose_tui_idle_response(
+            Some("No response requested.".to_string()),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(output, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_strips_multiple_leading_resume_prompt_chrome_chunks() {
+        let output = compose_tui_idle_response(
+            Some(
+                "Continue from where you left off.\nNo response requested.\nfinal answer"
+                    .to_string(),
+            ),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(output, "final answer");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_idle_response_does_not_trim_when_no_resume_prompt_chrome() {
+        let output = compose_tui_idle_response(
+            Some("  intentional leading spaces".to_string()),
+            None,
+            String::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(output, "  intentional leading spaces");
     }
 }
