@@ -74,8 +74,7 @@ async fn force_purge_channel_mailbox(
     let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
         provider, token_hash, None,
     );
-    let result = handle.clear(persistence).await;
-    Some(result.queue_exit_events.len())
+    Some(handle.purge_queue(persistence).await)
 }
 
 #[derive(Clone)]
@@ -597,7 +596,7 @@ impl QueueService {
         };
 
         tracing::info!(
-            "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={}, queued_before={:?}, queued_after={:?}, queue_disk_before={}, queue_disk_after={}",
+            "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={}, queued_before={:?}, queued_after={:?}, queue_disk_before={}, queue_disk_after={}, queue_purged={:?}",
             channel_id,
             session_key,
             reported_tmux_session,
@@ -612,6 +611,7 @@ impl QueueService {
             lifecycle.queue_depth_after,
             lifecycle.queue_disk_present_before,
             lifecycle.queue_disk_present_after,
+            queue_purged_count,
         );
 
         Ok(json!({
