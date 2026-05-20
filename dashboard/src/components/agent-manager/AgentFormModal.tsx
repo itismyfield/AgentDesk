@@ -164,12 +164,21 @@ export default function AgentFormModal({
                   {spriteNum > 0 ? (
                     <img
                       src={`/sprites/${spriteNum}-D-1.png`}
-                      alt={`sprite ${spriteNum}`}
+                      alt={t({ ko: `스프라이트 ${spriteNum}`, en: `Sprite ${spriteNum}` })}
                       className="w-full h-full object-cover"
                       style={{ imageRendering: "pixelated" }}
                     />
                   ) : (
-                    <span className="text-2xl">{formValues.avatar_emoji || "🤖"}</span>
+                    <span
+                      className="text-2xl"
+                      role="img"
+                      aria-label={t({
+                        ko: `선택된 이모지 미리보기: ${formValues.avatar_emoji || "🤖"}`,
+                        en: `Selected emoji preview: ${formValues.avatar_emoji || "🤖"}`,
+                      })}
+                    >
+                      {formValues.avatar_emoji || "🤖"}
+                    </span>
                   )}
                 </div>
                 <button

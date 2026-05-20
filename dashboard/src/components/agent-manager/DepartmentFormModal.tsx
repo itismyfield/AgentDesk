@@ -323,7 +323,7 @@ export default function DepartmentFormModal({
                     <button
                       key={c}
                       type="button"
-                      aria-label={`Color ${c}`}
+                      aria-label={t({ ko: `색상 ${c}`, en: `Color ${c}` })}
                       aria-pressed={form.color === c}
                       onClick={() => setValue("color", c, { shouldDirty: true, shouldValidate: true })}
                       className="w-11 h-11 rounded-full transition-all hover:scale-110"
