@@ -714,9 +714,10 @@ pub fn execute_command_streaming(
     #[cfg(not(unix))]
     let entrypoint_supports_tui_hosting = false;
     let session_selection =
-        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
             &ProviderKind::Claude,
             entrypoint_supports_tui_hosting,
+            report_channel_id,
         );
     session_selection.log_start("claude.execute_command_streaming");
 

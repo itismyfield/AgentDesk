@@ -185,6 +185,13 @@ impl Config {
                 .providers
                 .values()
                 .any(|provider| provider.tui_hosting == Some(true))
+            || self.agents.iter().any(|agent| {
+                agent
+                    .channels
+                    .iter()
+                    .into_iter()
+                    .any(|(_, channel)| channel.and_then(AgentChannel::tui_hosting) == Some(true))
+            })
     }
 
     /// Issue #2193 — Codex remote SSH gate accessor.
@@ -525,6 +532,13 @@ impl AgentChannel {
         }
     }
 
+    pub fn tui_hosting(&self) -> Option<bool> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => config.tui_hosting,
+        }
+    }
+
     pub fn model(&self) -> Option<String> {
         match self {
             Self::Legacy(_) => None,
@@ -638,6 +652,8 @@ pub struct AgentChannelConfig {
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(default, alias = "tuiHosting", skip_serializing_if = "Option::is_none")]
+    pub tui_hosting: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
