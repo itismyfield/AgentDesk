@@ -383,13 +383,23 @@ pub(in crate::services::discord) fn process_watcher_lines(
                         && !outcome.is_provider_overloaded
                         && !result_str.is_empty()
                     {
-                        if full_response.is_empty() {
+                        if full_response.trim().is_empty() {
+                            full_response.clear();
                             full_response.push_str(&result_str);
                         } else if tool_state.any_tool_used && !tool_state.has_post_tool_text {
                             let trimmed_result = result_str.trim();
-                            if !trimmed_result.is_empty()
-                                && !full_response.trim_end().ends_with(trimmed_result)
-                            {
+                            // Skip only when the final newline-delimited chunk
+                            // of full_response is an exact duplicate of
+                            // result_str. Tail-substring matches against
+                            // narration are a false-positive risk.
+                            let already_present = !trimmed_result.is_empty()
+                                && full_response
+                                    .trim_end_matches('\n')
+                                    .rsplit('\n')
+                                    .next()
+                                    .map(|last| last.trim() == trimmed_result)
+                                    .unwrap_or(false);
+                            if !trimmed_result.is_empty() && !already_present {
                                 if !full_response.ends_with('\n') {
                                     full_response.push('\n');
                                 }

@@ -583,20 +583,10 @@ mod tests {
         );
         let deliveries = parser.ingest_frame(&frame(&binding, payload, 1));
         assert_eq!(deliveries.len(), 1);
-        assert!(
-            deliveries[0].response_text.contains("first chunk"),
-            "expected first chunk preserved; got: {:?}",
-            deliveries[0].response_text
-        );
-        assert!(
-            deliveries[0].response_text.contains("second chunk"),
-            "expected second chunk preserved; got: {:?}",
-            deliveries[0].response_text
-        );
-        assert!(
-            deliveries[0].response_text.contains("third chunk"),
-            "expected result fallback appended; got: {:?}",
-            deliveries[0].response_text
+        // Exact equality guards against accidental duplication or chunk reorder.
+        assert_eq!(
+            deliveries[0].response_text,
+            "first chunk second chunk \nthird chunk"
         );
     }
 
@@ -613,12 +603,9 @@ mod tests {
         );
         let deliveries = parser.ingest_frame(&frame(&binding, payload, 1));
         assert_eq!(deliveries.len(), 1);
-        assert!(
-            deliveries[0]
-                .response_text
-                .contains("cron self-prompt response"),
-            "expected background result.result delivered; got: {:?}",
-            deliveries[0].response_text
+        assert_eq!(
+            deliveries[0].response_text,
+            "OK | cron self-prompt response"
         );
         assert_eq!(
             deliveries[0].task_notification_kind,
