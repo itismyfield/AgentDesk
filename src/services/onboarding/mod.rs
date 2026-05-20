@@ -4664,6 +4664,7 @@ mod tests {
                         prompt_file: None,
                         workspace: Some("~/legacy".to_string()),
                         provider: Some("codex".to_string()),
+                        tui_hosting: None,
                         model: None,
                         reasoning_effort: None,
                         peer_agents: None,

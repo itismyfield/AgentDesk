@@ -366,9 +366,10 @@ fn tui_busy_followup_diagnostic(
     }
     let tmux_session_name = tmux_session_name?;
     let selection =
-        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
             provider,
             claude::is_tmux_available(),
+            Some(channel_id.get()),
         );
     if selection.driver != crate::services::provider_hosting::ProviderSessionDriver::TuiHosting
         || crate::services::claude_tui::hook_server::current_hook_endpoint().is_none()
@@ -511,6 +512,7 @@ fn prelaunch_runtime_kind_for_managed_session(
     provider: &ProviderKind,
     remote_profile_is_none: bool,
     has_tmux_session_name: bool,
+    channel_id: Option<u64>,
 ) -> Option<RuntimeHandoffKind> {
     if !remote_profile_is_none
         || !has_tmux_session_name
@@ -520,8 +522,8 @@ fn prelaunch_runtime_kind_for_managed_session(
         return None;
     }
     let selection =
-        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
-            provider, true,
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
+            provider, true, channel_id,
         );
     if selection.driver == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting {
         return match provider {
@@ -542,6 +544,7 @@ fn prelaunch_runtime_kind_for_managed_session(
     _provider: &ProviderKind,
     _remote_profile_is_none: bool,
     _has_tmux_session_name: bool,
+    _channel_id: Option<u64>,
 ) -> Option<RuntimeHandoffKind> {
     None
 }
@@ -2594,6 +2597,7 @@ async fn start_reserved_headless_turn_with_owner(
             &provider,
             remote_profile.is_none(),
             tmux_session_name.is_some(),
+            Some(channel_id.get()),
         ),
     );
     let (worktree_path, worktree_branch, base_commit) = {
@@ -5961,6 +5965,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             &provider,
             remote_profile.is_none(),
             tmux_session_name.is_some(),
+            Some(channel_id.get()),
         ),
     );
     let (worktree_path, worktree_branch, base_commit) = {
