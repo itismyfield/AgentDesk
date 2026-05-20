@@ -102,12 +102,29 @@ class DiscordClient:
             params["after"] = after_id
         query = urllib.parse.urlencode(params)
         url = f"{self.base_url}/api/discord/channels/{channel_id}/messages?{query}"
-        request = urllib.request.Request(url, method="GET")
+        # `Connection: close` prevents urllib's default HTTP/1.1 keep-alive
+        # from reusing the same socket for back-to-back polls. The reused
+        # connection could serve a cached response and the driver would
+        # observe a stale window — exactly the symptom in #2718 where the
+        # response landed in the channel within seconds but the polling
+        # loop kept seeing the earlier snapshot until it timed out.
+        request = urllib.request.Request(
+            url,
+            method="GET",
+            headers={"Connection": "close"},
+        )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
                 payload = response.read().decode("utf-8")
         except urllib.error.HTTPError as error:
-            raise RuntimeError(f"fetch_messages HTTP {error.code}: {error.read().decode('utf-8', 'replace')}") from error
+            raise RuntimeError(
+                f"fetch_messages HTTP {error.code}: "
+                f"{error.read().decode('utf-8', 'replace')}"
+            ) from error
+        except urllib.error.URLError as error:
+            # Bubble up transport-level failures instead of silently
+            # returning [] from a swallowed exception further up the stack.
+            raise RuntimeError(f"fetch_messages URL error: {error}") from error
         body = json.loads(payload) if payload else []
         if isinstance(body, list):
             return body
@@ -121,6 +138,7 @@ class DiscordClient:
         after_id: str | None = None,
         timeout_s: float = 120.0,
         poll_interval_s: float = 5.0,
+        debug_label: str | None = None,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         """Poll until *predicate* returns truthy.
 
@@ -129,16 +147,31 @@ class DiscordClient:
         to feed *observed* into its assertion window so we never lose
         duplicate / chrome signal that occurred while we were waiting for the
         target match.
+
+        Set ``AGENTDESK_E2E_WAIT_DEBUG=1`` to print one line per poll with
+        the running fetch counts and last_id progression — useful when
+        debugging \"channel had it but driver never saw it\" regressions.
         """
 
+        import os as _os
+
+        debug_enabled = bool(_os.environ.get("AGENTDESK_E2E_WAIT_DEBUG"))
         deadline = time.monotonic() + timeout_s
         last_id = after_id
         observed: list[dict[str, Any]] = []
         observed_ids: set[str] = set()
         found: dict[str, Any] | None = None
+        poll = 0
         while time.monotonic() < deadline and found is None:
+            poll += 1
             messages = self.fetch_messages(channel_id, after_id=last_id)
             messages = sorted(messages, key=lambda m: int(m.get("id", "0")))
+            if debug_enabled:
+                print(
+                    f"[wait_for_message] poll={poll} label={debug_label!r} "
+                    f"after_id={last_id!r} fetched={len(messages)} "
+                    f"observed_so_far={len(observed)}"
+                )
             for message in messages:
                 mid = str(message.get("id") or "")
                 if mid and mid not in observed_ids:
@@ -151,4 +184,10 @@ class DiscordClient:
                     last_id = mid
             if found is None:
                 time.sleep(poll_interval_s)
+        if debug_enabled and found is None:
+            print(
+                f"[wait_for_message] timeout after {poll} polls "
+                f"label={debug_label!r} last_id={last_id!r} "
+                f"observed_total={len(observed)}"
+            )
         return found, observed
