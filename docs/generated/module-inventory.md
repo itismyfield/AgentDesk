@@ -469,7 +469,7 @@
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 354 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 124 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 410 |  |
-| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 3298 | giant-file |
+| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 3290 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 375 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 185 |  |
 | `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 579 |  |
