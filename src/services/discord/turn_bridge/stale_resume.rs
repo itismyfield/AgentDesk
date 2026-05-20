@@ -57,6 +57,9 @@ pub(super) fn contains_stale_resume_error_text(text: &str) -> bool {
         // rollout/session/thread store has GC'd the resume target.
         "no saved session found with id",
         "no rollout found for conversation id",
+        // AgentDesk direct-TUI tail surface: Codex accepted a resume launch but
+        // never produced/updated a matching rollout transcript for that resume.
+        "timeout waiting for codex resumed rollout transcript",
     ];
     STALE_PHRASES.iter().any(|p| lower.contains(p))
 }
@@ -177,6 +180,9 @@ mod tests {
         ));
         assert!(contains_stale_resume_error_text(
             "no rollout found for conversation id 42"
+        ));
+        assert!(contains_stale_resume_error_text(
+            "Timeout waiting for Codex resumed rollout transcript under /Users/kunkun/.codex/sessions"
         ));
     }
 

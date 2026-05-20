@@ -754,6 +754,9 @@ fn rollout_session_meta_matches(path: &Path, cwd: &Path, session_id: Option<&str
         let Some(payload) = json.get("payload") else {
             continue;
         };
+        if !rollout_session_payload_is_tui_compatible(payload) {
+            continue;
+        }
         if let Some(expected_session_id) = session_id {
             let Some(actual_session_id) = payload.get("id").and_then(Value::as_str) else {
                 continue;
@@ -769,6 +772,20 @@ fn rollout_session_meta_matches(path: &Path, cwd: &Path, session_id: Option<&str
         return session_cwd == cwd;
     }
     false
+}
+
+fn rollout_session_payload_is_tui_compatible(payload: &Value) -> bool {
+    // AgentDesk's direct TUI tailer should follow interactive Codex CLI
+    // rollouts. codex-exec rollouts live under the same ~/.codex/sessions tree,
+    // but they are not a reliable target for direct TUI resume/tail handoff.
+    !payload
+        .get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == "exec")
+        && !payload
+            .get("originator")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "codex_exec")
 }
 
 fn rollout_file_len(path: &Path) -> Option<u64> {
@@ -1637,6 +1654,32 @@ mod tests {
         path
     }
 
+    fn write_rollout_with_source(
+        root: &Path,
+        relative: &str,
+        id: &str,
+        cwd: &Path,
+        source: &str,
+        originator: &str,
+        body: &str,
+    ) -> PathBuf {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\",\"source\":\"{}\",\"originator\":\"{}\"}}}}\n{}",
+                id,
+                cwd.display(),
+                source,
+                originator,
+                body
+            ),
+        )
+        .unwrap();
+        path
+    }
+
     #[test]
     fn maps_session_meta_assistant_text_tools_and_status() {
         let messages = collect_rollout(
@@ -1872,6 +1915,30 @@ mod tests {
             Some(StreamMessage::Done { result, session_id })
                 if result == "fresh new file" && session_id.as_deref() == Some("session-1")
         ));
+    }
+
+    #[test]
+    fn rollout_discovery_ignores_codex_exec_rollouts_for_direct_tui() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let modified_since = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        write_rollout_with_source(
+            dir.path(),
+            "rollout-exec.jsonl",
+            "session-1",
+            cwd.path(),
+            "exec",
+            "codex_exec",
+            "",
+        );
+
+        let discovered = latest_rollout_for_cwd_since(cwd.path(), modified_since, dir.path());
+
+        assert!(
+            discovered.is_none(),
+            "direct TUI tailing must not attach to codex-exec rollout files"
+        );
     }
 
     #[test]

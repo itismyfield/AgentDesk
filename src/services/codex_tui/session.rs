@@ -172,6 +172,9 @@ fn matching_rollout_candidates(
             let modified = metadata.modified().ok()?;
             let len = metadata.len();
             let session = read_rollout_session_meta(&path)?;
+            if !session.is_tui_compatible() {
+                return None;
+            }
             if session.id != requested_id {
                 return None;
             }
@@ -218,6 +221,22 @@ fn rollout_files_under(root: &Path) -> Vec<PathBuf> {
 struct RolloutSessionMeta {
     id: String,
     cwd: PathBuf,
+    source: Option<String>,
+    originator: Option<String>,
+}
+
+impl RolloutSessionMeta {
+    fn is_tui_compatible(&self) -> bool {
+        // Codex direct TUI can safely resume sessions recorded by the
+        // interactive CLI. Older AgentDesk codex-exec rollouts share the same
+        // JSONL directory and UUID shape, but resuming them through the TUI can
+        // leave no fresh rollout transcript for the tailer to follow.
+        !self.source.as_deref().is_some_and(|value| value == "exec")
+            && !self
+                .originator
+                .as_deref()
+                .is_some_and(|value| value == "codex_exec")
+    }
 }
 
 fn read_rollout_session_meta(path: &Path) -> Option<RolloutSessionMeta> {
@@ -245,6 +264,14 @@ fn read_rollout_session_meta(path: &Path) -> Option<RolloutSessionMeta> {
         return Some(RolloutSessionMeta {
             id: id.to_string(),
             cwd: PathBuf::from(cwd),
+            source: payload
+                .get("source")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            originator: payload
+                .get("originator")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
         });
     }
     None
@@ -299,6 +326,30 @@ mod tests {
                 id,
                 cwd.display(),
                 suffix
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    fn write_rollout_with_source(
+        root: &Path,
+        relative: &str,
+        id: &str,
+        cwd: &Path,
+        source: &str,
+        originator: &str,
+    ) -> PathBuf {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\",\"source\":\"{}\",\"originator\":\"{}\"}}}}\n",
+                id,
+                cwd.display(),
+                source,
+                originator
             ),
         )
         .unwrap();
@@ -391,6 +442,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         write_rollout(dir.path(), "rollout-a.jsonl", "other", cwd.path(), "");
+
+        let selection =
+            resolve_codex_tui_session(Some("sess-1"), cwd.path(), Some(dir.path()), false);
+
+        assert!(!selection.resume);
+        assert_eq!(
+            selection.reason,
+            "requested session id has no matching local rollout"
+        );
+        assert_eq!(selection.candidate_count, 0);
+    }
+
+    #[test]
+    fn requested_session_with_only_codex_exec_rollout_resolves_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        write_rollout_with_source(
+            dir.path(),
+            "rollout-exec.jsonl",
+            "sess-1",
+            cwd.path(),
+            "exec",
+            "codex_exec",
+        );
 
         let selection =
             resolve_codex_tui_session(Some("sess-1"), cwd.path(), Some(dir.path()), false);
