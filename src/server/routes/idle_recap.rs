@@ -65,8 +65,21 @@ pub async fn post_idle_recap(
     let Some(registry) = state.health_registry.clone() else {
         return skip("health registry unavailable (standalone mode)");
     };
-    let Some(http) = registry.notify_http_clone().await else {
-        return skip("notify bot not registered");
+    // Post via the provider bot (claude/codex), not notify-bot. The recap
+    // card carries an interactive `[새 세션 시작]` button — Discord routes the
+    // InteractionCreate to the application_id of the message author. The
+    // notify-bot is HTTP-only (no gateway), so its interactions are never
+    // received and users see "상호작용에 실패했습니다" after the 3s ACK timeout.
+    // The provider bots have gateways wired into `intake_gate::handle_event`,
+    // which already dispatches `idle_recap_interaction::handle_*`.
+    let http = match crate::services::discord::health::resolve_bot_http(
+        registry.as_ref(),
+        &snapshot.provider,
+    )
+    .await
+    {
+        Ok(http) => http,
+        Err(_) => return skip("provider bot not registered for recap interaction"),
     };
 
     let session_key_for_job = session_key.clone();
