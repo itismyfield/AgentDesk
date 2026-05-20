@@ -117,10 +117,23 @@ fn write_launch_script(
         .map(|arg| shell_escape(&arg))
         .collect::<Vec<_>>()
         .join(" ");
+    // Neutralise the Claude CLI's auto-resume prompt
+    // (PY6 = "Continue from where you left off.") that gets prepended
+    // every time the TUI deserialises a transcript whose last user
+    // message ended that turn.
+    //
+    // The CLI reads this via `process.env.CLAUDE_CODE_RESUME_PROMPT || …`.
+    // Setting the variable to an empty string is silently ignored
+    // (JavaScript `||` treats `""` as falsy), so we use a single space
+    // — a truthy placeholder that bypasses the default fallback. The
+    // meta user message that ends up in the transcript is then just
+    // " " (rendered invisibly by the TUI) instead of a full chat-style
+    // \"Continue from where you left off.\" prompt that would steer the
+    // assistant.
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
-         export CLAUDE_CODE_RESUME_PROMPT=\"\"\n\
+         export CLAUDE_CODE_RESUME_PROMPT=\" \"\n\
          exec {claude_bin} {args}\n",
         cwd = shell_escape(&config.working_dir.display().to_string()),
         claude_bin = shell_escape(&config.claude_bin.display().to_string()),
@@ -217,13 +230,23 @@ mod tests {
         assert!(settings.contains("claude-hook-relay"));
         assert!(script.contains("exec '/usr/local/bin/claude'"));
         assert!(!script.contains(" -p "));
-        // Neutralize Claude Code CLI's auto-resume prompt
+        // Neutralise the Claude CLI's auto-resume prompt
         // (PY6 = "Continue from where you left off.") so it does not
-        // re-prepend a meta user message every time the TUI deserializes
-        // its transcript at turn start.
+        // re-prepend a steering meta user message every time the TUI
+        // deserialises its transcript at turn start.
+        //
+        // #2718: the env var must be a *truthy* placeholder. Setting it
+        // to "" is silently ignored by PY6 because of its
+        // `process.env.CLAUDE_CODE_RESUME_PROMPT || "Continue..."` pattern
+        // — empty strings are falsy in JS and the default fallback wins.
+        // A single space is truthy and renders invisibly in the transcript.
         assert!(
-            script.contains("export CLAUDE_CODE_RESUME_PROMPT=\"\""),
-            "launch script must export CLAUDE_CODE_RESUME_PROMPT empty"
+            script.contains("export CLAUDE_CODE_RESUME_PROMPT=\" \""),
+            "launch script must export CLAUDE_CODE_RESUME_PROMPT to a truthy placeholder so PY6's || fallback does not kick in"
+        );
+        assert!(
+            !script.contains("export CLAUDE_CODE_RESUME_PROMPT=\"\""),
+            "empty-string placeholder is falsy and silently ignored by PY6"
         );
     }
 

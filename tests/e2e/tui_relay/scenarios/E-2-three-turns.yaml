@@ -19,3 +19,4 @@ assertions:
   - text_present: "[E2E:E2:TURN-1]"
   - text_present: "[E2E:E2:TURN-2]"
   - text_present: "[E2E:E2:TURN-3]"
+  - no_resume_prompt_chrome: true
