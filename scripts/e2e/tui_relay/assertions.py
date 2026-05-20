@@ -137,3 +137,34 @@ def no_control_chars(window: Window) -> None:
         leaked = forbidden.intersection(body)
         if leaked:
             raise AssertionError(f"control byte leaked into Discord message: {sorted(leaked)!r}")
+
+
+# #2718 chrome chunks the Claude CLI emits when the auto-resume prompt
+# (PY6) gets injected at the start of a turn. They must not appear in the
+# relay window — `text_present` substring matching alone would happily pass
+# even when the assistant body is e.g. \"No response requested.[E2E:E2:TURN-2]\"
+# (the chrome glued in front of the real marker).
+_RESUME_PROMPT_CHROME: tuple[str, ...] = (
+    "No response requested.",
+    "Continue from where you left off.",
+)
+
+
+def no_resume_prompt_chrome(window: Window) -> None:
+    """Fail if any relay body contains Claude CLI auto-resume chrome.
+
+    Pinned in #2718 after the PY6 (`Continue from where you left off.`)
+    auto-prompt was still being prepended every turn — the assistant would
+    answer the meta prompt with \"No response requested.\" and glue the real
+    marker onto the same Discord message. Substring `text_present` still
+    passed, masking the regression.
+    """
+
+    for message in window.messages:
+        body = message.get("content") or ""
+        for chrome in _RESUME_PROMPT_CHROME:
+            if chrome in body:
+                raise AssertionError(
+                    "Claude auto-resume prompt chrome leaked into relay body "
+                    f"({chrome!r}): {body[:120]!r}"
+                )

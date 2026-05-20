@@ -12,3 +12,4 @@ assertions:
       max: 6
   - no_duplicate_content: true
   - no_control_chars: true
+  - no_resume_prompt_chrome: true

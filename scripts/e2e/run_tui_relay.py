@@ -605,6 +605,8 @@ def run_assertion(spec: dict[str, Any], *, window: assertions.Window) -> None:
         assertions.text_present(window, needle=spec["text_present"])
     elif spec.get("no_control_chars"):
         assertions.no_control_chars(window)
+    elif spec.get("no_resume_prompt_chrome"):
+        assertions.no_resume_prompt_chrome(window)
     else:
         raise assertions.AssertionError(f"unknown assertion: {spec!r}")
 

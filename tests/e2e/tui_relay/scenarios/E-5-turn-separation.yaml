@@ -14,3 +14,4 @@ assertions:
   - no_duplicate_content: true
   - text_present: "[E2E:E5:TURN-A]"
   - text_present: "[E2E:E5:TURN-B]"
+  - no_resume_prompt_chrome: true
