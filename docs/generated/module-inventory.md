@@ -221,7 +221,7 @@
 | `server::routes::cluster` | `src/server/routes/cluster.rs` | 451 |  |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
-| `server::routes::discord` | `src/server/routes/discord.rs` | 302 |  |
+| `server::routes::discord` | `src/server/routes/discord.rs` | 354 |  |
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 123 |  |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 99 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 1070 | giant-file |

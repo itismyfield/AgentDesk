@@ -73,7 +73,7 @@
 | `DELETE` | `/api/departments/{id}` | `departments::delete_department` | `src/server/routes/departments.rs:184` | `src/server/routes/domains/admin.rs:42` |
 | `PATCH` | `/api/departments/{id}` | `departments::update_department` | `src/server/routes/departments.rs:110` | `src/server/routes/domains/admin.rs:42` |
 | `GET` | `/api/discord/bindings` | `discord::list_bindings` | `src/server/routes/discord.rs:18` | `src/server/routes/domains/integrations.rs:34` |
-| `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:226` | `src/server/routes/domains/integrations.rs:39` |
+| `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:278` | `src/server/routes/domains/integrations.rs:39` |
 | `GET` | `/api/discord/channels/{id}/messages` | `discord::channel_messages` | `src/server/routes/discord.rs:150` | `src/server/routes/domains/integrations.rs:35` |
 | `POST` | `/api/discord/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:1228` | `src/server/routes/domains/ops.rs:31` |
 | `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:1338` | `src/server/routes/domains/ops.rs:36` |

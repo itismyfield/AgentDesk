@@ -187,24 +187,76 @@ pub async fn channel_messages(
         channel_id.get()
     );
 
-    match reqwest::Client::new()
+    // #2723 diagnostic: log the query we forward to Discord so the
+    // driver-side timeout symptom can be correlated with the upstream
+    // request. Logged at info because this is an E2E investigation
+    // and we want it visible in the default rolling log.
+    tracing::info!(
+        channel_id = channel_id.get(),
+        limit,
+        before = params.before.as_deref().unwrap_or(""),
+        after = params.after.as_deref().unwrap_or(""),
+        "[#2723] channel_messages → upstream"
+    );
+
+    let response = match reqwest::Client::new()
         .get(&url)
         .header("Authorization", format!("Bot {token}"))
         .query(&query_params)
         .send()
         .await
     {
-        Ok(resp) => match resp.json::<serde_json::Value>().await {
-            Ok(data) => (StatusCode::OK, Json(json!({"messages": data}))),
-            Err(_) => (
+        Ok(resp) => resp,
+        Err(error) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                error = %error,
+                "[#2723] channel_messages discord request failed"
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "discord request failed"})),
+            );
+        }
+    };
+
+    let upstream_status = response.status();
+    let rate_remaining = response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+    let rate_reset_after = response
+        .headers()
+        .get("x-ratelimit-reset-after")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+
+    match response.json::<serde_json::Value>().await {
+        Ok(data) => {
+            let count = data.as_array().map(|a| a.len()).unwrap_or(0);
+            tracing::info!(
+                channel_id = channel_id.get(),
+                status = %upstream_status,
+                count,
+                rate_remaining = rate_remaining.as_deref().unwrap_or(""),
+                rate_reset_after = rate_reset_after.as_deref().unwrap_or(""),
+                "[#2723] channel_messages ← upstream"
+            );
+            (StatusCode::OK, Json(json!({"messages": data})))
+        }
+        Err(error) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                status = %upstream_status,
+                error = %error,
+                "[#2723] channel_messages discord response decode failed"
+            );
+            (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({"error": "discord response decode failed"})),
-            ),
-        },
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": "discord request failed"})),
-        ),
+            )
+        }
     }
 }
 
