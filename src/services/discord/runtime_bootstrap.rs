@@ -2105,8 +2105,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     // Graceful shutdown: on SIGTERM, persist queue/inflight/last_message state
     // and quick-exit. tmux/TUI processes survive — the next dcserver instance
-    // rehydrates the channel bindings (see rehydrate_existing_claude_tui_bindings)
-    // and resumes transcript tailing from the persisted last_offset.
+    // rehydrates the channel bindings (see rehydrate_existing_claude_tui_bindings;
+    // polled every CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL ≈ 5s) and resumes transcript
+    // tailing from the persisted last_offset.
     let shared_for_signal = shared.clone();
     tokio::spawn(async move {
         #[cfg(unix)]
