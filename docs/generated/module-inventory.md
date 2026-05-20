@@ -627,7 +627,7 @@
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 727 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
 | `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 1238 | giant-file |
-| `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 565 |  |
+| `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 645 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 469 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 768 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 3726 | giant-file |
