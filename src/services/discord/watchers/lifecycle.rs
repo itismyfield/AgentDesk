@@ -1,15 +1,38 @@
 use super::*;
 
-pub(super) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool {
-    if std::path::Path::new(&crate::services::tmux_common::session_dead_marker_path(
-        tmux_session_name,
-    ))
-    .exists()
-    {
-        return false;
-    }
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum LivenessProbeOutcome {
+    /// No dead marker observed; the tmux pane liveness check answered.
+    PaneCheckOnly { alive: bool },
+    /// Both the dead marker and the live pane exist — the marker is stale
+    /// (e.g. a prior wrapper recorded its own death but the session has
+    /// been respawned, or `POST /api/inflight/rebind` adopted an
+    /// externally-owned tmux session whose previous watcher marked the
+    /// pane dead). Callers should remove the marker and treat the session
+    /// as live; otherwise the watcher short-circuits to dead in its first
+    /// poll and defeats the rebind forward-only relay contract.
+    StaleMarkerClearAndAlive,
+    /// Dead marker present and the pane really is gone — honour the marker.
+    MarkerHonoredDead,
+}
 
-    tokio::time::timeout(
+pub(super) fn evaluate_liveness_probe(
+    marker_present: bool,
+    pane_alive: bool,
+) -> LivenessProbeOutcome {
+    match (marker_present, pane_alive) {
+        (true, true) => LivenessProbeOutcome::StaleMarkerClearAndAlive,
+        (true, false) => LivenessProbeOutcome::MarkerHonoredDead,
+        (false, alive) => LivenessProbeOutcome::PaneCheckOnly { alive },
+    }
+}
+
+pub(super) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool {
+    let marker_path =
+        crate::services::tmux_common::session_dead_marker_path(tmux_session_name);
+    let marker_present = std::path::Path::new(&marker_path).exists();
+
+    let pane_alive = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::task::spawn_blocking({
             let name = tmux_session_name.to_string();
@@ -18,7 +41,20 @@ pub(super) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool
     )
     .await
     .unwrap_or(Ok(false))
-    .unwrap_or(false)
+    .unwrap_or(false);
+
+    match evaluate_liveness_probe(marker_present, pane_alive) {
+        LivenessProbeOutcome::StaleMarkerClearAndAlive => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 🧹 clearing stale .pane_dead marker for {tmux_session_name} — tmux session is alive"
+            );
+            let _ = std::fs::remove_file(&marker_path);
+            true
+        }
+        LivenessProbeOutcome::MarkerHonoredDead => false,
+        LivenessProbeOutcome::PaneCheckOnly { alive } => alive,
+    }
 }
 
 pub(super) async fn handle_tmux_watcher_observed_death(
@@ -317,6 +353,34 @@ mod tests {
         let watcher = watchers.get(&channel_b).expect("replacement watcher");
         assert_eq!(watcher.output_path, "/tmp/provider-runtime.jsonl");
         assert!(!watchers.contains_key(&channel_a));
+    }
+
+    #[test]
+    fn liveness_probe_clears_stale_marker_when_pane_alive() {
+        assert_eq!(
+            evaluate_liveness_probe(true, true),
+            LivenessProbeOutcome::StaleMarkerClearAndAlive
+        );
+    }
+
+    #[test]
+    fn liveness_probe_honors_marker_when_pane_dead() {
+        assert_eq!(
+            evaluate_liveness_probe(true, false),
+            LivenessProbeOutcome::MarkerHonoredDead
+        );
+    }
+
+    #[test]
+    fn liveness_probe_uses_pane_check_when_no_marker() {
+        assert_eq!(
+            evaluate_liveness_probe(false, true),
+            LivenessProbeOutcome::PaneCheckOnly { alive: true }
+        );
+        assert_eq!(
+            evaluate_liveness_probe(false, false),
+            LivenessProbeOutcome::PaneCheckOnly { alive: false }
+        );
     }
 
     #[test]
