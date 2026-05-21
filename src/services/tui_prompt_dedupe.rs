@@ -452,10 +452,7 @@ fn mark_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str) 
 /// the matching anchor has not yet been consumed. Watchers use this to keep
 /// the post-terminal suppress guard from killing legitimate direct-input
 /// responses during the brief window before `record_prompt_anchor` lands.
-pub(crate) fn is_ssh_direct_observation_pending(
-    provider: &str,
-    tmux_session_name: &str,
-) -> bool {
+pub(crate) fn is_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str) -> bool {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
     if provider.is_empty() || tmux_session_name.is_empty() {
@@ -723,9 +720,8 @@ impl TuiPromptDedupeState {
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= SESSION_MAPPING_TTL);
         self.prompt_anchor_by_tmux
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= PROMPT_ANCHOR_TTL);
-        self.ssh_direct_observation_by_tmux.retain(|_, entry| {
-            now.duration_since(entry.recorded_at) <= SSH_DIRECT_OBSERVATION_TTL
-        });
+        self.ssh_direct_observation_by_tmux
+            .retain(|_, entry| now.duration_since(entry.recorded_at) <= SSH_DIRECT_OBSERVATION_TTL);
     }
 }
 
@@ -1074,8 +1070,17 @@ mod tests {
             channel_id: 77,
             message_id: 4242,
         };
-        record_prompt_anchor("claude", "tmux-direct", anchor.channel_id, anchor.message_id);
-        assert!(clear_prompt_anchor_for_response("claude", "tmux-direct", anchor));
+        record_prompt_anchor(
+            "claude",
+            "tmux-direct",
+            anchor.channel_id,
+            anchor.message_id,
+        );
+        assert!(clear_prompt_anchor_for_response(
+            "claude",
+            "tmux-direct",
+            anchor
+        ));
         assert!(!is_ssh_direct_observation_pending("claude", "tmux-direct"));
     }
 

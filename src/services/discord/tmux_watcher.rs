@@ -1700,9 +1700,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id.get(),
             )
             .is_none();
-        let ssh_direct_prompt_pending = if turn_result_relayed
-            && post_terminal_inflight_missing
-        {
+        let ssh_direct_prompt_pending = if turn_result_relayed && post_terminal_inflight_missing {
             crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                 watcher_provider.as_str(),
                 &tmux_session_name,
