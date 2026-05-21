@@ -917,8 +917,13 @@ pub(super) fn should_suppress_streaming_placeholder_after_recent_stop(
 pub(super) fn should_suppress_post_terminal_output_without_inflight(
     terminal_success_seen: bool,
     inflight_missing: bool,
+    ssh_direct_prompt_pending: bool,
 ) -> bool {
-    terminal_success_seen && inflight_missing
+    // SSH-direct prompts never create an inflight (they bypass the Discord
+    // message path), so the (terminal + no-inflight) shape alone is not enough
+    // to call new output "ghost noise" — a pending prompt anchor signals a
+    // legitimate user turn whose response we must still relay.
+    terminal_success_seen && inflight_missing && !ssh_direct_prompt_pending
 }
 
 #[cfg(test)]
@@ -928,15 +933,19 @@ mod post_terminal_output_tests {
     #[test]
     fn post_terminal_output_without_inflight_is_suppressed() {
         assert!(should_suppress_post_terminal_output_without_inflight(
-            true, true
+            true, true, false
         ));
         assert!(
-            !should_suppress_post_terminal_output_without_inflight(false, true),
+            !should_suppress_post_terminal_output_without_inflight(false, true, false),
             "pre-terminal output still belongs to the active watcher turn"
         );
         assert!(
-            !should_suppress_post_terminal_output_without_inflight(true, false),
+            !should_suppress_post_terminal_output_without_inflight(true, false, false),
             "a newly active inflight owns subsequent output"
+        );
+        assert!(
+            !should_suppress_post_terminal_output_without_inflight(true, true, true),
+            "SSH-direct prompt anchor present: output is a real direct-input response"
         );
     }
 }

@@ -1690,13 +1690,34 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "  [{ts}] 👁 post-terminal-success continuation: new output arrived for {tmux_session_name} after terminal success (offset {data_start_offset} -> {new_offset}); watcher staying alive"
             );
         }
-        if should_suppress_post_terminal_output_without_inflight(
-            turn_result_relayed,
+        // Compute the SSH-direct bypass signal lazily — the dedupe state
+        // lookup grabs a global Mutex and walks the purge maps, so we only
+        // pay that cost when the cheap (terminal + no-inflight) prefix is
+        // already true and we are about to suppress.
+        let post_terminal_inflight_missing =
             crate::services::discord::inflight::load_inflight_state(
                 &watcher_provider,
                 channel_id.get(),
             )
-            .is_none(),
+            .is_none();
+        let ssh_direct_prompt_pending = if turn_result_relayed && post_terminal_inflight_missing {
+            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id.get(),
+            )
+            .is_some()
+                || crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending(
+                    watcher_provider.as_str(),
+                    &tmux_session_name,
+                )
+        } else {
+            false
+        };
+        if should_suppress_post_terminal_output_without_inflight(
+            turn_result_relayed,
+            post_terminal_inflight_missing,
+            ssh_direct_prompt_pending,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
