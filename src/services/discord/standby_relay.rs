@@ -551,9 +551,6 @@ async fn deliver_response(
             let ts = chrono::Local::now().format("%H:%M:%S");
             match outcome {
                 Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
-                    shared
-                        .placeholder_controller
-                        .forget_placeholder_pin(provider, channel_id, msg_id);
                     tracing::info!(
                         "  [{ts}] 👁 standby_relay ✓ delivered terminal response (edit) channel {} msg {} ({} chars)",
                         channel_id.get(),
@@ -575,9 +572,6 @@ async fn deliver_response(
                         );
                         return true;
                     }
-                    shared
-                        .placeholder_controller
-                        .forget_placeholder_pin(provider, channel_id, msg_id);
                     tracing::info!(
                         "  [{ts}] 👁 standby_relay ✓ delivered terminal response via fallback and deleted stale placeholder channel {} msg {} ({} chars, edit_error={})",
                         channel_id.get(),

@@ -173,9 +173,6 @@ impl SessionBoundDiscordRelaySink {
                     self.delivered_total.fetch_add(1, Ordering::AcqRel);
                     match super::http::delete_channel_message(&http, channel, msg_id).await {
                         Ok(()) => {
-                            shared
-                                .placeholder_controller
-                                .forget_placeholder_pin(&provider, channel, msg_id);
                             tracing::info!(
                                 provider = provider.as_str(),
                                 channel = channel_id,

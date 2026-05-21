@@ -3250,7 +3250,6 @@ pub(super) fn spawn_turn_bridge(
             let response_placeholder = super::formatting::build_processing_status_block(SPINNER[0]);
             match gateway.send_message(channel_id, &response_placeholder).await {
                 Ok(response_msg_id) => {
-                    let status_panel_placeholder_msg_id = current_msg_id;
                     status_panel_msg_id = Some(current_msg_id);
                     inflight_state.status_message_id = Some(current_msg_id.get());
                     current_msg_id = response_msg_id;
@@ -3259,19 +3258,6 @@ pub(super) fn spawn_turn_bridge(
                     inflight_state.current_msg_len = last_edit_text.len();
                     inflight_state.response_sent_offset = response_sent_offset;
                     inflight_state.full_response = full_response.clone();
-                    let status_panel_pin_key = super::placeholder_controller::PlaceholderKey {
-                        provider: provider.clone(),
-                        channel_id,
-                        message_id: status_panel_placeholder_msg_id,
-                    };
-                    shared_owned
-                        .placeholder_controller
-                        .unpin_placeholder_message(
-                            gateway.as_ref(),
-                            &status_panel_pin_key,
-                            "status_panel_response_message_split",
-                        )
-                        .await;
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -3311,25 +3297,12 @@ pub(super) fn spawn_turn_bridge(
             inflight_state.long_running_placeholder_active = false;
         }
 
-        match save_inflight_state(&inflight_state) {
-            Ok(()) => {
-                let placeholder_pin_key = super::placeholder_controller::PlaceholderKey {
-                    provider: provider.clone(),
-                    channel_id,
-                    message_id: current_msg_id,
-                };
-                shared_owned
-                    .placeholder_controller
-                    .pin_placeholder_message(gateway.as_ref(), &placeholder_pin_key)
-                    .await;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "[turn_bridge] failed to persist inflight state before pinning placeholder in channel {}: {}",
-                    channel_id,
-                    error
-                );
-            }
+        if let Err(error) = save_inflight_state(&inflight_state) {
+            tracing::warn!(
+                "[turn_bridge] failed to persist inflight state in channel {}: {}",
+                channel_id,
+                error
+            );
         }
         crate::services::observability::emit_turn_started(
             provider.as_str(),
@@ -3381,7 +3354,6 @@ pub(super) fn spawn_turn_bridge(
             }};
         }
 
-        let mut pending_placeholder_pin_transition_after_state_save = None;
         let mut pending_long_running_open_after_state_save = None;
         let mut pending_long_running_retarget_after_state_save = None;
 
@@ -3802,7 +3774,6 @@ pub(super) fn spawn_turn_bridge(
                             )
                                 && long_running_placeholder_active.is_none()
                                 && pending_long_running_open_after_state_save.is_none()
-                                && pending_placeholder_pin_transition_after_state_save.is_none()
                                 && pending_long_running_retarget_after_state_save.is_none()
                             {
                                 if let Some((reason, close_trigger, reason_detail)) =
@@ -3982,14 +3953,6 @@ pub(super) fn spawn_turn_bridge(
                                         let _ =
                                             pending_long_running_retarget_after_state_save.take();
                                         shared_owned.placeholder_controller.detach(&key);
-                                        shared_owned
-                                            .placeholder_controller
-                                            .unpin_placeholder_message(
-                                                gateway.as_ref(),
-                                                &key,
-                                                "terminal_before_retarget_persisted",
-                                            )
-                                            .await;
                                         inflight_state.long_running_placeholder_active = false;
                                         state_dirty = true;
                                     } else {
@@ -4203,14 +4166,6 @@ pub(super) fn spawn_turn_bridge(
                                 if pending_retarget_matches_key {
                                     let _ = pending_long_running_retarget_after_state_save.take();
                                     shared_owned.placeholder_controller.detach(&key);
-                                    shared_owned
-                                        .placeholder_controller
-                                        .unpin_placeholder_message(
-                                            gateway.as_ref(),
-                                            &key,
-                                            "done_before_retarget_persisted",
-                                        )
-                                        .await;
                                     inflight_state.long_running_placeholder_active = false;
                                 } else {
                                     let outcome = shared_owned
@@ -4978,7 +4933,6 @@ pub(super) fn spawn_turn_bridge(
                     {
                         Ok(()) => match gateway.send_message(channel_id, &status_block).await {
                             Ok(next_msg_id) => {
-                                let previous_msg_id = current_msg_id;
                                 let next_response_sent_offset =
                                     response_sent_offset + plan.split_at;
                                 assert_response_sent_offset_progress(
@@ -5001,24 +4955,6 @@ pub(super) fn spawn_turn_bridge(
                                 inflight_state.response_sent_offset = response_sent_offset;
                                 inflight_state.full_response = full_response.clone();
                                 state_dirty = true;
-                                let previous_pin_key =
-                                    super::placeholder_controller::PlaceholderKey {
-                                        provider: provider.clone(),
-                                        channel_id,
-                                        message_id: previous_msg_id,
-                                    };
-                                let next_pin_key = super::placeholder_controller::PlaceholderKey {
-                                    provider: provider.clone(),
-                                    channel_id,
-                                    message_id: current_msg_id,
-                                };
-                                pending_placeholder_pin_transition_after_state_save =
-                                    Some(match pending_placeholder_pin_transition_after_state_save {
-                                        Some((first_previous_pin_key, _)) => {
-                                            (first_previous_pin_key, next_pin_key)
-                                        }
-                                        None => (previous_pin_key, next_pin_key),
-                                    });
                                 if let Some((_, _, _, _, pending_new_key)) =
                                     pending_long_running_retarget_after_state_save.as_mut()
                                 {
@@ -5157,7 +5093,6 @@ pub(super) fn spawn_turn_bridge(
             }
 
             if state_dirty
-                || pending_placeholder_pin_transition_after_state_save.is_some()
                 || pending_long_running_open_after_state_save.is_some()
                 || pending_long_running_retarget_after_state_save.is_some()
                 || inflight_state.current_tool_line != current_tool_line
@@ -5171,22 +5106,6 @@ pub(super) fn spawn_turn_bridge(
                 inflight_state.prev_tool_status = prev_tool_status.clone();
                 match save_inflight_state(&inflight_state) {
                     Ok(()) => {
-                        if let Some((previous_pin_key, next_pin_key)) =
-                            pending_placeholder_pin_transition_after_state_save.take()
-                        {
-                            shared_owned
-                                .placeholder_controller
-                                .pin_placeholder_message(gateway.as_ref(), &next_pin_key)
-                                .await;
-                            shared_owned
-                                .placeholder_controller
-                                .unpin_placeholder_message(
-                                    gateway.as_ref(),
-                                    &previous_pin_key,
-                                    "streaming_rollover_old_message",
-                                )
-                                .await;
-                        }
                         if let Some((key, snapshot, close_trigger, ack_consumed)) =
                             pending_long_running_open_after_state_save.take()
                         {
@@ -5344,14 +5263,6 @@ pub(super) fn spawn_turn_bridge(
             {
                 let _ = pending_long_running_retarget_after_state_save.take();
                 shared_owned.placeholder_controller.detach(&key);
-                shared_owned
-                    .placeholder_controller
-                    .unpin_placeholder_message(
-                        gateway.as_ref(),
-                        &key,
-                        "relay_stream_end_before_retarget_persisted",
-                    )
-                    .await;
                 inflight_state.long_running_placeholder_active = false;
                 let _ = save_inflight_state(&inflight_state);
             }
@@ -5369,14 +5280,6 @@ pub(super) fn spawn_turn_bridge(
                 if pending_retarget_matches_key {
                     let _ = pending_long_running_retarget_after_state_save.take();
                     shared_owned.placeholder_controller.detach(&key);
-                    shared_owned
-                        .placeholder_controller
-                        .unpin_placeholder_message(
-                            gateway.as_ref(),
-                            &key,
-                            "stream_end_before_retarget_persisted",
-                        )
-                        .await;
                     inflight_state.long_running_placeholder_active = false;
                 } else {
                     let outcome = shared_owned
@@ -5878,14 +5781,6 @@ pub(super) fn spawn_turn_bridge(
                 if pending_retarget_matches_key {
                     let _ = pending_long_running_retarget_after_state_save.take();
                     shared_owned.placeholder_controller.detach(&key);
-                    shared_owned
-                        .placeholder_controller
-                        .unpin_placeholder_message(
-                            gateway.as_ref(),
-                            &key,
-                            "cancel_before_retarget_persisted",
-                        )
-                        .await;
                     inflight_state.long_running_placeholder_active = false;
                     let _ = save_inflight_state(&inflight_state);
                 } else {
@@ -7126,25 +7021,6 @@ pub(super) fn spawn_turn_bridge(
                 "  [{ts}] ✓ Cleared restart report for channel {} (turn completed normally)",
                 channel_id
             );
-        }
-
-        if bridge_output_owner.is_none()
-            && (cancelled
-                || is_prompt_too_long
-                || terminal_delivery_committed
-                || status_panel_terminal_committed
-                || recovery_retry)
-            && current_msg_id.get() != 0
-        {
-            let pin_key = super::placeholder_controller::PlaceholderKey {
-                provider: provider.clone(),
-                channel_id,
-                message_id: current_msg_id,
-            };
-            shared_owned
-                .placeholder_controller
-                .unpin_placeholder_message(gateway.as_ref(), &pin_key, "turn_finalization")
-                .await;
         }
 
         if cancelled && cancel_token.restart_mode().is_some() {

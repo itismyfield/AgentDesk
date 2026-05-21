@@ -4379,34 +4379,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             //     that survives into the next turn will not accidentally clear
             //     that turn's freshly registered cancel_token.
             let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
-            if let Some(state) = inflight_state.as_ref().filter(|state| {
-                !state.rebind_origin && state.channel_id != 0 && state.current_msg_id != 0
-            }) {
-                let message_id = serenity::MessageId::new(state.current_msg_id);
-                // `Manage Messages` lives on the announce bot in this deployment;
-                // route the unpin there to avoid a 403 storm. See
-                // `crate::services::discord::gateway::manage_messages_http`.
-                let unpin_http =
-                    crate::services::discord::gateway::manage_messages_http(&shared, &http).await;
-                match channel_id.unpin(unpin_http.as_ref(), message_id).await {
-                    Ok(()) => {
-                        shared.placeholder_controller.forget_placeholder_pin(
-                            &provider_kind,
-                            channel_id,
-                            message_id,
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            provider = provider_kind.as_str(),
-                            channel_id = channel_id.get(),
-                            message_id = message_id.get(),
-                            error = %error,
-                            "[tmux_watcher] placeholder unpin failed after terminal relay; tracked cleanup will retry"
-                        );
-                    }
-                }
-            }
             crate::services::discord::inflight::clear_inflight_state(
                 &provider_kind,
                 channel_id.get(),
