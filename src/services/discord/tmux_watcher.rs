@@ -1697,6 +1697,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id.get(),
             )
             .is_none(),
+            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                watcher_provider.as_str(),
+                &tmux_session_name,
+                channel_id.get(),
+            )
+            .is_some(),
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(

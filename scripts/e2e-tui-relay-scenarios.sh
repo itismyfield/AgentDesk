@@ -266,6 +266,37 @@ run_turn_scenario() {
   printf '%s\n' "$marker"
 }
 
+# E-4 regression guard: inject a prompt directly into the TUI pane via
+# tmux send-keys (bypassing the Discord message path) and verify the response
+# still relays to Discord. This exercises the SSH-direct anchor path that
+# `should_suppress_post_terminal_output_without_inflight` must respect.
+run_direct_turn_scenario() {
+  local channel="$1"
+  local session="$2"
+  local label="$3"
+  local instruction="$4"
+  local before marker sent_prompt buffer_name
+  if ! tmux has-session -t "$session" 2>/dev/null; then
+    echo "tmux session missing for direct scenario: $session" >&2
+    return 1
+  fi
+  prepare_tmux_input "$session"
+  before="$(latest_message_id "$channel")"
+  marker="TUI-E2E-${run_id}-${label}"
+  sent_prompt="$marker $instruction"
+  buffer_name="e2e-direct-${run_id}-${label}"
+  # paste-buffer + Enter mirrors the production input path (cf. PR #2731)
+  # so the TUI sees a single committed prompt rather than per-keystroke noise.
+  tmux set-buffer -b "$buffer_name" -- "$sent_prompt"
+  tmux paste-buffer -b "$buffer_name" -t "$session"
+  tmux delete-buffer -b "$buffer_name" >/dev/null 2>&1 || true
+  sleep 1
+  tmux send-keys -t "$session" Enter
+  wait_tmux_contains "$session" "$marker"
+  wait_relay_evidence "$channel" "$marker" "$before" "$sent_prompt" ""
+  printf '%s\n' "$marker"
+}
+
 clear_channel_session "$CLAUDE_CHANNEL" "$CLAUDE_TMUX"
 clear_channel_session "$CODEX_CHANNEL" "$CODEX_TMUX"
 
@@ -280,6 +311,12 @@ run_turn_scenario "$CODEX_CHANNEL" "$CODEX_TMUX" codex-long "반드시 shell/Bas
 
 run_turn_scenario "$CLAUDE_CHANNEL" "$CLAUDE_TMUX" claude-rollover "marker를 그대로 포함하고, 1부터 180까지 번호 목록을 출력해 롤오버를 유도해줘." >/dev/null
 run_turn_scenario "$CODEX_CHANNEL" "$CODEX_TMUX" codex-rollover "marker를 그대로 포함하고, 1부터 180까지 번호 목록을 출력해 롤오버를 유도해줘." >/dev/null
+
+# Must run AFTER the Discord-side turns above so the watcher already has
+# turn_result_relayed = true — i.e., this exercises the exact shape that the
+# post-terminal suppress guard wrongly silenced before the anchor exemption.
+run_direct_turn_scenario "$CLAUDE_CHANNEL" "$CLAUDE_TMUX" claude-ssh-direct "한 줄로 marker를 그대로 응답하고, 'ssh-direct' 단어도 포함해줘." >/dev/null
+run_direct_turn_scenario "$CODEX_CHANNEL" "$CODEX_TMUX" codex-ssh-direct "한 줄로 marker를 그대로 응답하고, 'ssh-direct' 단어도 포함해줘." >/dev/null
 
 assert_tmux_alive "$CLAUDE_TMUX"
 assert_tmux_alive "$CODEX_TMUX"
