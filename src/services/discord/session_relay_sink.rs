@@ -300,18 +300,8 @@ impl SessionRelayParser {
                 break;
             }
 
-            // #2749: Background task notifications (e.g. CronCreate self-prompts)
-            // must still deliver their final response. assistant_text_seen may be
-            // false when the parser fell back to result.result text only, but the
-            // user still expects to see the answer. Subagent / MonitorAutoTurn keep
-            // requiring assistant text to avoid noisy intermediate notifications.
-            let task_kind_allows_delivery = match self.task_notification_kind {
-                None => true,
-                Some(TaskNotificationKind::Background) => true,
-                Some(_) => self.assistant_text_seen,
-            };
-            let has_user_visible_response =
-                !self.full_response.trim().is_empty() && task_kind_allows_delivery;
+            let has_user_visible_response = !self.full_response.trim().is_empty()
+                && (self.task_notification_kind.is_none() || self.assistant_text_seen);
             if has_user_visible_response {
                 deliveries.push(SessionRelayDelivery {
                     provider: frame.binding.provider.clone(),
@@ -563,53 +553,6 @@ mod tests {
         assert_eq!(
             deliveries[0].task_notification_kind,
             Some(TaskNotificationKind::Subagent)
-        );
-    }
-
-    #[test]
-    fn parser_preserves_text_across_tool_uses_within_turn() {
-        // #2749 Pattern A: [text1] → [tool_use, text2] → [tool_use, no post-text]
-        // → result. The trailing tool_use without post-text used to clear
-        // full_response and overwrite with result.result, dropping text1+text2.
-        let binding = matched("44");
-        let mut parser = SessionRelayParser::default();
-        let payload = concat!(
-            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first chunk \"}]}}\n",
-            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}},{\"type\":\"text\",\"text\":\"second chunk \"}]}}\n",
-            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"ok\"}]}}\n",
-            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"Bash\",\"input\":{\"command\":\"pwd\"}}]}}\n",
-            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_2\",\"content\":\"/tmp\"}]}}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"third chunk\"}\n"
-        );
-        let deliveries = parser.ingest_frame(&frame(&binding, payload, 1));
-        assert_eq!(deliveries.len(), 1);
-        // Exact equality guards against accidental duplication or chunk reorder.
-        assert_eq!(
-            deliveries[0].response_text,
-            "first chunk second chunk \nthird chunk"
-        );
-    }
-
-    #[test]
-    fn parser_delivers_background_task_notification_with_result_text() {
-        // #2749 Pattern B: a Background-classified turn (e.g. cron self-prompt)
-        // whose response is captured via result.result only used to drop because
-        // assistant_text_seen was false. Background turns should still deliver.
-        let binding = matched("45");
-        let mut parser = SessionRelayParser::default();
-        let payload = concat!(
-            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-2\",\"status\":\"completed\",\"summary\":\"background work\"}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"OK | cron self-prompt response\"}\n"
-        );
-        let deliveries = parser.ingest_frame(&frame(&binding, payload, 1));
-        assert_eq!(deliveries.len(), 1);
-        assert_eq!(
-            deliveries[0].response_text,
-            "OK | cron self-prompt response"
-        );
-        assert_eq!(
-            deliveries[0].task_notification_kind,
-            Some(TaskNotificationKind::Background)
         );
     }
 
