@@ -1025,9 +1025,13 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
 fn codex_idle_prompt_observation_should_tail_response(
     observation: crate::services::tui_prompt_dedupe::PromptObservation,
 ) -> bool {
-    !matches!(
+    // The turn bridge owns Discord-originated Codex prompts. The idle rollout
+    // relay is only for text typed directly into the Codex TUI; tailing
+    // suppressed Discord/recent duplicates can replay stale prior-turn output
+    // after a newer Discord message has already started.
+    matches!(
         observation,
-        crate::services::tui_prompt_dedupe::PromptObservation::Ignored
+        crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
     )
 }
 
@@ -2102,14 +2106,14 @@ agents:
     }
 
     #[test]
-    fn codex_idle_prompt_recent_duplicate_still_tails_response() {
+    fn codex_idle_prompt_tails_only_new_ssh_direct_prompt() {
         assert!(codex_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
         ));
-        assert!(codex_idle_prompt_observation_should_tail_response(
+        assert!(!codex_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::SuppressedDiscordDuplicate
         ));
-        assert!(codex_idle_prompt_observation_should_tail_response(
+        assert!(!codex_idle_prompt_observation_should_tail_response(
             crate::services::tui_prompt_dedupe::PromptObservation::SuppressedRecentDuplicate
         ));
         assert!(!codex_idle_prompt_observation_should_tail_response(
