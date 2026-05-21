@@ -3244,7 +3244,9 @@ pub(super) fn spawn_turn_bridge(
         let status_panel_started_at = chrono::Utc::now().timestamp();
         let turn_start = std::time::Instant::now();
 
-        if shared_owned.status_panel_v2_enabled && status_panel_msg_id.is_none() {
+        if shared_owned.status_panel_v2_enabled
+            && (status_panel_msg_id.is_none() || status_panel_msg_id == Some(current_msg_id))
+        {
             let response_placeholder = super::formatting::build_processing_status_block(SPINNER[0]);
             match gateway.send_message(channel_id, &response_placeholder).await {
                 Ok(response_msg_id) => {

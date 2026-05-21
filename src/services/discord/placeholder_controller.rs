@@ -127,7 +127,6 @@ impl Default for PlaceholderEntry {
 /// ones so we never drop a live card mid-flight.
 const PLACEHOLDER_ENTRIES_MAX: usize = 4096;
 const PLACEHOLDER_LIVE_EVENTS_MIN_EDIT_INTERVAL: Duration = Duration::from_secs(3);
-const PLACEHOLDER_PIN_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// PR #5 — bounded retry budget for placeholder edits. Discord routinely
 /// hands back rate-limit (429) and transient gateway (5xx) errors that the
@@ -485,92 +484,33 @@ impl PlaceholderController {
         load_placeholder_pin_sidecar(&path).contains(&key.message_id)
     }
 
-    fn pin_failure_is_recent(&self, key: &PlaceholderKey) -> bool {
-        if let Some(last_failure) = self.pin_failures.get(key) {
-            if last_failure.elapsed() < PLACEHOLDER_PIN_FAILURE_RETRY_DELAY {
-                return true;
-            }
-        }
-        self.pin_failures.remove(key);
-        false
-    }
-
     pub(super) async fn pin_placeholder_message<G: TurnGateway + ?Sized>(
         &self,
-        gateway: &G,
+        _gateway: &G,
         key: &PlaceholderKey,
     ) {
-        let scope = PlaceholderPinScope::from_key(key);
-        if !self.pinned_placeholders.contains_key(&scope)
-            && let Some(root) = placeholder_pin_root()
-        {
-            let path = placeholder_pin_sidecar_path(&root, &key.provider, key.channel_id);
-            let persisted = load_placeholder_pin_sidecar(&path);
-            if !persisted.is_empty() {
-                self.pinned_placeholders.insert(scope.clone(), persisted);
-            }
-        }
+        // Pin/unpin churn turned out to be noisy in Discord and does not add
+        // enough operational value. Keep the call sites intact for lifecycle
+        // ownership, but do not issue Discord pin API calls or persist new
+        // sidecar state.
         let stale_keys: Vec<PlaceholderKey> = self
             .tracked_pin_keys_for_channel(key.channel_id)
             .into_iter()
-            .filter(|tracked| tracked != key)
             .collect();
         for stale_key in stale_keys {
-            self.unpin_placeholder_message(gateway, &stale_key, "stale_placeholder_pin_cleanup")
-                .await;
+            self.forget_pin(&stale_key);
         }
-
-        if self.pin_is_tracked(key) {
-            return;
-        }
-
-        if self.pin_failure_is_recent(key) {
-            return;
-        }
-
-        match gateway.pin_message(key.channel_id, key.message_id).await {
-            Ok(true) => {
-                self.pin_failures.remove(key);
-                self.remember_pin(key);
-            }
-            Ok(false) => {
-                self.pin_failures.insert(key.clone(), Instant::now());
-            }
-            Err(error) => {
-                tracing::warn!(
-                    key = ?key,
-                    error = %error,
-                    "placeholder pin failed; continuing without pinned live card"
-                );
-                self.pin_failures.insert(key.clone(), Instant::now());
-            }
-        }
+        self.pin_failures.remove(key);
     }
 
     pub(super) async fn unpin_placeholder_message<G: TurnGateway + ?Sized>(
         &self,
-        gateway: &G,
+        _gateway: &G,
         key: &PlaceholderKey,
-        reason: &'static str,
+        _reason: &'static str,
     ) {
         self.pin_failures.remove(key);
-        let was_tracked = self.pin_is_tracked(key);
-        match gateway.unpin_message(key.channel_id, key.message_id).await {
-            Ok(true) => self.forget_pin(key),
-            Ok(false) if was_tracked => self.remember_pin(key),
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(
-                    key = ?key,
-                    error = %error,
-                    reason,
-                    "placeholder unpin failed; will retry on the next pin cleanup"
-                );
-                if was_tracked {
-                    self.remember_pin(key);
-                }
-            }
-        }
+        self.forget_pin(key);
     }
 
     fn entry(&self, key: &PlaceholderKey) -> Arc<Mutex<PlaceholderEntry>> {
@@ -1373,7 +1313,7 @@ mod live_events_tests {
     }
 
     #[tokio::test]
-    async fn active_placeholder_pins_and_terminal_transition_unpins() {
+    async fn active_placeholder_does_not_call_discord_pin_apis() {
         let gateway = Arc::new(CountingGateway::new());
         let controller = PlaceholderController::default();
 
@@ -1381,18 +1321,18 @@ mod live_events_tests {
             .ensure_active(gateway.as_ref(), key(), input())
             .await;
         assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
-        assert_eq!(gateway.pins.load(Ordering::SeqCst), 1);
+        assert_eq!(gateway.pins.load(Ordering::SeqCst), 0);
         assert_eq!(gateway.unpins.load(Ordering::SeqCst), 0);
 
         let outcome = controller
             .transition(gateway.as_ref(), key(), PlaceholderLifecycle::Completed)
             .await;
         assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
-        assert_eq!(gateway.unpins.load(Ordering::SeqCst), 1);
+        assert_eq!(gateway.unpins.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn active_placeholder_rollover_unpins_stale_message_before_pinning_new_one() {
+    async fn active_placeholder_rollover_forgets_stale_pin_without_discord_calls() {
         let gateway = Arc::new(CountingGateway::new());
         let controller = PlaceholderController::default();
         let old_key = key();
@@ -1414,8 +1354,8 @@ mod live_events_tests {
             PlaceholderControllerOutcome::Edited
         );
 
-        assert_eq!(gateway.pins.load(Ordering::SeqCst), 2);
-        assert_eq!(gateway.unpins.load(Ordering::SeqCst), 1);
+        assert_eq!(gateway.pins.load(Ordering::SeqCst), 0);
+        assert_eq!(gateway.unpins.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1438,8 +1378,8 @@ mod live_events_tests {
             .await;
 
         assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
-        assert_eq!(gateway.pins.load(Ordering::SeqCst), 1);
-        assert_eq!(gateway.unpins.load(Ordering::SeqCst), 1);
+        assert_eq!(gateway.pins.load(Ordering::SeqCst), 0);
+        assert_eq!(gateway.unpins.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1467,7 +1407,7 @@ mod live_events_tests {
             .await;
 
         assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
-        assert_eq!(gateway.pins.load(Ordering::SeqCst), 1);
+        assert_eq!(gateway.pins.load(Ordering::SeqCst), 0);
         assert_eq!(gateway.unpins.load(Ordering::SeqCst), 0);
     }
 
@@ -1489,12 +1429,12 @@ mod live_events_tests {
             PlaceholderControllerOutcome::Coalesced
         );
 
-        assert_eq!(gateway.pins.load(Ordering::SeqCst), 1);
+        assert_eq!(gateway.pins.load(Ordering::SeqCst), 0);
         assert_eq!(gateway.unpins.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn active_placeholder_pin_failure_does_not_fail_active_transition() {
+    async fn active_placeholder_ignores_pin_failures_because_pin_api_is_disabled() {
         let gateway = Arc::new(CountingGateway::failing_pins());
         let controller = PlaceholderController::default();
 
@@ -1504,11 +1444,11 @@ mod live_events_tests {
 
         assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
         assert_eq!(gateway.edits.load(Ordering::SeqCst), 1);
-        assert_eq!(gateway.pins.load(Ordering::SeqCst), 1);
+        assert_eq!(gateway.pins.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn active_placeholder_pin_failure_is_throttled_on_coalesced_updates() {
+    async fn coalesced_updates_still_do_not_call_pin_api() {
         let gateway = Arc::new(CountingGateway::failing_pins());
         let controller = PlaceholderController::default();
 
@@ -1525,11 +1465,11 @@ mod live_events_tests {
             PlaceholderControllerOutcome::Coalesced
         );
 
-        assert_eq!(gateway.pins.load(Ordering::SeqCst), 1);
+        assert_eq!(gateway.pins.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn terminal_cleanup_clears_untracked_pin_failure() {
+    async fn terminal_cleanup_keeps_pin_failure_tracking_empty() {
         let gateway = Arc::new(CountingGateway::failing_pins());
         let controller = PlaceholderController::default();
         let key = key();
@@ -1540,7 +1480,7 @@ mod live_events_tests {
                 .await,
             PlaceholderControllerOutcome::Edited
         );
-        assert!(controller.pin_failures.contains_key(&key));
+        assert!(!controller.pin_failures.contains_key(&key));
 
         assert_eq!(
             controller

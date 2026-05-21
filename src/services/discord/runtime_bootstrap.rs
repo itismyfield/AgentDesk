@@ -1382,7 +1382,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // Populate known slash command names for router fallback logic
                 let cmd_names: std::collections::HashSet<String> =
                     commands.iter().map(|c| c.name.clone()).collect();
-                let _ = shared_for_migrate.known_slash_commands.set(cmd_names);
+                let _ = shared_for_migrate
+                    .known_slash_commands
+                    .set(cmd_names.clone());
                 for guild in &_ready.guilds {
                     if let Err(e) =
                         poise::builtins::register_in_guild(ctx, commands, guild.id).await
@@ -1393,6 +1395,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         );
                     }
                 }
+                audit_or_prune_global_slash_commands(ctx, cmd_names.clone()).await;
                 tracing::info!(
                     "  ✓ Bot connected — Registered commands in {} guild(s)",
                     _ready.guilds.len()
@@ -2240,6 +2243,61 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     if let Some(handle) = gateway_lease_task {
         handle.abort();
         let _ = handle.await;
+    }
+}
+
+async fn audit_or_prune_global_slash_commands(
+    ctx: &serenity::Context,
+    current_guild_command_names: std::collections::HashSet<String>,
+) {
+    let globals = match serenity::Command::get_global_commands(ctx).await {
+        Ok(commands) => commands,
+        Err(error) => {
+            tracing::warn!("failed to list global slash commands for pruning: {error}");
+            return;
+        }
+    };
+
+    if globals.is_empty() {
+        return;
+    }
+
+    let prune_enabled = std::env::var("AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS")
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+
+    for command in globals {
+        let command_name = command.name.clone();
+        if current_guild_command_names.contains(&command_name) {
+            tracing::info!(
+                command = %command_name,
+                command_id = command.id.get(),
+                "global slash command duplicates a guild command"
+            );
+            continue;
+        }
+        if !prune_enabled {
+            tracing::warn!(
+                command = %command_name,
+                command_id = command.id.get(),
+                "stale global slash command detected; set AGENTDESK_PRUNE_GLOBAL_SLASH_COMMANDS=1 to delete"
+            );
+            continue;
+        }
+        if let Err(error) = serenity::Command::delete_global_command(ctx, command.id).await {
+            tracing::warn!(
+                command = %command_name,
+                command_id = command.id.get(),
+                error = %error,
+                "failed to delete stale global slash command"
+            );
+        } else {
+            tracing::info!(
+                command = %command_name,
+                command_id = command.id.get(),
+                "deleted stale global slash command; guild commands remain authoritative"
+            );
+        }
     }
 }
 
