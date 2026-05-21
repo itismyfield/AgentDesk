@@ -270,12 +270,19 @@ run_turn_scenario() {
 # tmux send-keys (bypassing the Discord message path) and verify the response
 # still relays to Discord. This exercises the SSH-direct anchor path that
 # `should_suppress_post_terminal_output_without_inflight` must respect.
+#
+# Mirrors the production single-line input path used by `tui_send_text` in
+# both claude_tui/input.rs and codex_tui/input.rs: `send-keys -l -- <text>`
+# followed by a settle delay and Enter. We intentionally avoid paste-buffer
+# here — production only switches to paste-buffer for multi-line input and
+# uses different flags (`paste-buffer -p -r`), so paste-buffer in tests
+# would mask single-line regressions and add bracketed-paste timing risk.
 run_direct_turn_scenario() {
   local channel="$1"
   local session="$2"
   local label="$3"
   local instruction="$4"
-  local before marker sent_prompt buffer_name
+  local before marker sent_prompt
   if ! tmux has-session -t "$session" 2>/dev/null; then
     echo "tmux session missing for direct scenario: $session" >&2
     return 1
@@ -284,13 +291,10 @@ run_direct_turn_scenario() {
   before="$(latest_message_id "$channel")"
   marker="TUI-E2E-${run_id}-${label}"
   sent_prompt="$marker $instruction"
-  buffer_name="e2e-direct-${run_id}-${label}"
-  # paste-buffer + Enter mirrors the production input path (cf. PR #2731)
-  # so the TUI sees a single committed prompt rather than per-keystroke noise.
-  tmux set-buffer -b "$buffer_name" -- "$sent_prompt"
-  tmux paste-buffer -b "$buffer_name" -t "$session"
-  tmux delete-buffer -b "$buffer_name" >/dev/null 2>&1 || true
-  sleep 1
+  tmux send-keys -t "$session" -l -- "$sent_prompt"
+  # Match the 200ms-after-paste settle pattern from PR #2730/#2731 — gives
+  # the TUI line editor a tick to flush the input buffer before Enter.
+  sleep 0.3
   tmux send-keys -t "$session" Enter
   wait_tmux_contains "$session" "$marker"
   wait_relay_evidence "$channel" "$marker" "$before" "$sent_prompt" ""
