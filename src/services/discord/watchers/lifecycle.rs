@@ -28,8 +28,7 @@ pub(super) fn evaluate_liveness_probe(
 }
 
 pub(super) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool {
-    let marker_path =
-        crate::services::tmux_common::session_dead_marker_path(tmux_session_name);
+    let marker_path = crate::services::tmux_common::session_dead_marker_path(tmux_session_name);
     let marker_present = std::path::Path::new(&marker_path).exists();
 
     let pane_alive = tokio::time::timeout(
