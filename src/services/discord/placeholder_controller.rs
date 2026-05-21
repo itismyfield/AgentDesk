@@ -979,7 +979,6 @@ mod live_events_tests {
         assert_eq!(outcome, PlaceholderControllerOutcome::Coalesced);
         assert_eq!(gateway.edits.load(Ordering::SeqCst), 1);
     }
-
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
