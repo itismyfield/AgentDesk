@@ -366,7 +366,7 @@
 | `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2121 | giant-file |
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 3500 | giant-file |
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 421 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 6537 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 6542 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 910 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 413 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1382 | giant-file |
@@ -465,7 +465,7 @@
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 231 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2833 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 10810 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 10827 | giant-file |
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 354 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 124 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 410 |  |
@@ -630,7 +630,7 @@
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 645 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 469 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 768 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 3726 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 3824 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 868 |  |
 | `ui` | `src/ui/mod.rs` | 1 |  |
 | `ui::ai_screen` | `src/ui/ai_screen.rs` | 155 |  |
