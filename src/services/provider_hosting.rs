@@ -52,6 +52,8 @@ impl ProviderSessionSelection {
 
 static PROVIDER_TUI_HOSTING: LazyLock<RwLock<BTreeMap<String, bool>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
+static PROVIDER_TUI_HOSTING_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64), bool>>> =
+    LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
 /// Issue #2193 — runtime mirror of `providers.codex.remote_ssh_enabled`.
 /// Defaults to `false`; the bootstrap step hard-fails before this can be
@@ -73,6 +75,29 @@ pub fn install_provider_hosting_config(config: &Config) {
             values.insert(provider_id.trim().to_ascii_lowercase(), enabled);
         }
     }
+    let mut channel_values = BTreeMap::new();
+    for agent in &config.agents {
+        for (channel_kind, channel) in agent.channels.iter() {
+            let Some(channel) = channel else {
+                continue;
+            };
+            let Some(enabled) = channel.tui_hosting() else {
+                continue;
+            };
+            let Some(channel_id) = channel
+                .channel_id()
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let provider_id = channel
+                .provider()
+                .unwrap_or_else(|| channel_kind.to_string())
+                .trim()
+                .to_ascii_lowercase();
+            channel_values.insert((provider_id, channel_id), enabled);
+        }
+    }
 
     let summary = values
         .iter()
@@ -83,6 +108,18 @@ pub fn install_provider_hosting_config(config: &Config) {
         .write()
         .unwrap_or_else(|error| error.into_inner()) = values;
     tracing::info!(summary, "provider tui_hosting config installed");
+    let channel_summary = channel_values
+        .iter()
+        .map(|((provider, channel_id), enabled)| format!("{provider}:{channel_id}={enabled}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    *PROVIDER_TUI_HOSTING_BY_CHANNEL
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = channel_values;
+    tracing::info!(
+        channel_summary,
+        "provider per-channel tui_hosting config installed"
+    );
 
     // Issue #2193 — mirror the codex remote SSH gate into a runtime cell
     // the dispatch path can read without re-parsing the full Config.
@@ -116,13 +153,30 @@ pub fn resolve_provider_session_selection_with_capability(
     provider: &ProviderKind,
     entrypoint_supports_tui_hosting: bool,
 ) -> ProviderSessionSelection {
+    resolve_provider_session_selection_with_channel(provider, entrypoint_supports_tui_hosting, None)
+}
+
+pub fn resolve_provider_session_selection_with_channel(
+    provider: &ProviderKind,
+    entrypoint_supports_tui_hosting: bool,
+    channel_id: Option<u64>,
+) -> ProviderSessionSelection {
     let provider_id = provider.as_str().to_ascii_lowercase();
-    let requested_tui_hosting = PROVIDER_TUI_HOSTING
+    let provider_default = PROVIDER_TUI_HOSTING
         .read()
         .unwrap_or_else(|error| error.into_inner())
         .get(&provider_id)
         .copied()
         .unwrap_or_else(|| default_provider_tui_hosting(&provider_id));
+    let requested_tui_hosting = channel_id
+        .and_then(|channel_id| {
+            PROVIDER_TUI_HOSTING_BY_CHANNEL
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&(provider_id.clone(), channel_id))
+                .copied()
+        })
+        .unwrap_or(provider_default);
 
     if !requested_tui_hosting {
         return ProviderSessionSelection {
@@ -165,6 +219,26 @@ pub fn any_requested_tui_hosting_driver_available(config: &Config) -> bool {
         .filter(|provider_id| config.provider_tui_hosting_enabled(provider_id))
         .filter_map(|provider_id| ProviderKind::from_str(provider_id))
         .any(|provider| provider_tui_hosting_driver_available(&provider))
+        || config.agents.iter().any(|agent| {
+            agent
+                .channels
+                .iter()
+                .into_iter()
+                .any(|(channel_kind, channel)| {
+                    let Some(channel) = channel else {
+                        return false;
+                    };
+                    if channel.tui_hosting() != Some(true) {
+                        return false;
+                    }
+                    let provider_id = channel
+                        .provider()
+                        .unwrap_or_else(|| channel_kind.to_string());
+                    ProviderKind::from_str(&provider_id)
+                        .as_ref()
+                        .is_some_and(provider_tui_hosting_driver_available)
+                })
+        })
 }
 
 pub fn provider_tui_hosting_driver_available(provider: &ProviderKind) -> bool {
@@ -174,17 +248,20 @@ pub fn provider_tui_hosting_driver_available(provider: &ProviderKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ProviderConfig};
+    use crate::config::{
+        AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, AgentVoiceConfig, Config,
+        ProviderConfig,
+    };
     use std::sync::{LazyLock, Mutex};
 
     static TEST_CONFIG_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
-    fn defaults_request_tui_for_claude_and_codex_only() {
+    fn defaults_request_tui_for_claude_only() {
         let config = Config::default();
 
         assert!(config.provider_tui_hosting_enabled("claude"));
-        assert!(config.provider_tui_hosting_enabled("codex"));
+        assert!(!config.provider_tui_hosting_enabled("codex"));
         assert!(!config.provider_tui_hosting_enabled("qwen"));
         assert!(!config.provider_tui_hosting_enabled("gemini"));
         assert!(!config.provider_tui_hosting_enabled("opencode"));
@@ -227,13 +304,93 @@ mod tests {
     #[test]
     fn requested_tui_selects_codex_driver_when_available() {
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
-        install_provider_hosting_config(&Config::default());
+        let mut config = Config::default();
+        config.providers.insert(
+            "codex".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(true),
+                ..ProviderConfig::default()
+            },
+        );
+        install_provider_hosting_config(&config);
 
         let selection = resolve_provider_session_selection(&ProviderKind::Codex);
 
         assert!(selection.requested_tui_hosting);
         assert_eq!(selection.driver, ProviderSessionDriver::TuiHosting);
         assert_eq!(selection.fallback_reason, None);
+    }
+
+    #[test]
+    fn codex_defaults_to_legacy_prompt_driver() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        install_provider_hosting_config(&Config::default());
+
+        let selection = resolve_provider_session_selection(&ProviderKind::Codex);
+
+        assert!(!selection.requested_tui_hosting);
+        assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
+        assert_eq!(selection.fallback_reason, None);
+    }
+
+    #[test]
+    fn channel_override_can_enable_tui_when_provider_default_is_disabled() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                tui_hosting: Some(false),
+                ..ProviderConfig::default()
+            },
+        );
+        config.agents.push(test_agent_with_claude_channel(
+            "1506295332949196840",
+            Some(true),
+        ));
+        install_provider_hosting_config(&config);
+
+        let selected_channel = resolve_provider_session_selection_with_channel(
+            &ProviderKind::Claude,
+            true,
+            Some(1506295332949196840),
+        );
+        assert!(selected_channel.requested_tui_hosting);
+        assert_eq!(selected_channel.driver, ProviderSessionDriver::TuiHosting);
+
+        let other_channel =
+            resolve_provider_session_selection_with_channel(&ProviderKind::Claude, true, Some(42));
+        assert!(!other_channel.requested_tui_hosting);
+        assert_eq!(other_channel.driver, ProviderSessionDriver::LegacyPrompt);
+
+        let no_channel = resolve_provider_session_selection(&ProviderKind::Claude);
+        assert!(!no_channel.requested_tui_hosting);
+        assert_eq!(no_channel.driver, ProviderSessionDriver::LegacyPrompt);
+        assert!(any_requested_tui_hosting_driver_available(&config));
+    }
+
+    #[test]
+    fn channel_override_can_disable_tui_when_provider_default_is_enabled() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let mut config = Config::default();
+        config.agents.push(test_agent_with_claude_channel(
+            "1506295332949196840",
+            Some(false),
+        ));
+        install_provider_hosting_config(&config);
+
+        let selected_channel = resolve_provider_session_selection_with_channel(
+            &ProviderKind::Claude,
+            true,
+            Some(1506295332949196840),
+        );
+        assert!(!selected_channel.requested_tui_hosting);
+        assert_eq!(selected_channel.driver, ProviderSessionDriver::LegacyPrompt);
+
+        let other_channel =
+            resolve_provider_session_selection_with_channel(&ProviderKind::Claude, true, Some(42));
+        assert!(other_channel.requested_tui_hosting);
+        assert_eq!(other_channel.driver, ProviderSessionDriver::TuiHosting);
     }
 
     #[test]
@@ -314,5 +471,31 @@ mod tests {
         // Reset for other tests.
         install_provider_hosting_config(&Config::default());
         assert!(!codex_remote_ssh_enabled());
+    }
+
+    fn test_agent_with_claude_channel(channel_id: &str, tui_hosting: Option<bool>) -> AgentDef {
+        AgentDef {
+            id: "adk-dashboard-e2e".to_string(),
+            name: "ADK Dashboard E2E".to_string(),
+            name_ko: None,
+            aliases: Vec::new(),
+            wake_word: None,
+            voice_enabled: true,
+            sensitivity_mode: None,
+            voice: AgentVoiceConfig::default(),
+            provider: "codex".to_string(),
+            channels: AgentChannels {
+                claude: Some(AgentChannel::Detailed(AgentChannelConfig {
+                    id: Some(channel_id.to_string()),
+                    provider: Some("claude".to_string()),
+                    tui_hosting,
+                    ..AgentChannelConfig::default()
+                })),
+                ..AgentChannels::default()
+            },
+            keywords: Vec::new(),
+            department: None,
+            avatar_emoji: None,
+        }
     }
 }

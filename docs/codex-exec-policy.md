@@ -20,10 +20,12 @@ hosting. The decision point is whether the path may continue to invoke
 
 ## Decision
 
-Direct TUI hosting is the preferred local interactive Codex path and must not
-use `codex exec --json`. The remaining local wrapper and headless paths may
-continue to use `codex exec --json` because they are either explicit fallback
-paths or intentionally non-interactive.
+Direct TUI hosting is an opt-in local interactive Codex path and must not use
+`codex exec --json`. The default local Discord Codex path is the legacy tmux
+wrapper unless `providers.codex.tui_hosting: true` is explicitly configured.
+The remaining local wrapper and headless paths may continue to use
+`codex exec --json` because they are either explicit fallback paths or
+intentionally non-interactive.
 
 This issue does not migrate launch-option parity (#2173) or typed handoff
 (#2174). Those changes should keep the runtime-kind split intact: TUI hosting

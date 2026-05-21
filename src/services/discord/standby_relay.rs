@@ -550,30 +550,40 @@ async fn deliver_response(
             .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             match outcome {
-                Ok(ReplaceLongMessageOutcome::EditedOriginal)
-                | Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }) => {
-                    // `Manage Messages` lives on the announce bot in this
-                    // deployment; route the unpin there to avoid 403.
-                    let unpin_http = super::gateway::manage_messages_http(shared, http).await;
-                    match channel_id.unpin(unpin_http.as_ref(), msg_id).await {
-                        Ok(()) => shared
-                            .placeholder_controller
-                            .forget_placeholder_pin(provider, channel_id, msg_id),
-                        Err(error) => {
-                            tracing::warn!(
-                                provider = provider.as_str(),
-                                channel_id = channel_id.get(),
-                                message_id = msg_id.get(),
-                                error = %error,
-                                "[standby_relay] placeholder unpin failed after terminal delivery; tracked cleanup will retry"
-                            );
-                        }
-                    }
+                Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
+                    shared
+                        .placeholder_controller
+                        .forget_placeholder_pin(provider, channel_id, msg_id);
                     tracing::info!(
                         "  [{ts}] 👁 standby_relay ✓ delivered terminal response (edit) channel {} msg {} ({} chars)",
                         channel_id.get(),
                         msg_id.get(),
                         chars
+                    );
+                    true
+                }
+                Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
+                    if let Err(delete_error) =
+                        super::http::delete_channel_message(http, channel_id, msg_id).await
+                    {
+                        tracing::warn!(
+                            "  [{ts}] ⚠ standby_relay delivered terminal response via fallback but stale placeholder delete failed channel {} msg {} (edit_error={}, delete_error={})",
+                            channel_id.get(),
+                            msg_id.get(),
+                            edit_error,
+                            delete_error
+                        );
+                        return true;
+                    }
+                    shared
+                        .placeholder_controller
+                        .forget_placeholder_pin(provider, channel_id, msg_id);
+                    tracing::info!(
+                        "  [{ts}] 👁 standby_relay ✓ delivered terminal response via fallback and deleted stale placeholder channel {} msg {} ({} chars, edit_error={})",
+                        channel_id.get(),
+                        msg_id.get(),
+                        chars,
+                        edit_error
                     );
                     true
                 }

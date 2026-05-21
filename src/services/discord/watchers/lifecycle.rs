@@ -851,6 +851,33 @@ pub(super) fn should_suppress_streaming_placeholder_after_recent_stop(
     has_assistant_response && inflight_missing && recent_turn_stop
 }
 
+pub(super) fn should_suppress_post_terminal_output_without_inflight(
+    terminal_success_seen: bool,
+    inflight_missing: bool,
+) -> bool {
+    terminal_success_seen && inflight_missing
+}
+
+#[cfg(test)]
+mod post_terminal_output_tests {
+    use super::should_suppress_post_terminal_output_without_inflight;
+
+    #[test]
+    fn post_terminal_output_without_inflight_is_suppressed() {
+        assert!(should_suppress_post_terminal_output_without_inflight(
+            true, true
+        ));
+        assert!(
+            !should_suppress_post_terminal_output_without_inflight(false, true),
+            "pre-terminal output still belongs to the active watcher turn"
+        );
+        assert!(
+            !should_suppress_post_terminal_output_without_inflight(true, false),
+            "a newly active inflight owns subsequent output"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WatcherClaimAction {
     SpawnFresh,

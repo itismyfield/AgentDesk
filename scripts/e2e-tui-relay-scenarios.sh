@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Live Discord/TUI relay smoke suite for the dedicated E2E channels.
+# It intentionally uses the shipped AgentDesk CLI and runtime tmux sessions
+# instead of DB internals so the check follows the operator path.
+
+AGENTDESK_BIN="${AGENTDESK_BIN:-$HOME/.adk/release/bin/agentdesk}"
+SEND_SOURCE="${SEND_SOURCE:-project-agentdesk}"
+SEND_BOT="${SEND_BOT:-announce}"
+CLAUDE_CHANNEL="${CLAUDE_CHANNEL:-1506295332949196840}"
+CODEX_CHANNEL="${CODEX_CHANNEL:-1506295335096549406}"
+CLAUDE_TMUX="${CLAUDE_TMUX:-AgentDesk-claude-adk-dash-cc-e2e}"
+CODEX_TMUX="${CODEX_TMUX:-AgentDesk-codex-adk-dash-cdx-e2e}"
+TIMEOUT_SECS="${TIMEOUT_SECS:-180}"
+
+run_id="$(date +%Y%m%d-%H%M%S)"
+
+if [ "${1:-}" = "--help" ]; then
+  echo "Usage: $0"
+  exit 0
+fi
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "missing required command: $1" >&2
+    exit 2
+  }
+}
+
+send_turn() {
+  local channel="$1"
+  local label="$2"
+  local instruction="${3:-진행 확인. 한 줄로 marker를 그대로 응답하고, 현재 작업 디렉토리 basename도 함께 알려줘.}"
+  local marker="TUI-E2E-${run_id}-${label}"
+  "$AGENTDESK_BIN" send \
+    --target "channel:$channel" \
+    --source "$SEND_SOURCE" \
+    --bot "$SEND_BOT" \
+    --content "$marker $instruction" >&2
+  echo "$marker"
+}
+
+send_control() {
+  local channel="$1"
+  local content="$2"
+  "$AGENTDESK_BIN" send \
+    --target "channel:$channel" \
+    --bot "$SEND_BOT" \
+    --content "$content" >&2
+}
+
+latest_message_id() {
+  local channel="$1"
+  "$AGENTDESK_BIN" discord read "$channel" --limit 1 \
+    | python3 -c 'import json,sys; msgs=json.load(sys.stdin).get("messages",[]); print(msgs[0]["id"] if msgs else "0")'
+}
+
+messages_after() {
+  local channel="$1"
+  local _after_id="$2"
+  "$AGENTDESK_BIN" discord read "$channel" --limit 30
+}
+
+diag_status() {
+  local channel="$1"
+  "$AGENTDESK_BIN" diag "$channel" --json \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status","unknown"))'
+}
+
+message_probe() {
+  local channel="$1"
+  local after_id="$2"
+  local marker="$3"
+  local mode="$4"
+  local sent_prompt="$5"
+  local expected_extra="${6:-}"
+  messages_after "$channel" "$after_id" | AFTER_ID="$after_id" MARKER="$marker" MODE="$mode" SENT_PROMPT="$sent_prompt" EXPECTED_EXTRA="$expected_extra" python3 -c '
+import json, os, re, sys
+marker, mode = os.environ["MARKER"], os.environ["MODE"]
+sent_prompt = os.environ["SENT_PROMPT"]
+expected_extra = os.environ.get("EXPECTED_EXTRA", "")
+after_id = int(os.environ.get("AFTER_ID") or "0")
+doc = json.load(sys.stdin)
+messages = [m for m in doc.get("messages", []) if int(m.get("id") or "0") > after_id]
+
+def bot(m):
+    return bool(m.get("author", {}).get("bot"))
+
+def content(m):
+    return m.get("content") or ""
+
+def processing_message(text):
+    return bool(
+        re.search(r"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+Processing\.\.\.$", text)
+        or re.search(r"진행 중\s+—\s+(claude|codex|qwen)", text, re.IGNORECASE)
+        or re.search(r"도구 실행 중\s*\(", text)
+    )
+
+if mode == "processing":
+    ok = any(bot(m) and processing_message(content(m)) for m in messages)
+elif mode == "response":
+    ok = any(
+        bot(m)
+        and marker in content(m)
+        and content(m) != sent_prompt
+        and (not expected_extra or expected_extra in content(m))
+        for m in messages
+    )
+elif mode == "stale_processing":
+    ok = any(bot(m) and processing_message(content(m)) for m in messages)
+else:
+    raise SystemExit(f"unknown probe mode: {mode}")
+raise SystemExit(0 if ok else 1)
+'
+}
+
+wait_clear_evidence() {
+  local channel="$1"
+  local before_id="$2"
+  local deadline=$((SECONDS + 60))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if messages_after "$channel" "$before_id" | AFTER_ID="$before_id" python3 -c '
+import json, os, sys
+after_id = int(os.environ.get("AFTER_ID") or "0")
+messages = [m for m in json.load(sys.stdin).get("messages", []) if int(m.get("id") or "0") > after_id]
+ok = any((m.get("content") or "") in {"Session cleared.", "🧹 세션 클리어 (!clear)"} for m in messages)
+raise SystemExit(0 if ok else 1)
+'; then
+      [ "$(diag_status "$channel")" = "idle" ] && return 0
+    fi
+    sleep 2
+  done
+  echo "timeout waiting for !clear evidence on channel $channel" >&2
+  return 1
+}
+
+wait_relay_evidence() {
+  local channel="$1"
+  local marker="$2"
+  local before_id="$3"
+  local sent_prompt="$4"
+  local expected_extra="${5:-}"
+  local require_persistent_processing="${6:-0}"
+  local saw_busy=0
+  local saw_processing=0
+  local saw_response=0
+  local busy_processing_misses=0
+
+  local deadline=$((SECONDS + TIMEOUT_SECS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    local status
+    status="$(diag_status "$channel")"
+    local processing_visible=0
+    if message_probe "$channel" "$before_id" "$marker" processing "$sent_prompt" "$expected_extra"; then
+      processing_visible=1
+      saw_processing=1
+    fi
+
+    if [ "$status" != "idle" ]; then
+      saw_busy=1
+      if [ "$require_persistent_processing" = "1" ] && [ "$processing_visible" -eq 0 ]; then
+        busy_processing_misses=$((busy_processing_misses + 1))
+        if [ "$busy_processing_misses" -ge 2 ]; then
+          echo "processing placeholder disappeared while channel $channel was busy" >&2
+          return 1
+        fi
+      else
+        busy_processing_misses=0
+      fi
+    fi
+    if message_probe "$channel" "$before_id" "$marker" response "$sent_prompt" "$expected_extra"; then
+      saw_response=1
+    fi
+    if [ "$saw_response" -eq 1 ] && [ "$status" = "idle" ]; then
+      if [ "$require_persistent_processing" = "1" ] && { [ "$saw_busy" -ne 1 ] || [ "$saw_processing" -ne 1 ]; }; then
+        sleep 3
+        continue
+      fi
+      if message_probe "$channel" "$before_id" "$marker" stale_processing "$sent_prompt" "$expected_extra"; then
+        echo "stale processing placeholder remained after response in channel $channel" >&2
+        return 1
+      fi
+      return 0
+    fi
+    sleep 3
+  done
+  echo "timeout waiting for relay evidence on channel $channel (busy=$saw_busy processing=$saw_processing response=$saw_response)" >&2
+  return 1
+}
+
+wait_tmux_contains() {
+  local session="$1"
+  local marker="$2"
+  local deadline=$((SECONDS + 60))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if tmux capture-pane -p -J -S -200 -t "$session" 2>/dev/null | grep -q "$marker"; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "timeout waiting for marker in tmux session $session: $marker" >&2
+  return 1
+}
+
+assert_tmux_alive() {
+  local session="$1"
+  tmux has-session -t "$session" 2>/dev/null || {
+    echo "tmux session not alive: $session" >&2
+    return 1
+  }
+}
+
+prepare_tmux_input() {
+  local session="$1"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    tmux send-keys -t "$session" C-u >/dev/null 2>&1 || true
+    sleep 1
+  fi
+}
+
+clear_channel_session() {
+  local channel="$1"
+  local session="$2"
+  local before
+  before="$(latest_message_id "$channel")"
+  send_control "$channel" "!clear"
+  wait_clear_evidence "$channel" "$before"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    prepare_tmux_input "$session"
+  fi
+}
+
+assert_no_processing_tail() {
+  local session="$1"
+  local tail
+  tail="$(tmux capture-pane -p -J -S -40 -t "$session" 2>/dev/null || true)"
+  if printf '%s\n' "$tail" | grep -Eiq 'processing placeholder|No response requested'; then
+    echo "unexpected relay noise in tmux tail for $session" >&2
+    return 1
+  fi
+}
+
+require_cmd tmux
+require_cmd python3
+[ -x "$AGENTDESK_BIN" ] || {
+  echo "agentdesk binary not executable: $AGENTDESK_BIN" >&2
+  exit 2
+}
+
+run_turn_scenario() {
+  local channel="$1"
+  local session="$2"
+  local label="$3"
+  local instruction="$4"
+  local expected_extra="${5:-}"
+  local require_persistent_processing="${6:-0}"
+  local before marker sent_prompt
+  prepare_tmux_input "$session"
+  before="$(latest_message_id "$channel")"
+  marker="TUI-E2E-${run_id}-${label}"
+  sent_prompt="$marker $instruction"
+  marker="$(send_turn "$channel" "$label" "$instruction")"
+  wait_tmux_contains "$session" "$marker"
+  wait_relay_evidence "$channel" "$marker" "$before" "$sent_prompt" "$expected_extra" "$require_persistent_processing"
+  printf '%s\n' "$marker"
+}
+
+clear_channel_session "$CLAUDE_CHANNEL" "$CLAUDE_TMUX"
+clear_channel_session "$CODEX_CHANNEL" "$CODEX_TMUX"
+
+claude_marker="$(run_turn_scenario "$CLAUDE_CHANNEL" "$CLAUDE_TMUX" claude-basic "한 줄로 marker를 그대로 응답하고, 현재 작업 디렉토리 basename도 함께 알려줘.")"
+codex_marker="$(run_turn_scenario "$CODEX_CHANNEL" "$CODEX_TMUX" codex-basic "한 줄로 marker를 그대로 응답하고, 현재 작업 디렉토리 basename도 함께 알려줘.")"
+
+run_turn_scenario "$CLAUDE_CHANNEL" "$CLAUDE_TMUX" claude-memory "직전 응답에 나온 marker를 기억해서 그대로 포함하고, 이 새 marker도 함께 포함해 한 줄로 답해줘." "$claude_marker" >/dev/null
+run_turn_scenario "$CODEX_CHANNEL" "$CODEX_TMUX" codex-memory "직전 응답에 나온 marker를 기억해서 그대로 포함하고, 이 새 marker도 함께 포함해 한 줄로 답해줘." "$codex_marker" >/dev/null
+
+run_turn_scenario "$CLAUDE_CHANNEL" "$CLAUDE_TMUX" claude-long "반드시 shell/Bash 도구로 sleep 8을 실행한 뒤 marker를 그대로 포함해 한 줄로 답해줘." "" 1 >/dev/null
+run_turn_scenario "$CODEX_CHANNEL" "$CODEX_TMUX" codex-long "반드시 shell/Bash 도구로 sleep 8을 실행한 뒤 marker를 그대로 포함해 한 줄로 답해줘." "" 1 >/dev/null
+
+run_turn_scenario "$CLAUDE_CHANNEL" "$CLAUDE_TMUX" claude-rollover "marker를 그대로 포함하고, 1부터 180까지 번호 목록을 출력해 롤오버를 유도해줘." >/dev/null
+run_turn_scenario "$CODEX_CHANNEL" "$CODEX_TMUX" codex-rollover "marker를 그대로 포함하고, 1부터 180까지 번호 목록을 출력해 롤오버를 유도해줘." >/dev/null
+
+assert_tmux_alive "$CLAUDE_TMUX"
+assert_tmux_alive "$CODEX_TMUX"
+assert_no_processing_tail "$CLAUDE_TMUX"
+assert_no_processing_tail "$CODEX_TMUX"
+
+echo "TUI relay E2E smoke completed:"
+echo "  claude: $claude_marker"
+echo "  codex:  $codex_marker"

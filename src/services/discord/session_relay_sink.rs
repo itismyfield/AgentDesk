@@ -157,8 +157,7 @@ impl SessionBoundDiscordRelaySink {
             )
             .await
             {
-                Ok(ReplaceLongMessageOutcome::EditedOriginal)
-                | Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }) => {
+                Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
                     self.delivered_total.fetch_add(1, Ordering::AcqRel);
                     tracing::info!(
                         provider = provider.as_str(),
@@ -168,6 +167,38 @@ impl SessionBoundDiscordRelaySink {
                         chars = relay_text.chars().count(),
                         "session-bound relay sink delivered terminal response via placeholder edit"
                     );
+                    Ok(())
+                }
+                Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
+                    self.delivered_total.fetch_add(1, Ordering::AcqRel);
+                    match super::http::delete_channel_message(&http, channel, msg_id).await {
+                        Ok(()) => {
+                            shared
+                                .placeholder_controller
+                                .forget_placeholder_pin(&provider, channel, msg_id);
+                            tracing::info!(
+                                provider = provider.as_str(),
+                                channel = channel_id,
+                                message = msg_id.get(),
+                                tmux_session = %delivery.session_name,
+                                chars = relay_text.chars().count(),
+                                error = %edit_error,
+                                "session-bound relay sink delivered terminal response via fallback and deleted stale placeholder"
+                            );
+                        }
+                        Err(delete_error) => {
+                            tracing::warn!(
+                                provider = provider.as_str(),
+                                channel = channel_id,
+                                message = msg_id.get(),
+                                tmux_session = %delivery.session_name,
+                                chars = relay_text.chars().count(),
+                                error = %edit_error,
+                                delete_error = %delete_error,
+                                "session-bound relay sink delivered terminal response via fallback but stale placeholder delete failed"
+                            );
+                        }
+                    }
                     Ok(())
                 }
                 Ok(ReplaceLongMessageOutcome::PartialContinuationFailure { error, .. }) => {

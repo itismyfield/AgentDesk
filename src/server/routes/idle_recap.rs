@@ -42,21 +42,15 @@ pub async fn post_idle_recap(
         return error(StatusCode::INTERNAL_SERVER_ERROR, "pg pool unavailable");
     };
 
-    // Always stamp `idle_recap_posted_at` first so the policy dedupes this
-    // cycle even if the renderer below decides to skip (no channel binding,
-    // notify bot offline, …). Without this, a transient renderer failure
-    // would cause the policy to retry on every tick. SQL lives in the
-    // service module to keep this route handler SRP-clean (no raw `sqlx::query`
-    // alongside the `json!` response shaping).
-    if let Err(e) = idle_recap::stamp_recap_cycle(&pool, &session_key).await {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("stamp: {e}"));
-    }
-
     let snapshot = match idle_recap::load_recap_snapshot(&pool, &session_key).await {
         Ok(Some(snap)) => snap,
         Ok(None) => return error(StatusCode::NOT_FOUND, "session not found"),
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("load: {e}")),
     };
+
+    if !snapshot.has_resumable_provider_session() {
+        return skip("no resumable provider session");
+    }
 
     let Some(channel_id) = idle_recap::resolve_post_channel(&snapshot) else {
         return skip("no discord channel bound to agent");
@@ -65,9 +59,29 @@ pub async fn post_idle_recap(
     let Some(registry) = state.health_registry.clone() else {
         return skip("health registry unavailable (standalone mode)");
     };
-    let Some(http) = registry.notify_http_clone().await else {
-        return skip("notify bot not registered");
+    // Post via the provider bot (claude/codex), not notify-bot. The recap
+    // card carries an interactive `[새 세션 시작]` button — Discord routes the
+    // InteractionCreate to the application_id of the message author. The
+    // notify-bot is HTTP-only (no gateway), so its interactions are never
+    // received and users see "상호작용에 실패했습니다" after the 3s ACK timeout.
+    // The provider bots have gateways wired into `intake_gate::handle_event`,
+    // which already dispatches `idle_recap_interaction::handle_*`.
+    let http = match crate::services::discord::health::resolve_bot_http(
+        registry.as_ref(),
+        &snapshot.provider,
+    )
+    .await
+    {
+        Ok(http) => http,
+        Err(_) => return skip("provider bot not registered for recap interaction"),
     };
+
+    // Stamp only after the recap is known to be meaningful and postable. No
+    // resumable-session skips should stay eligible until a real session id is
+    // recorded; transient delivery skips still dedupe this idle cycle.
+    if let Err(e) = idle_recap::stamp_recap_cycle(&pool, &session_key).await {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("stamp: {e}"));
+    }
 
     let session_key_for_job = session_key.clone();
     tokio::spawn(async move {
