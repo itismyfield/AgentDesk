@@ -214,8 +214,13 @@ wait_relay_evidence() {
         continue
       fi
       if message_probe "$channel" "$before_id" "$marker" stale_processing "$sent_prompt" "$expected_extra"; then
-        echo "stale processing placeholder remained after response in channel $channel" >&2
-        return 1
+        # Discord REST can briefly return the pre-edit status panel right after
+        # the watcher commits idle. Treat it as stale only if it survives settle.
+        sleep 3
+        if message_probe "$channel" "$before_id" "$marker" stale_processing "$sent_prompt" "$expected_extra"; then
+          echo "stale processing placeholder remained after response in channel $channel" >&2
+          return 1
+        fi
       fi
       return 0
     fi
@@ -228,7 +233,7 @@ wait_relay_evidence() {
 wait_tmux_contains() {
   local session="$1"
   local marker="$2"
-  local deadline=$((SECONDS + 60))
+  local deadline=$((SECONDS + TIMEOUT_SECS))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if tmux capture-pane -p -J -S -1000 -t "$session" 2>/dev/null | grep -q "$marker"; then
       return 0
