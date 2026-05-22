@@ -5287,6 +5287,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "restored watcher completed with queued backlog",
             )
             .await;
+            if !watcher_direct_terminal_idle_committed {
+                watcher_direct_terminal_idle_committed =
+                    commit_watcher_direct_terminal_session_idle(
+                        &shared,
+                        &provider_kind,
+                        channel_id,
+                        &tmux_session_name,
+                        terminal_kind,
+                        data_start_offset,
+                        current_offset,
+                    )
+                    .await;
+            }
             let delegated_finalize_owed = owed;
             let mailbox = shared.mailbox(channel_id);
             let has_active_turn = mailbox.has_active_turn().await;
