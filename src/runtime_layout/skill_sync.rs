@@ -607,6 +607,9 @@ fn deploy_skill_link(
         if existing_target == desired || same_canonical_path(&link_path, &source_path) {
             return Ok(LinkState::Unchanged);
         }
+        if existing_skill_link_is_compatible(provider, skill_name, &link_path) {
+            return Ok(LinkState::SkippedExisting);
+        }
         remove_link_or_path(&link_path)?;
         create_symlink_entry(&source_path, &link_path, is_dir_link)?;
         return Ok(LinkState::Updated);
@@ -618,6 +621,46 @@ fn deploy_skill_link(
 
     create_symlink_entry(&source_path, &link_path, is_dir_link)?;
     Ok(LinkState::Created)
+}
+
+fn existing_skill_link_is_compatible(provider: &str, skill_name: &str, link_path: &Path) -> bool {
+    let Ok(resolved) = fs::canonicalize(link_path) else {
+        return false;
+    };
+
+    if provider == "claude" {
+        return resolved
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+            && resolved.is_file()
+            && resolved
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == skill_name);
+    }
+
+    let skill_dir = if resolved.is_dir() {
+        resolved
+    } else if resolved
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+    {
+        match resolved.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => return false,
+        }
+    } else {
+        return false;
+    };
+
+    skill_dir.join("SKILL.md").is_file()
+        && skill_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == skill_name)
 }
 
 fn copy_skill_dir_resolving_symlinks(src: &Path, dest: &Path) -> Result<(), String> {

@@ -1230,6 +1230,31 @@ agents: []
     }
 
     #[test]
+    #[cfg(unix)]
+    fn sync_managed_skills_preserves_existing_absolute_codex_link_to_compatible_skill() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let home = temp.path().join("home");
+        let _home_guard = TestHomeGuard::install(&home, root);
+        let managed_skill_md = root
+            .join("skills")
+            .join("agentdesk-restart")
+            .join("SKILL.md");
+        let external_skill_dir = temp.path().join("obsidian").join("agentdesk-restart");
+        let codex_link = home.join(".codex").join("skills").join("agentdesk-restart");
+        write_text(&managed_skill_md, "# managed\nbody");
+        write_text(&external_skill_dir.join("SKILL.md"), "# external\nbody");
+        fs::create_dir_all(codex_link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&external_skill_dir, &codex_link).unwrap();
+        ensure_managed_skills_manifest(root).unwrap();
+
+        let report = sync_managed_skills(root).unwrap();
+
+        assert_eq!(report.updated_links, 0);
+        assert!(same_canonical_path(&codex_link, &external_skill_dir));
+    }
+
+    #[test]
     fn remove_legacy_path_unlinks_symlink_without_deleting_source() {
         let temp = tempfile::tempdir().unwrap();
         let source_dir = temp.path().join("obsidian").join("role-context");

@@ -423,7 +423,11 @@ pub fn observe_prompt_by_tmux(
 ) -> PromptObservation {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
-    if provider.is_empty() || tmux_session_name.is_empty() || prompt.trim().is_empty() {
+    let prompt = prompt.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() || prompt.is_empty() {
+        return PromptObservation::Ignored;
+    }
+    if is_synthetic_tui_user_prompt(prompt) {
         return PromptObservation::Ignored;
     }
     if take_matching_pending_prompt(&provider, tmux_session_name, prompt) {
@@ -603,7 +607,7 @@ pub fn extract_codex_rollout_user_prompt(json: &Value) -> Option<String> {
     {
         return None;
     }
-    extract_message_content_text(payload)
+    reject_synthetic_tui_user_prompt(extract_message_content_text(payload)?)
 }
 
 pub fn extract_claude_transcript_user_prompt(json: &Value) -> Option<String> {
@@ -625,7 +629,7 @@ pub fn extract_claude_transcript_user_prompt(json: &Value) -> Option<String> {
     {
         return None;
     }
-    extract_message_content_text(message)
+    reject_synthetic_tui_user_prompt(extract_message_content_text(message)?)
 }
 
 pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
@@ -640,7 +644,21 @@ pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
     {
         return None;
     }
-    extract_message_content_text(message)
+    reject_synthetic_tui_user_prompt(extract_message_content_text(message)?)
+}
+
+fn reject_synthetic_tui_user_prompt(prompt: String) -> Option<String> {
+    (!is_synthetic_tui_user_prompt(&prompt)).then_some(prompt)
+}
+
+fn is_synthetic_tui_user_prompt(prompt: &str) -> bool {
+    let prompt = prompt.trim();
+    if prompt.starts_with("<environment_context>") && prompt.ends_with("</environment_context>") {
+        return true;
+    }
+    prompt.starts_with("[Shared Agent Knowledge]\n")
+        || prompt.starts_with("[Proactive Memory Guidance]\n")
+        || prompt == "No response requested."
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1335,6 +1353,25 @@ mod tests {
     }
 
     #[test]
+    fn ignores_synthetic_context_prompt_without_relay_lease() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        assert_eq!(
+            observe_prompt_by_tmux(
+                "codex",
+                "tmux-c",
+                "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>",
+            ),
+            PromptObservation::Ignored
+        );
+        assert!(
+            !external_input_relay_lease_present("codex", "tmux-c", 42),
+            "bootstrap context must not create an SSH-direct relay lease"
+        );
+    }
+
+    #[test]
     fn external_input_relay_lease_can_be_bound_to_channel_after_observation() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();
@@ -1395,6 +1432,25 @@ mod tests {
             extract_codex_rollout_user_prompt(&json).as_deref(),
             Some("hello\nworld")
         );
+    }
+
+    #[test]
+    fn ignores_codex_rollout_environment_context_user_message() {
+        let json = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>"
+                    }
+                ]
+            }
+        });
+
+        assert_eq!(extract_codex_rollout_user_prompt(&json), None);
     }
 
     #[test]
