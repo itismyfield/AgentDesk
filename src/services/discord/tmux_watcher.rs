@@ -100,6 +100,24 @@ fn watcher_should_defer_delegated_fresh_idle(
     delegated_finalize_owed && full_response.trim().is_empty()
 }
 
+fn watcher_should_bypass_post_terminal_no_inflight_suppress(
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    terminal_success_seen: bool,
+    inflight_missing: bool,
+) -> bool {
+    // Legacy tmux wrappers can accept prompt text typed directly into the tmux
+    // pane after the previous Discord turn has already committed. That input
+    // produces fresh JSONL without creating a Discord inflight/anchor, so the
+    // post-terminal ghost-output suppressor must let the normal parser decide
+    // whether the bytes contain a response.
+    terminal_success_seen
+        && inflight_missing
+        && matches!(
+            runtime_kind,
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper)
+        )
+}
+
 fn adopt_watcher_terminal_message_ids_from_inflight(
     placeholder_msg_id: &mut Option<serenity::MessageId>,
     placeholder_from_restored_inflight: &mut bool,
@@ -2097,12 +2115,35 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         } else {
             false
         };
-        if should_suppress_post_terminal_output_without_inflight(
-            turn_result_relayed,
-            post_terminal_inflight_missing,
-            ssh_direct_prompt_pending,
-            external_input_lease_present,
-        ) {
+        let runtime_kind_marker = if turn_result_relayed && post_terminal_inflight_missing {
+            crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session_name)
+        } else {
+            None
+        };
+        let legacy_wrapper_terminal_input_candidate =
+            watcher_should_bypass_post_terminal_no_inflight_suppress(
+                runtime_kind_marker,
+                turn_result_relayed,
+                post_terminal_inflight_missing,
+            );
+        let post_terminal_no_inflight_should_suppress =
+            should_suppress_post_terminal_output_without_inflight(
+                turn_result_relayed,
+                post_terminal_inflight_missing,
+                ssh_direct_prompt_pending,
+                external_input_lease_present,
+            );
+        if post_terminal_no_inflight_should_suppress && legacy_wrapper_terminal_input_candidate {
+            tracing::info!(
+                provider = %watcher_provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                data_start_offset,
+                current_offset,
+                "watcher: bypassed post-terminal no-inflight suppress for legacy wrapper terminal input candidate"
+            );
+        }
+        if post_terminal_no_inflight_should_suppress && !legacy_wrapper_terminal_input_candidate {
             let suppressed_range = (data_start_offset, current_offset);
             if last_post_terminal_suppressed_range != Some(suppressed_range) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -5813,11 +5854,13 @@ mod tests {
         should_probe_tmux_liveness, terminal_event_consumed_offset,
         watcher_direct_terminal_should_commit_session_idle,
         watcher_fallback_edit_failure_can_delete_original_placeholder,
-        watcher_inflight_represents_external_input, watcher_should_defer_delegated_fresh_idle,
-        watcher_should_delete_suppressed_placeholder,
+        watcher_inflight_represents_external_input,
+        watcher_should_bypass_post_terminal_no_inflight_suppress,
+        watcher_should_defer_delegated_fresh_idle, watcher_should_delete_suppressed_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
         watcher_terminal_edit_consumes_placeholder, watcher_terminal_token_update_status,
     };
+    use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::InflightTurnState;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::provider::ProviderKind;
@@ -6021,6 +6064,33 @@ mod tests {
             watcher_terminal_token_update_status(false),
             crate::db::session_status::TURN_ACTIVE
         );
+    }
+
+    #[test]
+    fn legacy_wrapper_post_terminal_direct_input_bypasses_no_inflight_suppress() {
+        assert!(watcher_should_bypass_post_terminal_no_inflight_suppress(
+            Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+            true,
+            true
+        ));
+        assert!(!watcher_should_bypass_post_terminal_no_inflight_suppress(
+            Some(RuntimeHandoffKind::ClaudeTui),
+            true,
+            true
+        ));
+        assert!(!watcher_should_bypass_post_terminal_no_inflight_suppress(
+            None, true, true
+        ));
+        assert!(!watcher_should_bypass_post_terminal_no_inflight_suppress(
+            Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+            false,
+            true
+        ));
+        assert!(!watcher_should_bypass_post_terminal_no_inflight_suppress(
+            Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+            true,
+            false
+        ));
     }
 
     #[test]
