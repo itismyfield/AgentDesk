@@ -118,6 +118,14 @@ fn watcher_should_bypass_post_terminal_no_inflight_suppress(
         )
 }
 
+fn watcher_should_clear_stale_terminal_message_ids(
+    inflight_present: bool,
+    has_assistant_response: bool,
+    placeholder_msg_id: Option<serenity::MessageId>,
+) -> bool {
+    has_assistant_response && !inflight_present && placeholder_msg_id.is_some()
+}
+
 fn adopt_watcher_terminal_message_ids_from_inflight(
     placeholder_msg_id: &mut Option<serenity::MessageId>,
     placeholder_from_restored_inflight: &mut bool,
@@ -4108,6 +4116,26 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             .as_ref()
             .map(|state| state.silent_turn)
             .unwrap_or(false);
+        if watcher_should_clear_stale_terminal_message_ids(
+            inflight_before_relay.is_some(),
+            has_assistant_response,
+            placeholder_msg_id,
+        ) {
+            if let Some(stale_msg_id) = placeholder_msg_id {
+                tracing::info!(
+                    provider = %watcher_provider.as_str(),
+                    channel = channel_id.get(),
+                    tmux_session = %tmux_session_name,
+                    stale_placeholder_msg_id = stale_msg_id.get(),
+                    status_panel_msg_id = status_panel_msg_id.map(|id| id.get()).unwrap_or(0),
+                    "watcher: clearing stale terminal message ids before no-inflight terminal relay"
+                );
+            }
+            placeholder_msg_id = None;
+            status_panel_msg_id = None;
+            placeholder_from_restored_inflight = false;
+            last_edit_text.clear();
+        }
         if inflight_silent_turn && has_assistant_response {
             // Headless silent trigger (metadata.silent=true) — suppress assistant
             // text relay to the channel entirely, but keep the watcher state
@@ -5856,7 +5884,8 @@ mod tests {
         watcher_fallback_edit_failure_can_delete_original_placeholder,
         watcher_inflight_represents_external_input,
         watcher_should_bypass_post_terminal_no_inflight_suppress,
-        watcher_should_defer_delegated_fresh_idle, watcher_should_delete_suppressed_placeholder,
+        watcher_should_clear_stale_terminal_message_ids, watcher_should_defer_delegated_fresh_idle,
+        watcher_should_delete_suppressed_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
         watcher_terminal_edit_consumes_placeholder, watcher_terminal_token_update_status,
     };
@@ -6090,6 +6119,28 @@ mod tests {
             Some(RuntimeHandoffKind::LegacyTmuxWrapper),
             true,
             false
+        ));
+    }
+
+    #[test]
+    fn no_inflight_terminal_response_does_not_reuse_previous_placeholder() {
+        assert!(watcher_should_clear_stale_terminal_message_ids(
+            false,
+            true,
+            Some(MessageId::new(42))
+        ));
+        assert!(!watcher_should_clear_stale_terminal_message_ids(
+            true,
+            true,
+            Some(MessageId::new(42))
+        ));
+        assert!(!watcher_should_clear_stale_terminal_message_ids(
+            false,
+            false,
+            Some(MessageId::new(42))
+        ));
+        assert!(!watcher_should_clear_stale_terminal_message_ids(
+            false, true, None
         ));
     }
 
