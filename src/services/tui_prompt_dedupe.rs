@@ -328,6 +328,16 @@ pub(crate) fn runtime_binding_for_tmux_session(
         .map(|entry| entry.value.clone())
 }
 
+pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
+    let tmux_session_name = tmux_session_name.trim();
+    if tmux_session_name.is_empty() {
+        return false;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    state.runtime_by_tmux.remove(tmux_session_name).is_some()
+}
+
 pub(crate) fn runtime_bindings_for_kind(
     runtime_kind: RuntimeHandoffKind,
 ) -> Vec<(String, TuiRuntimeBinding)> {
@@ -1025,6 +1035,31 @@ mod tests {
                 relay_last_offset: None,
             })
         );
+    }
+
+    #[test]
+    fn clears_runtime_binding_by_tmux_session() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        register_tmux_runtime_binding(
+            "tmux-runtime",
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: "/tmp/claude-transcript.jsonl".to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("session-123".to_string()),
+                last_offset: 77,
+                relay_last_offset: None,
+            },
+        );
+
+        assert!(runtime_binding_for_tmux_session("tmux-runtime").is_some());
+        assert!(clear_tmux_runtime_binding("tmux-runtime"));
+        assert!(runtime_binding_for_tmux_session("tmux-runtime").is_none());
+        assert!(!clear_tmux_runtime_binding("tmux-runtime"));
+        assert!(!clear_tmux_runtime_binding("   "));
     }
 
     #[test]
