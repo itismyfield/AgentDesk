@@ -159,6 +159,16 @@ fn watcher_direct_terminal_should_commit_session_idle(
             || ssh_direct_pending)
 }
 
+fn watcher_terminal_token_update_status(
+    watcher_direct_terminal_idle_committed: bool,
+) -> &'static str {
+    if watcher_direct_terminal_idle_committed {
+        crate::db::session_status::IDLE
+    } else {
+        crate::db::session_status::TURN_ACTIVE
+    }
+}
+
 #[cfg(unix)]
 async fn commit_watcher_direct_terminal_session_idle(
     shared: &std::sync::Arc<SharedData>,
@@ -168,7 +178,7 @@ async fn commit_watcher_direct_terminal_session_idle(
     terminal_kind: Option<WatcherTerminalKind>,
     data_start_offset: u64,
     current_offset: u64,
-) {
+) -> bool {
     if shared.mailbox(channel_id).cancel_token().await.is_some() {
         tracing::debug!(
             channel_id = channel_id.get(),
@@ -176,7 +186,7 @@ async fn commit_watcher_direct_terminal_session_idle(
             provider = %provider.as_str(),
             "skipping watcher-direct terminal session-idle commit; mailbox turn is active"
         );
-        return;
+        return false;
     }
 
     if crate::services::discord::inflight::load_inflight_state(provider, channel_id.get()).is_some()
@@ -187,7 +197,7 @@ async fn commit_watcher_direct_terminal_session_idle(
             provider = %provider.as_str(),
             "skipping watcher-direct terminal session-idle commit; inflight state is active"
         );
-        return;
+        return false;
     }
 
     let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
@@ -226,7 +236,7 @@ async fn commit_watcher_direct_terminal_session_idle(
                 terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
                 "skipping watcher-direct terminal session-idle commit; session row is absent or newer live"
             );
-            return;
+            return false;
         }
         Err(error) => {
             tracing::warn!(
@@ -240,7 +250,7 @@ async fn commit_watcher_direct_terminal_session_idle(
                 error = %error,
                 "failed to commit watcher-direct terminal session idle"
             );
-            return;
+            return false;
         }
     }
 
@@ -254,6 +264,7 @@ async fn commit_watcher_direct_terminal_session_idle(
         terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
         "watcher-direct terminal response committed session idle"
     );
+    true
 }
 
 /// #2442 (H3) — fast-path check for the wrapper's `ready_for_input` JSONL
@@ -4336,6 +4347,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             frame_ack_outcome = ?session_bound_ack_outcome,
             "relay flight recorder"
         );
+        let mut watcher_direct_terminal_idle_committed = false;
         let relay_ok = if session_bound_relay_owns_terminal_delivery {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -4638,16 +4650,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             external_input_lease_before_relay,
                             ssh_direct_pending,
                         ) {
-                            commit_watcher_direct_terminal_session_idle(
-                                &shared,
-                                &watcher_provider,
-                                channel_id,
-                                &tmux_session_name,
-                                terminal_kind,
-                                data_start_offset,
-                                current_offset,
-                            )
-                            .await;
+                            watcher_direct_terminal_idle_committed =
+                                commit_watcher_direct_terminal_session_idle(
+                                    &shared,
+                                    &watcher_provider,
+                                    channel_id,
+                                    &tmux_session_name,
+                                    terminal_kind,
+                                    data_start_offset,
+                                    current_offset,
+                                )
+                                .await;
                         }
                     }
                     last_relayed_offset = Some(turn_data_start_offset);
@@ -5449,7 +5462,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 session_key.as_deref(),
                 channel_name.as_deref(),
                 None,
-                crate::db::session_status::TURN_ACTIVE,
+                watcher_terminal_token_update_status(watcher_direct_terminal_idle_committed),
                 &provider,
                 None,
                 Some(tokens),
@@ -5795,7 +5808,7 @@ mod tests {
         watcher_inflight_represents_external_input, watcher_should_defer_delegated_fresh_idle,
         watcher_should_delete_suppressed_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
-        watcher_terminal_edit_consumes_placeholder,
+        watcher_terminal_edit_consumes_placeholder, watcher_terminal_token_update_status,
     };
     use crate::services::discord::InflightTurnState;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
@@ -5991,6 +6004,15 @@ mod tests {
         assert!(!watcher_direct_terminal_should_commit_session_idle(
             true, false, false, false, false, false
         ));
+    }
+
+    #[test]
+    fn watcher_direct_terminal_idle_commit_keeps_later_token_update_idle() {
+        assert_eq!(watcher_terminal_token_update_status(true), "idle");
+        assert_eq!(
+            watcher_terminal_token_update_status(false),
+            crate::db::session_status::TURN_ACTIVE
+        );
     }
 
     #[test]
