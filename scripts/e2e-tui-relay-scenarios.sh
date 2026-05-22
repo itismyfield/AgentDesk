@@ -209,7 +209,7 @@ wait_relay_evidence() {
       saw_response=1
     fi
     if [ "$saw_response" -eq 1 ] && [ "$status" = "idle" ]; then
-      if [ "$require_persistent_processing" = "1" ] && { [ "$saw_busy" -ne 1 ] || [ "$saw_processing" -ne 1 ]; }; then
+      if [ "$require_persistent_processing" = "1" ] && [ "$saw_busy" -eq 1 ] && [ "$saw_processing" -ne 1 ]; then
         sleep 3
         continue
       fi
