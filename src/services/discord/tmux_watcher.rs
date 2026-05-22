@@ -68,29 +68,13 @@ fn watcher_should_delete_suppressed_placeholder(placeholder_from_restored_inflig
 }
 
 fn watcher_fallback_edit_failure_can_delete_original_placeholder(
-    response_sent_offset: usize,
-    last_edit_text: &str,
+    _response_sent_offset: usize,
+    _last_edit_text: &str,
 ) -> bool {
-    response_sent_offset == 0 && {
-        let text = last_edit_text.trim();
-        !text.is_empty()
-            && text.contains("Processing")
-            && !text.lines().any(|line| {
-                let line = line.trim();
-                !line.is_empty()
-                    && !line.contains("Processing")
-                    && !line.starts_with('⠋')
-                    && !line.starts_with('⠙')
-                    && !line.starts_with('⠹')
-                    && !line.starts_with('⠸')
-                    && !line.starts_with('⠼')
-                    && !line.starts_with('⠴')
-                    && !line.starts_with('⠦')
-                    && !line.starts_with('⠧')
-                    && !line.starts_with('⠇')
-                    && !line.starts_with('⠏')
-            })
-    }
+    // #2757 parity with session_relay_sink: after a terminal fallback send,
+    // the original message id may already contain partial assistant content.
+    // Without a Discord probe proving it is a pure placeholder, preserve it.
+    false
 }
 
 fn watcher_should_defer_delegated_fresh_idle(
@@ -792,6 +776,13 @@ fn session_bound_relay_frame_ack_reached(target: Option<&SessionBoundRelayAckTar
     sequence_reached(snapshot.last_delivered_sequence, target.sequence)
 }
 
+fn watcher_should_direct_send_after_session_bound_ack(
+    should_direct_send: bool,
+    ack_outcome: SessionBoundRelayAckOutcome,
+) -> bool {
+    should_direct_send && !matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered)
+}
+
 async fn wait_for_session_bound_relay_delivery_ack(
     target: Option<&SessionBoundRelayAckTarget>,
     timeout: std::time::Duration,
@@ -1455,6 +1446,42 @@ mod matched_session_jsonl_gate_tests {
     }
 
     #[test]
+    fn frame_accepted_without_terminal_commit_uses_watcher_direct_fallback() {
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::TimedOut
+        ));
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::MissingTarget
+        ));
+        assert!(!watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::Delivered
+        ));
+        assert!(!watcher_should_direct_send_after_session_bound_ack(
+            false,
+            SessionBoundRelayAckOutcome::TimedOut
+        ));
+    }
+
+    #[test]
+    fn session_sink_route_skip_uses_watcher_direct_fallback() {
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::SinkError
+        ));
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::Dropped
+        ));
+        assert!(!watcher_should_direct_send_after_session_bound_ack(
+            true,
+            SessionBoundRelayAckOutcome::Delivered
+        ));
+    }
+
+    #[test]
     fn missing_matched_session_jsonl_is_unknown_for_existing_inflight() {
         let missing_path = std::env::temp_dir().join(format!(
             "agentdesk-missing-external-jsonl-{}-{}.jsonl",
@@ -1485,6 +1512,35 @@ fn watcher_commit_should_advance_runtime_binding(
     gate_outcome: TuiCompletionGateOutcome,
 ) -> bool {
     terminal_output_committed && !matches!(gate_outcome, TuiCompletionGateOutcome::TimedOut)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WatcherTerminalCommitSideEffects {
+    advance_runtime_binding: bool,
+    advance_confirmed_end: bool,
+    clear_inflight: bool,
+    finish_restored_turn: bool,
+    late_output_retry_possible: bool,
+}
+
+#[cfg(test)]
+fn watcher_terminal_commit_side_effects_for_test(
+    terminal_output_committed: bool,
+    gate_outcome: TuiCompletionGateOutcome,
+) -> WatcherTerminalCommitSideEffects {
+    let lifecycle_allowed =
+        terminal_output_committed && !matches!(gate_outcome, TuiCompletionGateOutcome::TimedOut);
+    WatcherTerminalCommitSideEffects {
+        advance_runtime_binding: watcher_commit_should_advance_runtime_binding(
+            terminal_output_committed,
+            gate_outcome,
+        ),
+        advance_confirmed_end: lifecycle_allowed,
+        clear_inflight: lifecycle_allowed,
+        finish_restored_turn: lifecycle_allowed,
+        late_output_retry_possible: terminal_output_committed && !lifecycle_allowed,
+    }
 }
 
 fn watcher_terminal_kind_requires_tui_completion_gate(
@@ -1526,6 +1582,28 @@ mod runtime_binding_offset_tests {
             true,
             TuiCompletionGateOutcome::TimedOut
         ));
+    }
+
+    #[test]
+    fn tui_completion_gate_timeout_preserves_offsets_inflight_and_late_output_retry() {
+        let side_effects =
+            watcher_terminal_commit_side_effects_for_test(true, TuiCompletionGateOutcome::TimedOut);
+
+        assert!(!side_effects.advance_runtime_binding);
+        assert!(!side_effects.advance_confirmed_end);
+        assert!(!side_effects.clear_inflight);
+        assert!(!side_effects.finish_restored_turn);
+        assert!(side_effects.late_output_retry_possible);
+
+        let confirmed = watcher_terminal_commit_side_effects_for_test(
+            true,
+            TuiCompletionGateOutcome::ConfirmedIdle,
+        );
+        assert!(confirmed.advance_runtime_binding);
+        assert!(confirmed.advance_confirmed_end);
+        assert!(confirmed.clear_inflight);
+        assert!(confirmed.finish_restored_turn);
+        assert!(!confirmed.late_output_retry_possible);
     }
 
     #[test]
@@ -4416,6 +4494,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let recent_stop_reason =
             recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset)
                 .map(|stop| stop.reason);
+        let watcher_direct_fallback_after_session_bound_ack =
+            watcher_should_direct_send_after_session_bound_ack(
+                relay_decision.should_direct_send,
+                session_bound_ack_outcome,
+            );
         tracing::info!(
             target: "agentdesk::relay_flight_recorder",
             provider = watcher_provider.as_str(),
@@ -4439,7 +4522,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             terminal_commit_ack = session_bound_relay_owns_terminal_delivery,
             route = if session_bound_relay_owns_terminal_delivery {
                 "session_bound"
-            } else if relay_decision.should_direct_send {
+            } else if watcher_direct_fallback_after_session_bound_ack {
                 "watcher_direct"
             } else if relay_decision.suppressed {
                 "suppressed"
@@ -4490,7 +4573,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
             clear_provider_overload_retry_state(channel_id);
             true
-        } else if relay_decision.should_direct_send {
+        } else if watcher_direct_fallback_after_session_bound_ack {
             let formatted = if shared.status_panel_v2_enabled {
                 crate::services::discord::formatting::format_for_discord_with_status_panel(
                     current_response,
@@ -6323,7 +6406,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_edit_failure_preserves_original_when_response_was_streamed() {
+    fn fallback_edit_failure_never_deletes_original_without_placeholder_probe() {
         assert!(
             !watcher_fallback_edit_failure_can_delete_original_placeholder(12, "partial answer")
         );
@@ -6331,7 +6414,7 @@ mod tests {
             !watcher_fallback_edit_failure_can_delete_original_placeholder(0, "partial answer")
         );
         assert!(
-            watcher_fallback_edit_failure_can_delete_original_placeholder(0, "⠙ Processing...")
+            !watcher_fallback_edit_failure_can_delete_original_placeholder(0, "⠙ Processing...")
         );
     }
 

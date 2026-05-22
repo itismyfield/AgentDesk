@@ -1252,17 +1252,16 @@ async fn run_codex_idle_response_tail(
         }
     };
 
-    crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
-        &tmux_session_name,
-        rollout_path.to_str().unwrap_or_default(),
-        final_offset,
-    );
-
     let response = response.trim();
     if response.is_empty() {
+        crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+            &tmux_session_name,
+            rollout_path.to_str().unwrap_or_default(),
+            final_offset,
+        );
         return;
     }
-    deliver_tui_idle_response(
+    let delivered = deliver_tui_idle_response(
         &shared,
         ProviderKind::Codex,
         channel_id,
@@ -1271,6 +1270,13 @@ async fn run_codex_idle_response_tail(
         tail_started_at,
     )
     .await;
+    if tui_idle_tail_should_commit_runtime_binding_offset(response, delivered) {
+        crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+            &tmux_session_name,
+            rollout_path.to_str().unwrap_or_default(),
+            final_offset,
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -1365,18 +1371,17 @@ async fn run_claude_idle_response_tail(
         }
     };
 
-    advance_claude_tmux_runtime_binding_offset(
-        &tmux_session_name,
-        &transcript_path,
-        final_offset,
-        true,
-    );
-
     let response = response.trim();
     if response.is_empty() {
+        advance_claude_tmux_runtime_binding_offset(
+            &tmux_session_name,
+            &transcript_path,
+            final_offset,
+            true,
+        );
         return;
     }
-    deliver_tui_idle_response(
+    let delivered = deliver_tui_idle_response(
         &shared,
         ProviderKind::Claude,
         channel_id,
@@ -1385,6 +1390,14 @@ async fn run_claude_idle_response_tail(
         tail_started_at,
     )
     .await;
+    if tui_idle_tail_should_commit_runtime_binding_offset(response, delivered) {
+        advance_claude_tmux_runtime_binding_offset(
+            &tmux_session_name,
+            &transcript_path,
+            final_offset,
+            true,
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -1477,7 +1490,7 @@ async fn deliver_tui_idle_response(
     tmux_session_name: &str,
     response: &str,
     tail_started_at: chrono::DateTime<chrono::Utc>,
-) {
+) -> bool {
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         tracing::warn!(
             channel_id = channel_id.get(),
@@ -1485,7 +1498,7 @@ async fn deliver_tui_idle_response(
             provider = %provider.as_str(),
             "skipping TUI idle response relay; Discord HTTP unavailable"
         );
-        return;
+        return false;
     };
     let formatted = if shared.status_panel_v2_enabled {
         super::formatting::format_for_discord_with_status_panel(response, &provider)
@@ -1538,6 +1551,7 @@ async fn deliver_tui_idle_response(
                 prompt_anchor_message_id = reference.map(|(_, message_id)| message_id.get()),
                 "TUI idle response relayed"
             );
+            true
         }
         Err(error) => {
             tracing::warn!(
@@ -1547,8 +1561,17 @@ async fn deliver_tui_idle_response(
                 error = %error,
                 "failed to relay TUI idle response"
             );
+            false
         }
     }
+}
+
+#[cfg(unix)]
+fn tui_idle_tail_should_commit_runtime_binding_offset(
+    response: &str,
+    discord_delivery_succeeded: bool,
+) -> bool {
+    response.trim().is_empty() || discord_delivery_succeeded
 }
 
 #[cfg(unix)]
@@ -2399,5 +2422,21 @@ agents:
         );
 
         assert_eq!(output, "  intentional leading spaces");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_response_tail_discord_send_failure_does_not_advance_runtime_binding_offset() {
+        assert!(!tui_idle_tail_should_commit_runtime_binding_offset(
+            "final answer",
+            false
+        ));
+        assert!(tui_idle_tail_should_commit_runtime_binding_offset(
+            "final answer",
+            true
+        ));
+        assert!(tui_idle_tail_should_commit_runtime_binding_offset(
+            "", false
+        ));
     }
 }

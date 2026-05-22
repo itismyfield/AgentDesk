@@ -633,6 +633,20 @@ mod tests {
         assert!(matches!(result, Err(RelaySinkError::Transient(_))));
     }
 
+    #[tokio::test]
+    async fn session_sink_frame_consumed_without_terminal_delivery_returns_frame_accepted() {
+        let binding = matched("44");
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+        let payload = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"partial only\"}]}}\n";
+
+        let outcome = sink
+            .deliver(&frame(&binding, payload, 1))
+            .await
+            .expect("frame without terminal delivery should be accepted");
+
+        assert_eq!(outcome, RelaySinkOutcome::FrameAccepted);
+    }
+
     #[test]
     fn parser_emits_only_user_visible_task_notification_response() {
         let binding = matched("42");
