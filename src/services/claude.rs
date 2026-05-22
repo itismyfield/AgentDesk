@@ -1601,6 +1601,24 @@ impl ClaudeTuiStrandedPromptDraftState {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClaudeTuiWarmFollowupSubmitPlan {
+    submit_existing_session: bool,
+    recheck_busy_before_submit: bool,
+}
+
+#[cfg(unix)]
+fn claude_tui_warm_followup_submit_plan(
+    recreate_before_submit: bool,
+    prompt_draft_cleared_before_submit: bool,
+) -> ClaudeTuiWarmFollowupSubmitPlan {
+    ClaudeTuiWarmFollowupSubmitPlan {
+        submit_existing_session: !recreate_before_submit,
+        recheck_busy_before_submit: !prompt_draft_cleared_before_submit,
+    }
+}
+
+#[cfg(unix)]
 fn claude_tui_followup_stranded_prompt_draft_state(
     snapshot: &crate::services::claude_tui::input::PromptReadinessSnapshot,
     transcript_path: &std::path::Path,
@@ -2118,9 +2136,16 @@ fn execute_streaming_local_tui_tmux(
                 }
             }
         }
-        if !recreate_before_submit && !prompt_draft_cleared_before_submit {
-            if let Some(snapshot) =
-                claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
+        let submit_plan = claude_tui_warm_followup_submit_plan(
+            recreate_before_submit,
+            prompt_draft_cleared_before_submit,
+        );
+        if submit_plan.submit_existing_session {
+            if submit_plan.recheck_busy_before_submit
+                && let Some(snapshot) = claude_tui_followup_busy_before_submit(
+                    tmux_session_name,
+                    Some(&transcript_path),
+                )
             {
                 // #2416: instead of dropping the user's message when the TUI is busy,
                 // wait for the next prompt-ready window. The transcript-idle
@@ -3889,6 +3914,24 @@ mod claude_tui_session_resolution_tests {
         );
 
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn warm_followup_continues_after_prompt_draft_clear() {
+        let normal = claude_tui_warm_followup_submit_plan(false, false);
+        assert!(normal.submit_existing_session);
+        assert!(normal.recheck_busy_before_submit);
+
+        let draft_cleared = claude_tui_warm_followup_submit_plan(false, true);
+        assert!(draft_cleared.submit_existing_session);
+        assert!(
+            !draft_cleared.recheck_busy_before_submit,
+            "cleared draft must proceed to prompt submission instead of skipping warm follow-up"
+        );
+
+        let recreate = claude_tui_warm_followup_submit_plan(true, false);
+        assert!(!recreate.submit_existing_session);
+        assert!(recreate.recheck_busy_before_submit);
     }
 }
 

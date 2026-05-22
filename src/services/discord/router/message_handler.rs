@@ -215,7 +215,6 @@ fn classify_claude_tui_followup_submission(
     if snapshot.tmux_pane_alive
         && snapshot.prompt_draft_detected
         && transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Unknown
-        && matches!(watcher_state, "missing" | "cancelled")
         && inflight_state == "missing"
     {
         return None;
@@ -8211,7 +8210,7 @@ mod session_strategy_lifecycle_tests {
 
     #[cfg(unix)]
     #[test]
-    fn claude_tui_unknown_transcript_with_active_evidence_still_blocks() {
+    fn claude_tui_unknown_transcript_with_stranded_draft_ignores_persistent_watcher() {
         let snapshot = HostedTuiPromptReadinessSnapshot {
             prompt_marker_detected: false,
             prompt_draft_detected: true,
@@ -8229,9 +8228,22 @@ mod session_strategy_lifecycle_tests {
                 crate::services::tui_turn_state::TuiTurnState::Unknown,
                 "AgentDesk-claude-active",
             )
-            .is_some(),
-            "active watcher evidence keeps unknown transcript conservative"
+            .is_none(),
+            "a persistent attached watcher is idle coverage, not active-turn evidence by itself"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_tui_unknown_transcript_with_active_inflight_still_blocks() {
+        let snapshot = HostedTuiPromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "❯ possible redraw".to_string(),
+        };
+
         assert!(
             classify_claude_tui_followup_submission(
                 &snapshot,
