@@ -326,6 +326,85 @@ fn observe_qwen_user_prompts_in_buffer(
     }
 }
 
+fn legacy_wrapper_prompt_candidates_from_pane(pane: &str) -> Vec<String> {
+    let mut collecting = false;
+    let mut current_block: Vec<String> = Vec::new();
+    let mut last_submitted_block: Vec<String> = Vec::new();
+
+    for raw_line in pane.lines() {
+        let line = raw_line.trim_matches('\r').trim();
+        if line.contains("Ready for input") {
+            collecting = true;
+            current_block.clear();
+            continue;
+        }
+        if line == "[sending...]" {
+            if collecting && !current_block.is_empty() {
+                last_submitted_block = current_block.clone();
+            }
+            collecting = false;
+            current_block.clear();
+            continue;
+        }
+        if collecting && !line.is_empty() {
+            current_block.push(line.to_string());
+        }
+    }
+
+    if last_submitted_block.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    for candidate in [
+        last_submitted_block.join(""),
+        last_submitted_block.join(" "),
+        last_submitted_block.join("\n"),
+    ] {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        if !candidates.iter().any(|existing: &String| {
+            crate::services::tui_prompt_dedupe::prompts_match(existing, candidate)
+        }) {
+            candidates.push(candidate.to_string());
+        }
+    }
+    candidates
+}
+
+fn observe_legacy_wrapper_direct_prompt_from_pane(
+    provider: &crate::services::provider::ProviderKind,
+    tmux_session_name: &str,
+    channel_id: serenity::ChannelId,
+    data_start_offset: u64,
+    current_offset: u64,
+) -> crate::services::tui_prompt_dedupe::PromptObservation {
+    let Some(pane) = crate::services::platform::tmux::capture_pane(tmux_session_name, -160) else {
+        return crate::services::tui_prompt_dedupe::PromptObservation::Ignored;
+    };
+    let candidates = legacy_wrapper_prompt_candidates_from_pane(&pane);
+    if candidates.is_empty() {
+        return crate::services::tui_prompt_dedupe::PromptObservation::Ignored;
+    }
+    let observation = crate::services::tui_prompt_dedupe::observe_prompt_candidates_by_tmux(
+        provider.as_str(),
+        tmux_session_name,
+        &candidates,
+    );
+    tracing::info!(
+        provider = %provider.as_str(),
+        channel = channel_id.get(),
+        tmux_session = %tmux_session_name,
+        data_start_offset,
+        current_offset,
+        observation = ?observation,
+        "watcher: observed legacy wrapper pane prompt before post-terminal suppression"
+    );
+    observation
+}
+
 /// #2427 D/A wires — emit an explicit-signal inflight cleanup attempt.
 ///
 /// Used by the TurnCompleted broadcast and the dead-pane post-mortem
@@ -2183,6 +2262,23 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id.get(),
             )
             .is_none();
+        let runtime_kind_marker = if turn_result_relayed && post_terminal_inflight_missing {
+            crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&tmux_session_name)
+        } else {
+            None
+        };
+        if matches!(
+            runtime_kind_marker,
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper)
+        ) {
+            let _ = observe_legacy_wrapper_direct_prompt_from_pane(
+                &watcher_provider,
+                &tmux_session_name,
+                channel_id,
+                data_start_offset,
+                current_offset,
+            );
+        }
         let ssh_direct_prompt_pending = if turn_result_relayed && post_terminal_inflight_missing {
             crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
                 watcher_provider.as_str(),
@@ -5968,7 +6064,8 @@ mod tests {
         Utf8ChunkDecoder, adopt_watcher_terminal_message_ids_from_inflight,
         build_watcher_streaming_edit_text,
         discard_restored_response_seed_before_no_inflight_terminal_relay,
-        discard_watcher_pending_buffer_after_suppressed_turn, should_probe_tmux_liveness,
+        discard_watcher_pending_buffer_after_suppressed_turn,
+        legacy_wrapper_prompt_candidates_from_pane, should_probe_tmux_liveness,
         terminal_event_consumed_offset, watcher_direct_terminal_should_commit_session_idle,
         watcher_fallback_edit_failure_can_delete_original_placeholder,
         watcher_inflight_represents_external_input,
@@ -6179,6 +6276,35 @@ mod tests {
         assert_eq!(
             watcher_terminal_token_update_status(false),
             crate::db::session_status::TURN_ACTIVE
+        );
+    }
+
+    #[test]
+    fn legacy_wrapper_pane_prompt_candidates_reconstruct_wrapped_direct_input() {
+        let pane = "\
+▶ Ready for input (type message + Enter)
+TUI-E2E-marker 한 줄로 marker를 그대로 응답하고, 'ssh
+-direct' 단어도 포함해줘.
+[sending...]
+[session: abc]
+TUI-E2E-marker ssh-direct
+
+▶ Ready for input (type message + Enter)
+";
+
+        let candidates = legacy_wrapper_prompt_candidates_from_pane(pane);
+
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.contains("'ssh-direct'")),
+            "wrapped terminal prompt should have a compact candidate for pending-prompt matching"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.contains("'ssh -direct'")),
+            "wrapped terminal prompt should keep a spaced candidate for readable direct observation"
         );
     }
 

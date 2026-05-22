@@ -431,27 +431,52 @@ pub fn observe_prompt_by_tmux(
     tmux_session_name: &str,
     prompt: &str,
 ) -> PromptObservation {
+    observe_prompt_candidates_by_tmux(provider, tmux_session_name, &[prompt.to_string()])
+}
+
+pub fn observe_prompt_candidates_by_tmux(
+    provider: &str,
+    tmux_session_name: &str,
+    prompts: &[String],
+) -> PromptObservation {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
-    let prompt = prompt.trim();
-    if provider.is_empty() || tmux_session_name.is_empty() || prompt.is_empty() {
+    let mut candidates = Vec::new();
+    for prompt in prompts {
+        let prompt = prompt.trim();
+        if prompt.is_empty() || is_synthetic_tui_user_prompt(prompt) {
+            continue;
+        }
+        if !candidates
+            .iter()
+            .any(|candidate: &String| prompts_match(candidate, prompt))
+        {
+            candidates.push(prompt.to_string());
+        }
+    }
+    if provider.is_empty() || tmux_session_name.is_empty() || candidates.is_empty() {
         return PromptObservation::Ignored;
     }
-    if is_synthetic_tui_user_prompt(prompt) {
-        return PromptObservation::Ignored;
+    for prompt in &candidates {
+        if take_matching_pending_prompt(&provider, tmux_session_name, prompt) {
+            return PromptObservation::SuppressedDiscordDuplicate;
+        }
     }
-    if take_matching_pending_prompt(&provider, tmux_session_name, prompt) {
-        return PromptObservation::SuppressedDiscordDuplicate;
-    }
-    if take_or_record_recent_observed_prompt(&provider, tmux_session_name, prompt) {
-        return PromptObservation::SuppressedRecentDuplicate;
+    for prompt in &candidates {
+        if take_or_record_recent_observed_prompt(&provider, tmux_session_name, prompt) {
+            return PromptObservation::SuppressedRecentDuplicate;
+        }
     }
     mark_ssh_direct_observation_pending(&provider, tmux_session_name);
     record_external_input_relay_lease(&provider, tmux_session_name, None);
+    let prompt = candidates
+        .first()
+        .expect("non-empty candidates")
+        .to_string();
     let event = ObservedTuiPrompt {
         provider,
         tmux_session_name: tmux_session_name.to_string(),
-        prompt: prompt.to_string(),
+        prompt,
     };
     let _ = OBSERVED_PROMPTS.send(event);
     PromptObservation::PublishedSshDirect
@@ -1317,6 +1342,29 @@ mod tests {
         assert_eq!(
             observe_prompt_by_tmux("codex", "tmux-b", "please inspect the failing test"),
             PromptObservation::SuppressedDiscordDuplicate
+        );
+    }
+
+    #[test]
+    fn candidate_observation_checks_all_pending_forms_before_direct_publish() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        record_discord_originated_prompt("claude", "tmux-c", "hello wrapped prompt");
+
+        assert_eq!(
+            observe_prompt_candidates_by_tmux(
+                "claude",
+                "tmux-c",
+                &[
+                    "hellowrappedprompt".to_string(),
+                    "hello wrapped prompt".to_string()
+                ],
+            ),
+            PromptObservation::SuppressedDiscordDuplicate
+        );
+        assert!(
+            !external_input_relay_lease_present("claude", "tmux-c", 42),
+            "a candidate matching a Discord-origin prompt must not create an ExternalInput lease"
         );
     }
 
