@@ -396,11 +396,12 @@ fn observe_legacy_wrapper_direct_prompt_from_pane(
     if candidates.is_empty() {
         return crate::services::tui_prompt_dedupe::PromptObservation::Ignored;
     }
-    let observation = crate::services::tui_prompt_dedupe::observe_prompt_candidates_by_tmux(
-        provider.as_str(),
-        tmux_session_name,
-        &candidates,
-    );
+    let observation =
+        crate::services::tui_prompt_dedupe::observe_prompt_candidates_by_tmux_for_relay_lease(
+            provider.as_str(),
+            tmux_session_name,
+            &candidates,
+        );
     tracing::info!(
         provider = %provider.as_str(),
         channel = channel_id.get(),

@@ -431,13 +431,51 @@ pub fn observe_prompt_by_tmux(
     tmux_session_name: &str,
     prompt: &str,
 ) -> PromptObservation {
-    observe_prompt_candidates_by_tmux(provider, tmux_session_name, &[prompt.to_string()])
+    observe_prompt_candidates_by_tmux_inner(
+        provider,
+        tmux_session_name,
+        &[prompt.to_string()],
+        PromptObservationEffect::NotifyAndLease,
+    )
 }
 
 pub fn observe_prompt_candidates_by_tmux(
     provider: &str,
     tmux_session_name: &str,
     prompts: &[String],
+) -> PromptObservation {
+    observe_prompt_candidates_by_tmux_inner(
+        provider,
+        tmux_session_name,
+        prompts,
+        PromptObservationEffect::NotifyAndLease,
+    )
+}
+
+pub(crate) fn observe_prompt_candidates_by_tmux_for_relay_lease(
+    provider: &str,
+    tmux_session_name: &str,
+    prompts: &[String],
+) -> PromptObservation {
+    observe_prompt_candidates_by_tmux_inner(
+        provider,
+        tmux_session_name,
+        prompts,
+        PromptObservationEffect::RelayLeaseOnly,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptObservationEffect {
+    NotifyAndLease,
+    RelayLeaseOnly,
+}
+
+fn observe_prompt_candidates_by_tmux_inner(
+    provider: &str,
+    tmux_session_name: &str,
+    prompts: &[String],
+    effect: PromptObservationEffect,
 ) -> PromptObservation {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
@@ -467,8 +505,11 @@ pub fn observe_prompt_candidates_by_tmux(
             return PromptObservation::SuppressedRecentDuplicate;
         }
     }
-    mark_ssh_direct_observation_pending(&provider, tmux_session_name);
     record_external_input_relay_lease(&provider, tmux_session_name, None);
+    if effect == PromptObservationEffect::RelayLeaseOnly {
+        return PromptObservation::PublishedSshDirect;
+    }
+    mark_ssh_direct_observation_pending(&provider, tmux_session_name);
     let prompt = candidates
         .first()
         .expect("non-empty candidates")
@@ -1365,6 +1406,30 @@ mod tests {
         assert!(
             !external_input_relay_lease_present("claude", "tmux-c", 42),
             "a candidate matching a Discord-origin prompt must not create an ExternalInput lease"
+        );
+    }
+
+    #[test]
+    fn relay_lease_only_observation_does_not_create_late_prompt_anchor_signal() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        assert_eq!(
+            observe_prompt_candidates_by_tmux_for_relay_lease(
+                "claude",
+                "tmux-lease-only",
+                &["typed over ssh".to_string()],
+            ),
+            PromptObservation::PublishedSshDirect
+        );
+        assert!(external_input_relay_lease_present(
+            "claude",
+            "tmux-lease-only",
+            42
+        ));
+        assert!(
+            !is_ssh_direct_observation_pending("claude", "tmux-lease-only"),
+            "watcher emergency observation must not create a late prompt-anchor signal"
         );
     }
 
