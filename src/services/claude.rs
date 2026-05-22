@@ -1642,6 +1642,27 @@ fn claude_tui_followup_stranded_prompt_draft_state(
 }
 
 #[cfg(unix)]
+fn claude_tui_unknown_transcript_draft_recreate_allowed(
+    snapshot: &crate::services::claude_tui::input::PromptReadinessSnapshot,
+) -> bool {
+    if !snapshot.tmux_pane_alive || !snapshot.prompt_draft_detected || !snapshot.capture_available {
+        return false;
+    }
+    let tail = snapshot.pane_tail.as_str();
+    let tail_lower = tail.to_ascii_lowercase();
+    if tail_lower.contains("esc to interrupt")
+        || tail_lower.contains("processing")
+        || tail_lower.contains("thinking")
+        || tail_lower.contains("running")
+    {
+        return false;
+    }
+    tail.contains("Baked for")
+        || tail.contains("Brewed for")
+        || (tail.contains("Tools:") && tail.contains(" done"))
+}
+
+#[cfg(unix)]
 fn ensure_tmux_key_send_success(
     output: std::process::Output,
     action_name: &str,
@@ -2022,7 +2043,14 @@ fn execute_streaming_local_tui_tmux(
                         } else {
                             "claude tui pane died while clearing stranded prompt draft"
                         };
-                        if !allow_recreate {
+                        let recreate_after_persistent_draft = allow_recreate
+                            || (matches!(
+                                draft_state,
+                                ClaudeTuiStrandedPromptDraftState::UnknownTranscript
+                            ) && claude_tui_unknown_transcript_draft_recreate_allowed(
+                                &post_clear_snapshot,
+                            ));
+                        if !recreate_after_persistent_draft {
                             tracing::warn!(
                                 tmux_session_name,
                                 transcript_turn_state = draft_state.as_str(),
@@ -2089,7 +2117,14 @@ fn execute_streaming_local_tui_tmux(
                         return Ok(());
                     }
                     Err(error) => {
-                        if !allow_recreate {
+                        let recreate_after_clear_error = allow_recreate
+                            || (matches!(
+                                draft_state,
+                                ClaudeTuiStrandedPromptDraftState::UnknownTranscript
+                            ) && claude_tui_unknown_transcript_draft_recreate_allowed(
+                                &snapshot,
+                            ));
+                        if !recreate_after_clear_error {
                             tracing::warn!(
                                 tmux_session_name,
                                 error = %error,
@@ -3914,6 +3949,29 @@ mod claude_tui_session_resolution_tests {
         );
 
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn unknown_transcript_quiescent_draft_can_recreate_hosted_tui() {
+        let quiescent = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "⏺ marker\n\n✻ Baked for 13s\n\n❯ stale draft\n  🤖 Opus(H) │ Tools: 1 done"
+                .to_string(),
+        };
+        assert!(claude_tui_unknown_transcript_draft_recreate_allowed(
+            &quiescent
+        ));
+
+        let active = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            pane_tail: "❯ draft\n  Thinking... Esc to interrupt".to_string(),
+            ..quiescent
+        };
+        assert!(!claude_tui_unknown_transcript_draft_recreate_allowed(
+            &active
+        ));
     }
 
     #[test]

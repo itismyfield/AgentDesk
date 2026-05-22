@@ -97,13 +97,26 @@ def processing_message(text):
         or re.search(r"도구 실행 중\s*\(", text)
     )
 
+def relay_response_candidate(m):
+    text = content(m)
+    if not bot(m):
+        return False
+    if text == sent_prompt:
+        return False
+    if text.startswith("터미널에 직접 주입된 입력"):
+        return False
+    if text in {"Session cleared.", "🧹 세션 클리어 (!clear)"}:
+        return False
+    if text.startswith("✅ **응답 완료**"):
+        return False
+    return True
+
 if mode == "processing":
     ok = any(bot(m) and processing_message(content(m)) for m in messages)
 elif mode == "response":
     ok = any(
-        bot(m)
+        relay_response_candidate(m)
         and marker in content(m)
-        and content(m) != sent_prompt
         and (not expected_extra or expected_extra in content(m))
         for m in messages
     )

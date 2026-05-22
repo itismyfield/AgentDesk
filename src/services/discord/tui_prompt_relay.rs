@@ -1222,6 +1222,7 @@ async fn run_codex_idle_response_tail(
     rollout_path: PathBuf,
     start_offset: u64,
 ) {
+    let tail_started_at = chrono::Utc::now();
     let tmux_for_tail = tmux_session_name.clone();
     let rollout_for_tail = rollout_path.clone();
     let tail_result = tokio::task::spawn_blocking(move || {
@@ -1267,6 +1268,7 @@ async fn run_codex_idle_response_tail(
         channel_id,
         &tmux_session_name,
         response,
+        tail_started_at,
     )
     .await;
 }
@@ -1333,6 +1335,7 @@ async fn run_claude_idle_response_tail(
     transcript_path: PathBuf,
     start_offset: u64,
 ) {
+    let tail_started_at = chrono::Utc::now();
     let tmux_for_tail = tmux_session_name.clone();
     let transcript_for_tail = transcript_path.clone();
     let tail_result = tokio::task::spawn_blocking(move || {
@@ -1379,6 +1382,7 @@ async fn run_claude_idle_response_tail(
         channel_id,
         &tmux_session_name,
         response,
+        tail_started_at,
     )
     .await;
 }
@@ -1472,6 +1476,7 @@ async fn deliver_tui_idle_response(
     channel_id: ChannelId,
     tmux_session_name: &str,
     response: &str,
+    tail_started_at: chrono::DateTime<chrono::Utc>,
 ) {
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         tracing::warn!(
@@ -1512,6 +1517,19 @@ async fn deliver_tui_idle_response(
                     anchor,
                 );
             }
+            crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                provider.as_str(),
+                tmux_session_name,
+                channel_id.get(),
+            );
+            post_tui_idle_response_session_idle(
+                shared,
+                &provider,
+                channel_id,
+                tmux_session_name,
+                tail_started_at,
+            )
+            .await;
             tracing::info!(
                 channel_id = channel_id.get(),
                 tmux_session_name = %tmux_session_name,
@@ -1531,6 +1549,89 @@ async fn deliver_tui_idle_response(
             );
         }
     }
+}
+
+#[cfg(unix)]
+async fn post_tui_idle_response_session_idle(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    tail_started_at: chrono::DateTime<chrono::Utc>,
+) {
+    if shared.mailbox(channel_id).cancel_token().await.is_some() {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            provider = %provider.as_str(),
+            "skipping TUI idle response session-idle commit; mailbox turn is active"
+        );
+        return;
+    }
+
+    if super::inflight::load_inflight_state(provider, channel_id.get()).is_some() {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            provider = %provider.as_str(),
+            "skipping TUI idle response session-idle commit; inflight state is active"
+        );
+        return;
+    }
+
+    let session_key = super::adk_session::build_namespaced_session_key(
+        &shared.token_hash,
+        provider,
+        tmux_session_name,
+    );
+    let channel_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+    };
+    let agent_id = super::resolve_channel_role_binding(channel_id, channel_name.as_deref())
+        .map(|binding| binding.role_id);
+
+    match super::internal_api::mark_session_idle_if_not_newer_live(
+        &session_key,
+        provider.as_str(),
+        agent_id.as_deref(),
+        tail_started_at,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                session_key = %session_key,
+                "skipping TUI idle response session-idle commit; session row is absent or newer live"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                session_key = %session_key,
+                error = %error,
+                "failed to commit TUI idle response session idle"
+            );
+            return;
+        }
+    }
+
+    tracing::info!(
+        channel_id = channel_id.get(),
+        tmux_session_name = %tmux_session_name,
+        provider = %provider.as_str(),
+        session_key = %session_key,
+        "TUI idle response committed session idle"
+    );
 }
 
 #[cfg(unix)]

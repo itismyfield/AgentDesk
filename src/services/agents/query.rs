@@ -99,6 +99,14 @@ pub async fn find_diag_session_pg(
              OR a.discord_channel_cc = $1
              OR a.discord_channel_cdx = $1
           ORDER BY CASE
+                       WHEN s.thread_channel_id::TEXT = $1 THEN 0
+                       WHEN s.provider = 'claude' AND a.discord_channel_cc = $1 THEN 1
+                       WHEN s.provider = 'codex' AND a.discord_channel_cdx = $1 THEN 1
+                       WHEN a.discord_channel_id = $1 OR a.discord_channel_alt = $1 THEN 2
+                       WHEN a.discord_channel_cc = $1 OR a.discord_channel_cdx = $1 THEN 3
+                       ELSE 4
+                   END,
+                   CASE
                        WHEN s.status IN ('turn_active', 'working') THEN 0
                        WHEN s.status = 'awaiting_bg' THEN 1
                        ELSE 2

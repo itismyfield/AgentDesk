@@ -172,9 +172,15 @@ pub(in crate::services::discord) fn process_watcher_lines(
         // Parse the JSON line
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
             let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            if outcome.soft_terminal_candidate && event_type == "user" {
-                buffer.insert_str(0, &line);
-                break;
+            if event_type == "user" && watcher_user_event_is_prompt_boundary(&val) {
+                if outcome.soft_terminal_candidate || !full_response.trim().is_empty() {
+                    if !outcome.soft_terminal_candidate {
+                        outcome.soft_terminal_candidate = true;
+                        outcome.terminal_kind = Some(WatcherTerminalKind::SoftUserBoundary);
+                    }
+                    buffer.insert_str(0, &line);
+                    break;
+                }
             }
             observe_stream_context(&val, state);
             tool_state.record_placeholder_events_from_json(&val);
@@ -539,6 +545,40 @@ pub(in crate::services::discord) fn process_watcher_lines(
     outcome
 }
 
+fn watcher_user_event_is_prompt_boundary(value: &serde_json::Value) -> bool {
+    if value
+        .get("isMeta")
+        .and_then(serde_json::Value::as_bool)
+        .is_some_and(|is_meta| is_meta)
+    {
+        return false;
+    }
+    let Some(message) = value.get("message") else {
+        return false;
+    };
+    if message
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|role| role != "user")
+    {
+        return false;
+    }
+    message_content_has_user_prompt_text(message)
+}
+
+fn message_content_has_user_prompt_text(message: &serde_json::Value) -> bool {
+    match message.get("content") {
+        Some(serde_json::Value::String(text)) => !text.trim().is_empty(),
+        Some(serde_json::Value::Array(items)) => items.iter().any(|item| {
+            item.get("text")
+                .or_else(|| item.get("input_text"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        }),
+        _ => false,
+    }
+}
+
 fn strip_leading_tui_response_chrome_in_place(
     full_response: &mut String,
     outcome: &mut WatcherLineOutcome,
@@ -607,6 +647,55 @@ mod tests {
         );
         assert_eq!(full_response, "tui reply late tail");
         assert_eq!(state.last_session_id.as_deref(), Some("sess-tui"));
+        assert!(buffer.trim().is_empty());
+    }
+
+    #[test]
+    fn process_watcher_lines_splits_late_user_prompt_after_assistant_text() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"previous reply\"}]},\"sessionId\":\"sess-tui\"}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"ssh direct prompt\"}]},\"sessionId\":\"sess-tui\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ssh direct reply\"}]},\"sessionId\":\"sess-tui\"}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(!outcome.found_result);
+        assert!(outcome.soft_terminal_candidate);
+        assert_eq!(
+            outcome.terminal_kind,
+            Some(WatcherTerminalKind::SoftUserBoundary)
+        );
+        assert_eq!(full_response, "previous reply");
+        assert!(
+            buffer.contains("ssh direct prompt"),
+            "the next turn must remain buffered for the following watcher pass"
+        );
+        assert!(!buffer.contains("previous reply"));
+    }
+
+    #[test]
+    fn process_watcher_lines_does_not_split_tool_result_user_messages() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"using tool\"},{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{}}]},\"sessionId\":\"sess-tui\"}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"done\"}]},\"sessionId\":\"sess-tui\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\" after tool\"}]},\"sessionId\":\"sess-tui\"}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(!outcome.soft_terminal_candidate);
+        assert_eq!(full_response, "using tool after tool");
         assert!(buffer.trim().is_empty());
     }
 

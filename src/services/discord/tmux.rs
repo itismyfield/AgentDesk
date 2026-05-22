@@ -127,6 +127,7 @@ pub(super) struct WatcherLineOutcome {
 pub(super) enum WatcherTerminalKind {
     HardResult,
     SoftStopHookSummary,
+    SoftUserBoundary,
     AuthError,
     ProviderOverload,
 }
@@ -136,6 +137,7 @@ impl WatcherTerminalKind {
         match self {
             Self::HardResult => "hard_result",
             Self::SoftStopHookSummary => "soft_stop_hook_summary",
+            Self::SoftUserBoundary => "soft_user_boundary",
             Self::AuthError => "auth_error",
             Self::ProviderOverload => "provider_overload",
         }
