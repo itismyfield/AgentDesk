@@ -31,6 +31,13 @@ fn tmux_line_is_claude_tui_prompt_draft(line: &str) -> bool {
     !rest.is_empty() && !discord_submitted_prompt
 }
 
+fn tmux_lines_after_claude_prompt_show_completed_history(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let line = trim_prompt_line(line);
+        line.starts_with('⏺') || line.starts_with("✻ ")
+    })
+}
+
 pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -> bool {
     capture
         .lines()
@@ -41,13 +48,32 @@ pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -
 }
 
 pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
-    capture
+    let non_empty = capture
         .lines()
-        .rev()
         .filter(|l| !l.trim().is_empty())
-        .take(CLAUDE_TUI_READY_SCAN_LINES)
-        .find(|line| trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER))
-        .is_some_and(tmux_line_is_claude_tui_prompt_draft)
+        .collect::<Vec<_>>();
+    let start = non_empty.len().saturating_sub(CLAUDE_TUI_READY_SCAN_LINES);
+    let recent = &non_empty[start..];
+    recent
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, line)| {
+            if !trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER) {
+                return None;
+            }
+            if !tmux_line_is_claude_tui_prompt_draft(line) {
+                return Some(false);
+            }
+            // Claude keeps submitted prompt lines in the pane history. If the
+            // prompt line is followed by rendered assistant/completion output,
+            // it is historical text, not an editable composer draft.
+            if tmux_lines_after_claude_prompt_show_completed_history(&recent[index + 1..]) {
+                return Some(false);
+            }
+            Some(true)
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn tmux_capture_indicates_generic_ready_banner(capture: &str) -> bool {
@@ -589,6 +615,33 @@ assistant output
   🤖 Opus(H) │ ██░░░░░░░░ │ 24%";
 
         assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_ignores_submitted_direct_history_prompt() {
+        let capture = "\
+❯ direct prompt typed through ssh
+⏺ direct prompt typed through ssh
+✻ Brewed for 2s
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ██░░░░░░░░ │ 24%";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_treats_running_submitted_prompt_as_not_ready() {
+        let capture = "\
+⏺ previous response
+✻ Brewed for 2s
+─────────────────────────────────────────────────────────────────────────────
+❯ direct prompt that has just been submitted
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ██░░░░░░░░ │ 24%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done";
+
+        assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(!tmux_capture_indicates_claude_tui_ready_for_input(capture));
     }
 }
 
