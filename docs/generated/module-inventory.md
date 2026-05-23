@@ -434,13 +434,13 @@
 | `services::discord::outbound::transport` | `src/services/discord/outbound/transport.rs` | 367 |  |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 456 |  |
 | `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 1618 | giant-file |
-| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 639 |  |
+| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 640 |  |
 | `services::discord::placeholder_live_events::common` | `src/services/discord/placeholder_live_events/common.rs` | 130 |  |
 | `services::discord::placeholder_live_events::context_panel` | `src/services/discord/placeholder_live_events/context_panel.rs` | 58 |  |
 | `services::discord::placeholder_live_events::recent_events` | `src/services/discord/placeholder_live_events/recent_events.rs` | 236 |  |
 | `services::discord::placeholder_live_events::session_panel` | `src/services/discord/placeholder_live_events/session_panel.rs` | 204 |  |
 | `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 316 |  |
-| `services::discord::placeholder_live_events::task_panel` | `src/services/discord/placeholder_live_events/task_panel.rs` | 29 |  |
+| `services::discord::placeholder_live_events::task_panel` | `src/services/discord/placeholder_live_events/task_panel.rs` | 88 |  |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1113 | giant-file |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 404 |  |
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 496 |  |
@@ -497,7 +497,7 @@
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 329 |  |
 | `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 6560 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 2445 | giant-file |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 8111 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 8140 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2449 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 88 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 194 |  |

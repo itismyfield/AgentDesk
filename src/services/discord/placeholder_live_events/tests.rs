@@ -481,6 +481,9 @@ fn recent_header_prefers_dispatch_owner_over_local_node() {
         card_id: None,
         dispatch_type: None,
         owner_instance_id: Some("mac-book-release".to_string()),
+        card_title: None,
+        dispatch_title: None,
+        github_issue_number: None,
     };
     assert_eq!(
         render_recent_section_header(Some(&snapshot), true, Some("mac-mini-release")),
@@ -499,6 +502,9 @@ fn recent_header_falls_back_to_local_node_when_no_dispatch_owner() {
         card_id: None,
         dispatch_type: None,
         owner_instance_id: None,
+        card_title: None,
+        dispatch_title: None,
+        github_issue_number: None,
     };
     assert_eq!(
         render_recent_section_header(
@@ -517,6 +523,9 @@ fn recent_header_omits_node_when_cluster_disabled_or_unknown() {
         card_id: None,
         dispatch_type: None,
         owner_instance_id: Some("mac-book-release".to_string()),
+        card_title: None,
+        dispatch_title: None,
+        github_issue_number: None,
     };
     assert_eq!(
         render_recent_section_header(Some(&snapshot), false, Some("mac-mini-release")),
@@ -526,20 +535,71 @@ fn recent_header_omits_node_when_cluster_disabled_or_unknown() {
 }
 
 #[test]
-fn status_panel_renders_task_line_from_dispatch_metadata() {
+fn status_panel_renders_task_line_with_card_title() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(185);
     assert!(events.set_task_panel_info(
         channel_id,
-        "dsp_123",
-        Some("42"),
-        Some("implementation"),
-        None,
+        TaskPanelInfo {
+            dispatch_id: "bddc480d-43d1-4f1f-b3fd-e0d96b3b3d82",
+            card_id: Some("e781f0c4-ea65-4dc3-814a-279d6eecadac"),
+            dispatch_type: Some("review"),
+            card_title: Some("Resolve runtime maintenance issues"),
+            ..Default::default()
+        },
     ));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
 
-    assert!(rendered.contains("Task      dispatch #dsp\\_123 · card #42 · implementation"));
+    assert!(
+        rendered.contains("Task      review · \"Resolve runtime maintenance issues\" · #bddc480d")
+    );
+    assert!(!rendered.contains("card #"));
+    assert!(!rendered.contains("e781f0c4"));
+}
+
+#[test]
+fn status_panel_renders_task_line_with_github_issue() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(188);
+    assert!(events.set_task_panel_info(
+        channel_id,
+        TaskPanelInfo {
+            dispatch_id: "bddc480d-43d1-4f1f-b3fd-e0d96b3b3d82",
+            card_id: Some("card-xyz"),
+            dispatch_type: Some("review"),
+            card_title: Some("Fix CI inventory drift"),
+            github_issue_number: Some(1234),
+            ..Default::default()
+        },
+    ));
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+    assert!(
+        rendered.contains("Task      review · gh#1234 \"Fix CI inventory drift\" · dsp #bddc480d")
+    );
+}
+
+#[test]
+fn status_panel_falls_back_to_dispatch_title_when_card_title_missing() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(189);
+    assert!(events.set_task_panel_info(
+        channel_id,
+        TaskPanelInfo {
+            dispatch_id: "dsp_abcdef12345",
+            dispatch_type: Some("implementation"),
+            dispatch_title: Some("Backfill outbox claims"),
+            ..Default::default()
+        },
+    ));
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+    assert!(
+        rendered.contains("Task      implementation · \"Backfill outbox claims\" · #dsp\\_abcd")
+    );
 }
 
 #[test]
@@ -556,7 +616,13 @@ fn status_panel_omits_task_line_without_dispatch_id() {
 fn status_panel_renders_task_line_with_dispatch_fallback() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(187);
-    assert!(events.set_task_panel_info(channel_id, "dsp_404", None, None, None));
+    assert!(events.set_task_panel_info(
+        channel_id,
+        TaskPanelInfo {
+            dispatch_id: "dsp_404",
+            ..Default::default()
+        },
+    ));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 

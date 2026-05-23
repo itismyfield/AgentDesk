@@ -26,6 +26,7 @@ use context_panel::{ContextPanelSnapshot, render_context_panel_line};
 use recent_events::render_events;
 use session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use status_events::{is_schedule_wakeup_tool, parse_eta_secs};
+pub(in crate::services::discord) use task_panel::TaskPanelInfo;
 use task_panel::{TaskPanelSnapshot, clean_task_panel_value, render_task_panel_line};
 
 pub(in crate::services::discord) use recent_events::RecentPlaceholderEvent;
@@ -146,12 +147,9 @@ impl PlaceholderLiveEvents {
     pub(in crate::services::discord) fn set_task_panel_info(
         &self,
         channel_id: ChannelId,
-        dispatch_id: &str,
-        card_id: Option<&str>,
-        dispatch_type: Option<&str>,
-        owner_instance_id: Option<&str>,
+        info: TaskPanelInfo<'_>,
     ) -> bool {
-        let dispatch_id = clean_task_panel_value(dispatch_id);
+        let dispatch_id = clean_task_panel_value(info.dispatch_id);
         if dispatch_id.is_empty() {
             return self.set_task_panel_snapshot(channel_id, None);
         }
@@ -164,9 +162,12 @@ impl PlaceholderLiveEvents {
             channel_id,
             Some(TaskPanelSnapshot {
                 dispatch_id,
-                card_id: clean_optional(card_id),
-                dispatch_type: clean_optional(dispatch_type),
-                owner_instance_id: clean_optional(owner_instance_id),
+                card_id: clean_optional(info.card_id),
+                dispatch_type: clean_optional(info.dispatch_type),
+                owner_instance_id: clean_optional(info.owner_instance_id),
+                card_title: clean_optional(info.card_title),
+                dispatch_title: clean_optional(info.dispatch_title),
+                github_issue_number: info.github_issue_number.filter(|n| *n > 0),
             }),
         )
     }

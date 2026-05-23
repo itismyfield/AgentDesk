@@ -1629,6 +1629,9 @@ struct TaskPanelDispatchMetadata {
     card_id: Option<String>,
     dispatch_type: Option<String>,
     claim_owner: Option<String>,
+    card_title: Option<String>,
+    dispatch_title: Option<String>,
+    github_issue_number: Option<i64>,
 }
 
 async fn load_task_panel_dispatch_metadata(
@@ -1639,8 +1642,14 @@ async fn load_task_panel_dispatch_metadata(
         return Ok(None);
     };
     let row = sqlx::query(
-        "SELECT td.kanban_card_id, td.dispatch_type, dox.claim_owner
+        "SELECT td.kanban_card_id,
+                td.dispatch_type,
+                td.title AS dispatch_title,
+                kc.title AS card_title,
+                kc.github_issue_number,
+                dox.claim_owner
          FROM task_dispatches td
+         LEFT JOIN kanban_cards kc ON kc.id = td.kanban_card_id
          LEFT JOIN dispatch_outbox dox ON dox.dispatch_id = td.id
          WHERE td.id = $1
          ORDER BY dox.created_at DESC NULLS LAST
@@ -1661,6 +1670,15 @@ async fn load_task_panel_dispatch_metadata(
             })?,
             claim_owner: row.try_get("claim_owner").map_err(|error| {
                 format!("decode task panel claim_owner for {dispatch_id}: {error}")
+            })?,
+            card_title: row.try_get("card_title").map_err(|error| {
+                format!("decode task panel card_title for {dispatch_id}: {error}")
+            })?,
+            dispatch_title: row.try_get("dispatch_title").map_err(|error| {
+                format!("decode task panel dispatch_title for {dispatch_id}: {error}")
+            })?,
+            github_issue_number: row.try_get("github_issue_number").map_err(|error| {
+                format!("decode task panel github_issue_number for {dispatch_id}: {error}")
             })?,
         })
     })
@@ -1691,14 +1709,25 @@ async fn refresh_task_panel_line_from_dispatch(
         };
     shared.placeholder_live_events.set_task_panel_info(
         channel_id,
-        dispatch_id,
-        metadata.as_ref().and_then(|value| value.card_id.as_deref()),
-        metadata
-            .as_ref()
-            .and_then(|value| value.dispatch_type.as_deref()),
-        metadata
-            .as_ref()
-            .and_then(|value| value.claim_owner.as_deref()),
+        crate::services::discord::placeholder_live_events::TaskPanelInfo {
+            dispatch_id,
+            card_id: metadata.as_ref().and_then(|value| value.card_id.as_deref()),
+            dispatch_type: metadata
+                .as_ref()
+                .and_then(|value| value.dispatch_type.as_deref()),
+            owner_instance_id: metadata
+                .as_ref()
+                .and_then(|value| value.claim_owner.as_deref()),
+            card_title: metadata
+                .as_ref()
+                .and_then(|value| value.card_title.as_deref()),
+            dispatch_title: metadata
+                .as_ref()
+                .and_then(|value| value.dispatch_title.as_deref()),
+            github_issue_number: metadata
+                .as_ref()
+                .and_then(|value| value.github_issue_number),
+        },
     )
 }
 
