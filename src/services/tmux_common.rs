@@ -47,6 +47,31 @@ fn tmux_lines_after_claude_prompt_show_completed_history(lines: &[&str]) -> bool
     })
 }
 
+fn tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(lines: &[&str]) -> bool {
+    let busy = lines.iter().any(|line| {
+        let lower = trim_prompt_line(line).to_ascii_lowercase();
+        lower.contains("esc to interrupt")
+            || lower.contains("processing")
+            || lower.contains("thinking")
+            || lower.contains("running")
+    });
+    if busy {
+        return false;
+    }
+    let separator = lines.iter().any(|line| {
+        trim_prompt_line(line)
+            .chars()
+            .filter(|ch| *ch == '─')
+            .count()
+            >= 8
+    });
+    let idle_footer = lines.iter().any(|line| {
+        let line = trim_prompt_line(line);
+        line.contains("Tools: 0 done") || line.contains("bypass permissions")
+    });
+    separator && idle_footer
+}
+
 pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -> bool {
     capture
         .lines()
@@ -58,6 +83,35 @@ pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -
 
 pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
     tmux_capture_claude_tui_prompt_draft_backspace_budget(capture).is_some()
+}
+
+pub(crate) fn tmux_capture_indicates_claude_tui_idle_suggestion(capture: &str) -> bool {
+    let non_empty = capture
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>();
+    let start = non_empty.len().saturating_sub(CLAUDE_TUI_DRAFT_SCAN_LINES);
+    let recent = &non_empty[start..];
+    recent
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, line)| {
+            if !trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER) {
+                return None;
+            }
+            if !tmux_line_is_claude_tui_prompt_draft(line) {
+                return Some(false);
+            }
+            let after_prompt = &recent[index + 1..];
+            if tmux_lines_after_claude_prompt_show_completed_history(after_prompt) {
+                return Some(false);
+            }
+            Some(tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(
+                after_prompt,
+            ))
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn tmux_capture_claude_tui_prompt_draft_backspace_budget(
@@ -710,6 +764,22 @@ assistant output
 
         assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
         assert!(!tmux_capture_indicates_claude_tui_ready_for_input(capture));
+    }
+
+    #[test]
+    fn claude_idle_suggestion_prompt_is_not_recoverable_draft_context() {
+        let capture = "\
+⏺ TUI-E2E marker
+✻ Worked for 2s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}좋아, 잘 동작하네
+────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ░░░░░░░░░░ │ 4%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(tmux_capture_indicates_claude_tui_idle_suggestion(capture));
     }
 }
 

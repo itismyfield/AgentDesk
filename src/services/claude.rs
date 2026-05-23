@@ -1651,6 +1651,9 @@ fn claude_tui_snapshot_has_recoverable_prompt_draft(
 ) -> bool {
     snapshot.tmux_pane_alive
         && snapshot.prompt_draft_detected
+        && !crate::services::claude_tui::input::claude_prompt_draft_is_idle_suggestion_tail(
+            &snapshot.pane_tail,
+        )
         && crate::services::claude_tui::input::claude_prompt_draft_backspace_budget_from_tail(
             &snapshot.pane_tail,
         )
@@ -4211,6 +4214,36 @@ mod claude_tui_session_resolution_tests {
             tmux_pane_alive: true,
             capture_available: true,
             pane_tail: "계획만 적고 보류 — 1개\n  CLAUDE.md: 1, MCP: 2 │ Tools: 5 done".to_string(),
+        };
+
+        assert_eq!(
+            claude_tui_followup_stranded_prompt_draft_state(&snapshot, &transcript_path),
+            None
+        );
+    }
+
+    #[test]
+    fn idle_suggestion_prompt_does_not_recreate_claude_tui() {
+        let transcript_dir = tempfile::tempdir().unwrap();
+        let transcript_path = transcript_dir.path().join("session.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#,
+        )
+        .unwrap();
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\
+✻ Worked for 2s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}좋아, 잘 동작하네
+────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on"
+                .to_string(),
         };
 
         assert_eq!(

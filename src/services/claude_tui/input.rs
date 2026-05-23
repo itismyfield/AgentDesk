@@ -409,6 +409,10 @@ pub(crate) fn claude_prompt_draft_backspace_budget_from_tail(pane_tail: &str) ->
     crate::services::tmux_common::tmux_capture_claude_tui_prompt_draft_backspace_budget(pane_tail)
 }
 
+pub(crate) fn claude_prompt_draft_is_idle_suggestion_tail(pane_tail: &str) -> bool {
+    crate::services::tmux_common::tmux_capture_indicates_claude_tui_idle_suggestion(pane_tail)
+}
+
 pub(crate) fn claude_prompt_draft_backspace_budget_from_line(line: &str) -> Option<usize> {
     crate::services::tmux_common::claude_tui_prompt_draft_backspace_budget_from_line(line)
 }
@@ -807,7 +811,12 @@ fn transcript_idle_confirms_prompt_ready(
     snapshot: &PromptReadinessSnapshot,
     transcript_path: Option<&std::path::Path>,
 ) -> bool {
-    if !snapshot.tmux_pane_alive || snapshot.prompt_draft_detected {
+    if !snapshot.tmux_pane_alive {
+        return false;
+    }
+    if snapshot.prompt_draft_detected
+        && !claude_prompt_draft_is_idle_suggestion_tail(&snapshot.pane_tail)
+    {
         return false;
     }
     transcript_path.is_some_and(|path| {
@@ -1221,6 +1230,38 @@ line 13";
         };
 
         assert!(!transcript_idle_confirms_prompt_ready(
+            &snapshot,
+            Some(file.path())
+        ));
+    }
+
+    #[test]
+    fn idle_transcript_accepts_claude_suggestion_prompt_chrome() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+        )
+        .unwrap();
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\
+✻ Worked for 2s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}좋아, 잘 동작하네
+────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on"
+                .to_string(),
+        };
+
+        assert!(claude_prompt_draft_is_idle_suggestion_tail(
+            &snapshot.pane_tail
+        ));
+        assert!(transcript_idle_confirms_prompt_ready(
             &snapshot,
             Some(file.path())
         ));
