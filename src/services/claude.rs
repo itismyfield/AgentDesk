@@ -1858,6 +1858,24 @@ fn resolve_claude_tui_session_for_launch(
     })
 }
 
+#[cfg(unix)]
+fn fresh_claude_tui_session_resolution(
+    working_dir: &std::path::Path,
+    claude_home: Option<&std::path::Path>,
+) -> Result<ClaudeTuiSessionResolution, String> {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        working_dir,
+        &session_id,
+        claude_home,
+    )?;
+    Ok(ClaudeTuiSessionResolution {
+        session_id,
+        transcript_path,
+        resume: false,
+    })
+}
+
 /// Execute claude command on a remote host via SSH, streaming stdout lines
 /// back through the sender channel.
 /// NOTE: Remote SSH execution is not available in AgentDesk — always returns Err.
@@ -1963,10 +1981,10 @@ fn execute_streaming_local_tui_tmux(
     let working_dir_path = std::path::Path::new(working_dir);
     let session_resolution =
         resolve_claude_tui_session_for_launch(working_dir_path, session_id, None)?;
-    let resolved_session_id = session_resolution.session_id;
-    let transcript_path = session_resolution.transcript_path;
-    let transcript_path_string = transcript_path.display().to_string();
-    let resume = session_resolution.resume;
+    let mut resolved_session_id = session_resolution.session_id;
+    let mut transcript_path = session_resolution.transcript_path;
+    let mut transcript_path_string = transcript_path.display().to_string();
+    let mut resume = session_resolution.resume;
 
     let session_exists = tmux_session_exists(tmux_session_name);
     let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
@@ -2096,6 +2114,12 @@ fn execute_streaming_local_tui_tmux(
                                 tmux_session_name,
                                 reason,
                             );
+                            let fresh_resolution =
+                                fresh_claude_tui_session_resolution(working_dir_path, None)?;
+                            resolved_session_id = fresh_resolution.session_id;
+                            transcript_path = fresh_resolution.transcript_path;
+                            transcript_path_string = transcript_path.display().to_string();
+                            resume = fresh_resolution.resume;
                             recreate_before_submit = true;
                         }
                     }
@@ -2169,6 +2193,12 @@ fn execute_streaming_local_tui_tmux(
                                     error
                                 ),
                             );
+                            let fresh_resolution =
+                                fresh_claude_tui_session_resolution(working_dir_path, None)?;
+                            resolved_session_id = fresh_resolution.session_id;
+                            transcript_path = fresh_resolution.transcript_path;
+                            transcript_path_string = transcript_path.display().to_string();
+                            resume = fresh_resolution.resume;
                             recreate_before_submit = true;
                         }
                     }
@@ -4038,6 +4068,30 @@ mod claude_tui_session_resolution_tests {
                 .and_then(|name| name.to_str()),
             Some(expected_filename.as_str())
         );
+    }
+
+    #[test]
+    fn stranded_draft_recreate_forces_non_resume_session() {
+        let cwd = tempfile::tempdir().unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        let stale_session_id = uuid::Uuid::new_v4().to_string();
+        let stale_transcript =
+            crate::services::claude_tui::transcript_tail::claude_transcript_path(
+                cwd.path(),
+                &stale_session_id,
+                Some(claude_home.path()),
+            )
+            .unwrap();
+        std::fs::create_dir_all(stale_transcript.parent().unwrap()).unwrap();
+        std::fs::write(&stale_transcript, "old transcript").unwrap();
+
+        let resolution =
+            fresh_claude_tui_session_resolution(cwd.path(), Some(claude_home.path())).unwrap();
+
+        assert!(!resolution.resume);
+        assert_ne!(resolution.session_id, stale_session_id);
+        assert_ne!(resolution.transcript_path, stale_transcript);
+        assert!(uuid::Uuid::parse_str(&resolution.session_id).is_ok());
     }
 
     #[test]
