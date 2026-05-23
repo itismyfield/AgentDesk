@@ -170,6 +170,11 @@
   - `src/services/discord/{commands/text_commands.rs, commands/diagnostics.rs,
     discord_config_audit.rs, router/intake_gate.rs, model_catalog.rs,
     qwen_tmux_wrapper.rs, agentdesk_config.rs, inflight.rs}` (all 1000+ lines).
+  - `src/services/tmux_common.rs` (1233 lines; shared tmux pane scan + Claude
+    TUI ready/draft heuristics surface — bugfix only outside a split plan).
+  - `src/services/discord/standby_relay.rs` (1095 lines; cluster-standby
+    JSONL→Discord relay loop from #2011 phase 5.3, bugfix only outside an
+    extraction plan).
 - active_callsite_coverage: n/a.
 - invariants: watcher single-owner per #1222; placeholder lifecycle invariants
   per #1112; `/api/inflight/rebind` is the only path that synthesises an

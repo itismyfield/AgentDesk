@@ -64,6 +64,7 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1c6f6dcd93167903",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:7ad920b17a3df190",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:7abf8711963b3515",
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:6a864e3e920d8a62",
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.
@@ -81,8 +82,13 @@ git_subprocess_callsites = [
 # Legacy SQLite references: cli/migrate, compat, and db/legacy_sqlite are
 # exempt by path rule already. Baseline cleared in #1440 — keep this list
 # empty; new violations should be removed from production sources rather
-# than allowlisted.
+# than allowlisted. The two entries below are `#[cfg(all(test, feature =
+# "legacy-sqlite-tests"))]`-gated test helpers (`shared.sqlite.as_ref()`
+# fallback path); the audit regex `\.sqlite\b` cannot see the cfg gate, so
+# we pin them by file:line.
 legacy_sqlite_refs = [
+  "src/services/discord/turn_bridge/mod.rs:2634",
+  "src/services/discord/watchers/lifecycle.rs:347",
 ]
 
 # Source-of-truth alias writes: runtime_layout is already exempt.
