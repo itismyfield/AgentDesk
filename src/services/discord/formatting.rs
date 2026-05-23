@@ -1322,7 +1322,8 @@ mod tests {
             "🔄 **응답 처리 중**\n",
             "> **도구**: ⚙ Bash: cargo build · **사유**: 응답 스트리밍 중\n",
             "> **시작**: <t:1700000000:R>\n",
-            "완료 시 이 채널로 결과를 이어서 표시합니다.",
+            "완료 시 이 채널로 결과를 이어서 표시합니다.\n",
+            "⠋ 계속 처리 중 · 시작 <t:1700000000:R>",
         );
         assert_eq!(text, expected);
     }
@@ -1340,6 +1341,7 @@ mod tests {
         assert!(text.contains("**도구**: Bash · **사유**: 백그라운드 도구 실행 중"));
         assert!(text.contains("**명령**: `cargo test --package agentdesk -- --nocapture`"));
         assert!(text.contains("<t:1700000000:R>"));
+        assert!(text.ends_with("⠋ 계속 처리 중 · 시작 <t:1700000000:R>"));
     }
 
     #[test]
@@ -1354,6 +1356,7 @@ mod tests {
         assert!(completed.starts_with("✅ **응답 완료**\n"));
         assert!(completed.contains("**도구**: —"));
         assert!(completed.contains("결과가 위에 도착했습니다."));
+        assert!(!completed.contains("계속 처리 중"));
 
         let failed = build_monitor_handoff_placeholder(
             MonitorHandoffStatus::Failed {
@@ -2113,8 +2116,45 @@ pub(super) fn format_for_discord_with_status_panel(
 
 #[cfg(test)]
 mod status_panel_v2_formatter_tests {
-    use super::{format_for_discord, format_for_discord_with_provider};
+    use super::{
+        MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
+        build_monitor_handoff_placeholder_with_live_events, format_for_discord,
+        format_for_discord_with_provider,
+    };
     use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn monitor_handoff_active_keeps_processing_tail_last() {
+        let text = build_monitor_handoff_placeholder_with_live_events(
+            MonitorHandoffStatus::Active,
+            MonitorHandoffReason::AsyncDispatch,
+            1_700_000_000,
+            Some("⚙ Bash: cargo build"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("```text\n[Bash] cargo build\n```"),
+        );
+
+        assert!(text.contains("```text\n[Bash] cargo build\n```"));
+        assert!(text.ends_with("⠋ 계속 처리 중 · 시작 <t:1700000000:R>"));
+    }
+
+    #[test]
+    fn monitor_handoff_terminal_states_drop_processing_tail() {
+        let text = build_monitor_handoff_placeholder(
+            MonitorHandoffStatus::Completed,
+            MonitorHandoffReason::AsyncDispatch,
+            1_700_000_000,
+            None,
+            None,
+        );
+
+        assert!(text.starts_with("✅ **응답 완료**\n"));
+        assert!(!text.contains("계속 처리 중"));
+    }
 
     #[test]
     fn status_panel_disabled_codex_formatter_keeps_legacy_tool_markers() {
@@ -3708,6 +3748,10 @@ fn monitor_handoff_footer(
     }
 }
 
+fn monitor_handoff_active_tail(started_at_unix: i64) -> String {
+    format!("⠋ 계속 처리 중 · 시작 <t:{started_at_unix}:R>")
+}
+
 /// Build the placeholder content shown when a turn hands off to the tmux
 /// watcher (or another async monitor) for completion. Layout uses Discord
 /// markdown rather than a real `CreateEmbed` — Discord's PATCH semantics
@@ -3894,6 +3938,9 @@ pub(super) fn build_monitor_handoff_placeholder_with_live_events(
         })
     {
         lines.push(block.to_string());
+    }
+    if matches!(status, MonitorHandoffStatus::Active) {
+        lines.push(monitor_handoff_active_tail(started_at_unix));
     }
 
     lines.join("\n")

@@ -222,9 +222,15 @@ fn status_panel_turn_completed_drops_recent_live_block() {
         .unwrap(),
     );
 
-    let active = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let active = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        1_700_000_005,
+    );
     assert!(active.contains("🖥️ Recent"));
     assert!(active.contains("[Bash]"));
+    assert!(active.ends_with("⠋ 계속 처리 중 · 갱신 <t:1700000005:R> · 시작 <t:1700000000:R>"));
 
     events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
 
@@ -232,6 +238,76 @@ fn status_panel_turn_completed_drops_recent_live_block() {
     assert!(completed.starts_with("✅ **응답 완료** — claude"));
     assert!(!completed.contains("🖥️ Recent"));
     assert!(!completed.contains("[Bash]"));
+    assert!(!completed.contains("계속 처리 중"));
+}
+
+#[test]
+fn status_panel_codex_active_tail_remains_last_after_recent_block() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(175);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Bash",
+            &json!({"command": "cargo test --package agentdesk"}).to_string(),
+        ),
+    );
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use(
+            "Bash",
+            &json!({"command": "cargo test --package agentdesk"}).to_string(),
+        )
+        .unwrap(),
+    );
+
+    let rendered = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Codex,
+        1_700_000_000,
+        1_700_000_005,
+    );
+
+    assert!(rendered.contains("🔧 도구 실행 중"));
+    assert!(rendered.contains("🖥️ Recent"));
+    assert!(rendered.contains("[Bash]"));
+    assert!(
+        rendered.ends_with("⠋ 계속 처리 중 · 갱신 <t:1700000005:R> · 시작 <t:1700000000:R>"),
+        "active tail marker must remain the final visible line: {rendered}"
+    );
+}
+
+#[test]
+fn status_panel_preserves_active_tail_when_body_is_truncated() {
+    let sections = vec!["x".repeat(STATUS_PANEL_MAX_CHARS + 100)];
+    let tail = render_active_tail_marker(1_700_000_000, 1_700_000_005);
+
+    let rendered = truncate_status_panel_sections(sections, Some(&tail));
+
+    assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+    assert!(rendered.ends_with(&tail));
+}
+
+#[test]
+fn status_panel_active_tail_changes_with_heartbeat() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(176);
+
+    let first = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Codex,
+        1_700_000_000,
+        1_700_000_005,
+    );
+    let second = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Codex,
+        1_700_000_000,
+        1_700_000_010,
+    );
+
+    assert_ne!(first, second);
+    assert!(second.ends_with("⠋ 계속 처리 중 · 갱신 <t:1700000010:R> · 시작 <t:1700000000:R>"));
 }
 
 #[test]

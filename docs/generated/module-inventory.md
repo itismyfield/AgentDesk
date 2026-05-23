@@ -398,7 +398,7 @@
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1463 | giant-file |
 | `services::discord::commands::voice` | `src/services/discord/commands/voice.rs` | 959 |  |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 612 |  |
-| `services::discord::formatting` | `src/services/discord/formatting.rs` | 4016 | giant-file |
+| `services::discord::formatting` | `src/services/discord/formatting.rs` | 4063 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 961 |  |
 | `services::discord::health` | `src/services/discord/health.rs` | 5738 | giant-file |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 22 |  |
@@ -434,7 +434,7 @@
 | `services::discord::outbound::transport` | `src/services/discord/outbound/transport.rs` | 367 |  |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 456 |  |
 | `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 1618 | giant-file |
-| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 583 |  |
+| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 639 |  |
 | `services::discord::placeholder_live_events::common` | `src/services/discord/placeholder_live_events/common.rs` | 130 |  |
 | `services::discord::placeholder_live_events::context_panel` | `src/services/discord/placeholder_live_events/context_panel.rs` | 58 |  |
 | `services::discord::placeholder_live_events::recent_events` | `src/services/discord/placeholder_live_events/recent_events.rs` | 236 |  |

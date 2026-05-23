@@ -239,6 +239,21 @@ impl PlaceholderLiveEvents {
         provider: &ProviderKind,
         started_at_unix: i64,
     ) -> String {
+        self.render_status_panel_with_heartbeat(
+            channel_id,
+            provider,
+            started_at_unix,
+            chrono::Utc::now().timestamp(),
+        )
+    }
+
+    fn render_status_panel_with_heartbeat(
+        &self,
+        channel_id: ChannelId,
+        provider: &ProviderKind,
+        started_at_unix: i64,
+        heartbeat_at_unix: i64,
+    ) -> String {
         let snapshot = self
             .status_by_channel
             .get(&channel_id)
@@ -254,6 +269,7 @@ impl PlaceholderLiveEvents {
             self.render_block(channel_id),
             provider,
             started_at_unix,
+            heartbeat_at_unix,
         )
     }
 }
@@ -407,6 +423,7 @@ fn render_status_panel(
     live_block: Option<String>,
     provider: &ProviderKind,
     started_at_unix: i64,
+    heartbeat_at_unix: i64,
 ) -> String {
     let header_status = if matches!(provider, ProviderKind::Codex)
         && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. })
@@ -480,17 +497,56 @@ fn render_status_panel(
             .filter(|block| !block.trim().is_empty())
             .map(|block| format!("{recent_header}\n{block}"))
     };
+    let active_tail = (!matches!(header_status, DerivedStatus::Completed { .. }))
+        .then(|| render_active_tail_marker(started_at_unix, heartbeat_at_unix));
 
     if let Some(recent) = recent_section.as_ref() {
         let mut with_recent = sections.clone();
         with_recent.push(recent.clone());
-        let joined = with_recent.join("\n\n");
+        let joined = join_status_panel_sections(&with_recent, active_tail.as_deref());
         if joined.chars().count() <= STATUS_PANEL_MAX_CHARS {
             return joined;
         }
     }
 
-    truncate_chars(&sections.join("\n\n"), STATUS_PANEL_MAX_CHARS)
+    truncate_status_panel_sections(sections, active_tail.as_deref())
+}
+
+fn render_active_tail_marker(started_at_unix: i64, heartbeat_at_unix: i64) -> String {
+    format!("⠋ 계속 처리 중 · 갱신 <t:{heartbeat_at_unix}:R> · 시작 <t:{started_at_unix}:R>")
+}
+
+fn join_status_panel_sections(sections: &[String], active_tail: Option<&str>) -> String {
+    let mut joined = sections.join("\n\n");
+    if let Some(tail) = active_tail {
+        if !joined.is_empty() {
+            joined.push_str("\n\n");
+        }
+        joined.push_str(tail);
+    }
+    joined
+}
+
+fn truncate_status_panel_sections(sections: Vec<String>, active_tail: Option<&str>) -> String {
+    let joined = join_status_panel_sections(&sections, active_tail);
+    if joined.chars().count() <= STATUS_PANEL_MAX_CHARS {
+        return joined;
+    }
+
+    let Some(tail) = active_tail else {
+        return truncate_chars(&joined, STATUS_PANEL_MAX_CHARS);
+    };
+
+    let separator = "\n\n";
+    let tail_chars = tail.chars().count();
+    let separator_chars = separator.chars().count();
+    if tail_chars + separator_chars >= STATUS_PANEL_MAX_CHARS {
+        return truncate_chars(tail, STATUS_PANEL_MAX_CHARS);
+    }
+
+    let body_budget = STATUS_PANEL_MAX_CHARS - tail_chars - separator_chars;
+    let body = truncate_chars(&sections.join(separator), body_budget);
+    format!("{body}{separator}{tail}")
 }
 
 fn render_recent_section_header(
