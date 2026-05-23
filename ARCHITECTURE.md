@@ -535,6 +535,7 @@ src/
 │   │   ├── stall_recovery.rs
 │   │   ├── standby_relay.rs
 │   │   ├── streaming_finalizer.rs
+│   │   ├── task_supervisor.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_kill_policy.rs
@@ -697,11 +698,13 @@ src/
 ├── utils/
 │   ├── api.rs
 │   ├── async_bridge.rs
+│   ├── auth.rs
 │   ├── discord.rs
 │   ├── format.rs
 │   ├── github_links.rs
 │   ├── loopback_url.rs
 │   ├── mod.rs
+│   ├── redact.rs
 │   └── wip_detect.rs
 ├── voice/
 │   ├── tts/
