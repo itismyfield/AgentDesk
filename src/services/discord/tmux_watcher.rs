@@ -313,6 +313,39 @@ fn jsonl_tail_contains_ready_for_input_sentinel(output_path: &str) -> bool {
     String::from_utf8_lossy(&buf).contains(&needle)
 }
 
+fn watcher_jsonl_turn_state_ready_for_input(
+    provider: &crate::services::provider::ProviderKind,
+    output_path: &str,
+    current_offset: u64,
+) -> Option<bool> {
+    if !matches!(provider, crate::services::provider::ProviderKind::Claude) {
+        return None;
+    }
+    let path = std::path::Path::new(output_path);
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Some(false);
+    };
+    if meta.len() > current_offset {
+        return Some(false);
+    }
+    let probe = crate::services::tui_turn_state::JsonlTurnStateProbe::new(provider, path);
+    Some(
+        crate::services::tui_turn_state::TuiTurnStateProbe::observe(&probe)
+            == crate::services::tui_turn_state::TuiTurnState::Idle,
+    )
+}
+
+fn watcher_session_ready_for_input(
+    tmux_session_name: &str,
+    provider: &crate::services::provider::ProviderKind,
+    output_path: &str,
+    current_offset: u64,
+) -> bool {
+    watcher_jsonl_turn_state_ready_for_input(provider, output_path, current_offset).unwrap_or_else(
+        || crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider),
+    )
+}
+
 fn observe_qwen_user_prompts_in_buffer(
     buffer: &str,
     provider: &crate::services::provider::ProviderKind,
@@ -2844,6 +2877,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         // and short-circuit the 2s probe cadence. The
                         // legacy `should_probe_ready` cadence stays as a
                         // fallback for the SIGKILL / sentinel-lost case.
+                        //
+                        // Claude TUI is transcript-backed: its visible
+                        // composer can stay on-screen during active work, so
+                        // watcher completion must use the JSONL turn state,
+                        // not pane chrome.
                         let sentinel_ready =
                             !matches!(
                                 watcher_provider,
@@ -2865,9 +2903,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     tokio::task::spawn_blocking({
                                         let name = tmux_session_name.clone();
                                         let provider = watcher_provider.clone();
+                                        let path = output_path.clone();
+                                        let offset = current_offset;
                                         move || {
-                                            crate::services::provider::tmux_session_ready_for_input(
-                                                &name, &provider,
+                                            watcher_session_ready_for_input(
+                                                &name, &provider, &path, offset,
                                             )
                                         }
                                     }),
@@ -6106,7 +6146,7 @@ mod tests {
         terminal_event_consumed_offset, watcher_batch_contains_relayable_response,
         watcher_direct_terminal_should_commit_session_idle,
         watcher_fallback_edit_failure_can_delete_original_placeholder,
-        watcher_inflight_represents_external_input,
+        watcher_inflight_represents_external_input, watcher_jsonl_turn_state_ready_for_input,
         watcher_should_clear_stale_terminal_message_ids, watcher_should_defer_delegated_fresh_idle,
         watcher_should_delete_suppressed_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
@@ -6357,6 +6397,74 @@ TUI-E2E-marker ssh-direct
         assert!(watcher_batch_contains_relayable_response(
             br#"{"type":"result","result":"ok"}"#
         ));
+    }
+
+    #[test]
+    fn claude_watcher_ready_uses_transcript_turn_state_not_pane_prompt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            concat!(
+                r#"{"type":"user","message":{"content":"review"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            watcher_jsonl_turn_state_ready_for_input(
+                &crate::services::provider::ProviderKind::Claude,
+                file.path().to_str().unwrap(),
+                len,
+            ),
+            Some(false)
+        );
+
+        std::fs::write(
+            file.path(),
+            concat!(
+                r#"{"type":"user","message":{"content":"review"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            watcher_jsonl_turn_state_ready_for_input(
+                &crate::services::provider::ProviderKind::Claude,
+                file.path().to_str().unwrap(),
+                len,
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn claude_watcher_ready_waits_for_unread_transcript_bytes() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
+        )
+        .unwrap();
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            watcher_jsonl_turn_state_ready_for_input(
+                &crate::services::provider::ProviderKind::Claude,
+                file.path().to_str().unwrap(),
+                len.saturating_sub(1),
+            ),
+            Some(false)
+        );
     }
 
     #[test]
