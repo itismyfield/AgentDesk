@@ -413,6 +413,17 @@ pub(in crate::services::discord) async fn release_mailbox_after_hosted_tui_busy_
     shared: &Arc<SharedData>,
     provider: &super::super::ProviderKind,
     channel_id: ChannelId,
-) {
-    let _ = super::super::mailbox_finish_turn(shared, provider, channel_id).await;
+) -> bool {
+    let finish = super::super::mailbox_finish_turn(shared, provider, channel_id).await;
+    if finish.mailbox_online && finish.has_pending {
+        super::super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            "hosted_tui_busy_pre_submit_pending",
+        );
+        true
+    } else {
+        false
+    }
 }

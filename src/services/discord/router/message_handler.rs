@@ -6024,6 +6024,12 @@ pub(in crate::services::discord) async fn handle_text_message(
             )
             .await;
         }
+        let queue_kickoff_scheduled = release_mailbox_after_hosted_tui_busy_pre_submit(
+            shared,
+            &bot_owner_provider,
+            channel_id,
+        )
+        .await;
         let mut diagnostic_json = diagnostic.to_json();
         if let Some(object) = diagnostic_json.as_object_mut() {
             object.insert(
@@ -6041,6 +6047,10 @@ pub(in crate::services::discord) async fn handle_text_message(
             object.insert(
                 "queued_card_rendered".to_string(),
                 serde_json::json!(queued_card_rendered),
+            );
+            object.insert(
+                "queue_kickoff_scheduled".to_string(),
+                serde_json::json!(queue_kickoff_scheduled),
             );
             // #2728: when `enqueued == false` we previously had no signal in
             // the producer-exit diagnostic to distinguish dup-guard / dedup /
@@ -6069,8 +6079,6 @@ pub(in crate::services::discord) async fn handle_text_message(
             diagnostic_json,
         );
         super::super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
-        release_mailbox_after_hosted_tui_busy_pre_submit(shared, &bot_owner_provider, channel_id)
-            .await;
         shared
             .global_active
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -6101,7 +6109,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             enqueue_outcome.merged,
             queue_depth_after_busy_enqueue,
             queued_card_rendered,
-            false
+            queue_kickoff_scheduled
         );
         cancel_token
             .cancelled
@@ -10581,7 +10589,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn busy_pre_submit_requeues_without_immediate_idle_kickoff() {
+    async fn busy_pre_submit_requeues_and_schedules_idle_kickoff_when_pending() {
         use crate::services::provider::CancelToken;
         use std::sync::Arc;
         use std::sync::atomic::Ordering;
@@ -10623,12 +10631,17 @@ mod tests {
         );
 
         let backlog_before = shared.deferred_hook_backlog.load(Ordering::Relaxed);
-        release_mailbox_after_hosted_tui_busy_pre_submit(&shared, &provider, channel_id).await;
+        let kicked =
+            release_mailbox_after_hosted_tui_busy_pre_submit(&shared, &provider, channel_id).await;
 
+        assert!(
+            kicked,
+            "hosted TUI busy pre-submit must schedule a deferred kickoff when it leaves a queued item behind"
+        );
         assert_eq!(
             shared.deferred_hook_backlog.load(Ordering::Relaxed),
-            backlog_before,
-            "hosted TUI busy pre-submit must not immediately re-kick the same queued retry"
+            backlog_before + 1,
+            "hosted TUI busy pre-submit must not leave an idle mailbox with a queued retry"
         );
 
         let snapshot = shared.mailbox(channel_id).snapshot().await;

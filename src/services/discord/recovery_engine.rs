@@ -565,6 +565,16 @@ fn recovery_has_post_work_ready_evidence(state: &inflight::InflightTurnState) ->
             .is_some_and(|summary| !summary.trim().is_empty())
 }
 
+fn recovery_ready_without_output_already_delivered(state: &inflight::InflightTurnState) -> bool {
+    state.response_sent_offset > 0 || state.last_watcher_relayed_offset.is_some()
+}
+
+fn recovery_ready_without_output_has_captured_response(
+    state: &inflight::InflightTurnState,
+) -> bool {
+    !state.full_response.trim().is_empty()
+}
+
 fn recovery_phase_after_tmux_probe(can_recover: bool, pane_alive: Option<bool>) -> RecoveryPhase {
     let phase = match (can_recover, pane_alive) {
         (false, _) => RecoveryPhase::Done,
@@ -2630,32 +2640,56 @@ pub(super) async fn restore_inflight_turns(
             RecoveryPhase::Done
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ✓ clearing inflight turn for channel {}: tmux is ready for input and output is idle after offset {}",
-                state.channel_id,
-                state.last_offset
-            );
-            let final_text = if state.full_response.trim().is_empty() {
-                stale_inflight_message("")
-            } else {
-                super::formatting::format_for_discord_with_provider(&state.full_response, provider)
-            };
-            if relay_recovery_terminal_notice(http, shared, &state, &final_text).await {
+            // #2770: ready/idle is not terminal delivery evidence. If recovery
+            // has neither captured text nor a recorded relay commit, preserve
+            // the inflight so the pane-alive reattach path below can own it.
+            if recovery_ready_without_output_already_delivered(&state) {
+                tracing::info!(
+                    "  [{ts}] ✓ clearing inflight turn for channel {}: tmux is ready for input and terminal delivery was already recorded after offset {}",
+                    state.channel_id,
+                    state.last_offset
+                );
                 finish_recovered_turn_mailbox(
                     shared,
                     provider,
                     channel_id,
-                    "recovery_ready_without_output",
+                    "recovery_ready_without_output_already_delivered",
                 )
                 .await;
                 clear_inflight_state(provider, state.channel_id);
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ recovery: ready-without-output notice failed — preserving inflight for retry"
-                );
+                continue;
             }
-            continue;
+            if recovery_ready_without_output_has_captured_response(&state) {
+                tracing::info!(
+                    "  [{ts}] ✓ clearing inflight turn for channel {}: tmux is ready for input and captured output is idle after offset {}",
+                    state.channel_id,
+                    state.last_offset
+                );
+                let final_text = super::formatting::format_for_discord_with_provider(
+                    &state.full_response,
+                    provider,
+                );
+                if relay_recovery_terminal_notice(http, shared, &state, &final_text).await {
+                    finish_recovered_turn_mailbox(
+                        shared,
+                        provider,
+                        channel_id,
+                        "recovery_ready_without_output",
+                    )
+                    .await;
+                    clear_inflight_state(provider, state.channel_id);
+                } else {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ recovery: ready-without-output notice failed — preserving inflight for retry"
+                    );
+                }
+                continue;
+            }
+            tracing::warn!(
+                "  [{ts}] ⚠ recovery: deferring ready-without-output completion for channel {} because no captured assistant response or terminal delivery evidence exists",
+                state.channel_id
+            );
         }
 
         let can_recover = tmux_session_name
@@ -3996,6 +4030,40 @@ mod tests {
     fn recovery_phase_from_str_rejects_unknown_value() {
         assert_eq!(RecoveryPhase::from_str("unknown"), None);
         assert_eq!(RecoveryPhase::from_str(""), None);
+    }
+
+    #[test]
+    fn ready_without_output_requires_captured_response_or_delivery_evidence() {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx".to_string()),
+            123,
+            456,
+            789,
+            "real user input".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.input".to_string()),
+            0,
+        );
+        state.any_tool_used = true;
+
+        assert!(recovery_has_post_work_ready_evidence(&state));
+        assert!(!recovery_ready_without_output_has_captured_response(&state));
+        assert!(!recovery_ready_without_output_already_delivered(&state));
+
+        state.full_response = "terminal answer".to_string();
+        assert!(recovery_ready_without_output_has_captured_response(&state));
+
+        state.full_response.clear();
+        state.response_sent_offset = 42;
+        assert!(recovery_ready_without_output_already_delivered(&state));
+
+        state.response_sent_offset = 0;
+        state.last_watcher_relayed_offset = Some(100);
+        assert!(recovery_ready_without_output_already_delivered(&state));
     }
 
     #[test]

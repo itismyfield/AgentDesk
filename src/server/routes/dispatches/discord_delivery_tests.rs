@@ -1695,8 +1695,10 @@ async fn sync_dispatch_status_reaction_with_pg_marks_completed_dispatch_success(
 /// to `failed` and announce-bot runs `apply_dispatch_status_reaction_state`.
 /// Before the fix the announce-bot's `/@me` DELETE skipped command-bot's
 /// `⏳`, leaving the message rendered as `⏳ + ❌` (in-progress vs failed
-/// ambiguity). The fix issues a 404-tolerant `/@me` DELETE on each
-/// provider's command-bot token so whichever provider owns `⏳` cleans up.
+/// ambiguity). A later failure mode also left command-bot `✅` beside the
+/// announce-bot `❌` when a failed dispatch had produced text. The fix issues
+/// 404-tolerant `/@me` DELETEs on each provider command-bot token so whichever
+/// provider owns either marker cleans up.
 #[tokio::test]
 async fn apply_dispatch_status_reaction_state_failed_clears_command_bot_pending() {
     let _env_lock = env_lock();
@@ -1736,14 +1738,17 @@ async fn apply_dispatch_status_reaction_state_failed_clears_command_bot_pending(
         vec![
             // announce-bot drops its own stale ⏳ (404-tolerant).
             "DELETE /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
-            // #1445: each provider command-bot also drops its own ⏳
-            // (the 404 case for whichever bot didn't own it is fine).
+            // announce-bot drops its own stale ✅ before adding ❌.
+            "DELETE /channels/123/messages/message-123/reactions/%E2%9C%85/@me",
+            // #1445/#2769: each provider command-bot also drops its own
+            // ⏳/✅ pair (404 for whichever bot didn't own it is fine).
             "DELETE /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
+            "DELETE /channels/123/messages/message-123/reactions/%E2%9C%85/@me",
             "DELETE /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
             "DELETE /channels/123/messages/message-123/reactions/%E2%9C%85/@me",
             "PUT /channels/123/messages/message-123/reactions/%E2%9D%8C/@me",
         ],
-        "#1445: failed dispatch must DELETE command-bot ⏳ via each provider token before announce-bot adds ❌ — final reaction state is ❌ only, never ⏳ + ❌"
+        "#1445/#2769: failed dispatch must DELETE command-bot ⏳/✅ via each provider token before announce-bot adds ❌ — final reaction state is ❌ only, never ⏳ + ❌ or ✅ + ❌"
     );
     assert!(
         !reaction_calls

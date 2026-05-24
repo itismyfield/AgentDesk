@@ -251,42 +251,40 @@ async fn apply_dispatch_status_reaction_state(
         }
         DispatchStatusReactionState::Failed => {
             // Clean announce-bot's own ⏳/✅ (404-tolerant) then add ❌.
-            // #1445: also DELETE the command-bot's `⏳` via each launchable
-            // command-bot token — repair paths that bypass the live
-            // command-bot cleanup (queue/API cancel, orphan recovery) leave
-            // the pending marker in place, so without this users see
-            // ⏳ + ❌ together and can't tell whether the dispatch is
-            // in-progress or failed. The cross-bot cleanup is best-effort:
-            // a 401/403 from a stale or revoked token must not block the
+            // #1445/#2769: also DELETE command-bot terminal markers via each
+            // launchable command-bot token. Repair paths that bypass the live
+            // command-bot cleanup can leave ⏳ behind, and failed dispatches
+            // that produced text can also keep the command-bot ✅ added by
+            // turn delivery. Without this users see ⏳ + ❌ or ✅ + ❌ and
+            // cannot tell which state is authoritative. The cross-bot cleanup
+            // is best-effort: a 401/403 from a stale token must not block the
             // authoritative ❌ PUT, so failures are logged and swallowed.
-            // Command bot's ✅ added on response delivery (turn_bridge:1537)
-            // is a separate @user reaction and will still render alongside
-            // ❌ — inevitable cross-bot collision on failed turns that
-            // returned text. ❌ remains the authoritative failure signal.
             update_dispatch_reaction_presence(client, token, base_url, target, '⏳', false).await?;
+            update_dispatch_reaction_presence(client, token, base_url, target, '✅', false).await?;
             for owner_token in collect_command_bot_pending_tokens() {
                 if owner_token == token {
                     // Already cleaned via the announce-bot @me DELETE above.
                     continue;
                 }
-                if let Err(error) = update_dispatch_reaction_presence(
-                    client,
-                    &owner_token,
-                    base_url,
-                    target,
-                    '⏳',
-                    false,
-                )
-                .await
-                {
-                    tracing::debug!(
-                        message_id = %target.message_id,
-                        %error,
-                        "[dispatch] #1445 best-effort command-bot ⏳ cleanup skipped (treating as harmless)"
-                    );
+                for emoji in ['⏳', '✅'] {
+                    if let Err(error) = update_dispatch_reaction_presence(
+                        client,
+                        &owner_token,
+                        base_url,
+                        target,
+                        emoji,
+                        false,
+                    )
+                    .await
+                    {
+                        tracing::debug!(
+                            message_id = %target.message_id,
+                            %error,
+                            "[dispatch] #1445 best-effort command-bot {emoji} cleanup skipped (treating as harmless)"
+                        );
+                    }
                 }
             }
-            update_dispatch_reaction_presence(client, token, base_url, target, '✅', false).await?;
             update_dispatch_reaction_presence(client, token, base_url, target, '❌', true).await
         }
     }
