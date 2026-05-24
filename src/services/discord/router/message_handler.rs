@@ -45,6 +45,7 @@ use crate::services::memory::{
 #[cfg(test)]
 use crate::services::observability::turn_lifecycle::TurnEvent;
 use crate::services::provider::{CancelToken, cancel_requested};
+use std::future::Future;
 use std::sync::Arc;
 use url::Url;
 
@@ -3183,7 +3184,7 @@ pub(crate) async fn execute_intake_turn_core(
 }
 
 async fn claim_voice_transcript_announcement_processing(
-    shared: &Arc<SharedData>,
+    pg_pool: Option<&sqlx::PgPool>,
     channel_id: ChannelId,
     message_id: MessageId,
     already_accepted: bool,
@@ -3192,7 +3193,7 @@ async fn claim_voice_transcript_announcement_processing(
     if already_accepted {
         return true;
     }
-    let Some(pool) = shared.pg_pool.as_ref() else {
+    let Some(pool) = pg_pool else {
         return true;
     };
     match crate::voice::announce_meta::mark_voice_announcement_durable_consumed(pool, message_id)
@@ -3219,6 +3220,65 @@ async fn claim_voice_transcript_announcement_processing(
             false
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VoiceTranscriptAnnouncementRouteOutcome {
+    NotVoiceAnnouncement,
+    DuplicateSuppressed,
+    ForegroundHandled,
+    FallbackNormalTurn,
+}
+
+impl VoiceTranscriptAnnouncementRouteOutcome {
+    fn bypasses_normal_turn(self) -> bool {
+        matches!(self, Self::DuplicateSuppressed | Self::ForegroundHandled)
+    }
+}
+
+async fn route_voice_transcript_announcement_once<F, Fut>(
+    pg_pool: Option<&sqlx::PgPool>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    voice_announcement_already_accepted: bool,
+    voice_announcement: Option<&crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    mut foreground_handler: F,
+) -> VoiceTranscriptAnnouncementRouteOutcome
+where
+    F: FnMut(crate::voice::prompt::VoiceTranscriptAnnouncement) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let Some(announcement) = voice_announcement else {
+        return VoiceTranscriptAnnouncementRouteOutcome::NotVoiceAnnouncement;
+    };
+    if !claim_voice_transcript_announcement_processing(
+        pg_pool,
+        channel_id,
+        message_id,
+        voice_announcement_already_accepted,
+        "handle_text_message_pre_accept",
+    )
+    .await
+    {
+        return VoiceTranscriptAnnouncementRouteOutcome::DuplicateSuppressed;
+    }
+    if foreground_handler(announcement.clone()).await {
+        return VoiceTranscriptAnnouncementRouteOutcome::ForegroundHandled;
+    }
+
+    let mut event = crate::voice::flight::VoiceFlightEvent::new(
+        crate::voice::flight::VoiceFlightRoute::FallbackNormalTurn,
+    );
+    event.voice_channel_id = Some(channel_id.get());
+    event.control_channel_id = Some(announcement.control_channel_id.unwrap_or(channel_id.get()));
+    event.user_id = Some(announcement.user_id.clone());
+    event.utterance_id = Some(announcement.utterance_id.clone());
+    event.stt_mode = announcement.stt_mode.clone();
+    event.stt_latency_ms = announcement.stt_latency_ms;
+    event.transcript_chars = Some(announcement.transcript.chars().count());
+    event.reason = Some("voice_foreground_not_handled".to_string());
+    crate::voice::flight::record_voice_flight_event(event);
+    VoiceTranscriptAnnouncementRouteOutcome::FallbackNormalTurn
 }
 
 pub(in crate::services::discord) async fn handle_text_message(
@@ -3401,18 +3461,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
     }
     let is_voice_announcement = voice_announcement.is_some();
-    if is_voice_announcement
-        && !claim_voice_transcript_announcement_processing(
-            shared,
-            channel_id,
-            user_msg_id,
-            voice_announcement_already_accepted,
-            "handle_text_message_pre_accept",
-        )
-        .await
-    {
-        return Ok(());
-    }
     let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
         let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
         if let Some(started_at) = announcement.started_at.as_deref() {
@@ -3458,28 +3506,25 @@ pub(in crate::services::discord) async fn handle_text_message(
         .as_ref()
         .map(|announcement| announcement.transcript.as_str())
         .unwrap_or(user_text);
-    if let Some(announcement) = voice_announcement.as_ref()
-        && shared
-            .voice_barge_in
-            .try_handle_voice_transcript_announcement(shared, channel_id, announcement)
-            .await
-    {
+    let voice_route_outcome = route_voice_transcript_announcement_once(
+        shared.pg_pool.as_ref(),
+        channel_id,
+        user_msg_id,
+        voice_announcement_already_accepted,
+        voice_announcement.as_ref(),
+        |announcement| {
+            let voice_barge_in = shared.voice_barge_in.clone();
+            let shared = Arc::clone(shared);
+            async move {
+                voice_barge_in
+                    .try_handle_voice_transcript_announcement(&shared, channel_id, &announcement)
+                    .await
+            }
+        },
+    )
+    .await;
+    if voice_route_outcome.bypasses_normal_turn() {
         return Ok(());
-    }
-    if let Some(announcement) = voice_announcement.as_ref() {
-        let mut event = crate::voice::flight::VoiceFlightEvent::new(
-            crate::voice::flight::VoiceFlightRoute::FallbackNormalTurn,
-        );
-        event.voice_channel_id = Some(channel_id.get());
-        event.control_channel_id =
-            Some(announcement.control_channel_id.unwrap_or(channel_id.get()));
-        event.user_id = Some(announcement.user_id.clone());
-        event.utterance_id = Some(announcement.utterance_id.clone());
-        event.stt_mode = announcement.stt_mode.clone();
-        event.stt_latency_ms = announcement.stt_latency_ms;
-        event.transcript_chars = Some(announcement.transcript.chars().count());
-        event.reason = Some("voice_foreground_not_handled".to_string());
-        crate::voice::flight::record_voice_flight_event(event);
     }
     if !is_voice_announcement
         && shared
@@ -8810,6 +8855,10 @@ mod tests {
     use crate::services::memory::RecallResponse;
     use crate::ui::ai_screen::{HistoryItem, HistoryType};
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::Duration;
 
     fn sample_recall() -> RecallResponse {
@@ -8821,6 +8870,192 @@ mod tests {
             warnings: Vec::new(),
             token_usage: crate::services::memory::TokenUsage::default(),
         }
+    }
+
+    fn voice_announcement_fixture(
+        transcript: &str,
+        utterance_id: &str,
+    ) -> crate::voice::prompt::VoiceTranscriptAnnouncement {
+        crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: transcript.to_string(),
+            user_id: "42".to_string(),
+            utterance_id: utterance_id.to_string(),
+            language: "ko-KR".to_string(),
+            verbose_progress: true,
+            started_at: Some("2026-05-24T21:00:00+09:00".to_string()),
+            completed_at: Some("2026-05-24T21:00:01+09:00".to_string()),
+            samples_written: Some(48_000),
+            control_channel_id: Some(44_001),
+            stt_mode: Some("file".to_string()),
+            stt_latency_ms: Some(120),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn voice_announcement_foreground_response_bypasses_normal_turn() {
+        let channel_id = ChannelId::new(44_001);
+        let message_id = MessageId::new(55_001);
+        let announcement = voice_announcement_fixture("지금 상태 알려줘", "utt-foreground");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let outcome = route_voice_transcript_announcement_once(
+            None,
+            channel_id,
+            message_id,
+            false,
+            Some(&announcement),
+            {
+                let calls = Arc::clone(&calls);
+                move |seen| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        assert_eq!(seen.utterance_id, "utt-foreground");
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            VoiceTranscriptAnnouncementRouteOutcome::ForegroundHandled
+        );
+        assert!(
+            outcome.bypasses_normal_turn(),
+            "foreground voice responses must return before normal text turn handling"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "foreground handler must be invoked exactly once"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn voice_announcement_foreground_miss_falls_back_to_normal_turn() {
+        let channel_id = ChannelId::new(44_002);
+        let message_id = MessageId::new(55_002);
+        let announcement = voice_announcement_fixture("긴 작업 처리해줘", "utt-fallback");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let outcome = route_voice_transcript_announcement_once(
+            None,
+            channel_id,
+            message_id,
+            false,
+            Some(&announcement),
+            {
+                let calls = Arc::clone(&calls);
+                move |_seen| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        false
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            VoiceTranscriptAnnouncementRouteOutcome::FallbackNormalTurn
+        );
+        assert!(
+            !outcome.bypasses_normal_turn(),
+            "only an actual foreground response or duplicate claim may bypass the normal turn"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_duplicate_voice_announcement_invokes_foreground_once() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(44_003);
+        let message_id = MessageId::new(55_003);
+        let announcement = voice_announcement_fixture("상태 알려줘", "utt-durable-once");
+        let pending_key = crate::voice::announce_meta::durable_voice_announcement_pending_key(
+            "voice:1:44003:utt-durable-once",
+            "announce:generation:1",
+        );
+
+        crate::voice::announce_meta::persist_voice_announcement_reservation_durable(
+            &pool,
+            &pending_key,
+            channel_id,
+            "🎙️ \"상태 알려줘\"",
+            &announcement,
+        )
+        .await
+        .expect("persist durable voice announcement");
+        assert!(
+            crate::voice::announce_meta::bind_voice_announcement_durable_message_id(
+                &pool,
+                &pending_key,
+                message_id,
+            )
+            .await
+            .expect("bind durable announcement message id")
+        );
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first = route_voice_transcript_announcement_once(
+            Some(&pool),
+            channel_id,
+            message_id,
+            false,
+            Some(&announcement),
+            {
+                let calls = Arc::clone(&calls);
+                move |seen| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        assert_eq!(seen.utterance_id, "utt-durable-once");
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                }
+            },
+        )
+        .await;
+        let duplicate = route_voice_transcript_announcement_once(
+            Some(&pool),
+            channel_id,
+            message_id,
+            false,
+            Some(&announcement),
+            {
+                let calls = Arc::clone(&calls);
+                move |_seen| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            first,
+            VoiceTranscriptAnnouncementRouteOutcome::ForegroundHandled
+        );
+        assert_eq!(
+            duplicate,
+            VoiceTranscriptAnnouncementRouteOutcome::DuplicateSuppressed
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "durable consumed_at must suppress duplicate Discord delivery before foreground handling"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     fn make_session(

@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -32,6 +34,8 @@ use crate::voice::tts::{
 use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
 
 use super::SharedData;
+#[cfg(test)]
+use super::voice_background_driver::{VoiceBackgroundDriverKind, VoiceBackgroundStartOutcome};
 use super::voice_background_driver::{
     VoiceBackgroundStartRequest, VoiceBackgroundTurnDriver, default_voice_announce_generation,
     select_voice_background_driver, voice_announce_delivery_id,
@@ -296,6 +300,29 @@ enum VoiceForegroundDecision {
     Silence,
     HandoffBackground(String),
     Speak(String),
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TestVoiceBackgroundStart {
+    driver_kind: VoiceBackgroundDriverKind,
+    source_channel_id: ChannelId,
+    target_channel_id: ChannelId,
+    utterance_id: String,
+    summary: String,
+    message_content: String,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct VoiceBargeInTestState {
+    foreground_decisions: StdMutex<VecDeque<VoiceForegroundDecision>>,
+    background_result_summaries: StdMutex<VecDeque<Option<String>>>,
+    background_handoff_outcomes: StdMutex<VecDeque<Result<VoiceBackgroundStartOutcome, String>>>,
+    background_starts: StdMutex<Vec<TestVoiceBackgroundStart>>,
+    synth_requests: StdMutex<Vec<(u64, String, &'static str)>>,
+    play_requests: StdMutex<Vec<(u64, &'static str)>>,
+    force_synth_success: AtomicBool,
 }
 
 fn voice_flight_event_from_announcement(
@@ -1102,6 +1129,8 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     // natural exit.
     inflight_foreground_cancels:
         dashmap::DashMap<u64, Vec<Arc<crate::services::provider::CancelToken>>>,
+    #[cfg(test)]
+    test_state: Arc<VoiceBargeInTestState>,
 }
 
 impl VoiceBargeInRuntime {
@@ -1152,6 +1181,8 @@ impl VoiceBargeInRuntime {
             config_cache: std::sync::Mutex::new(None),
             alias_collision_signature: std::sync::Mutex::new(None),
             inflight_foreground_cancels: dashmap::DashMap::new(),
+            #[cfg(test)]
+            test_state: Arc::new(VoiceBargeInTestState::default()),
         }
     }
 
@@ -1186,7 +1217,88 @@ impl VoiceBargeInRuntime {
             config_cache: std::sync::Mutex::new(None),
             alias_collision_signature: std::sync::Mutex::new(None),
             inflight_foreground_cancels: dashmap::DashMap::new(),
+            #[cfg(test)]
+            test_state: Arc::new(VoiceBargeInTestState::default()),
         }
+    }
+
+    async fn generate_foreground_ack_text_for_runtime(
+        &self,
+        transcript: &str,
+        language: &str,
+        foreground: &EffectiveVoiceForegroundConfig,
+        cancel_token: Arc<crate::services::provider::CancelToken>,
+    ) -> Option<VoiceForegroundDecision> {
+        #[cfg(test)]
+        if let Some(decision) = self
+            .test_state
+            .foreground_decisions
+            .lock()
+            .expect("voice test foreground decisions lock")
+            .pop_front()
+        {
+            return Some(decision);
+        }
+
+        generate_foreground_ack_text(transcript, language, foreground, cancel_token).await
+    }
+
+    async fn generate_voice_background_result_summary_for_runtime(
+        &self,
+        background_result: &str,
+        language: &str,
+        foreground: &EffectiveVoiceForegroundConfig,
+        cancel_token: Arc<crate::services::provider::CancelToken>,
+    ) -> Option<String> {
+        #[cfg(test)]
+        if let Some(summary) = self
+            .test_state
+            .background_result_summaries
+            .lock()
+            .expect("voice test background summaries lock")
+            .pop_front()
+        {
+            return summary;
+        }
+
+        generate_voice_background_result_summary(
+            background_result,
+            language,
+            foreground,
+            cancel_token,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    fn take_test_background_handoff_outcome(
+        &self,
+        driver_kind: VoiceBackgroundDriverKind,
+        source_channel_id: ChannelId,
+        target_channel_id: ChannelId,
+        announcement: &crate::voice::prompt::VoiceTranscriptAnnouncement,
+        summary: &str,
+        message_content: &str,
+    ) -> Option<Result<VoiceBackgroundStartOutcome, String>> {
+        let outcome = self
+            .test_state
+            .background_handoff_outcomes
+            .lock()
+            .expect("voice test background handoff outcomes lock")
+            .pop_front()?;
+        self.test_state
+            .background_starts
+            .lock()
+            .expect("voice test background starts lock")
+            .push(TestVoiceBackgroundStart {
+                driver_kind,
+                source_channel_id,
+                target_channel_id,
+                utterance_id: announcement.utterance_id.clone(),
+                summary: summary.to_string(),
+                message_content: message_content.to_string(),
+            });
+        Some(outcome)
     }
 
     pub(in crate::services::discord) fn enabled(&self) -> bool {
@@ -1882,13 +1994,14 @@ impl VoiceBargeInRuntime {
             .await;
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
         self.register_inflight_foreground_cancel(voice_channel_id, cancel_token.clone());
-        let summary_result = generate_voice_background_result_summary(
-            background_result,
-            &language,
-            &foreground,
-            cancel_token.clone(),
-        )
-        .await;
+        let summary_result = self
+            .generate_voice_background_result_summary_for_runtime(
+                background_result,
+                &language,
+                &foreground,
+                cancel_token.clone(),
+            )
+            .await;
         self.unregister_inflight_foreground_cancel(voice_channel_id, &cancel_token);
         // #2250: if cancel won the race (e.g. user barge-in or guild
         // teardown), suppress fallback speech and skip TTS entirely.
@@ -2366,14 +2479,15 @@ impl VoiceBargeInRuntime {
         self.play_processing_chime(shared, source_channel_id).await;
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
         self.register_inflight_foreground_cancel(source_channel_id, cancel_token.clone());
-        let decision = generate_foreground_ack_text(
-            &announcement.transcript,
-            &language,
-            &foreground,
-            cancel_token.clone(),
-        )
-        .await
-        .unwrap_or(VoiceForegroundDecision::Silence);
+        let decision = self
+            .generate_foreground_ack_text_for_runtime(
+                &announcement.transcript,
+                &language,
+                &foreground,
+                cancel_token.clone(),
+            )
+            .await
+            .unwrap_or(VoiceForegroundDecision::Silence);
         let foreground_latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
         // Issue #2335 (c) — Codex round 2: keep the foreground cancel token
@@ -2772,18 +2886,48 @@ impl VoiceBargeInRuntime {
             }
         }
 
-        let outcome = match driver
-            .start(VoiceBackgroundStartRequest {
-                guild_id,
-                voice_channel_id: source_channel_id,
-                channel_id: target_channel_id,
-                shared,
-                utterance_id: &announcement.utterance_id,
-                generation,
-                message_content: &prompt,
-            })
-            .await
-        {
+        let start_result = {
+            #[cfg(test)]
+            {
+                if let Some(result) = self.take_test_background_handoff_outcome(
+                    driver.kind(),
+                    source_channel_id,
+                    target_channel_id,
+                    announcement,
+                    summary,
+                    &prompt,
+                ) {
+                    result
+                } else {
+                    driver
+                        .start(VoiceBackgroundStartRequest {
+                            guild_id,
+                            voice_channel_id: source_channel_id,
+                            channel_id: target_channel_id,
+                            shared,
+                            utterance_id: &announcement.utterance_id,
+                            generation,
+                            message_content: &prompt,
+                        })
+                        .await
+                }
+            }
+            #[cfg(not(test))]
+            {
+                driver
+                    .start(VoiceBackgroundStartRequest {
+                        guild_id,
+                        voice_channel_id: source_channel_id,
+                        channel_id: target_channel_id,
+                        shared,
+                        utterance_id: &announcement.utterance_id,
+                        generation,
+                        message_content: &prompt,
+                    })
+                    .await
+            }
+        };
+        let outcome = match start_result {
             Ok(outcome) => outcome,
             Err(error) => {
                 store.cancel_handoff_reservation(&correlation_id);
@@ -3807,6 +3951,24 @@ impl VoiceBargeInRuntime {
         channel_id: ChannelId,
         context: &'static str,
     ) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            let request_index = {
+                let mut requests = self
+                    .test_state
+                    .synth_requests
+                    .lock()
+                    .expect("voice test synth requests lock");
+                requests.push((channel_id.get(), text.to_string(), context));
+                requests.len()
+            };
+            if self.test_state.force_synth_success.load(Ordering::Relaxed) {
+                return Some(
+                    std::env::temp_dir()
+                        .join(format!("agentdesk-test-voice-progress-{request_index}.wav")),
+                );
+            }
+        }
         let Some(tts) = self.tts.read().await.clone() else {
             return None;
         };
@@ -3850,6 +4012,13 @@ impl VoiceBargeInRuntime {
         path: PathBuf,
         context: &'static str,
     ) {
+        #[cfg(test)]
+        self.test_state
+            .play_requests
+            .lock()
+            .expect("voice test play requests lock")
+            .push((channel_id.get(), context));
+
         let Some(guild_id) = self
             .voice_guilds
             .get(&channel_id.get())
@@ -4632,6 +4801,255 @@ mod tests {
             known_slash_commands: tokio::sync::OnceCell::new(),
             inflight_signals: tokio::sync::broadcast::channel(256).0,
         })
+    }
+
+    fn voice_transcript_announcement_for_tests(
+        transcript: &str,
+        utterance_id: &str,
+    ) -> crate::voice::prompt::VoiceTranscriptAnnouncement {
+        crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: transcript.to_string(),
+            user_id: "42".to_string(),
+            utterance_id: utterance_id.to_string(),
+            language: "ko-KR".to_string(),
+            verbose_progress: true,
+            started_at: Some("2026-05-24T21:00:00+09:00".to_string()),
+            completed_at: Some("2026-05-24T21:00:01+09:00".to_string()),
+            samples_written: Some(48_000),
+            control_channel_id: None,
+            stt_mode: Some("file".to_string()),
+            stt_latency_ms: Some(120),
+        }
+    }
+
+    fn install_active_voice_route(
+        runtime: &VoiceBargeInRuntime,
+        source_channel: ChannelId,
+        target_channel: ChannelId,
+    ) {
+        runtime.active_voice_routes.insert(
+            source_channel.get(),
+            ActiveVoiceRoute {
+                agent_id: "project-agentdesk".to_string(),
+                channel_id: target_channel,
+                updated_at: Instant::now(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_transcript_simple_question_uses_foreground_tts_without_background_handoff() {
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel = ChannelId::new(2_776_101);
+        let target_channel = ChannelId::new(2_776_102);
+        install_active_voice_route(&runtime, source_channel, target_channel);
+        runtime
+            .test_state
+            .force_synth_success
+            .store(true, Ordering::Relaxed);
+        runtime
+            .test_state
+            .foreground_decisions
+            .lock()
+            .expect("voice test foreground decisions lock")
+            .push_back(VoiceForegroundDecision::Speak(
+                "상태 확인했어요.".to_string(),
+            ));
+        let announcement =
+            voice_transcript_announcement_for_tests("지금 상태 알려줘", "issue-2776-simple");
+
+        assert!(
+            runtime
+                .try_handle_voice_transcript_announcement(&shared, source_channel, &announcement)
+                .await,
+            "mapped voice transcript announcements must be consumed by foreground routing"
+        );
+
+        assert!(
+            runtime
+                .test_state
+                .background_starts
+                .lock()
+                .expect("voice test background starts lock")
+                .is_empty(),
+            "a simple foreground answer must not start a background provider turn"
+        );
+        let synths = runtime
+            .test_state
+            .synth_requests
+            .lock()
+            .expect("voice test synth requests lock")
+            .clone();
+        assert!(
+            synths.iter().any(|(channel_id, text, context)| {
+                *channel_id == source_channel.get()
+                    && text == "상태 확인했어요."
+                    && *context == "voice barge-in acknowledgement"
+            }),
+            "foreground speak decisions must synthesize the short TTS answer"
+        );
+        let plays = runtime
+            .test_state
+            .play_requests
+            .lock()
+            .expect("voice test play requests lock")
+            .clone();
+        assert!(
+            plays.iter().any(|(channel_id, context)| {
+                *channel_id == source_channel.get() && *context == "voice barge-in acknowledgement"
+            }),
+            "foreground TTS output must be routed back to the voice channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_transcript_work_request_hands_off_via_announce_bot_and_tts_ack() {
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel = ChannelId::new(2_776_201);
+        let target_channel = ChannelId::new(2_776_202);
+        let handoff_message = MessageId::new(2_776_203);
+        crate::voice::announce_meta::global_store().forget_handoff(handoff_message);
+        install_active_voice_route(&runtime, source_channel, target_channel);
+        runtime
+            .test_state
+            .force_synth_success
+            .store(true, Ordering::Relaxed);
+        runtime
+            .test_state
+            .foreground_decisions
+            .lock()
+            .expect("voice test foreground decisions lock")
+            .push_back(VoiceForegroundDecision::HandoffBackground(
+                "로그 확인 후 원인 요약".to_string(),
+            ));
+        runtime
+            .test_state
+            .background_handoff_outcomes
+            .lock()
+            .expect("voice test background handoff outcomes lock")
+            .push_back(Ok(VoiceBackgroundStartOutcome {
+                turn_id: format!("voice-announce:{}", handoff_message.get()),
+                driver_kind: VoiceBackgroundDriverKind::AnnounceBotTranscript,
+                message_id: Some(handoff_message),
+            }));
+        let announcement =
+            voice_transcript_announcement_for_tests("로그 확인해줘", "issue-2776-handoff");
+
+        assert!(
+            runtime
+                .try_handle_voice_transcript_announcement(&shared, source_channel, &announcement)
+                .await,
+            "background handoff decisions are still handled by the foreground voice layer"
+        );
+
+        let starts = runtime
+            .test_state
+            .background_starts
+            .lock()
+            .expect("voice test background starts lock")
+            .clone();
+        assert_eq!(
+            starts.len(),
+            1,
+            "work request must start exactly one background turn"
+        );
+        let start = &starts[0];
+        assert_eq!(
+            start.driver_kind,
+            VoiceBackgroundDriverKind::AnnounceBotTranscript,
+            "voice background work must enter through the canonical announce-bot transcript driver"
+        );
+        assert_eq!(start.source_channel_id, source_channel);
+        assert_eq!(start.target_channel_id, target_channel);
+        assert_eq!(start.utterance_id, "issue-2776-handoff");
+        assert_eq!(start.summary, "로그 확인 후 원인 요약");
+        assert!(start.message_content.contains("로그 확인해줘"));
+        assert!(start.message_content.contains("로그 확인 후 원인 요약"));
+        assert!(
+            start
+                .message_content
+                .contains("ADK_VOICE_BACKGROUND_HANDOFF v1"),
+            "background prompt must carry the typed handoff marker for the turn bridge"
+        );
+        let handoff_meta = crate::voice::announce_meta::global_store()
+            .get_handoff(handoff_message)
+            .expect("handoff metadata must be bound to the announce-bot message id");
+        assert_eq!(handoff_meta.voice_channel_id, source_channel.get());
+        assert_eq!(handoff_meta.background_channel_id, target_channel.get());
+        assert_eq!(handoff_meta.agent_id.as_deref(), Some("project-agentdesk"));
+
+        let synths = runtime
+            .test_state
+            .synth_requests
+            .lock()
+            .expect("voice test synth requests lock")
+            .clone();
+        assert!(
+            synths.iter().any(|(channel_id, text, context)| {
+                *channel_id == source_channel.get()
+                    && text == voice_background_handoff_ack("ko-KR")
+                    && *context == "voice barge-in acknowledgement"
+            }),
+            "handoff ack must be spoken in the foreground voice channel"
+        );
+        crate::voice::announce_meta::global_store().forget_handoff(handoff_message);
+    }
+
+    #[tokio::test]
+    async fn voice_background_completion_summary_uses_foreground_tts() {
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel = ChannelId::new(2_776_301);
+        let target_channel = ChannelId::new(2_776_302);
+        runtime
+            .test_state
+            .force_synth_success
+            .store(true, Ordering::Relaxed);
+        runtime
+            .test_state
+            .background_result_summaries
+            .lock()
+            .expect("voice test background summaries lock")
+            .push_back(Some("작업이 끝났어요.".to_string()));
+
+        runtime
+            .speak_voice_background_completion_summary(
+                &shared,
+                source_channel,
+                target_channel,
+                "작업 완료. 상세 로그는 채널에 남겼습니다.",
+                false,
+            )
+            .await;
+
+        let synths = runtime
+            .test_state
+            .synth_requests
+            .lock()
+            .expect("voice test synth requests lock")
+            .clone();
+        assert!(
+            synths.iter().any(|(channel_id, text, context)| {
+                *channel_id == source_channel.get()
+                    && text == "작업이 끝났어요."
+                    && *context == "voice background result summary"
+            }),
+            "background completion summaries must be converted back into foreground TTS"
+        );
+        let plays = runtime
+            .test_state
+            .play_requests
+            .lock()
+            .expect("voice test play requests lock")
+            .clone();
+        assert!(
+            plays.iter().any(|(channel_id, context)| {
+                *channel_id == source_channel.get() && *context == "voice background result summary"
+            }),
+            "completion summary audio must target the original voice channel"
+        );
     }
 
     #[test]
