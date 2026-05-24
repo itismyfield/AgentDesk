@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
 
 const TURN_STATE_TAIL_BYTES: u64 = 64 * 1024;
@@ -26,6 +27,35 @@ impl TuiTurnState {
 
     pub(crate) fn is_busy(self) -> bool {
         matches!(self, Self::Streaming | Self::UserSubmitted)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TuiReadyState {
+    Ready,
+    Busy,
+    Unknown,
+}
+
+impl TuiReadyState {
+    pub(crate) fn from_turn_state(state: TuiTurnState) -> Self {
+        match state {
+            TuiTurnState::Idle => Self::Ready,
+            TuiTurnState::Streaming | TuiTurnState::UserSubmitted => Self::Busy,
+            TuiTurnState::Unknown => Self::Unknown,
+        }
+    }
+
+    pub(crate) fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Busy => "busy",
+            Self::Unknown => "unknown",
+        }
     }
 }
 
@@ -59,6 +89,64 @@ pub(crate) fn observe_provider_jsonl_turn_state(
         ProviderKind::Codex => observe_codex_jsonl_turn_state(path),
         _ => TuiTurnState::Unknown,
     }
+}
+
+pub(crate) fn provider_runtime_has_structured_jsonl_turn_state(
+    provider: &ProviderKind,
+    runtime_kind: Option<RuntimeHandoffKind>,
+) -> bool {
+    let provider_has_jsonl = matches!(provider, ProviderKind::Claude | ProviderKind::Codex);
+    if !provider_has_jsonl {
+        return false;
+    }
+    !matches!(
+        runtime_kind,
+        Some(RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend)
+    )
+}
+
+pub(crate) fn jsonl_ready_for_input(
+    provider: &ProviderKind,
+    runtime_kind: Option<RuntimeHandoffKind>,
+    path: &Path,
+    consumed_offset: Option<u64>,
+) -> Option<TuiReadyState> {
+    if !provider_runtime_has_structured_jsonl_turn_state(provider, runtime_kind) {
+        return None;
+    }
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Some(TuiReadyState::Unknown);
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Some(TuiReadyState::Unknown);
+    }
+    if consumed_offset.is_some_and(|offset| metadata.len() > offset) {
+        return Some(TuiReadyState::Busy);
+    }
+    Some(TuiReadyState::from_turn_state(
+        observe_provider_jsonl_turn_state(provider, path),
+    ))
+}
+
+pub(crate) fn runtime_binding_ready_for_input(
+    provider: &ProviderKind,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    require_consumed: bool,
+) -> Option<TuiReadyState> {
+    if !provider_runtime_has_structured_jsonl_turn_state(provider, Some(binding.runtime_kind)) {
+        return None;
+    }
+    let path = match binding.runtime_kind {
+        RuntimeHandoffKind::ClaudeTui => Path::new(binding.relay_output_path()),
+        RuntimeHandoffKind::CodexTui => Path::new(&binding.output_path),
+        RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend => return None,
+    };
+    jsonl_ready_for_input(
+        provider,
+        Some(binding.runtime_kind),
+        path,
+        require_consumed.then_some(binding.last_offset),
+    )
 }
 
 pub(crate) fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
@@ -549,6 +637,47 @@ mod tests {
         assert_eq!(
             observe_codex_jsonl_turn_state(file.path()),
             TuiTurnState::Idle
+        );
+    }
+
+    #[test]
+    fn structured_jsonl_ready_requires_consumed_offset() {
+        let file =
+            write_jsonl(&[r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#]);
+        let len = std::fs::metadata(file.path()).unwrap().len();
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len.saturating_sub(1)),
+            ),
+            Some(TuiReadyState::Busy)
+        );
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::ClaudeTui),
+                file.path(),
+                Some(len),
+            ),
+            Some(TuiReadyState::Ready)
+        );
+    }
+
+    #[test]
+    fn legacy_wrapper_runtime_does_not_claim_structured_ready_state() {
+        let file = write_jsonl(&[r#"{"type":"result","result":"done","session_id":"s"}"#]);
+
+        assert_eq!(
+            jsonl_ready_for_input(
+                &ProviderKind::Claude,
+                Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+                file.path(),
+                None,
+            ),
+            None
         );
     }
 

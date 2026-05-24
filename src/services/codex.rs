@@ -2175,7 +2175,12 @@ fn send_followup_to_tmux(
         start_offset,
         sender.clone(),
         cancel_token,
-        SessionProbe::tmux(tmux_session_name.to_string(), ProviderKind::Codex),
+        SessionProbe::tmux_with_structured_output(
+            tmux_session_name.to_string(),
+            ProviderKind::Codex,
+            Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+            output_path.to_string(),
+        ),
     ) {
         Ok(read_result) => read_result,
         Err(failure) => {
@@ -2184,10 +2189,13 @@ fn send_followup_to_tmux(
             let input_exists = std::path::Path::new(input_fifo_path).exists();
             let session_alive = tmux_session_has_live_pane(tmux_session_name);
             let ready_for_input = session_alive
-                && crate::services::provider::tmux_session_ready_for_input(
-                    tmux_session_name,
+                && crate::services::tui_turn_state::jsonl_ready_for_input(
                     &ProviderKind::Codex,
-                );
+                    Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+                    std::path::Path::new(output_path),
+                    Some(failure.last_offset),
+                )
+                .is_some_and(crate::services::tui_turn_state::TuiReadyState::is_ready);
 
             if let Some(fallback) = tmux_followup_fallback_after_read_error(
                 start_offset,

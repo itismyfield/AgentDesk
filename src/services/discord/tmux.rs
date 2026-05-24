@@ -1525,8 +1525,8 @@ fn is_terminal_finalize_stop_candidate(
 /// We currently only gate `RuntimeHandoffKind::ClaudeTui`. `LegacyTmuxWrapper`
 /// drives a non-interactive wrapper script whose `result` event coincides
 /// with the script exiting, so no extra quiescence step is needed.
-/// `CodexTui` has its own completion contract and is intentionally excluded
-/// from this gate to keep the fix minimal and reviewable.
+/// The gate is based on structured provider JSONL state, not visible TUI
+/// composer chrome.
 ///
 /// `task_notification_kind` is accepted but intentionally does NOT skip the
 /// gate — a Background or MonitorAutoTurn that runs inside ClaudeTui still

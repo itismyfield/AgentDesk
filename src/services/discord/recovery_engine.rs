@@ -565,6 +565,37 @@ fn recovery_has_post_work_ready_evidence(state: &inflight::InflightTurnState) ->
             .is_some_and(|summary| !summary.trim().is_empty())
 }
 
+fn inflight_ready_for_input_without_tui_pane(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    require_consumed: bool,
+) -> Option<crate::services::tui_turn_state::TuiReadyState> {
+    let output_path = state
+        .output_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    crate::services::tui_turn_state::jsonl_ready_for_input(
+        provider,
+        state.runtime_kind,
+        std::path::Path::new(output_path),
+        require_consumed.then_some(state.last_offset),
+    )
+}
+
+fn inflight_or_legacy_tmux_ready_for_input(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    tmux_session_name: &str,
+    require_consumed: bool,
+) -> bool {
+    inflight_ready_for_input_without_tui_pane(provider, state, require_consumed)
+        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
+        .unwrap_or_else(|| {
+            crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider)
+        })
+}
+
 fn recovery_ready_without_output_already_delivered(state: &inflight::InflightTurnState) -> bool {
     state.response_sent_offset > 0 || state.last_watcher_relayed_offset.is_some()
 }
@@ -2632,7 +2663,7 @@ pub(super) async fn restore_inflight_turns(
         let tmux_ready_without_new_output = tmux_session_name.as_deref().map_or(false, |name| {
             !output_has_new_bytes
                 && recovery_has_post_work_ready_evidence(&state)
-                && crate::services::provider::tmux_session_ready_for_input(name, provider)
+                && inflight_or_legacy_tmux_ready_for_input(provider, &state, name, true)
         });
 
         if matches!(

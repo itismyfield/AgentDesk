@@ -315,24 +315,18 @@ fn jsonl_tail_contains_ready_for_input_sentinel(output_path: &str) -> bool {
 
 fn watcher_jsonl_turn_state_ready_for_input(
     provider: &crate::services::provider::ProviderKind,
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
     output_path: &str,
     current_offset: u64,
 ) -> Option<bool> {
-    if !matches!(provider, crate::services::provider::ProviderKind::Claude) {
-        return None;
-    }
     let path = std::path::Path::new(output_path);
-    let Ok(meta) = std::fs::metadata(path) else {
-        return Some(false);
-    };
-    if meta.len() > current_offset {
-        return Some(false);
-    }
-    let probe = crate::services::tui_turn_state::JsonlTurnStateProbe::new(provider, path);
-    Some(
-        crate::services::tui_turn_state::TuiTurnStateProbe::observe(&probe)
-            == crate::services::tui_turn_state::TuiTurnState::Idle,
+    crate::services::tui_turn_state::jsonl_ready_for_input(
+        provider,
+        runtime_kind,
+        path,
+        Some(current_offset),
     )
+    .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
 }
 
 fn watcher_session_ready_for_input(
@@ -341,9 +335,13 @@ fn watcher_session_ready_for_input(
     output_path: &str,
     current_offset: u64,
 ) -> bool {
-    watcher_jsonl_turn_state_ready_for_input(provider, output_path, current_offset).unwrap_or_else(
-        || crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider),
-    )
+    let runtime_kind =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
+            .map(|binding| binding.runtime_kind);
+    watcher_jsonl_turn_state_ready_for_input(provider, runtime_kind, output_path, current_offset)
+        .unwrap_or_else(|| {
+            crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider)
+        })
 }
 
 fn observe_qwen_user_prompts_in_buffer(
@@ -1076,6 +1074,28 @@ fn matched_session_jsonl_turn_state(
         return Some(crate::services::tui_turn_state::TuiTurnState::Unknown);
     }
     Some(crate::services::tui_turn_state::observe_provider_jsonl_turn_state(provider, path))
+}
+
+fn matched_session_structured_ready_for_input(
+    provider: &ProviderKind,
+    inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+) -> Option<crate::services::tui_turn_state::TuiReadyState> {
+    let state = inflight?;
+    if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
+        return None;
+    }
+    let output_path = state
+        .output_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    crate::services::tui_turn_state::jsonl_ready_for_input(
+        provider,
+        state.runtime_kind,
+        std::path::Path::new(output_path),
+        None,
+    )
 }
 
 fn jsonl_terminal_can_confirm_completion(
@@ -1812,15 +1832,20 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
 
     let started_at = tokio::time::Instant::now();
     loop {
-        let session_name = tmux_session_name.to_string();
-        let provider_for_probe = provider.clone();
         let ready = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            tokio::task::spawn_blocking(move || {
-                crate::services::provider::tmux_session_ready_for_input(
-                    &session_name,
-                    &provider_for_probe,
-                )
+            tokio::task::spawn_blocking({
+                let provider = provider.clone();
+                let tmux_session_name = tmux_session_name.to_string();
+                let inflight = inflight.clone();
+                move || {
+                    matched_session_structured_ready_for_input(
+                        &provider,
+                        inflight.as_ref(),
+                        &tmux_session_name,
+                    )
+                    .is_some_and(crate::services::tui_turn_state::TuiReadyState::is_ready)
+                }
             }),
         )
         .await
@@ -1838,7 +1863,7 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
                 channel = channel_id.get(),
                 tmux_session = %tmux_session_name,
                 gate = "tui_completion_quiescence",
-                "[{ts}] \u{26a0} TUI pane was not yet idle after {:?} — suppressing turn-complete status to avoid premature completion (#2161); placeholder sweeper / next-turn intake will reconcile",
+                "[{ts}] \u{26a0} TUI structured turn state was not idle after {:?} — suppressing turn-complete status to avoid premature completion (#2161); placeholder sweeper / next-turn intake will reconcile",
                 crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT,
             );
             return TuiCompletionGateOutcome::TimedOut;
@@ -6417,6 +6442,7 @@ TUI-E2E-marker ssh-direct
         assert_eq!(
             watcher_jsonl_turn_state_ready_for_input(
                 &crate::services::provider::ProviderKind::Claude,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
                 file.path().to_str().unwrap(),
                 len,
             ),
@@ -6440,6 +6466,7 @@ TUI-E2E-marker ssh-direct
         assert_eq!(
             watcher_jsonl_turn_state_ready_for_input(
                 &crate::services::provider::ProviderKind::Claude,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
                 file.path().to_str().unwrap(),
                 len,
             ),
@@ -6460,6 +6487,7 @@ TUI-E2E-marker ssh-direct
         assert_eq!(
             watcher_jsonl_turn_state_ready_for_input(
                 &crate::services::provider::ProviderKind::Claude,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
                 file.path().to_str().unwrap(),
                 len.saturating_sub(1),
             ),

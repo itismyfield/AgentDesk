@@ -2542,21 +2542,13 @@ fn idle_queue_snapshot_has_kickable_backlog(
 }
 
 #[cfg(unix)]
-fn hosted_tui_turn_state_blocks_idle_queue(
-    prompt_marker_detected: bool,
-    prompt_draft_detected: bool,
-    tmux_pane_alive: bool,
-    transcript_turn_state: crate::services::tui_turn_state::TuiTurnState,
+fn hosted_tui_ready_state_blocks_idle_queue(
+    ready_state: Option<crate::services::tui_turn_state::TuiReadyState>,
 ) -> bool {
-    if !tmux_pane_alive
-        || transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Idle
-    {
-        return false;
-    }
-    if prompt_marker_detected && !prompt_draft_detected && !transcript_turn_state.is_busy() {
-        return false;
-    }
-    true
+    matches!(
+        ready_state,
+        Some(crate::services::tui_turn_state::TuiReadyState::Busy)
+    )
 }
 
 #[cfg(unix)]
@@ -2602,57 +2594,24 @@ async fn idle_queue_blocked_by_hosted_tui_busy_pane(
         return false;
     }
 
-    let transcript_turn_state =
+    let ready_state =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux_session_name)
             .and_then(|binding| {
-                let output_path = std::path::Path::new(binding.relay_output_path()).to_path_buf();
-                std::fs::metadata(&output_path).ok()?;
-                let probe = crate::services::tui_turn_state::JsonlTurnStateProbe::new(
-                    provider,
-                    &output_path,
-                );
-                Some(crate::services::tui_turn_state::TuiTurnStateProbe::observe(
-                    &probe,
-                ))
-            })
-            .unwrap_or(crate::services::tui_turn_state::TuiTurnState::Unknown);
+                crate::services::tui_turn_state::runtime_binding_ready_for_input(
+                    provider, &binding, true,
+                )
+            });
 
-    let (prompt_marker_detected, prompt_draft_detected, tmux_pane_alive) = match provider {
-        ProviderKind::Codex => {
-            let snapshot =
-                crate::services::codex_tui::input::prompt_readiness_snapshot(&tmux_session_name);
-            (
-                snapshot.composer_marker_detected,
-                snapshot.prompt_draft_detected,
-                snapshot.tmux_pane_alive,
-            )
-        }
-        _ => {
-            let snapshot =
-                crate::services::claude_tui::input::prompt_readiness_snapshot(&tmux_session_name);
-            (
-                snapshot.prompt_marker_detected,
-                snapshot.prompt_draft_detected,
-                snapshot.tmux_pane_alive,
-            )
-        }
-    };
-
-    let blocked = hosted_tui_turn_state_blocks_idle_queue(
-        prompt_marker_detected,
-        prompt_draft_detected,
-        tmux_pane_alive,
-        transcript_turn_state,
-    );
+    let blocked = hosted_tui_ready_state_blocks_idle_queue(ready_state);
     if blocked {
         tracing::info!(
             channel_id = channel_id.get(),
             provider = provider.as_str(),
             tmux_session_name = %tmux_session_name,
-            ?transcript_turn_state,
-            prompt_marker_detected,
-            prompt_draft_detected,
-            "idle queue kickoff deferred while hosted TUI is still busy"
+            ready_state = ready_state
+                .map(crate::services::tui_turn_state::TuiReadyState::as_str)
+                .unwrap_or("unavailable"),
+            "idle queue kickoff deferred while hosted TUI structured turn state is busy"
         );
     }
     blocked
@@ -5423,33 +5382,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn hosted_tui_busy_state_blocks_idle_queue_until_ready_or_idle() {
-        use crate::services::tui_turn_state::TuiTurnState;
+    fn hosted_tui_busy_state_blocks_idle_queue_until_structured_ready() {
+        use crate::services::tui_turn_state::TuiReadyState;
 
-        assert!(super::hosted_tui_turn_state_blocks_idle_queue(
-            false,
-            false,
-            true,
-            TuiTurnState::Unknown
-        ));
-        assert!(!super::hosted_tui_turn_state_blocks_idle_queue(
-            true,
-            false,
-            true,
-            TuiTurnState::Unknown
-        ));
-        assert!(!super::hosted_tui_turn_state_blocks_idle_queue(
-            false,
-            false,
-            true,
-            TuiTurnState::Idle
-        ));
-        assert!(!super::hosted_tui_turn_state_blocks_idle_queue(
-            false,
-            false,
-            false,
-            TuiTurnState::Streaming
-        ));
+        assert!(super::hosted_tui_ready_state_blocks_idle_queue(Some(
+            TuiReadyState::Busy
+        )));
+        assert!(!super::hosted_tui_ready_state_blocks_idle_queue(Some(
+            TuiReadyState::Ready
+        )));
+        assert!(!super::hosted_tui_ready_state_blocks_idle_queue(Some(
+            TuiReadyState::Unknown
+        )));
+        assert!(!super::hosted_tui_ready_state_blocks_idle_queue(None));
     }
 
     #[tokio::test]

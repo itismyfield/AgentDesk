@@ -62,9 +62,20 @@ impl SessionActivityResolver {
             let ready =
                 crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)
                     .map(|(provider, _)| {
-                        crate::services::provider::tmux_session_ready_for_input(
-                            tmux_name, &provider,
+                        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+                            tmux_name,
                         )
+                        .and_then(|binding| {
+                            crate::services::tui_turn_state::runtime_binding_ready_for_input(
+                                &provider, &binding, true,
+                            )
+                        })
+                        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
+                        .unwrap_or_else(|| {
+                            crate::services::provider::tmux_session_ready_for_input(
+                                tmux_name, &provider,
+                            )
+                        })
                     })
                     .unwrap_or(false);
             #[cfg(not(unix))]

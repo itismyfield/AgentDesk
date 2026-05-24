@@ -1599,8 +1599,43 @@ impl SessionProbe {
         )
     }
 
+    #[cfg(unix)]
+    pub fn tmux_with_structured_output(
+        session_name: String,
+        provider: ProviderKind,
+        runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+        output_path: String,
+    ) -> Self {
+        let name_alive = session_name.clone();
+        let name_ready = session_name;
+        let provider_ready = provider;
+        Self::new(
+            move || tmux_session_alive(&name_alive),
+            move || {
+                crate::services::tui_turn_state::jsonl_ready_for_input(
+                    &provider_ready,
+                    runtime_kind,
+                    std::path::Path::new(&output_path),
+                    None,
+                )
+                .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
+                .unwrap_or_else(|| tmux_session_ready_for_input(&name_ready, &provider_ready))
+            },
+        )
+    }
+
     #[cfg(not(unix))]
     pub fn tmux(_session_name: String, _provider: ProviderKind) -> Self {
+        Self::new(|| false, || false)
+    }
+
+    #[cfg(not(unix))]
+    pub fn tmux_with_structured_output(
+        _session_name: String,
+        _provider: ProviderKind,
+        _runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+        _output_path: String,
+    ) -> Self {
         Self::new(|| false, || false)
     }
 

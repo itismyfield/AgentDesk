@@ -91,6 +91,19 @@ fn fallback_sigint_pid_for_provider(
     }
 }
 
+fn tmux_ready_for_input_without_tui_pane(tmux_session_name: &str, provider: &ProviderKind) -> bool {
+    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
+        .and_then(|binding| {
+            crate::services::tui_turn_state::runtime_binding_ready_for_input(
+                provider, &binding, true,
+            )
+        })
+        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
+        .unwrap_or_else(|| {
+            crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider)
+        })
+}
+
 pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
     provider: &ProviderKind,
     token: &Arc<CancelToken>,
@@ -214,10 +227,8 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
     let session_for_probe = tmux_session_name.to_string();
     let provider_for_probe = provider.clone();
     let probe = tokio::task::spawn_blocking(move || {
-        let ready_for_input = crate::services::provider::tmux_session_ready_for_input(
-            &session_for_probe,
-            &provider_for_probe,
-        );
+        let ready_for_input =
+            tmux_ready_for_input_without_tui_pane(&session_for_probe, &provider_for_probe);
         let provider_pid =
             provider_cli_pid_in_tmux(&session_for_probe, &provider_for_probe, tracked_child_pid);
         (ready_for_input, provider_pid)
@@ -415,10 +426,8 @@ async fn hard_stop_unresponsive_provider_cli_turn(
     let probe = tokio::task::spawn_blocking(move || {
         let pane_pid = crate::services::platform::tmux::pane_pid(&session_for_probe);
         let session_alive = pane_pid.is_some();
-        let ready_for_input = crate::services::provider::tmux_session_ready_for_input(
-            &session_for_probe,
-            &provider_for_probe,
-        );
+        let ready_for_input =
+            tmux_ready_for_input_without_tui_pane(&session_for_probe, &provider_for_probe);
         let current_provider_pid =
             provider_cli_pid_in_tmux(&session_for_probe, &provider_for_probe, tracked_child_pid);
         (
@@ -483,7 +492,7 @@ fn hard_stop_pid_for_unresponsive_provider(
     // radius as `CleanupSession`, which `PreserveSession*` policies forbid.
     // If the provider CLI is still the pane foreground, killing it would
     // tear down a reusable TUI session. Skip the kill; either readiness
-    // was missed by the visual probe or the next intake/recovery pass can
+    // was missed by the structured/pane fallback probe or the next intake/recovery pass can
     // reconcile the preserved session.
     if Some(candidate) == pane_pid {
         return None;

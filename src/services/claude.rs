@@ -1521,18 +1521,18 @@ fn emit_claude_tui_busy_followup_notice(
         tmux_session_name,
         prompt_marker_detected = snapshot.prompt_marker_detected,
         prompt_draft_detected = snapshot.prompt_draft_detected,
-        previous_tui_turn_still_running = snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
+        prompt_draft_blocks_submission = snapshot.tmux_pane_alive && snapshot.prompt_draft_detected,
         tmux_pane_alive = snapshot.tmux_pane_alive,
         capture_available = snapshot.capture_available,
         pane_tail = %snapshot.pane_tail,
         "claude_tui follow-up blocked before prompt submission because hosted TUI is busy"
     );
     debug_log(&format!(
-        "Claude TUI follow-up blocked before prompt submission: session={} prompt_marker_detected={} prompt_draft_detected={} previous_tui_turn_still_running={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
+        "Claude TUI follow-up blocked before prompt submission: session={} prompt_marker_detected={} prompt_draft_detected={} prompt_draft_blocks_submission={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
         tmux_session_name,
         snapshot.prompt_marker_detected,
         snapshot.prompt_draft_detected,
-        snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
+        snapshot.tmux_pane_alive && snapshot.prompt_draft_detected,
         snapshot.tmux_pane_alive,
         snapshot.capture_available,
         snapshot.pane_tail
@@ -1580,7 +1580,7 @@ fn claude_tui_followup_busy_before_submit_from_snapshot(
             _ => {}
         }
     }
-    if snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected {
+    if snapshot.tmux_pane_alive && snapshot.prompt_draft_detected {
         Some(snapshot)
     } else {
         None
@@ -2292,7 +2292,7 @@ fn execute_streaming_local_tui_tmux(
                                 "transcript_path": transcript_path_string,
                                 "prompt_marker_detected": post_wait_snapshot.prompt_marker_detected,
                                 "prompt_draft_detected": post_wait_snapshot.prompt_draft_detected,
-                                "previous_tui_turn_still_running": post_wait_snapshot.tmux_pane_alive && !post_wait_snapshot.prompt_marker_detected,
+                                "prompt_draft_blocks_submission": post_wait_snapshot.tmux_pane_alive && post_wait_snapshot.prompt_draft_detected,
                                 "tmux_pane_alive": post_wait_snapshot.tmux_pane_alive,
                                 "capture_available": post_wait_snapshot.capture_available,
                                 "initial_busy_snapshot_prompt_marker_detected": snapshot.prompt_marker_detected,

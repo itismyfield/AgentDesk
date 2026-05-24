@@ -209,26 +209,17 @@ fn classify_claude_tui_followup_submission(
     transcript_turn_state: crate::services::tui_turn_state::TuiTurnState,
     tmux_session_name: &str,
 ) -> Option<ClaudeTuiBusyFollowupDiagnostic> {
-    if transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Idle {
+    let structured_turn_busy = transcript_turn_state.is_busy();
+    let draft_blocks_submission =
+        snapshot.tmux_pane_alive && snapshot.prompt_draft_detected && inflight_state != "missing";
+    if !structured_turn_busy && !draft_blocks_submission {
         return None;
-    }
-    if snapshot.tmux_pane_alive
-        && snapshot.prompt_draft_detected
-        && transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Unknown
-        && inflight_state == "missing"
-    {
-        return None;
-    }
-    if snapshot.prompt_marker_detected || !snapshot.tmux_pane_alive {
-        if !transcript_turn_state.is_busy() {
-            return None;
-        }
     }
     Some(ClaudeTuiBusyFollowupDiagnostic {
         tmux_session_name: tmux_session_name.to_string(),
         prompt_marker_detected: snapshot.prompt_marker_detected,
         prompt_draft_detected: snapshot.prompt_draft_detected,
-        previous_tui_turn_still_running: true,
+        previous_tui_turn_still_running: structured_turn_busy,
         tmux_pane_alive: snapshot.tmux_pane_alive,
         capture_available: snapshot.capture_available,
         watcher_state,
@@ -8079,7 +8070,7 @@ mod session_strategy_lifecycle_tests {
 
     #[cfg(unix)]
     #[test]
-    fn claude_tui_direct_busy_followup_blocks_before_prompt_submit() {
+    fn claude_tui_structured_busy_followup_blocks_before_prompt_submit() {
         let snapshot = HostedTuiPromptReadinessSnapshot {
             prompt_marker_detected: false,
             prompt_draft_detected: false,
@@ -8093,10 +8084,10 @@ mod session_strategy_lifecycle_tests {
             "attached",
             Some(1479671301387059200),
             "missing",
-            crate::services::tui_turn_state::TuiTurnState::Unknown,
+            crate::services::tui_turn_state::TuiTurnState::Streaming,
             "AgentDesk-claude-adk-cdx-direct",
         )
-        .expect("busy direct TUI turn should block follow-up submission");
+        .expect("structured busy TUI turn should block follow-up submission");
 
         assert!(diagnostic.previous_tui_turn_still_running);
         assert!(!diagnostic.prompt_marker_detected);
