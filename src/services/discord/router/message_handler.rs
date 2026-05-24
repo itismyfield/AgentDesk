@@ -8844,33 +8844,14 @@ mod session_strategy_lifecycle_tests {
     }
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-mod tests {
-    use super::super::super::DiscordSession;
-    use super::super::control_intent::{
-        build_control_intent_system_reminder, detect_natural_language_control_intent,
-    };
+#[cfg(test)]
+mod voice_route_tests {
     use super::*;
-    use crate::services::discord::prompt_builder;
-    use crate::services::memory::RecallResponse;
-    use crate::ui::ai_screen::{HistoryItem, HistoryType};
-    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use poise::serenity_prelude::{ChannelId, MessageId};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::time::Duration;
-
-    fn sample_recall() -> RecallResponse {
-        RecallResponse {
-            shared_knowledge: Some("[Shared Knowledge]".to_string()),
-            longterm_catalog: Some("- notes.md".to_string()),
-            external_recall: Some("[External Recall]".to_string()),
-            memento_context_loaded: true,
-            warnings: Vec::new(),
-            token_usage: crate::services::memory::TokenUsage::default(),
-        }
-    }
 
     fn voice_announcement_fixture(
         transcript: &str,
@@ -9056,6 +9037,32 @@ mod tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+}
+
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+mod tests {
+    use super::super::super::DiscordSession;
+    use super::super::control_intent::{
+        build_control_intent_system_reminder, detect_natural_language_control_intent,
+    };
+    use super::*;
+    use crate::services::discord::prompt_builder;
+    use crate::services::memory::RecallResponse;
+    use crate::ui::ai_screen::{HistoryItem, HistoryType};
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn sample_recall() -> RecallResponse {
+        RecallResponse {
+            shared_knowledge: Some("[Shared Knowledge]".to_string()),
+            longterm_catalog: Some("- notes.md".to_string()),
+            external_recall: Some("[External Recall]".to_string()),
+            memento_context_loaded: true,
+            warnings: Vec::new(),
+            token_usage: crate::services::memory::TokenUsage::default(),
+        }
     }
 
     fn make_session(
