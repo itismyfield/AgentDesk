@@ -465,7 +465,7 @@
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 231 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2943 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 11160 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 11402 | giant-file |
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 355 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 124 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 429 |  |
@@ -511,7 +511,7 @@
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1604 | giant-file |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 150 |  |
 | `services::discord::voice_background_driver` | `src/services/discord/voice_background_driver.rs` | 228 |  |
-| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 5692 | giant-file |
+| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 6313 | giant-file |
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 160 |  |
 | `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 2148 | giant-file |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 254 |  |
@@ -631,7 +631,7 @@
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 774 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 469 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 768 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 3886 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 4082 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 868 |  |
 | `ui` | `src/ui/mod.rs` | 1 |  |
 | `ui::ai_screen` | `src/ui/ai_screen.rs` | 155 |  |
