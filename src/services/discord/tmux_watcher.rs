@@ -2845,7 +2845,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         // legacy `should_probe_ready` cadence stays as a
                         // fallback for the SIGKILL / sentinel-lost case.
                         let sentinel_ready =
-                            jsonl_tail_contains_ready_for_input_sentinel(&output_path);
+                            !matches!(
+                                watcher_provider,
+                                crate::services::provider::ProviderKind::Claude
+                            ) && jsonl_tail_contains_ready_for_input_sentinel(&output_path);
                         let should_probe_ready = sentinel_ready
                             || last_ready_probe_at
                                 .map(|last| {

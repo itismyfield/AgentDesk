@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
 
 const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
+const CLAUDE_TUI_ACTIVE_SCAN_LINES: usize = 24;
 const CLAUDE_TUI_DRAFT_SCAN_LINES: usize = 36;
 const CLAUDE_TUI_READY_BANNER: &str = "Ready for input (type message + Enter)";
 const CLAUDE_TUI_PROMPT_MARKER: &str = "\u{276f}";
@@ -73,12 +74,38 @@ fn tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(lines: &[&str]) ->
 }
 
 pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -> bool {
-    capture
+    let recent = capture
         .lines()
         .rev()
         .filter(|l| !l.trim().is_empty())
+        .take(CLAUDE_TUI_ACTIVE_SCAN_LINES)
+        .collect::<Vec<_>>();
+
+    if recent.iter().any(|l| l.contains(CLAUDE_TUI_READY_BANNER)) {
+        return true;
+    }
+
+    let prompt_seen = recent
+        .iter()
         .take(CLAUDE_TUI_READY_SCAN_LINES)
-        .any(|l| l.contains(CLAUDE_TUI_READY_BANNER) || tmux_line_is_claude_tui_ready_prompt(l))
+        .any(|l| tmux_line_is_claude_tui_ready_prompt(l));
+    prompt_seen && !tmux_recent_lines_show_claude_tui_active_work(&recent)
+}
+
+fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let line = trim_prompt_line(line);
+        let lower = line.to_ascii_lowercase();
+        line.contains("Actioning")
+            || line.contains("Musing")
+            || lower.contains("esc to interrupt")
+            || lower.contains("current work")
+            || (line.starts_with('⏺')
+                && ((line.contains("Running ") && line.contains("command"))
+                    || line.contains("Searching for ")
+                    || line.contains("Reading ")
+                    || line.contains("Editing ")))
+    })
 }
 
 pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
@@ -687,6 +714,39 @@ assistant output
 
         assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
         assert!(!tmux_capture_indicates_claude_tui_ready_for_input(capture));
+    }
+
+    #[test]
+    fn claude_ready_prompt_rejects_active_work_chrome() {
+        let capture = "\
+⏺ Running 1 shell command…
+· Actioning… (4m 7s · ↓ 9.4k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's
+     current work
+─────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 7%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 12 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(!tmux_capture_indicates_claude_tui_ready_for_input(capture));
+    }
+
+    #[test]
+    fn claude_ready_prompt_accepts_idle_empty_prompt() {
+        let capture = "\
+✻ Churned for 4m 56s
+─────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 7%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 17 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(capture));
     }
 
     #[test]
