@@ -151,6 +151,10 @@ impl PlaceholderLiveEvents {
         self.set_session_panel_snapshot(channel_id, snapshot)
     }
 
+    pub(in crate::services::discord) fn clear_session_panel(&self, channel_id: ChannelId) -> bool {
+        self.set_session_panel_snapshot(channel_id, None)
+    }
+
     fn set_session_panel_snapshot(
         &self,
         channel_id: ChannelId,

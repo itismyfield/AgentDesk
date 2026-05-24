@@ -1611,7 +1611,9 @@ async fn refresh_session_panel_line_from_lifecycle(
         Ok(Some(event)) => shared
             .placeholder_live_events
             .set_session_panel_lifecycle_event(channel_id, &event.kind, &event.details_json),
-        Ok(None) => false,
+        Ok(None) => shared
+            .placeholder_live_events
+            .clear_session_panel(channel_id),
         Err(error) => {
             tracing::debug!(
                 "[turn_bridge] failed to load session lifecycle line for turn {} in channel {}: {}",

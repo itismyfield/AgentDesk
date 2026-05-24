@@ -454,10 +454,26 @@ fn status_panel_omits_recovery_line_when_count_is_zero_or_missing() {
 fn status_panel_omits_session_line_when_lifecycle_details_are_absent() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(180);
-    assert!(!events.set_session_panel_lifecycle_event(channel_id, "session_resumed", &json!({}),));
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        "session_fresh",
+        &json!({
+            "reason": "idle_timeout",
+            "recoveryMessageCount": 25,
+        }),
+    ));
+    assert!(
+        events
+            .render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000)
+            .contains("🆕 새 세션 시작")
+    );
+
+    assert!(events.set_session_panel_lifecycle_event(channel_id, "session_resumed", &json!({}),));
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(!rendered.contains("Lifecycle "));
+    assert!(!rendered.contains("새 세션 시작"));
+    assert!(!rendered.contains("최근 대화"));
 }
 
 #[test]
