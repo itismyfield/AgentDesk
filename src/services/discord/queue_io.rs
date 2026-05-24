@@ -91,6 +91,10 @@ fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
     attempt < DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
 }
 
+fn should_retry_zero_start_deferred_idle_queue(reason: &'static str) -> bool {
+    reason == "hosted_tui_busy_pre_submit_pending"
+}
+
 impl Drop for DeferredHookBacklogGuard {
     fn drop(&mut self) {
         self.shared
@@ -126,7 +130,27 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
                     channel_id,
                     DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
                 );
-                super::kickoff_idle_queues(ctx, &shared, tok, &provider).await;
+                let started = super::kickoff_idle_queues(ctx, &shared, tok, &provider).await;
+                let target_still_pending = if should_retry_zero_start_deferred_idle_queue(reason) {
+                    !super::mailbox_snapshot(shared.as_ref(), channel_id)
+                        .await
+                        .intervention_queue
+                        .is_empty()
+                } else {
+                    false
+                };
+                if started == 0
+                    && target_still_pending
+                    && should_retry_deferred_idle_queue_kickoff(attempt)
+                {
+                    tracing::info!(
+                        "  [{ts}] ⏳ Deferred drain: channel {} still queued after zero-start drain ({reason}, attempt {attempt}/{}); retrying",
+                        channel_id,
+                        DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
+                    );
+                    tokio::time::sleep(DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY).await;
+                    continue;
+                }
                 return;
             }
 
@@ -184,6 +208,16 @@ mod tests {
         test_env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn zero_start_deferred_retry_is_limited_to_hosted_tui_busy_queue() {
+        assert!(should_retry_zero_start_deferred_idle_queue(
+            "hosted_tui_busy_pre_submit_pending"
+        ));
+        assert!(!should_retry_zero_start_deferred_idle_queue(
+            "race-loss enqueue idle drain"
+        ));
     }
 
     #[test]

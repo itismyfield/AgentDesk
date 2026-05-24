@@ -2415,8 +2415,147 @@ fn idle_queue_snapshot_has_kickable_backlog(
     snapshot: &ChannelMailboxSnapshot,
 ) -> bool {
     snapshot.cancel_token.is_none()
+        && snapshot.active_request_owner.is_none()
+        && snapshot.active_user_message_id.is_none()
+        && snapshot.recovery_started_at.is_none()
         && !snapshot.intervention_queue.is_empty()
         && !cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
+}
+
+#[cfg(unix)]
+fn hosted_tui_turn_state_blocks_idle_queue(
+    prompt_marker_detected: bool,
+    prompt_draft_detected: bool,
+    tmux_pane_alive: bool,
+    transcript_turn_state: crate::services::tui_turn_state::TuiTurnState,
+) -> bool {
+    if !tmux_pane_alive
+        || transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Idle
+    {
+        return false;
+    }
+    if prompt_marker_detected && !prompt_draft_detected && !transcript_turn_state.is_busy() {
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+async fn idle_queue_blocked_by_hosted_tui_busy_pane(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> bool {
+    if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
+        || !provider.uses_managed_tmux_backend()
+        || !claude::is_tmux_available()
+    {
+        return false;
+    }
+
+    let selection =
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
+            provider,
+            true,
+            Some(channel_id.get()),
+        );
+    if selection.driver != crate::services::provider_hosting::ProviderSessionDriver::TuiHosting {
+        return false;
+    }
+
+    if matches!(provider, ProviderKind::Claude)
+        && crate::services::claude_tui::hook_server::current_hook_endpoint().is_none()
+    {
+        return false;
+    }
+
+    let tmux_session_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+            .map(|name| provider.build_tmux_session_name(&name))
+    };
+    let Some(tmux_session_name) = tmux_session_name else {
+        return false;
+    };
+    if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name) {
+        return false;
+    }
+
+    let transcript_turn_state =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux_session_name)
+            .and_then(|binding| {
+                let output_path = std::path::Path::new(binding.relay_output_path()).to_path_buf();
+                std::fs::metadata(&output_path).ok()?;
+                let probe = crate::services::tui_turn_state::JsonlTurnStateProbe::new(
+                    provider,
+                    &output_path,
+                );
+                Some(crate::services::tui_turn_state::TuiTurnStateProbe::observe(
+                    &probe,
+                ))
+            })
+            .unwrap_or(crate::services::tui_turn_state::TuiTurnState::Unknown);
+
+    let (prompt_marker_detected, prompt_draft_detected, tmux_pane_alive) = match provider {
+        ProviderKind::Codex => {
+            let snapshot =
+                crate::services::codex_tui::input::prompt_readiness_snapshot(&tmux_session_name);
+            (
+                snapshot.composer_marker_detected,
+                snapshot.prompt_draft_detected,
+                snapshot.tmux_pane_alive,
+            )
+        }
+        _ => {
+            let snapshot =
+                crate::services::claude_tui::input::prompt_readiness_snapshot(&tmux_session_name);
+            (
+                snapshot.prompt_marker_detected,
+                snapshot.prompt_draft_detected,
+                snapshot.tmux_pane_alive,
+            )
+        }
+    };
+
+    let blocked = hosted_tui_turn_state_blocks_idle_queue(
+        prompt_marker_detected,
+        prompt_draft_detected,
+        tmux_pane_alive,
+        transcript_turn_state,
+    );
+    if blocked {
+        tracing::info!(
+            channel_id = channel_id.get(),
+            provider = provider.as_str(),
+            tmux_session_name = %tmux_session_name,
+            ?transcript_turn_state,
+            prompt_marker_detected,
+            prompt_draft_detected,
+            "idle queue kickoff deferred while hosted TUI is still busy"
+        );
+    }
+    blocked
+}
+
+#[cfg(not(unix))]
+async fn idle_queue_blocked_by_hosted_tui_busy_pane(
+    _shared: &SharedData,
+    _provider: &ProviderKind,
+    _channel_id: ChannelId,
+) -> bool {
+    false
+}
+
+async fn idle_queue_channel_has_kickable_backlog(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+) -> bool {
+    idle_queue_snapshot_has_kickable_backlog(shared, provider, channel_id, snapshot)
+        && !idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id).await
 }
 
 async fn mailbox_try_start_turn(
@@ -2944,6 +3083,7 @@ async fn idle_queue_take_next_soft_if_ready(
 ) -> Option<(Intervention, bool)> {
     if mailbox_has_active_turn(shared, channel_id).await
         || cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
+        || idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id).await
     {
         return None;
     }
@@ -3682,23 +3822,19 @@ pub(super) async fn kickoff_idle_queues(
     shared: &Arc<SharedData>,
     token: &str,
     provider: &ProviderKind,
-) {
+) -> usize {
     // Collect channels with queued items that are idle (no active turn). Dequeue only
     // after the routing guard passes so a rejected channel stays preserved on disk/in memory.
     let mailbox_snapshots = shared.mailboxes.snapshot_all().await;
-    let channels_to_kick: Vec<ChannelId> = mailbox_snapshots
-        .into_iter()
-        .filter_map(|(channel_id, snapshot)| {
-            if idle_queue_snapshot_has_kickable_backlog(shared, provider, channel_id, &snapshot) {
-                Some(channel_id)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut channels_to_kick: Vec<ChannelId> = Vec::new();
+    for (channel_id, snapshot) in mailbox_snapshots {
+        if idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &snapshot).await {
+            channels_to_kick.push(channel_id);
+        }
+    }
 
     if channels_to_kick.is_empty() {
-        return;
+        return 0;
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3707,6 +3843,7 @@ pub(super) async fn kickoff_idle_queues(
         channels_to_kick.len()
     );
 
+    let mut started_count = 0usize;
     for channel_id in channels_to_kick {
         let settings_snapshot = shared.settings.read().await.clone();
         if let Err(reason) =
@@ -3721,11 +3858,24 @@ pub(super) async fn kickoff_idle_queues(
             continue;
         }
 
+        let fresh_snapshot = mailbox_snapshot(shared, channel_id).await;
+        if !idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &fresh_snapshot)
+            .await
+        {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                provider = provider.as_str(),
+                "KICKOFF: skipped queued turn after fresh mailbox/TUI guard"
+            );
+            continue;
+        }
+
         let Some((intervention, has_more)) =
             idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await
         else {
             continue;
         };
+        started_count += 1;
 
         let owner_name = if intervention.author_id.get() <= 1 {
             "system".to_string()
@@ -3817,6 +3967,7 @@ pub(super) async fn kickoff_idle_queues(
             mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
         }
     }
+    started_count
 }
 
 /// Scan for provider-specific skills available to this bot.
@@ -5078,6 +5229,81 @@ mod tests {
         assert!(existing.contains(&90));
         assert!(existing.contains(&100));
         assert!(!existing.contains(&200));
+    }
+
+    #[test]
+    fn idle_queue_kickoff_rejects_starting_mailbox_metadata() {
+        let shared = super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1486333430516947291);
+        let queued = Intervention {
+            author_id: UserId::new(42),
+            author_is_bot: false,
+            message_id: MessageId::new(100),
+            source_message_ids: vec![MessageId::new(100)],
+            text: "queued".to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            voice_announcement: None,
+        };
+
+        let idle = super::ChannelMailboxSnapshot {
+            intervention_queue: vec![queued.clone()],
+            ..Default::default()
+        };
+        assert!(super::idle_queue_snapshot_has_kickable_backlog(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            &idle
+        ));
+
+        let starting = super::ChannelMailboxSnapshot {
+            active_request_owner: Some(UserId::new(42)),
+            active_user_message_id: Some(MessageId::new(200)),
+            intervention_queue: vec![queued],
+            ..Default::default()
+        };
+        assert!(!super::idle_queue_snapshot_has_kickable_backlog(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            &starting
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hosted_tui_busy_state_blocks_idle_queue_until_ready_or_idle() {
+        use crate::services::tui_turn_state::TuiTurnState;
+
+        assert!(super::hosted_tui_turn_state_blocks_idle_queue(
+            false,
+            false,
+            true,
+            TuiTurnState::Unknown
+        ));
+        assert!(!super::hosted_tui_turn_state_blocks_idle_queue(
+            true,
+            false,
+            true,
+            TuiTurnState::Unknown
+        ));
+        assert!(!super::hosted_tui_turn_state_blocks_idle_queue(
+            false,
+            false,
+            true,
+            TuiTurnState::Idle
+        ));
+        assert!(!super::hosted_tui_turn_state_blocks_idle_queue(
+            false,
+            false,
+            false,
+            TuiTurnState::Streaming
+        ));
     }
 
     #[tokio::test]
