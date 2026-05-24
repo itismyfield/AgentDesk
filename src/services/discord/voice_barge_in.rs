@@ -4998,6 +4998,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_handoff_stop_suppresses_ack_and_cancels_started_turn() {
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel = ChannelId::new(2_777_101);
+        let target_channel = ChannelId::new(2_777_102);
+        let handoff_message = MessageId::new(2_777_103);
+        crate::voice::announce_meta::global_store().forget_handoff(handoff_message);
+        crate::voice::cancel_tombstone::global_store().forget(handoff_message);
+        install_active_voice_route(&runtime, source_channel, target_channel);
+        runtime
+            .test_state
+            .force_synth_success
+            .store(true, Ordering::Relaxed);
+        runtime
+            .test_state
+            .foreground_decisions
+            .lock()
+            .expect("voice test foreground decisions lock")
+            .push_back(VoiceForegroundDecision::HandoffBackground(
+                "로그 확인 후 원인 요약".to_string(),
+            ));
+        runtime
+            .test_state
+            .background_handoff_outcomes
+            .lock()
+            .expect("voice test background handoff outcomes lock")
+            .push_back(Ok(VoiceBackgroundStartOutcome {
+                turn_id: format!("voice-announce:{}", handoff_message.get()),
+                driver_kind: VoiceBackgroundDriverKind::AnnounceBotTranscript,
+                message_id: Some(handoff_message),
+            }));
+        let active_token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            shared
+                .mailbox(target_channel)
+                .try_start_turn(
+                    active_token.clone(),
+                    serenity::UserId::new(42),
+                    handoff_message
+                )
+                .await
+        );
+        crate::voice::cancel_tombstone::global_store()
+            .record(handoff_message, "voice_barge_in_explicit_stop");
+        let announcement =
+            voice_transcript_announcement_for_tests("로그 확인해줘", "issue-2777-handoff-stop");
+
+        assert!(
+            runtime
+                .try_handle_voice_transcript_announcement(&shared, source_channel, &announcement)
+                .await
+        );
+
+        assert!(active_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            active_token.cancel_source().as_deref(),
+            Some("voice_barge_in_explicit_stop")
+        );
+        assert_eq!(
+            crate::voice::cancel_tombstone::global_store()
+                .lookup(handoff_message)
+                .as_deref(),
+            Some("voice_barge_in_explicit_stop")
+        );
+        assert!(
+            runtime
+                .test_state
+                .synth_requests
+                .lock()
+                .expect("voice test synth requests lock")
+                .is_empty(),
+            "stop immediately after handoff start must suppress the stale spoken ack"
+        );
+        let plays = runtime
+            .test_state
+            .play_requests
+            .lock()
+            .expect("voice test play requests lock")
+            .clone();
+        assert!(
+            !plays
+                .iter()
+                .any(|(_, context)| *context == "voice barge-in acknowledgement"),
+            "suppressed handoff ack must not reach playback"
+        );
+        let event = crate::services::observability::events::recent(200)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event_type == crate::voice::flight::VOICE_FLIGHT_EVENT_TYPE
+                    && event
+                        .payload
+                        .get("utterance_id")
+                        .and_then(|value| value.as_str())
+                        == Some("issue-2777-handoff-stop")
+            })
+            .expect("handoff stop must emit a flight event");
+        assert_eq!(
+            event.payload.get("route").and_then(|value| value.as_str()),
+            Some("explicit_stop")
+        );
+        assert_eq!(
+            event.payload.get("reason").and_then(|value| value.as_str()),
+            Some("post_background_handoff_started")
+        );
+        assert_eq!(
+            event
+                .payload
+                .get("handoff_message_id")
+                .and_then(|value| value.as_u64()),
+            Some(handoff_message.get())
+        );
+        crate::voice::announce_meta::global_store().forget_handoff(handoff_message);
+        crate::voice::cancel_tombstone::global_store().forget(handoff_message);
+    }
+
+    #[tokio::test]
     async fn voice_background_completion_summary_uses_foreground_tts() {
         let runtime = Arc::new(enabled_runtime());
         let shared = voice_handoff_shared_for_tests();
@@ -5654,6 +5771,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_active_followup_speech_is_deferred_not_cancelled() {
+        let runtime = enabled_runtime();
+        let shared = voice_handoff_shared_for_tests();
+        let source_channel_id = ChannelId::new(2_777_201);
+        let target_channel_id = ChannelId::new(2_777_202);
+        install_active_voice_route(&runtime, source_channel_id, target_channel_id);
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            shared
+                .mailbox(target_channel_id)
+                .try_start_turn(
+                    token.clone(),
+                    serenity::UserId::new(7),
+                    MessageId::new(2_777_203),
+                )
+                .await
+        );
+
+        let outcome = runtime
+            .handle_processing_transcript(
+                &shared,
+                &ProviderKind::Claude,
+                source_channel_id,
+                "이 내용도 반영해줘",
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            VoiceBargeInTranscriptOutcome::Deferred(prompt) if prompt == "이 내용도 반영해줘"
+        ));
+        assert!(
+            !token.cancelled.load(Ordering::Relaxed),
+            "follow-up speech during a background turn must not abort without an explicit stop"
+        );
+        assert!(token.cancel_source().is_none());
+        let drain = runtime
+            .take_deferred_prompt(source_channel_id)
+            .await
+            .expect("deferred follow-up must be buffered for the next turn");
+        assert_eq!(drain.prompt, "이 내용도 반영해줘");
+    }
+
+    #[tokio::test]
     async fn voice_channel_for_background_uses_config_fallback_without_active_route() {
         let runtime = enabled_runtime();
         let mut config = crate::config::Config::default();
@@ -5828,6 +5989,48 @@ mod tests {
         assert_eq!(player.stops.load(Ordering::SeqCst), 1);
         assert!(cancellation.is_cancelled());
         assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
+    }
+
+    #[tokio::test]
+    async fn live_pcm_hook_cuts_playback_and_cancels_foreground_token() {
+        use crate::services::provider::CancelSource;
+
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let hook = DiscordVoiceBargeInHook::new(runtime.clone(), shared, ProviderKind::Claude);
+        let channel_id = ChannelId::new(2_777_301);
+        let player = Arc::new(MockPlayer::default());
+        let playback_cancel = CancellationToken::new();
+        let foreground_token = Arc::new(crate::services::provider::CancelToken::new());
+        runtime.reset_after_playback_start(channel_id, player.clone(), playback_cancel.clone());
+        runtime.register_inflight_foreground_cancel(channel_id, foreground_token.clone());
+
+        let loud = [16_384, -16_384, 16_384, -16_384];
+        hook.observe_pcm(channel_id.get(), 42, &loud);
+        hook.observe_pcm(channel_id.get(), 42, &loud);
+        tokio::task::yield_now().await;
+
+        assert_eq!(player.stops.load(Ordering::SeqCst), 1);
+        assert!(playback_cancel.is_cancelled());
+        assert!(
+            !runtime.playbacks.contains_key(&channel_id.get()),
+            "live cut must remove the stale playback registration"
+        );
+        assert!(foreground_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            foreground_token.cancel_source().as_deref(),
+            Some("voice_barge_in_live_cut")
+        );
+        assert_eq!(
+            foreground_token.cancel_source_kind(),
+            Some(CancelSource::UserBargeIn)
+        );
+        assert!(
+            !runtime
+                .inflight_foreground_cancels
+                .contains_key(&channel_id.get()),
+            "synchronous hook cancel must drain the foreground cancel registry"
+        );
     }
 
     #[test]
