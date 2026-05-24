@@ -511,7 +511,7 @@
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1604 | giant-file |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 150 |  |
 | `services::discord::voice_background_driver` | `src/services/discord/voice_background_driver.rs` | 228 |  |
-| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 5146 | giant-file |
+| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 5364 | giant-file |
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 160 |  |
 | `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 2148 | giant-file |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 254 |  |
