@@ -14,7 +14,7 @@ use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadOutputFailure {
@@ -208,27 +208,27 @@ impl SessionHandle {
 static PROCESS_HANDLES: LazyLock<Mutex<HashMap<String, SessionHandle>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+fn process_handles() -> MutexGuard<'static, HashMap<String, SessionHandle>> {
+    PROCESS_HANDLES.lock().unwrap_or_else(|error| {
+        tracing::warn!("Recovered poisoned PROCESS_HANDLES mutex; continuing with inner state");
+        error.into_inner()
+    })
+}
+
 pub fn insert_process_session(session_name: impl Into<String>, handle: SessionHandle) {
-    PROCESS_HANDLES
-        .lock()
-        .unwrap()
-        .insert(session_name.into(), handle);
+    process_handles().insert(session_name.into(), handle);
 }
 
 pub fn remove_process_session(session_name: &str) -> Option<SessionHandle> {
-    PROCESS_HANDLES.lock().unwrap().remove(session_name)
+    process_handles().remove(session_name)
 }
 
 pub fn process_session_pid(session_name: &str) -> Option<u32> {
-    PROCESS_HANDLES
-        .lock()
-        .unwrap()
-        .get(session_name)
-        .map(SessionHandle::pid)
+    process_handles().get(session_name).map(SessionHandle::pid)
 }
 
 pub fn process_session_is_alive(session_name: &str) -> bool {
-    let handles = PROCESS_HANDLES.lock().unwrap();
+    let handles = process_handles();
     handles
         .get(session_name)
         .map(|handle| ProcessBackend::new().is_alive(handle))
@@ -236,7 +236,7 @@ pub fn process_session_is_alive(session_name: &str) -> bool {
 }
 
 pub fn send_process_session_input(session_name: &str, message: &str) -> Result<(), String> {
-    let handles = PROCESS_HANDLES.lock().unwrap();
+    let handles = process_handles();
     let handle = handles
         .get(session_name)
         .ok_or_else(|| format!("No process handle found for session {}", session_name))?;
