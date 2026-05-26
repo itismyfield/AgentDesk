@@ -122,6 +122,16 @@ test("kanban-rules skips preflight once for api_reopen cards and preserves other
 
 test("kanban-rules writes consultation-clear metadata as a JSON object param", () => {
   const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      "card-consult": {
+        id: "card-consult",
+        title: "Consulted card",
+        status: "in_progress",
+        priority: "medium",
+        assigned_agent_id: "agent-1",
+        deferred_dod_json: null
+      }
+    },
     dbQuery: createSqlRouter([
       {
         match: "FROM task_dispatches WHERE id = ?",
@@ -168,10 +178,21 @@ test("kanban-rules writes consultation-clear metadata as a JSON object param", (
   assert.deepEqual(written.consultation_result, { verdict: "clear", summary: "ready" });
   assert.equal(written.preflight_status, "clear");
   assert.equal(written.preflight_summary, "Consultation resolved: ready");
+  assert.equal(state.queries.some((query) => /title, status, priority/.test(query.sql)), false);
 });
 
 test("kanban-rules writes consultation-escalated metadata as a JSON object param", () => {
   const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      "card-consult-blocked": {
+        id: "card-consult-blocked",
+        title: "Blocked consultation card",
+        status: "in_progress",
+        priority: "medium",
+        assigned_agent_id: "agent-1",
+        deferred_dod_json: null
+      }
+    },
     dbQuery: createSqlRouter([
       {
         match: "FROM task_dispatches WHERE id = ?",
@@ -224,6 +245,16 @@ test("kanban-rules writes consultation-escalated metadata as a JSON object param
 
 test("kanban-rules writes noop work-resolution metadata as a JSON object param", () => {
   const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      "card-noop": {
+        id: "card-noop",
+        title: "Noop card",
+        status: "in_progress",
+        priority: "medium",
+        assigned_agent_id: "agent-1",
+        deferred_dod_json: null
+      }
+    },
     dbQuery: createSqlRouter([
       {
         match: "FROM task_dispatches WHERE id = ?",
@@ -315,6 +346,16 @@ test("kanban-rules preflight already_applied transitions the card to done and sk
 
 test("kanban-rules sends completed rework dispatches directly back to review", () => {
   const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      "card-3": {
+        id: "card-3",
+        title: "Rework card",
+        status: "in_progress",
+        priority: "medium",
+        assigned_agent_id: "agent-3",
+        deferred_dod_json: null
+      }
+    },
     dbQuery: createSqlRouter([
       {
         match: "FROM task_dispatches WHERE id = ?",
@@ -355,6 +396,19 @@ test("kanban-rules sends completed rework dispatches directly back to review", (
 
 test("kanban-rules marks DoD-only gate failures as awaiting_dod instead of escalating immediately", () => {
   const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      "card-4": {
+        id: "card-4",
+        title: "DoD incomplete card",
+        status: "in_progress",
+        priority: "high",
+        assigned_agent_id: "agent-4",
+        deferred_dod_json: {
+          items: ["add tests", "update docs"],
+          verified: ["add tests"]
+        }
+      }
+    },
     dbQuery: createSqlRouter([
       {
         match: "FROM task_dispatches WHERE id = ?",
@@ -408,6 +462,48 @@ test("kanban-rules marks DoD-only gate failures as awaiting_dod instead of escal
       options: {}
     }
   ]);
+});
+
+test("kanban-rules ignores malformed DoD verified shape from facade card", () => {
+  const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      "card-dod-malformed": {
+        id: "card-dod-malformed",
+        title: "Malformed DoD card",
+        status: "in_progress",
+        priority: "medium",
+        assigned_agent_id: "agent-4",
+        deferred_dod_json: {
+          items: ["add tests"],
+          verified: { "add tests": true }
+        }
+      }
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "dispatch-dod-malformed",
+            kanban_card_id: "card-dod-malformed",
+            to_agent_id: "agent-4",
+            dispatch_type: "implementation",
+            chain_depth: 0,
+            created_at: "2026-04-22 16:15:00",
+            result: "{}",
+            context: "{}",
+            status: "completed"
+          }
+        ]
+      }
+    ])
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-dod-malformed" });
+
+  assert.deepEqual(state.statusCalls, [{ cardId: "card-dod-malformed", status: "review", force: false }]);
+  assert.deepEqual(state.reviewStatusCalls, []);
+  assert.deepEqual(state.manualInterventions, []);
 });
 
 test("kanban-rules _loadCardAlertContext uses typed facade agentdesk.cards.get", () => {

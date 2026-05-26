@@ -168,12 +168,8 @@ var rules = {
       return;
     }
 
-    var cards = agentdesk.db.query(
-      "SELECT id, title, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
-      [dispatch.kanban_card_id]
-    );
-    if (cards.length === 0) return;
-    var card = cards[0];
+    var card = agentdesk.cards.get(dispatch.kanban_card_id);
+    if (!card) return;
     var cfg = agentdesk.pipeline.resolveForCard(card.id);
     var inProgressState = agentdesk.pipeline.nextGatedTarget(agentdesk.pipeline.kickoffState(cfg), cfg);
     var reviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
@@ -326,10 +322,14 @@ var rules = {
       // All items must be in verified to pass.
       if (card.deferred_dod_json) {
         try {
-          var dod = JSON.parse(card.deferred_dod_json);
-          var items = dod.items || [];
-          var verified = dod.verified || [];
-          if (items.length > 0) {
+          var dod = typeof card.deferred_dod_json === "string"
+            ? JSON.parse(card.deferred_dod_json)
+            : card.deferred_dod_json;
+          var items = dod && Array.isArray(dod.items) ? dod.items : [];
+          var verified = dod && Array.isArray(dod.verified)
+            ? dod.verified
+            : (dod && typeof dod.verified === "undefined" ? [] : null);
+          if (items.length > 0 && verified) {
             var unverified = 0;
             for (var i = 0; i < items.length; i++) {
               if (verified.indexOf(items[i]) === -1) unverified++;
