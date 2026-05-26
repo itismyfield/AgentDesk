@@ -211,7 +211,7 @@
 | `server::multinode_regression` | `src/server/multinode_regression.rs` | 419 |  |
 | `server::resource_locks` | `src/server/resource_locks.rs` | 412 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 443 |  |
-| `server::routes::agents` | `src/server/routes/agents.rs` | 1149 | giant-file |
+| `server::routes::agents` | `src/server/routes/agents.rs` | 1158 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1886 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1378 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 568 |  |
@@ -290,7 +290,7 @@
 | `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 645 |  |
 | `services::agents` | `src/services/agents/mod.rs` | 2 |  |
 | `services::agents::query` | `src/services/agents/query.rs` | 577 |  |
-| `services::agents::turn` | `src/services/agents/turn.rs` | 810 |  |
+| `services::agents::turn` | `src/services/agents/turn.rs` | 820 |  |
 | `services::analytics` | `src/services/analytics.rs` | 21 |  |
 | `services::analytics::api_usage` | `src/services/analytics/api_usage.rs` | 198 |  |
 | `services::analytics::dispatch_metrics` | `src/services/analytics/dispatch_metrics.rs` | 258 |  |

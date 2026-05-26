@@ -1134,16 +1134,25 @@ mod tests {
     }
 
     #[test]
-    fn normalize_recent_output_masks_bearer_and_key_assignments() {
+    fn normalize_recent_output_masks_auth_headers_and_key_assignments() {
         let output = normalize_recent_output(
-            "\u{1b}[32mAuthorization: Bearer secret-token\u{1b}[0m\nOPENAI_API_KEY=sk-secret\nvisible line",
+            "\u{1b}[32mAuthorization: Bearer secret-token\u{1b}[0m\nAuthorization: Bot bot-secret\nauthorization: basic dXNlcjpwYXNz\nauthorization: Digest username=\"u\", nonce=\"nonce-secret\", response=\"digest-secret\"\nauthorization: plain-secret\nOPENAI_API_KEY=sk-secret\nvisible line",
         )
         .expect("normalized output");
 
         assert!(output.contains("Authorization: Bearer [REDACTED]"));
+        assert!(output.contains("Authorization: Bot [REDACTED]"));
+        assert!(output.contains("authorization: basic [REDACTED]"));
+        assert!(output.contains("authorization: Digest [REDACTED]"));
+        assert!(output.contains("authorization: [REDACTED]"));
         assert!(output.contains("OPENAI_API_KEY=[REDACTED]"));
         assert!(output.contains("visible line"));
         assert!(!output.contains("secret-token"));
+        assert!(!output.contains("bot-secret"));
+        assert!(!output.contains("dXNlcjpwYXNz"));
+        assert!(!output.contains("nonce-secret"));
+        assert!(!output.contains("digest-secret"));
+        assert!(!output.contains("plain-secret"));
         assert!(!output.contains("sk-secret"));
     }
 }
